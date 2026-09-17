@@ -216,6 +216,11 @@ public class ChatViewModel(
         // has no synchronous `combine` for two StateFlows;
         // two parallel collectors keep the derived flow hot
         // for the ViewModel's lifetime.
+        // ADR-0051 — a name accepted by the poll bumps the store version; the
+        // members panel re-titles in place without being reopened.
+        viewModelScope.launch {
+            me.lakko.app.chat.GroupNameStore.version.collect { refreshGroupName() }
+        }
         viewModelScope.launch {
             repo.state.collect { repoState ->
                 derived.value = buildState(repoState, composer.value)
@@ -540,11 +545,83 @@ public class ChatViewModel(
         mutableAddMemberInput.value = value
     }
 
+    // --- ADR-0051 — the shared group name -----------------------------------
+
+    private val mutableGroupName: MutableStateFlow<String> = MutableStateFlow("")
+
+    /** The group's shared name as this device holds it; empty when none. */
+    public val groupName: StateFlow<String> = mutableGroupName.asStateFlow()
+
+    private val mutableGroupNameDraft: MutableStateFlow<String> = MutableStateFlow("")
+
+    /** The `Group name` field's text while editing. */
+    public val groupNameDraft: StateFlow<String> = mutableGroupNameDraft.asStateFlow()
+
+    private val mutableGroupNameBusy: MutableStateFlow<Boolean> = MutableStateFlow(false)
+
+    /** `true` while a rename is being sent. */
+    public val groupNameBusy: StateFlow<Boolean> = mutableGroupNameBusy.asStateFlow()
+
+    private val mutableGroupNameError: MutableStateFlow<String?> = MutableStateFlow(null)
+
+    /** The last rename failure, else `null`. */
+    public val groupNameError: StateFlow<String?> = mutableGroupNameError.asStateFlow()
+
+    /** Re-read the stored shared name (and reset the draft to it). */
+    private fun refreshGroupName() {
+        val stored = repo.groupName(groupIdHex)?.name.orEmpty()
+        mutableGroupName.value = stored
+        if (!mutableGroupNameBusy.value) mutableGroupNameDraft.value = stored
+    }
+
+    public fun setGroupNameDraft(value: String) {
+        if (value.length <= GroupPresentationStore.MAX_NAME_CHARS) {
+            mutableGroupNameDraft.value = value
+            mutableGroupNameError.value = null
+        }
+    }
+
+    /**
+     * ADR-0051 §3 — Save: send the draft into the group (an empty draft
+     * clears the name). Gated on the LIVE role — a stale edit control tapped
+     * by a demoted admin reads "Only admins can rename this group". The local
+     * title changes only once the send succeeded.
+     */
+    public fun saveGroupName() {
+        if (mutableGroupNameBusy.value) return
+        val draft = mutableGroupNameDraft.value.trim()
+        if (draft == mutableGroupName.value.trim()) return
+        if (repo.ownRole(groupIdHex) == Role.MEMBER) {
+            mutableGroupNameError.value = me.lakko.app.chat.GROUP_NAME_ONLY_ADMINS
+            return
+        }
+        mutableGroupNameBusy.value = true
+        mutableGroupNameError.value = null
+        viewModelScope.launch {
+            try {
+                repo.setGroupName(groupIdHex, draft)
+                mutableGroupName.value = draft
+                mutableGroupNameDraft.value = draft
+            } catch (e: uniffi.lakko_ffi_uniffi.FfiException) {
+                // The composer refused the text (line break, control character,
+                // too long): the message names the rule.
+                mutableGroupNameError.value = e.message ?: me.lakko.app.chat.GROUP_NAME_SEND_FAILED
+                android.util.Log.w("ChatViewModel", "saveGroupName refused", e)
+            } catch (e: Throwable) {
+                mutableGroupNameError.value = me.lakko.app.chat.GROUP_NAME_SEND_FAILED
+                android.util.Log.w("ChatViewModel", "saveGroupName failed", e)
+            } finally {
+                mutableGroupNameBusy.value = false
+            }
+        }
+    }
+
     /** Open / close the members sheet; refresh the roster on open. */
     public fun toggleMembersPanel() {
         val opening = !mutableMembersPanelOpen.value
         mutableMembersPanelOpen.value = opening
         if (opening) {
+            mutableGroupNameError.value = null
             mutableMembershipError.value = null
             // A notice describes one action's outcome, so it must not outlive
             // the panel that produced it: the pending row annotation is the
@@ -927,6 +1004,8 @@ public class ChatViewModel(
         refreshMembership()
         val ended = membershipEnded.value
         mutableMembers.value = repo.members(groupIdHex) ?: emptyList()
+        // ADR-0051 — the shared name rides the same refresh as the roster.
+        refreshGroupName()
         val role = repo.ownRole(groupIdHex)
         // ADR-0045 UX §6.2.7 — and NOBODY may manage members once their own
         // membership has ended. `Add member`, the invite link, every `Remove`

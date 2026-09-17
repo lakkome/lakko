@@ -37,6 +37,9 @@ struct ChannelReaderScreen: View {
         /// than the retention window, or a gap). Never force-decrypted with a
         /// wrong seed (invariant #4) — surfaced as a placeholder + skipped.
         case olderKeyWindow
+        /// ADR-0051 §4 — a metadata record (kept, never shown) or a malformed
+        /// record (dropped). Not a post row at all.
+        case hidden
     }
     @State private var bootstrap: Bootstrap = .notSubscribed
     @State private var bootstrapError: String?
@@ -45,7 +48,12 @@ struct ChannelReaderScreen: View {
     @State private var pollTask: Task<Void, Never>?
 
     private var sortedPosts: [PostView] {
-        posts.sorted { $0.cursor < $1.cursor }
+        posts
+            .filter { post in
+                if case .hidden? = decodedByCursor[post.cursor] { return false }
+                return true
+            }
+            .sorted { $0.cursor < $1.cursor }
     }
 
     var body: some View {
@@ -88,15 +96,28 @@ struct ChannelReaderScreen: View {
         .onDisappear { pollTask?.cancel() }
     }
 
+    /// ADR-0051 §5 — the header card: the shared name (else local, else the
+    /// handle), `@handle`, the description when a record carried one, and a
+    /// one-line status that reads the bootstrap while access is being set up.
     @ViewBuilder
     private var description: some View {
-        if let desc = state.channels.first(where: { $0.id == channelId })?.localDescription,
-           !desc.isEmpty {
-            Text(desc)
-                .font(.subheadline)
-                .foregroundStyle(Color.lakkoTextMuted)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.bottom, 6)
+        ChannelHeaderCard(
+            channelId: channelId,
+            channel: state.channels.first(where: { $0.id == channelId }),
+            foundHandle: foundHandle,
+            isOwner: false,
+            status: headerStatus
+        )
+        .padding(.bottom, 6)
+    }
+
+    private var headerStatus: String? {
+        switch bootstrap {
+        case .notSubscribed: return "Not subscribed"
+        case .registering: return "Subscribing..."
+        case .polling: return "Waiting to be let in..."
+        case .active: return nil
+        case .errorState: return "Not subscribed"
         }
     }
 
@@ -174,6 +195,8 @@ struct ChannelReaderScreen: View {
         case .text(let text): return .text(text)
         case .olderKeyWindow: return .unavailable(UnavailablePostReason.beforeAccess)
         case .unreadable: return .unavailable(UnavailablePostReason.notVerified)
+        // Filtered out of `sortedPosts`; unreachable, kept exhaustive.
+        case .hidden: return .decoding
         case .none: return .decoding
         }
     }
@@ -416,10 +439,17 @@ struct ChannelReaderScreen: View {
                         channelIdHex: channelId,
                         postWireB64Url: post.payloadB64
                     )
-                    if let text = String(data: plain, encoding: .utf8) {
+                    // ADR-0051 §4 — a metadata record titles the channel
+                    // (newest wins) and is never a post; a domain match that
+                    // failed a bound is dropped, never rendered as text.
+                    switch ChannelMetaRecord.classify(plain) {
+                    case .text(let text):
                         next[post.cursor] = .text(text)
-                    } else {
-                        next[post.cursor] = .unreadable
+                    case .meta(let meta):
+                        state.recordSharedMeta(channelId: channelId, meta: meta)
+                        next[post.cursor] = .hidden
+                    case .malformed:
+                        next[post.cursor] = .hidden
                     }
                 } catch {
                     next[post.cursor] = .unreadable

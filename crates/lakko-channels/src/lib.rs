@@ -36,6 +36,14 @@
 //!   `ChannelSubscriberKeypair` + `sealSubscriberSeedEnvelope` +
 //!   `openSubscriberSeedEnvelope` (sprint G4-3c).
 //!
+//! ## What's also here (ADR-0051)
+//!
+//! - [`meta`] — the channel metadata record (name + description),
+//!   carried as the plaintext of an ordinary post and recognised by
+//!   readers ahead of the text path via
+//!   [`classify_post_plaintext`]. `compose_channel_meta` /
+//!   `decode_channel_meta` / `channel_meta_is_newer`.
+//!
 //! ## What's NOT here yet
 //!
 //! - **Rotation distribution wire (4c).** The fanout
@@ -78,6 +86,7 @@
 
 pub mod epoch;
 pub mod error;
+pub mod meta;
 pub mod post;
 pub mod rotation_policy;
 pub mod seed;
@@ -85,6 +94,11 @@ pub mod subscribe;
 
 pub use epoch::{EpochId, EPOCH_ID_LEN};
 pub use error::{ChannelError, Result};
+pub use meta::{
+    channel_meta_is_newer, classify_post_plaintext, compose_channel_meta, decode_channel_meta,
+    ChannelMeta, ChannelMetaError, ChannelMetaFieldError, PostContent, CHANNEL_META_DOMAIN_V1,
+    CHANNEL_META_MAX_LEN, CHANNEL_META_MIN_LEN, CHANNEL_META_VERSION_V1,
+};
 pub use post::{
     compose_post, decode_post, verify_and_decrypt, ChannelPost, MAX_PLAINTEXT_LEN,
     POST_SIG_DOMAIN_V1,

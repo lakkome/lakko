@@ -41,6 +41,7 @@ import {
 } from "./contacts/MailboxContext";
 import { PowActivityIndicator } from "./ui/PowActivityIndicator";
 import { ProfileProvider } from "./profile/ProfileContext";
+import { GroupNameProvider } from "./chat/GroupNameContext";
 import { WakeNavigator } from "./push/WakeNavigator";
 import { routes } from "./routes/routes";
 import { SwUpdateBanner } from "./sw/SwUpdateBanner";
@@ -89,6 +90,11 @@ const RootLayout: Component<RouteSectionProps> = (props) => (
  *     and publishes through the canonical identity) and ABOVE the mailbox,
  *     whose Welcome joins and contact requests feed it.
  *
+ *   <GroupNameProvider> — ADR-0051 shared group names: the per-group store,
+ *     the role-gated receive and the growth re-send. Inside Auth + Chat for
+ *     the same reasons, and ABOVE the mailbox, whose Welcome joins title
+ *     from it.
+ *
  *   <MailboxProvider> — the identity-mailbox receive loop (contact
  *     requests, acks, Welcomes) for the whole signed-in session, and
  *     the pending-request list the Contacts route renders. Inside
@@ -111,6 +117,7 @@ const App: Component = () => (
     <AuthProvider>
       <DeviceGroupSyncProvider>
         <ProfileProvider>
+        <GroupNameProvider>
         <MailboxProvider>
         <CallHostProvider>
         <BackgroundReceiveProvider>
@@ -156,6 +163,7 @@ const App: Component = () => (
         </BackgroundReceiveProvider>
         </CallHostProvider>
         </MailboxProvider>
+        </GroupNameProvider>
         </ProfileProvider>
       </DeviceGroupSyncProvider>
     </AuthProvider>

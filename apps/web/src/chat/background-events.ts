@@ -23,6 +23,7 @@
  *   | profile               | the profile store             | no                      |
  *   | pushRoutingSecret     | the gated receive             | no                      |
  *   | committerBeacon       | the beacon observation store  | no                      |
+ *   | group-name            | the gated group-name store    | no                      |
  *
  * The overlays (`op`) are in-memory state in the chat view and were never
  * persisted — a reload always started them empty — so handing them over
@@ -43,6 +44,8 @@ export interface BackgroundEventPlan {
   readonly profiles: readonly Of<"profile">[];
   readonly pushSecrets: readonly Of<"pushRoutingSecret">[];
   readonly beacons: readonly Of<"committerBeacon">[];
+  /** ADR-0051 — shared group names, for the role-gated receive. */
+  readonly groupNames: readonly Of<"group-name">[];
   /** Proposals the receipt gate STORED; a refused one is a pending request
    *  nowhere. */
   readonly storedProposals: readonly Of<"membershipProposal">[];
@@ -59,6 +62,7 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
   const profiles: Of<"profile">[] = [];
   const pushSecrets: Of<"pushRoutingSecret">[] = [];
   const beacons: Of<"committerBeacon">[] = [];
+  const groupNames: Of<"group-name">[] = [];
   const storedProposals: Of<"membershipProposal">[] = [];
   let sawCommit = false;
   for (const e of events) {
@@ -97,6 +101,9 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
       case "committerBeacon":
         beacons.push(e);
         break;
+      case "group-name":
+        groupNames.push(e);
+        break;
       default: {
         const unhandled: never = e;
         throw new Error(
@@ -105,5 +112,15 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
       }
     }
   }
-  return { timeline, toView, signaling, profiles, pushSecrets, beacons, storedProposals, sawCommit };
+  return {
+    timeline,
+    toView,
+    signaling,
+    profiles,
+    pushSecrets,
+    beacons,
+    groupNames,
+    storedProposals,
+    sawCommit,
+  };
 }

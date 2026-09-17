@@ -419,6 +419,18 @@ pub enum FfiError {
     /// (ADR-0050).
     #[error("{0}")]
     MembershipDeviceLimitReached(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0051 channel metadata — appended, for the ordinal reason above.
+    // ------------------------------------------------------------------
+    /// A channel metadata record (name + description) violates a bound or
+    /// is malformed (ADR-0051 §4). The message starts with the frozen
+    /// `lakko_channels::meta::ChannelMetaError::code()` (for example
+    /// `name.empty`, `description.tooLong`) followed by `": "` and the
+    /// human-readable reason, so a client can select copy from the code
+    /// without parsing prose.
+    #[error("{0}")]
+    ChannelMeta(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {
@@ -457,6 +469,19 @@ impl From<lakko_contacts::profile::ProfileError> for FfiError {
         match e {
             P::DisplayName(d) => d.into(),
             P::Username(u) => u.into(),
+            other => Self::Contacts(other.to_string()),
+        }
+    }
+}
+
+impl From<lakko_contacts::group_name::GroupNameError> for FfiError {
+    fn from(e: lakko_contacts::group_name::GroupNameError) -> Self {
+        use lakko_contacts::group_name::GroupNameError as G;
+        match e {
+            // The group name reuses the profile display-name rule, so it
+            // reuses the typed `DisplayName*` variants too — no new variant,
+            // so no ordinal to append (ADR-0051 §1).
+            G::Name(d) => d.into(),
             other => Self::Contacts(other.to_string()),
         }
     }

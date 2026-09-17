@@ -109,6 +109,8 @@ public fun ChatListScreen(
     // resolved name; a group under its local name or its members' names.
     val directory = remember(repository) { ProfileDirectory.get(repository.context) }
     val nameVersion by directory.version.collectAsStateWithLifecycle()
+    // ADR-0051 — a shared group name accepted on a poll re-titles the row.
+    val groupNameVersion by me.lakko.app.chat.GroupNameStore.version.collectAsStateWithLifecycle()
     val flagsState = deviceGroupSync?.flags?.collectAsStateWithLifecycle()
     val flagsMap: Map<String, FlagsState> = flagsState?.value ?: emptyMap()
     val readCursorState = deviceGroupSync?.readCursors?.collectAsStateWithLifecycle()
@@ -130,7 +132,7 @@ public fun ChatListScreen(
 
     // Every row's presentation, derived once per state / name change: the
     // kind filter, the title, the preview line and the last-message time.
-    val rows = remember(state, kind, nameVersion, flagsMap) {
+    val rows = remember(state, kind, nameVersion, groupNameVersion, flagsMap) {
         val now = System.currentTimeMillis()
         state.threads
             .filter { conversationKind(context, repository, it.groupIdHex) == kind }

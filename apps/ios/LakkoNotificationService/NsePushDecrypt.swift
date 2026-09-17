@@ -549,6 +549,26 @@ public func nseLooksLikeProfile(_ bytes: Data, envelopeLens: ClosedRange<Int>) -
     envelopeLens.contains(bytes.count) && bytes.first == profileEnvelopeFirstByte
 }
 
+/// First byte of the ADR-0051 group-name domain separator
+/// `lakko/group-name/v1\0` — the same ASCII `l` as every other in-group
+/// envelope domain, kept as its own constant for the same reason as the
+/// others: retiring one wire format must not re-point another's peek.
+private let groupNameEnvelopeFirstByte: UInt8 = 0x6C
+
+/// Cheap PRE-FILTER for an ADR-0051 group-name envelope: a length inside the
+/// well-formed range plus the first domain byte.
+///
+/// Variable length like the profile (a name of its own length, or none — an
+/// empty name is the "clear" envelope), so the peek is a RANGE whose bounds
+/// arrive from the slim FFI (`groupNameEnvelopeMinLen()` /
+/// `groupNameEnvelopeMaxLen()`), never copied here: a stale upper bound would
+/// fail in the dangerous direction (a long name would stop being suppressed
+/// and land in a notification as `lakko/group-name/v1` plus binary). The peek
+/// decides nothing; `decodeGroupNameEnvelope` is the verdict.
+public func nseLooksLikeGroupName(_ bytes: Data, envelopeLens: ClosedRange<Int>) -> Bool {
+    envelopeLens.contains(bytes.count) && bytes.first == groupNameEnvelopeFirstByte
+}
+
 /// `true` when an already-DECRYPTED MLS application body is an in-group SERVICE
 /// envelope that must NEVER be rendered as a notification.
 ///
@@ -585,13 +605,20 @@ public func nseLooksLikeProfile(_ bytes: Data, envelopeLens: ClosedRange<Int>) -
 /// NOTHING else: the NSE never stores the profile (C-59 — this process writes
 /// no durable state) and has no roster to attribute it with anyway. The
 /// foreground app stores it on its own receive path.
+///
+/// ADR-0051 adds a fifth, the group-name envelope, with the same treatment:
+/// recognised and suppressed, never stored (the NSE has no role table to
+/// gate it with, and no durable store to write). A recognised envelope makes
+/// the caller fall back to the newest real message or the generic body.
 public func nseIsServiceEnvelope(
     _ bytes: Data,
     decodesAsPushRoutingSecret: (Data) -> Bool,
     decodesAsCommitterBeacon: (Data) -> Bool,
     committerBeaconEnvelopeLen: Int,
     decodesAsProfile: (Data) -> Bool,
-    profileEnvelopeLens: ClosedRange<Int>
+    profileEnvelopeLens: ClosedRange<Int>,
+    decodesAsGroupName: (Data) -> Bool,
+    groupNameEnvelopeLens: ClosedRange<Int>
 ) -> Bool {
     if nseLooksLikeCallSignaling(bytes) { return true }
     if nseLooksLikePushRoutingSecret(bytes), decodesAsPushRoutingSecret(bytes) { return true }
@@ -600,6 +627,9 @@ public func nseIsServiceEnvelope(
         return true
     }
     if nseLooksLikeProfile(bytes, envelopeLens: profileEnvelopeLens), decodesAsProfile(bytes) {
+        return true
+    }
+    if nseLooksLikeGroupName(bytes, envelopeLens: groupNameEnvelopeLens), decodesAsGroupName(bytes) {
         return true
     }
     return false

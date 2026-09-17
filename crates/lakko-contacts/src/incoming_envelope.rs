@@ -43,7 +43,14 @@
 //!    [`crate::profile::profile_is_newer`] than what it holds, and
 //!    verifies any claimed username through discovery before
 //!    showing it.
-//! 7. **Intro-message fallthrough** — plain free-text
+//! 7. [`crate::group_name::try_unwrap_group_name`] — the group's
+//!    shared name (ADR-0051 §1). Caller resolves the MLS sender
+//!    leaf to the account key (C-68), runs the ADR-0051 §2 role
+//!    gate (owner / admin, or any member when the group has no
+//!    role table), and keeps it only if
+//!    [`crate::group_name::group_name_is_newer`] than the stored
+//!    stamp for that group. An empty name clears the name.
+//! 8. **Intro-message fallthrough** — plain free-text
 //!    `ContactRequest` (ADR-0005 scenario A; "add me as a
 //!    contact"). Caller renders the bytes as a UTF-8 intro
 //!    message.
@@ -78,6 +85,7 @@ use thiserror::Error;
 use crate::call_kp_forward::try_unwrap_call_kp_forward;
 use crate::call_welcome::{try_unwrap_call_welcome, CallWelcomeError};
 use crate::committer_beacon::{try_unwrap_committer_beacon, CommitterBeaconError};
+use crate::group_name::{try_unwrap_group_name, GroupName, GroupNameError};
 use crate::media_state::{try_unwrap_media_state, MediaStateError};
 use crate::profile::{try_unwrap_profile, Profile, ProfileError};
 use crate::push_routing::{try_unwrap_push_routing_secret, PushRoutingSecretError};
@@ -165,6 +173,19 @@ pub enum IncomingEnvelope<'a> {
     /// through discovery (ADR-0048 §3). Never rendered as a chat
     /// bubble.
     Profile(Profile),
+    /// The group's shared name (ADR-0051 §1): the name (empty = clear)
+    /// and the setter-clock stamp — already validated against every
+    /// bound. Never rendered as a chat bubble.
+    ///
+    /// **The caller must not store this unconditionally.** The sender's
+    /// authority is the receiver's check (ADR-0051 §2): resolve the MLS
+    /// sender leaf to the account key at receipt (C-68), read the live
+    /// role table, accept only from the owner or an admin (or from any
+    /// member when the group has no role table), then keep it only when
+    /// [`crate::group_name::group_name_is_newer`] than the stored stamp
+    /// for that group — the whole read-decide-write under the per-group
+    /// lock (C-62 sub-invariant 5).
+    GroupName(GroupName),
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -203,6 +224,11 @@ pub enum DispatchError {
     /// refused — a profile has no remainder worth keeping.
     #[error(transparent)]
     Profile(#[from] ProfileError),
+    /// A group-name envelope (ADR-0051) matched its domain separator
+    /// but was malformed or out of bounds. The whole envelope is
+    /// refused — a name has no remainder worth keeping.
+    #[error(transparent)]
+    GroupName(#[from] GroupNameError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -253,7 +279,11 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     if let Some(profile) = try_unwrap_profile(plaintext)? {
         return Ok(IncomingEnvelope::Profile(profile));
     }
-    // 7. Plain intro message — ADR-0005 scenario A.
+    // 7. Group name — ADR-0051.
+    if let Some(group_name) = try_unwrap_group_name(plaintext)? {
+        return Ok(IncomingEnvelope::GroupName(group_name));
+    }
+    // 8. Plain intro message — ADR-0005 scenario A.
     Ok(IncomingEnvelope::IntroMessage(plaintext))
 }
 
@@ -342,6 +372,49 @@ mod tests {
             Err(DispatchError::Profile(ProfileError::DisplayName(
                 DisplayNameError::ControlOrFormatCharacter
             ))),
+        );
+    }
+
+    #[test]
+    fn dispatches_group_name_envelope() {
+        use crate::group_name::compose_group_name;
+        for name in ["Trio", ""] {
+            let group_name = GroupName {
+                name: name.to_string(),
+                updated_at_ms: 42,
+            };
+            let wrapped = compose_group_name(&group_name).unwrap();
+            let result = dispatch_incoming_envelope(&wrapped).unwrap();
+            assert_eq!(result, IncomingEnvelope::GroupName(group_name));
+            assert!(!matches!(result, IncomingEnvelope::IntroMessage(_)));
+        }
+    }
+
+    #[test]
+    fn an_out_of_bounds_group_name_is_an_error_not_an_intro_message() {
+        // Fail-closed: a name carrying a right-to-left override must be
+        // dropped, never rendered as chat text.
+        use crate::group_name::{GROUP_NAME_ENVELOPE_DOMAIN_V1, GROUP_NAME_VERSION_V1};
+        use crate::profile::DisplayNameError;
+        let name = "Trio\u{202E}".as_bytes();
+        let mut wrapped = GROUP_NAME_ENVELOPE_DOMAIN_V1.to_vec();
+        wrapped.push(GROUP_NAME_VERSION_V1);
+        wrapped.extend_from_slice(&0u64.to_be_bytes());
+        wrapped.push(u8::try_from(name.len()).unwrap());
+        wrapped.extend_from_slice(name);
+        assert_eq!(
+            dispatch_incoming_envelope(&wrapped),
+            Err(DispatchError::GroupName(GroupNameError::Name(
+                DisplayNameError::ControlOrFormatCharacter
+            ))),
+        );
+        // A truncated one too: the domain matched, so it is a broken
+        // group name, not a bubble reading `lakko/group-name/v1`.
+        let mut truncated = GROUP_NAME_ENVELOPE_DOMAIN_V1.to_vec();
+        truncated.push(GROUP_NAME_VERSION_V1);
+        assert_eq!(
+            dispatch_incoming_envelope(&truncated),
+            Err(DispatchError::GroupName(GroupNameError::Truncated)),
         );
     }
 

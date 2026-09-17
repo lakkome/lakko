@@ -188,9 +188,10 @@ struct ChannelsListScreen: View {
             return RowData(
                 channel: channel,
                 model: ChannelsFormatting.rowModel(
+                    sharedName: channel.sharedName,
                     name: channel.localName,
-                    description: channel.localDescription,
                     handle: channel.handle,
+                    isOwner: state.keysByChannel[channel.id] != nil,
                     subscriberCount: state.subscriberCountByChannel[channel.id],
                     newestPostMs: ChannelsFormatting.newestPostMs(posts.map(\.serverTsMs)),
                     nowMs: nowMs,

@@ -988,7 +988,7 @@ async function withNetworkTimeout<T>(
  *     `.catch()` before `.finally()` keeps this bookkeeping chain from
  *     surfacing an unhandled rejection (the caller still sees the real one).
  */
-function withRoutingRowLock<T>(
+export function withRoutingRowLock<T>(
   accountId: string,
   groupIdB64: string,
   task: () => Promise<T>,

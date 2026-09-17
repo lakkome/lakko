@@ -78,8 +78,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import me.lakko.app.channels.CHANNEL_NEEDS_A_NAME
 import me.lakko.app.channels.ChannelDiscovery
 import me.lakko.app.channels.ChannelHandle
+import me.lakko.app.channels.ChannelMetaPublisher
+import me.lakko.app.channels.ClassifiedPost
+import me.lakko.app.channels.classifyChannelPlaintext
+import me.lakko.app.channels.sharedMeta
 import me.lakko.app.channels.ChannelKeyStore
 import me.lakko.app.channels.ChannelPublisherIdentity
 import me.lakko.app.channels.ChannelPublisherKeyStore
@@ -168,6 +173,7 @@ public fun ChannelsListScreen(
 ) {
     val channels by state.channels.collectAsState()
     val postsByChannel by state.postsByChannel.collectAsState()
+    val keysByChannel by state.keysByChannel.collectAsState()
     val context = LocalContext.current
     var query by rememberSaveable { mutableStateOf("") }
     var menuOpen by remember { mutableStateOf(false) }
@@ -177,13 +183,14 @@ public fun ChannelsListScreen(
     val use24h = remember(context) { DateFormat.is24HourFormat(context) }
     val counts = SubscriberFanoutRegistry.subscriberCounts()
 
-    val rows = remember(channels, postsByChannel, counts) {
+    val rows = remember(channels, postsByChannel, keysByChannel, counts) {
         val now = System.currentTimeMillis()
         channels.map { channel ->
             channelRowModel(
                 channel = channel,
                 posts = postsByChannel[channel.id],
                 subscriberCount = counts[channel.id],
+                isOwner = keysByChannel.containsKey(channel.id),
                 nowMs = now,
                 zone = zone,
                 use24h = use24h,
@@ -337,16 +344,13 @@ private fun ChannelRow(row: ChannelRowModel, onClick: () -> Unit) {
                     )
                 }
             }
-            val second = listOfNotNull(row.handle, row.subscriberLine).joinToString(" · ")
-            if (second.isNotEmpty()) {
-                Text(
-                    text = second,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
+            Text(
+                text = row.subtitle,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
@@ -601,6 +605,22 @@ public fun NewChannelScreen(
                                 ),
                             )
                             state.setKeys(id, keys)
+                            // ADR-0051 §4 — the metadata record is the first
+                            // post: subscribers title the channel from it. A
+                            // failed post leaves the channel created; the next
+                            // Save or rotation re-issues it.
+                            try {
+                                ChannelMetaPublisher.post(
+                                    state = state,
+                                    client = client,
+                                    channelId = id,
+                                    name = name.trim(),
+                                    description = description.trim(),
+                                    updatedAtMs = System.currentTimeMillis().toULong(),
+                                )
+                            } catch (e: Throwable) {
+                                Log.w(TAG, "channel record not posted at creation", e)
+                            }
                             onCreated(id)
                         } catch (e: LegacyChannelException) {
                             error = e.message
@@ -634,7 +654,26 @@ internal sealed interface PostRender {
     data class Plain(val value: String) : PostRender
     object Unreadable : PostRender
     object OlderKeyWindow : PostRender
+
+    /** ADR-0051 §4 — a metadata record (adopted into the channel log) or a
+     *  malformed one (dropped): never a card. */
+    object Hidden : PostRender
 }
+
+/**
+ * ADR-0051 §4 — the render for one decrypted plaintext: text renders, a
+ * metadata record is filed as the channel's newest (when newer) and hidden, a
+ * malformed record is hidden. Runs before the text path on every post.
+ */
+private fun renderDecrypted(state: ChannelsUiState, channelId: String, plaintext: ByteArray): PostRender =
+    when (val c = classifyChannelPlaintext(plaintext)) {
+        is ClassifiedPost.Text -> PostRender.Plain(c.text)
+        is ClassifiedPost.Meta -> {
+            state.adoptSharedMeta(channelId, c.meta)
+            PostRender.Hidden
+        }
+        ClassifiedPost.Malformed -> PostRender.Hidden
+    }
 
 /**
  * The channel: posts as cards, newest at the bottom like a chat. An owner
@@ -657,13 +696,14 @@ public fun ChannelDetailScreen(
     val keys = keysByChannel[channelId]
     val isSubscriber = subscriberKeysByChannel.containsKey(channelId)
     val title = channel?.let { channelTitle(it) } ?: "Channel"
-    val subtitle = channel?.let { channelHandleLabel(it.handle) }
+    // The header card below carries the name, the handle, the description and
+    // the status; the top bar shows the title once and nothing else.
+    val header = channel?.let { channelHeaderModel(it, isOwner = keys != null) }
 
     Scaffold(
         topBar = {
             ChannelTopBar(
                 title = title,
-                subtitle = subtitle,
                 onBack = onBack,
                 actions = {
                     if (keys != null) {
@@ -683,14 +723,14 @@ public fun ChannelDetailScreen(
             when {
                 keys != null -> OwnerChannelView(
                     channelId = channelId,
-                    description = channel?.localDescription.orEmpty(),
+                    header = header,
                     state = state,
                     client = client,
                     keys = keys,
                 )
                 isSubscriber -> SubscriberChannelView(
                     channelId = channelId,
-                    description = channel?.localDescription.orEmpty(),
+                    header = header,
                     state = state,
                     client = client,
                 )
@@ -701,7 +741,7 @@ public fun ChannelDetailScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center,
                 ) {
-                    channel?.localDescription?.takeIf { it.isNotEmpty() }?.let {
+                    channel?.let { channelDescription(it) }?.let {
                         Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Spacer(Modifier.height(12.dp))
                     }
@@ -750,7 +790,6 @@ public fun ChannelSubscribeScreen(
         topBar = {
             ChannelTopBar(
                 title = channel?.let { channelTitle(it) } ?: "Channel",
-                subtitle = channel?.let { channelHandleLabel(it.handle) },
                 onBack = onBack,
             )
         },
@@ -762,7 +801,7 @@ public fun ChannelSubscribeScreen(
         ) {
             SubscriberChannelView(
                 channelId = channelId,
-                description = channel?.localDescription.orEmpty(),
+                header = channel?.let { channelHeaderModel(it, isOwner = false) },
                 state = state,
                 client = client,
             )
@@ -774,7 +813,7 @@ public fun ChannelSubscribeScreen(
 @Composable
 private fun OwnerChannelView(
     channelId: String,
-    description: String,
+    header: ChannelHeaderModel?,
     state: ChannelsUiState,
     client: ChannelsClient,
     keys: ChannelPublisherKeys,
@@ -812,12 +851,16 @@ private fun OwnerChannelView(
             decodedByCursor.clear()
             for (p in fetched.posts) {
                 decodedByCursor[p.cursor] = try {
-                    PostRender.Plain(
+                    // ADR-0051 §4 — classify before the text path: the
+                    // publisher's own metadata record is never a card.
+                    renderDecrypted(
+                        state,
+                        channelId,
                         ChannelsComposer.verifyAndDecrypt(
                             seed = currentSeed,
                             channelIdHex = channelId,
                             postWireB64Url = p.payloadB64,
-                        ).toString(Charsets.UTF_8),
+                        ),
                     )
                 } catch (_: Throwable) {
                     PostRender.Unreadable
@@ -838,7 +881,7 @@ private fun OwnerChannelView(
             posts = posts,
             renderOf = { decodedByCursor[it.cursor] },
             loading = loading,
-            description = description,
+            header = header,
             emptyLine = "No posts yet. Write the first one below.",
             modifier = Modifier.weight(1f),
         )
@@ -958,73 +1001,109 @@ private fun PublishComposer(
 }
 
 /**
- * The posts, newest at the bottom (a reversed lazy list over the newest-first
- * order starts scrolled to the bottom like a chat). The channel description
- * heads the list when there is one.
+ * The reader (docs/ux/group-and-channel-names.md section 3.2, redesign 5.4):
+ * a header card — avatar, name, `@handle`, the description when present and
+ * the standing status — then the posts as cards, newest at the bottom (a
+ * reversed lazy list over the newest-first order starts scrolled to the bottom
+ * like a chat). A post whose render is [PostRender.Hidden] (a metadata record)
+ * is left out; with nothing visible the empty sentence sits under the header.
  */
 @Composable
 private fun PostList(
     posts: List<PostView>,
     renderOf: (PostView) -> PostRender?,
     loading: Boolean,
-    description: String,
+    header: ChannelHeaderModel?,
     emptyLine: String,
     modifier: Modifier = Modifier,
     statusLine: (@Composable () -> Unit)? = null,
 ) {
-    val context = LocalContext.current
     val zone = remember { ZoneId.systemDefault() }
     val locale = remember { Locale.getDefault() }
-    val use24h = remember(context) { DateFormat.is24HourFormat(context) }
     val ordered = remember(posts) { posts.sortedByDescending { it.serverTsMs } }
+    val visible = ordered.filter { renderOf(it) != PostRender.Hidden }
     val now = System.currentTimeMillis()
 
-    if (ordered.isEmpty()) {
-        Column(
-            modifier = modifier
-                .fillMaxWidth()
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-        ) {
-            if (description.isNotEmpty()) {
-                Text(description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.height(12.dp))
-            }
-            if (statusLine != null) {
-                statusLine()
-            } else if (loading) {
-                CircularProgressIndicator()
-            } else {
-                Text(emptyLine, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-        return
-    }
     LazyColumn(
         modifier = modifier.fillMaxWidth(),
         reverseLayout = true,
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        items(items = ordered, key = { it.cursor.toLong() }) { post ->
+        items(items = visible, key = { it.cursor.toLong() }) { post ->
             PostCard(
-                time = formatPostTime(post.serverTsMs.toLong(), now, zone, use24h, locale),
+                time = postRelativeTimeLabel(post.serverTsMs.toLong(), now, zone, locale),
                 render = renderOf(post),
             )
         }
-        if (statusLine != null) {
+        if (visible.isEmpty()) {
+            item("empty") {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 24.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    when {
+                        statusLine != null -> statusLine()
+                        loading -> CircularProgressIndicator()
+                        else -> Text(
+                            emptyLine,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        } else if (statusLine != null) {
             item("status") { statusLine() }
         }
-        if (description.isNotEmpty()) {
-            item("description") {
-                Text(
-                    description,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(bottom = 8.dp),
-                )
+        if (header != null) {
+            item("header") { ChannelHeaderCard(header) }
+        }
+    }
+}
+
+/** The card at the top of the reader: who this channel is. */
+@Composable
+private fun ChannelHeaderCard(header: ChannelHeaderModel) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 6.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = MaterialTheme.shapes.medium,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            LakkoAvatar(name = header.title, seed = header.title, size = 72.dp)
+            Spacer(Modifier.height(12.dp))
+            Text(
+                header.title,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            header.handleLine?.let {
+                Spacer(Modifier.height(2.dp))
+                Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+            header.description?.let {
+                Spacer(Modifier.height(10.dp))
+                Text(it, style = MaterialTheme.typography.bodyMedium)
+            }
+            Spacer(Modifier.height(10.dp))
+            Text(
+                header.statusLine,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
@@ -1037,7 +1116,7 @@ private fun PostCard(time: String, render: PostRender?) {
         shape = MaterialTheme.shapes.medium,
         border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
-        Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
             when (render) {
                 null -> Text(
                     "Loading...",
@@ -1052,9 +1131,14 @@ private fun PostCard(time: String, render: PostRender?) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                is PostRender.Plain -> Text(render.value, style = MaterialTheme.typography.bodyLarge)
+                is PostRender.Plain -> Text(
+                    render.value,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                PostRender.Hidden -> Unit
             }
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(8.dp))
             Text(
                 time,
                 style = MaterialTheme.typography.labelSmall,
@@ -1080,7 +1164,7 @@ private enum class SubscribeBootstrap { Registering, Waiting, Active, Failed }
 @Composable
 private fun SubscriberChannelView(
     channelId: String,
-    description: String,
+    header: ChannelHeaderModel?,
     state: ChannelsUiState,
     client: ChannelsClient,
 ) {
@@ -1174,8 +1258,10 @@ private fun SubscriberChannelView(
                             postWireB64Url = p.payloadB64,
                         )
                     ) {
+                        // ADR-0051 §4 — classify before the text path: a
+                        // metadata record titles the channel, never a card.
                         is ChannelsComposer.SubscriberPostResult.Decoded ->
-                            PostRender.Plain(r.plaintext.toString(Charsets.UTF_8))
+                            renderDecrypted(state, channelId, r.plaintext)
                         is ChannelsComposer.SubscriberPostResult.MissingEpochSeed ->
                             PostRender.OlderKeyWindow
                         ChannelsComposer.SubscriberPostResult.Unreadable ->
@@ -1265,7 +1351,7 @@ private fun SubscriberChannelView(
         posts = if (bootstrap == SubscribeBootstrap.Active) posts else emptyList(),
         renderOf = { decodedByCursor[it.cursor] },
         loading = bootstrap != SubscribeBootstrap.Active,
-        description = description,
+        header = header,
         emptyLine = "No posts yet.",
         statusLine = status,
         modifier = Modifier.fillMaxSize(),
@@ -1463,6 +1549,7 @@ public fun ChannelManageScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             openError?.let { ErrorLine(it) }
+            channel?.let { ChannelDetailsCard(channel = it, state = state, client = client) }
             SubscribersCard(channelId = channelId, state = state, client = client)
             CoPublishersCard(
                 channelId = channelId,
@@ -1481,9 +1568,100 @@ public fun ChannelManageScreen(
                 publisherGroup = pubGroup,
                 zone = zone,
                 locale = locale,
-                afterRotate = { refreshPublisherKey() },
+                afterRotate = {
+                    refreshPublisherKey()
+                    // ADR-0051 §4 — re-issue the record under the new key so a
+                    // late subscriber, who holds only the newest epochs, still
+                    // finds one it can read. The stored stamp, verbatim.
+                    ChannelMetaPublisher.reissue(state, client, channelId)
+                },
             )
             Spacer(Modifier.height(8.dp))
+        }
+    }
+}
+
+/**
+ * ADR-0051 §4 / UX 3.2 — the channel's name and description, editable by the
+ * publisher. Save posts a new metadata record (a fresh stamp) and updates the
+ * local copy; an empty name is refused with "A channel needs a name".
+ */
+@Composable
+private fun ChannelDetailsCard(channel: ChannelHandle, state: ChannelsUiState, client: ChannelsClient) {
+    val current = remember(channel.id) { channel.sharedMeta() }
+    var name by remember(channel.id) { mutableStateOf(current?.name ?: channel.localName) }
+    var description by remember(channel.id) { mutableStateOf(current?.description ?: channel.localDescription) }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+    val dirty = name.trim() != channelTitle(channel) || description.trim() != channelDescription(channel).orEmpty()
+
+    SectionCard(
+        title = "Channel",
+        description = "Every subscriber sees the name and the description.",
+    ) {
+        OutlinedTextField(
+            value = name,
+            onValueChange = {
+                name = it
+                error = null
+            },
+            label = { Text("Name") },
+            singleLine = true,
+            enabled = !busy,
+            isError = error != null && name.trim().isEmpty(),
+            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+            value = description,
+            onValueChange = {
+                description = it
+                error = null
+            },
+            label = { Text("Description (optional)") },
+            enabled = !busy,
+            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        error?.let { ErrorLine(it) }
+        Button(
+            onClick = {
+                if (busy) return@Button
+                val trimmedName = name.trim()
+                if (trimmedName.isEmpty()) {
+                    error = CHANNEL_NEEDS_A_NAME
+                    return@Button
+                }
+                busy = true
+                error = null
+                scope.launch {
+                    try {
+                        ChannelMetaPublisher.post(
+                            state = state,
+                            client = client,
+                            channelId = channel.id,
+                            name = trimmedName,
+                            description = description.trim(),
+                            updatedAtMs = System.currentTimeMillis().toULong(),
+                        )
+                        state.updateLocalMeta(channel.id, localName = trimmedName, localDescription = description.trim())
+                    } catch (e: uniffi.lakko_ffi_uniffi.FfiException.ChannelMeta) {
+                        // The message opens with the frozen reason code; the
+                        // human-readable half follows the ": ".
+                        error = e.message?.substringAfter(": ", missingDelimiterValue = "")
+                            ?.takeIf { it.isNotEmpty() } ?: "The name or description is not allowed."
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "channel record not posted", e)
+                        error = "Could not save. Retry."
+                    } finally {
+                        busy = false
+                    }
+                }
+            },
+            enabled = !busy && dirty,
+        ) {
+            Text(if (busy) "Saving..." else "Save")
         }
     }
 }

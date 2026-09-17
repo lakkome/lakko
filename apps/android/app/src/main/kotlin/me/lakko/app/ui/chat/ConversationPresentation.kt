@@ -20,14 +20,18 @@ import me.lakko.app.profile.ProfileDirectory
 public typealias ConversationKind = me.lakko.app.chat.ConversationKind
 
 /**
- * Local, per-device presentation facts about groups this device created or
- * named: the "created as a group" flag and the optional local group name. Both
- * live in plain `SharedPreferences` (names are local labels, never sent).
+ * Local, per-device presentation facts about groups this device created: the
+ * "created as a group" flag, in plain `SharedPreferences`.
+ *
+ * The group NAME no longer lives here. Since ADR-0051 a name is a fact shared
+ * inside the group — sent as an encrypted envelope, accepted from the owner or
+ * an admin, ordered by its stamp — and it is stored per `(account, group)` in
+ * [me.lakko.app.chat.GroupNameStore] together with that stamp. What remains
+ * here is the one presentation fact that is genuinely local.
  */
 public object GroupPresentationStore {
     private const val PREFS = "lakko-group-presentation"
     private const val KEY_CREATED = "created-as-group"
-    private const val NAME_PREFIX = "name:"
 
     private fun prefs(context: Context): SharedPreferences =
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -45,17 +49,7 @@ public object GroupPresentationStore {
     public fun wasCreatedAsGroup(context: Context, groupIdHex: String): Boolean =
         prefs(context).getStringSet(KEY_CREATED, emptySet()).orEmpty().contains(groupIdHex.lowercase())
 
-    public fun setName(context: Context, groupIdHex: String, name: String?) {
-        val e = prefs(context).edit()
-        val trimmed = name?.trim().orEmpty()
-        if (trimmed.isEmpty()) e.remove(NAME_PREFIX + groupIdHex.lowercase())
-        else e.putString(NAME_PREFIX + groupIdHex.lowercase(), trimmed.take(MAX_NAME_CHARS))
-        e.apply()
-    }
-
-    public fun name(context: Context, groupIdHex: String): String? =
-        prefs(context).getString(NAME_PREFIX + groupIdHex.lowercase(), null)?.takeIf { it.isNotBlank() }
-
+    /** The input cap for a group name (ADR-0051 §1: 1 to 64 scalars). */
     public const val MAX_NAME_CHARS: Int = 64
 }
 
@@ -84,8 +78,12 @@ public fun isGroupConversation(
 
 /**
  * The title of a conversation, never a hex id: the other person's name for a
- * chat; the local group name, else a name derived from the members
+ * chat; the shared group name (ADR-0051), else a name derived from the members
  * ("Anna, Ivan, Maria" and "+2" beyond three), else "Group".
+ *
+ * Callers that cache the result must key it on
+ * [me.lakko.app.chat.GroupNameStore.version] as well as the roster and the
+ * profile directory, so a name arriving on a poll re-titles in place.
  */
 public fun conversationTitle(
     context: Context,
@@ -98,7 +96,9 @@ public fun conversationTitle(
             return directory.resolve(key).primary
         }
     }
-    GroupPresentationStore.name(context, groupIdHex)?.let { return it }
+    me.lakko.app.chat.GroupNameStore
+        .name(context, repository.currentAccountIdB64(), groupIdHex)
+        ?.let { return it }
     return memberDerivedTitle(otherMemberNames(repository, directory, groupIdHex))
 }
 

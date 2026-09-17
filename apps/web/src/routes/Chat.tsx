@@ -132,6 +132,14 @@ import {
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
 import { recordRemovedDevices } from "../chat/device-readmission";
 import { useProfiles } from "../profile/ProfileContext";
+import { useGroupNames } from "../chat/GroupNameContext";
+import {
+  GROUP_NAME_LABEL,
+  GROUP_NAME_ONLY_ADMINS,
+  GROUP_NAME_SAVE,
+  groupNameErrorCode,
+  groupNameErrorText,
+} from "../chat/group-name-store";
 import { membersGrew } from "../profile/membership-growth";
 import { createUsernameCheck } from "../profile/username-field";
 import { mayLookUp, usernameReason } from "../profile/rules";
@@ -425,6 +433,7 @@ function ChatView(props: {
   // ADR-0048 — profile names: the one display resolver, the received-profile
   // store the receive loop feeds, and the publish triggers.
   const profiles = useProfiles();
+  const groupNames = useGroupNames();
   // The app-level 1x1 call slot and signaling queue (`calls/CallHostContext`):
   // calls ring and survive on every screen, not just inside this view.
   const callHost = useCallHost();
@@ -675,10 +684,14 @@ function ChatView(props: {
       resolveName: (k) => profiles.resolve(k).name,
       linkedContactName: loadAccepted().find((c) => c.groupIdB64 === props.entry.groupIdB64)
         ?.displayName,
+      // ADR-0051 §5 — the shared name first, then the member-derived title.
       label: groupTitle(
-        props.entry.label,
+        groupNames.nameOf(props.entry.groupIdB64) ?? props.entry.label,
         others.map((k) => memberNameOf(profiles.resolve(k))),
       ),
+      // The persisted kind decides, not the size: a two-person group is
+      // titled as a group, the same way the list files it.
+      isGroup: isGroupChat(),
     });
   };
 
@@ -883,6 +896,50 @@ function ChatView(props: {
   // add or explicit Cancel.
   const [addMemberOpen, setAddMemberOpen] = createSignal(false);
   const [addMemberInput, setAddMemberInput] = createSignal("");
+  // ADR-0051 — the `Group name` row of the group info (UX spec §3.1.2 / §5).
+  const [groupNameInput, setGroupNameInput] = createSignal("");
+  const [groupNameBusy, setGroupNameBusy] = createSignal(false);
+  const [groupNameError, setGroupNameError] = createSignal<string | null>(null);
+  // The field follows the shared name (a rename that lands while the panel
+  // is open replaces what is typed — the spec's "re-title in place").
+  createEffect(
+    on(
+      () => groupNames.nameOf(props.entry.groupIdB64),
+      (shared) => {
+        setGroupNameInput(shared ?? "");
+        setGroupNameError(null);
+      },
+    ),
+  );
+  /** Save the `Group name` row. The affordance is gated on the `ownRole`
+   *  signal, which can lag the group by one poll, so the role is re-read
+   *  off the LIVE group here and a stale control answers with the spec's
+   *  copy. Send first, then store: the title changes only once the send
+   *  succeeded. */
+  async function onSaveGroupName(): Promise<void> {
+    if (groupNameBusy()) return;
+    setGroupNameError(null);
+    setGroupNameBusy(true);
+    try {
+      const role = await groupNames.liveRole(props.entry.group);
+      if (role === "member") {
+        setGroupNameError(GROUP_NAME_ONLY_ADMINS);
+        return;
+      }
+      await groupNames.rename(props.entry, groupNameInput());
+      setNotice(null);
+    } catch (err) {
+      const code = groupNameErrorCode(err);
+      setGroupNameError(code !== undefined ? groupNameErrorText(code) : formatError(err));
+    } finally {
+      setGroupNameBusy(false);
+    }
+  }
+  /** Whether the row is editable: owner / admin, or a table-less group,
+   *  and the membership still standing. A plain member sees it read-only. */
+  const canRenameGroup = (): boolean => ownRole() !== "member" && !membershipEnded();
+  const groupNameUnchanged = (): boolean =>
+    groupNameInput().trim() === (groupNames.nameOf(props.entry.groupIdB64) ?? "");
   // ADR-0048 §4 — no lookup leaves the device for a name that fails the rule.
   const addMemberCheck = createUsernameCheck(addMemberInput);
   // ADR-0028 (G-3) — the minted group invite-link (the owner/admin
@@ -1000,6 +1057,9 @@ function ChatView(props: {
     const current = new Set(members().map((m) => base64Encode(m.sigPubkey)));
     if (membersGrew(lastMemberKeys, current)) {
       profiles.groupGrew(props.entry.groupIdB64);
+      // ADR-0051 §3 — an owner / admin holding a name re-sends it (original
+      // stamp) so the newcomer learns it; same throttle + jitter.
+      groupNames.groupGrew(props.entry.groupIdB64);
     }
     if (current.size > 0) lastMemberKeys = current;
   });
@@ -1547,7 +1607,7 @@ function ChatView(props: {
     // `vitest` cannot load this file.
     if (
       !(await requestConfirm(
-        leaveGroupConfirmation({ groupLabel: props.entry.label }),
+        leaveGroupConfirmation({ groupLabel: resolvePeerName() }),
       ))
     ) {
       return;
@@ -2039,7 +2099,7 @@ function ChatView(props: {
     // The action names the chat.
     if (
       !(await requestConfirm(
-        deleteChatConfirmation({ chatLabel: props.entry.label }),
+        deleteChatConfirmation({ chatLabel: resolvePeerName() }),
       ))
     ) {
       return;
@@ -2841,6 +2901,16 @@ function ChatView(props: {
           createdAt: e.createdAt,
           payloadBytes: e.payloadBytes,
           ...(e.senderLeaf === undefined ? {} : { senderLeaf: e.senderLeaf }),
+        });
+        continue;
+      }
+      // ADR-0051 — the shared group name. Through the role-gated verdict
+      // under the per-group lock; on accept the store re-titles the header,
+      // the list row and the group info in place. Never a timeline row.
+      if (e.kind === "group-name") {
+        void groupNames.receive(props.entry, e).catch((err) => {
+          // eslint-disable-next-line no-console
+          console.warn("group name receive failed", err);
         });
         continue;
       }
@@ -5204,6 +5274,54 @@ function ChatView(props: {
           button. The own-leaf row gets a "(you)" badge instead
           of a Remove button (can't kick yourself). */}
       <Show when={membersOpen()}>
+        {/* ADR-0051 — the `Group name` row (UX spec §3.1.2 / §5). Visible to
+            everyone in a group; editable by the owner and admins (read from
+            the live group at Save), read-only for a plain member. An empty
+            name clears it and the title falls back to the members' names. */}
+        <Show when={isGroupChat()}>
+          <section aria-label={GROUP_NAME_LABEL} class="lk-card" style={{ gap: "8px" }}>
+            <h2>{GROUP_NAME_LABEL}</h2>
+            <Show
+              when={canRenameGroup()}
+              fallback={<span style={{ "font-size": "0.9rem" }}>{resolvePeerName()}</span>}
+            >
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void onSaveGroupName();
+                }}
+                style={{ display: "flex", "flex-direction": "row", "align-items": "center", gap: "8px" }}
+              >
+                <input
+                  type="text"
+                  aria-label={GROUP_NAME_LABEL}
+                  placeholder={resolvePeerName()}
+                  autocomplete="off"
+                  maxLength={64}
+                  value={groupNameInput()}
+                  onInput={(e) => setGroupNameInput(e.currentTarget.value)}
+                  style={{ flex: 1 }}
+                  disabled={groupNameBusy()}
+                  aria-invalid={groupNameError() !== null}
+                />
+                <button
+                  class="primary"
+                  type="submit"
+                  disabled={groupNameBusy() || groupNameUnchanged()}
+                >
+                  {groupNameBusy() ? "Saving…" : GROUP_NAME_SAVE}
+                </button>
+              </form>
+            </Show>
+            <Show when={groupNameError()}>
+              {(msg) => (
+                <span class="form-error" role="alert">
+                  {msg()}
+                </span>
+              )}
+            </Show>
+          </section>
+        </Show>
         <section aria-label="Members" class="lk-card" style={{ gap: "8px" }}>
           <h2>Members ({members().length})</h2>
           {/* ADR-0045 UX §5.1 — the pending notice. TOP of the panel, above
@@ -6902,6 +7020,11 @@ function timelineRowToPersisted(
     // ADR-0048 — consumed by the receive loop (filed in the profile store),
     // never a timeline row. Never persist it: a name belongs in the encrypted
     // profile store, not in the transcript.
+    return null;
+  }
+  if (row.event.kind === "group-name") {
+    // ADR-0051 — consumed by the group-name gate, never a timeline row (no
+    // "renamed the group" transcript row in this version). Never persist it.
     return null;
   }
   if (row.event.kind === "membershipProposal") {

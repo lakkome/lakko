@@ -10,6 +10,13 @@
  * rename, profile name, verified username, fingerprint), read from the live
  * MLS roster so it works however the chat was created. A group keeps its label;
  * a linked contact's rename still names an accept-created chat.
+ *
+ * Which of the two a conversation IS follows the persisted conversation kind
+ * (`conversation-kind.ts`), not the member count: a two-person GROUP is titled
+ * as a group (ADR-0051 shared name first, then the member-derived title), the
+ * same way the list files it, so a rename reaches the header, the confirmations
+ * and the ringing banner. Without `isGroup` the two-member roster used to win
+ * here and the header read the other person's name over the group's.
  */
 
 import type { Group as WasmGroup } from "../../wasm/lakko_ffi_wasm";
@@ -24,12 +31,18 @@ export interface PeerNameInputs {
   readonly resolveName: (signatureKeyB64: string) => string;
   /** A linked contact's user-chosen name for this chat, if any. */
   readonly linkedContactName: string | undefined;
-  /** The chat's label. */
+  /** The chat's label — for a group, already resolved with the ADR-0051
+   *  precedence (shared name, else the label, else the members' names). */
   readonly label: string;
+  /** `true` when the conversation is filed as a GROUP (the persisted kind),
+   *  whatever its size: the peer-name branches are skipped and `label` is
+   *  the title. Defaults to the size-based rule. */
+  readonly isGroup?: boolean;
 }
 
 /** Pure half of the rule. */
 export function peerName(inputs: PeerNameInputs): string {
+  if (inputs.isGroup === true) return inputs.label.length > 0 ? inputs.label : "Group";
   const peers = inputs.memberKeysB64.filter((k) => k !== inputs.ownKeyB64);
   if (inputs.memberKeysB64.length === 2 && peers.length === 1 && peers[0] !== undefined) {
     return inputs.resolveName(peers[0]);

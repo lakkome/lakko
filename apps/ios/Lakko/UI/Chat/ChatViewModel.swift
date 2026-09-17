@@ -356,6 +356,13 @@ public final class ChatViewModel: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
+        // ADR-0051 — a shared group name arriving re-titles the header and the
+        // members panel in place.
+        repository.$groupNameRevision
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
     }
 
     /// ADR-0024 — `true` while ``ChatScreen`` is on-screen. The screen
@@ -1139,18 +1146,65 @@ public final class ChatViewModel: ObservableObject {
     }
 
     /// The header title (UX spec section 5.2): the other person's name in a
-    /// 1x1 chat, the members' names in a group. Never the group id.
+    /// 1x1 chat; in a group the shared group name (ADR-0051 §5), else the
+    /// members' names. Never the group id.
     var conversationTitle: String {
+        // ADR-0051 §5 — a shared name wins for ANY conversation that has one,
+        // whatever its kind or member count: a two-person conversation renamed
+        // from another client is still keyed as a chat here.
+        if let shared = groupName { return shared }
         if !presentsAsGroup, let peer = oneToOnePeerName { return peer }
         return ConversationTitle.groupTitle(
             otherMemberNames: ChatListViewModel.otherMemberNames(
                 repository: repository, groupIdHex: groupIdHex))
     }
 
+    // MARK: - ADR-0051 group name
+
+    /// The shared group name this device holds, or `nil` (member-derived
+    /// title). Read from the repository's store on every access so an accepted
+    /// envelope re-titles in place (``ChatRepository/groupNameRevision`` drives
+    /// the re-render).
+    var groupName: String? {
+        repository.groupName(groupIdHex: groupIdHex)
+    }
+
+    /// ADR-0051 §3 — may this device rename the group? The owner and admins
+    /// (or any member of a legacy group with no role table), read from the LIVE
+    /// group, never a cached role — and nobody once their membership ended. A
+    /// plain member sees the name read-only.
+    var canRenameGroup: Bool {
+        repository.ownRole(groupIdHex: groupIdHex) != .member && !membershipHasEnded
+    }
+
+    /// ADR-0051 §3 — send the new name (an empty string clears it). The store
+    /// and the title change only after the send succeeded; a failure returns
+    /// the error copy the members panel shows and leaves the title as it was.
+    func saveGroupName(_ name: String) async -> String? {
+        do {
+            try await repository.setGroupName(groupIdHex: groupIdHex, name: name)
+            objectWillChange.send()
+            return nil
+        } catch {
+            NSLog("ADR-0051 rename failed: \(error)")
+            return "Could not save the name. Check your connection and try again."
+        }
+    }
+
+    /// The new-group flow's hand-off (docs/ux/new-group.md §3): the chat opened
+    /// with the members that did land, and says which adds did not. Rendered in
+    /// the members panel's ungated notice slot.
+    func noteSetupNotice(_ text: String) {
+        membershipNotice = text
+    }
+
     /// The header's second line: "@username" in a 1x1 chat when the other
     /// person's username is verified, "N members" in a group, else nothing.
     var conversationSubtitle: String? {
-        if !presentsAsGroup, let peer = repository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex) {
+        // ADR-0051 — under a shared name the peer's handle is not the second
+        // line (the title is no longer the peer); the member count is.
+        if !presentsAsGroup, groupName == nil,
+           let peer = repository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex) {
             let resolved = ProfileDirectory.shared.resolve(signatureKey: peer)
             guard let username = resolved.verifiedUsername, resolved.source != .verifiedUsername
             else { return nil }

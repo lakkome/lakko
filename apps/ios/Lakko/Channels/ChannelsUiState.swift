@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import LakkoCore
 import SwiftUI
 
 /// Local channels state (Phase 4 G4-2 iOS). Mirror of
@@ -219,9 +220,46 @@ public final class ChannelsUiState: ObservableObject {
             localName: localName ?? old.localName,
             localDescription: localDescription ?? old.localDescription,
             addedAtMs: old.addedAtMs,
-            handle: handle ?? old.handle
+            handle: handle ?? old.handle,
+            sharedName: old.sharedName,
+            sharedDescription: old.sharedDescription,
+            sharedUpdatedAtMs: old.sharedUpdatedAtMs
         )
         persistChannelLog()
+    }
+
+    /// ADR-0051 §4 — keep `meta` as the channel's shared name and description
+    /// if it is strictly newer than what the row holds (the core's
+    /// `channelMetaIsNewer`; equal is not newer, so a rotation re-issue of the
+    /// current record changes nothing). Persists through the channel log.
+    /// Returns `true` when the row changed. A channel not in the list is not
+    /// created here (a reader lists it when subscribing).
+    @discardableResult
+    public func recordSharedMeta(channelId: String, meta: SharedChannelMeta) -> Bool {
+        guard let idx = channels.firstIndex(where: { $0.id == channelId }) else { return false }
+        let old = channels[idx]
+        if old.sharedUpdatedAtMs > 0,
+           !channelMetaIsNewer(
+               incomingUpdatedAtMs: meta.updatedAtMs, storedUpdatedAtMs: old.sharedUpdatedAtMs) {
+            return false
+        }
+        channels[idx] = ChannelHandle(
+            id: old.id,
+            localName: old.localName,
+            localDescription: old.localDescription,
+            addedAtMs: old.addedAtMs,
+            handle: old.handle,
+            sharedName: meta.name,
+            sharedDescription: meta.description,
+            sharedUpdatedAtMs: meta.updatedAtMs
+        )
+        persistChannelLog()
+        return true
+    }
+
+    /// The newest shared record held for `channelId`, or `nil`.
+    public func sharedMeta(channelId: String) -> SharedChannelMeta? {
+        channels.first(where: { $0.id == channelId })?.sharedMeta
     }
 
     /// Cache the subscriber count the manage screen or the list refresh
@@ -596,18 +634,58 @@ public struct ChannelHandle: Equatable, Sendable, Identifiable {
     /// or the one it was found by), without the leading `@`. Empty when
     /// unknown. Local-only, like the name.
     public let handle: String
+    /// ADR-0051 §4 — the name from the newest shared metadata record this
+    /// device has read (its own, for a publisher). Empty until one lands;
+    /// wins over `localName` for the title.
+    public let sharedName: String
+    /// ADR-0051 §4 — the description from the same record; shown only when
+    /// present.
+    public let sharedDescription: String
+    /// ADR-0051 §4 — the record's stamp; `0` when none was read. A newer
+    /// record replaces the fields, an older or equal one is ignored.
+    public let sharedUpdatedAtMs: UInt64
 
     public init(
         id: String,
         localName: String,
         localDescription: String,
         addedAtMs: UInt64,
-        handle: String = ""
+        handle: String = "",
+        sharedName: String = "",
+        sharedDescription: String = "",
+        sharedUpdatedAtMs: UInt64 = 0
     ) {
         self.id = id
         self.localName = localName
         self.localDescription = localDescription
         self.addedAtMs = addedAtMs
         self.handle = handle
+        self.sharedName = sharedName
+        self.sharedDescription = sharedDescription
+        self.sharedUpdatedAtMs = sharedUpdatedAtMs
+    }
+
+    /// The newest shared record this row holds, or `nil` when none landed.
+    public var sharedMeta: SharedChannelMeta? {
+        guard sharedUpdatedAtMs > 0, !sharedName.isEmpty else { return nil }
+        return SharedChannelMeta(
+            name: sharedName, description: sharedDescription, updatedAtMs: sharedUpdatedAtMs)
+    }
+
+    /// ADR-0051 §5 — the title: the shared name, else the local name, else the
+    /// bare handle, else "Channel". Mirrors web `channelTitle`.
+    public var title: String {
+        let shared = sharedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !shared.isEmpty { return shared }
+        let local = localName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !local.isEmpty { return local }
+        let bare = handle.trimmingCharacters(in: .whitespacesAndNewlines).drop(while: { $0 == "@" })
+        return bare.isEmpty ? "Channel" : String(bare)
+    }
+
+    /// The description to show: the shared one when a record landed, else
+    /// the local one (a publisher before its first record).
+    public var displayDescription: String {
+        sharedMeta != nil ? sharedDescription : localDescription
     }
 }

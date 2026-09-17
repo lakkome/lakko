@@ -66,6 +66,14 @@ const profile: IncomingChatEvent = {
   senderKey: "k" as never,
   createdAt: T,
 };
+const groupName: IncomingChatEvent = {
+  kind: "group-name",
+  messageId: 10,
+  groupName: { name: "Trio", updatedAtMs: 5n },
+  senderLeaf: 1,
+  senderKey: "k" as never,
+  createdAt: T,
+};
 
 describe("planBackgroundEvents", () => {
   const plan = planBackgroundEvents([
@@ -78,6 +86,7 @@ describe("planBackgroundEvents", () => {
     beacon,
     secret,
     profile,
+    groupName,
   ]);
 
   it("files chat and system rows into the timeline, in journal order", () => {
@@ -106,6 +115,12 @@ describe("planBackgroundEvents", () => {
     for (const kind of ["committerBeacon", "pushRoutingSecret", "profile"]) {
       expect(plan.toView.some((e) => e.kind === kind)).toBe(false);
     }
+  });
+
+  it("settles a group name where it is received, never in the view (ADR-0051)", () => {
+    expect(plan.groupNames.map((e) => e.messageId)).toEqual([10]);
+    expect(plan.toView.some((e) => e.kind === "group-name")).toBe(false);
+    expect(plan.timeline.some((e) => (e.messageId as number) === 10)).toBe(false);
   });
 
   it("flags a commit so the membership-shrink rotation runs (ADR-0043)", () => {

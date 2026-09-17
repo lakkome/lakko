@@ -1196,7 +1196,10 @@ private fun SessionRoot(
                     // when names or the roster change. A 1x1 names its peer itself.
                     val nameVersion by profileDirectory.version.collectAsStateWithLifecycle()
                     val membersVersion by chatVm.members.collectAsStateWithLifecycle()
-                    val groupTitle = remember(groupIdHex, nameVersion, membersVersion, chatState) {
+                    // ADR-0051 — a shared name accepted on a poll re-titles the header.
+                    val groupNameVersion by me.lakko.app.chat.GroupNameStore.version
+                        .collectAsStateWithLifecycle()
+                    val groupTitle = remember(groupIdHex, nameVersion, membersVersion, groupNameVersion, chatState) {
                         me.lakko.app.ui.chat.conversationTitle(
                             appContext, chatRepository, profileDirectory, groupIdHex,
                         )

@@ -461,6 +461,13 @@ public final class ChatListViewModel: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
+        // ADR-0051 — a shared group name arriving (or set here) re-titles the
+        // group's row in place.
+        repository.$groupNameRevision
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
     }
 
     /// ADR-0050 section 2.9 — whether groups the pairing bundle named are not
@@ -495,9 +502,15 @@ public final class ChatListViewModel: ObservableObject {
         return verdict.kind
     }
 
-    /// The row title: the other person's resolved name (ADR-0048) for a chat,
-    /// the members' names for a group. Never a hex id (UX spec section 6).
+    /// The row title (ADR-0051 §5): the shared group name whenever the
+    /// conversation has one — whatever its kind or member count, since a
+    /// two-person conversation renamed from another client is still keyed as
+    /// a chat here — else the other person's resolved name (ADR-0048) for a
+    /// chat, else the members' names. Never a hex id (UX spec section 6).
     func title(groupIdHex: String) -> String {
+        if let shared = repository.groupName(groupIdHex: groupIdHex) {
+            return shared
+        }
         if let peer = repository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex) {
             return ProfileDirectory.shared.resolve(signatureKey: peer).name
         }

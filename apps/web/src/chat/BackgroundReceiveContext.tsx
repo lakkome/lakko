@@ -85,6 +85,7 @@ import {
   recordBeaconObservation,
   type ActingCommitter,
 } from "./committer-beacon";
+import { useGroupNames } from "./GroupNameContext";
 import { readIsActive } from "./membership-ended";
 import {
   loadMessageLog,
@@ -178,6 +179,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   const auth = useAuth();
   const chats = useChats();
   const profiles = useProfiles();
+  const groupNames = useGroupNames();
   const callHost = useCallHost();
 
   const coordinator = new ReceiveCoordinator<IncomingChatEvent>();
@@ -637,6 +639,14 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
 
     for (const p of plan.profiles) {
       if (p.profile !== undefined && p.senderKey !== undefined) profiles.ingest(p.senderKey, p.profile);
+    }
+    // ADR-0051 — the shared group name, through the role-gated verdict under
+    // the per-group lock; the chat list re-titles from the store.
+    for (const n of plan.groupNames) {
+      void groupNames.receive(entry, n).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn("background receive: group name receive failed", err);
+      });
     }
     for (const secret of plan.pushSecrets) {
       void receivePushRoutingSecretGated(

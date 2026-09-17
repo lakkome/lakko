@@ -12,6 +12,7 @@ import { useNavigate } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
 import { base64Decode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { useChats } from "../chat/ChatContext";
+import { useGroupNames } from "../chat/GroupNameContext";
 import { accountIdBytesFromHex, setPendingGroupSetup } from "../chat/pending-group-setup";
 import { recordConversationKind } from "../chat/conversation-kind-store";
 import { ContactsClient } from "../contacts/client";
@@ -27,6 +28,7 @@ export default function NewGroup(): JSX.Element {
   const auth = useAuth();
   const chats = useChats();
   const profiles = useProfiles();
+  const groupNames = useGroupNames();
   const navigate = useNavigate();
 
   const client = new ContactsClient(undefined, undefined, {
@@ -84,6 +86,19 @@ export default function NewGroup(): JSX.Element {
         group: result.group,
       });
       profiles.groupJoined(active.groupIdB64);
+      // ADR-0051 §3 — the name is a shared fact: into the device store and,
+      // right after the creating commit, into the group so the first Welcome
+      // recipient gets it with its first poll. A failed send is covered by
+      // the growth re-send. The group exists at this point whatever happens
+      // here, so a refusal is logged rather than shown on the create form.
+      if (name().trim().length > 0) {
+        try {
+          await groupNames.recordCreated(active, name());
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("new group: name not recorded", err);
+        }
+      }
       const s = auth.state();
       if (s.kind === "session") {
         // docs/ux/client-redesign.md section 3 — a group created here is a
@@ -137,7 +152,7 @@ export default function NewGroup(): JSX.Element {
             />
           </label>
           <p class="lk-card-desc" style={{ margin: 0 }}>
-            The name stays on your devices; it is not sent to the server.
+            Every member sees the name. It is sent encrypted; the server never reads it.
           </p>
         </section>
         <section class="lk-card" style={{ gap: "4px" }}>

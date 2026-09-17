@@ -199,7 +199,9 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
             decodesAsCommitterBeacon: Self.decodesAsCommitterBeacon,
             committerBeaconEnvelopeLen: Self.committerBeaconEnvelopeLength,
             decodesAsProfile: Self.decodesAsProfile,
-            profileEnvelopeLens: Self.profileEnvelopeLengths
+            profileEnvelopeLens: Self.profileEnvelopeLengths,
+            decodesAsGroupName: Self.decodesAsGroupName,
+            groupNameEnvelopeLens: Self.groupNameEnvelopeLengths
         ) {
             return nil
         }
@@ -287,6 +289,23 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
     private static var profileEnvelopeLengths: ClosedRange<Int> {
         let minLen = Int(profileEnvelopeMinLen())
         let maxLen = Int(profileEnvelopeMaxLen())
+        return minLen...max(minLen, maxLen)
+    }
+
+    /// The AUTHORITATIVE half of the ADR-0051 group-name filter: the slim
+    /// FFI's `decodeGroupNameEnvelope`. READ-ONLY: a pure decode. The NSE never
+    /// stores a group name (C-59) and holds no role table to gate it with; it
+    /// only needs the yes/no that keeps a rename out of a notification body.
+    private static func decodesAsGroupName(_ bytes: Data) -> Bool {
+        (try? decodeGroupNameEnvelope(plaintext: bytes)) != nil
+    }
+
+    /// The well-formed group-name envelope length range, read from the slim
+    /// FFI's `groupNameEnvelopeMinLen()` / `groupNameEnvelopeMaxLen()` so no
+    /// wire number is hand-copied into the NSE.
+    private static var groupNameEnvelopeLengths: ClosedRange<Int> {
+        let minLen = Int(groupNameEnvelopeMinLen())
+        let maxLen = Int(groupNameEnvelopeMaxLen())
         return minLen...max(minLen, maxLen)
     }
 

@@ -51,7 +51,8 @@ import me.lakko.app.ui.contacts.contactRouteKey
 /**
  * New group — docs/ux/new-group.md, the Android shape.
  *
- * A local name (never sent; optional) and the accepted contacts with a
+ * An optional name — shared with every member (ADR-0051, sent into the group
+ * right after the creating commit) — and the accepted contacts with a
  * checkbox each. Create starts the group with the first pick through the
  * repository's existing 1x1 create path, records the group as created-as-a-
  * group (so the Groups list owns it even while it has two people), adds the
@@ -107,7 +108,7 @@ public fun NewGroupScreen(
             OutlinedTextField(
                 value = name,
                 onValueChange = { if (it.length <= GroupPresentationStore.MAX_NAME_CHARS) name = it },
-                label = { Text("Group name (optional)") },
+                label = { Text(me.lakko.app.chat.GROUP_NAME_LABEL + " (optional)") },
                 singleLine = true,
                 enabled = !creating,
                 modifier = Modifier
@@ -216,7 +217,19 @@ public fun NewGroupScreen(
                             return@launch
                         }
                         GroupPresentationStore.markCreatedAsGroup(appContext, groupIdHex)
-                        GroupPresentationStore.setName(appContext, groupIdHex, name)
+                        // ADR-0051 §3 — the name is written to the shared-name
+                        // store and sent into the group right after the
+                        // creating commit, BEFORE the follow-up adds, so the
+                        // first Welcome recipients get it on their first poll.
+                        // A failed send keeps the creator's own name (the
+                        // growth re-send carries it to the members later).
+                        if (name.isNotBlank()) {
+                            try {
+                                chatRepository.setGroupName(groupIdHex, name, storeFirst = true)
+                            } catch (cause: Throwable) {
+                                android.util.Log.w("NewGroupScreen", "group name not sent", cause)
+                            }
+                        }
                         for (next in chosen.drop(1)) {
                             try {
                                 chatRepository.addMemberToGroup(

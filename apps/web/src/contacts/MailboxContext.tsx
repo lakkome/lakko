@@ -43,6 +43,7 @@ import {
 
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
+import { useGroupNames } from "../chat/GroupNameContext";
 import { groupIdHex } from "../devices/sync/state";
 import { isDsNetworkFailure } from "../ds/client";
 import {
@@ -100,6 +101,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   const auth = useAuth();
   const chats = useChats();
   const profiles = useProfiles();
+  const groupNames = useGroupNames();
   const client = new ContactsClient(undefined, undefined, {
     identityProvider: () => chats.identity(),
     // ADR-0050: requests, acks and the account mailbox are the person's;
@@ -164,8 +166,13 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
               auth.identitySecrets(),
               ev.welcome.welcomeBytes,
             );
+            // ADR-0051 — a name this device already holds for the group (a
+            // re-join, a second Welcome) titles it at once; otherwise the
+            // stand-in the title resolver reads as "unnamed".
             const active = chats.add({
-              label: `Joined group (Welcome ${ev.welcome.messageId})`,
+              label:
+                groupNames.nameOf(base64Encode(group.groupId)) ??
+                `Joined group (Welcome ${ev.welcome.messageId})`,
               group,
             });
             joinedWelcomeIds.add(ev.welcome.messageId);

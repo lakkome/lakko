@@ -81,8 +81,15 @@
 use std::sync::Mutex;
 
 use lakko_channels::{
-    compose_post, decode_post, open_seed, post::ChannelPost as InnerPost, seal_seed,
-    verify_and_decrypt, ContentKeySeed, EpochId, CHANNEL_ID_LEN, EXPORTER_LABEL_V1,
+    compose_post, decode_post,
+    meta::{
+        channel_meta_is_newer as inner_channel_meta_is_newer, classify_post_plaintext,
+        compose_channel_meta as inner_compose_channel_meta, ChannelMeta, ChannelMetaError,
+        PostContent,
+    },
+    open_seed,
+    post::ChannelPost as InnerPost,
+    seal_seed, verify_and_decrypt, ContentKeySeed, EpochId, CHANNEL_ID_LEN, EXPORTER_LABEL_V1,
     SEED_ENVELOPE_LEN,
 };
 use lakko_crypto::agreement::{PublicKey as X25519PublicKey, SecretKey as X25519SecretKey};
@@ -554,6 +561,142 @@ pub fn channel_seed_envelope_len() -> u32 {
     u32::try_from(SEED_ENVELOPE_LEN).unwrap_or(u32::MAX)
 }
 
+// =========================================================
+// Channel metadata record (ADR-0051 §4)
+// =========================================================
+//
+// The record is the PLAINTEXT of an ordinary post: the client
+// composes it here, then hands the bytes to `composeChannelPost`
+// like any message. On receive, the client runs
+// `classifyChannelPostPlaintext` on every decrypted post BEFORE
+// the text path, keeps the newest `Meta` per channel by
+// `channelMetaIsNewer`, drops `Malformed`, and renders `Text`.
+
+impl From<ChannelMetaError> for FfiError {
+    fn from(e: ChannelMetaError) -> Self {
+        Self::ChannelMeta(format!("{}: {e}", e.code()))
+    }
+}
+
+/// A channel's name and description as the publisher stated
+/// them (ADR-0051 §4). Both are the publisher's own statement,
+/// trusted because the carrying post's signature verified.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiChannelMeta {
+    /// Trimmed, 1 to 64 Unicode scalars, at most 255 bytes, one line,
+    /// no control / bidi / invisible format characters.
+    pub name: String,
+    /// Trimmed, 0 to 300 scalars, at most 1024 bytes; LINE FEED
+    /// permitted, otherwise the name's character rules.
+    pub description: String,
+    /// Publisher-clock UNIX milliseconds. A re-issue (after a
+    /// rotation, or for retention) MUST carry the stored value
+    /// verbatim, never a fresh clock read.
+    pub updated_at_ms: u64,
+}
+
+impl From<ChannelMeta> for FfiChannelMeta {
+    fn from(m: ChannelMeta) -> Self {
+        Self {
+            name: m.name,
+            description: m.description,
+            updated_at_ms: m.updated_at_ms,
+        }
+    }
+}
+
+impl From<FfiChannelMeta> for ChannelMeta {
+    fn from(m: FfiChannelMeta) -> Self {
+        Self {
+            name: m.name,
+            description: m.description,
+            updated_at_ms: m.updated_at_ms,
+        }
+    }
+}
+
+/// What a decrypted post plaintext turned out to be.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FfiChannelPostKind {
+    /// Not a metadata record; render `text` through the text path.
+    Text,
+    /// A well-formed, in-bounds metadata record in `meta`.
+    Meta,
+    /// The record domain matched but the record failed a bound;
+    /// `error` carries the frozen reason code. Drop it, never
+    /// render it as text.
+    Malformed,
+}
+
+/// Result of [`classify_channel_post_plaintext`]. A flat record
+/// rather than an enum with data: exactly one of `text` / `meta` /
+/// `error` is set, selected by `kind`.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiChannelPostContent {
+    /// Which of the three fields below is populated.
+    pub kind: FfiChannelPostKind,
+    /// The plaintext, verbatim, when `kind == Text`.
+    pub text: Option<Vec<u8>>,
+    /// The decoded record when `kind == Meta`.
+    pub meta: Option<FfiChannelMeta>,
+    /// The frozen `ChannelMetaError::code()` when `kind == Malformed`
+    /// (for example `name.empty`, `unknownVersion`).
+    pub error: Option<String>,
+}
+
+/// Compose a channel metadata record — the PLAINTEXT to hand to
+/// [`compose_channel_post`]. Trim the inputs first; the composer
+/// refuses untrimmed text exactly as every reader's decoder does.
+///
+/// # Errors
+///
+/// [`FfiError::ChannelMeta`] with the frozen reason code first in
+/// the message (`name.empty`, `name.tooLong`, `name.lineBreak`,
+/// `name.controlOrFormatCharacter`, `name.tooManyBytes`,
+/// `name.notTrimmed`, and the same under `description.`).
+#[uniffi::export]
+pub fn compose_channel_meta(meta: FfiChannelMeta) -> Result<Vec<u8>, FfiError> {
+    Ok(inner_compose_channel_meta(&ChannelMeta::from(meta))?)
+}
+
+/// Classify a decrypted post plaintext: run this on EVERY post
+/// before the text path. Never fails — an unrecognised plaintext is
+/// `Text`, a matching domain that fails a bound is `Malformed`.
+#[uniffi::export]
+#[must_use]
+pub fn classify_channel_post_plaintext(plaintext: Vec<u8>) -> FfiChannelPostContent {
+    match classify_post_plaintext(&plaintext) {
+        PostContent::Text(text) => FfiChannelPostContent {
+            kind: FfiChannelPostKind::Text,
+            text: Some(text.to_vec()),
+            meta: None,
+            error: None,
+        },
+        PostContent::Meta(meta) => FfiChannelPostContent {
+            kind: FfiChannelPostKind::Meta,
+            text: None,
+            meta: Some(meta.into()),
+            error: None,
+        },
+        PostContent::Malformed(e) => FfiChannelPostContent {
+            kind: FfiChannelPostKind::Malformed,
+            text: None,
+            meta: None,
+            error: Some(e.code()),
+        },
+    }
+}
+
+/// `true` when a record stamped `incoming_updated_at_ms` must replace
+/// the stored one for the same channel. Strictly greater; equal is
+/// NOT newer, so a re-issue of the record already held is not an
+/// update.
+#[uniffi::export]
+#[must_use]
+pub fn channel_meta_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u64) -> bool {
+    inner_channel_meta_is_newer(incoming_updated_at_ms, stored_updated_at_ms)
+}
+
 // ---------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------
@@ -830,5 +973,97 @@ mod tests {
         let post = decode_channel_post(wire).unwrap();
         let plaintext = verify_and_decrypt_channel_post(recovered_seed, channel_id, post).unwrap();
         assert_eq!(plaintext, b"phase-4b end-to-end");
+    }
+
+    // -----------------------------------------------------
+    // Channel metadata record (ADR-0051 §4) tests
+    // -----------------------------------------------------
+
+    fn ffi_meta(name: &str, description: &str, at: u64) -> FfiChannelMeta {
+        FfiChannelMeta {
+            name: name.to_string(),
+            description: description.to_string(),
+            updated_at_ms: at,
+        }
+    }
+
+    #[test]
+    fn channel_meta_compose_then_classify_round_trips() {
+        let meta = ffi_meta("Lakko News", "Releases\nand outages", 1_700_000_000_000);
+        let wire = compose_channel_meta(meta.clone()).unwrap();
+        let content = classify_channel_post_plaintext(wire);
+        assert_eq!(content.kind, FfiChannelPostKind::Meta);
+        assert_eq!(content.meta, Some(meta));
+        assert!(content.text.is_none());
+        assert!(content.error.is_none());
+    }
+
+    #[test]
+    fn channel_meta_text_post_classifies_as_text_verbatim() {
+        let text = b"hello subscribers".to_vec();
+        let content = classify_channel_post_plaintext(text.clone());
+        assert_eq!(content.kind, FfiChannelPostKind::Text);
+        assert_eq!(content.text, Some(text));
+        assert!(content.meta.is_none());
+        assert!(content.error.is_none());
+        // The printable domain without the NUL is still text.
+        let lookalike = b"lakko/channel-meta/v1".to_vec();
+        let content = classify_channel_post_plaintext(lookalike.clone());
+        assert_eq!(content.kind, FfiChannelPostKind::Text);
+        assert_eq!(content.text, Some(lookalike));
+    }
+
+    #[test]
+    fn channel_meta_malformed_record_carries_the_code() {
+        // A bare separator: the domain matched, the payload is missing.
+        let content =
+            classify_channel_post_plaintext(lakko_channels::CHANNEL_META_DOMAIN_V1.to_vec());
+        assert_eq!(content.kind, FfiChannelPostKind::Malformed);
+        assert_eq!(content.error.as_deref(), Some("truncated"));
+        assert!(content.text.is_none());
+        assert!(content.meta.is_none());
+    }
+
+    #[test]
+    fn channel_meta_compose_refuses_out_of_bounds_with_the_code_first() {
+        let err = compose_channel_meta(ffi_meta("", "", 0)).unwrap_err();
+        match err {
+            FfiError::ChannelMeta(msg) => assert!(msg.starts_with("name.empty: "), "{msg}"),
+            other => panic!("expected ChannelMeta, got {other:?}"),
+        }
+        let err = compose_channel_meta(ffi_meta("ok", "bad\u{202E}", 0)).unwrap_err();
+        match err {
+            FfiError::ChannelMeta(msg) => assert!(
+                msg.starts_with("description.controlOrFormatCharacter: "),
+                "{msg}"
+            ),
+            other => panic!("expected ChannelMeta, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn channel_meta_is_newer_is_strict() {
+        assert!(channel_meta_is_newer(2, 1));
+        assert!(!channel_meta_is_newer(1, 1));
+        assert!(!channel_meta_is_newer(0, 1));
+    }
+
+    #[test]
+    fn channel_meta_record_survives_the_full_post_pipeline() {
+        // The record is the plaintext of an ordinary post: compose the
+        // record, seal it as a post, decode + verify on the subscriber
+        // side, classify the recovered plaintext.
+        let signer = ChannelSigningKey::generate();
+        let seed = new_channel_seed_for_test();
+        let channel_id = vec![0x51u8; CHANNEL_ID_LEN];
+        let meta = ffi_meta("Lakko News", "", 42);
+        let record = compose_channel_meta(meta.clone()).unwrap();
+        let wire =
+            compose_channel_post(seed.clone(), channel_id.clone(), 1, signer, 0, record).unwrap();
+        let post = decode_channel_post(wire).unwrap();
+        let plaintext = verify_and_decrypt_channel_post(seed, channel_id, post).unwrap();
+        let content = classify_channel_post_plaintext(plaintext);
+        assert_eq!(content.kind, FfiChannelPostKind::Meta);
+        assert_eq!(content.meta, Some(meta));
     }
 }

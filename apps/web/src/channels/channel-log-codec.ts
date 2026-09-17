@@ -30,6 +30,10 @@
  *     than waiting for the next catch-up.
  *   * `publisherSigningSeeds` — the creator's / co-publisher's
  *     per-channel Ed25519 signing seed.
+ *   * `channelMeta` — the newest ADR-0051 metadata record per channel
+ *     (`name`, `description`, `updated_at_ms`): a subscriber's shared
+ *     title, and for a publisher its own copy, which is the source of
+ *     the next record it posts (after a rotation, on Save).
  *   * `publisherProviderSnapshotB64` + `publisherLeafKeyB64` — the
  *     MLS provider storage of the ACCOUNT identity the PublisherGroups
  *     live in, and the signature key it was taken under. The channel
@@ -88,6 +92,22 @@ export interface PersistedPublisherSigningSeed {
   readonly seedHex: string;
 }
 
+/** ADR-0051 §4 — the newest channel metadata record this device holds. */
+export interface ChannelSharedMeta {
+  readonly name: string;
+  readonly description: string;
+  /** The record's `updated_at_ms` (a `u64`). */
+  readonly updatedAtMs: bigint;
+}
+
+export interface PersistedChannelMeta {
+  readonly channelId: string;
+  readonly name: string;
+  readonly description: string;
+  /** Decimal string — a `u64` does not survive `JSON.parse` as a number. */
+  readonly updatedAtMs: string;
+}
+
 /** Wire shape of the encrypted blob, post-decrypt + JSON-parse. */
 export interface ChannelLogPayload {
   readonly version: number;
@@ -95,6 +115,9 @@ export interface ChannelLogPayload {
   readonly subscriberKeys: readonly PersistedSubscriberKey[];
   readonly subscribedSeeds: readonly PersistedSubscribedSeed[];
   readonly publisherSigningSeeds: readonly PersistedPublisherSigningSeed[];
+  /** ADR-0051 — one newest record per channel. Absent in a row written by
+   *  a narrower writer (decodes as none). */
+  readonly channelMeta?: readonly PersistedChannelMeta[];
   /** Base64 of `Identity.snapshotStorage()` on the account identity the
    *  PublisherGroups were created in. Absent / `null` when this device has
    *  never held a publisher group. */
@@ -112,6 +135,8 @@ export interface ChannelLogSnapshot {
   readonly subscriberKeys: ReadonlyMap<string, ChannelSubscriberKeys>;
   readonly subscribedSeeds: ReadonlyMap<string, ReadonlyMap<number, Uint8Array>>;
   readonly publisherSigningSeeds: ReadonlyMap<string, Uint8Array>;
+  /** ADR-0051 — channel id -> newest metadata record. */
+  readonly channelMeta: ReadonlyMap<string, ChannelSharedMeta>;
   readonly publisherProviderSnapshot: Uint8Array | null;
   readonly publisherLeafKeyB64: string | null;
 }
@@ -123,6 +148,7 @@ export function emptyChannelLogSnapshot(): ChannelLogSnapshot {
     subscriberKeys: new Map(),
     subscribedSeeds: new Map(),
     publisherSigningSeeds: new Map(),
+    channelMeta: new Map(),
     publisherProviderSnapshot: null,
     publisherLeafKeyB64: null,
   };
@@ -201,12 +227,22 @@ export function encodeChannelLog(snapshot: ChannelLogSnapshot): ChannelLogPayloa
   for (const [channelId, seed] of snapshot.publisherSigningSeeds) {
     publisherSigningSeeds.push({ channelId, seedHex: bytesToHex(seed) });
   }
+  const channelMeta: PersistedChannelMeta[] = [];
+  for (const [channelId, m] of snapshot.channelMeta) {
+    channelMeta.push({
+      channelId,
+      name: m.name,
+      description: m.description,
+      updatedAtMs: m.updatedAtMs.toString(),
+    });
+  }
   return {
     version: CHANNEL_LOG_VERSION,
     channels,
     subscriberKeys,
     subscribedSeeds,
     publisherSigningSeeds,
+    channelMeta,
     publisherProviderSnapshotB64:
       snapshot.publisherProviderSnapshot === null
         ? null
@@ -281,6 +317,20 @@ export function decodeChannelLog(payload: unknown): ChannelLogSnapshot | null {
     publisherSigningSeeds.set(s.channelId, seed);
   }
 
+  const channelMeta = new Map<string, ChannelSharedMeta>();
+  for (const raw of asArray(p.channelMeta)) {
+    const m = raw as Record<string, unknown>;
+    if (typeof m !== "object" || m === null) continue;
+    if (!isChannelIdHex(m.channelId)) continue;
+    if (typeof m.name !== "string" || typeof m.description !== "string") continue;
+    if (typeof m.updatedAtMs !== "string" || !/^\d+$/.test(m.updatedAtMs)) continue;
+    channelMeta.set(m.channelId, {
+      name: m.name,
+      description: m.description,
+      updatedAtMs: BigInt(m.updatedAtMs),
+    });
+  }
+
   const snapshotB64 = p.publisherProviderSnapshotB64;
   const leafKey = p.publisherLeafKeyB64;
   const publisherProviderSnapshot =
@@ -292,6 +342,7 @@ export function decodeChannelLog(payload: unknown): ChannelLogSnapshot | null {
     subscriberKeys,
     subscribedSeeds,
     publisherSigningSeeds,
+    channelMeta,
     // A snapshot with no key to check it against is unusable: drop both.
     publisherProviderSnapshot: publisherLeafKeyB64 === null ? null : publisherProviderSnapshot,
     publisherLeafKeyB64: publisherProviderSnapshot === null ? null : publisherLeafKeyB64,

@@ -13,6 +13,7 @@ import me.lakko.app.ds.FetchResult
 import me.lakko.app.push.GroupPushRouting
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 import uniffi.lakko_ffi_uniffi.FfiException
+import uniffi.lakko_ffi_uniffi.FfiGroupName
 import uniffi.lakko_ffi_uniffi.FfiProfile
 import uniffi.lakko_ffi_uniffi.FfiPushRoutingSecret
 import uniffi.lakko_ffi_uniffi.Group
@@ -594,6 +595,15 @@ private fun decodeProfileOrNull(bytes: ByteArray): FfiProfile? =
         null
     }
 
+/** ADR-0051 — the authoritative, fail-closed group-name decode: the name, or
+ *  `null` for a malformed / out-of-bounds envelope (dropped, never rendered). */
+private fun decodeGroupNameOrNull(bytes: ByteArray): FfiGroupName? =
+    try {
+        uniffi.lakko_ffi_uniffi.decodeGroupNameEnvelope(bytes)
+    } catch (_: Throwable) {
+        null
+    }
+
 /**
  * Classify one decrypted DS row into an [IncomingChatEvent].
  *
@@ -634,6 +644,7 @@ internal fun toEvent(
     isCommitterBeacon: (ByteArray) -> Boolean = ::committerBeaconArm,
     parseBody: (ByteArray) -> ParsedBody = ::parseBodyEnvelope,
     decodeProfile: (ByteArray) -> FfiProfile? = ::decodeProfileOrNull,
+    decodeGroupName: (ByteArray) -> FfiGroupName? = ::decodeGroupNameOrNull,
 ): IncomingChatEvent =
     when (processed) {
         is ProcessedMessage.Application -> {
@@ -741,6 +752,19 @@ internal fun toEvent(
                 IncomingChatEvent.Profile(
                     messageId = messageId,
                     profile = decodeProfile(processed.data),
+                    senderKey = processed.senderLeaf?.let(resolveSender),
+                    createdAt = createdAt,
+                )
+            } else if (looksLikeGroupNameEnvelope(processed.data)) {
+                // ADR-0051 — the group's shared name. Never a timeline bubble.
+                // Same shape as the profile arm: the sender is resolved to its
+                // account KEY here (C-68), because the repository's role gate
+                // judges the sender's authority at the moment of receipt. A
+                // malformed envelope arrives as `groupName = null` and is
+                // consumed as a no-op; the chat parser never sees it.
+                IncomingChatEvent.GroupName(
+                    messageId = messageId,
+                    groupName = decodeGroupName(processed.data),
                     senderKey = processed.senderLeaf?.let(resolveSender),
                     createdAt = createdAt,
                 )
@@ -1223,6 +1247,21 @@ public sealed interface IncomingChatEvent {
     public data class CommitterBeacon(
         val messageId: Long,
         val senderLeaf: UInt?,
+        val createdAt: String,
+    ) : IncomingChatEvent
+
+    /** ADR-0051 — a group-name envelope. Never a timeline bubble.
+     *
+     *  [groupName] is `null` when the envelope matched the group-name domain
+     *  but was malformed or out of bounds; it is consumed as a no-op.
+     *
+     *  [senderKey] is the sender's account key resolved from the MLS sender
+     *  leaf at receipt (C-68), `null` when unresolvable — the repository's role
+     *  gate then refuses it in a role-table group. */
+    public data class GroupName(
+        val messageId: Long,
+        val groupName: FfiGroupName?,
+        val senderKey: MemberIdentity?,
         val createdAt: String,
     ) : IncomingChatEvent
 }

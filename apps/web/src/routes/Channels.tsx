@@ -66,9 +66,10 @@ import {
 import { pollForCoPublishWelcome, requestToCoPublish } from "../channels/copublisher";
 import { LegacyChannelError } from "../channels/legacy-v1";
 import { DiscoveryHttpError, registerChannelHandle } from "../channels/channel-discovery";
-import { displayHandle } from "../channels/channel-row";
+import { channelTitle, displayHandle } from "../channels/channel-row";
+import { foldChannelMeta, publishChannelMeta } from "../channels/channel-meta";
 import { ManagePanel } from "../channels/ManagePanel";
-import { PostCard, toPostDecode, type PostDecode } from "../channels/PostCard";
+import { isHiddenPostDecode, PostCard, toPostDecode, type PostDecode } from "../channels/PostCard";
 import { PublishComposer } from "../channels/PublishComposer";
 import { DsClient } from "../ds/client";
 import { useAuth } from "../auth/AuthContext";
@@ -78,6 +79,7 @@ import {
   channelsActions,
   channelsState,
 } from "../state/channels-state";
+import { loadWasm } from "../wasm";
 import { paths } from "./paths";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
@@ -133,7 +135,10 @@ function PostList(props: {
   readonly emptyText?: string;
 }): JSX.Element {
   let scroller: HTMLDivElement | undefined;
-  const ordered = createMemo(() => oldestFirst(props.posts));
+  // ADR-0051 — a metadata record (and a malformed one) is never a card.
+  const ordered = createMemo(() =>
+    oldestFirst(props.posts).filter((p) => !isHiddenPostDecode(props.decodedByCursor.get(p.cursor))),
+  );
   createEffect(() => {
     void ordered().length;
     void props.decodedByCursor;
@@ -169,16 +174,39 @@ function PostList(props: {
   );
 }
 
-/** Local metadata for a channel id, with plain fallbacks. */
+/** Metadata for a channel id (ADR-0051 §5): the shared record first, then
+ *  the local fields, then the handle. */
 function channelMetaOf(id: string): { name: string; description: string; handle: string } {
   const h = channelsState.channels().find((c) => c.id === id);
+  const shared = channelsState.metaByChannel().get(id);
   const handle = displayHandle(h?.localHandle);
-  const name = (h?.localName ?? "").trim();
   return {
-    name: name.length > 0 ? name : handle.length > 0 ? handle.slice(1) : "Channel",
-    description: h?.localDescription ?? "",
+    name: channelTitle(shared?.name, h?.localName ?? "", h?.localHandle),
+    description: (shared?.description ?? h?.localDescription ?? "").trim(),
     handle,
   };
+}
+
+/** Decode a fetched page: every plaintext is classified (record / text /
+ *  malformed) and the newest record is folded into the channel's shared
+ *  meta. Returns the per-cursor outcomes for the list. */
+async function decodePage(
+  channelIdHex: string,
+  posts: ReadonlyArray<ChannelPostView>,
+  seedForEpoch: (epoch: number) => Uint8Array | undefined,
+): Promise<ReadonlyMap<number, PostDecode>> {
+  const wasm = await loadWasm();
+  const entries = await Promise.all(
+    posts.map(async (p) => {
+      const res = await decodeAndDecryptPost(channelIdHex, p.payloadB64, seedForEpoch);
+      return [p.cursor, toPostDecode(res, (bytes) => wasm.classifyChannelPostPlaintext(bytes))] as const;
+    }),
+  );
+  await foldChannelMeta(
+    channelIdHex,
+    entries.map(([, d]) => d),
+  );
+  return new Map(entries);
 }
 
 // ============================================================================
@@ -269,6 +297,16 @@ const NewChannel: Component = () => {
         ...(wantedHandle.length > 0 ? { localHandle: wantedHandle } : {}),
       });
       channelsActions.setKeys(id, keys);
+      // ADR-0051 §4 — the first metadata record, right after creation, so
+      // the first subscribers title the channel from it. The channel exists
+      // either way; a failed post is logged and the next Save or rotation
+      // re-issues it.
+      try {
+        await publishChannelMeta(id, { name: name(), description: description() });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("channel metadata record not posted at creation", err);
+      }
       navigate(paths.channel(id));
     } catch (err) {
       if (err instanceof LegacyChannelError) {
@@ -294,7 +332,7 @@ const NewChannel: Component = () => {
       </button>
       <div class="lk-page-head">
         <h1>New channel</h1>
-        <p>The name and description stay on this device. Only encrypted posts reach the server.</p>
+        <p>Subscribers see the name and description. They travel encrypted; only ciphertext reaches the server.</p>
       </div>
       <form
         class="lk-card"
@@ -611,21 +649,16 @@ const ChannelView: Component = () => {
       return;
     }
     const seed = keys.seed;
-    void Promise.all(
-      d.posts.map(async (p) => {
-        const res = await decodeAndDecryptPost(params.id, p.payloadB64, () => seed);
-        return [p.cursor, toPostDecode(res)] as const;
-      }),
-    ).then((entries) => {
-      setDecodedByCursor(new Map(entries));
-    });
+    void decodePage(params.id, d.posts, () => seed).then(setDecodedByCursor);
   });
 
+  /** Under the name (UX spec §5): the description when there is one, else
+   *  the handle. */
   const subLine = (): string => {
     const m = meta();
     if (manageOpen()) return "Manage";
-    if (m.handle.length > 0) return m.handle;
-    return m.description;
+    if (m.description.length > 0) return m.description;
+    return m.handle;
   };
 
   return (
@@ -899,16 +932,7 @@ const ChannelSubscribe: Component = () => {
       setDecodedByCursor(new Map());
       return;
     }
-    void Promise.all(
-      ps.map(async (p) => {
-        const res = await decodeAndDecryptPost(params.id, p.payloadB64, (epoch) =>
-          seedMap?.get(epoch),
-        );
-        return [p.cursor, toPostDecode(res)] as const;
-      }),
-    ).then((entries) => {
-      setDecodedByCursor(new Map(entries));
-    });
+    void decodePage(params.id, ps, (epoch) => seedMap?.get(epoch)).then(setDecodedByCursor);
   });
 
   const meta = (): ReturnType<typeof channelMetaOf> => channelMetaOf(params.id);
@@ -919,8 +943,12 @@ const ChannelSubscribe: Component = () => {
         return "Subscribing...";
       case "polling":
         return "Waiting to be let in...";
-      case "active":
-        return meta().handle.length > 0 ? meta().handle : "Subscribed";
+      case "active": {
+        // UX spec §5 — the description under the header when present.
+        const m = meta();
+        if (m.description.length > 0) return m.description;
+        return m.handle.length > 0 ? m.handle : "Subscribed";
+      }
       case "error":
         return "Not subscribed";
     }

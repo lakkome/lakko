@@ -96,6 +96,8 @@ import {
   markOwnPublished,
 } from "./own-published";
 import { sniffProfile, type ReceivedProfile } from "../profile/profile-envelope";
+import { sniffGroupName } from "./group-name-envelope";
+import type { StoredGroupName } from "./group-name-store";
 import {
   resolveMemberIdentity,
   type MemberIdentity,
@@ -373,6 +375,25 @@ export type IncomingChatEvent =
       senderLeaf: number | undefined;
       /** The sender's signature key resolved at receipt (C-68) — the ONLY key
        *  a profile may be filed under. `undefined` ⇒ the profile is dropped. */
+      senderKey: MemberIdentity | undefined;
+      createdAt: string;
+    }
+  | {
+      /** ADR-0051 — the group's shared name (or a clear, `name === ""`).
+       *  Never a timeline bubble: the receive loop runs it through the
+       *  role-gated verdict (`chat/group-name-store.ts`) under the per-group
+       *  lock and re-titles the chat in place.
+       *
+       *  `groupName` is `undefined` when the domain matched but the envelope
+       *  failed its bounds — the core refuses it as a whole, so the row is
+       *  dropped rather than stored or rendered. */
+      kind: "group-name";
+      messageId: number;
+      groupName: StoredGroupName | undefined;
+      /** Diagnostic only. */
+      senderLeaf: number | undefined;
+      /** The sender's ACCOUNT key resolved at receipt (C-68), the key the
+       *  ADR-0022 role table names. `undefined` ⇒ unverifiable, dropped. */
       senderKey: MemberIdentity | undefined;
       createdAt: string;
     };
@@ -1150,6 +1171,23 @@ export async function toEvent(
           kind: "profile",
           messageId,
           profile: sniff.kind === "profile" ? sniff.profile : undefined,
+          senderLeaf,
+          senderKey,
+          createdAt,
+        };
+      }
+    }
+    // ADR-0051 — the shared group name, before the chat parser for the same
+    // reason: the lossy-UTF-8 fallback would render it as a bubble carrying
+    // the domain string and the name. A domain match that fails its bounds
+    // is dropped here too (`groupName: undefined`), never parsed as chat.
+    {
+      const sniff = sniffGroupName(await loadWasm(), bytes);
+      if (sniff.kind !== "none") {
+        return {
+          kind: "group-name",
+          messageId,
+          groupName: sniff.kind === "name" ? sniff.value : undefined,
           senderLeaf,
           senderKey,
           createdAt,

@@ -407,7 +407,9 @@ final class GroupCallRecordTests: XCTestCase {
                     decodesAsCommitterBeacon: { _ in false },
                     committerBeaconEnvelopeLen: 27,
                     decodesAsProfile: { _ in false },
-                    profileEnvelopeLens: 28...315
+                    profileEnvelopeLens: 28...315,
+                    decodesAsGroupName: { _ in false },
+                    groupNameEnvelopeLens: 30...285
                 ),
                 name
             )

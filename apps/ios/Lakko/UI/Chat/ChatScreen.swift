@@ -1625,6 +1625,97 @@ private struct AttachmentChip: View {
 /// A4 — the group-membership sheet: add a member by `@username` (G-4-verified)
 /// and view / remove the live MLS roster. Names resolve through the accepted
 /// contacts list (ADR-0021), falling back to a short key fingerprint.
+/// ADR-0051 §3 — the `Group name` row of the members panel.
+///
+/// The draft is local to the row and re-seeded from the shared name whenever
+/// it changes underneath (an envelope from another admin arriving while the
+/// panel is open), unless the user is mid-edit — then their text stays and
+/// Save decides, with the newer stamp winning on every device. An empty Save
+/// clears the name (the title falls back to the members). The title only
+/// changes after the send succeeded; a failed send shows the error line and
+/// leaves the draft in place.
+private struct GroupNameSection: View {
+    @ObservedObject var viewModel: ChatViewModel
+
+    @State private var draft: String = ""
+    @State private var seededFrom: String? = nil
+    @State private var busy = false
+    @State private var error: String?
+    @FocusState private var focused: Bool
+
+    /// UX spec §2 — one line, at most 64 characters.
+    private static let maxLength = 64
+
+    private var dirty: Bool {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines) != (viewModel.groupName ?? "")
+    }
+
+    var body: some View {
+        Section("Group name") {
+            if viewModel.canRenameGroup {
+                HStack {
+                    TextField("Group name", text: $draft)
+                        .focused($focused)
+                        .disabled(busy)
+                        .onChange(of: draft) { _, value in
+                            if value.count > Self.maxLength {
+                                draft = String(value.prefix(Self.maxLength))
+                            }
+                            if value.contains(where: \.isNewline) {
+                                draft = value.filter { !$0.isNewline }
+                            }
+                        }
+                    Button(busy ? "Saving..." : "Save") {
+                        Task { await save() }
+                    }
+                    .disabled(busy || !dirty)
+                }
+                if let error {
+                    Text(error)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+            } else {
+                Text(viewModel.groupName ?? "No name yet")
+                    .foregroundStyle(viewModel.groupName == nil ? Color.lakkoTextMuted : Color.lakkoText)
+                    .accessibilityLabel(
+                        viewModel.groupName.map { "Group name \($0)" } ?? "No group name yet")
+            }
+        }
+        .onAppear { reseedIfIdle() }
+        .onChange(of: viewModel.groupName) { _, _ in reseedIfIdle() }
+    }
+
+    /// Seed the draft from the shared name unless the user is editing a
+    /// different value than the one this row last seeded from.
+    private func reseedIfIdle() {
+        let shared = viewModel.groupName ?? ""
+        if !focused || draft == (seededFrom ?? "") {
+            draft = shared
+        }
+        seededFrom = shared
+    }
+
+    private func save() async {
+        if busy { return }
+        busy = true
+        error = nil
+        defer { busy = false }
+        // A stale control: the role can change while the panel is open. The
+        // core's peers would refuse the envelope anyway; say why here.
+        guard viewModel.canRenameGroup else {
+            error = "Only admins can rename this group"
+            return
+        }
+        if let message = await viewModel.saveGroupName(draft) {
+            error = message
+        } else {
+            focused = false
+            reseedIfIdle()
+        }
+    }
+}
+
 private struct MembersSheet: View {
     @ObservedObject var viewModel: ChatViewModel
 
@@ -1687,6 +1778,15 @@ private struct MembersSheet: View {
                     // focusable so `Dismiss` is still a real button. Nothing
                     // here claims a mechanism the platform does not have.
                     .accessibilityElement(children: .contain)
+                }
+                // ADR-0051 §3 — the shared group name: read-only for a plain
+                // member, editable with Save for the owner and admins (read
+                // from the live group). For a group, and for any conversation
+                // that already carries a shared name (a two-person one renamed
+                // from another client is still keyed as a chat here); a plain
+                // 1x1 chat is titled by the other person.
+                if viewModel.presentsAsGroup || viewModel.groupName != nil {
+                    GroupNameSection(viewModel: viewModel)
                 }
                 // ADR-0022 — only owner/admin (or an open/legacy group) sees
                 // the add affordance; a plain member's add would be refused.

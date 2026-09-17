@@ -144,6 +144,11 @@ export function TimelineBubble(
       // pushed into `rows()`. Defensive.
       return null;
     }
+    if (ev.kind === "group-name") {
+      // ADR-0051 — consumed by the group-name gate, never pushed into
+      // `rows()`. Defensive.
+      return null;
+    }
     if (ev.kind === "membershipProposal") {
       // ADR-0045 UX section 10 — a request is not something that HAPPENED to
       // the group; only outcomes belong in the timeline. The receive loop

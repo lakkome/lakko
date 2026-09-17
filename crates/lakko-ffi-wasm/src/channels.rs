@@ -77,8 +77,15 @@
 use wasm_bindgen::prelude::*;
 
 use lakko_channels::{
-    compose_post, decode_post, open_seed, post::ChannelPost as RustChannelPost, seal_seed,
-    verify_and_decrypt, ContentKeySeed, EpochId, CHANNEL_ID_LEN, EXPORTER_LABEL_V1,
+    compose_post, decode_post,
+    meta::{
+        channel_meta_is_newer as inner_channel_meta_is_newer, classify_post_plaintext,
+        compose_channel_meta as inner_compose_channel_meta, ChannelMeta, ChannelMetaError,
+        PostContent,
+    },
+    open_seed,
+    post::ChannelPost as RustChannelPost,
+    seal_seed, verify_and_decrypt, ContentKeySeed, EpochId, CHANNEL_ID_LEN, EXPORTER_LABEL_V1,
     SEED_ENVELOPE_LEN,
 };
 use lakko_crypto::agreement::{PublicKey as X25519PublicKey, SecretKey as X25519SecretKey};
@@ -456,6 +463,161 @@ pub fn channel_seed_envelope_len() -> u32 {
     u32::try_from(SEED_ENVELOPE_LEN).unwrap_or(u32::MAX)
 }
 
+// =========================================================
+// Channel metadata record (ADR-0051 §4)
+// =========================================================
+//
+// The record is the PLAINTEXT of an ordinary post: the client
+// composes it here, then hands the bytes to `composeChannelPost`
+// like any message. On receive, the client runs
+// `classifyChannelPostPlaintext` on every decrypted post BEFORE
+// the text path, keeps the newest `"meta"` per channel by
+// `channelMetaIsNewer`, drops `"malformed"`, and renders `"text"`.
+//
+// ```ts
+// const record = composeChannelMeta("Lakko News", "Releases", BigInt(Date.now()));
+// const wire   = composeChannelPost(seed, channelId, epoch, signer, counter, record);
+// // ... subscriber side ...
+// const c = classifyChannelPostPlaintext(plaintext);
+// if (c.kind === "meta" && channelMetaIsNewer(c.updatedAtMs!, stored.updatedAtMs)) { ... }
+// ```
+
+/// The value thrown for a record that fails a bound: a real `Error`
+/// carrying the frozen `ChannelMetaError::code()` as an own
+/// `channelMetaError` property (`name.empty`, `description.tooLong`,
+/// ...). A client selects copy from the code, never from the message;
+/// the message never contains the input.
+fn channel_meta_error_value(e: ChannelMetaError) -> JsValue {
+    let err = js_sys::Error::new(&e.to_string());
+    // Best-effort, as in `discovery.rs`: a failed property write must not
+    // replace the error being reported.
+    let _ = js_sys::Reflect::set(
+        err.as_ref(),
+        &JsValue::from_str("channelMetaError"),
+        &JsValue::from_str(&e.code()),
+    );
+    err.into()
+}
+
+/// What a decrypted post plaintext turned out to be. JS reads `kind`
+/// first, then the getters that kind populates: `text` for `"text"`;
+/// `name` / `description` / `updatedAtMs` for `"meta"`; `error` for
+/// `"malformed"`. Every other getter is `undefined`.
+#[wasm_bindgen(js_name = "ChannelPostContent")]
+pub struct WasmChannelPostContent {
+    kind: &'static str,
+    text: Option<Vec<u8>>,
+    meta: Option<ChannelMeta>,
+    error: Option<String>,
+}
+
+#[wasm_bindgen(js_class = "ChannelPostContent")]
+impl WasmChannelPostContent {
+    /// `"text"` | `"meta"` | `"malformed"`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn kind(&self) -> String {
+        self.kind.to_string()
+    }
+
+    /// The plaintext, verbatim, when `kind === "text"`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn text(&self) -> Option<Vec<u8>> {
+        self.text.clone()
+    }
+
+    /// The channel name when `kind === "meta"`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn name(&self) -> Option<String> {
+        self.meta.as_ref().map(|m| m.name.clone())
+    }
+
+    /// The channel description (possibly empty) when `kind === "meta"`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn description(&self) -> Option<String> {
+        self.meta.as_ref().map(|m| m.description.clone())
+    }
+
+    /// The record's stamp as a BigInt when `kind === "meta"`. A re-issue
+    /// MUST carry this value verbatim, never a fresh clock read.
+    #[wasm_bindgen(getter, js_name = "updatedAtMs")]
+    #[must_use]
+    pub fn updated_at_ms(&self) -> Option<u64> {
+        self.meta.as_ref().map(|m| m.updated_at_ms)
+    }
+
+    /// The frozen `ChannelMetaError::code()` when `kind === "malformed"`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn error(&self) -> Option<String> {
+        self.error.clone()
+    }
+}
+
+/// Compose a channel metadata record — the PLAINTEXT to hand to
+/// `composeChannelPost`. Trim the inputs first; the composer refuses
+/// untrimmed text exactly as every reader's decoder does.
+///
+/// # Errors
+///
+/// Throws an `Error` whose `channelMetaError` property is the frozen
+/// reason code (`name.empty`, `name.tooLong`, `name.lineBreak`,
+/// `name.controlOrFormatCharacter`, `name.tooManyBytes`,
+/// `name.notTrimmed`, and the same under `description.`).
+#[wasm_bindgen(js_name = "composeChannelMeta")]
+pub fn compose_channel_meta(
+    name: &str,
+    description: &str,
+    updated_at_ms: u64,
+) -> Result<Vec<u8>, JsValue> {
+    let meta = ChannelMeta {
+        name: name.to_string(),
+        description: description.to_string(),
+        updated_at_ms,
+    };
+    inner_compose_channel_meta(&meta).map_err(channel_meta_error_value)
+}
+
+/// Classify a decrypted post plaintext: run this on EVERY post before
+/// the text path. Never throws — an unrecognised plaintext is `"text"`,
+/// a matching domain that fails a bound is `"malformed"`.
+#[wasm_bindgen(js_name = "classifyChannelPostPlaintext")]
+#[must_use]
+pub fn classify_channel_post_plaintext(plaintext: &[u8]) -> WasmChannelPostContent {
+    match classify_post_plaintext(plaintext) {
+        PostContent::Text(text) => WasmChannelPostContent {
+            kind: "text",
+            text: Some(text.to_vec()),
+            meta: None,
+            error: None,
+        },
+        PostContent::Meta(meta) => WasmChannelPostContent {
+            kind: "meta",
+            text: None,
+            meta: Some(meta),
+            error: None,
+        },
+        PostContent::Malformed(e) => WasmChannelPostContent {
+            kind: "malformed",
+            text: None,
+            meta: None,
+            error: Some(e.code()),
+        },
+    }
+}
+
+/// `true` when a record stamped `incomingUpdatedAtMs` must replace the
+/// stored one for the same channel. Strictly greater; equal is NOT
+/// newer, so a re-issue of the record already held is not an update.
+#[wasm_bindgen(js_name = "channelMetaIsNewer")]
+#[must_use]
+pub fn channel_meta_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u64) -> bool {
+    inner_channel_meta_is_newer(incoming_updated_at_ms, stored_updated_at_ms)
+}
+
 // ---------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------
@@ -807,5 +969,81 @@ mod tests {
         let plaintext =
             verify_and_decrypt_channel_post(&recovered_seed, &channel_id, &post).unwrap();
         assert_eq!(plaintext, b"phase-4b wasm e2e");
+    }
+
+    // -----------------------------------------------------
+    // Channel metadata record (ADR-0051 §4) tests
+    // -----------------------------------------------------
+    //
+    // The throwing path of `composeChannelMeta` builds a
+    // `js_sys::Error`, which cannot be constructed on a host
+    // target (the same wasm-bindgen rule the negative-path note
+    // above records), so only the positive path and the
+    // never-throwing classifier run here; the bounds themselves
+    // are pinned by `lakko-channels`'s own tests.
+
+    #[test]
+    fn channel_meta_compose_then_classify_round_trips_wasm_host() {
+        let wire =
+            compose_channel_meta("Lakko News", "Releases\nand outages", 1_700_000_000_000).unwrap();
+        let content = classify_channel_post_plaintext(&wire);
+        assert_eq!(content.kind(), "meta");
+        assert_eq!(content.name().as_deref(), Some("Lakko News"));
+        assert_eq!(
+            content.description().as_deref(),
+            Some("Releases\nand outages")
+        );
+        assert_eq!(content.updated_at_ms(), Some(1_700_000_000_000));
+        assert!(content.text().is_none());
+        assert!(content.error().is_none());
+    }
+
+    #[test]
+    fn channel_meta_text_post_classifies_as_text_verbatim_wasm_host() {
+        let text = b"hello subscribers";
+        let content = classify_channel_post_plaintext(text);
+        assert_eq!(content.kind(), "text");
+        assert_eq!(content.text().as_deref(), Some(&text[..]));
+        assert!(content.name().is_none());
+        assert!(content.description().is_none());
+        assert!(content.updated_at_ms().is_none());
+        assert!(content.error().is_none());
+        // The printable domain without the NUL is still text.
+        let lookalike = b"lakko/channel-meta/v1";
+        let content = classify_channel_post_plaintext(lookalike);
+        assert_eq!(content.kind(), "text");
+        assert_eq!(content.text().as_deref(), Some(&lookalike[..]));
+    }
+
+    #[test]
+    fn channel_meta_malformed_record_carries_the_code_wasm_host() {
+        let content = classify_channel_post_plaintext(lakko_channels::CHANNEL_META_DOMAIN_V1);
+        assert_eq!(content.kind(), "malformed");
+        assert_eq!(content.error().as_deref(), Some("truncated"));
+        assert!(content.text().is_none());
+        assert!(content.name().is_none());
+    }
+
+    #[test]
+    fn channel_meta_is_newer_is_strict_wasm_host() {
+        assert!(channel_meta_is_newer(2, 1));
+        assert!(!channel_meta_is_newer(1, 1));
+        assert!(!channel_meta_is_newer(0, 1));
+    }
+
+    #[test]
+    fn channel_meta_record_survives_the_full_post_pipeline_wasm_host() {
+        let signer = WasmChannelSigningKey::generate_js();
+        let seed = new_channel_seed_for_test();
+        let channel_id = [0x51u8; CHANNEL_ID_LEN];
+        let record = compose_channel_meta("Lakko News", "", 42).unwrap();
+        let wire = compose_channel_post(&seed, &channel_id, 1, &signer, 0, &record).unwrap();
+        let post = decode_channel_post(&wire).unwrap();
+        let plaintext = verify_and_decrypt_channel_post(&seed, &channel_id, &post).unwrap();
+        let content = classify_channel_post_plaintext(&plaintext);
+        assert_eq!(content.kind(), "meta");
+        assert_eq!(content.name().as_deref(), Some("Lakko News"));
+        assert_eq!(content.description().as_deref(), Some(""));
+        assert_eq!(content.updated_at_ms(), Some(42));
     }
 }

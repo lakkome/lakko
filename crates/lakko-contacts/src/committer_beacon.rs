@@ -753,6 +753,8 @@ mod tests {
             crate::call_kp_forward::CALL_KP_FORWARD_ENVELOPE_DOMAIN_V1,
             crate::media_state::MEDIA_STATE_ENVELOPE_DOMAIN_V1,
             crate::push_routing::PUSH_ROUTING_SECRET_ENVELOPE_DOMAIN_V1,
+            crate::profile::PROFILE_ENVELOPE_DOMAIN_V1,
+            crate::group_name::GROUP_NAME_ENVELOPE_DOMAIN_V1,
             b"lakko-invite-revoke/v1\x00",
             b"lakko-call-invite-revoke/v1\x00",
             crate::invite::JOINER_TAG_SALT_DOMAIN_V1,

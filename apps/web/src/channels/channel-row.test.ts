@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   channelRowMatches,
   channelRowModel,
+  channelTitle,
   displayHandle,
   subscriberCountLabel,
 } from "./channel-row";
@@ -35,6 +36,13 @@ describe("channelRowModel", () => {
     expect(channelRowModel({ ...base, localName: "", localHandle: undefined }, NOW).title).toBe(
       "Channel",
     );
+  });
+
+  it("the shared name wins over the local name and the handle (ADR-0051)", () => {
+    expect(channelRowModel({ ...base, sharedName: "Lakko News" }, NOW).title).toBe("Lakko News");
+    expect(channelRowModel({ ...base, sharedName: "  " }, NOW).title).toBe("Lakko news");
+    expect(channelTitle(undefined, "", "lakko-news")).toBe("lakko-news");
+    expect(channelTitle("Shared", "Local", undefined)).toBe("Shared");
   });
 
   it("adds the subscriber count when it is known", () => {

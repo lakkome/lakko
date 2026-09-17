@@ -4,6 +4,7 @@
 package me.lakko.app.push
 
 import me.lakko.app.chat.looksLikeCallSignaling
+import me.lakko.app.chat.looksLikeGroupNameEnvelope
 import me.lakko.app.chat.looksLikeProfileEnvelope
 
 /**
@@ -142,6 +143,13 @@ internal fun isServiceEnvelope(
     // Kind 4 — ADR-0048 profile. The same prefix test the foreground
     // `ChatClient` classifier uses, so the two paths cannot drift.
     if (looksLikeProfileEnvelope(payload)) return true
+
+    // Kind 5 — ADR-0051 group name. The same NUL-terminated-prefix shape as
+    // the profile, so the peek is a complete classification here too; a
+    // rename must never be previewed as a notification body reading
+    // `lakko/group-name/v1`. Suppressed only — storing a name is a WRITE and
+    // this path is read-only (C-59).
+    if (looksLikeGroupNameEnvelope(payload)) return true
 
     return false
 }

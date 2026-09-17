@@ -43,12 +43,95 @@ struct ChannelDetailScreen: View {
         .navigationBarTitleDisplayMode(.inline)
     }
 
+    /// ADR-0051 §5 — the shared name, else the local name, else the handle.
     private var title: String {
         let channel = state.channels.first(where: { $0.id == channelId })
-        if let name = channel?.localName, !name.isEmpty { return name }
-        if let handle = channel?.handle, !handle.isEmpty { return "@\(handle)" }
-        if !foundHandle.isEmpty { return "@\(foundHandle)" }
-        return "Channel"
+        return ChannelsFormatting.title(
+            sharedName: channel?.sharedName ?? "",
+            localName: channel?.localName ?? "",
+            handle: channel?.handle ?? foundHandle)
+    }
+}
+
+// MARK: - Header card (ADR-0051 §5, UX spec §3.2)
+
+/// The card at the top of the channel view, the same shape as web's
+/// `ChannelHead`: avatar, the name, `@handle` (never repeated when the name
+/// IS the handle), the description when present, one status line.
+struct ChannelHeaderCard: View {
+    let channelId: String
+    let channel: ChannelHandle?
+    /// The handle the channel was found by when it is not listed yet.
+    var foundHandle: String = ""
+    let isOwner: Bool
+    /// Overrides the role / handle status while access is being set up.
+    var status: String? = nil
+
+    private var handle: String { channel?.handle ?? foundHandle }
+
+    private var title: String {
+        ChannelsFormatting.title(
+            sharedName: channel?.sharedName ?? "",
+            localName: channel?.localName ?? "",
+            handle: handle)
+    }
+
+    private var handleLine: String? {
+        let bare = ChannelsFormatting.bareHandle(handle)
+        return !bare.isEmpty && bare != title ? "@\(bare)" : nil
+    }
+
+    private var statusLine: String {
+        status ?? ChannelsFormatting.headerStatus(title: title, handle: handle, isOwner: isOwner)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 12) {
+                InitialsAvatar(
+                    name: title,
+                    identity: channelId,
+                    size: 48,
+                    placeholderSymbol: "megaphone.fill"
+                )
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.headline)
+                        .foregroundStyle(Color.lakkoText)
+                        .lineLimit(2)
+                    if let handleLine {
+                        Text(handleLine)
+                            .font(.subheadline)
+                            .foregroundStyle(Color.lakkoTextMuted)
+                            .lineLimit(1)
+                    }
+                    // The status is the handle when it is not already shown
+                    // above; never the same line twice.
+                    if statusLine != handleLine {
+                        Text(statusLine)
+                            .font(.footnote)
+                            .foregroundStyle(Color.lakkoTextMuted)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            if let description = channel?.displayDescription.trimmingCharacters(in: .whitespacesAndNewlines),
+               !description.isEmpty {
+                Text(description)
+                    .font(.subheadline)
+                    .foregroundStyle(Color.lakkoText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.lakkoSurface)
+        .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: LakkoRadius.card, style: .continuous)
+                .stroke(Color.lakkoBorder, lineWidth: 1)
+        )
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -65,18 +148,28 @@ private struct ChannelOwnerView: View {
     @State private var publishBusy = false
     @State private var publishError: String?
     @State private var decodedByCursor: [UInt64: String?] = [:]
+    /// ADR-0051 §4 — cursors of rows that are metadata records (kept, never
+    /// shown) or malformed records (dropped). Filtered out of ``posts``.
+    @State private var hiddenCursors: Set<UInt64> = []
     @State private var loading = true
     @FocusState private var composerFocused: Bool
 
     private var posts: [PostView] {
-        (state.postsByChannel[channelId] ?? []).sorted { $0.cursor < $1.cursor }
+        (state.postsByChannel[channelId] ?? [])
+            .filter { !hiddenCursors.contains($0.cursor) }
+            .sorted { $0.cursor < $1.cursor }
     }
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
-                    description
+                    ChannelHeaderCard(
+                        channelId: channelId,
+                        channel: state.channels.first(where: { $0.id == channelId }),
+                        isOwner: true
+                    )
+                    .padding(.bottom, 6)
                     if posts.isEmpty {
                         Text(loading ? "Loading..." : "No posts yet. Your first post appears here.")
                             .font(.subheadline)
@@ -118,20 +211,6 @@ private struct ChannelOwnerView: View {
             }
         }
         .task { await refresh() }
-    }
-
-    /// The description only. The channel id and the server-side key
-    /// generation are bookkeeping, not something a reader acts on.
-    @ViewBuilder
-    private var description: some View {
-        if let desc = state.channels.first(where: { $0.id == channelId })?.localDescription,
-           !desc.isEmpty {
-            Text(desc)
-                .font(.subheadline)
-                .foregroundStyle(Color.lakkoTextMuted)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.bottom, 6)
-        }
     }
 
     private func content(for post: PostView) -> ChannelPostCard.Content {
@@ -253,9 +332,11 @@ private struct ChannelOwnerView: View {
     private func decodeAll(posts: [PostView]) {
         guard let keys = state.keysByChannel[channelId] else {
             decodedByCursor = [:]
+            hiddenCursors = []
             return
         }
         var next: [UInt64: String?] = [:]
+        var hidden: Set<UInt64> = []
         for post in posts {
             do {
                 let plain = try ChannelsComposer.verifyAndDecrypt(
@@ -263,12 +344,23 @@ private struct ChannelOwnerView: View {
                     channelIdHex: channelId,
                     postWireB64Url: post.payloadB64
                 )
-                next[post.cursor] = String(data: plain, encoding: .utf8)
+                // ADR-0051 §4 — a metadata record is kept (newest wins) and
+                // never rendered; a domain match that failed a bound is dropped.
+                switch ChannelMetaRecord.classify(plain) {
+                case .text(let text):
+                    next[post.cursor] = text
+                case .meta(let meta):
+                    state.recordSharedMeta(channelId: channelId, meta: meta)
+                    hidden.insert(post.cursor)
+                case .malformed:
+                    hidden.insert(post.cursor)
+                }
             } catch {
                 next[post.cursor] = nil as String?
             }
         }
         decodedByCursor = next
+        hiddenCursors = hidden
     }
 }
 

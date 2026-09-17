@@ -59,6 +59,7 @@ export default function ChannelsLayout(props: RouteSectionProps): JSX.Element {
       model: channelRowModel(
         {
           id: c.id,
+          sharedName: channelsState.metaByChannel().get(c.id)?.name,
           localName: c.localName,
           localHandle: c.localHandle,
           isOwner: isOwner(c.id),

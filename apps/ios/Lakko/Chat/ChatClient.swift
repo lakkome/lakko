@@ -530,6 +530,26 @@ public final class ChatClient {
                     createdAt: createdAt
                 )
             }
+            // ADR-0051 — sniff for a group-name envelope before the chat
+            // parser, for the same reason as the arms above: the lossy-UTF-8
+            // fallback would otherwise render it as a bubble reading
+            // `lakko/group-name/v1` plus binary. It carries the MLS-authenticated
+            // `senderLeaf` onward (not a resolved key) because the receive side
+            // resolves it against the role table exactly as the push-routing
+            // secret does — owner / admin may set the name, a member may not.
+            // A malformed envelope (a bound violation) is refused by the codec
+            // as a whole and falls through to the chat parser like any other
+            // unrecognised plaintext — the same stance the NotificationService
+            // filter takes, so the timeline and the notification agree.
+            if let groupName = Self.decodeGroupNameIfEnvelope(data) {
+                return .groupName(
+                    messageId: messageId,
+                    name: groupName.name,
+                    updatedAtMs: groupName.updatedAtMs,
+                    senderLeaf: senderLeaf,
+                    createdAt: createdAt
+                )
+            }
             // ADR-0023 — the identity that leaf names, resolved HERE because
             // here is where the roster is the one the message was sealed
             // under. Every downstream attribution reads this, never the leaf.
@@ -789,6 +809,24 @@ public final class ChatClient {
     /// `"lakko/profile/v1"`). Decides nothing on its own.
     private static let profileEnvelopeFirstByte: UInt8 = 0x6C
 
+    /// ADR-0051 — the group name carried by this application plaintext, or
+    /// `nil` when it is not a well-formed group-name envelope.
+    ///
+    /// The first-byte peek only keeps an FFI call off the path for a chat
+    /// envelope (which opens with `{`); `decodeGroupNameEnvelope` is the whole
+    /// verdict — domain, version, and every field bound. An empty decoded name
+    /// is a valid envelope meaning "clear the name" and is returned as such.
+    static func decodeGroupNameIfEnvelope(_ bytes: Data) -> FfiGroupName? {
+        guard bytes.first == groupNameEnvelopeFirstByte,
+              let decoded = try? decodeGroupNameEnvelope(plaintext: bytes)
+        else { return nil }
+        return decoded
+    }
+
+    /// First byte of the ADR-0051 group-name domain separator (`'l'` of
+    /// `"lakko/group-name/v1"`). Decides nothing on its own.
+    private static let groupNameEnvelopeFirstByte: UInt8 = 0x6C
+
     static func looksLikeCommitterBeacon(_ bytes: Data) -> Bool {
         guard bytes.count == committerBeaconLen,
               bytes.first == committerBeaconFirstByte
@@ -906,6 +944,21 @@ public enum IncomingChatEvent: Equatable {
         messageId: Int64,
         profile: ProfileClaim,
         senderKey: MemberIdentity?,
+        createdAt: String
+    )
+    /// ADR-0051 — the group's shared name (an empty `name` clears it). Never
+    /// a timeline bubble: the receive loop runs the role gate against the LIVE
+    /// group (owner / admin, or any member when there is no role table), then
+    /// the strictly-newer order, and re-titles the chat on accept.
+    ///
+    /// `senderLeaf` is the MLS-authenticated author, resolved against the
+    /// roster + the ADR-0022 role table at receipt; `nil` means unattributable,
+    /// so only a byte-identical re-send is accepted.
+    case groupName(
+        messageId: Int64,
+        name: String,
+        updatedAtMs: UInt64,
+        senderLeaf: UInt32?,
         createdAt: String
     )
     /// ADR-0042 — an in-group push-routing-secret distribution envelope

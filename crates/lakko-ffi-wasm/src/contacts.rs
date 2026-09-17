@@ -37,6 +37,11 @@ use lakko_contacts::group_join_attribution::{
     decode_attribution as rust_group_join_attribution_decode,
     GroupJoinAttribution as RustGroupJoinAttribution,
 };
+use lakko_contacts::group_name::{
+    compose_group_name as rust_compose_group_name, decode_group_name as rust_decode_group_name,
+    group_name_is_newer as rust_group_name_is_newer,
+    normalize_group_name as rust_normalize_group_name, GroupName as RustGroupName, GroupNameError,
+};
 use lakko_contacts::incoming_envelope::{
     dispatch_incoming_envelope as rust_dispatch_incoming_envelope, IncomingEnvelope,
 };
@@ -100,6 +105,13 @@ fn coded_error(message: &str, property: &str, code: &str) -> JsValue {
 /// `"username.invalidCharacters"`, `"truncated"`, …
 fn profile_error_value(e: ProfileError) -> JsValue {
     coded_error(&e.to_string(), "profileError", &e.code())
+}
+
+/// Thrown for a group name refused by its bounds or its wire shape: an
+/// `Error` with a `groupNameError` code — `"name.tooLong"`,
+/// `"name.controlOrFormatCharacter"`, `"truncated"`, …
+fn group_name_error_value(e: GroupNameError) -> JsValue {
+    coded_error(&e.to_string(), "groupNameError", &e.code())
 }
 
 /// Turn caller-supplied fields into the canonical core profile: trim the
@@ -546,6 +558,98 @@ pub fn decode_profile_envelope(plaintext: &[u8]) -> Result<WasmProfile, JsValue>
 #[must_use]
 pub fn profile_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u64) -> bool {
     rust_profile_is_newer(incoming_updated_at_ms, stored_updated_at_ms)
+}
+
+// ============================================================================
+// Group-name envelope (ADR-0051 §1)
+// ============================================================================
+
+/// A group's shared name. Mirror of
+/// [`lakko_contacts::group_name::GroupName`].
+///
+/// **A name received from someone else is that person's assertion about the
+/// whole group, and the sender's authority is the RECEIVER's check** (ADR-0051
+/// §2): resolve the MLS sender leaf to the account key at receipt (C-68), read
+/// the live role table, accept only from the owner or an admin (or from any
+/// member when the group carries no role table), then keep it only when
+/// `groupNameIsNewer` than the stored stamp for that group. Persist the stamp
+/// and re-emit it VERBATIM on a growth re-send (the ADR-0044 lesson).
+#[wasm_bindgen(js_name = GroupName)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WasmGroupName {
+    name: String,
+    updated_at_ms: u64,
+}
+
+impl From<RustGroupName> for WasmGroupName {
+    fn from(g: RustGroupName) -> Self {
+        Self {
+            name: g.name,
+            updated_at_ms: g.updated_at_ms,
+        }
+    }
+}
+
+#[wasm_bindgen(js_class = GroupName)]
+impl WasmGroupName {
+    /// The name; **empty means "clear the name"** (fall back to the
+    /// member-derived title).
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.name.clone()
+    }
+
+    /// Setter-clock UNIX milliseconds, as a `bigint`.
+    #[wasm_bindgen(getter, js_name = updatedAtMs)]
+    pub fn updated_at_ms(&self) -> u64 {
+        self.updated_at_ms
+    }
+}
+
+/// Compose a group-name envelope (ADR-0051 §1) — the inner plaintext to
+/// publish as an MLS application message on the group's journal.
+///
+/// The name is trimmed (blank = clear the name) and must pass the profile
+/// display-name rule. The envelope produced is always one a receiver
+/// accepts.
+///
+/// # Errors
+///
+/// Throws an `Error` with a `groupNameError` code such as
+/// `"name.controlOrFormatCharacter"` or `"name.tooLong"`.
+#[wasm_bindgen(js_name = composeGroupNameEnvelope)]
+pub fn compose_group_name_envelope(name: &str, updated_at_ms: u64) -> Result<Vec<u8>, JsValue> {
+    let group_name = RustGroupName {
+        name: rust_normalize_group_name(name)
+            .map_err(|e| group_name_error_value(GroupNameError::Name(e)))?,
+        updated_at_ms,
+    };
+    rust_compose_group_name(&group_name).map_err(group_name_error_value)
+}
+
+/// Strictly decode a group-name envelope (ADR-0051 §1). Fail-closed:
+/// anything malformed or out of bounds is refused as a whole.
+///
+/// Use `dispatchIncomingEnvelope` when the plaintext might be any kind.
+///
+/// # Errors
+///
+/// Throws an `Error` with a `groupNameError` code (`"wrongDomain"`,
+/// `"truncated"`, `"name.tooLong"`, …).
+#[wasm_bindgen(js_name = decodeGroupNameEnvelope)]
+pub fn decode_group_name_envelope(plaintext: &[u8]) -> Result<WasmGroupName, JsValue> {
+    rust_decode_group_name(plaintext)
+        .map(WasmGroupName::from)
+        .map_err(group_name_error_value)
+}
+
+/// `true` when a group name stamped `incomingUpdatedAtMs` must replace the
+/// stored one **for the same group**. Strictly greater wins; equal is not
+/// newer, so a growth re-send of the stored name is not an update.
+#[wasm_bindgen(js_name = groupNameIsNewer)]
+#[must_use]
+pub fn group_name_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u64) -> bool {
+    rust_group_name_is_newer(incoming_updated_at_ms, stored_updated_at_ms)
 }
 
 /// Prepare what a person typed as their display name: trim, `undefined` for
@@ -1402,6 +1506,14 @@ pub enum WasmIncomingEnvelopeKind {
     /// (C-68), keep it only when `profileIsNewer`, and verify the username
     /// through discovery before showing it.
     Profile = 6,
+    /// The group's shared name (ADR-0051 §1). The decoded, bounds-checked
+    /// name rides the `groupName` getter of [`WasmIncomingEnvelope`];
+    /// `payload` is empty, `cameraOn`, `mintEpoch` and `profile` are
+    /// `undefined`. Appended as `7` so the pre-existing tags stay fixed.
+    /// Never render it as a chat bubble; the sender's authority is the
+    /// receiver's role-table check (ADR-0051 §2), then `groupNameIsNewer`.
+    /// An empty name clears the name.
+    GroupName = 7,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -1415,6 +1527,7 @@ pub struct WasmIncomingEnvelope {
     camera_on: Option<bool>,
     mint_epoch: Option<u64>,
     profile: Option<WasmProfile>,
+    group_name: Option<WasmGroupName>,
 }
 
 #[wasm_bindgen(js_class = IncomingEnvelope)]
@@ -1465,6 +1578,13 @@ impl WasmIncomingEnvelope {
     pub fn profile(&self) -> Option<WasmProfile> {
         self.profile.clone()
     }
+
+    /// Set only for `GroupName` (ADR-0051): the decoded group name.
+    /// `undefined` for every other kind.
+    #[wasm_bindgen(getter, js_name = groupName)]
+    pub fn group_name(&self) -> Option<WasmGroupName> {
+        self.group_name.clone()
+    }
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts
@@ -1492,6 +1612,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             camera_on: None,
             mint_epoch: None,
             profile: None,
+            group_name: None,
         },
         IncomingEnvelope::CallKeyPackage(p) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::CallKeyPackage,
@@ -1499,6 +1620,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             camera_on: None,
             mint_epoch: None,
             profile: None,
+            group_name: None,
         },
         IncomingEnvelope::MediaState { camera_on } => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::MediaState,
@@ -1506,6 +1628,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             camera_on: Some(camera_on),
             mint_epoch: None,
             profile: None,
+            group_name: None,
         },
         IncomingEnvelope::PushRoutingSecret { mint_epoch, secret } => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::PushRoutingSecret,
@@ -1513,6 +1636,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             camera_on: None,
             mint_epoch: Some(mint_epoch),
             profile: None,
+            group_name: None,
         },
         IncomingEnvelope::CommitterBeacon => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::CommitterBeacon,
@@ -1520,6 +1644,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             camera_on: None,
             mint_epoch: None,
             profile: None,
+            group_name: None,
         },
         IncomingEnvelope::Profile(p) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::Profile,
@@ -1527,6 +1652,15 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             camera_on: None,
             mint_epoch: None,
             profile: Some(p.into()),
+            group_name: None,
+        },
+        IncomingEnvelope::GroupName(g) => WasmIncomingEnvelope {
+            kind: WasmIncomingEnvelopeKind::GroupName,
+            payload: Vec::new(),
+            camera_on: None,
+            mint_epoch: None,
+            profile: None,
+            group_name: Some(g.into()),
         },
         IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::IntroMessage,
@@ -1534,6 +1668,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             camera_on: None,
             mint_epoch: None,
             profile: None,
+            group_name: None,
         },
     })
 }
@@ -2391,6 +2526,36 @@ mod tests {
             .unwrap();
         assert_eq!(opened.profile(), Some(decoded));
         assert_eq!(opened.intro_message(), b"hi bob");
+    }
+
+    /// ADR-0051: the group-name envelope is trimmed on compose, round-trips,
+    /// and dispatches as its own kind — never as an intro message. Success
+    /// paths only — a throw builds a `js_sys::Error`, which panics off
+    /// wasm32; the refusal matrix lives in `lakko-contacts`.
+    #[test]
+    fn group_name_envelope_round_trips_and_dispatches() {
+        let envelope = compose_group_name_envelope("  Trio ", 42).unwrap();
+        let decoded = decode_group_name_envelope(&envelope).unwrap();
+        assert_eq!(decoded.name(), "Trio");
+        assert_eq!(decoded.updated_at_ms(), 42);
+        assert!(group_name_is_newer(43, 42) && !group_name_is_newer(42, 42));
+
+        let dispatched = dispatch_incoming_envelope(&envelope).unwrap();
+        assert_eq!(dispatched.kind(), WasmIncomingEnvelopeKind::GroupName);
+        assert!(dispatched.payload().is_empty());
+        assert_eq!(dispatched.profile(), None);
+        assert_eq!(dispatched.group_name(), Some(decoded));
+
+        // Blank clears the name and still dispatches as a group name.
+        let clear = compose_group_name_envelope("   ", 43).unwrap();
+        let decoded = decode_group_name_envelope(&clear).unwrap();
+        assert_eq!(decoded.name(), "");
+        let dispatched = dispatch_incoming_envelope(&clear).unwrap();
+        assert_eq!(dispatched.kind(), WasmIncomingEnvelopeKind::GroupName);
+        assert_eq!(
+            dispatched.group_name().map(|g| g.name()),
+            Some(String::new())
+        );
     }
 
     #[test]

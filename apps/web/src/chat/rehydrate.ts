@@ -59,6 +59,7 @@ import { ensureGroupPushRouting } from "../push/group-routing";
 import { loadWasm } from "../wasm";
 import { ChatClient } from "./client";
 import { type ChatApi } from "./ChatContext";
+import { loadGroupNameRows } from "./group-name-idb";
 import { loadMlsSnapshot } from "./mls-store";
 
 /**
@@ -174,6 +175,18 @@ export async function rehydrateMlsState(
     },
   });
 
+  // ADR-0051 — the shared names this device holds, so a restored group is
+  // titled at once rather than from an id. Best-effort: with no row (or an
+  // unreadable one) every group gets the unnamed stand-in and the title
+  // resolver builds it from the members.
+  let names: ReadonlyMap<string, { readonly name: string }> | null = null;
+  try {
+    names = await loadGroupNameRows(accountIdB64, deviceKey);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("rehydrateMlsState: group-name rows unreadable", err);
+  }
+
   // Re-create a WasmGroup for every persisted id. Group.load
   // is a static factory that walks the just-restored provider's
   // storage and rebuilds the in-memory `MlsGroup` struct
@@ -227,7 +240,7 @@ export async function rehydrateMlsState(
     }
 
     chats.add({
-      label: synthesisedGroupLabel(groupIdB64),
+      label: restoredGroupLabel(names, groupIdB64),
       group,
     });
 
@@ -251,15 +264,15 @@ export async function rehydrateMlsState(
 }
 
 /**
- * Stand-in label for a rehydrated group. Phase-1 doesn't carry
- * per-group display metadata across reloads — the label set by
- * `startGroupWithUsername` ("Group with @bob") only lives in
- * the in-memory registry. After a reload all we have is the
- * `group_id` byte string. A 6-char prefix is enough to tell
- * groups apart in the UI; 1.16d3d's contacts cache will let us
- * look up a real label from the peer's signature pubkey in a
- * follow-up sprint.
+ * Label for a rehydrated group: the shared name this device holds for it
+ * (ADR-0051), else the bare stand-in `Group`, which `group-title.ts` reads
+ * as "unnamed" and the title resolver replaces with the members' names. An
+ * id prefix is never shown (docs/ux/client-redesign.md section 5.1).
  */
-function synthesisedGroupLabel(groupIdB64: string): string {
-  return `Group ${groupIdB64.slice(0, 6)}`;
+function restoredGroupLabel(
+  names: ReadonlyMap<string, { readonly name: string }> | null,
+  groupIdB64: string,
+): string {
+  const held = names?.get(groupIdB64)?.name ?? "";
+  return held.length > 0 ? held : "Group";
 }

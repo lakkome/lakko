@@ -133,6 +133,7 @@ import { deleteMessageLog } from "../chat/message-log-store";
 import { wipeChannelsForAccount } from "../state/channels-state";
 import { clearConversationKinds } from "../chat/conversation-kind-store";
 import { deleteProfileRow } from "../profile/profile-idb";
+import { deleteGroupNameRow } from "../chat/group-name-idb";
 import { clearOwnProfile } from "../profile/own-profile";
 import { rehydrateMlsState } from "../chat/rehydrate";
 import { subscribeToPush, unsubscribeFromPush } from "../push/subscribe";
@@ -3223,6 +3224,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           // best-effort
         }
         clearOwnProfile(cached.accountIdB64);
+        // ADR-0051 — the encrypted shared-group-name row, same contract.
+        try {
+          await deleteGroupNameRow(cached.accountIdB64);
+        } catch {
+          // best-effort
+        }
         // Phase 1.13c: drop the persisted session token too. The
         // ciphertext is unreadable without the device key just
         // wiped, but a stale row would confuse the rehydrate

@@ -248,6 +248,45 @@ public final class ChatRepository: ObservableObject {
         ProfileDirectory.shared.acceptReceived(claim, signatureKeyB64: senderKey)
     }
 
+    /// ADR-0051 §3 — the per-account, per-group `{ name, updatedAtMs }` store
+    /// behind every group title. Public so the list / chat view models read
+    /// the title through it (``groupName(groupIdHex:)``).
+    public let groupNameStore: GroupNameStore
+
+    /// ADR-0051 — bumped on every accepted name (received or set here), so the
+    /// chat list and the open chat re-title in place. The title itself is read
+    /// from ``groupNameStore`` on demand; this only says "read it again".
+    @Published public private(set) var groupNameRevision: Int = 0
+
+    /// ADR-0051 §2 — the per-group serializing chain the name receive runs
+    /// under (C-62 sub-invariant 5: the gate must read CURRENT stored state, and
+    /// two envelopes from one poll batch must not both decide against the same
+    /// pre-batch snapshot). Its own chain, not ``commitLock``: the receive sink
+    /// is called synchronously from inside the poll's commit-locked apply
+    /// region, so taking the commit chain from it would nest the lock.
+    private let groupNameLock = GroupMlsLock()
+
+    /// ADR-0051 §3 — the growth re-send: an owner / admin holding a name
+    /// re-sends it (original stamp) when the roster grows, throttled and
+    /// jittered like the profile republish.
+    private lazy var groupNamePublisher = GroupNamePublisher(
+        ports: GroupNamePublisher.Ports(
+            send: { [weak self] groupIdHex, bytes in
+                guard let self else { return }
+                try await self.publishApplicationMessage(
+                    groupIdHex: groupIdHex, plaintextBytes: bytes)
+            },
+            envelope: { [weak self] groupIdHex in
+                self?.groupNameEnvelopeForResend(groupIdHex: groupIdHex)
+            },
+            nowMs: { Self.nowMs() },
+            jitterMs: { Int64.random(in: 0...ProfilePublisher.maxJitterMs) },
+            sleep: { ms in
+                try? await Task.sleep(nanoseconds: UInt64(max(0, ms)) * 1_000_000)
+            }
+        )
+    )
+
     /// ADR-0048 §2 — publishes this device's own profile into its groups on
     /// join, on change and on growth, through the same locked application send
     /// path the other service envelopes take.
@@ -286,9 +325,11 @@ public final class ChatRepository: ObservableObject {
         unappliedRequestStore: UnappliedRequestStore = UnappliedRequestStore(),
         lastObservedOwnerStore: LastObservedOwnerStore = LastObservedOwnerStore(),
         leaveRequestStore: LeaveRequestStore = LeaveRequestStore(),
-        conversationKindStore: ConversationKindStore = ConversationKindStore()
+        conversationKindStore: ConversationKindStore = ConversationKindStore(),
+        groupNameStore: GroupNameStore = GroupNameStore()
     ) {
         self.conversationKindStore = conversationKindStore
+        self.groupNameStore = groupNameStore
         self.chatClient = chatClient
         self.dsClient = dsClient
         self.discovery = discovery
@@ -519,6 +560,8 @@ public final class ChatRepository: ObservableObject {
         // ADR-0048 — a scheduled growth republish belongs to the session that
         // saw the growth.
         profilePublisher.reset()
+        // ADR-0051 — same for a scheduled group-name re-send.
+        groupNamePublisher.reset()
         // The commit chain (``GroupMlsLock``) is deliberately NOT cleared. Dropping a tail does not
         // stop the section behind it — it only makes the next caller start
         // BESIDE that section, which is the race the chain exists to close.
@@ -740,6 +783,118 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
+    // MARK: - ADR-0051 group name
+
+    /// ADR-0051 §5 — the shared group name this device holds for
+    /// `groupIdHex`, or `nil` when none was ever set / it was cleared. The
+    /// title resolvers read this first, then fall back to the member-derived
+    /// title.
+    public func groupName(groupIdHex: String) -> String? {
+        guard let accountIdB64 = currentAccountIdB64 else { return nil }
+        return groupNameStore.load(accountIdB64: accountIdB64, groupIdHex: groupIdHex)?.displayName
+    }
+
+    /// ADR-0051 §3 — set (or, with an empty `name`, clear) the group's shared
+    /// name: compose the envelope with a fresh stamp, send it into the group
+    /// through the locked application path, and only THEN write the store and
+    /// re-title — so a failed send changes nothing locally (UX spec §4:
+    /// "the local title does not change until the send succeeds"). Throws
+    /// what the send threw, or the codec's refusal of a name that fails a
+    /// bound; the caller shows the same error copy as a failed message.
+    ///
+    /// The role check is the receivers' (every peer runs the gate against its
+    /// live role table); locally the UI only offers the control to the owner
+    /// and admins, read from the live group.
+    public func setGroupName(groupIdHex: String, name: String) async throws {
+        guard let accountIdB64 = currentAccountIdB64, groups[groupIdHex] != nil else {
+            throw ChatError.argument("no live Group handle for \(groupIdHex)")
+        }
+        let stamp = UInt64(max(0, Self.nowMs()))
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let bytes = try composeGroupNameEnvelope(
+            groupName: FfiGroupName(name: trimmed, updatedAtMs: stamp))
+        try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bytes)
+        // Under the name chain so a concurrent receive cannot interleave its
+        // read-decide-write with this write.
+        try await groupNameLock.run(groupIdHex: groupIdHex) { [self] in
+            groupNameStore.record(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex,
+                value: StoredGroupName(name: trimmed, updatedAtMs: stamp))
+            groupNamePublisher.notePublished(groupIdHex: groupIdHex)
+            groupNameRevision &+= 1
+        }
+    }
+
+    /// ADR-0051 §2 — a group-name envelope arrived on the group journal: run
+    /// the role gate against the LIVE group, then the strictly-newer order,
+    /// then (on accept) store it and re-title. Fire-and-forget; the whole
+    /// read-decide-write runs under the per-group name chain.
+    public func receiveGroupName(
+        groupIdHex: String,
+        name: String,
+        updatedAtMs: UInt64,
+        senderLeaf: UInt32?
+    ) {
+        guard currentAccountIdB64 != nil, groups[groupIdHex] != nil else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await self.groupNameLock.run(groupIdHex: groupIdHex) { [weak self] in
+                self?.performReceiveGroupName(
+                    groupIdHex: groupIdHex, name: name, updatedAtMs: updatedAtMs,
+                    senderLeaf: senderLeaf)
+            }
+        }
+    }
+
+    /// The locked body of ``receiveGroupName(groupIdHex:name:updatedAtMs:senderLeaf:)``.
+    /// Reads the live `Group` on the actor (roster + role table are the ONLY
+    /// authority for who the sender is and what they may do), then the
+    /// CURRENT stored row, and decides through ``GroupNameGate``.
+    private func performReceiveGroupName(
+        groupIdHex: String,
+        name: String,
+        updatedAtMs: UInt64,
+        senderLeaf: UInt32?
+    ) {
+        guard let accountIdB64 = currentAccountIdB64, let record = groups[groupIdHex] else { return }
+        let resolved = PushGroupRouting.resolveSenderAuthority(
+            group: record.group, senderLeaf: senderLeaf)
+        let stored = groupNameStore.load(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        let verdict = GroupNameGate.classify(
+            incomingName: name,
+            incomingUpdatedAtMs: updatedAtMs,
+            stored: stored,
+            senderKey: resolved.senderKey,
+            authority: resolved.authority
+        )
+        switch verdict {
+        case .acceptIdentical:
+            return
+        case .accept:
+            groupNameStore.record(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex,
+                value: StoredGroupName(name: name, updatedAtMs: updatedAtMs))
+            groupNameRevision &+= 1
+        case .rejectNotAuthorized, .rejectStale, .rejectUnverifiable:
+            NSLog("ADR-0051 group name for \(groupIdHex) dropped: \(verdict)")
+        }
+    }
+
+    /// ADR-0051 §3 — the envelope the growth re-send carries: the STORED name
+    /// with its STORED stamp, verbatim. `nil` when this device holds no name
+    /// for the group, is a plain member of a role-table group (its re-send
+    /// would be refused by every peer), or can no longer send into it.
+    private func groupNameEnvelopeForResend(groupIdHex: String) -> Data? {
+        guard let accountIdB64 = currentAccountIdB64, groups[groupIdHex] != nil,
+              !membershipEnded(membershipStateNow(groupIdHex: groupIdHex)),
+              let stored = groupNameStore.load(accountIdB64: accountIdB64, groupIdHex: groupIdHex),
+              stored.displayName != nil
+        else { return nil }
+        if ownRole(groupIdHex: groupIdHex) == .member { return nil }
+        return try? composeGroupNameEnvelope(
+            groupName: FfiGroupName(name: stored.name, updatedAtMs: stored.updatedAtMs))
+    }
+
     /// ADR-0048 §2 — the own profile changed: publish it into every group.
     public func publishOwnProfileToAllGroups() async {
         await profilePublisher.publishToAll(groupIdHexes: Array(groups.keys).sorted())
@@ -757,6 +912,9 @@ public final class ChatRepository: ObservableObject {
             return
         }
         profilePublisher.noteGrowth(groupIdHex: groupIdHex)
+        // ADR-0051 §3 — the newcomer cannot read the epoch the group name was
+        // sent in either; an owner / admin holding one re-sends it.
+        groupNamePublisher.noteGrowth(groupIdHex: groupIdHex)
     }
 
     /// ADR-0028 (G-3) — joiner step 1: request to join a group from a `/g/`
@@ -1562,6 +1720,8 @@ public final class ChatRepository: ObservableObject {
         // profile was published. Only SCHEDULES (the send takes this chain
         // later), so the lock held here is never awaited against itself.
         profilePublisher.noteGrowth(groupIdHex: groupIdHex)
+        // ADR-0051 §3 — same for the group name. Only schedules.
+        groupNamePublisher.noteGrowth(groupIdHex: groupIdHex)
         return commitPublish.id
     }
 
@@ -2922,6 +3082,14 @@ public final class ChatRepository: ObservableObject {
             },
             profileSink: { [weak self] claim, senderKey in
                 self?.receivedProfileSink(claim, senderKey)
+            },
+            // ADR-0051 — role-gate against the live group, order, store,
+            // re-title. Fire-and-forget (it only spawns a `Task`), so the name
+            // chain it takes is never awaited while the commit chain is held.
+            groupNameSink: { [weak self] name, updatedAtMs, senderLeaf in
+                self?.receiveGroupName(
+                    groupIdHex: groupIdHex, name: name, updatedAtMs: updatedAtMs,
+                    senderLeaf: senderLeaf)
             }
         )
         // THE ORDERING RULE — persist first, advance the cursor second, and hold
@@ -3826,6 +3994,11 @@ public final class ChatRepository: ObservableObject {
                         },
                         profileSink: { [weak self] claim, senderKey in
                             self?.receivedProfileSink(claim, senderKey)
+                        },
+                        groupNameSink: { [weak self] name, updatedAtMs, senderLeaf in
+                            self?.receiveGroupName(
+                                groupIdHex: groupIdHex, name: name, updatedAtMs: updatedAtMs,
+                                senderLeaf: senderLeaf)
                         }
                     )
                     // Per row, and deliberately not deferred to the end of the
@@ -5109,7 +5282,8 @@ private final class GroupRecord {
         pushRoutingSecretSink: ((Data, UInt64, UInt32?) -> Void)? = nil,
         committerBeaconSink: ((UInt32?, String) -> Void)? = nil,
         membershipProposalSink: ((ProposalRecord, String) -> Void)? = nil,
-        profileSink: ((ProfileClaim, MemberIdentity?) -> Void)? = nil
+        profileSink: ((ProfileClaim, MemberIdentity?) -> Void)? = nil,
+        groupNameSink: ((String, UInt64, UInt32?) -> Void)? = nil
     ) {
         for event in events {
             switch event {
@@ -5227,6 +5401,14 @@ private final class GroupRecord {
                 // with the signature key resolved at receipt (C-68), which is
                 // the only identity it may ever be stored under.
                 profileSink?(profile, senderKey)
+            case .groupName(_, let name, let updatedAtMs, let senderLeaf, _):
+                // ADR-0051 — the group's shared name. Not a timeline row:
+                // routed out to the repository, which owns the name store AND
+                // the live `Group` handle the role gate needs. The
+                // MLS-authenticated `senderLeaf` rides along so only the
+                // owner / admins can set it; the stamp so the strictly-newer
+                // order can refuse a stale re-send.
+                groupNameSink?(name, updatedAtMs, senderLeaf)
             }
         }
     }

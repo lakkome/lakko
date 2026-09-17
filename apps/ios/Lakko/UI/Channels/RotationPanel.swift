@@ -26,6 +26,11 @@ import SwiftUI
 /// its lifecycle + surfaces the error.
 struct RotationPanel: View {
     let channelId: String
+    /// ADR-0051 §4 — the publisher's own copy of the metadata record lives
+    /// here, and the post-rotation re-issue reads it (and the post-rotation
+    /// seed is written back here so the re-issue and every later post seal
+    /// under the seed the subscribers were just resealed to).
+    @ObservedObject var state: ChannelsUiState
     let client: ChannelsClient
     /// Canonical AccountIdentity (phrase) seed — used to open the channel's
     /// persistent PublisherGroup (same handle ``CoPublishersPanel`` opens).
@@ -59,6 +64,7 @@ struct RotationPanel: View {
         .task {
             await model.load(
                 channelId: channelId,
+                state: state,
                 client: client,
                 accountIdentitySeed: accountIdentitySeed
             )
@@ -84,6 +90,9 @@ final class RotationPanelModel: ObservableObject {
 
     private var channelIdHex = ""
     private var client = ChannelsClient()
+    /// ADR-0051 §4 — where the publisher's record and keys live; `nil` only
+    /// before `load`.
+    private weak var state: ChannelsUiState?
     private var identity: Identity?
     private var publisherGroup: PublisherGroup?
     private var cron: RotationCron?
@@ -95,10 +104,12 @@ final class RotationPanelModel: ObservableObject {
     /// cancelled in `teardown` on disappear).
     func load(
         channelId: String,
+        state: ChannelsUiState,
         client: ChannelsClient,
         accountIdentitySeed: Data
     ) async {
         self.channelIdHex = channelId
+        self.state = state
         self.client = client
         if cron == nil {
             do {
@@ -199,6 +210,32 @@ final class RotationPanelModel: ObservableObject {
     private func handleRotated(_ epoch: UInt32) {
         error = nil
         refreshStatus()
+        // ADR-0051 §4 — after every rotation the newest epoch must hold a
+        // record a late subscriber can read. The rotation advanced the
+        // PublisherGroup, so the content seed changed: write the new seed +
+        // epoch back first (every later post must seal under the seed the
+        // subscribers were just resealed to), then re-post the STORED record
+        // with its ORIGINAL stamp — never a fresh clock read, so the re-issue
+        // can never out-order an edit made in between.
+        guard let state, let identity, let publisherGroup else { return }
+        if let old = state.keysByChannel[channelIdHex],
+           let newSeed = try? publisherGroup.channelSeed(identity: identity) {
+            state.setKeys(
+                channelId: channelIdHex,
+                keys: ChannelPublisherKeys(seed: newSeed, signingKeySeed: old.signingKeySeed))
+        }
+        state.setEpoch(channelId: channelIdHex, epoch: epoch)
+        guard let record = state.sharedMeta(channelId: channelIdHex) else { return }
+        let channelId = channelIdHex
+        let client = self.client
+        Task { @MainActor in
+            do {
+                try await ChannelMetaRecord.post(
+                    state: state, client: client, channelId: channelId, meta: record)
+            } catch {
+                NSLog("Channels: post-rotation metadata re-issue failed: %@", String(describing: error))
+            }
+        }
     }
 
     private func handleError(_ err: Error) {

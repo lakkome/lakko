@@ -114,6 +114,12 @@ const PREVIEW_MAX_CHARS = 140;
  *   profile; `wrongDomain` is the only "not a profile" answer. Used ONLY to
  *   classify the row out of the preview path — the SW never stores a
  *   received profile (C-59). Optional so an older deps object still loads.
+ * @property {(bytes: Uint8Array) => any} [decodeGroupNameEnvelope]
+ *   ADR-0051 — the fail-closed group-name-envelope codec. THROWS an `Error`
+ *   carrying a `groupNameError` code when the bytes are not a well-formed
+ *   group name; `wrongDomain` is the only "not a group name" answer. Used
+ *   ONLY to classify the row out of the preview path — the SW never stores
+ *   a received name (C-59). Optional so an older deps object still loads.
  * @property {() => number} [committerBeaconEnvelopeLen]
  *   ADR-0045 — the exact on-wire length of a beacon envelope, read from
  *   the FFI rather than hand-copied into each client (the drift class
@@ -445,9 +451,10 @@ function looksLikeCallSignaling(bytes) {
  * kinds before its chat parse; this is the background mirror of that
  * same two-step peek, in the same order.
  *
- * Three kinds, each its own arm below: call signaling, the ADR-0042 /
- * ADR-0044 push-routing secret, and the ADR-0045 committer beacon. Each
- * arm is a cheap byte peek gating an authoritative codec.
+ * Five kinds, each its own arm below: call signaling, the ADR-0042 /
+ * ADR-0044 push-routing secret, the ADR-0045 committer beacon, the
+ * ADR-0048 profile and the ADR-0051 group name. Each arm is a cheap byte
+ * peek gating an authoritative codec.
  *
  * Classification ONLY — no writes, no cursor advance (C-59 / ADR-0041).
  *
@@ -464,7 +471,46 @@ function isServiceEnvelope(wasm, bytes) {
   if (isCommitterBeaconEnvelope(wasm, bytes)) return true;
   // 4. Profile (ADR-0048).
   if (isProfileEnvelope(wasm, bytes)) return true;
+  // 5. Group name (ADR-0051).
+  if (isGroupNameEnvelope(wasm, bytes)) return true;
   return false;
+}
+
+/**
+ * First byte of the ADR-0051 group-name domain separator (`'l'` of
+ * `"lakko/group-name/v1\0"`). Its own constant, like the ones above.
+ */
+const GROUP_NAME_ENVELOPE_FIRST_BYTE = 0x6c;
+
+/**
+ * Arm 5 of {@link isServiceEnvelope} — the ADR-0051 group-name envelope.
+ *
+ * Unfiltered, a rename would be previewed as a notification body reading
+ * `lakko/group-name/v1` plus the stamp bytes and the name. Same verdict rule
+ * as the profile arm: a decode that succeeds is a group name; a throw with
+ * any `groupNameError` code but `wrongDomain` is a domain match refused as
+ * a whole, suppressed here too; `wrongDomain` or a code-less throw falls
+ * through to the normal parse.
+ *
+ * The name is never kept: classification ONLY (C-59).
+ *
+ * @param {DecryptWasm} wasm
+ * @param {Uint8Array} bytes
+ * @returns {boolean}
+ */
+function isGroupNameEnvelope(wasm, bytes) {
+  if (bytes.length === 0 || bytes[0] !== GROUP_NAME_ENVELOPE_FIRST_BYTE) return false;
+  if (typeof wasm.decodeGroupNameEnvelope !== "function") return false;
+  let decoded;
+  try {
+    decoded = wasm.decodeGroupNameEnvelope(bytes);
+  } catch (err) {
+    const code =
+      err !== null && typeof err === "object" ? /** @type {any} */ (err).groupNameError : undefined;
+    return typeof code === "string" && code !== "wrongDomain";
+  }
+  freeQuietly(decoded);
+  return true;
 }
 
 /**

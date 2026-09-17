@@ -316,6 +316,43 @@ public class ChannelsUiState(
         persistChannels()
     }
 
+    /**
+     * ADR-0051 §4 — file [meta] as the channel's shared record when it is newer
+     * than what is held (strictly greater stamp; the first record wins). The
+     * reader's fold and the publisher's own copy both land here. Returns the
+     * record now held.
+     */
+    public fun adoptSharedMeta(channelId: String, meta: SharedChannelMeta): SharedChannelMeta? {
+        var kept: SharedChannelMeta? = null
+        var changed = false
+        _channels.update { list ->
+            changed = false
+            list.map {
+                if (it.id == channelId) {
+                    val held = it.sharedMeta()
+                    val next = newerChannelMeta(held, meta, ::channelMetaNewer)
+                    kept = next
+                    if (next == held) {
+                        it
+                    } else {
+                        changed = true
+                        it.copy(
+                            sharedName = next.name,
+                            sharedDescription = next.description,
+                            sharedUpdatedAtMs = next.updatedAtMs,
+                        )
+                    }
+                } else {
+                    it
+                }
+            }
+        }
+        // The reader re-runs classification on every refresh; a record already
+        // held must not cost a prefs write each time.
+        if (changed) persistChannels()
+        return kept
+    }
+
     public fun setPosts(channelId: String, posts: List<PostView>) {
         _postsByChannel.update { it + (channelId to posts) }
     }
@@ -578,4 +615,12 @@ public data class ChannelHandle(
     /** The public `@handle` this device registered for the channel, or ""
      *  when none was claimed (local display only; the wire form is the id). */
     public val handle: String = "",
+    /** ADR-0051 §4 — the name from the newest metadata record this device
+     *  read (a subscriber) or posted (the publisher); "" when none. */
+    public val sharedName: String = "",
+    /** ADR-0051 §4 — the description from that same record. */
+    public val sharedDescription: String = "",
+    /** ADR-0051 §4 — the record's publisher stamp; `null` when no record has
+     *  landed. A re-issue carries this value verbatim. */
+    public val sharedUpdatedAtMs: ULong? = null,
 )

@@ -58,6 +58,7 @@ import {
   type AcceptedContact,
 } from "../contacts/local-store";
 import { useProfiles } from "../profile/ProfileContext";
+import { useGroupNames } from "./GroupNameContext";
 import { paths } from "../routes/paths";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
@@ -91,6 +92,7 @@ export function ChatList(props: {
 }): JSX.Element {
   const chats = useChats();
   const profiles = useProfiles();
+  const groupNames = useGroupNames();
   const sync = useDeviceGroupSync();
   const auth = useAuth();
   const navigate = useNavigate();
@@ -169,9 +171,10 @@ export function ChatList(props: {
     ) {
       return byMember.displayName;
     }
-    // An unnamed group is titled from its members, never from an id.
+    // ADR-0051 §5 — the shared name first; an unnamed group is titled from
+    // its members, never from an id.
     return groupTitle(
-      g.label,
+      groupNames.nameOf(g.groupIdB64) ?? g.label,
       peers.map((k) => memberNameOf(profiles.resolve(k))),
     );
   };

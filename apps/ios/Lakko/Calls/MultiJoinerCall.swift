@@ -511,6 +511,11 @@ final class MultiJoinerCall {
             // the SFU signal-relay. A relay payload that classifies as one is
             // out of place here and carries no authenticated sender key — drop.
             break
+        case .groupName:
+            // ADR-0051 — a group-name envelope likewise rides the GROUP
+            // JOURNAL (role-gated in `ChatRepository.receiveGroupName`), never
+            // the SFU signal-relay. Out of place here — drop.
+            break
         }
     }
 

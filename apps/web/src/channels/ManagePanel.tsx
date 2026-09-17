@@ -28,8 +28,15 @@
  * co-publisher journal poll must keep running whether or not the owner is
  * looking at them.
  */
-import { createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
+import { createEffect, createSignal, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 
+import {
+  CHANNEL_NEEDS_NAME,
+  channelMetaErrorCode,
+  channelMetaErrorText,
+  publishChannelMeta,
+} from "./channel-meta";
+import { apiError, channelErrorText } from "./api";
 import { openPublisherGroup } from "./copublisher";
 import type { WasmIdentity } from "./composer";
 import { channelErrorMessage } from "./legacy-v1";
@@ -39,7 +46,134 @@ import { RotationPanel } from "./RotationPanel";
 import { SubscribersPanel } from "./SubscribersPanel";
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
-import { awaitChannelsHydration } from "../state/channels-state";
+import { awaitChannelsHydration, channelsActions, channelsState } from "../state/channels-state";
+
+/**
+ * ADR-0051 §4 — the channel's name and description, editable by the
+ * publisher. Save posts a new metadata record (an ordinary signed encrypted
+ * post) and keeps the copy this device edits from. Every subscriber
+ * re-titles from the newest record; the `@handle` stays the unique thing.
+ */
+function ChannelDetailsPanel(props: { readonly channelIdHex: string }): JSX.Element {
+  const held = (): { name: string; description: string } => {
+    const shared = channelsState.metaByChannel().get(props.channelIdHex);
+    if (shared !== undefined) return { name: shared.name, description: shared.description };
+    const local = channelsState.channels().find((c) => c.id === props.channelIdHex);
+    return { name: local?.localName ?? "", description: local?.localDescription ?? "" };
+  };
+  const [name, setName] = createSignal(held().name);
+  const [description, setDescription] = createSignal(held().description);
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+  const [notice, setNotice] = createSignal<string | null>(null);
+  // Follow a record that lands while the form is open (a co-publisher's
+  // edit): the newest record is the truth on every device.
+  createEffect(
+    on(
+      () => channelsState.metaByChannel().get(props.channelIdHex)?.updatedAtMs,
+      (_stamp, prev) => {
+        if (prev === undefined) return;
+        setName(held().name);
+        setDescription(held().description);
+      },
+    ),
+  );
+  const unchanged = (): boolean =>
+    name().trim() === held().name && description().trim() === held().description;
+
+  async function onSave(): Promise<void> {
+    if (busy()) return;
+    setError(null);
+    setNotice(null);
+    if (name().trim().length === 0) {
+      setError(CHANNEL_NEEDS_NAME);
+      return;
+    }
+    setBusy(true);
+    try {
+      const meta = await publishChannelMeta(props.channelIdHex, {
+        name: name(),
+        description: description(),
+      });
+      // The local fields follow, so a device that never reads its own posts
+      // back still titles the row the same way.
+      channelsActions.updateLocalMeta(props.channelIdHex, {
+        localName: meta.name,
+        localDescription: meta.description,
+      });
+      setName(meta.name);
+      setDescription(meta.description);
+      setNotice("Saved. Subscribers see the new name with their next posts.");
+    } catch (err) {
+      const code = channelMetaErrorCode(err);
+      if (code !== undefined) setError(channelMetaErrorText(code));
+      else if (apiError.is(err)) setError(`Could not save. ${channelErrorText(err)}`);
+      else setError(`Could not save. Try again. (${String(err)})`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section class="lk-card">
+      <h2>Channel</h2>
+      <p class="lk-card-desc">
+        The name and description reach every subscriber, encrypted. The server never reads them.
+      </p>
+      <form
+        onSubmit={(e): void => {
+          e.preventDefault();
+          void onSave();
+        }}
+      >
+        <label>
+          Name
+          <input
+            type="text"
+            value={name()}
+            maxLength={64}
+            disabled={busy()}
+            aria-invalid={error() === CHANNEL_NEEDS_NAME}
+            onInput={(e): void => {
+              setName(e.currentTarget.value);
+            }}
+          />
+        </label>
+        <label>
+          Description (optional)
+          <textarea
+            rows={3}
+            value={description()}
+            maxLength={300}
+            disabled={busy()}
+            onInput={(e): void => {
+              setDescription(e.currentTarget.value);
+            }}
+          />
+        </label>
+        <Show when={error()}>
+          {(msg) => (
+            <div class="lk-alert danger" role="alert">
+              {msg()}
+            </div>
+          )}
+        </Show>
+        <Show when={notice()}>
+          {(msg) => (
+            <div class="lk-alert info" role="status">
+              {msg()}
+            </div>
+          )}
+        </Show>
+        <div class="lk-actions lk-row-end">
+          <button type="submit" class="primary" disabled={busy() || unchanged()}>
+            {busy() ? "Saving..." : "Save"}
+          </button>
+        </div>
+      </form>
+    </section>
+  );
+}
 
 export function ManagePanel(props: { readonly channelIdHex: string }): JSX.Element {
   const auth = useAuth();
@@ -87,6 +221,7 @@ export function ManagePanel(props: { readonly channelIdHex: string }): JSX.Eleme
 
   return (
     <div class="lk-stack lk-channel-manage-body">
+      <ChannelDetailsPanel channelIdHex={props.channelIdHex} />
       <SubscribersPanel channelIdHex={props.channelIdHex} />
       <Show
         when={group() !== null && identity() !== null}

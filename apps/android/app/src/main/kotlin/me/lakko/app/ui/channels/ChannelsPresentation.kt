@@ -5,9 +5,7 @@ package me.lakko.app.ui.channels
 
 import me.lakko.app.channels.ChannelHandle
 import me.lakko.app.channels.PostView
-import me.lakko.app.ui.chat.formatClockTime
 import me.lakko.app.ui.chat.formatListTime
-import me.lakko.app.ui.chat.sameCalendarDay
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -15,20 +13,21 @@ import java.util.Locale
 
 /**
  * Pure presentation helpers for the Channels screens
- * (docs/ux/client-redesign.md section 5.4): everything a row or a status
- * line shows is computed here, off the composition, so it can be unit-tested
- * without Compose.
+ * (docs/ux/client-redesign.md section 5.4, docs/ux/group-and-channel-names.md
+ * section 3.2): everything a row, a header or a status line shows is computed
+ * here, off the composition, so it can be unit-tested without Compose.
  */
 
 /** Everything one Channels row renders. */
 public data class ChannelRowModel(
     val id: String,
-    /** The channel's local name; "Channel" when it has none. */
+    /** The shared name (ADR-0051), else the local name, else the handle, else "Channel". */
     val title: String,
-    /** "@handle", or `null` when the channel has no public handle. */
+    /** "@handle", or `null` when the channel has no public handle. Kept for search. */
     val handle: String?,
-    /** "12 subscribers" / "1 subscriber", or `null` when the count is not known. */
-    val subscriberLine: String?,
+    /** "@handle · 12 subscribers", or "Subscribed" / "Your channel" when there
+     *  is nothing else to say. Never repeats the handle when the title IS the handle. */
+    val subtitle: String,
     /** The formatted time of the newest post, or `null` when no post is known. */
     val time: String?,
     /** Sort key: the newest post's server time, else the time the channel was added. */
@@ -38,12 +37,13 @@ public data class ChannelRowModel(
 /**
  * The row for [channel]. Subscriber count and posts are optional inputs — an
  * owner learns the count from its fan-out, a reader never does; posts are
- * known once the channel has been opened.
+ * known once the channel has been opened. [isOwner] picks the fallback line.
  */
 public fun channelRowModel(
     channel: ChannelHandle,
     posts: List<PostView>?,
     subscriberCount: Int?,
+    isOwner: Boolean,
     nowMs: Long,
     zone: ZoneId,
     use24h: Boolean,
@@ -54,15 +54,71 @@ public fun channelRowModel(
         id = channel.id,
         title = channelTitle(channel),
         handle = channelHandleLabel(channel.handle),
-        subscriberLine = subscriberCountLine(subscriberCount),
+        subtitle = channelSubtitle(channel, subscriberCount, isOwner),
         time = newest?.let { formatListTime(it, nowMs, zone, use24h, locale) },
         sortMs = newest ?: channel.addedAtMs.toLong(),
     )
 }
 
-/** The local name, or "Channel" for a channel without one. */
-public fun channelTitle(channel: ChannelHandle): String =
-    channel.localName.trim().ifEmpty { "Channel" }
+/**
+ * The title precedence (ADR-0051 §5): the shared name from the newest record,
+ * else the local name, else the bare handle, else "Channel".
+ */
+public fun channelTitle(channel: ChannelHandle): String {
+    channel.sharedName.trim().takeIf { it.isNotEmpty() }?.let { return it }
+    channel.localName.trim().takeIf { it.isNotEmpty() }?.let { return it }
+    channel.handle.trim().removePrefix("@").takeIf { it.isNotEmpty() }?.let { return it }
+    return "Channel"
+}
+
+/** The description shown under the name: the shared one, else the local one; `null` when blank. */
+public fun channelDescription(channel: ChannelHandle): String? {
+    channel.sharedDescription.trim().takeIf { it.isNotEmpty() }?.let { return it }
+    return channel.localDescription.trim().takeIf { it.isNotEmpty() }
+}
+
+/**
+ * "@handle · 12 subscribers", "@handle", "12 subscribers", or the fallback
+ * "Your channel" / "Subscribed". The handle is left out when the title is
+ * already the handle, so a channel with no name never shows it twice.
+ */
+public fun channelSubtitle(channel: ChannelHandle, subscriberCount: Int?, isOwner: Boolean): String {
+    val parts = ArrayList<String>(2)
+    val handle = channelHandleLabel(channel.handle)
+    if (handle != null && !titleIsHandle(channel)) parts += handle
+    subscriberCountLine(subscriberCount)?.let { parts += it }
+    if (parts.isEmpty()) parts += channelStatusLine(isOwner)
+    return parts.joinToString(" · ")
+}
+
+/** `true` when the title falls back to the handle (no shared or local name). */
+public fun titleIsHandle(channel: ChannelHandle): Boolean {
+    val bare = channel.handle.trim().removePrefix("@")
+    return bare.isNotEmpty() && channelTitle(channel) == bare
+}
+
+/** The one-line standing status on a channel: the viewer's relation to it. */
+public fun channelStatusLine(isOwner: Boolean): String = if (isOwner) "Your channel" else "Subscribed"
+
+/** What the reader's header card shows. */
+public data class ChannelHeaderModel(
+    val title: String,
+    /** "@handle", or `null` when there is none or it would repeat the title. */
+    val handleLine: String?,
+    /** The description, or `null` when blank. */
+    val description: String?,
+    /** "Subscribed" / "Your channel". */
+    val statusLine: String,
+)
+
+/** The header card for [channel] as [isOwner] sees it. */
+public fun channelHeaderModel(channel: ChannelHandle, isOwner: Boolean): ChannelHeaderModel =
+    ChannelHeaderModel(
+        title = channelTitle(channel),
+        handleLine = channelHandleLabel(channel.handle)?.takeIf { !titleIsHandle(channel) },
+        description = channelDescription(channel),
+        statusLine = channelStatusLine(isOwner),
+    )
 
 /** "@handle" for a non-empty handle (with or without the "@" typed), else `null`. */
 public fun channelHandleLabel(handle: String): String? {
@@ -113,17 +169,22 @@ public fun relativeTimeLabel(atMs: Long, nowMs: Long, zone: ZoneId, locale: Loca
 }
 
 /**
- * The time on a post card: the clock time for a post from today, otherwise
- * the day and the clock time ("16 Sep, 14:05"; the year is added for another
- * year).
+ * The muted time on a post card, relative while it is recent: "Just now"
+ * under a minute, "5 min ago", "2 h ago" within a day, then the date ("16 Sep",
+ * with the year for another year). A future instant reads as "Just now".
  */
-public fun formatPostTime(atMs: Long, nowMs: Long, zone: ZoneId, use24h: Boolean, locale: Locale): String {
-    val clock = formatClockTime(atMs, zone, use24h, locale)
-    if (sameCalendarDay(atMs, nowMs, zone)) return clock
+public fun postRelativeTimeLabel(atMs: Long, nowMs: Long, zone: ZoneId, locale: Locale): String {
+    val delta = nowMs - atMs
+    val minute = 60_000L
+    val hour = 60 * minute
+    val day = 24 * hour
+    if (delta < minute) return "Just now"
+    if (delta < hour) return "${delta / minute} min ago"
+    if (delta < day) return "${delta / hour} h ago"
     val at = Instant.ofEpochMilli(atMs).atZone(zone)
     val now = Instant.ofEpochMilli(nowMs).atZone(zone)
     val pattern = if (at.year == now.year) "d MMM" else "d MMM yyyy"
-    return DateTimeFormatter.ofPattern(pattern, locale).format(at) + ", " + clock
+    return DateTimeFormatter.ofPattern(pattern, locale).format(at)
 }
 
 /**

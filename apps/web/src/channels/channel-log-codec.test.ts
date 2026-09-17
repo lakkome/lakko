@@ -44,6 +44,9 @@ function sample(): ChannelLogSnapshot {
       ],
     ]),
     publisherSigningSeeds: new Map([[CH_A, bytes(0x55)]]),
+    channelMeta: new Map([
+      [CH_A, { name: "Alpha news", description: "the first\nchannel", updatedAtMs: 18_446_744_073_709_551_615n }],
+    ]),
     publisherProviderSnapshot: new Uint8Array([0, 0, 0, 1, 9, 8, 7]),
     publisherLeafKeyB64: "bGVhZg==",
   };
@@ -60,6 +63,12 @@ describe("channel log codec", () => {
     expect(d.subscribedSeeds.get(CH_B)?.get(3)).toEqual(bytes(0x33));
     expect(d.subscribedSeeds.get(CH_B)?.get(4)).toEqual(bytes(0x44));
     expect(d.publisherSigningSeeds.get(CH_A)).toEqual(bytes(0x55));
+    // ADR-0051 — the stamp is a u64 and must come back exact.
+    expect(d.channelMeta.get(CH_A)).toEqual({
+      name: "Alpha news",
+      description: "the first\nchannel",
+      updatedAtMs: 18_446_744_073_709_551_615n,
+    });
     expect(d.publisherProviderSnapshot).toEqual(new Uint8Array([0, 0, 0, 1, 9, 8, 7]));
     expect(d.publisherLeafKeyB64).toBe("bGVhZg==");
   });
@@ -84,6 +93,14 @@ describe("channel log codec", () => {
       { channelId: CH_B, epoch: 4, seedHex: "44".repeat(32) },
     ]);
     expect(wire.publisherSigningSeeds).toEqual([{ channelId: CH_A, seedHex: "55".repeat(32) }]);
+    expect(wire.channelMeta).toEqual([
+      {
+        channelId: CH_A,
+        name: "Alpha news",
+        description: "the first\nchannel",
+        updatedAtMs: "18446744073709551615",
+      },
+    ]);
     // JSON-safe: no Uint8Array / Map reaches the wire.
     expect(JSON.parse(JSON.stringify(wire))).toEqual(wire);
   });
@@ -96,6 +113,7 @@ describe("channel log codec", () => {
       subscriberKeys: [],
       subscribedSeeds: [],
       publisherSigningSeeds: [],
+      channelMeta: [],
       publisherProviderSnapshotB64: null,
       publisherLeafKeyB64: null,
     });
@@ -139,6 +157,13 @@ describe("channel log codec", () => {
         { channelId: CH_A, seedHex: "55".repeat(33) },
         { channelId: CH_B, seedHex: "66".repeat(32) },
       ],
+      channelMeta: [
+        { channelId: CH_A, name: "ok", description: "", updatedAtMs: "7" },
+        // A negative / non-decimal stamp is a malformed record, never 0.
+        { channelId: CH_B, name: "bad", description: "", updatedAtMs: "-7" },
+        // @ts-expect-error -- a numeric stamp is exactly the malformed row under test
+        { channelId: CH_B, name: "bad", description: "", updatedAtMs: 7 },
+      ],
     };
     const d = decodeChannelLog(wire)!;
     expect(d.channels.map((c) => c.id)).toEqual([CH_A]);
@@ -146,6 +171,8 @@ describe("channel log codec", () => {
     expect([...d.subscriberKeys.keys()]).toEqual([CH_B]);
     expect([...(d.subscribedSeeds.get(CH_B)?.keys() ?? [])]).toEqual([2]);
     expect([...d.publisherSigningSeeds.keys()]).toEqual([CH_B]);
+    expect([...d.channelMeta.keys()]).toEqual([CH_A]);
+    expect(d.channelMeta.get(CH_A)?.updatedAtMs).toBe(7n);
   });
 
   it("tolerates missing sections (a row written by a narrower writer)", () => {
@@ -154,6 +181,7 @@ describe("channel log codec", () => {
     expect(d.subscriberKeys.size).toBe(0);
     expect(d.subscribedSeeds.size).toBe(0);
     expect(d.publisherSigningSeeds.size).toBe(0);
+    expect(d.channelMeta.size).toBe(0);
   });
 
   it("a provider snapshot without its leaf key is dropped, and vice versa", () => {

@@ -30,6 +30,7 @@
  */
 import { createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
 
+import { republishChannelMeta } from "./channel-meta";
 import { relativeTimeLabel } from "./relative-time";
 import {
   runRotationOnce,
@@ -94,6 +95,14 @@ export function RotationPanel(props: {
         }
         channelsActions.notePublisherGroupChanged();
         refreshStatus();
+        // ADR-0051 §4 — re-issue the metadata record under the NEW epoch
+        // (original stamp), so a late subscriber who holds only the newest
+        // seeds still finds the channel's name. After the seed + epoch
+        // refresh above, which is what the post is sealed with.
+        void republishChannelMeta(props.channelIdHex).catch((err: unknown) => {
+          // eslint-disable-next-line no-console
+          console.warn("post-rotation channel meta re-issue failed", err);
+        });
       },
     };
   }

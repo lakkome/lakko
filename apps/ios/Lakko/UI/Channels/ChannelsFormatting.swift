@@ -12,10 +12,12 @@ public enum ChannelsFormatting {
 
     // MARK: Row
 
-    /// What one channel row renders. Built once per body pass from the local
-    /// handle, the cached posts and the cached subscriber count.
+    /// What one channel row renders. Built once per body pass from the
+    /// shared record, the local handle, the cached posts and the cached
+    /// subscriber count. The same shape as the web `channelRowModel`.
     public struct RowModel: Equatable {
-        /// The name; "Channel" when the local name is empty.
+        /// ADR-0051 §5 — the shared name, else the local name, else the bare
+        /// handle, else "Channel".
         public let title: String
         /// "@handle", or `nil` when this device knows no handle.
         public let handleLabel: String?
@@ -25,9 +27,9 @@ public enum ChannelsFormatting {
         /// The newest post's time in the list vocabulary
         /// (``ChatListFormatting/lastMessageTime``), `nil` with no posts.
         public let timeLabel: String?
-        /// The second line: the handle and the subscriber count joined with
-        /// a middle dot, or the description when neither is known, or an
-        /// empty string.
+        /// The second line: `@handle · N subscribers` (the handle omitted when
+        /// the title already IS the handle, so it never shows twice), else
+        /// whichever of the two is known, else "Your channel" / "Subscribed".
         public let secondLine: String
 
         public init(
@@ -45,43 +47,67 @@ public enum ChannelsFormatting {
         }
     }
 
+    /// ADR-0051 §5 — the channel title precedence, shared with the reader
+    /// header: the shared name, else the local name, else the bare handle,
+    /// else "Channel".
+    public static func title(sharedName: String, localName: String, handle: String) -> String {
+        let shared = sharedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !shared.isEmpty { return shared }
+        let local = localName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !local.isEmpty { return local }
+        let bare = bareHandle(handle)
+        return bare.isEmpty ? "Channel" : bare
+    }
+
+    /// The handle without whitespace and without any leading `@`.
+    public static func bareHandle(_ handle: String) -> String {
+        String(handle.trimmingCharacters(in: .whitespacesAndNewlines).drop(while: { $0 == "@" }))
+    }
+
+    /// "1 subscriber" / "12 subscribers".
+    public static func subscriberCountLabel(_ count: Int) -> String {
+        count == 1 ? "1 subscriber" : "\(count) subscribers"
+    }
+
     public static func rowModel(
+        sharedName: String = "",
         name: String,
-        description: String,
         handle: String,
+        isOwner: Bool = false,
         subscriberCount: Int?,
         newestPostMs: Int64?,
         nowMs: Int64,
         calendar: Calendar,
         locale: Locale
     ) -> RowModel {
-        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let title = trimmedName.isEmpty ? "Channel" : trimmedName
-        let cleanHandle = handle
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .drop(while: { $0 == "@" })
-        let handleLabel = cleanHandle.isEmpty ? nil : "@\(cleanHandle)"
-        let subscribersLabel = subscriberCount.map { count in
-            count == 1 ? "1 subscriber" : "\(count) subscribers"
-        }
+        let title = Self.title(sharedName: sharedName, localName: name, handle: handle)
+        let bare = bareHandle(handle)
+        let handleLabel = bare.isEmpty ? nil : "@\(bare)"
+        let subscribersLabel = subscriberCount.map(subscriberCountLabel)
         let timeLabel = newestPostMs.map {
             ChatListFormatting.lastMessageTime(
                 ms: $0, nowMs: nowMs, calendar: calendar, locale: locale)
         }
-        let parts = [handleLabel, subscribersLabel].compactMap { $0 }
-        let secondLine: String
-        if parts.isEmpty {
-            secondLine = description.trimmingCharacters(in: .whitespacesAndNewlines)
-        } else {
-            secondLine = parts.joined(separator: " \u{00B7} ")
-        }
+        // Never the handle twice: when the title fell through to the handle,
+        // the second line carries only the count / the role.
+        let handleOnSecondLine = title == bare ? nil : handleLabel
+        var parts = [handleOnSecondLine, subscribersLabel].compactMap { $0 }
+        if parts.isEmpty { parts = [isOwner ? "Your channel" : "Subscribed"] }
         return RowModel(
             title: title,
             handleLabel: handleLabel,
             subscribersLabel: subscribersLabel,
             timeLabel: timeLabel,
-            secondLine: secondLine
+            secondLine: parts.joined(separator: " \u{00B7} ")
         )
+    }
+
+    /// The reader header's one-line status (UX spec §3.2 / §4): the handle
+    /// when the title is not already the handle, else the role.
+    public static func headerStatus(title: String, handle: String, isOwner: Bool) -> String {
+        let bare = bareHandle(handle)
+        if !bare.isEmpty, title != bare { return "@\(bare)" }
+        return isOwner ? "Your channel" : "Subscribed"
     }
 
     /// The newest post's server time among `posts`, `nil` when empty.

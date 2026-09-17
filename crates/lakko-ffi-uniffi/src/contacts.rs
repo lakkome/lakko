@@ -62,6 +62,11 @@ use lakko_contacts::group_join_attribution::{
     compose_attribution as rust_group_join_attribution_compose,
     decode_attribution as rust_group_join_attribution_decode,
 };
+use lakko_contacts::group_name::{
+    compose_group_name as rust_compose_group_name, decode_group_name as rust_decode_group_name,
+    group_name_is_newer as rust_group_name_is_newer,
+    normalize_group_name as rust_normalize_group_name, GroupName as RustGroupName,
+};
 use lakko_contacts::incoming_envelope::{
     dispatch_incoming_envelope as rust_dispatch_incoming_envelope, IncomingEnvelope,
 };
@@ -578,6 +583,93 @@ pub fn profile_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u64) 
 #[uniffi::export]
 pub fn normalize_display_name(input: String) -> Result<Option<String>, FfiError> {
     rust_normalize_display_name(&input).map_err(Into::into)
+}
+
+// ============================================================================
+// Group-name envelope — ADR-0051 §1
+// ============================================================================
+
+/// A group's shared name (ADR-0051). Mirror of
+/// [`lakko_contacts::group_name::GroupName`].
+///
+/// **A name received from someone else is that person's assertion about the
+/// whole group, and the sender's authority is the RECEIVER's check** (ADR-0051
+/// §2): resolve the MLS sender leaf to the account key at receipt (C-68), read
+/// the live role table, accept only from the owner or an admin (or from any
+/// member when the group carries no role table), then keep it only when
+/// [`group_name_is_newer`] than the stored stamp for that group. Persist the
+/// stamp and re-emit it VERBATIM on a growth re-send (the ADR-0044 lesson).
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct FfiGroupName {
+    /// The name. **Empty means "clear the name"** — receivers fall back to
+    /// the member-derived title.
+    pub name: String,
+    /// Setter-clock UNIX milliseconds at which the name was set.
+    pub updated_at_ms: u64,
+}
+
+impl From<RustGroupName> for FfiGroupName {
+    fn from(g: RustGroupName) -> Self {
+        Self {
+            name: g.name,
+            updated_at_ms: g.updated_at_ms,
+        }
+    }
+}
+
+/// Turn a caller-supplied group name into the canonical core value: trim the
+/// name (blank = clear the name). Anything else out of bounds is refused here
+/// with a typed variant, before any bytes exist.
+fn prepare_group_name(g: FfiGroupName) -> Result<RustGroupName, FfiError> {
+    Ok(RustGroupName {
+        name: rust_normalize_group_name(&g.name)?,
+        updated_at_ms: g.updated_at_ms,
+    })
+}
+
+/// Compose a group-name envelope (ADR-0051 §1) — the inner plaintext to
+/// publish as an MLS application message on the group's journal.
+///
+/// Prepares the name first (see [`FfiGroupName`]): it is trimmed and a blank
+/// one becomes "clear the name". The envelope produced is always one a
+/// receiver accepts (the profile display-name rule, reused).
+///
+/// # Errors
+///
+/// * `DisplayNameLineBreak` / `DisplayNameControlOrFormatCharacter` /
+///   `DisplayNameTooLong` / `DisplayNameTooManyBytes` — the name.
+#[uniffi::export]
+pub fn compose_group_name_envelope(group_name: FfiGroupName) -> Result<Vec<u8>, FfiError> {
+    let prepared = prepare_group_name(group_name)?;
+    rust_compose_group_name(&prepared).map_err(Into::into)
+}
+
+/// Strictly decode a group-name envelope (ADR-0051 §1). Fail-closed: a
+/// plaintext without the group-name domain separator, malformed, or with the
+/// name out of bounds is refused as a whole.
+///
+/// Use [`dispatch_incoming_envelope`] when the plaintext might be any
+/// in-group envelope kind.
+///
+/// # Errors
+///
+/// * [`FfiError::Contacts`] for a wrong domain / truncation / trailing bytes
+///   / unknown version / non-UTF-8 name.
+/// * A `DisplayName*` variant for an out-of-bounds name.
+#[uniffi::export]
+pub fn decode_group_name_envelope(plaintext: Vec<u8>) -> Result<FfiGroupName, FfiError> {
+    rust_decode_group_name(&plaintext)
+        .map(Into::into)
+        .map_err(Into::into)
+}
+
+/// `true` when a group name stamped `incoming_updated_at_ms` must replace
+/// the stored one **for the same group**. Strictly greater wins; equal is not
+/// newer, so a growth re-send of the stored name is not an update.
+#[uniffi::export]
+#[must_use]
+pub fn group_name_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u64) -> bool {
+    rust_group_name_is_newer(incoming_updated_at_ms, stored_updated_at_ms)
 }
 
 // ============================================================================
@@ -1513,6 +1605,17 @@ pub enum FfiIncomingEnvelopeKind {
     /// keep it only when [`profile_is_newer`], and verify the username
     /// through discovery before showing it.
     Profile,
+    /// The group's shared name (ADR-0051 §1). The decoded, bounds-checked
+    /// name rides the `group_name` field of [`FfiIncomingEnvelope`];
+    /// `payload` is empty. Never render it as a chat bubble. Appended last
+    /// so every earlier variant keeps its ordinal.
+    ///
+    /// The sender's authority is the receiver's check (ADR-0051 §2): resolve
+    /// the sender leaf to the account key (C-68), consult the live role
+    /// table (owner / admin, or any member when there is no table), then
+    /// keep it only when [`group_name_is_newer`]. An empty name clears the
+    /// name.
+    GroupName,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -1547,6 +1650,9 @@ pub struct FfiIncomingEnvelope {
     /// Set only for `Profile` (ADR-0048): the decoded profile. `None` for
     /// every other kind.
     pub profile: Option<FfiProfile>,
+    /// Set only for `GroupName` (ADR-0051): the decoded group name. `None`
+    /// for every other kind.
+    pub group_name: Option<FfiGroupName>,
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts.
@@ -1568,6 +1674,7 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
     let parsed = rust_dispatch_incoming_envelope(&plaintext)
         .map_err(|err| FfiError::Contacts(err.to_string()))?;
     let mut profile = None;
+    let mut group_name = None;
     let (kind, payload, camera_on, mint_epoch) = match parsed {
         IncomingEnvelope::CallWelcome(p) => {
             (FfiIncomingEnvelopeKind::CallWelcome, p.to_vec(), None, None)
@@ -1600,6 +1707,10 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
             profile = Some(p.into());
             (FfiIncomingEnvelopeKind::Profile, Vec::new(), None, None)
         },
+        IncomingEnvelope::GroupName(g) => {
+            group_name = Some(g.into());
+            (FfiIncomingEnvelopeKind::GroupName, Vec::new(), None, None)
+        },
         IncomingEnvelope::IntroMessage(p) => (
             FfiIncomingEnvelopeKind::IntroMessage,
             p.to_vec(),
@@ -1613,6 +1724,7 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
         camera_on,
         mint_epoch,
         profile,
+        group_name,
     })
 }
 
@@ -3436,6 +3548,82 @@ mod tests {
         ));
         assert!(profile_is_newer(2, 1));
         assert!(!profile_is_newer(1, 1));
+    }
+
+    /// ADR-0051: the group-name envelope prepares (trims), round-trips, and
+    /// dispatches as its own kind — never as an intro message.
+    #[test]
+    fn group_name_envelope_prepares_then_round_trips() {
+        let wire = compose_group_name_envelope(FfiGroupName {
+            name: "  Trio  ".to_string(),
+            updated_at_ms: 42,
+        })
+        .expect("compose");
+        let decoded = decode_group_name_envelope(wire.clone()).expect("decode");
+        assert_eq!(
+            decoded,
+            FfiGroupName {
+                name: "Trio".to_string(),
+                updated_at_ms: 42,
+            }
+        );
+        let dispatched = dispatch_incoming_envelope(wire).expect("dispatch");
+        assert_eq!(dispatched.kind, FfiIncomingEnvelopeKind::GroupName);
+        assert!(dispatched.payload.is_empty());
+        assert_eq!(dispatched.profile, None);
+        assert_eq!(dispatched.group_name, Some(decoded));
+
+        // Blank clears the name, and the clear itself dispatches as a
+        // group name (not as an empty intro message).
+        let clear = compose_group_name_envelope(FfiGroupName {
+            name: "   ".to_string(),
+            updated_at_ms: 43,
+        })
+        .expect("compose clear");
+        let decoded = decode_group_name_envelope(clear.clone()).expect("decode clear");
+        assert_eq!(decoded.name, "");
+        assert_eq!(decoded.updated_at_ms, 43);
+        let dispatched = dispatch_incoming_envelope(clear).expect("dispatch clear");
+        assert_eq!(dispatched.kind, FfiIncomingEnvelopeKind::GroupName);
+        assert_eq!(dispatched.group_name.map(|g| g.name), Some(String::new()));
+    }
+
+    #[test]
+    fn group_name_envelope_refusals_are_typed() {
+        assert!(matches!(
+            compose_group_name_envelope(FfiGroupName {
+                name: "Trio\u{202E}".to_string(),
+                updated_at_ms: 0,
+            }),
+            Err(FfiError::DisplayNameControlOrFormatCharacter(_))
+        ));
+        assert!(matches!(
+            compose_group_name_envelope(FfiGroupName {
+                name: "a".repeat(65),
+                updated_at_ms: 0,
+            }),
+            Err(FfiError::DisplayNameTooLong(_))
+        ));
+        assert!(matches!(
+            compose_group_name_envelope(FfiGroupName {
+                name: "Tr\nio".to_string(),
+                updated_at_ms: 0,
+            }),
+            Err(FfiError::DisplayNameLineBreak(_))
+        ));
+        assert!(matches!(
+            decode_group_name_envelope(b"hi".to_vec()),
+            Err(FfiError::Contacts(_))
+        ));
+        // A profile envelope is not a group name, and vice versa.
+        let profile_wire = compose_profile_envelope(typed_profile()).expect("compose profile");
+        assert!(matches!(
+            decode_group_name_envelope(profile_wire),
+            Err(FfiError::Contacts(_))
+        ));
+        assert!(group_name_is_newer(2, 1));
+        assert!(!group_name_is_newer(1, 1));
+        assert!(!group_name_is_newer(0, 1));
     }
 
     #[test]

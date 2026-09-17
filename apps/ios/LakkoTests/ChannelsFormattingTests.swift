@@ -22,7 +22,7 @@ final class ChannelsFormattingTests: XCTestCase {
 
     func testRowJoinsHandleAndSubscriberCount() {
         let row = ChannelsFormatting.rowModel(
-            name: "Weather", description: "Daily notes", handle: "weather",
+            name: "Weather", handle: "weather",
             subscriberCount: 12, newestPostMs: nil,
             nowMs: now, calendar: calendar, locale: locale)
         XCTAssertEqual(row.title, "Weather")
@@ -32,20 +32,69 @@ final class ChannelsFormattingTests: XCTestCase {
         XCTAssertNil(row.timeLabel)
     }
 
-    func testRowFallsBackToDescriptionWhenNothingElseIsKnown() {
-        let row = ChannelsFormatting.rowModel(
-            name: "  ", description: "Daily notes", handle: "",
+    /// ADR-0051 §5 — the shared name wins over the local name; the local
+    /// name over the handle; the handle over "Channel".
+    func testRowTitlePrecedence() {
+        XCTAssertEqual(
+            ChannelsFormatting.rowModel(
+                sharedName: "Lakko News", name: "my local label", handle: "lakkonews",
+                subscriberCount: nil, newestPostMs: nil,
+                nowMs: now, calendar: calendar, locale: locale).title,
+            "Lakko News")
+        XCTAssertEqual(
+            ChannelsFormatting.rowModel(
+                sharedName: " ", name: "my local label", handle: "lakkonews",
+                subscriberCount: nil, newestPostMs: nil,
+                nowMs: now, calendar: calendar, locale: locale).title,
+            "my local label")
+        XCTAssertEqual(
+            ChannelsFormatting.rowModel(
+                name: "  ", handle: "@lakkonews",
+                subscriberCount: nil, newestPostMs: nil,
+                nowMs: now, calendar: calendar, locale: locale).title,
+            "lakkonews", "the bare handle, never 'Channel', when a handle is known")
+        XCTAssertEqual(
+            ChannelsFormatting.rowModel(
+                name: "  ", handle: "",
+                subscriberCount: nil, newestPostMs: nil,
+                nowMs: now, calendar: calendar, locale: locale).title,
+            "Channel")
+    }
+
+    /// When the title fell through to the handle the second line must not
+    /// repeat it: it carries the count, else the role.
+    func testRowNeverShowsTheHandleTwice() {
+        let subscribed = ChannelsFormatting.rowModel(
+            name: "", handle: "lakkonews", isOwner: false,
             subscriberCount: nil, newestPostMs: nil,
             nowMs: now, calendar: calendar, locale: locale)
-        XCTAssertEqual(row.title, "Channel")
-        XCTAssertNil(row.handleLabel)
-        XCTAssertNil(row.subscribersLabel)
-        XCTAssertEqual(row.secondLine, "Daily notes")
+        XCTAssertEqual(subscribed.title, "lakkonews")
+        XCTAssertEqual(subscribed.secondLine, "Subscribed")
+        let owned = ChannelsFormatting.rowModel(
+            name: "", handle: "lakkonews", isOwner: true,
+            subscriberCount: 3, newestPostMs: nil,
+            nowMs: now, calendar: calendar, locale: locale)
+        XCTAssertEqual(owned.secondLine, "3 subscribers")
+    }
+
+    func testRowFallsBackToTheRoleWhenNothingElseIsKnown() {
+        let reader = ChannelsFormatting.rowModel(
+            name: "Weather", handle: "", isOwner: false,
+            subscriberCount: nil, newestPostMs: nil,
+            nowMs: now, calendar: calendar, locale: locale)
+        XCTAssertNil(reader.handleLabel)
+        XCTAssertNil(reader.subscribersLabel)
+        XCTAssertEqual(reader.secondLine, "Subscribed")
+        let owner = ChannelsFormatting.rowModel(
+            name: "Weather", handle: "", isOwner: true,
+            subscriberCount: nil, newestPostMs: nil,
+            nowMs: now, calendar: calendar, locale: locale)
+        XCTAssertEqual(owner.secondLine, "Your channel")
     }
 
     func testRowStripsALeadingAtAndSingularisesOneSubscriber() {
         let row = ChannelsFormatting.rowModel(
-            name: "News", description: "", handle: "@news",
+            name: "News", handle: "@news",
             subscriberCount: 1, newestPostMs: nil,
             nowMs: now, calendar: calendar, locale: locale)
         XCTAssertEqual(row.handleLabel, "@news")
@@ -54,10 +103,24 @@ final class ChannelsFormattingTests: XCTestCase {
 
     func testRowTimeUsesTheChatListVocabulary() {
         let row = ChannelsFormatting.rowModel(
-            name: "News", description: "", handle: "",
+            name: "News", handle: "",
             subscriberCount: nil, newestPostMs: now - 3_600_000,
             nowMs: now, calendar: calendar, locale: locale)
         XCTAssertEqual(row.timeLabel, "11:00")
+    }
+
+    /// The reader header's status line: the handle unless the title already
+    /// is the handle, then the role.
+    func testHeaderStatus() {
+        XCTAssertEqual(
+            ChannelsFormatting.headerStatus(title: "Lakko News", handle: "lakkonews", isOwner: false),
+            "@lakkonews")
+        XCTAssertEqual(
+            ChannelsFormatting.headerStatus(title: "lakkonews", handle: "@lakkonews", isOwner: false),
+            "Subscribed")
+        XCTAssertEqual(
+            ChannelsFormatting.headerStatus(title: "lakkonews", handle: "lakkonews", isOwner: true),
+            "Your channel")
     }
 
     func testNewestPostPicksTheMaximum() {
@@ -67,7 +130,7 @@ final class ChannelsFormattingTests: XCTestCase {
 
     func testSearchMatchesTitleHandleAndIgnoresALeadingAt() {
         let row = ChannelsFormatting.rowModel(
-            name: "Weather", description: "", handle: "wx",
+            name: "Weather", handle: "wx",
             subscriberCount: nil, newestPostMs: nil,
             nowMs: now, calendar: calendar, locale: locale)
         XCTAssertTrue(ChannelsFormatting.matches(query: "", row: row))

@@ -436,6 +436,9 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 is FfiException.MembershipJoinerAlreadyAMember ->
                     FfiRefusalReason.JOINER_ALREADY_A_MEMBER
                 is FfiException.SweepAlreadyStaged -> FfiRefusalReason.SWEEP_ALREADY_STAGED
+                // ADR-0051 — a channel metadata record out of bounds; not a
+                // membership refusal.
+                is FfiException.ChannelMeta -> null
 
                 // Everything that is NOT a membership refusal. Enumerated
                 // rather than defaulted, so a new `FfiException` subclass has

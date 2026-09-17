@@ -806,19 +806,19 @@ private struct SessionRoot: View, Equatable {
                 }
             )
         case .newGroup:
-            // No dedicated new-group flow exists on iOS yet: a group is made by
-            // opening a chat and adding members, so the picker lands in the
-            // chat with the members panel already open.
-            ContactPickerScreen(
-                viewModel: contactsVM,
-                title: "New group",
-                footer: "Pick the first member. Add the others from the members panel.",
-                onPick: { groupIdHex in
+            // docs/ux/new-group.md — a name (ADR-0051, shared with every
+            // member) above a checkable contact list; the group is founded with
+            // the first pick and the rest are added through the chat's normal
+            // add path, then the chat opens.
+            NewGroupScreen(
+                contacts: contactsVM,
+                chatRepository: chatRepository,
+                onCreated: { groupIdHex, notice in
                     let model = chatViewModel(for: groupIdHex)
                     // UX spec section 5.1 — made through the new-group flow:
                     // a group, even while it still has two people.
                     model.markConversationAsGroup()
-                    model.membersPanelOpen = true
+                    if let notice { model.noteSetupNotice(notice) }
                     replaceTop(route, with: .chat(groupIdHex: groupIdHex), in: tab)
                 }
             )

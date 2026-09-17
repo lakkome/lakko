@@ -493,6 +493,10 @@ class MultiJoinerCall private constructor(
             // an identity), so a profile arriving here could be bound to nobody
             // and is dropped, never stored (C-68).
             FfiIncomingEnvelopeKind.PROFILE -> Unit
+            // ADR-0051 — a group-name envelope likewise rides the GROUP JOURNAL,
+            // where the chat receive loop checks the sender's role. A relay
+            // payload binds the name to nobody, so it is dropped, never stored.
+            FfiIncomingEnvelopeKind.GROUP_NAME -> Unit
         }
     }
 

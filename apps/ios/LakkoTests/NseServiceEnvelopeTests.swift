@@ -172,6 +172,130 @@ final class NseServiceEnvelopeTests: XCTestCase {
         return payload.first == 0x01                     // schema version v1
     }
 
+    /// The frozen 20-byte ADR-0051 domain separator `lakko/group-name/v1\0`,
+    /// built from ASCII + an explicit NUL (no raw NUL in this source).
+    private static let groupNameDomain: Data = {
+        var d = Data("lakko/group-name/v1".utf8)
+        d.append(0x00)
+        return d
+    }()
+
+    /// Stand-in for the slim FFI's `groupNameEnvelopeMinLen()...groupNameEnvelopeMaxLen()`
+    /// (30...285 — domain 20 + version 1 + stamp 8 + one length byte, plus a
+    /// 255-byte name at most; the empty "clear" envelope is exactly the
+    /// minimum). Restated for the same reason as ``beaconEnvelopeLen``; the
+    /// Rust side pins the exported values (`crates/lakko-contacts/src/group_name.rs`
+    /// asserts 30 and 30 + 255). ``testGroupNameFixtureBoundsMatchTheAdvertisedRange``
+    /// keeps it honest against the envelopes this file builds.
+    private static let groupNameEnvelopeLens: ClosedRange<Int> = 30...285
+
+    /// A well-formed group-name envelope:
+    /// `domain(20) || version(1) || updated_at_ms(8 BE) || name_len || name`.
+    private func groupNameEnvelope(name: String = "Trio", updatedAtMs: UInt64 = 7) -> Data {
+        var out = Self.groupNameDomain
+        out.append(0x01)
+        for shift in stride(from: 56, through: 0, by: -8) {
+            out.append(UInt8((updatedAtMs >> UInt64(shift)) & 0xFF))
+        }
+        let nameBytes = Data(name.utf8)
+        out.append(UInt8(nameBytes.count))
+        out.append(nameBytes)
+        return out
+    }
+
+    /// Test double for the slim FFI's `decodeGroupNameEnvelope`: domain,
+    /// version, then the exact length structure (the character rules are the
+    /// Rust codec's and are covered there).
+    private func decodesAsGroupName(_ bytes: Data) -> Bool {
+        let domain = Self.groupNameDomain
+        guard bytes.count > domain.count, bytes.prefix(domain.count) == domain else { return false }
+        let payload = Array(bytes.dropFirst(domain.count))
+        guard payload.count >= 1 + 8 + 1, payload[0] == 0x01 else { return false }
+        let nameLen = Int(payload[9])
+        return payload.count == 10 + nameLen
+    }
+
+    // MARK: - Kind 5: group name (ADR-0051)
+
+    /// WITHOUT THE ARM a rename reaches `parseBodyEnvelope` and the
+    /// notification body reads `lakko/group-name/v1` plus binary.
+    func testGroupNameEnvelopeIsAServiceEnvelope() {
+        for envelope in [
+            groupNameEnvelope(),
+            groupNameEnvelope(name: ""),                                  // the "clear" envelope
+            groupNameEnvelope(name: String(repeating: "n", count: 255)), // the longest name
+        ] {
+            XCTAssertTrue(
+                nseIsServiceEnvelope(
+                    envelope,
+                    decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
+                    decodesAsCommitterBeacon: decodesAsCommitterBeacon,
+                    committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
+                    decodesAsProfile: decodesAsProfile,
+                    profileEnvelopeLens: Self.profileEnvelopeLens,
+                    decodesAsGroupName: decodesAsGroupName,
+                    groupNameEnvelopeLens: Self.groupNameEnvelopeLens
+                ),
+                "a group-name envelope of \(envelope.count) bytes must never be rendered"
+            )
+        }
+    }
+
+    /// The fixture's own shortest and longest envelopes sit exactly on the
+    /// advertised bounds, so the restated range cannot silently drift narrow.
+    func testGroupNameFixtureBoundsMatchTheAdvertisedRange() {
+        XCTAssertEqual(groupNameEnvelope(name: "").count, Self.groupNameEnvelopeLens.lowerBound)
+        XCTAssertEqual(
+            groupNameEnvelope(name: String(repeating: "n", count: 255)).count,
+            Self.groupNameEnvelopeLens.upperBound)
+    }
+
+    /// The peek accepts every real envelope and rejects the near-misses.
+    func testGroupNamePreFilter() {
+        XCTAssertTrue(nseLooksLikeGroupName(groupNameEnvelope(), envelopeLens: Self.groupNameEnvelopeLens))
+        XCTAssertFalse(nseLooksLikeGroupName(chatEnvelope, envelopeLens: Self.groupNameEnvelopeLens))
+        XCTAssertFalse(nseLooksLikeGroupName(Data(), envelopeLens: Self.groupNameEnvelopeLens))
+        XCTAssertFalse(
+            nseLooksLikeGroupName(
+                Data(repeating: 0x6C, count: 286), envelopeLens: Self.groupNameEnvelopeLens),
+            "one past the longest envelope")
+    }
+
+    /// Bytes that PASS the peek but fail the codec are NOT suppressed: a
+    /// 40-byte legacy plaintext starting with `l` must still render.
+    func testGroupNamePeekAloneDoesNotSuppress() {
+        let decoy = Data(repeating: 0x6C, count: 40)
+        XCTAssertTrue(nseLooksLikeGroupName(decoy, envelopeLens: Self.groupNameEnvelopeLens))
+        XCTAssertFalse(
+            nseIsServiceEnvelope(
+                decoy,
+                decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
+                decodesAsCommitterBeacon: decodesAsCommitterBeacon,
+                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
+                decodesAsProfile: decodesAsProfile,
+                profileEnvelopeLens: Self.profileEnvelopeLens,
+                decodesAsGroupName: decodesAsGroupName,
+                groupNameEnvelopeLens: Self.groupNameEnvelopeLens
+            ))
+    }
+
+    /// A rename landing as the newest row falls back to the real chat before
+    /// it; only renames yields the generic banner.
+    func testRenameAfterAChatFallsBackToTheChat() async {
+        let (result, suppressed) = await preview(rows: [
+            NseFetchedRow(id: 10, payload: Data("real message".utf8)),
+            NseFetchedRow(id: 11, payload: groupNameEnvelope(name: "Renamed")),
+        ])
+        XCTAssertEqual(result?.body, "real message")
+        XCTAssertEqual(suppressed, 1)
+        let (none, onlyRenames) = await preview(rows: [
+            NseFetchedRow(id: 12, payload: groupNameEnvelope(name: "A")),
+            NseFetchedRow(id: 13, payload: groupNameEnvelope(name: "")),
+        ])
+        XCTAssertNil(none)
+        XCTAssertEqual(onlyRenames, 2)
+    }
+
     // MARK: - Kind 1: push-routing-secret
 
     /// WITHOUT THE FIX this returns false and the envelope reaches
@@ -184,7 +308,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsCommitterBeacon: decodesAsCommitterBeacon,
                 committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
                 decodesAsProfile: decodesAsProfile,
-                profileEnvelopeLens: Self.profileEnvelopeLens
+                profileEnvelopeLens: Self.profileEnvelopeLens,
+                decodesAsGroupName: decodesAsGroupName,
+                groupNameEnvelopeLens: Self.groupNameEnvelopeLens
             ),
             "a v2 push-routing-secret envelope must never be rendered"
         )
@@ -224,7 +350,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsCommitterBeacon: decodesAsCommitterBeacon,
                 committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
                 decodesAsProfile: decodesAsProfile,
-                profileEnvelopeLens: Self.profileEnvelopeLens
+                profileEnvelopeLens: Self.profileEnvelopeLens,
+                decodesAsGroupName: decodesAsGroupName,
+                groupNameEnvelopeLens: Self.groupNameEnvelopeLens
             ),
             "the codec, not the peek, is the authority"
         )
@@ -245,7 +373,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsCommitterBeacon: decodesAsCommitterBeacon,
                 committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
                 decodesAsProfile: decodesAsProfile,
-                profileEnvelopeLens: Self.profileEnvelopeLens
+                profileEnvelopeLens: Self.profileEnvelopeLens,
+                decodesAsGroupName: decodesAsGroupName,
+                groupNameEnvelopeLens: Self.groupNameEnvelopeLens
             )
         )
     }
@@ -269,7 +399,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     decodesAsCommitterBeacon: decodesAsCommitterBeacon,
                     committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
                 decodesAsProfile: decodesAsProfile,
-                profileEnvelopeLens: Self.profileEnvelopeLens
+                profileEnvelopeLens: Self.profileEnvelopeLens,
+                    decodesAsGroupName: decodesAsGroupName,
+                    groupNameEnvelopeLens: Self.groupNameEnvelopeLens
                 ),
                 "call signaling must never be rendered"
             )
@@ -294,7 +426,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsCommitterBeacon: decodesAsCommitterBeacon,
                 committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
                 decodesAsProfile: decodesAsProfile,
-                profileEnvelopeLens: Self.profileEnvelopeLens
+                profileEnvelopeLens: Self.profileEnvelopeLens,
+                decodesAsGroupName: decodesAsGroupName,
+                groupNameEnvelopeLens: Self.groupNameEnvelopeLens
             ),
             "a committer beacon must never be rendered"
         )
@@ -391,7 +525,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsCommitterBeacon: decodesAsCommitterBeacon,
                 committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
                 decodesAsProfile: decodesAsProfile,
-                profileEnvelopeLens: Self.profileEnvelopeLens
+                profileEnvelopeLens: Self.profileEnvelopeLens,
+                decodesAsGroupName: decodesAsGroupName,
+                groupNameEnvelopeLens: Self.groupNameEnvelopeLens
             ),
             "the codec, not the peek, is the authority"
         )
@@ -407,7 +543,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsCommitterBeacon: decodesAsCommitterBeacon,
                 committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
                 decodesAsProfile: decodesAsProfile,
-                profileEnvelopeLens: Self.profileEnvelopeLens
+                profileEnvelopeLens: Self.profileEnvelopeLens,
+                decodesAsGroupName: decodesAsGroupName,
+                groupNameEnvelopeLens: Self.groupNameEnvelopeLens
             )
         )
     }
@@ -437,7 +575,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     decodesAsCommitterBeacon: decodesAsCommitterBeacon,
                     committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
                     decodesAsProfile: decodesAsProfile,
-                    profileEnvelopeLens: Self.profileEnvelopeLens
+                    profileEnvelopeLens: Self.profileEnvelopeLens,
+                    decodesAsGroupName: decodesAsGroupName,
+                    groupNameEnvelopeLens: Self.groupNameEnvelopeLens
                 ),
                 "a \(envelope.count)-byte profile must never be rendered"
             )
@@ -482,7 +622,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsCommitterBeacon: decodesAsCommitterBeacon,
                 committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
                 decodesAsProfile: decodesAsProfile,
-                profileEnvelopeLens: Self.profileEnvelopeLens
+                profileEnvelopeLens: Self.profileEnvelopeLens,
+                decodesAsGroupName: decodesAsGroupName,
+                groupNameEnvelopeLens: Self.groupNameEnvelopeLens
             ),
             "the codec, not the peek, is the authority"
         )
@@ -519,7 +661,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsCommitterBeacon: decodesAsCommitterBeacon,
                 committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
                 decodesAsProfile: decodesAsProfile,
-                profileEnvelopeLens: Self.profileEnvelopeLens
+                profileEnvelopeLens: Self.profileEnvelopeLens,
+                decodesAsGroupName: decodesAsGroupName,
+                groupNameEnvelopeLens: Self.groupNameEnvelopeLens
             ),
             "a chat envelope must still render"
         )
@@ -530,7 +674,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsCommitterBeacon: decodesAsCommitterBeacon,
                 committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
                 decodesAsProfile: decodesAsProfile,
-                profileEnvelopeLens: Self.profileEnvelopeLens
+                profileEnvelopeLens: Self.profileEnvelopeLens,
+                decodesAsGroupName: decodesAsGroupName,
+                groupNameEnvelopeLens: Self.groupNameEnvelopeLens
             ),
             "empty bytes are not a service envelope"
         )
@@ -545,6 +691,7 @@ final class NseServiceEnvelopeTests: XCTestCase {
         private let decodesAsPushRoutingSecret: (Data) -> Bool
         private let decodesAsCommitterBeacon: (Data) -> Bool
         private let decodesAsProfile: (Data) -> Bool
+        private let decodesAsGroupName: (Data) -> Bool
         private let text: (Data) -> String
         private(set) var suppressed = 0
         var closed = false
@@ -553,11 +700,13 @@ final class NseServiceEnvelopeTests: XCTestCase {
             decodesAsPushRoutingSecret: @escaping (Data) -> Bool,
             decodesAsCommitterBeacon: @escaping (Data) -> Bool,
             decodesAsProfile: @escaping (Data) -> Bool,
+            decodesAsGroupName: @escaping (Data) -> Bool,
             text: @escaping (Data) -> String
         ) {
             self.decodesAsPushRoutingSecret = decodesAsPushRoutingSecret
             self.decodesAsCommitterBeacon = decodesAsCommitterBeacon
             self.decodesAsProfile = decodesAsProfile
+            self.decodesAsGroupName = decodesAsGroupName
             self.text = text
         }
 
@@ -568,7 +717,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsCommitterBeacon: decodesAsCommitterBeacon,
                 committerBeaconEnvelopeLen: NseServiceEnvelopeTests.beaconEnvelopeLen,
                 decodesAsProfile: decodesAsProfile,
-                profileEnvelopeLens: NseServiceEnvelopeTests.profileEnvelopeLens
+                profileEnvelopeLens: NseServiceEnvelopeTests.profileEnvelopeLens,
+                decodesAsGroupName: decodesAsGroupName,
+                groupNameEnvelopeLens: NseServiceEnvelopeTests.groupNameEnvelopeLens
             ) {
                 suppressed += 1
                 return nil
@@ -607,6 +758,7 @@ final class NseServiceEnvelopeTests: XCTestCase {
             decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
             decodesAsCommitterBeacon: decodesAsCommitterBeacon,
             decodesAsProfile: decodesAsProfile,
+            decodesAsGroupName: decodesAsGroupName,
             text: { String(decoding: $0, as: UTF8.self) }
         )
         let result = await decryptPushPreview(

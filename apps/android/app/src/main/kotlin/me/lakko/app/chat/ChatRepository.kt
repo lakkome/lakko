@@ -3190,6 +3190,152 @@ public class ChatRepository(
         if (selfEvicted) return
         if (me.lakko.app.profile.membershipGrew(previousMemberKeys, currentMemberKeys)) {
             profileRepublish.onGrowth(groupIdHex)
+            // ADR-0051 §3 — the newcomer cannot read the earlier envelope, so
+            // an owner / admin holding the name re-sends it (original stamp),
+            // on the same throttled + jittered schedule.
+            groupNameRepublish.onGrowth(groupIdHex)
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0051 — the shared group name
+    // -----------------------------------------------------------------
+
+    /**
+     * ADR-0051 §3 — the growth re-send scheduler for the group name. The same
+     * class as the profile republish: one per-group throttle + jitter, a
+     * publish that is only ever launched, never awaited under a lock.
+     */
+    private val groupNameRepublish: me.lakko.app.profile.ProfileRepublishScheduler =
+        me.lakko.app.profile.ProfileRepublishScheduler(
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+            publish = { groupIdHex -> republishGroupNameIfHolder(groupIdHex) },
+        )
+
+    /** The shared name this device holds for [groupIdHex], or `null`. */
+    public fun groupName(groupIdHex: String): StoredGroupName? =
+        GroupNameStore.load(applicationContext, currentAccountIdB64.get(), groupIdHex)
+
+    /**
+     * ADR-0051 §2 — the receive gate. Called from the poll's locked apply
+     * region (per-group lock + provider lock held), so the role-table read,
+     * the stored-row read, the verdict and the write are one serialized
+     * read-decide-write against CURRENT state. Never touches the timeline.
+     */
+    private fun receiveGroupName(
+        group: Group,
+        groupIdHex: String,
+        senderKey: MemberIdentity?,
+        incoming: uniffi.lakko_ffi_uniffi.FfiGroupName,
+    ) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val owner = roleTableOwner(group)
+        val senderBytes = senderKey?.let {
+            try {
+                java.util.Base64.getDecoder().decode(it)
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+        }
+        val stored = GroupNameStore.load(applicationContext, accountIdB64, groupIdHex)
+        val candidate = StoredGroupName(name = incoming.name, updatedAtMs = incoming.updatedAtMs)
+        val verdict = groupNameVerdict(
+            senderSignatureKey = senderBytes,
+            owner = owner,
+            incoming = candidate,
+            stored = stored,
+            isNewer = { a, b -> uniffi.lakko_ffi_uniffi.groupNameIsNewer(a, b) },
+        )
+        if (!verdict.accepts) {
+            android.util.Log.i("ChatRepository", "ADR-0051 group name refused: $verdict")
+            return
+        }
+        if (verdict == GroupNameVerdict.ACCEPT_IDENTICAL) return
+        try {
+            GroupNameStore.save(applicationContext, accountIdB64, groupIdHex, candidate)
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0051 group name not stored", cause)
+        }
+    }
+
+    /**
+     * ADR-0051 §3 — set (or, with a blank [name], clear) the group's shared
+     * name: compose the envelope, publish it into the group, then persist the
+     * stamped row. The local title changes only once the send succeeded, so a
+     * failed rename never shows a name nobody else has (UX spec section 4).
+     * Throws on a refused name or a failed send; the caller shows the error.
+     *
+     * With [storeFirst] the row is written before the send — the New group
+     * path, where the creator's own name must survive even if the first send
+     * fails (the growth re-send carries it later).
+     */
+    public suspend fun setGroupName(groupIdHex: String, name: String, storeFirst: Boolean = false) {
+        val identity = canonicalIdentity.get() ?: throw IllegalStateException("not bootstrapped")
+        val record = groups[groupIdHex] ?: throw IllegalStateException("unknown group")
+        val accountIdB64 = currentAccountIdB64.get() ?: throw IllegalStateException("no session")
+        val stamp = System.currentTimeMillis().toULong()
+        // The composer trims and validates; a blank name composes as "clear".
+        val envelope = withContext(mlsDispatcher) {
+            uniffi.lakko_ffi_uniffi.composeGroupNameEnvelope(
+                uniffi.lakko_ffi_uniffi.FfiGroupName(name = name, updatedAtMs = stamp),
+            )
+        }
+        val row = StoredGroupName(name = name.trim(), updatedAtMs = stamp)
+        if (storeFirst) GroupNameStore.save(applicationContext, accountIdB64, groupIdHex, row)
+        withContext(mlsDispatcher) {
+            broadcastControlToGroup(
+                identity = identity,
+                groupIdHex = groupIdHex,
+                group = record.group,
+                envelope = envelope,
+            )
+        }
+        if (!storeFirst) GroupNameStore.save(applicationContext, accountIdB64, groupIdHex, row)
+        publishThreadList()
+    }
+
+    /**
+     * ADR-0051 §3 — the growth re-send: an owner / admin holding a non-empty
+     * name re-sends it with the ORIGINAL stamp (never a fresh clock read, so
+     * it can never clobber a later rename). A plain member in a role-table
+     * group holds no authority and sends nothing; a member of a legacy group
+     * with no role table may re-send, since the gate accepts it there.
+     */
+    private suspend fun republishGroupNameIfHolder(groupIdHex: String): Boolean {
+        val identity = canonicalIdentity.get() ?: return false
+        val record = groups[groupIdHex] ?: return false
+        if (readIsActive { record.group.isActive() } == false) return false
+        val stored = groupName(groupIdHex) ?: return false
+        if (stored.name.isBlank()) return false
+        val mayResend = try {
+            when (record.group.ownRole(identity)) {
+                Role.OWNER, Role.ADMIN -> true
+                Role.MEMBER -> false
+                null -> record.group.groupRoles() == null
+            }
+        } catch (_: Throwable) {
+            false
+        }
+        if (!mayResend) return false
+        val envelope = try {
+            uniffi.lakko_ffi_uniffi.composeGroupNameEnvelope(
+                uniffi.lakko_ffi_uniffi.FfiGroupName(name = stored.name, updatedAtMs = stored.updatedAtMs),
+            )
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0051 stored group name refused by the composer", cause)
+            return false
+        }
+        return try {
+            broadcastControlToGroup(
+                identity = identity,
+                groupIdHex = groupIdHex,
+                group = record.group,
+                envelope = envelope,
+            )
+            true
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0051 group name not re-sent", cause)
+            false
         }
     }
 
@@ -3740,6 +3886,12 @@ public class ChatRepository(
                     routeIncomingCallSignaling(groupIdHex, messageId, payload, createdAt, senderLeaf)
                 },
                 profileSink = { senderKey, profile -> receiveProfileBestEffort(senderKey, profile) },
+                groupNameSink = { senderKey, name ->
+                    // ADR-0051 — inside the poll's locked apply region, where
+                    // the role table read and the store write are serialized
+                    // per group (C-62 sub-invariant 5).
+                    receiveGroupName(record.group, groupIdHex, senderKey, name)
+                },
                 membershipProposalSink = { proposal, createdAt ->
                     // ADR-0045 UX §4 / §10 — stamp a PEER's request with the DS
                     // row's own timestamp. Without this the observation store
@@ -4345,6 +4497,10 @@ public class ChatRepository(
             if (rawAccountId != null) {
                 me.lakko.app.profile.OwnProfileStore.delete(applicationContext, rawAccountId)
             }
+            // ADR-0051 — the shared group names held for this account go too.
+            if (accountIdB64 != null) {
+                GroupNameStore.deleteAccount(applicationContext, accountIdB64)
+            }
         } catch (_: Throwable) {
             // best-effort
         }
@@ -4474,6 +4630,8 @@ public class ChatRepository(
         groupLocks.clear()
         // ADR-0048 — per-group republish timing belongs to the session.
         profileRepublish.reset()
+        // ADR-0051 — and the group-name re-send timing with it.
+        groupNameRepublish.reset()
         // A previous session's group-call records name calls in groups this
         // account may not be in.
         mutableGroupCalls.value = emptyMap()
@@ -5604,6 +5762,9 @@ public class ChatRepository(
                             profileSink = { senderKey, profile ->
                                 receiveProfileBestEffort(senderKey, profile)
                             },
+                            groupNameSink = { senderKey, name ->
+                                receiveGroupName(record.group, groupIdHex, senderKey, name)
+                            },
                             membershipProposalSink = { proposal, createdAt ->
                                 // The sweep's own apply pass consumes rows the
                                 // poll will never fetch again, so a proposal
@@ -6349,6 +6510,7 @@ private class GroupRecord(
         committerBeaconSink: ((UInt?, String) -> Unit)? = null,
         membershipProposalSink: ((ProposalRecord, String) -> Unit)? = null,
         profileSink: ((MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiProfile) -> Unit)? = null,
+        groupNameSink: ((MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiGroupName) -> Unit)? = null,
     ) {
         // ADR-0050 — a message this PERSON sent from another device arrives as an
         // incoming row (another leaf sealed it) but is ours: it renders on our
@@ -6420,6 +6582,14 @@ private class GroupRecord(
                     // sender key the classifier resolved at receipt.
                     val profile = event.profile
                     if (profile != null) profileSink?.invoke(event.senderKey, profile)
+                }
+                is IncomingChatEvent.GroupName -> {
+                    // ADR-0051 — the group's shared name. Not a timeline row. A
+                    // malformed envelope (`groupName == null`) is consumed as a
+                    // no-op; the sink runs the role gate + the stamp order and
+                    // writes the store only on accept.
+                    val name = event.groupName
+                    if (name != null) groupNameSink?.invoke(event.senderKey, name)
                 }
                 is IncomingChatEvent.ExternalJoinRequest -> {
                     // ADR-0027 (G-3) — a non-member's external Add proposal,

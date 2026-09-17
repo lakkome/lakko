@@ -43,6 +43,15 @@ public enum ConversationTitle {
         return rest > 0 ? "\(head) +\(rest)" : head
     }
 
+    /// ADR-0051 §5 — the group title's precedence: the shared group name when
+    /// one is held (trimmed, non-empty), else the member-derived title.
+    public static func resolvedGroupTitle(sharedName: String?, otherMemberNames: [String?]) -> String {
+        if let shared = sharedName?.trimmingCharacters(in: .whitespacesAndNewlines), !shared.isEmpty {
+            return shared
+        }
+        return groupTitle(otherMemberNames: otherMemberNames)
+    }
+
     /// "N members", singular-aware.
     public static func memberCountLabel(_ count: Int) -> String {
         count == 1 ? "1 member" : "\(count) members"

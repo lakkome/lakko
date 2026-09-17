@@ -36,7 +36,7 @@ struct NewChannelScreen: View {
                 TextField("Description (optional)", text: $description, axis: .vertical)
                     .lineLimit(2...4)
             } footer: {
-                Text("The name and description stay on this device.")
+                Text("Everyone who subscribes sees the name and description. The server never does.")
             }
             Section {
                 TextField("@handle (optional)", text: $handle)
@@ -126,6 +126,20 @@ struct NewChannelScreen: View {
                 handle: cleanHandle
             ))
             state.setKeys(channelId: id, keys: keys)
+            // ADR-0051 §4 — the metadata record, right after creation, so a
+            // subscriber's first read titles the channel. The channel exists
+            // either way; a failed post leaves the local name in place and the
+            // Manage screen's Save posts a new record.
+            if let meta = ChannelMetaRecord.fresh(
+                name: name, description: description,
+                nowMs: UInt64(Date().timeIntervalSince1970 * 1000)) {
+                do {
+                    try await ChannelMetaRecord.post(
+                        state: state, client: client, channelId: id, meta: meta)
+                } catch {
+                    NSLog("Channels: metadata record post failed: %@", String(describing: error))
+                }
+            }
             dismiss()
         } catch let err as LegacyChannelError {
             errorMessage = err.message

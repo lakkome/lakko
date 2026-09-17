@@ -6,13 +6,19 @@ package me.lakko.app.ui.channels
 import me.lakko.app.channels.ChannelHandle
 import me.lakko.app.channels.PostView
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.Instant
 import java.time.ZoneId
 import java.util.Locale
 
-/** docs/ux/client-redesign.md section 5.4 — the channel row and the status lines, all pure. */
+/**
+ * docs/ux/client-redesign.md section 5.4 + docs/ux/group-and-channel-names.md
+ * section 3.2 — the channel row, the reader header and the status lines, all
+ * pure.
+ */
 class ChannelsPresentationTest {
 
     private val zone: ZoneId = ZoneId.of("Europe/Berlin")
@@ -23,39 +29,91 @@ class ChannelsPresentationTest {
 
     private fun at(iso: String): Long = Instant.parse(iso).toEpochMilli()
 
-    private fun channel(name: String = "Lakko news", handle: String = "", addedAtMs: Long = at("2026-09-01T09:00:00Z")) =
-        ChannelHandle(id = "00ff".repeat(8), localName = name, localDescription = "", addedAtMs = addedAtMs.toULong(), handle = handle)
+    private fun channel(
+        name: String = "Lakko news",
+        handle: String = "",
+        addedAtMs: Long = at("2026-09-01T09:00:00Z"),
+        description: String = "",
+        sharedName: String = "",
+        sharedDescription: String = "",
+        sharedStamp: ULong? = null,
+    ) = ChannelHandle(
+        id = "00ff".repeat(8),
+        localName = name,
+        localDescription = description,
+        addedAtMs = addedAtMs.toULong(),
+        handle = handle,
+        sharedName = sharedName,
+        sharedDescription = sharedDescription,
+        sharedUpdatedAtMs = sharedStamp,
+    )
 
     private fun post(cursor: Long, iso: String) =
         PostView(cursor = cursor.toULong(), serverTsMs = at(iso).toULong(), payloadB64 = "x")
 
+    private fun row(
+        channel: ChannelHandle,
+        posts: List<PostView>? = null,
+        count: Int? = null,
+        isOwner: Boolean = false,
+    ) = channelRowModel(channel, posts, count, isOwner, now, zone, use24h = true, locale = en)
+
     // --- row model -------------------------------------------------------------
 
     @Test
-    fun `row carries name, handle, subscriber count and the newest post time`() {
+    fun `row carries name, handle plus subscriber count and the newest post time`() {
         val posts = listOf(post(1, "2026-09-16T07:03:00Z"), post(2, "2026-09-16T09:30:00Z"))
-        val row = channelRowModel(channel(handle = "news"), posts, 12, now, zone, use24h = true, locale = en)
-        assertEquals("Lakko news", row.title)
-        assertEquals("@news", row.handle)
-        assertEquals("12 subscribers", row.subscriberLine)
-        assertEquals("11:30", row.time)
-        assertEquals(at("2026-09-16T09:30:00Z"), row.sortMs)
+        val r = row(channel(handle = "news"), posts, count = 12, isOwner = true)
+        assertEquals("Lakko news", r.title)
+        assertEquals("@news", r.handle)
+        assertEquals("@news · 12 subscribers", r.subtitle)
+        assertEquals("11:30", r.time)
+        assertEquals(at("2026-09-16T09:30:00Z"), r.sortMs)
     }
 
     @Test
-    fun `row without posts, handle or count leaves those slots empty and sorts by added time`() {
+    fun `row without posts, handle or count falls back to the relation line and sorts by added time`() {
         val added = at("2026-09-10T10:00:00Z")
-        val row = channelRowModel(channel(addedAtMs = added), null, null, now, zone, use24h = true, locale = en)
-        assertNull(row.handle)
-        assertNull(row.subscriberLine)
-        assertNull(row.time)
-        assertEquals(added, row.sortMs)
+        assertEquals("Subscribed", row(channel(addedAtMs = added)).subtitle)
+        assertEquals("Your channel", row(channel(addedAtMs = added), isOwner = true).subtitle)
+        val r = row(channel(addedAtMs = added))
+        assertNull(r.handle)
+        assertNull(r.time)
+        assertEquals(added, r.sortMs)
     }
 
     @Test
-    fun `an unnamed channel is titled Channel, never its id`() {
-        val row = channelRowModel(channel(name = "  "), null, null, now, zone, true, en)
-        assertEquals("Channel", row.title)
+    fun `title precedence is shared name, then local name, then handle, then Channel`() {
+        assertEquals("Lakko News", channelTitle(channel(name = "local", handle = "h", sharedName = "Lakko News", sharedStamp = 1uL)))
+        assertEquals("local", channelTitle(channel(name = "local", handle = "h")))
+        assertEquals("lakkonews", channelTitle(channel(name = "  ", handle = "@lakkonews")))
+        assertEquals("Channel", channelTitle(channel(name = "  ")))
+    }
+
+    @Test
+    fun `a channel titled by its handle never shows the handle twice`() {
+        val byHandle = channel(name = "", handle = "lakkonews")
+        assertEquals("lakkonews", row(byHandle).title)
+        assertEquals("Subscribed", row(byHandle).subtitle)
+        assertEquals("3 subscribers", row(byHandle, count = 3, isOwner = true).subtitle)
+        assertNull(channelHeaderModel(byHandle, isOwner = false).handleLine)
+        // With a name the handle is informative and shown once, in the subtitle.
+        val named = channel(name = "", handle = "lakkonews", sharedName = "Lakko News", sharedStamp = 1uL)
+        assertEquals("@lakkonews", row(named).subtitle)
+        assertEquals("@lakkonews", channelHeaderModel(named, isOwner = false).handleLine)
+    }
+
+    @Test
+    fun `header carries the shared description over the local one and the relation line`() {
+        val h = channelHeaderModel(
+            channel(name = "local", description = "old", sharedName = "Lakko News", sharedDescription = "Daily notes", sharedStamp = 5uL),
+            isOwner = true,
+        )
+        assertEquals("Lakko News", h.title)
+        assertEquals("Daily notes", h.description)
+        assertEquals("Your channel", h.statusLine)
+        assertNull(channelHeaderModel(channel(description = "  "), isOwner = false).description)
+        assertEquals("Subscribed", channelHeaderModel(channel(), isOwner = false).statusLine)
     }
 
     @Test
@@ -71,8 +129,8 @@ class ChannelsPresentationTest {
 
     @Test
     fun `filter matches title or handle and orders newest first`() {
-        val a = channelRowModel(channel(name = "Alpha", handle = "alpha"), listOf(post(1, "2026-09-15T10:00:00Z")), null, now, zone, true, en)
-        val b = channelRowModel(channel(name = "Beta", handle = "daily"), listOf(post(1, "2026-09-16T10:00:00Z")), null, now, zone, true, en)
+        val a = row(channel(name = "Alpha", handle = "alpha"), listOf(post(1, "2026-09-15T10:00:00Z")))
+        val b = row(channel(name = "Beta", handle = "daily"), listOf(post(1, "2026-09-16T10:00:00Z")))
         assertEquals(listOf(b, a), filterChannelRows(listOf(a, b), ""))
         assertEquals(listOf(a), filterChannelRows(listOf(a, b), "ALP"))
         assertEquals(listOf(b), filterChannelRows(listOf(a, b), "@dai"))
@@ -100,17 +158,27 @@ class ChannelsPresentationTest {
     // --- post time ----------------------------------------------------------------
 
     @Test
-    fun `post time is the clock today and the day plus clock otherwise`() {
-        assertEquals("09:03", formatPostTime(at("2026-09-16T07:03:00Z"), now, zone, true, en))
-        assertEquals("14 Sept, 09:03", formatPostTime(at("2026-09-14T07:03:00Z"), now, zone, true, en))
-        assertEquals("14 Sept 2025, 09:03", formatPostTime(at("2025-09-14T07:03:00Z"), now, zone, true, en))
+    fun `post time is relative while recent, then the date`() {
+        assertEquals("Just now", postRelativeTimeLabel(now - 20_000L, now, zone, en))
+        assertEquals("Just now", postRelativeTimeLabel(now + 5_000L, now, zone, en))
+        assertEquals("5 min ago", postRelativeTimeLabel(now - 5 * 60_000L, now, zone, en))
+        assertEquals("2 h ago", postRelativeTimeLabel(now - 2 * 3_600_000L, now, zone, en))
+        assertEquals("14 Sept", postRelativeTimeLabel(at("2026-09-14T07:03:00Z"), now, zone, en))
+        assertEquals("14 Sept 2025", postRelativeTimeLabel(at("2025-09-14T07:03:00Z"), now, zone, en))
+    }
+
+    @Test
+    fun `post time never shows a clock with a meridiem`() {
+        val label = postRelativeTimeLabel(at("2026-09-16T07:03:00Z"), now, zone, Locale.US)
+        assertFalse(label, label.contains("AM") || label.contains("PM"))
+        assertTrue(label, label.endsWith("ago") || label == "Just now")
     }
 
     @Test
     fun `unreadable reason is one plain sentence with no protocol words`() {
         for (line in listOf(unreadableReasonLine(true), unreadableReasonLine(false))) {
             for (banned in listOf("epoch", "seed", "cursor", "key window", "hex")) {
-                org.junit.Assert.assertFalse("$line contains $banned", line.contains(banned, ignoreCase = true))
+                assertFalse("$line contains $banned", line.contains(banned, ignoreCase = true))
             }
         }
     }

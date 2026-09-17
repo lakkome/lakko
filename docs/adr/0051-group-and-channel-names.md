@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0051: Group and channel names carried end-to-end encrypted to every member and subscriber
 
-- **Status:** Proposed
+- **Status:** Accepted (the maintainer chose the envelope-plus-record design over the GroupContext extension on 2026-09-17)
 - **Date:** 2026-09-17
 - **Context:** Phase 3 product completeness. UX spec:
   [`docs/ux/group-and-channel-names.md`](../ux/group-and-channel-names.md).

@@ -39,6 +39,7 @@ import {
   emptyChannelLogSnapshot,
   encodeChannelLog,
   type ChannelLogSnapshot,
+  type ChannelSharedMeta,
 } from "../channels/channel-log-codec";
 import { deleteChannelLog, loadChannelLog, saveChannelLog } from "../channels/channel-log-store";
 import { channelIdFromHex } from "../channels/composer";
@@ -103,6 +104,12 @@ interface ChannelsStateInternal {
   readonly subscribedSeedsByChannel: Accessor<
     ReadonlyMap<string, ReadonlyMap<number, Uint8Array>>
   >;
+  /** ADR-0051 §4 — per-channel newest shared metadata record
+   *  (name, description, stamp): what a subscriber titles the
+   *  channel from, and a publisher's own copy, the source of the
+   *  next record it posts. Persisted in the encrypted channel
+   *  log. */
+  readonly metaByChannel: Accessor<ReadonlyMap<string, ChannelSharedMeta>>;
   /** `true` once the per-account hydration has settled for
    *  the current session (whether or not a row existed).
    *  Routes that mint keys on mount await
@@ -136,6 +143,9 @@ const [subscriberKeysByChannel, setSubscriberKeysByChannel] = createSignal<
 const [subscribedSeedsByChannel, setSubscribedSeedsByChannel] = createSignal<
   ReadonlyMap<string, ReadonlyMap<number, Uint8Array>>
 >(new Map());
+const [metaByChannel, setMetaByChannel] = createSignal<
+  ReadonlyMap<string, ChannelSharedMeta>
+>(new Map());
 const [hydrated, setHydrated] = createSignal(false);
 
 export const channelsState: ChannelsStateInternal = {
@@ -146,6 +156,7 @@ export const channelsState: ChannelsStateInternal = {
   counterByChannel,
   subscriberKeysByChannel,
   subscribedSeedsByChannel,
+  metaByChannel,
   hydrated,
 };
 
@@ -190,6 +201,7 @@ function currentSnapshot(s: PersistSink): ChannelLogSnapshot {
     subscriberKeys: subscriberKeysByChannel(),
     subscribedSeeds: subscribedSeedsByChannel(),
     publisherSigningSeeds: signing,
+    channelMeta: metaByChannel(),
     publisherProviderSnapshot: lastProviderSnapshot,
     publisherLeafKeyB64: lastProviderSnapshot === null ? null : lastProviderLeafKeyB64,
   };
@@ -335,6 +347,17 @@ export async function hydrateChannelsState(args: HydrateChannelsArgs): Promise<v
     }
     return next;
   });
+  // ADR-0051 — two copies of our own bookkeeping, not a receive: the one
+  // with the greater stamp stays (a plain compare; the receive path uses the
+  // core's `channelMetaIsNewer`, which is the same strict rule).
+  setMetaByChannel((map) => {
+    const next = new Map<string, ChannelSharedMeta>(stored.channelMeta);
+    for (const [id, m] of map) {
+      const held = next.get(id);
+      if (held === undefined || m.updatedAtMs > held.updatedAtMs) next.set(id, m);
+    }
+    return next;
+  });
 
   // 3. Publisher keys: re-derive the content seed from the restored group.
   if (providerRestored && stored.publisherSigningSeeds.size > 0) {
@@ -422,6 +445,7 @@ export function clearChannelsSession(): Promise<void> {
   setKeysByChannel(new Map());
   setSubscriberKeysByChannel(new Map());
   setSubscribedSeedsByChannel(new Map());
+  setMetaByChannel(new Map());
   setHydrated(false);
   return pending;
 }
@@ -474,6 +498,11 @@ export const channelsActions = {
       next.delete(channelId);
       return next;
     });
+    setMetaByChannel((map) => {
+      const next = new Map(map);
+      next.delete(channelId);
+      return next;
+    });
     // Clear only the in-memory counter — the PERSISTED floor is
     // deliberately kept. Un-follow does NOT destroy the PublisherGroup
     // (the seed source persists in the account identity's provider), so
@@ -497,6 +526,18 @@ export const channelsActions = {
     setChannels((list) =>
       list.map((c) => (c.id === channelId ? { ...c, ...patch } : c)),
     );
+    schedulePersist();
+  },
+  /** ADR-0051 — install the newest shared metadata record for a channel.
+   *  The caller has already decided it is newer (`channelMetaIsNewer` on
+   *  the receive path; the publisher's own fresh stamp on the send path).
+   *  Persisted. */
+  setSharedMeta(channelId: string, meta: ChannelSharedMeta): void {
+    setMetaByChannel((map) => {
+      const next = new Map(map);
+      next.set(channelId, meta);
+      return next;
+    });
     schedulePersist();
   },
   /** Replace the post cache for a channel after a fetch. */

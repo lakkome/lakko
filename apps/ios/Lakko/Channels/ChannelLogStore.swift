@@ -286,13 +286,32 @@ public struct PersistedChannel: Codable, Equatable {
     public let localDescription: String
     public let addedAtMs: UInt64
     public let handle: String
+    /// ADR-0051 §4 — the newest shared metadata record's fields. Optional in
+    /// the JSON so a blob written before the record existed decodes with no
+    /// shared name (the row falls back to the local name / handle) — no
+    /// schema bump needed.
+    public let sharedName: String?
+    public let sharedDescription: String?
+    public let sharedUpdatedAtMs: UInt64?
 
-    public init(id: String, localName: String, localDescription: String, addedAtMs: UInt64, handle: String) {
+    public init(
+        id: String,
+        localName: String,
+        localDescription: String,
+        addedAtMs: UInt64,
+        handle: String,
+        sharedName: String? = nil,
+        sharedDescription: String? = nil,
+        sharedUpdatedAtMs: UInt64? = nil
+    ) {
         self.id = id
         self.localName = localName
         self.localDescription = localDescription
         self.addedAtMs = addedAtMs
         self.handle = handle
+        self.sharedName = sharedName
+        self.sharedDescription = sharedDescription
+        self.sharedUpdatedAtMs = sharedUpdatedAtMs
     }
 
     public init(handle h: ChannelHandle) {
@@ -301,7 +320,10 @@ public struct PersistedChannel: Codable, Equatable {
             localName: h.localName,
             localDescription: h.localDescription,
             addedAtMs: h.addedAtMs,
-            handle: h.handle
+            handle: h.handle,
+            sharedName: h.sharedUpdatedAtMs > 0 ? h.sharedName : nil,
+            sharedDescription: h.sharedUpdatedAtMs > 0 ? h.sharedDescription : nil,
+            sharedUpdatedAtMs: h.sharedUpdatedAtMs > 0 ? h.sharedUpdatedAtMs : nil
         )
     }
 
@@ -311,7 +333,10 @@ public struct PersistedChannel: Codable, Equatable {
             localName: localName,
             localDescription: localDescription,
             addedAtMs: addedAtMs,
-            handle: handle
+            handle: handle,
+            sharedName: sharedName ?? "",
+            sharedDescription: sharedDescription ?? "",
+            sharedUpdatedAtMs: sharedUpdatedAtMs ?? 0
         )
     }
 }

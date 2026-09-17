@@ -2274,6 +2274,65 @@ private fun TransferOwnershipStep(
     }
 }
 
+/**
+ * ADR-0051 / docs/ux/group-and-channel-names.md section 3.1 — the `Group name`
+ * row of the members panel. Owner / admin: a field with Save (an empty name
+ * clears it). Plain member: the name read-only, no edit affordance.
+ */
+@Composable
+private fun GroupNameRow(viewModel: ChatViewModel, canRename: Boolean) {
+    val name by viewModel.groupName.collectAsStateWithLifecycle()
+    val draft by viewModel.groupNameDraft.collectAsStateWithLifecycle()
+    val busy by viewModel.groupNameBusy.collectAsStateWithLifecycle()
+    val error by viewModel.groupNameError.collectAsStateWithLifecycle()
+    Column {
+        if (canRename) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = viewModel::setGroupNameDraft,
+                    label = { Text(me.lakko.app.chat.GROUP_NAME_LABEL) },
+                    singleLine = true,
+                    enabled = !busy,
+                    isError = error != null,
+                    keyboardOptions = KeyboardOptions(
+                        capitalization = KeyboardCapitalization.Sentences,
+                    ),
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(8.dp))
+                Button(
+                    onClick = viewModel::saveGroupName,
+                    enabled = !busy && draft.trim() != name.trim(),
+                ) { Text(if (busy) "Sending..." else me.lakko.app.chat.GROUP_NAME_SAVE) }
+            }
+        } else {
+            Text(
+                text = me.lakko.app.chat.GROUP_NAME_LABEL,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = name.ifBlank { "No name yet" },
+                style = MaterialTheme.typography.bodyLarge,
+                color = if (name.isBlank()) {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                },
+            )
+        }
+        error?.let { message ->
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+    }
+}
+
 @Composable
 private fun MembersSheet(
     viewModel: ChatViewModel,
@@ -2447,6 +2506,11 @@ private fun MembersSheet(
                     Spacer(Modifier.height(8.dp))
                     NewOwnerNoticeCard(notice = it, onDismiss = viewModel::dismissNewOwnerNotice)
                 }
+                Spacer(Modifier.height(12.dp))
+                // ADR-0051 — the shared group name: visible to everyone,
+                // editable by the owner and admins (the LIVE role, read by
+                // `refreshMembers`), read-only for a plain member.
+                GroupNameRow(viewModel = viewModel, canRename = canManage)
                 Spacer(Modifier.height(12.dp))
                 // ADR-0022 — only owner/admin (or an open/legacy group) sees the
                 // add affordance; a plain member's add would be refused by peers.

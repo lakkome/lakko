@@ -29,6 +29,11 @@
 //!   classified by [`incoming_envelope`].
 //! - [`username`] — the ADR-0048 §4 canonical-username rule
 //!   (`[a-z0-9_]`, 3 to 32), shared with `lakko-discovery-client`.
+//! - [`group_name`] — the ADR-0051 group-name envelope (the shared
+//!   name of a group, `updated_at_ms`, empty = clear): the profile
+//!   template reused, bounded, fail-closed, classified by
+//!   [`incoming_envelope`]; the sender's authority is the receiver's
+//!   role-table check, not this crate's.
 //!
 //! ## What's NOT here (1.9b and later)
 //!
@@ -67,6 +72,7 @@ pub mod envelope;
 pub mod error;
 pub mod group_invite;
 pub mod group_join_attribution;
+pub mod group_name;
 pub mod incoming_envelope;
 pub mod invite;
 pub mod media_state;
@@ -109,6 +115,11 @@ pub use group_invite::{
 pub use group_join_attribution::{
     compose_attribution as compose_group_join_attribution,
     decode_attribution as decode_group_join_attribution, GroupJoinAttribution,
+};
+pub use group_name::{
+    compose_group_name, decode_group_name, group_name_is_newer, normalize_group_name,
+    try_unwrap_group_name, GroupName, GroupNameError, GROUP_NAME_ENVELOPE_DOMAIN_V1,
+    GROUP_NAME_ENVELOPE_MAX_LEN, GROUP_NAME_ENVELOPE_MIN_LEN, GROUP_NAME_VERSION_V1,
 };
 pub use incoming_envelope::{dispatch_incoming_envelope, DispatchError, IncomingEnvelope};
 pub use invite::{

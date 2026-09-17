@@ -42,6 +42,12 @@
 //!   [`profile::profile_envelope_min_len`] / [`profile::profile_envelope_max_len`]
 //!   — the same filter question for the ADR-0048 profile envelope. Decode
 //!   returns no fields: the NSE must not learn or store profiles (C-59).
+//! - [`group_name::decode_group_name_envelope`] +
+//!   [`group_name::group_name_envelope_min_len`] /
+//!   [`group_name::group_name_envelope_max_len`] — the same filter question
+//!   for the ADR-0051 group-name envelope. Decode returns the name (it is
+//!   not personal data and may title a preview) but nothing here composes,
+//!   orders or persists one: acceptance stays the app's decision (C-59).
 //!
 //! There is deliberately **no compose / send / call / channel / transport
 //! surface**: the NSE only reads and decrypts, then discards. It NEVER writes
@@ -60,6 +66,7 @@ use lakko_mls::{Group as MlsGroup, Identity as MlsIdentity, Incoming as MlsIncom
 
 pub mod attachments;
 pub mod committer_beacon;
+pub mod group_name;
 pub mod profile;
 pub mod push_routing;
 

@@ -100,6 +100,11 @@ import { base64Decode, base64Encode, base64UrlEncodeNoPad } from "../auth/accoun
 import { loadAccepted } from "../contacts/local-store";
 import { onGroupMlsIdle } from "../mls/group-lock";
 import { useProfiles } from "../profile/ProfileContext";
+import { memberNameOf } from "../profile/member-label";
+import { useGroupNames } from "../chat/GroupNameContext";
+import { decideConversationKind } from "../chat/conversation-kind";
+import { persistedConversationKind } from "../chat/conversation-kind-store";
+import { groupTitle } from "../chat/group-title";
 import { paths } from "../routes/paths";
 import {
   callActions,
@@ -294,6 +299,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   const auth = useAuth();
   const chats = useChats();
   const profiles = useProfiles();
+  const groupNames = useGroupNames();
 
   // Seals and publishes signaling through the locked, fail-closed-persisting
   // seam (`call-signaling-publish.ts`), like every other application message.
@@ -356,12 +362,28 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     const entry = groupEntry(groupIdB64);
     if (entry === undefined) return "Peer";
     const own = chats.identity();
+    const ownKeyB64 = own === null ? null : base64Encode(own.signaturePublicKey);
+    const memberKeysB64 = memberKeysOf(entry.group);
+    const account = accountId();
+    // The same title the chat header and the list show (ADR-0051 §5): the
+    // persisted kind decides group-vs-1x1, the shared name comes first.
+    const isGroup =
+      decideConversationKind(
+        account === null ? null : persistedConversationKind(account, groupIdB64),
+        memberKeysB64.length,
+      ) === "group";
     return peerName({
-      ownKeyB64: own === null ? null : base64Encode(own.signaturePublicKey),
-      memberKeysB64: memberKeysOf(entry.group),
+      ownKeyB64,
+      memberKeysB64,
       resolveName: (k) => profiles.resolve(k).name,
       linkedContactName: loadAccepted().find((c) => c.groupIdB64 === groupIdB64)?.displayName,
-      label: entry.label,
+      label: groupTitle(
+        groupNames.nameOf(groupIdB64) ?? entry.label,
+        memberKeysB64
+          .filter((k) => k !== ownKeyB64)
+          .map((k) => memberNameOf(profiles.resolve(k))),
+      ),
+      isGroup,
     });
   }
 

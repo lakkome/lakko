@@ -217,6 +217,11 @@ private data class StoredChannel(
     val localDescription: String,
     val addedAtMs: String,
     val handle: String = "",
+    /** ADR-0051 — the shared record; absent on rows written before it existed. */
+    val sharedName: String = "",
+    val sharedDescription: String = "",
+    /** The record stamp as text; "" when no record has landed. */
+    val sharedUpdatedAtMs: String = "",
 )
 
 @Serializable
@@ -246,6 +251,9 @@ internal fun encodeChannels(channels: List<ChannelHandle>): String =
                 localDescription = it.localDescription,
                 addedAtMs = it.addedAtMs.toString(),
                 handle = it.handle,
+                sharedName = it.sharedName,
+                sharedDescription = it.sharedDescription,
+                sharedUpdatedAtMs = it.sharedUpdatedAtMs?.toString() ?: "",
             )
         },
     )
@@ -263,6 +271,11 @@ internal fun decodeChannels(raw: String): List<ChannelHandle>? =
                 localDescription = s.localDescription,
                 addedAtMs = addedAt,
                 handle = s.handle,
+                sharedName = s.sharedName,
+                sharedDescription = s.sharedDescription,
+                // A blank or unparseable stamp reads as "no record": the
+                // channel falls back to its handle until one lands.
+                sharedUpdatedAtMs = s.sharedUpdatedAtMs.toULongOrNull(),
             )
         }
     } catch (_: Exception) {

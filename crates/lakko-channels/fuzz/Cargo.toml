@@ -47,3 +47,10 @@ path = "fuzz_targets/epoch_id_from_be_bytes.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "channel_meta_decode"
+path = "fuzz_targets/channel_meta_decode.rs"
+test = false
+doc = false
+bench = false
