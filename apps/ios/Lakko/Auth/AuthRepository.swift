@@ -1165,6 +1165,12 @@ public final class AuthRepository: ObservableObject {
             // clean-wipe rationale; the live `ContactsRepository` unbinds on
             // the `identitySecrets = nil` below, so nothing re-writes the row.
             ContactsInboxStore().clear(accountIdB64: cached.accountIdB64)
+            // The account's channel list + subscriber-side recovered content
+            // seeds. Same clean-wipe rationale. (The three per-installation
+            // channel Keychain blobs — publisher seeds, publish counters,
+            // subscriber keypairs — are not per-account and are left as they
+            // were before this store existed.)
+            ChannelLogStore().delete(accountIdB64: cached.accountIdB64)
         }
         sessionStore.clear()
         identitySecrets = nil

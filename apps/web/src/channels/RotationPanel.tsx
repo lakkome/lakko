@@ -44,6 +44,7 @@ import {
 } from "./rotation-state-store";
 import type { WasmIdentity } from "./composer";
 import type { ChannelRotationPolicy, PublisherGroupHandle } from "./publisher-group-handle";
+import { channelsActions, channelsState } from "../state/channels-state";
 import { loadWasm } from "../wasm";
 import { Icon } from "../ui/icons";
 
@@ -70,7 +71,28 @@ export function RotationPanel(props: {
       saveState: (next: ChannelRotationState): void => {
         saveRotationState(props.channelIdHex, next);
       },
-      onRotated: (): void => {
+      onRotated: (newEpoch: number): void => {
+        // The rotation advanced the PublisherGroup's MLS epoch, so the
+        // exporter — the content seed every post is sealed under — changed.
+        // Re-derive it into the publisher keys (keeping the signing seed) so
+        // the next post is sealed under the seed the subscribers were just
+        // resealed to, and snapshot the advanced provider into the channel
+        // log so a reload re-opens the group at THIS epoch.
+        try {
+          const prev = channelsState.keysByChannel().get(props.channelIdHex);
+          if (prev !== undefined) {
+            const seed = props.publisherGroup.channelSeed(props.identity);
+            channelsActions.setKeys(props.channelIdHex, {
+              seed,
+              signingKeySeed: prev.signingKeySeed,
+            });
+          }
+          channelsActions.setEpoch(props.channelIdHex, newEpoch);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("post-rotation seed refresh failed", err);
+        }
+        channelsActions.notePublisherGroupChanged();
         refreshStatus();
       },
     };

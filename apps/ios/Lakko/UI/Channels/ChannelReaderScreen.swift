@@ -76,7 +76,12 @@ struct ChannelReaderScreen: View {
         }
         .task {
             // Already subscribed on this device: resume without asking again.
+            // The subscriber keypair outlives the channel list (it is a
+            // Keychain item, the list a per-account file), so a channel
+            // reached through Find with keys already on the device must be
+            // listed here too, or it reads fine and never appears on the tab.
             if state.subscriberKeysByChannel[channelId] != nil {
+                ensureListed()
                 await runBootstrap()
             }
         }
@@ -206,16 +211,20 @@ struct ChannelReaderScreen: View {
     /// it was found by (when it is not listed yet), then run the same
     /// bootstrap a returning subscriber runs.
     private func subscribe() async {
-        if !state.channels.contains(where: { $0.id == channelId }) {
-            state.addChannel(.init(
-                id: channelId,
-                localName: foundHandle,
-                localDescription: "",
-                addedAtMs: UInt64(Date().timeIntervalSince1970 * 1000),
-                handle: foundHandle
-            ))
-        }
+        ensureListed()
         await runBootstrap()
+    }
+
+    /// Add this channel to the persisted list when it is not there yet.
+    private func ensureListed() {
+        guard !state.channels.contains(where: { $0.id == channelId }) else { return }
+        state.addChannel(.init(
+            id: channelId,
+            localName: foundHandle,
+            localDescription: "",
+            addedAtMs: UInt64(Date().timeIntervalSince1970 * 1000),
+            handle: foundHandle
+        ))
     }
 
     private func ensureKeypair() -> ChannelSubscriberKeys {

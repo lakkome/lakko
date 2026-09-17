@@ -713,6 +713,26 @@ private fun SessionRoot(
     // state (Keystore-backed key persistence) and one REST client.
     val channelsState = rememberChannelsUiState()
     val channelsClient = remember { me.lakko.app.channels.ChannelsClient() }
+    // Bind the channels state to the account once the identity secrets land:
+    // load this account's persisted channel list + subscriber seeds, restore
+    // the publisher MLS provider snapshot, and re-open the publisher keys of
+    // every channel this device has a signing seed for — so a creator can
+    // post again and a subscriber can read again after a relaunch. Idempotent
+    // per account, so a token-refresh re-emission costs nothing; the MLS work
+    // runs off the main thread inside `bind`.
+    LaunchedEffect(identitySecrets, channelsState) {
+        val secrets = identitySecrets ?: return@LaunchedEffect
+        try {
+            channelsState.bind(
+                accountIdB64 = me.lakko.app.auth.base64Encode(secrets.accountId),
+                accountIdentitySeed = secrets.accountIdentitySeed,
+            )
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (e: Throwable) {
+            android.util.Log.w("SessionRoot", "channels state bind failed", e)
+        }
+    }
 
     // The app-level receive loop: every group long-polled while the app is in
     // the foreground, WHATEVER screen is showing. Call signaling (the 1x1 call
@@ -867,12 +887,18 @@ private fun SessionRoot(
     val logout = {
         me.lakko.app.calls.AppCallHost.reset()
         contactsRepository.clear()
+        // In-memory only, like chat.clear(): the persisted channel log and
+        // the publisher provider snapshot stay for the next sign-in.
+        channelsState.unbind()
         chatRepository.clear()
         authRepository.logout()
     }
     val forgetDevice = {
         me.lakko.app.calls.AppCallHost.reset()
         contactsRepository.clear()
+        // The account's channel log + publisher provider snapshot go with the
+        // device, like the chat snapshot below.
+        channelsState.forgetAccount()
         // chat.forgetDevice() BEFORE auth.forgetDevice() — see the file-level
         // docstring for the ordering rationale.
         chatRepository.forgetDevice()
@@ -964,7 +990,6 @@ private fun SessionRoot(
                         NewChannelScreen(
                             state = channelsState,
                             client = channelsClient,
-                            accountIdentitySeed = secrets.accountIdentitySeed,
                             sessionToken = secrets.sessionToken,
                             onBack = { navController.popBackStack() },
                             onCreated = { id ->
@@ -982,7 +1007,6 @@ private fun SessionRoot(
                     if (secrets != null) {
                         JoinCoPublisherScreen(
                             state = channelsState,
-                            accountIdentitySeed = secrets.accountIdentitySeed,
                             onBack = { navController.popBackStack() },
                             onJoined = { id ->
                                 navController.navigate(Routes.channel(id)) {
@@ -1032,7 +1056,6 @@ private fun SessionRoot(
                             channelId = id,
                             state = channelsState,
                             client = channelsClient,
-                            accountIdentitySeed = secrets.accountIdentitySeed,
                             onBack = { navController.popBackStack() },
                         )
                     } else {

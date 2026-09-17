@@ -72,8 +72,12 @@ import { PostCard, toPostDecode, type PostDecode } from "../channels/PostCard";
 import { PublishComposer } from "../channels/PublishComposer";
 import { DsClient } from "../ds/client";
 import { useAuth } from "../auth/AuthContext";
-import { channelsActions, channelsState } from "../state/channels-state";
-import { loadWasm } from "../wasm";
+import { useChats } from "../chat/ChatContext";
+import {
+  awaitChannelsHydration,
+  channelsActions,
+  channelsState,
+} from "../state/channels-state";
 import { paths } from "./paths";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
@@ -184,6 +188,7 @@ function channelMetaOf(id: string): { name: string; description: string; handle:
 const NewChannel: Component = () => {
   const navigate = useNavigate();
   const auth = useAuth();
+  const chats = useChats();
   const [name, setName] = createSignal("");
   const [description, setDescription] = createSignal("");
   // Optional `@handle` claimed via OPRF discovery (G4-5) so others can
@@ -241,16 +246,21 @@ const NewChannel: Component = () => {
       await createChannel(id);
       // Mint local publisher keys — the content-key seed comes from an MLS
       // PublisherGroup exporter (ADR-0010 Tier 1), the signing-key seed is a
-      // fresh Ed25519 keypair seed. Identity is rebuilt here from the
-      // canonical AccountIdentity (phrase) seed (ADR-0017).
-      const wasm = await loadWasm();
-      const identity = wasm.Identity.fromSeed(secrets.accountIdentitySeed);
-      let keys;
-      try {
-        keys = await freshPublisherKeys(identity, id);
-      } finally {
-        identity.free();
+      // fresh Ed25519 keypair seed. The group is created in the SESSION-LONG
+      // account identity's provider (ADR-0017 canonical identity), which the
+      // channel log snapshots — a throwaway `Identity.fromSeed` would take
+      // the group, and the seed every subscriber holds, with it.
+      const identity = chats.accountIdentity();
+      if (identity === null) {
+        setError("Sign in again to create a channel.");
+        return;
       }
+      await awaitChannelsHydration();
+      const keys = await freshPublisherKeys(
+        identity,
+        id,
+        channelsState.keysByChannel().get(id)?.signingKeySeed,
+      );
       channelsActions.addChannel({
         id,
         localName: name().trim(),
@@ -367,6 +377,7 @@ const NewChannel: Component = () => {
 const JoinCoPublisher: Component = () => {
   const navigate = useNavigate();
   const auth = useAuth();
+  const chats = useChats();
   const [link, setLink] = createSignal("");
   const [name, setName] = createSignal("");
   const [busy, setBusy] = createSignal(false);
@@ -376,8 +387,12 @@ const JoinCoPublisher: Component = () => {
   async function onJoin(): Promise<void> {
     const l = link().trim();
     if (l.length === 0) return;
-    const secrets = auth.identitySecrets();
-    if (secrets === null) {
+    // The session-long account identity: the external-join KeyPackage this
+    // request mints, and the PublisherGroup the Welcome lands, live in its
+    // provider, which the channel log snapshots. A throwaway identity would
+    // lose both on the next reload.
+    const identity = chats.accountIdentity();
+    if (auth.identitySecrets() === null || identity === null) {
       setError("Sign in again to join a channel.");
       return;
     }
@@ -385,32 +400,37 @@ const JoinCoPublisher: Component = () => {
     setError(null);
     setStatus("Sending your request...");
     try {
-      const wasm = await loadWasm();
-      const identity = wasm.Identity.fromSeed(secrets.accountIdentitySeed);
-      try {
-        const ds = new DsClient();
-        const { groupId, channelIdHex, joinerKey } = await requestToCoPublish(ds, identity, l);
-        setStatus("Waiting for the channel owner to approve...");
-        let keys: Awaited<ReturnType<typeof pollForCoPublishWelcome>> = null;
-        for (let i = 0; i < 60 && keys === null; ++i) {
-          keys = await pollForCoPublishWelcome(ds, identity, groupId, joinerKey, channelIdHex);
-          if (keys === null) await new Promise((r) => setTimeout(r, 3000));
-        }
-        if (keys === null) {
-          setError("No approval yet. Try again once the owner has approved.");
-          return;
-        }
-        channelsActions.addChannel({
-          id: channelIdHex,
-          localName: name().trim() || "Co-published channel",
-          localDescription: "",
-          addedAtMs: Date.now(),
-        });
-        channelsActions.setKeys(channelIdHex, keys);
-        navigate(paths.channel(channelIdHex));
-      } finally {
-        identity.free();
+      await awaitChannelsHydration();
+      const ds = new DsClient();
+      const { groupId, channelIdHex, joinerKey } = await requestToCoPublish(ds, identity, l);
+      // The proposal's KeyPackage private keys are in the provider now; get
+      // them on disk so a reload while waiting can still open the Welcome.
+      channelsActions.notePublisherGroupChanged();
+      setStatus("Waiting for the channel owner to approve...");
+      let keys: Awaited<ReturnType<typeof pollForCoPublishWelcome>> = null;
+      for (let i = 0; i < 60 && keys === null; ++i) {
+        keys = await pollForCoPublishWelcome(
+          ds,
+          identity,
+          groupId,
+          joinerKey,
+          channelIdHex,
+          channelsState.keysByChannel().get(channelIdHex)?.signingKeySeed,
+        );
+        if (keys === null) await new Promise((r) => setTimeout(r, 3000));
       }
+      if (keys === null) {
+        setError("No approval yet. Try again once the owner has approved.");
+        return;
+      }
+      channelsActions.addChannel({
+        id: channelIdHex,
+        localName: name().trim() || "Co-published channel",
+        localDescription: "",
+        addedAtMs: Date.now(),
+      });
+      channelsActions.setKeys(channelIdHex, keys);
+      navigate(paths.channel(channelIdHex));
     } catch (err) {
       setError(
         err instanceof LegacyChannelError
@@ -709,11 +729,15 @@ const ChannelSubscribe: Component = () => {
   };
 
   // Persisted keypair lookup. If none exists on first mount, generate one
-  // and store it.
+  // and store it. Waits for the per-account hydration first: on a reload
+  // this route can mount before the encrypted channel log is read, and
+  // minting a fresh keypair then would orphan the seeds sealed to the old
+  // public key until the publisher's next rotation.
   async function ensureKeypair(): Promise<{
     readonly secret: Uint8Array;
     readonly public: Uint8Array;
   }> {
+    await awaitChannelsHydration();
     const existing = channelsState.subscriberKeysByChannel().get(params.id);
     if (existing !== undefined) {
       return existing;

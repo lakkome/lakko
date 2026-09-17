@@ -102,25 +102,37 @@ public object CoPublisher {
      *  commits) via the role-gated path. Surfaces external-join proposals into
      *  the PublisherGroup's retained pending set. Non-MLS entries (a Welcome
      *  rendezvous) and our own already-merged commits throw and are skipped.
-     *  Returns the number of pending requests after the poll. */
+     *  Returns how many entries were applied (the caller snapshots the
+     *  provider when that is non-zero — an applied commit advanced the
+     *  group's epoch) and the number of pending requests after the poll. */
     public suspend fun pollJournal(
         ds: DsClient,
         identity: Identity,
         publisherGroup: PublisherGroup,
-    ): Int {
+    ): JournalPoll {
         val groupId = publisherGroup.groupId()
         val raw = ds.fetchGroup(groupId, after = 0L, waitSecs = 0)
+        var applied = 0
         for (m in raw.messages) {
             try {
                 publisherGroup.processIncomingVerifyingRoles(identity, m.payload)
+                applied += 1
             } catch (_: Throwable) {
                 // Non-MLS entry (a Welcome rendezvous) or a commit we have already
                 // merged (epoch mismatch) — skip; the FIFO journal catches up on
                 // any genuinely-new commit on the next poll.
             }
         }
-        return publisherGroup.pendingExternalJoins().size
+        return JournalPoll(applied = applied, pending = publisherGroup.pendingExternalJoins().size)
     }
+
+    /** What one [pollJournal] pass did. */
+    public data class JournalPoll(
+        /** Journal entries the group accepted this pass. */
+        val applied: Int,
+        /** Pending co-publisher requests after the pass. */
+        val pending: Int,
+    )
 
     /** The pending co-publisher external-join requests — each a 32-byte joiner
      *  leaf signature key (the `proposalRef` for approve / reject). */

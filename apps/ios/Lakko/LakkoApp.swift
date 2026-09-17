@@ -765,6 +765,10 @@ private struct SessionRoot: View, Equatable {
     @ViewBuilder private var channelsRoot: some View {
         if let seed = authRepository.identitySecrets?.accountIdentitySeed {
             ChannelsRootScreen(
+                // The per-account channel log (list + subscribed seeds) is
+                // keyed on the session account; `account` is an input of this
+                // shell, so it is current on every evaluation.
+                accountIdB64: account.accountIdB64,
                 accountIdentitySeed: seed,
                 sessionTokenProvider: {
                     authRepository.identitySecrets?.sessionToken

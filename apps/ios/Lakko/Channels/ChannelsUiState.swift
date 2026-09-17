@@ -13,10 +13,21 @@ import SwiftUI
 /// keys, server-cached posts + epochs. Display names +
 /// descriptions are **local-only** — never sent to the
 /// server.
+///
+/// ## What survives a relaunch
+///
+/// Once ``bind(accountIdB64:)`` has run (the root screen does it at
+/// construction): the channel list and the subscriber-side recovered seeds
+/// (``ChannelLogStore``, one sealed file per account), the publisher keys
+/// (content seed + signing seed, ``ChannelPublisherKeyStore``), the publish
+/// counters (``ChannelPublishCounterStore``) and the subscriber keypairs
+/// (``ChannelSubscriberKeyStore``). Posts, epochs and subscriber counts are
+/// server caches and are re-read.
 @MainActor
 public final class ChannelsUiState: ObservableObject {
 
-    /// User's local channel list, newest-first.
+    /// User's local channel list, newest-first. Persisted per account through
+    /// ``ChannelLogStore`` on every mutation once bound.
     @Published public private(set) var channels: [ChannelHandle] = []
 
     /// Per-channel post cache (filled by
@@ -31,11 +42,20 @@ public final class ChannelsUiState: ObservableObject {
     /// known; shown on the channel row, never persisted.
     @Published public private(set) var subscriberCountByChannel: [String: Int] = [:]
 
-    /// Per-channel publisher keys (local-only). The `signingKeySeed` half is
-    /// persisted in the hardware-backed Keychain
-    /// (``ChannelPublisherKeyStore``, G-29) via ``persistPublisherSigningSeeds``
-    /// so a relaunch keeps signing under the same key (invariant #7); the
-    /// content-key `seed` re-derives from the MLS PublisherGroup on open.
+    /// Per-channel publisher keys (local-only). Both halves are persisted in
+    /// the hardware-backed Keychain (``ChannelPublisherKeyStore``, G-29) via
+    /// ``persistPublisherKeys`` and restored by ``bind(accountIdB64:)``, so a
+    /// relaunched publisher posts and reads under the same content seed its
+    /// subscribers hold and keeps signing under the same Ed25519 key
+    /// (invariant #7).
+    ///
+    /// The content seed is persisted rather than re-derived because on iOS
+    /// the MLS PublisherGroup it came from is NOT durable: every channel path
+    /// builds a throwaway `Identity.fromSeed` whose OpenMLS provider is
+    /// in-memory and never snapshotted, so `publisherGroupOpenOrCreate` on a
+    /// fresh identity would mint a new group with a new random seed — one no
+    /// subscriber has an envelope for. The seed this device sealed posts and
+    /// envelopes under is the one that must come back.
     @Published public private(set) var keysByChannel: [String: ChannelPublisherKeys] = [:]
 
     /// Per-channel persisted publisher **signing** seed, restored from the
@@ -43,6 +63,18 @@ public final class ChannelsUiState: ObservableObject {
     /// (``ChannelsComposer/freshPublisherKeys``) reuses the seed here so this
     /// device continues signing the channel under the same Ed25519 key.
     private var publisherSigningSeedByChannel: [String: Data] = [:]
+
+    /// Per-channel persisted publisher **content** seed, stored in the same
+    /// Keychain blob as the signing seed. ``bind(accountIdB64:)`` rebuilds
+    /// ``keysByChannel`` from the two maps for every channel in the list that
+    /// has both.
+    private var publisherContentSeedByChannel: [String: Data] = [:]
+
+    /// The per-account sealed store behind ``channels`` and
+    /// ``subscribedSeedsByChannel``. Written through on every mutation once
+    /// ``boundAccountIdB64`` is set; unbound mutations stay in memory.
+    private let logStore = ChannelLogStore()
+    private var boundAccountIdB64: String?
 
     /// Per-channel **forever-monotone** publish counter, persisted at rest in
     /// the hardware-backed Keychain (``ChannelPublishCounterStore``) so it never
@@ -74,10 +106,11 @@ public final class ChannelsUiState: ObservableObject {
     /// N epochs' seeds so it can decrypt a post made under a
     /// rotation it missed — each `ChannelPost` carries its
     /// `epoch_id`, and the reader selects the seed matching
-    /// that epoch. In-memory only — never persisted, never
-    /// sent off-device (same posture as the single-seed cache
-    /// it replaces). UI shows a "waiting for seed delivery"
-    /// state until the map has an entry for the channel.
+    /// that epoch. Persisted per account through ``ChannelLogStore``
+    /// (AES-GCM under a Keychain wrap key) so a relaunched subscriber
+    /// reads without waiting for a fresh fan-out; never sent off-device.
+    /// UI shows a "waiting for seed delivery" state until the map has an
+    /// entry for the channel.
     @Published public private(set)
     var subscribedSeedsByChannel: [String: [UInt32: Data]] = [:]
 
@@ -94,13 +127,50 @@ public final class ChannelsUiState: ObservableObject {
         // launch can poll for envelopes without the user
         // re-subscribing manually.
         self.subscriberKeysByChannel = Self.loadSubscriberKeys()
-        // Restore persisted publisher signing seeds so a relaunched publisher
-        // keeps signing its channels under the same Ed25519 key (G-29).
-        self.publisherSigningSeedByChannel = Self.loadPublisherSigningSeeds()
+        // Restore persisted publisher seeds (signing + content) so a
+        // relaunched publisher keeps signing its channels under the same
+        // Ed25519 key (G-29) and can rebuild its keys on bind.
+        let publisherSeeds = Self.loadPublisherKeys()
+        self.publisherSigningSeedByChannel = publisherSeeds.signing
+        self.publisherContentSeedByChannel = publisherSeeds.content
         // Restore persisted per-channel publish counters so a relaunched
         // publisher never restarts the AEAD counter at 0 under the stable
         // content seed + epoch (nonce-reuse defence).
         self.counterByChannel = Self.loadPublishCounters()
+    }
+
+    /// Construct already bound to `accountIdB64` — the shape the root
+    /// screen's `@StateObject` uses so the list is loaded before the first
+    /// body evaluation and no follow-up task re-renders the tab.
+    public convenience init(accountIdB64: String) {
+        self.init()
+        bind(accountIdB64: accountIdB64)
+    }
+
+    // MARK: - Binding
+
+    /// Attach the state to one account: load its persisted channel list and
+    /// subscribed seeds, and rebuild the publisher keys of every listed
+    /// channel whose content + signing seeds the Keychain holds. From here on
+    /// every mutation of the list or the seed map writes through.
+    ///
+    /// Rebinding to a different account replaces the in-memory list; the
+    /// previous account's file is left as it is. The publish counters are
+    /// untouched — they are a forever-monotone floor, never reset here.
+    public func bind(accountIdB64: String) {
+        boundAccountIdB64 = accountIdB64
+        if let payload = logStore.get(accountIdB64: accountIdB64) {
+            channels = payload.channelHandles
+            subscribedSeedsByChannel = payload.subscribedSeedsByChannel
+        } else {
+            channels = []
+            subscribedSeedsByChannel = [:]
+        }
+        keysByChannel = ChannelPublisherReopen.keys(
+            channels: channels,
+            contentSeeds: publisherContentSeedByChannel,
+            signingSeeds: publisherSigningSeedByChannel
+        )
     }
 
     // MARK: - Mutations
@@ -111,6 +181,7 @@ public final class ChannelsUiState: ObservableObject {
         var without = channels.filter { $0.id != handle.id }
         without.insert(handle, at: 0)
         channels = without
+        persistChannelLog()
     }
 
     public func removeChannel(_ channelId: String) {
@@ -119,6 +190,7 @@ public final class ChannelsUiState: ObservableObject {
         epochByChannel[channelId] = nil
         subscriberCountByChannel[channelId] = nil
         keysByChannel[channelId] = nil
+        persistChannelLog()
         // Deliberately KEEP this channel's publish counter (in-memory + at
         // rest): un-publishing does NOT destroy the MLS PublisherGroup content
         // seed, so a re-add of the same channel_id re-derives the same content
@@ -126,10 +198,11 @@ public final class ChannelsUiState: ObservableObject {
         // re-add can never rewind it to 0 and re-collide the AEAD nonce. (This
         // is robust even though the signing seed below IS dropped — matches the
         // web client, and does not rely on the sender_pubkey changing.)
-        // Drop this channel's persisted publisher signing seed (G-29) — the
-        // device is no longer a publisher for it.
+        // Drop this channel's persisted publisher seeds (G-29) — the device
+        // is no longer a publisher for it.
         publisherSigningSeedByChannel[channelId] = nil
-        persistPublisherSigningSeeds()
+        publisherContentSeedByChannel[channelId] = nil
+        persistPublisherKeys()
     }
 
     public func updateLocalMeta(
@@ -148,6 +221,7 @@ public final class ChannelsUiState: ObservableObject {
             addedAtMs: old.addedAtMs,
             handle: handle ?? old.handle
         )
+        persistChannelLog()
     }
 
     /// Cache the subscriber count the manage screen or the list refresh
@@ -165,9 +239,11 @@ public final class ChannelsUiState: ObservableObject {
         epochByChannel[channelId] = epoch
     }
 
-    /// Install fresh publisher keys. Persists the `signingKeySeed` half to the
-    /// hardware-backed Keychain (G-29) so a relaunch reuses it via
-    /// ``persistedPublisherSigningSeed(channelId:)``.
+    /// Install fresh publisher keys. Persists both halves to the
+    /// hardware-backed Keychain (G-29): the `signingKeySeed` so a re-open
+    /// reuses it via ``persistedPublisherSigningSeed(channelId:)``, and the
+    /// content `seed` so ``bind(accountIdB64:)`` rebuilds the keys after a
+    /// relaunch.
     ///
     /// The publish counter is **load-else-0**: it starts at 0 only for a channel
     /// this device has never published to, and otherwise keeps its persisted
@@ -182,7 +258,8 @@ public final class ChannelsUiState: ObservableObject {
         }
         persistPublishCounters()
         publisherSigningSeedByChannel[channelId] = keys.signingKeySeed
-        persistPublisherSigningSeeds()
+        publisherContentSeedByChannel[channelId] = keys.seed
+        persistPublisherKeys()
     }
 
     /// The persisted per-channel publisher signing seed, or `nil` when this
@@ -229,6 +306,7 @@ public final class ChannelsUiState: ObservableObject {
         subscriberKeysByChannel[channelId] = nil
         subscribedSeedsByChannel[channelId] = nil
         persistSubscriberKeys()
+        persistChannelLog()
     }
 
     /// Cache the recovered content-key seed for one epoch
@@ -239,6 +317,7 @@ public final class ChannelsUiState: ObservableObject {
         var byEpoch = subscribedSeedsByChannel[channelId] ?? [:]
         byEpoch[epoch] = seed
         subscribedSeedsByChannel[channelId] = byEpoch
+        persistChannelLog()
     }
 
     /// The recovered `epoch -> seed` map for `channelId`
@@ -257,12 +336,31 @@ public final class ChannelsUiState: ObservableObject {
         subscriberKeysByChannel = [:]
         subscribedSeedsByChannel = [:]
         publisherSigningSeedByChannel = [:]
+        publisherContentSeedByChannel = [:]
         persistSubscriberKeys()
-        persistPublisherSigningSeeds()
+        persistPublisherKeys()
         // Wipe the persisted publish counters (logout / reset). A fresh account
         // on this device starts every channel's counter at 0 again — safe
         // because a fresh account also mints fresh publisher keys + seeds.
         persistPublishCounters()
+        if let account = boundAccountIdB64 {
+            logStore.delete(accountIdB64: account)
+        }
+    }
+
+    // MARK: - Channel-log persistence (list + subscribed seeds)
+
+    /// Write the channel list and the subscribed seeds through to the bound
+    /// account's sealed file. A no-op before ``bind(accountIdB64:)``.
+    private func persistChannelLog() {
+        guard let account = boundAccountIdB64 else { return }
+        logStore.put(
+            accountIdB64: account,
+            payload: ChannelLogPayload(
+                channels: channels,
+                subscribedSeedsByChannel: subscribedSeedsByChannel
+            )
+        )
     }
 
     // MARK: - Subscriber-keypair persistence
@@ -334,35 +432,40 @@ public final class ChannelsUiState: ObservableObject {
         return out
     }
 
-    // MARK: - Publisher signing-seed persistence (G-29)
+    // MARK: - Publisher seed persistence (G-29)
 
     /// One row in the persisted Keychain blob.
     private struct PersistedPublisherKey: Codable {
         let channelId: String
         /// Hex-encoded 32-byte Ed25519 signing seed.
         let signingSeedHex: String
+        /// Hex-encoded 32-byte channel content seed. Absent on a row written
+        /// before the content seed was persisted; such a channel keeps its
+        /// signing seed but cannot be re-opened as a publisher on bind.
+        let seedHex: String?
     }
 
-    private func persistPublisherSigningSeeds() {
-        // G-29 — the Ed25519 signing seed is hardware-backed-Keychain material,
-        // not `UserDefaults` plaintext (invariant #7). An empty set wipes the
-        // item (remove-channel / reset / logout).
+    private func persistPublisherKeys() {
+        // G-29 — both seeds are hardware-backed-Keychain material, not
+        // `UserDefaults` plaintext (invariant #7). An empty set wipes the item
+        // (remove-channel / reset / logout).
         if publisherSigningSeedByChannel.isEmpty {
             ChannelPublisherKeyStore.delete()
             return
         }
         let rows: [PersistedPublisherKey] =
-            publisherSigningSeedByChannel.map { (channelId, seed) in
+            publisherSigningSeedByChannel.map { (channelId, signingSeed) in
                 PersistedPublisherKey(
                     channelId: channelId,
-                    signingSeedHex: ChannelsComposer.bytesToHex(seed)
+                    signingSeedHex: ChannelsComposer.bytesToHex(signingSeed),
+                    seedHex: publisherContentSeedByChannel[channelId].map(ChannelsComposer.bytesToHex)
                 )
             }
         guard let data = try? JSONEncoder().encode(rows) else { return }
         ChannelPublisherKeyStore.save(data)
     }
 
-    private static func loadPublisherSigningSeeds() -> [String: Data] {
+    private static func loadPublisherKeys() -> (signing: [String: Data], content: [String: Data]) {
         guard
             let data = ChannelPublisherKeyStore.load(),
             let rows = try? JSONDecoder().decode(
@@ -370,14 +473,18 @@ public final class ChannelsUiState: ObservableObject {
                 from: data
             )
         else {
-            return [:]
+            return ([:], [:])
         }
-        var out: [String: Data] = [:]
+        var signing: [String: Data] = [:]
+        var content: [String: Data] = [:]
         for row in rows {
-            guard let seed = Data(hexString: row.signingSeedHex) else { continue }
-            out[row.channelId] = seed
+            guard let signingSeed = Data(hexString: row.signingSeedHex) else { continue }
+            signing[row.channelId] = signingSeed
+            if let hex = row.seedHex, let seed = Data(hexString: hex) {
+                content[row.channelId] = seed
+            }
         }
-        return out
+        return (signing, content)
     }
 
     // MARK: - Publish-counter persistence (AEAD nonce-reuse defence)
@@ -424,6 +531,34 @@ public final class ChannelsUiState: ObservableObject {
         var out: [String: UInt64] = [:]
         for row in rows {
             out[row.channelId] = row.counter
+        }
+        return out
+    }
+}
+
+/// The pure decision ``ChannelsUiState/bind(accountIdB64:)`` takes: which
+/// listed channels come back as publisher channels after a relaunch.
+///
+/// A channel is re-opened as a publisher only when it is in the persisted
+/// list AND the Keychain holds both its content seed and its signing seed,
+/// each 32 bytes. A seed left behind for a channel that is no longer listed
+/// is not enough on its own (the row is what the user sees), and a listed
+/// channel with only a signing seed (a row written before the content seed
+/// was persisted) reads as a subscriber channel rather than a publisher
+/// channel with a guessed key. Free of the state object so it is testable
+/// without one.
+public enum ChannelPublisherReopen {
+    public static func keys(
+        channels: [ChannelHandle],
+        contentSeeds: [String: Data],
+        signingSeeds: [String: Data]
+    ) -> [String: ChannelPublisherKeys] {
+        var out: [String: ChannelPublisherKeys] = [:]
+        for channel in channels {
+            guard let seed = contentSeeds[channel.id], seed.count == 32,
+                  let signing = signingSeeds[channel.id], signing.count == 32
+            else { continue }
+            out[channel.id] = ChannelPublisherKeys(seed: seed, signingKeySeed: signing)
         }
         return out
     }

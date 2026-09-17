@@ -81,6 +81,7 @@ import kotlinx.coroutines.launch
 import me.lakko.app.channels.ChannelDiscovery
 import me.lakko.app.channels.ChannelHandle
 import me.lakko.app.channels.ChannelKeyStore
+import me.lakko.app.channels.ChannelPublisherIdentity
 import me.lakko.app.channels.ChannelPublisherKeyStore
 import me.lakko.app.channels.ChannelPublisherKeys
 import me.lakko.app.channels.ChannelsClient
@@ -92,13 +93,14 @@ import me.lakko.app.channels.LegacyChannelException
 import me.lakko.app.channels.LegacyChannelV1
 import me.lakko.app.channels.PostView
 import me.lakko.app.channels.RotationCron
+import me.lakko.app.channels.SharedPreferencesChannelLogStore
+import me.lakko.app.channels.StoredRotationState
 import me.lakko.app.discovery.DiscoveryHttpError
 import me.lakko.app.ds.DsClient
 import me.lakko.app.ui.components.LakkoAvatar
 import me.lakko.app.ui.contacts.copyToClipboard
 import me.lakko.app.ui.contacts.launchShareIntent
 import uniffi.lakko_ffi_uniffi.ChannelRotationState
-import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.PublisherGroup
 import uniffi.lakko_ffi_uniffi.channelRotationPolicyDefault
 import uniffi.lakko_ffi_uniffi.channelRotationStateAfterRotation
@@ -123,15 +125,22 @@ private const val TAG = "ChannelsScreen"
 /**
  * Build the process-scoped [ChannelsUiState], persisting the subscriber
  * keypairs AND the publisher signing seeds into the hardware-backed Keystore
- * (G-29) rather than plaintext `SharedPreferences`.
+ * (G-29) rather than plaintext `SharedPreferences`. The per-account channel
+ * log (list, subscriber seeds, rotation state) rides the same encrypted
+ * subscriber-key file, and the publisher MLS identity snapshots its provider
+ * through [ChannelPublisherIdentity.onDevice]. The session shell binds the
+ * state to the account once the identity secrets land.
  */
 @Composable
 public fun rememberChannelsUiState(): ChannelsUiState {
     val context = LocalContext.current
     return remember {
+        val subscriberPrefs = ChannelKeyStore.encryptedPrefs(context)
         ChannelsUiState(
-            prefs = ChannelKeyStore.encryptedPrefs(context),
+            prefs = subscriberPrefs,
             publisherPrefs = ChannelPublisherKeyStore.encryptedPrefs(context),
+            logStore = SharedPreferencesChannelLogStore(subscriberPrefs),
+            publisher = ChannelPublisherIdentity.onDevice(context),
         )
     }
 }
@@ -483,13 +492,12 @@ private fun ErrorLine(message: String, modifier: Modifier = Modifier) {
  * Create a channel: a local name and description, an optional public handle.
  * The handle is claimed first so a taken handle aborts before anything is
  * created; the channel key seed comes from the account's publisher group
- * (G-27 / ADR-0017), which is why the account identity seed is needed.
+ * (G-27 / ADR-0017) on the shared [ChannelPublisherIdentity] the state owns.
  */
 @Composable
 public fun NewChannelScreen(
     state: ChannelsUiState,
     client: ChannelsClient,
-    accountIdentitySeed: ByteArray,
     sessionToken: String,
     onBack: () -> Unit,
     onCreated: (channelId: String) -> Unit,
@@ -570,16 +578,18 @@ public fun NewChannelScreen(
                             }
                             client.createChannel(id)
                             // G-27 / ADR-0017: the channel content-key seed
-                            // comes from a real MLS publisher group exporter.
-                            val identity = Identity.fromSeed(accountIdentitySeed)
-                            val keys = try {
+                            // comes from a real MLS publisher group exporter,
+                            // created in the shared publisher identity's
+                            // provider and snapshotted with it so the seed
+                            // survives a relaunch.
+                            val publisher = state.publisher
+                                ?: throw IllegalStateException("channel publisher identity not available")
+                            val keys = publisher.withIdentity { identity ->
                                 ChannelsComposer.freshPublisherKeys(
                                     identity = identity,
                                     channelIdHex = id,
                                     existingSigningSeed = state.persistedPublisherSigningSeed(id),
                                 )
-                            } finally {
-                                identity.close()
                             }
                             state.addChannel(
                                 ChannelHandle(
@@ -1383,15 +1393,16 @@ private fun hexToBytesOrNull(hex: String): ByteArray? {
 /**
  * The owner's Manage screen. Opens the channel's publisher group once —
  * rotation and co-publisher management mutate the SAME MLS group, so one
- * handle serves both (the Rust handle is mutex-guarded; the heartbeat and
- * the request poll share it serially).
+ * handle serves both. Every call on the group goes through the state's
+ * shared [ChannelPublisherIdentity]: serialised, off the main thread, and
+ * followed by a provider snapshot after each epoch-advancing operation so a
+ * relaunch reopens the group at the epoch the subscribers hold.
  */
 @Composable
 public fun ChannelManageScreen(
     channelId: String,
     state: ChannelsUiState,
     client: ChannelsClient,
-    accountIdentitySeed: ByteArray,
     onBack: () -> Unit,
 ) {
     val channels by state.channels.collectAsState()
@@ -1399,16 +1410,15 @@ public fun ChannelManageScreen(
     val context = LocalContext.current
     val zone = remember { ZoneId.systemDefault() }
     val locale = remember { Locale.getDefault() }
+    val publisher = state.publisher
 
-    var pubIdentity by remember(channelId) { mutableStateOf<Identity?>(null) }
     var pubGroup by remember(channelId) { mutableStateOf<PublisherGroup?>(null) }
     var openError by remember(channelId) { mutableStateOf<String?>(null) }
     LaunchedEffect(channelId) {
         try {
-            val id = Identity.fromSeed(accountIdentitySeed)
-            val pg = CoPublisher.openPublisherGroup(id, channelId)
-            pubIdentity = id
-            pubGroup = pg
+            val pub = publisher ?: throw IllegalStateException("channel publisher identity not available")
+            // Open-or-create: persisted so a group minted here is not lost.
+            pubGroup = pub.withIdentity { id -> CoPublisher.openPublisherGroup(id, channelId) }
         } catch (e: Throwable) {
             Log.w(TAG, "open publisher group failed", e)
             openError = LegacyChannelV1.describe(e) { "Could not open this channel's keys on this device." }
@@ -1423,11 +1433,12 @@ public fun ChannelManageScreen(
      *  the composer's copy so the next post seals under the key the
      *  subscribers were just given. */
     suspend fun refreshPublisherKey() {
-        val id = pubIdentity ?: return
+        val pub = publisher ?: return
         val pg = pubGroup ?: return
         val current = state.keysByChannel.value[channelId] ?: return
         try {
-            state.setKeys(channelId, current.copy(seed = pg.channelSeed(id)))
+            val seed = pub.withIdentity(persist = false) { id -> pg.channelSeed(id) }
+            state.setKeys(channelId, current.copy(seed = seed))
             state.setEpoch(channelId, client.fetchEpoch(channelId))
         } catch (e: Throwable) {
             Log.w(TAG, "publisher key refresh failed", e)
@@ -1456,7 +1467,7 @@ public fun ChannelManageScreen(
             CoPublishersCard(
                 channelId = channelId,
                 client = client,
-                identity = pubIdentity,
+                publisher = publisher,
                 publisherGroup = pubGroup,
                 onCopy = { copyToClipboard(context, it) },
                 onShare = { launchShareIntent(context, it) },
@@ -1464,8 +1475,9 @@ public fun ChannelManageScreen(
             )
             KeysCard(
                 channelId = channelId,
+                state = state,
                 client = client,
-                identity = pubIdentity,
+                publisher = publisher,
                 publisherGroup = pubGroup,
                 zone = zone,
                 locale = locale,
@@ -1554,7 +1566,7 @@ private fun SubscribersCard(channelId: String, state: ChannelsUiState, client: C
 private fun CoPublishersCard(
     channelId: String,
     client: ChannelsClient,
-    identity: Identity?,
+    publisher: ChannelPublisherIdentity?,
     publisherGroup: PublisherGroup?,
     onCopy: (String) -> Unit,
     onShare: (String) -> Unit,
@@ -1568,14 +1580,19 @@ private fun CoPublishersCard(
     val scope = rememberCoroutineScope()
 
     // Poll the publisher group's journal for join requests with the SHARED
-    // handle the screen owns; re-armed if the handle re-opens.
+    // handle the screen owns; re-armed if the handle re-opens. A poll that
+    // applied a peer's commit advanced the epoch, so the provider is
+    // snapshotted then (and only then).
     LaunchedEffect(publisherGroup) {
-        val id = identity ?: return@LaunchedEffect
+        val pub = publisher ?: return@LaunchedEffect
         val pg = publisherGroup ?: return@LaunchedEffect
         while (true) {
             try {
-                CoPublisher.pollJournal(ds, id, pg)
-                pending = CoPublisher.pending(pg)
+                val poll = pub.withIdentity(persist = false) { id -> CoPublisher.pollJournal(ds, id, pg) }
+                if (poll.applied > 0) pub.persist()
+                pending = pub.withIdentity(persist = false) { CoPublisher.pending(pg) }
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
             } catch (_: Throwable) {
                 // Best-effort — keep the last good pending list.
             }
@@ -1591,14 +1608,16 @@ private fun CoPublishersCard(
         if (current == null) {
             OutlinedButton(
                 onClick = {
-                    val id = identity
+                    val pub = publisher
                     val pg = publisherGroup
-                    if (busy || id == null || pg == null) return@OutlinedButton
+                    if (busy || pub == null || pg == null) return@OutlinedButton
                     busy = true
                     error = null
                     scope.launch {
                         try {
-                            link = CoPublisher.createCoPublisherLink(id, pg)
+                            link = pub.withIdentity(persist = false) { id ->
+                                CoPublisher.createCoPublisherLink(id, pg)
+                            }
                         } catch (e: Throwable) {
                             Log.w(TAG, "create co-publisher link failed", e)
                             error = "Could not create the link. Try again."
@@ -1636,32 +1655,43 @@ private fun CoPublishersCard(
                     Text("Request ${index + 1}", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
                     TextButton(
                         onClick = {
-                            val pg = publisherGroup ?: return@TextButton
-                            if (busy) return@TextButton
+                            val pub = publisher
+                            val pg = publisherGroup
+                            if (busy || pub == null || pg == null) return@TextButton
                             error = null
-                            try {
-                                CoPublisher.reject(pg, ref)
-                                pending = CoPublisher.pending(pg)
-                            } catch (e: Throwable) {
-                                Log.w(TAG, "reject failed", e)
-                                error = "Could not reject the request. Try again."
+                            scope.launch {
+                                try {
+                                    // A local drop of the retained request: no
+                                    // commit, no epoch advance, nothing to persist.
+                                    pending = pub.withIdentity(persist = false) {
+                                        CoPublisher.reject(pg, ref)
+                                        CoPublisher.pending(pg)
+                                    }
+                                } catch (e: Throwable) {
+                                    Log.w(TAG, "reject failed", e)
+                                    error = "Could not reject the request. Try again."
+                                }
                             }
                         },
                         enabled = !busy,
                     ) { Text("Reject", color = MaterialTheme.colorScheme.error) }
                     TextButton(
                         onClick = {
-                            val id = identity
+                            val pub = publisher
                             val pg = publisherGroup
-                            if (busy || id == null || pg == null) return@TextButton
+                            if (busy || pub == null || pg == null) return@TextButton
                             busy = true
                             error = null
                             scope.launch {
                                 try {
                                     // The audited approve: adds the joiner and
                                     // reseals the new key to every subscriber.
-                                    CoPublisher.approve(ds, client, id, pg, ref, channelId)
-                                    pending = CoPublisher.pending(pg)
+                                    // Persisted after success — the Add advanced
+                                    // the epoch the subscribers were resealed to.
+                                    pending = pub.withIdentity { id ->
+                                        CoPublisher.approve(ds, client, id, pg, ref, channelId)
+                                        CoPublisher.pending(pg)
+                                    }
                                     afterApprove()
                                 } catch (e: Throwable) {
                                     Log.w(TAG, "approve failed", e)
@@ -1683,17 +1713,21 @@ private fun CoPublishersCard(
 /**
  * Key rotation (ADR-0010 / C-54). The Rust core owns the *when*
  * (`channelShouldRotate`), [RotationCron] the *how* (rotate the group, reseal
- * every subscriber, one atomic fan-out). The heartbeat is seeded as "rotated
- * just now" on open — the policy would otherwise fire immediately against a
- * fresh state — so within a session the scheduled trigger stays silent and
- * "Rotate now" is the immediate control; the status line names a time only
- * for a rotation that happened in this session.
+ * every subscriber, one atomic fan-out). The heartbeat state is persisted per
+ * channel in the state's channel log (like the web and iOS stores), so the
+ * schedule survives a relaunch: a channel opened past its rotation deadline
+ * rotates on the first tick. A channel with no persisted state is seeded as
+ * "rotated just now" on first open, so the policy does not fire against a
+ * genesis state. "Rotate now" is the immediate control. Every group call
+ * runs on the shared [ChannelPublisherIdentity]; the provider is snapshotted
+ * after a rotation that landed.
  */
 @Composable
 private fun KeysCard(
     channelId: String,
+    state: ChannelsUiState,
     client: ChannelsClient,
-    identity: Identity?,
+    publisher: ChannelPublisherIdentity?,
     publisherGroup: PublisherGroup?,
     zone: ZoneId,
     locale: Locale,
@@ -1701,41 +1735,60 @@ private fun KeysCard(
 ) {
     val policy = remember { channelRotationPolicyDefault() }
     var cronState by remember(channelId) {
-        mutableStateOf(channelRotationStateAfterRotation(System.currentTimeMillis().toULong()))
+        mutableStateOf(
+            state.rotationState(channelId)?.toFfi()
+                ?: channelRotationStateAfterRotation(System.currentTimeMillis().toULong())
+                    .also { seeded -> state.saveRotationState(channelId, seeded.toStored()) },
+        )
     }
-    var lastRotatedAtMs by remember(channelId) { mutableStateOf<Long?>(null) }
+    var lastRotatedAtMs by remember(channelId) {
+        mutableStateOf(cronState.lastRotationMs.takeIf { it > 0uL }?.toLong())
+    }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
+    /** Persist + adopt a new heartbeat state. */
+    fun adoptState(next: ChannelRotationState) {
+        cronState = next
+        state.saveRotationState(channelId, next.toStored())
+    }
+
     // The rotation heartbeat, armed once the publisher handle is open,
-    // cancelled when this card leaves the composition.
-    LaunchedEffect(identity, publisherGroup) {
-        val id = identity ?: return@LaunchedEffect
+    // cancelled when this card leaves the composition. One pass at once, then
+    // one per interval, the [RotationCron.start] cadence — driven here rather
+    // than by `start` so each pass runs on the shared identity and a landed
+    // rotation is snapshotted before the next tick.
+    LaunchedEffect(publisher, publisherGroup) {
+        val pub = publisher ?: return@LaunchedEffect
         val pg = publisherGroup ?: return@LaunchedEffect
-        val job = RotationCron(
-            publisherGroup = pg,
-            identity = id,
-            channelIdHex = channelId,
-            channelsClient = client,
-            saveState = { next -> cronState = next },
-            onRotated = { _ ->
-                lastRotatedAtMs = System.currentTimeMillis()
-                scope.launch { afterRotate() }
-            },
-        ).start(
-            scope = scope,
-            policy = policy,
-            loadState = { cronState },
-            onError = { e ->
+        while (true) {
+            try {
+                val result = pub.withIdentity(persist = false) { id ->
+                    RotationCron(
+                        publisherGroup = pg,
+                        identity = id,
+                        channelIdHex = channelId,
+                        channelsClient = client,
+                        saveState = { next -> adoptState(next) },
+                    ).runOnce(
+                        policy = policy,
+                        state = cronState,
+                        nowMs = System.currentTimeMillis().toULong(),
+                    )
+                }
+                if (result.rotated) {
+                    pub.persist()
+                    lastRotatedAtMs = System.currentTimeMillis()
+                    afterRotate()
+                }
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (e: Throwable) {
                 Log.w(TAG, "scheduled rotation failed", e)
                 error = "Could not rotate the keys. It will be retried."
-            },
-        )
-        try {
-            kotlinx.coroutines.awaitCancellation()
-        } finally {
-            job.cancel()
+            }
+            delay(ROTATION_HEARTBEAT_MS)
         }
     }
 
@@ -1749,31 +1802,33 @@ private fun KeysCard(
         )
         OutlinedButton(
             onClick = {
-                val id = identity
+                val pub = publisher
                 val pg = publisherGroup
-                if (busy || id == null || pg == null) return@OutlinedButton
+                if (busy || pub == null || pg == null) return@OutlinedButton
                 busy = true
                 error = null
                 scope.launch {
                     try {
-                        val cron = RotationCron(
-                            publisherGroup = pg,
-                            identity = id,
-                            channelIdHex = channelId,
-                            channelsClient = client,
-                            saveState = { next -> cronState = next },
-                        )
                         // A genesis {0,0} state makes the policy fire against
                         // any real wall-clock now; runOnce rotates + reseals
                         // every subscriber atomically and returns the fresh
                         // after-rotation state adopted as the new baseline.
-                        val result = cron.runOnce(
-                            policy = policy,
-                            state = ChannelRotationState(lastRotationMs = 0uL, postsSinceRotation = 0u),
-                            nowMs = System.currentTimeMillis().toULong(),
-                        )
-                        cronState = result.newState
+                        val result = pub.withIdentity(persist = false) { id ->
+                            RotationCron(
+                                publisherGroup = pg,
+                                identity = id,
+                                channelIdHex = channelId,
+                                channelsClient = client,
+                                saveState = { next -> adoptState(next) },
+                            ).runOnce(
+                                policy = policy,
+                                state = ChannelRotationState(lastRotationMs = 0uL, postsSinceRotation = 0u),
+                                nowMs = System.currentTimeMillis().toULong(),
+                            )
+                        }
+                        adoptState(result.newState)
                         if (result.rotated) {
+                            pub.persist()
                             lastRotatedAtMs = System.currentTimeMillis()
                             afterRotate()
                         }
@@ -1793,6 +1848,15 @@ private fun KeysCard(
     }
 }
 
+/** The scheduled rotation check cadence — the [RotationCron.start] default. */
+private const val ROTATION_HEARTBEAT_MS: Long = 5L * 60L * 1_000L
+
+private fun StoredRotationState.toFfi(): ChannelRotationState =
+    ChannelRotationState(lastRotationMs = lastRotationMs, postsSinceRotation = postsSinceRotation)
+
+private fun ChannelRotationState.toStored(): StoredRotationState =
+    StoredRotationState(lastRotationMs = lastRotationMs, postsSinceRotation = postsSinceRotation)
+
 // ============================================================================
 // Join as co-publisher (ADR-0028 OQ3, joiner side)
 // ============================================================================
@@ -1804,7 +1868,6 @@ private fun KeysCard(
 @Composable
 public fun JoinCoPublisherScreen(
     state: ChannelsUiState,
-    accountIdentitySeed: ByteArray,
     onBack: () -> Unit,
     onJoined: (channelId: String) -> Unit,
 ) {
@@ -1854,24 +1917,37 @@ public fun JoinCoPublisherScreen(
                     status = "Sending your request..."
                     scope.launch {
                         try {
-                            val identity = Identity.fromSeed(accountIdentitySeed)
-                            val request = CoPublisher.requestToCoPublish(ds, identity, trimmed)
+                            val publisher = state.publisher
+                                ?: throw IllegalStateException("channel publisher identity not available")
+                            // The request mints a KeyPackage whose private keys
+                            // live in the shared identity's provider; the join
+                            // below must run on the SAME identity, and the
+                            // joined group is persisted with it.
+                            val request = publisher.withIdentity { identity ->
+                                CoPublisher.requestToCoPublish(ds, identity, trimmed)
+                            }
                             status = "Waiting for the channel owner to approve..."
                             var keys: ChannelPublisherKeys? = null
                             var attempts = 0
                             while (keys == null && attempts < 60) {
-                                keys = CoPublisher.pollForCoPublishWelcome(
-                                    ds,
-                                    identity,
-                                    request.groupId,
-                                    request.joinerKey,
-                                    request.channelIdHex,
-                                    // G-29 — reuse the persisted signing seed on a re-poll.
-                                    state.persistedPublisherSigningSeed(request.channelIdHex),
-                                )
+                                keys = publisher.withIdentity(persist = false) { identity ->
+                                    CoPublisher.pollForCoPublishWelcome(
+                                        ds,
+                                        identity,
+                                        request.groupId,
+                                        request.joinerKey,
+                                        request.channelIdHex,
+                                        // G-29 — reuse the persisted signing seed on a re-poll.
+                                        state.persistedPublisherSigningSeed(request.channelIdHex),
+                                    )
+                                }
                                 if (keys == null) {
                                     delay(3_000L)
                                     attempts += 1
+                                } else {
+                                    // Joined: the PublisherGroup now lives in the
+                                    // provider at the post-approve epoch.
+                                    publisher.persist()
                                 }
                             }
                             val resolved = keys

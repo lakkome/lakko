@@ -26,7 +26,11 @@ import SwiftUI
 // MARK: - ChannelsRootScreen
 
 public struct ChannelsRootScreen: View {
-    @StateObject private var state = ChannelsUiState()
+    /// Bound to the session account at construction, so the persisted channel
+    /// list and publisher keys are loaded before the first body evaluation
+    /// (`@StateObject` evaluates the autoclosure once per view identity, and
+    /// `SessionRoot` re-identifies the tree per account).
+    @StateObject private var state: ChannelsUiState
     private let client: ChannelsClient
     /// ADR-0017: the 64-byte canonical AccountIdentity (phrase) seed for the
     /// current session. `NewChannelScreen.create` rebuilds a transient
@@ -40,11 +44,15 @@ public struct ChannelsRootScreen: View {
     /// refresh is picked up without rebuilding the view.
     private let sessionTokenProvider: () -> String?
 
+    /// `accountIdB64` selects the per-account channel log
+    /// (``ChannelLogStore``) the state loads from and writes through to.
     public init(
         client: ChannelsClient = ChannelsClient(),
+        accountIdB64: String,
         accountIdentitySeed: Data,
         sessionTokenProvider: @escaping () -> String? = { nil }
     ) {
+        self._state = StateObject(wrappedValue: ChannelsUiState(accountIdB64: accountIdB64))
         self.client = client
         self.accountIdentitySeed = accountIdentitySeed
         self.sessionTokenProvider = sessionTokenProvider

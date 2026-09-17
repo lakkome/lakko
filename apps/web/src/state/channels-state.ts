@@ -5,29 +5,46 @@
  * Channels client-side state — Phase 4 G4-2.
  *
  * Stores the user's local channel list (display names +
- * descriptions are NEVER sent to the server — they live
- * only in this in-memory state and, in a future sprint,
- * an encrypted-at-rest device-group-keyed sqlite cache).
+ * descriptions are NEVER sent to the server), the reader-side
+ * keys + recovered seeds, and the publisher keys of the channels
+ * this device posts to. All of it persists per account in the
+ * encrypted `channel-log-store.ts` blob (device-root-key AES-GCM
+ * in IndexedDB) and is hydrated once per session by
+ * `channels/ChannelsHydration.tsx`; every mutation below writes
+ * through (coalesced, serialised).
  *
- * The server-side state (posts, subscribers, current
- * epoch) is fetched lazily via `apps/web/src/channels/api.ts`
- * and cached here keyed by channel id.
+ * The server-side state (posts, subscribers, current epoch) is
+ * fetched lazily via `apps/web/src/channels/api.ts` and cached
+ * here keyed by channel id; it is not persisted.
+ *
+ * ## The PublisherGroup lives in the ACCOUNT identity's provider
+ *
+ * The channel content seed is an MLS exporter over a persistent
+ * `PublisherGroup` — persistent in the OpenMLS provider of whichever
+ * `Identity` created it. Every web call site used to build a
+ * throwaway `Identity.fromSeed(...)` and free it, so the group (and
+ * with it the seed every subscriber holds) was re-minted on the next
+ * open. The channel paths now use the session-long account identity
+ * (`useChats().accountIdentity()`), and every flush of this store
+ * captures that identity's `snapshotStorage()` into the blob; the
+ * hydration restores it before re-opening any publisher keys.
  */
 
 import { createSignal, type Accessor } from "solid-js";
 
-import {
-  bytesToHex,
-  type ChannelPublisherKeys,
-  type ChannelSubscriberKeys,
-} from "../channels/composer";
+import type { ChannelPublisherKeys, ChannelSubscriberKeys, WasmIdentity } from "../channels/composer";
 import type { ChannelHandle, ChannelPostView } from "../channels/api";
 import {
-  clearAllCounters,
-  issueAndAdvance,
-  loadAllCounters,
-  seedCounter,
-} from "../channels/publish-counter-store";
+  decodeChannelLog,
+  emptyChannelLogSnapshot,
+  encodeChannelLog,
+  type ChannelLogSnapshot,
+} from "../channels/channel-log-codec";
+import { deleteChannelLog, loadChannelLog, saveChannelLog } from "../channels/channel-log-store";
+import { channelIdFromHex } from "../channels/composer";
+import { issueAndAdvance, loadAllCounters, seedCounter } from "../channels/publish-counter-store";
+import { base64Encode } from "../auth/account-id";
+import { loadWasm } from "../wasm";
 
 interface ChannelsStateInternal {
   /** User's local channel list, ordered by `addedAtMs`
@@ -46,7 +63,9 @@ interface ChannelsStateInternal {
    *  to the server. Holds the content-key seed + Ed25519
    *  signing-key seed the WASM composer needs. Present
    *  only on channels where the local user is a
-   *  publisher. */
+   *  publisher. The signing seed is persisted; the content
+   *  seed is re-derived at hydration from the restored
+   *  PublisherGroup. */
   readonly keysByChannel: Accessor<ReadonlyMap<string, ChannelPublisherKeys>>;
   /** Per-channel monotone publish counter. Bumped on
    *  every successful publish so the next post carries
@@ -62,10 +81,10 @@ interface ChannelsStateInternal {
   readonly counterByChannel: Accessor<ReadonlyMap<string, bigint>>;
   /** Per-channel subscriber-side X25519 keypair the
    *  device generated for joining a channel as a
-   *  reader (Phase 4b G4-3c). Persisted in localStorage
-   *  under the `lakko.channels.subscriber-keys.v1` key so
-   *  a page reload does not lose the secret half (and
-   *  with it, access to undecoded posts on the channel). */
+   *  reader (Phase 4b G4-3c). Persisted in the encrypted
+   *  channel log so a page reload does not lose the secret
+   *  half (and with it, access to undecoded posts on the
+   *  channel). */
   readonly subscriberKeysByChannel: Accessor<
     ReadonlyMap<string, ChannelSubscriberKeys>
   >;
@@ -79,23 +98,24 @@ interface ChannelsStateInternal {
    *  shows a "waiting for seed delivery" state; a post
    *  whose epoch has no seed renders as an unreadable
    *  placeholder and is NEVER force-decrypted with a
-   *  wrong-epoch seed (invariant #4). In-memory only —
-   *  never persisted, never sent off-device. */
+   *  wrong-epoch seed (invariant #4). Persisted in the
+   *  encrypted channel log; never sent off-device. */
   readonly subscribedSeedsByChannel: Accessor<
     ReadonlyMap<string, ReadonlyMap<number, Uint8Array>>
   >;
+  /** `true` once the per-account hydration has settled for
+   *  the current session (whether or not a row existed).
+   *  Routes that mint keys on mount await
+   *  `awaitChannelsHydration()` so they do not race a
+   *  reload's restore. */
+  readonly hydrated: Accessor<boolean>;
 }
 
-// Declared ABOVE the signals on purpose. `subscriberKeysByChannel` below is
-// initialised at module evaluation by calling `loadSubscriberKeysFromStorage()`,
-// and while that function declaration is hoisted, this `const` is not: declared
-// further down (where it used to live, beside the storage helpers) it is still
-// in its temporal dead zone when the initialiser reads it, so importing this
-// module threw `ReferenceError: Cannot access 'STORAGE_KEY' before
-// initialization` -- and `routes/routes.tsx` imports it eagerly, so the whole
-// web app rendered a blank page. vitest never saw it: its `node` environment
-// has no `localStorage`, and the function returns before reading the key.
-const STORAGE_KEY = "lakko.channels.subscriber-keys.v1";
+/** Plaintext `localStorage` key the subscriber keypairs used to live
+ *  under. Removed on hydration — nothing is deployed to users, so the
+ *  old value is not migrated, only wiped so a plaintext secret does
+ *  not linger. */
+const LEGACY_SUBSCRIBER_KEYS_STORAGE_KEY = "lakko.channels.subscriber-keys.v1";
 
 const [channels, setChannels] = createSignal<ReadonlyArray<ChannelHandle>>([]);
 const [postsByChannel, setPostsByChannel] = createSignal<
@@ -112,10 +132,11 @@ const [counterByChannel, setCounterByChannel] = createSignal<
 >(loadAllCounters());
 const [subscriberKeysByChannel, setSubscriberKeysByChannel] = createSignal<
   ReadonlyMap<string, ChannelSubscriberKeys>
->(loadSubscriberKeysFromStorage());
+>(new Map());
 const [subscribedSeedsByChannel, setSubscribedSeedsByChannel] = createSignal<
   ReadonlyMap<string, ReadonlyMap<number, Uint8Array>>
 >(new Map());
+const [hydrated, setHydrated] = createSignal(false);
 
 export const channelsState: ChannelsStateInternal = {
   channels,
@@ -125,7 +146,301 @@ export const channelsState: ChannelsStateInternal = {
   counterByChannel,
   subscriberKeysByChannel,
   subscribedSeedsByChannel,
+  hydrated,
 };
+
+// ---------------------------------------------------------
+// Persistence sink
+// ---------------------------------------------------------
+
+/** What a flush needs: where to write, the wrap key, and a way to read
+ *  the account identity's provider snapshot at flush time. */
+interface PersistSink {
+  readonly accountIdB64: string;
+  readonly deviceKey: CryptoKey;
+  /** `Identity.snapshotStorage()` of the account identity, or `null`
+   *  when it is not available (logged out mid-flush). */
+  readonly snapshotProvider: () => Uint8Array | null;
+  /** base64 of the account identity's signature public key. */
+  readonly leafKeyB64: string;
+}
+
+let sink: PersistSink | null = null;
+/** The last provider snapshot this session captured or restored. Reused
+ *  when `snapshotProvider` yields `null` so a flush that races a logout
+ *  never overwrites a good snapshot with nothing. */
+let lastProviderSnapshot: Uint8Array | null = null;
+let lastProviderLeafKeyB64: string | null = null;
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+let flushChain: Promise<void> = Promise.resolve();
+/** Debounce window for coalescing a burst of mutations into one write. */
+const FLUSH_DELAY_MS = 150;
+
+/** Capture the persisted view of the in-memory state, synchronously. */
+function currentSnapshot(s: PersistSink): ChannelLogSnapshot {
+  const signing = new Map<string, Uint8Array>();
+  for (const [id, k] of keysByChannel()) signing.set(id, k.signingKeySeed);
+  const provider = s.snapshotProvider();
+  if (provider !== null) {
+    lastProviderSnapshot = provider;
+    lastProviderLeafKeyB64 = s.leafKeyB64;
+  }
+  return {
+    channels: channels(),
+    subscriberKeys: subscriberKeysByChannel(),
+    subscribedSeeds: subscribedSeedsByChannel(),
+    publisherSigningSeeds: signing,
+    publisherProviderSnapshot: lastProviderSnapshot,
+    publisherLeafKeyB64: lastProviderSnapshot === null ? null : lastProviderLeafKeyB64,
+  };
+}
+
+/** Write the current state now (serialised behind any in-flight write).
+ *  The snapshot is taken synchronously at call time. */
+function flushNow(): Promise<void> {
+  const s = sink;
+  if (s === null) return Promise.resolve();
+  const payload = encodeChannelLog(currentSnapshot(s));
+  const run = flushChain.then(() => saveChannelLog(s.accountIdB64, s.deviceKey, payload));
+  flushChain = run.catch((err: unknown) => {
+    // eslint-disable-next-line no-console
+    console.warn("channel log persist failed", err);
+  });
+  return flushChain;
+}
+
+/** Coalesce mutations into one write per `FLUSH_DELAY_MS`. No-op until
+ *  the hydration arms the sink — mutations before that are picked up by
+ *  the hydration's own merge + write. */
+function schedulePersist(): void {
+  if (sink === null || flushTimer !== null) return;
+  flushTimer = setTimeout(() => {
+    flushTimer = null;
+    void flushNow();
+  }, FLUSH_DELAY_MS);
+}
+
+/** Flush a pending debounced write immediately, if any. */
+function flushPending(): Promise<void> {
+  if (flushTimer === null) return Promise.resolve();
+  clearTimeout(flushTimer);
+  flushTimer = null;
+  return flushNow();
+}
+
+// ---------------------------------------------------------
+// Hydration
+// ---------------------------------------------------------
+
+let hydrationWaiters: Array<() => void> = [];
+
+/** Resolves once the current session's hydration has settled (or at
+ *  once when it already has). */
+export function awaitChannelsHydration(): Promise<void> {
+  if (hydrated()) return Promise.resolve();
+  return new Promise((resolve) => {
+    hydrationWaiters.push(resolve);
+  });
+}
+
+function settleHydration(): void {
+  setHydrated(true);
+  const waiters = hydrationWaiters;
+  hydrationWaiters = [];
+  for (const w of waiters) w();
+}
+
+export interface HydrateChannelsArgs {
+  readonly accountIdB64: string;
+  readonly deviceKey: CryptoKey;
+  /** The session-long ACCOUNT identity the PublisherGroups live in.
+   *  Its provider is restored from the blob and re-snapshotted on every
+   *  flush; it must be the same instance the channel routes use. */
+  readonly identity: WasmIdentity;
+  /** Reads the account identity's provider at flush time; `null` when
+   *  the session has ended. Defaults to snapshotting `identity`. */
+  readonly snapshotProvider?: () => Uint8Array | null;
+  /** `false` once the session this hydration belongs to has ended (a
+   *  logout / account switch during the load). A stale hydration must
+   *  not arm write-through for the old account, or its late flush would
+   *  put the new session's (empty) state under the old account's row.
+   *  Defaults to always current. */
+  readonly isCurrent?: () => boolean;
+}
+
+/**
+ * Load the per-account channel log, restore the PublisherGroup provider
+ * into `identity`, fill the in-memory state and arm write-through.
+ *
+ * Merges rather than replaces: a mutation that landed before this
+ * settled (in-memory) wins over the stored row on the same id, and the
+ * union is written back. For every persisted signing seed the publisher
+ * keys are re-opened via `PublisherGroup.load` — never `openOrCreate`:
+ * if the restored provider does not hold the group, creating one would
+ * silently fork the channel onto a seed no subscriber has, so the seed
+ * is dropped and the channel shows as not publishable instead.
+ *
+ * Never throws; a failure logs and settles the hydration so routes do
+ * not hang on `awaitChannelsHydration()`.
+ */
+export async function hydrateChannelsState(args: HydrateChannelsArgs): Promise<void> {
+  const leafKeyB64 = base64Encode(args.identity.signaturePublicKey);
+  let stored: ChannelLogSnapshot = emptyChannelLogSnapshot();
+  try {
+    const payload = await loadChannelLog(args.accountIdB64, args.deviceKey);
+    const decoded = payload === null ? null : decodeChannelLog(payload);
+    if (decoded !== null) stored = decoded;
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("channel log load failed; starting empty", err);
+  }
+
+  // 1. The provider snapshot, gated on the leaf key (mirrors
+  //    `chat/rehydrate.ts`): a snapshot from another account identity
+  //    holds groups this key did not sign for, and `restoreStorage`
+  //    replaces the whole provider.
+  let providerRestored = false;
+  if (stored.publisherProviderSnapshot !== null) {
+    if (stored.publisherLeafKeyB64 !== leafKeyB64) {
+      // eslint-disable-next-line no-console
+      console.warn("channel log: provider snapshot belongs to another identity; dropped");
+    } else {
+      // Keep the stored bytes as the best-known snapshot whether or not
+      // the restore succeeds: a later flush that cannot read the provider
+      // must re-write THESE, never `null` over them.
+      lastProviderSnapshot = stored.publisherProviderSnapshot;
+      lastProviderLeafKeyB64 = leafKeyB64;
+      try {
+        args.identity.restoreStorage(stored.publisherProviderSnapshot);
+        providerRestored = true;
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("channel log: provider snapshot restore failed; publisher keys not re-opened", err);
+      }
+    }
+  }
+
+  // 2. Merge the plain sections (in-memory wins on a clash).
+  const mem = channels();
+  const memIds = new Set(mem.map((c) => c.id));
+  const mergedChannels = [...mem, ...stored.channels.filter((c) => !memIds.has(c.id))].sort(
+    (a, b) => b.addedAtMs - a.addedAtMs,
+  );
+  setChannels(mergedChannels);
+  setSubscriberKeysByChannel((map) => new Map([...stored.subscriberKeys, ...map]));
+  setSubscribedSeedsByChannel((map) => {
+    const next = new Map<string, ReadonlyMap<number, Uint8Array>>(stored.subscribedSeeds);
+    for (const [id, inner] of map) {
+      next.set(id, new Map([...(next.get(id) ?? []), ...inner]));
+    }
+    return next;
+  });
+
+  // 3. Publisher keys: re-derive the content seed from the restored group.
+  if (providerRestored && stored.publisherSigningSeeds.size > 0) {
+    try {
+      const wasm = await loadWasm();
+      for (const [id, signingKeySeed] of stored.publisherSigningSeeds) {
+        if (keysByChannel().has(id)) continue;
+        try {
+          const group = wasm.PublisherGroup.load(args.identity, channelIdFromHex(id));
+          if (group === undefined) {
+            // eslint-disable-next-line no-console
+            console.warn(`channel ${id}: publisher group missing from the restored provider`);
+            continue;
+          }
+          let seed: Uint8Array;
+          try {
+            seed = group.channelSeed(args.identity);
+          } finally {
+            group.free();
+          }
+          channelsActions.setKeys(id, { seed, signingKeySeed });
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn(`channel ${id}: could not re-open publisher keys`, err);
+        }
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("channel log: wasm unavailable; publisher keys not re-opened", err);
+    }
+  }
+
+  // 4. The plaintext localStorage row the subscriber keys used to live in.
+  try {
+    localStorage.removeItem(LEGACY_SUBSCRIBER_KEYS_STORAGE_KEY);
+  } catch {
+    // no localStorage (tests) or blocked storage — nothing to wipe
+  }
+
+  // 5. Arm write-through and settle. Write back once so the merged view
+  //    (and a fresh provider snapshot) is on disk. A hydration whose
+  //    session ended while it was loading arms nothing and writes nothing;
+  //    it only releases anyone still waiting on it.
+  if (args.isCurrent !== undefined && !args.isCurrent()) {
+    const waiters = hydrationWaiters;
+    hydrationWaiters = [];
+    for (const w of waiters) w();
+    return;
+  }
+  sink = {
+    accountIdB64: args.accountIdB64,
+    deviceKey: args.deviceKey,
+    snapshotProvider: args.snapshotProvider ?? ((): Uint8Array => args.identity.snapshotStorage()),
+    leafKeyB64,
+  };
+  settleHydration();
+  await flushNow();
+}
+
+/**
+ * Mark the hydration settled without loading anything — the session has
+ * no device key (or no account identity), so there is nothing to read or
+ * write. Routes awaiting the hydration proceed with in-memory state.
+ */
+export function markChannelsHydrationUnavailable(): void {
+  sink = null;
+  settleHydration();
+}
+
+/**
+ * Drop the in-memory channel state for the session that just ended
+ * (logout, account switch). Flushes a pending write first so the last
+ * mutation lands. Leaves the encrypted row AND the publish counters on
+ * disk: the row is per account and unreadable without the device key,
+ * and a publish counter must never rewind under a live seed.
+ */
+export function clearChannelsSession(): Promise<void> {
+  const pending = flushPending();
+  sink = null;
+  lastProviderSnapshot = null;
+  lastProviderLeafKeyB64 = null;
+  setChannels([]);
+  setPostsByChannel(new Map());
+  setEpochByChannel(new Map());
+  setKeysByChannel(new Map());
+  setSubscriberKeysByChannel(new Map());
+  setSubscribedSeedsByChannel(new Map());
+  setHydrated(false);
+  return pending;
+}
+
+/**
+ * The `forgetDevice` half: drop the in-memory state AND the account's
+ * encrypted row. The publish counters (`publish-counter-store.ts`) are
+ * deliberately left: they are keyed by channel id, not account, so
+ * wiping them could rewind another account's counter on this browser,
+ * and a counter that is too high is always safe.
+ */
+export async function wipeChannelsForAccount(accountIdB64: string): Promise<void> {
+  await clearChannelsSession();
+  await deleteChannelLog(accountIdB64);
+}
+
+// ---------------------------------------------------------
+// Actions
+// ---------------------------------------------------------
 
 export const channelsActions = {
   /** Add a freshly-created or freshly-subscribed channel
@@ -137,6 +452,7 @@ export const channelsActions = {
       const without = list.filter((c) => c.id !== handle.id);
       return [handle, ...without];
     });
+    schedulePersist();
   },
   /** Remove a channel from the local list. The server-
    *  side registry is unaffected — this is purely the
@@ -160,15 +476,17 @@ export const channelsActions = {
     });
     // Clear only the in-memory counter — the PERSISTED floor is
     // deliberately kept. Un-follow does NOT destroy the PublisherGroup
-    // (the seed source persists in the OpenMLS provider), so re-joining
-    // the same channel later re-derives the SAME seed; the counter must
-    // resume, not rewind to 0, or the AEAD `(key, nonce)` reuses.
-    // `setKeys` re-seeds the in-memory value from the persisted floor.
+    // (the seed source persists in the account identity's provider), so
+    // re-joining the same channel later re-derives the SAME seed; the
+    // counter must resume, not rewind to 0, or the AEAD `(key, nonce)`
+    // reuses. `setKeys` re-seeds the in-memory value from the persisted
+    // floor.
     setCounterByChannel((map) => {
       const next = new Map(map);
       next.delete(channelId);
       return next;
     });
+    schedulePersist();
   },
   /** Replace the local name / description for a channel.
    *  No-op if the channel id is unknown. */
@@ -179,6 +497,7 @@ export const channelsActions = {
     setChannels((list) =>
       list.map((c) => (c.id === channelId ? { ...c, ...patch } : c)),
     );
+    schedulePersist();
   },
   /** Replace the post cache for a channel after a fetch. */
   setPosts(channelId: string, posts: ReadonlyArray<ChannelPostView>): void {
@@ -196,7 +515,7 @@ export const channelsActions = {
       return next;
     });
   },
-  /** Install fresh publisher keys for a channel. Seeds the
+  /** Install publisher keys for a channel. Seeds the
    *  publish counter LOAD-ELSE-0: a genuinely new channel
    *  (no in-memory and no persisted counter) starts at 0;
    *  an existing channel keeps its floor. It must NOT clobber
@@ -207,7 +526,8 @@ export const channelsActions = {
    *  the same seed + epoch (catastrophic keystream reuse).
    *  Mirrors the publisher-seed reuse-else-generate pattern.
    *  `nextCounter` owns the write-through; `setKeys` only
-   *  seeds the in-memory value. */
+   *  seeds the in-memory value. Persists the signing seed
+   *  and a fresh provider snapshot. */
   setKeys(channelId: string, keys: ChannelPublisherKeys): void {
     setKeysByChannel((map) => {
       const next = new Map(map);
@@ -219,6 +539,7 @@ export const channelsActions = {
       next.set(channelId, seedCounter(map.get(channelId), channelId));
       return next;
     });
+    schedulePersist();
   },
   /** Atomically bump the publish counter for a channel
    *  and return the value the publisher should use for
@@ -249,26 +570,24 @@ export const channelsActions = {
   },
   /** Install / replace the subscriber-side X25519 keypair
    *  the device generated when joining `channelId` as a
-   *  reader. Also persists to localStorage so a reload
-   *  does not strand the user without the secret needed
-   *  to open future envelopes. */
+   *  reader. Persisted so a reload does not strand the user
+   *  without the secret needed to open future envelopes. */
   setSubscriberKeys(channelId: string, keys: ChannelSubscriberKeys): void {
     setSubscriberKeysByChannel((map) => {
       const next = new Map(map);
       next.set(channelId, keys);
-      persistSubscriberKeys(next);
       return next;
     });
+    schedulePersist();
   },
   /** Forget the subscriber-side keypair for `channelId` —
-   *  used on un-follow. Clears the recovered seed too,
-   *  since it was only useful while the device had the
+   *  used on un-follow. Clears the recovered seeds too,
+   *  since they were only useful while the device had the
    *  matching secret half. */
   clearSubscriberKeys(channelId: string): void {
     setSubscriberKeysByChannel((map) => {
       const next = new Map(map);
       next.delete(channelId);
-      persistSubscriberKeys(next);
       return next;
     });
     setSubscribedSeedsByChannel((map) => {
@@ -276,12 +595,13 @@ export const channelsActions = {
       next.delete(channelId);
       return next;
     });
+    schedulePersist();
   },
   /** Record the recovered content-key seed for a specific
    *  epoch after the subscriber opened that epoch's seed
    *  envelope (ADR-0031 multi-epoch retention). Idempotent
-   *  per `(channelId, epoch)`. In-memory only — never
-   *  persisted, never sent off-device. */
+   *  per `(channelId, epoch)`. Persisted; never sent
+   *  off-device. */
   setSubscribedSeedForEpoch(
     channelId: string,
     epoch: number,
@@ -294,6 +614,7 @@ export const channelsActions = {
       next.set(channelId, inner);
       return next;
     });
+    schedulePersist();
   },
   /** Look up the recovered seed for a channel. With an
    *  `epoch` returns the seed for exactly that epoch (used
@@ -311,103 +632,12 @@ export const channelsActions = {
     }
     return bestEpoch === undefined ? undefined : inner.get(bestEpoch);
   },
-  /** Wipe everything — the full-account-wipe path. Drops
-   *  subscriber keypairs AND the persisted publish counters
-   *  from localStorage.
-   *
-   *  SAFETY: dropping the persisted counters is correct ONLY
-   *  when the PublisherGroup seed source is also destroyed —
-   *  i.e. a full device wipe (`forgetDevice`) that clears the
-   *  OpenMLS provider. It must NOT be wired to a soft
-   *  `logout()` that leaves the PublisherGroup intact, or a
-   *  later re-login would re-derive the same channel seed with
-   *  a counter rewound to 0 and re-use an AEAD `(key, nonce)`.
-   *  (`reset()` currently has no callers.) */
-  reset(): void {
-    setChannels([]);
-    setPostsByChannel(new Map());
-    setEpochByChannel(new Map());
-    setKeysByChannel(new Map());
-    setCounterByChannel(new Map());
-    setSubscriberKeysByChannel(new Map());
-    setSubscribedSeedsByChannel(new Map());
-    persistSubscriberKeys(new Map());
-    clearAllCounters();
+  /** The account identity's MLS provider changed outside this
+   *  store's own mutations — a PublisherGroup commit (co-publisher
+   *  approve, an applied incoming commit, a rotation) or an
+   *  external-join KeyPackage minted for a co-publisher request.
+   *  Schedules a flush so the next snapshot carries it. */
+  notePublisherGroupChanged(): void {
+    schedulePersist();
   },
 };
-
-// ---------------------------------------------------------
-// localStorage persistence (subscriber keypairs only)
-// ---------------------------------------------------------
-//
-// Publisher keys live in `keysByChannel` and are NOT
-// persisted to localStorage yet — they will move into the
-// encrypted-at-rest device-group-keyed sqlite cache in a
-// follow-up storage sprint. Subscriber keys are persisted
-// in the meantime because losing the secret half between
-// reloads means losing access to every future post on the
-// channel; the device-group cache rule still applies and
-// the production rewrite will migrate this localStorage
-// key into the same store.
-
-interface PersistedSubscriberKey {
-  readonly channelId: string;
-  /** Hex-encoded 32-byte X25519 secret. */
-  readonly secretHex: string;
-  /** Hex-encoded 32-byte X25519 public. */
-  readonly publicHex: string;
-}
-
-function loadSubscriberKeysFromStorage(): ReadonlyMap<
-  string,
-  ChannelSubscriberKeys
-> {
-  if (typeof localStorage === "undefined") {
-    return new Map();
-  }
-  const raw = localStorage.getItem(STORAGE_KEY);
-  if (raw === null) {
-    return new Map();
-  }
-  try {
-    const arr = JSON.parse(raw) as ReadonlyArray<PersistedSubscriberKey>;
-    const out = new Map<string, ChannelSubscriberKeys>();
-    for (const entry of arr) {
-      out.set(entry.channelId, {
-        secret: hexToBytes(entry.secretHex),
-        public: hexToBytes(entry.publicHex),
-      });
-    }
-    return out;
-  } catch {
-    // Corrupt JSON — drop the store rather than crashing
-    // the app. The user can re-subscribe; the worst case is
-    // they get stale envelopes from earlier rotations that
-    // they can no longer open.
-    return new Map();
-  }
-}
-
-function persistSubscriberKeys(
-  map: ReadonlyMap<string, ChannelSubscriberKeys>,
-): void {
-  if (typeof localStorage === "undefined") {
-    return;
-  }
-  const arr: ReadonlyArray<PersistedSubscriberKey> = Array.from(
-    map.entries(),
-  ).map(([channelId, k]) => ({
-    channelId,
-    secretHex: bytesToHex(k.secret),
-    publicHex: bytesToHex(k.public),
-  }));
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(arr));
-}
-
-function hexToBytes(hex: string): Uint8Array {
-  const out = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < out.length; i += 1) {
-    out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
-  return out;
-}

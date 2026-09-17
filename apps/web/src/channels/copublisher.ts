@@ -263,6 +263,7 @@ export async function pollForCoPublishWelcome(
   groupId: Uint8Array,
   joinerKey: Uint8Array,
   channelIdHex: string,
+  existingSigningSeed?: Uint8Array,
 ): Promise<ChannelPublisherKeys | null> {
   const wasm = await loadWasm();
   const raw = await ds.fetchGroup(groupId, { after: 0, waitSecs: 0 });
@@ -272,9 +273,10 @@ export async function pollForCoPublishWelcome(
       const group = wasm.Group.joinFromWelcome(welcome, identity);
       group.free();
       // Now an MLS member of the PublisherGroup — `freshPublisherKeys` opens the
-      // (now-joined) group, derives the shared content-key seed, and mints a
-      // fresh per-device signing key so this device can publish.
-      return await freshPublisherKeys(identity, channelIdHex);
+      // (now-joined) group, derives the shared content-key seed, and reuses the
+      // persisted per-device signing seed (or mints one) so this device can
+      // publish.
+      return await freshPublisherKeys(identity, channelIdHex, existingSigningSeed);
     }
   }
   return null;

@@ -130,6 +130,7 @@ import { clearLeaveRequestedForAccount } from "../chat/membership-ended";
 import { clearRemovedDevicesForAccount } from "../chat/device-readmission";
 import { clearBeaconObservationsForAccount } from "../chat/committer-beacon";
 import { deleteMessageLog } from "../chat/message-log-store";
+import { wipeChannelsForAccount } from "../state/channels-state";
 import { clearConversationKinds } from "../chat/conversation-kind-store";
 import { deleteProfileRow } from "../profile/profile-idb";
 import { clearOwnProfile } from "../profile/own-profile";
@@ -3199,6 +3200,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // the same account_id.
         try {
           await deleteMessageLog(cached.accountIdB64);
+        } catch {
+          // best-effort
+        }
+        // The encrypted channel log (channel list, subscriber keys + seeds,
+        // publisher signing seeds, the PublisherGroup provider snapshot):
+        // same rationale as the message log. The in-memory channel state
+        // goes with it; the publish counters stay (see the function's doc).
+        try {
+          await wipeChannelsForAccount(cached.accountIdB64);
         } catch {
           // best-effort
         }

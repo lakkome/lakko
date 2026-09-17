@@ -29,6 +29,7 @@ import type { PublisherGroupHandle } from "./publisher-group-handle";
 import { membershipRefusalOf } from "../chat/membership-refusal";
 import { membershipRefusalRetryMaySucceed } from "../../wasm/lakko_ffi_wasm";
 import { DsClient } from "../ds/client";
+import { channelsActions } from "../state/channels-state";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 
@@ -59,6 +60,9 @@ export function CoPublishersPanel(props: {
   async function refreshPending(): Promise<void> {
     try {
       await pollCoPublisherJournal(ds, props.identity, props.publisherGroup);
+      // An applied co-publisher commit advanced the group in the account
+      // identity's provider; the channel log snapshots it on the next flush.
+      channelsActions.notePublisherGroupChanged();
       setPending(pendingCoPublishers(props.publisherGroup));
     } catch (err) {
       setError(`Could not check for requests: ${String(err)}`);
@@ -84,6 +88,8 @@ export function CoPublishersPanel(props: {
     setBusy(true);
     try {
       await approveCoPublisher(ds, props.identity, props.publisherGroup, ref, props.channelIdHex);
+      // The Add commit advanced the group (and its exporter); snapshot it.
+      channelsActions.notePublisherGroupChanged();
       setPending(pendingCoPublishers(props.publisherGroup));
     } catch (err) {
       // ADR-0045 UX section 6 — the co-publisher approve reaches the SAME

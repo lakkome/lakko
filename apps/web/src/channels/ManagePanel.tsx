@@ -38,24 +38,30 @@ import { CoPublishersPanel } from "./CoPublishersPanel";
 import { RotationPanel } from "./RotationPanel";
 import { SubscribersPanel } from "./SubscribersPanel";
 import { useAuth } from "../auth/AuthContext";
-import { loadWasm } from "../wasm";
+import { useChats } from "../chat/ChatContext";
+import { awaitChannelsHydration } from "../state/channels-state";
 
 export function ManagePanel(props: { readonly channelIdHex: string }): JSX.Element {
   const auth = useAuth();
+  const chats = useChats();
   const [identity, setIdentity] = createSignal<WasmIdentity | null>(null);
   const [group, setGroup] = createSignal<PublisherGroupHandle | null>(null);
   const [openError, setOpenError] = createSignal<string | null>(null);
 
   onMount(() => {
-    const secrets = auth.identitySecrets();
-    if (secrets === null) {
+    // The SESSION-LONG account identity, not a throwaway `Identity.fromSeed`:
+    // the PublisherGroup lives in this identity's provider, which the channel
+    // log snapshots. This panel borrows the handle and never frees it.
+    const id = chats.accountIdentity();
+    if (auth.identitySecrets() === null || id === null) {
       setOpenError("Sign in again to manage this channel.");
       return;
     }
     void (async (): Promise<void> => {
       try {
-        const wasm = await loadWasm();
-        const id = wasm.Identity.fromSeed(secrets.accountIdentitySeed);
+        // The provider is restored by the hydration; opening before it would
+        // create a second, forked group.
+        await awaitChannelsHydration();
         const pg = await openPublisherGroup(id, props.channelIdHex);
         setIdentity(id);
         setGroup(pg);
@@ -67,17 +73,13 @@ export function ManagePanel(props: { readonly channelIdHex: string }): JSX.Eleme
     })();
   });
 
-  // Own the shared handles' lifetime. The child panels stop their timers on
+  // Own the group handle's lifetime. The child panels stop their timers on
   // their own cleanup (which runs before this parent cleanup), so no
-  // in-flight callback touches a freed handle on unmount.
+  // in-flight callback touches a freed handle on unmount. The identity is
+  // the session's; it is NOT freed here.
   onCleanup(() => {
     try {
       group()?.free();
-    } catch {
-      /* ignore */
-    }
-    try {
-      identity()?.free();
     } catch {
       /* ignore */
     }

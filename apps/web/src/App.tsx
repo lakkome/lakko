@@ -33,6 +33,7 @@ import { AuthProvider } from "./auth/AuthContext";
 import { ChatProvider } from "./chat/ChatContext";
 import { BackgroundReceiveProvider } from "./chat/BackgroundReceiveContext";
 import { CallHostProvider, CallHostView } from "./calls/CallHostContext";
+import { ChannelsHydration } from "./channels/ChannelsHydration";
 import { DeviceGroupSyncProvider } from "./devices/sync/DeviceGroupSyncContext";
 import {
   MailboxJoinFailureBanner,
@@ -114,6 +115,15 @@ const App: Component = () => (
         <CallHostProvider>
         <BackgroundReceiveProvider>
           <Router root={RootLayout}>{routes}</Router>
+          {/*
+           * Per-session hydration of the channel list / subscriber seeds /
+           * publisher keys from the encrypted channel log, and the restore of
+           * the PublisherGroup provider it carries. Whole-session for the
+           * same reason as the receivers above: the list must exist before
+           * the Channels route mounts, and the restore must precede any
+           * PublisherGroup open.
+           */}
+          <ChannelsHydration />
           {/*
            * A Welcome this device could not open. Top level for the same
            * reason as the update banner below: it is received for the whole

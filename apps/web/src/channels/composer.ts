@@ -125,10 +125,24 @@ export interface ChannelPublisherKeys {
  * until step 3 (flagged in the G-27 closeout). See
  * `crates/lakko-mls/src/publisher_group.rs` for the
  * Rust-core invariant + the load-or-create dance.
+ *
+ * "Persisted in the provider" means the provider of THIS
+ * `identity`: pass the session-long account identity
+ * (`useChats().accountIdentity()`), whose provider the channel
+ * log snapshots, not a throwaway `Identity.fromSeed` — a group
+ * created in a throwaway provider dies with it.
+ *
+ * `existingSigningSeed` — the per-channel Ed25519 signing seed
+ * this device persisted on a prior open (mirror of the iOS /
+ * Android `existingSigningSeed`). When supplied and well-formed
+ * the publisher keeps signing under the same key across a
+ * reload; a wrong-length seed falls back to a fresh one rather
+ * than failing the open (the caller re-persists what it gets).
  */
 export async function freshPublisherKeys(
   identity: WasmIdentity,
   channelIdHex: string,
+  existingSigningSeed?: Uint8Array,
 ): Promise<ChannelPublisherKeys> {
   const wasm = await loadWasm();
   const channelId = channelIdFromHex(channelIdHex);
@@ -152,6 +166,17 @@ export async function freshPublisherKeys(
     publisher.free();
   }
 
+  if (existingSigningSeed !== undefined && existingSigningSeed.length === 32) {
+    // Reconstruct rather than trust: a seed the constructor refuses is
+    // treated like an absent one.
+    try {
+      const signer = new wasm.ChannelSigningKey(existingSigningSeed);
+      signer.free();
+      return { seed, signingKeySeed: existingSigningSeed.slice() };
+    } catch {
+      // fall through to a fresh seed
+    }
+  }
   const signer = wasm.ChannelSigningKey.generate();
   const signingKeySeed = signer.toSeed();
   signer.free();

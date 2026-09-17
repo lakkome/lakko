@@ -4,10 +4,13 @@
 package me.lakko.app.channels
 
 import android.content.SharedPreferences
+import android.util.Log
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -39,13 +42,28 @@ import org.json.JSONObject
  * the same Ed25519 key (G-29); `null` disables persistence.
  * The content-key `seed` re-derives from the MLS PublisherGroup
  * on open, so it is not persisted here.
+ *
+ * The channel LIST, the subscriber `epoch -> seed` map and the per-channel
+ * rotation state are persisted per account through [logStore]
+ * ([ChannelLogStore], the same encrypted prefs file) from [bind] on:
+ * write-through on every mutation, loaded on bind. The MLS PublisherGroups
+ * live in [publisher] ([ChannelPublisherIdentity]), whose provider is
+ * snapshotted so a creator's content seed survives a relaunch; [bind]
+ * re-opens the publisher keys of every channel this device has a signing
+ * seed for. `null` for either (the test default) disables that half.
  */
 public class ChannelsUiState(
     private val prefs: SharedPreferences? = null,
     private val publisherPrefs: SharedPreferences? = null,
+    private val logStore: ChannelLogStore? = null,
+    /** The shared, snapshotted publisher identity every owner-side MLS call
+     *  runs on; `null` disables the publisher half (tests). */
+    public val publisher: ChannelPublisherIdentity? = null,
 ) {
 
     public companion object {
+        private const val TAG = "ChannelsUiState"
+
         /** Storage key for subscriber-keypair persistence.
          *  Same name the web + iOS sides use so an
          *  on-device audit grep finds every store at
@@ -121,15 +139,121 @@ public class ChannelsUiState(
     private val _subscribedSeedsByChannel =
         MutableStateFlow<Map<String, Map<UInt, ByteArray>>>(emptyMap())
     /** Per-channel `epoch -> content-key seed` map (Phase 4b
-     *  G4-3c + ADR-0031 multi-epoch retention). In-memory
-     *  only — never persisted, never sent off-device. A
-     *  subscriber that missed a rotation opens the server's
-     *  retained set (up to N=4 epochs) into this map on
-     *  catch-up, then decrypts each post with the seed
-     *  matching ITS `epoch_id`. UI shows a "waiting for seed
-     *  delivery" state until at least one epoch lands here. */
+     *  G4-3c + ADR-0031 multi-epoch retention). Persisted per
+     *  account in the encrypted [logStore] from [bind] on, never
+     *  sent off-device. A subscriber that missed a rotation opens
+     *  the server's retained set (up to N=4 epochs) into this map
+     *  on catch-up, then decrypts each post with the seed matching
+     *  ITS `epoch_id`. UI shows a "waiting for seed delivery" state
+     *  until at least one epoch lands here. */
     public val subscribedSeedsByChannel: StateFlow<Map<String, Map<UInt, ByteArray>>> =
         _subscribedSeedsByChannel.asStateFlow()
+
+    /** The account the list / seeds / rotation state are bound to, or
+     *  `null` before [bind]. Mutations before bind are in-memory only. */
+    @Volatile
+    private var boundAccountIdB64: String? = null
+
+    /** The bound account id (base64), or `null`. */
+    public val boundAccount: String?
+        get() = boundAccountIdB64
+
+    /**
+     * Bind this state to an account: load its persisted channel list and
+     * subscriber seeds (replacing the in-memory ones), bind the shared
+     * [publisher] identity (restoring its provider snapshot), then re-open
+     * the publisher keys of every listed channel this device has a persisted
+     * signing seed for — so the creator can post again after a relaunch.
+     * Idempotent for the same account (the store is not re-read; only
+     * channels still lacking keys are re-opened). A different account
+     * replaces everything account-scoped. Runs off the main thread.
+     */
+    public suspend fun bind(accountIdB64: String, accountIdentitySeed: ByteArray) {
+        withContext(Dispatchers.Default) {
+            if (boundAccountIdB64 != accountIdB64) {
+                val store = logStore
+                val channels = store?.loadChannels(accountIdB64) ?: emptyList()
+                val seeds = store?.loadSubscribedSeeds(accountIdB64) ?: emptyMap()
+                _postsByChannel.value = emptyMap()
+                _epochByChannel.value = emptyMap()
+                _keysByChannel.value = emptyMap()
+                _channels.value = channels
+                _subscribedSeedsByChannel.value = seeds
+                boundAccountIdB64 = accountIdB64
+            }
+            publisher?.bind(accountIdB64, accountIdentitySeed)
+            reopenPublisherKeys()
+        }
+    }
+
+    /** Re-open the publisher keys ([channelsToReopen]) on the bound
+     *  [publisher]. A channel whose open fails is skipped and logged; the
+     *  owner sees it as a channel without a composer until the next bind. */
+    private suspend fun reopenPublisherKeys() {
+        val pub = publisher ?: return
+        val targets = channelsToReopen(
+            channels = _channels.value,
+            signingSeedByChannel = publisherSigningSeedByChannel,
+            channelsWithKeys = _keysByChannel.value.keys,
+        )
+        for (channel in targets) {
+            try {
+                val keys = pub.withIdentity { identity ->
+                    ChannelsComposer.freshPublisherKeys(
+                        identity = identity,
+                        channelIdHex = channel.id,
+                        existingSigningSeed = persistedPublisherSigningSeed(channel.id),
+                    )
+                }
+                setKeys(channel.id, keys)
+            } catch (e: Throwable) {
+                Log.w(TAG, "publisher keys not re-opened for a channel", e)
+            }
+        }
+    }
+
+    /** Drop the in-memory account-scoped state and close the publisher
+     *  identity; everything persisted stays for the next sign-in. Logout. */
+    public fun unbind() {
+        publisher?.unbind()
+        boundAccountIdB64 = null
+        _channels.value = emptyList()
+        _postsByChannel.value = emptyMap()
+        _epochByChannel.value = emptyMap()
+        _keysByChannel.value = emptyMap()
+        _subscribedSeedsByChannel.value = emptyMap()
+    }
+
+    /** [unbind] AND delete the bound account's persisted channel log and
+     *  publisher provider snapshot. Forget device. The subscriber keypairs,
+     *  publisher signing seeds and publish counters are device-wide (not
+     *  keyed per account) and are left as they were. */
+    public fun forgetAccount() {
+        val acct = boundAccountIdB64
+        publisher?.forget()
+        if (acct != null) {
+            try {
+                logStore?.delete(acct)
+            } catch (e: Throwable) {
+                Log.w(TAG, "channel log not deleted", e)
+            }
+        }
+        unbind()
+    }
+
+    /** The persisted rotation heartbeat state for [channelId], or `null`
+     *  when none (or unbound). */
+    public fun rotationState(channelId: String): StoredRotationState? {
+        val acct = boundAccountIdB64 ?: return null
+        return logStore?.loadRotationState(acct, channelId)
+    }
+
+    /** Persist the rotation heartbeat state for [channelId]. No-op when
+     *  unbound. */
+    public fun saveRotationState(channelId: String, state: StoredRotationState) {
+        val acct = boundAccountIdB64 ?: return
+        logStore?.saveRotationState(acct, channelId, state)
+    }
 
     /** Per-channel persisted publisher **signing** seed (G-29),
      *  restored from [publisherPrefs] on construction. The
@@ -148,6 +272,7 @@ public class ChannelsUiState(
             val without = list.filter { it.id != handle.id }
             listOf(handle) + without
         }
+        persistChannels()
     }
 
     public fun removeChannel(channelId: String) {
@@ -155,6 +280,10 @@ public class ChannelsUiState(
         _postsByChannel.update { it - channelId }
         _epochByChannel.update { it - channelId }
         _keysByChannel.update { it - channelId }
+        _subscribedSeedsByChannel.update { it - channelId }
+        persistChannels()
+        persistSubscribedSeeds()
+        boundAccountIdB64?.let { acct -> logStore?.deleteRotationState(acct, channelId) }
         // Deliberately KEEP this channel's publish counter (in-memory + at
         // rest): un-publishing does NOT destroy the MLS PublisherGroup content
         // seed, so a re-add of the same channel_id re-derives the same content
@@ -184,6 +313,7 @@ public class ChannelsUiState(
                 }
             }
         }
+        persistChannels()
     }
 
     public fun setPosts(channelId: String, posts: List<PostView>) {
@@ -254,6 +384,7 @@ public class ChannelsUiState(
         _subscriberKeysByChannel.update { it - channelId }
         _subscribedSeedsByChannel.update { it - channelId }
         persistSubscriberKeys()
+        persistSubscribedSeeds()
     }
 
     /** Cache the recovered content-key seed for a specific
@@ -266,6 +397,7 @@ public class ChannelsUiState(
             val inner = outer[channelId] ?: emptyMap()
             outer + (channelId to (inner + (epoch to seed)))
         }
+        persistSubscribedSeeds()
     }
 
     /** Snapshot the `epoch -> seed` map recovered so far for
@@ -287,6 +419,35 @@ public class ChannelsUiState(
         persistSubscriberKeys()
         persistPublisherSigningSeeds()
         persistPublisherCounters()
+        persistChannels()
+        persistSubscribedSeeds()
+    }
+
+    // -----------------------------------------------------------------
+    // Channel-log persistence (list + subscriber seeds), per account
+    // -----------------------------------------------------------------
+
+    /** Write the channel list through to the bound account's log. A
+     *  mutation before [bind] stays in memory (there is no account to key
+     *  it by) and is replaced by the persisted list when bind runs. */
+    private fun persistChannels() {
+        val acct = boundAccountIdB64 ?: return
+        val store = logStore ?: return
+        try {
+            store.saveChannels(acct, _channels.value)
+        } catch (e: Throwable) {
+            Log.w(TAG, "channel list not persisted", e)
+        }
+    }
+
+    private fun persistSubscribedSeeds() {
+        val acct = boundAccountIdB64 ?: return
+        val store = logStore ?: return
+        try {
+            store.saveSubscribedSeeds(acct, _subscribedSeedsByChannel.value)
+        } catch (e: Throwable) {
+            Log.w(TAG, "subscriber seeds not persisted", e)
+        }
     }
 
     // -----------------------------------------------------------------
