@@ -152,6 +152,12 @@ public class ChatRepository(
      *  the session token is never attached to that shared client's other
      *  requests. */
     private val keyPackageDiscoveryFactory: () -> DiscoveryClient = { DiscoveryClient() },
+    /** ADR-0024 — durable per-group read watermarks, so the author-side
+     *  "Read" state survives a relaunch (the poll resumes past receipts it
+     *  already applied). Seeded into each group record at bootstrap / join;
+     *  written off the MLS locks after a batch that carried a receipt. */
+    private val readWatermarkStore: ReadWatermarkStore =
+        SharedPreferencesReadWatermarkStore(applicationContext),
 ) : AutoCloseable {
 
     /**
@@ -493,6 +499,15 @@ public class ChatRepository(
         // for its whole duration; it now runs here on [mlsDispatcher], and
         // the shell renders a loading state until `bootstrapped` flips.
         MainThreadGuard.assertOffMain("ChatRepository.bootstrap")
+        // ADR-0024 — read the persisted read watermarks BEFORE the provider
+        // lock: a preferences read is disk I/O and the lock must not be held
+        // across it (G-37). Seeded into each record once it is rebuilt below.
+        val persistedWatermarks: Map<String, Map<MemberIdentity, Long>> = try {
+            readWatermarkStore.loadAccount(newAccountIdB64)
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "read watermarks not loaded", cause)
+            emptyMap()
+        }
         // Under the provider lock: `restoreStorage` replaces the WHOLE
         // provider and the per-group `loadGroup` / log seeding must land
         // before any poll's apply (which takes this same lock) can run
@@ -558,7 +573,9 @@ public class ChatRepository(
                     try {
                         val groupId = hexToBytes(groupIdHex) ?: continue
                         val group = loadGroup(identity, groupId) ?: continue
-                        groups[groupIdHex] = GroupRecord(group = group, groupId = groupId)
+                        val record = GroupRecord(group = group, groupId = groupId)
+                        persistedWatermarks[groupIdHex.lowercase()]?.let(record::seedReadWatermarks)
+                        groups[groupIdHex] = record
                         // ADR-0042 legacy-sweep — provision opaque push routing for
                         // each rehydrated group: OWNER + no secret -> mint + persist
                         // + distribute the envelope + subscribe under push_gid; a
@@ -869,6 +886,9 @@ public class ChatRepository(
             ensurePushRoutingBestEffort(group, identity)
             groupIdHex
         }
+        // ADR-0024 — a group re-joined under the same id keeps the read state
+        // this device already persisted for it. Read outside the provider lock.
+        seedReadWatermarksBestEffort(groupIdHex)
         publishThreadList()
         // ADR-0048 §2 — publish this device's profile into the group it just
         // joined: nobody there knows its name yet.
@@ -3931,6 +3951,8 @@ public class ChatRepository(
                     )
                 },
             )
+            // ADR-0024 — a receipt advanced the watermark: persist it off the lock.
+            persistReadWatermarksIfReceipts(groupIdHex, record, result.events)
             // The chat list's unread badge: incoming chat messages applied
             // while this chat is not on screen (see [LocalUnreadCounter]).
             localUnread.onIncomingApplied(
@@ -4500,6 +4522,8 @@ public class ChatRepository(
             // ADR-0051 — the shared group names held for this account go too.
             if (accountIdB64 != null) {
                 GroupNameStore.deleteAccount(applicationContext, accountIdB64)
+                // ADR-0024 — and the persisted read watermarks.
+                readWatermarkStore.deleteAccount(accountIdB64)
             }
         } catch (_: Throwable) {
             // best-effort
@@ -5792,6 +5816,7 @@ public class ChatRepository(
                                 )
                             },
                         )
+                        persistReadWatermarksIfReceipts(groupIdHex, record, listOf(sweptEvent))
                         // A swept chat message counts toward the chat list's
                         // unread badge exactly as a polled one does.
                         localUnread.onIncomingApplied(
@@ -6100,6 +6125,52 @@ public class ChatRepository(
         }
     }
 
+    /**
+     * ADR-0024 — after a batch that carried at least one read receipt, write
+     * the record's watermark map to [readWatermarkStore].
+     *
+     * The snapshot is taken synchronously (it is an immutable map); the write
+     * is LAUNCHED onto [pushScope] (the repository's process-lifetime
+     * `Dispatchers.IO` scope), so it never runs on the main thread and never
+     * while the caller's per-group or provider lock is held (G-37). The store's
+     * merge is monotone, so launches landing out of order still converge. The
+     * account is captured now and re-checked before writing, so a write that
+     * outlives a logout / forget-device does not resurrect wiped rows.
+     *
+     * Call AFTER [GroupRecord.consumeEvents] has folded the events.
+     */
+    private fun persistReadWatermarksIfReceipts(
+        groupIdHex: String,
+        record: GroupRecord,
+        events: List<IncomingChatEvent>,
+    ) {
+        if (events.none { it is IncomingChatEvent.ReadReceipt }) return
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        pushScope.launch {
+            val snapshot = record.readUpToSnapshot()
+            if (snapshot.isEmpty()) return@launch
+            if (currentAccountIdB64.get() != accountIdB64) return@launch
+            try {
+                readWatermarkStore.merge(accountIdB64, groupIdHex.lowercase(), snapshot)
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "read watermarks not persisted", cause)
+            }
+        }
+    }
+
+    /** ADR-0024 — seed one group's record from [readWatermarkStore]. Callers
+     *  must not hold the provider or per-group lock (a preferences read). */
+    private fun seedReadWatermarksBestEffort(groupIdHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val record = groups[groupIdHex] ?: return
+        try {
+            val stored = readWatermarkStore.load(accountIdB64, groupIdHex.lowercase())
+            if (stored.isNotEmpty()) record.seedReadWatermarks(stored)
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "read watermarks not seeded", cause)
+        }
+    }
+
     /** Capture `(cursor, messages)` per known group + write
      *  it to the encrypted message log (Phase 2a3f1).
      *  Best-effort — Keystore / FS failures swallowed; the
@@ -6386,8 +6457,9 @@ private class GroupRecord(
 
     /** ADR-0024 — monotone per-MEMBER read watermark: the highest read-up-to
      *  messageId each member has asserted. A lower value never overwrites a
-     *  higher one (re-sync replay is idempotent). Session state — not
-     *  persisted.
+     *  higher one (re-sync replay is idempotent). Persisted by the
+     *  repository into [ReadWatermarkStore] and seeded back via
+     *  [seedReadWatermarks] after a relaunch.
      *
      *  Keyed on the sender's signature key, never the MLS leaf — see
      *  [foldReadWatermark]. */
@@ -6758,6 +6830,14 @@ private class GroupRecord(
         synchronized(presenceLock) {
             typingByMember = pruneTyping(typingByMember, now)
             return typingByMember.keys.toSet()
+        }
+    }
+
+    /** ADR-0024 — fold persisted watermarks into the live map. Monotone, so a
+     *  receipt applied before the seed is never lowered by it. */
+    fun seedReadWatermarks(stored: Map<MemberIdentity, Long>) {
+        synchronized(presenceLock) {
+            readUpToByMember = mergeReadWatermarks(readUpToByMember, stored)
         }
     }
 

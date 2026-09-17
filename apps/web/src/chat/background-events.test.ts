@@ -74,6 +74,7 @@ const groupName: IncomingChatEvent = {
   senderKey: "k" as never,
   createdAt: T,
 };
+const receipt: IncomingChatEvent = { ...edit, messageId: 11, op: "read-receipt", target: 1, text: "" };
 
 describe("planBackgroundEvents", () => {
   const plan = planBackgroundEvents([
@@ -87,6 +88,7 @@ describe("planBackgroundEvents", () => {
     secret,
     profile,
     groupName,
+    receipt,
   ]);
 
   it("files chat and system rows into the timeline, in journal order", () => {
@@ -101,7 +103,7 @@ describe("planBackgroundEvents", () => {
   });
 
   it("hands the chat view what only it can fold (rows, ops, proposals)", () => {
-    expect(plan.toView.map((e) => e.messageId)).toEqual([1, 2, 4, 5, 6]);
+    expect(plan.toView.map((e) => e.messageId)).toEqual([1, 2, 4, 5, 6, 11]);
   });
 
   it("records only proposals the receipt gate stored", () => {
@@ -121,6 +123,11 @@ describe("planBackgroundEvents", () => {
     expect(plan.groupNames.map((e) => e.messageId)).toEqual([10]);
     expect(plan.toView.some((e) => e.kind === "group-name")).toBe(false);
     expect(plan.timeline.some((e) => (e.messageId as number) === 10)).toBe(false);
+  });
+
+  it("settles a read receipt in the durable store and still hands it to the view (ADR-0024)", () => {
+    expect(plan.readReceipts.map((e) => e.messageId)).toEqual([11]);
+    expect(plan.readReceipts.some((e) => e.op !== "read-receipt")).toBe(false);
   });
 
   it("flags a commit so the membership-shrink rotation runs (ADR-0043)", () => {

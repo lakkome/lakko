@@ -14,6 +14,7 @@
  *   | kind                  | settled where it is received  | handed to the chat view |
  *   |-----------------------|-------------------------------|-------------------------|
  *   | application, system   | persisted to the message log  | yes (timeline)          |
+ *   | op (read-receipt)     | the read-watermark store      | yes (idempotent)        |
  *   | op                    | —                             | yes (edit / delete /    |
  *   |                       |                               | reaction / typing /     |
  *   |                       |                               | read-receipt overlays)  |
@@ -25,9 +26,12 @@
  *   | committerBeacon       | the beacon observation store  | no                      |
  *   | group-name            | the gated group-name store    | no                      |
  *
- * The overlays (`op`) are in-memory state in the chat view and were never
- * persisted — a reload always started them empty — so handing them over
- * matches what the chat would have shown had it been open this session.
+ * The edit / delete / reaction / typing overlays are in-memory state in the
+ * chat view and were never persisted — a reload always started them empty —
+ * so handing them over matches what the chat would have shown had it been
+ * open this session. Read receipts are the exception: they are durable
+ * (`read-watermark-store.ts`) and settled here, because a receipt the chat
+ * view never sees would otherwise leave a read message showing "Sent".
  */
 import type { InboundSignalingRow } from "../calls/call-signaling-dispatch";
 import type { IncomingChatEvent } from "./client";
@@ -44,6 +48,9 @@ export interface BackgroundEventPlan {
   readonly profiles: readonly Of<"profile">[];
   readonly pushSecrets: readonly Of<"pushRoutingSecret">[];
   readonly beacons: readonly Of<"committerBeacon">[];
+  /** ADR-0024 — read receipts, for the durable watermark store. Also in
+   *  `toView`; the store's fold is monotone, so the second ingest is a no-op. */
+  readonly readReceipts: readonly Of<"op">[];
   /** ADR-0051 — shared group names, for the role-gated receive. */
   readonly groupNames: readonly Of<"group-name">[];
   /** Proposals the receipt gate STORED; a refused one is a pending request
@@ -63,6 +70,7 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
   const pushSecrets: Of<"pushRoutingSecret">[] = [];
   const beacons: Of<"committerBeacon">[] = [];
   const groupNames: Of<"group-name">[] = [];
+  const readReceipts: Of<"op">[] = [];
   const storedProposals: Of<"membershipProposal">[] = [];
   let sawCommit = false;
   for (const e of events) {
@@ -77,6 +85,9 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
         if (e.systemKind === "commit") sawCommit = true;
         break;
       case "op":
+        if (e.op === "read-receipt") readReceipts.push(e);
+        toView.push(e);
+        break;
       case "externalJoinRequest":
         toView.push(e);
         break;
@@ -119,6 +130,7 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
     profiles,
     pushSecrets,
     beacons,
+    readReceipts,
     groupNames,
     storedProposals,
     sawCommit,

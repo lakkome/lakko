@@ -42,6 +42,7 @@ import {
 import { PowActivityIndicator } from "./ui/PowActivityIndicator";
 import { ProfileProvider } from "./profile/ProfileContext";
 import { GroupNameProvider } from "./chat/GroupNameContext";
+import { ReadWatermarkProvider } from "./chat/ReadWatermarkContext";
 import { WakeNavigator } from "./push/WakeNavigator";
 import { routes } from "./routes/routes";
 import { SwUpdateBanner } from "./sw/SwUpdateBanner";
@@ -108,6 +109,10 @@ const RootLayout: Component<RouteSectionProps> = (props) => (
  *     the background receive, which its group-call banner reads); its state
  *     lives here, above it.
  *
+ *   <ReadWatermarkProvider> — ADR-0024 read receipts: the durable
+ *     per-group watermark store both receive paths feed, so "Read" survives
+ *     a reload and a receipt applied while the chat was closed is kept.
+ *
  *   <BackgroundReceiveProvider> — receives every joined group whose chat
  *     view is not open, feeding the call host and the message log. Inside
  *     the call host, which it hands call signaling to.
@@ -118,6 +123,7 @@ const App: Component = () => (
       <DeviceGroupSyncProvider>
         <ProfileProvider>
         <GroupNameProvider>
+        <ReadWatermarkProvider>
         <MailboxProvider>
         <CallHostProvider>
         <BackgroundReceiveProvider>
@@ -163,6 +169,7 @@ const App: Component = () => (
         </BackgroundReceiveProvider>
         </CallHostProvider>
         </MailboxProvider>
+        </ReadWatermarkProvider>
         </GroupNameProvider>
         </ProfileProvider>
       </DeviceGroupSyncProvider>

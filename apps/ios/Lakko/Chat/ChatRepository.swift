@@ -253,6 +253,19 @@ public final class ChatRepository: ObservableObject {
     /// the title through it (``groupName(groupIdHex:)``).
     public let groupNameStore: GroupNameStore
 
+    /// ADR-0024 — the per-account, per-group durable read watermarks
+    /// (`senderSignatureKeyB64 -> upTo`). Fed here, at receipt, for EVERY group
+    /// whether or not its chat is open, so a receipt applied by the session
+    /// poll or while another chat is open is not lost, and the Read tick
+    /// survives a relaunch (the DS poll never replays an applied row).
+    public let readWatermarkStore: ReadWatermarkStore
+
+    /// ADR-0024 — the in-memory mirror of ``readWatermarkStore`` for the
+    /// current account, keyed by group hex. Populated on every advancing
+    /// receipt (the rest is read through ``readWatermarks(groupIdHex:)``); the
+    /// open chat subscribes to its own group's entry. Cleared with the session.
+    @Published public private(set) var readWatermarksByGroup: [String: PresenceOps.ReadWatermarkMap] = [:]
+
     /// ADR-0051 — bumped on every accepted name (received or set here), so the
     /// chat list and the open chat re-title in place. The title itself is read
     /// from ``groupNameStore`` on demand; this only says "read it again".
@@ -326,10 +339,12 @@ public final class ChatRepository: ObservableObject {
         lastObservedOwnerStore: LastObservedOwnerStore = LastObservedOwnerStore(),
         leaveRequestStore: LeaveRequestStore = LeaveRequestStore(),
         conversationKindStore: ConversationKindStore = ConversationKindStore(),
-        groupNameStore: GroupNameStore = GroupNameStore()
+        groupNameStore: GroupNameStore = GroupNameStore(),
+        readWatermarkStore: ReadWatermarkStore = ReadWatermarkStore()
     ) {
         self.conversationKindStore = conversationKindStore
         self.groupNameStore = groupNameStore
+        self.readWatermarkStore = readWatermarkStore
         self.chatClient = chatClient
         self.dsClient = dsClient
         self.discovery = discovery
@@ -507,6 +522,8 @@ public final class ChatRepository: ObservableObject {
             snapshotLeafKeyStore.clear(accountIdB64: accountIdB64)
             knownGroupsStore.clear(accountIdB64: accountIdB64)
             conversationKindStore.clear(accountIdB64: accountIdB64)
+            // ADR-0024 — who read what, in which group.
+            readWatermarkStore.clear(accountIdB64: accountIdB64)
             DeviceReadmissionMemory.clearForAccount(accountIdB64: accountIdB64)
             // ADR-0040 (G-35) — drop any pending-commit outbox entries for the
             // account alongside the snapshot they were paired with, so a wiped
@@ -550,6 +567,8 @@ public final class ChatRepository: ObservableObject {
         groupCalls.removeAll()
         unreadCounts.removeAll()
         canonicalIdentity = nil
+        // ADR-0024 — the mirror belongs to the account that loaded it.
+        readWatermarksByGroup.removeAll()
         // ADR-0040 (G-35) — a new session must re-sweep the outbox for every
         // group on its first poll.
         sweptGroupsThisSession.removeAll()
@@ -1214,6 +1233,8 @@ public final class ChatRepository: ObservableObject {
         unappliedRequestStore.clearForGroup(
             accountIdB64: accountIdB64, groupIdB64: groupIdB64)
         leaveRequestStore.clear(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
+        readWatermarkStore.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        readWatermarksByGroup.removeValue(forKey: groupIdHex)
         // LAST, and in this order: the registry is what a relaunch rehydrates
         // from, so dropping it after the live handle means a crash between the
         // two leaves the chat present rather than half-gone.
@@ -3054,6 +3075,9 @@ public final class ChatRepository: ObservableObject {
                     groupIdHex: groupIdHex, messageId: messageId, payload: payload,
                     createdAt: createdAt, senderLeaf: senderLeaf)
             },
+            readReceiptSink: { [weak self] sender, upTo in
+                self?.recordReadReceipt(groupIdHex: groupIdHex, sender: sender, upTo: upTo)
+            },
             chatStatusSink: { [weak self] status in
                 self?.chatStatusSink?(groupIdHex, status)
             },
@@ -3235,6 +3259,33 @@ public final class ChatRepository: ObservableObject {
     /// a monotone per-leaf read watermark. `nil` when no chat
     /// surface is attached; the per-record poll just drops them.
     public var chatStatusSink: ((String, ChatStatusEvent) -> Void)?
+
+    /// ADR-0024 — the read watermarks this device holds for `groupIdHex`
+    /// (sender signature key -> highest messageId read), loaded from the
+    /// durable store when the mirror has no entry yet. Empty with no signed-in
+    /// account. Deliberately does not write the published mirror: a view
+    /// model calls this from its initializer, which can run inside a view
+    /// update.
+    public func readWatermarks(groupIdHex: String) -> PresenceOps.ReadWatermarkMap {
+        if let cached = readWatermarksByGroup[groupIdHex] { return cached }
+        guard let accountIdB64 = currentAccountIdB64 else { return [:] }
+        return readWatermarkStore.load(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+    }
+
+    /// ADR-0024 — fold one inbound read receipt into the durable store and the
+    /// published mirror, advance-only. Called from the receive path for every
+    /// group, whichever chat is open.
+    func recordReadReceipt(groupIdHex: String, sender: MemberIdentity, upTo: Int64) {
+        guard let accountIdB64 = currentAccountIdB64 else { return }
+        if let next = readWatermarkStore.merge(
+            accountIdB64: accountIdB64, groupIdHex: groupIdHex, sender: sender, upTo: upTo)
+        {
+            readWatermarksByGroup[groupIdHex] = next
+        } else if readWatermarksByGroup[groupIdHex] == nil {
+            readWatermarksByGroup[groupIdHex] = readWatermarkStore.load(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        }
+    }
 
     // MARK: - Foreground receive support
 
@@ -3974,6 +4025,10 @@ public final class ChatRepository: ObservableObject {
                             self?.routeCallSignaling(
                                 groupIdHex: groupIdHex, messageId: messageId, payload: payload,
                                 createdAt: createdAt, senderLeaf: senderLeaf)
+                        },
+                        readReceiptSink: { [weak self] sender, upTo in
+                            self?.recordReadReceipt(
+                                groupIdHex: groupIdHex, sender: sender, upTo: upTo)
                         },
                         chatStatusSink: { [weak self] status in
                             self?.chatStatusSink?(groupIdHex, status)
@@ -5278,6 +5333,7 @@ private final class GroupRecord {
         _ events: [IncomingChatEvent],
         ownAuthorKey: MemberIdentity? = nil,
         callSignalingSink: ((Int64, Data, String, UInt32?) -> Void)? = nil,
+        readReceiptSink: ((MemberIdentity, Int64) -> Void)? = nil,
         chatStatusSink: ((ChatStatusEvent) -> Void)? = nil,
         pushRoutingSecretSink: ((Data, UInt64, UInt32?) -> Void)? = nil,
         committerBeaconSink: ((UInt32?, String) -> Void)? = nil,
@@ -5321,6 +5377,12 @@ private final class GroupRecord {
                     }
                     continue
                 case .readReceipt:
+                    // The durable watermark is fed here, independent of
+                    // whether any chat surface is attached; our own echo
+                    // (another device of this account) is not a reader.
+                    if let senderKey = senderKey, senderKey != ownAuthorKey {
+                        readReceiptSink?(senderKey, target)
+                    }
                     if let senderKey = senderKey {
                         chatStatusSink?(
                             .readReceipt(sender: senderKey, upTo: target)

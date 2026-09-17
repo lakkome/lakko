@@ -316,6 +316,19 @@ public final class ChatViewModel: ObservableObject {
                 self?.ongoingGroupCall = record
             }
             .store(in: &cancellables)
+        // ADR-0024 — read watermarks are held durably by the repository (fed
+        // at receipt for every group); seed from it and follow this group's
+        // entry so a receipt applied while another chat was open, or before
+        // a relaunch, still shows as Read.
+        readWatermarks = repository.readWatermarks(groupIdHex: groupIdHex)
+        repository.$readWatermarksByGroup
+            .compactMap { $0[groupIdHex] }
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] map in
+                self?.readWatermarks = map
+            }
+            .store(in: &cancellables)
         // ADR-0024 — attach the chat-status sink: inbound typing +
         // read-receipt signals for THIS thread fold into ephemeral
         // typing state + a monotone read watermark (no bubble). The
@@ -2155,7 +2168,10 @@ public final class ChatViewModel: ObservableObject {
     /// Receive-side monotone read watermark: member identity → the highest
     /// messageId that member has reported reading. Advance-only (a lower
     /// value never overwrites a higher one), so a re-sync replay of an
-    /// old receipt is idempotent. Session state, not persisted.
+    /// old receipt is idempotent. A mirror of the repository's durable,
+    /// per-group ``ChatRepository/readWatermarksByGroup`` entry — the
+    /// repository folds receipts at receipt for every group, so this screen
+    /// never folds them itself.
     ///
     /// Keyed on the signature key for the reason above, sharpened: this map is
     /// monotone and is never reset on a membership change, so a leaf key handed
@@ -2205,11 +2221,10 @@ public final class ChatViewModel: ObservableObject {
             guard typingMembers != before else { return }
             if isTyping { armTypingExpiryTimer() }
             recomputeTypingNow()
-        case .readReceipt(let sender, let upTo):
-            if let own = ownSignatureKeyB64, sender == own { return }
-            // MONOTONE — advance only.
-            readWatermarks = PresenceOps.foldReadWatermark(
-                readWatermarks, sender: sender, upTo: upTo)
+        case .readReceipt:
+            // Folded durably by the repository at receipt; this screen
+            // follows ``ChatRepository/readWatermarksByGroup``.
+            return
         }
     }
 

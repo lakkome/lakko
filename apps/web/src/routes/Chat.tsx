@@ -133,6 +133,7 @@ import { useChats, type ActiveGroup } from "../chat/ChatContext";
 import { recordRemovedDevices } from "../chat/device-readmission";
 import { useProfiles } from "../profile/ProfileContext";
 import { useGroupNames } from "../chat/GroupNameContext";
+import { useReadWatermarks } from "../chat/ReadWatermarkContext";
 import {
   GROUP_NAME_LABEL,
   GROUP_NAME_ONLY_ADMINS,
@@ -296,7 +297,6 @@ import {
   foldTyping,
   activeTypers,
   pruneTyping,
-  foldReadWatermark,
   isReadByEveryOther,
   shouldSendTyping,
   shouldSendReadReceipt,
@@ -434,6 +434,8 @@ function ChatView(props: {
   // store the receive loop feeds, and the publish triggers.
   const profiles = useProfiles();
   const groupNames = useGroupNames();
+  // ADR-0024 — the durable read watermarks both receive paths feed.
+  const readWatermarkStore = useReadWatermarks();
   // The app-level 1x1 call slot and signaling queue (`calls/CallHostContext`):
   // calls ring and survive on every screen, not just inside this view.
   const callHost = useCallHost();
@@ -585,13 +587,13 @@ function ChatView(props: {
   // Keyed on the identity, not the leaf: the watermark is monotone
   // and never reset on a membership change, so a leaf key handed a
   // departed member's whole read history to whoever was added into
-  // their slot. Session state (multi-device convergence is Phase-2
-  // future work). The own-message bubble reads it to flip "Sent" →
-  // "Read"; a lower value never lowers a higher one (re-sync
-  // idempotent).
-  const [readWatermarks, setReadWatermarks] = createSignal<ReadWatermarkMap>(
-    new Map(),
-  );
+  // their slot. Held in the session-wide durable store
+  // (`chat/read-watermark-store.ts`), which the background receive
+  // also feeds, so "Read" survives a reload and a chat switch. The
+  // own-message bubble reads it to flip "Sent" → "Read"; a lower
+  // value never lowers a higher one (re-sync idempotent).
+  const readWatermarks = (): ReadWatermarkMap =>
+    readWatermarkStore.of(props.entry.groupIdB64);
 
   // Phase 2a3f1-web — persistent message log. The plaintext
   // timeline survives reloads under the device root key in
@@ -2740,8 +2742,6 @@ function ChatView(props: {
     // batch, then write each signal once at the end.
     let typing = typingMap();
     let typingChanged = false;
-    let watermarks = readWatermarks();
-    let watermarksChanged = false;
     const nowMs = Date.now();
     for (const e of events) {
       if (e.kind === "op") {
@@ -2770,13 +2770,7 @@ function ChatView(props: {
           continue;
         }
         if (e.op === "read-receipt") {
-          if (e.senderKey !== undefined) {
-            const next = foldReadWatermark(watermarks, e.senderKey, e.target);
-            if (next !== watermarks) {
-              watermarks = next;
-              watermarksChanged = true;
-            }
-          }
+          readWatermarkStore.ingest(props.entry.groupIdB64, e.senderKey, e.target);
           continue;
         }
         // Fold the edit/delete/reaction op into the overlay first
@@ -2935,9 +2929,6 @@ function ChatView(props: {
     }
     if (typingChanged) {
       setTypingMap(typing);
-    }
-    if (watermarksChanged) {
-      setReadWatermarks(watermarks);
     }
     // ADR-0045 — a proposal in this batch changed what the pending-request
     // panel should show. Bumped here rather than at either call site, so both

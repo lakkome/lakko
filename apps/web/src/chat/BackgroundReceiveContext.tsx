@@ -86,6 +86,7 @@ import {
   type ActingCommitter,
 } from "./committer-beacon";
 import { useGroupNames } from "./GroupNameContext";
+import { useReadWatermarks } from "./ReadWatermarkContext";
 import { readIsActive } from "./membership-ended";
 import {
   loadMessageLog,
@@ -180,6 +181,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   const chats = useChats();
   const profiles = useProfiles();
   const groupNames = useGroupNames();
+  const readWatermarks = useReadWatermarks();
   const callHost = useCallHost();
 
   const coordinator = new ReceiveCoordinator<IncomingChatEvent>();
@@ -640,6 +642,9 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     for (const p of plan.profiles) {
       if (p.profile !== undefined && p.senderKey !== undefined) profiles.ingest(p.senderKey, p.profile);
     }
+    // ADR-0024 — read receipts land in the durable store whether or not the
+    // chat is open; the view reads its "Read" ticks from there.
+    for (const r of plan.readReceipts) readWatermarks.ingest(groupIdB64, r.senderKey, r.target);
     // ADR-0051 — the shared group name, through the role-gated verdict under
     // the per-group lock; the chat list re-titles from the store.
     for (const n of plan.groupNames) {
