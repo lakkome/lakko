@@ -51,7 +51,7 @@ extern "C" {
 // ---------------------------------------------------------------
 
 JNIEXPORT jlong JNICALL
-Java_me_lakko_sframe_LakkoFrameEncryptor_00024Companion_nativeCreate(
+Java_me_lakko_sframe_LakkoFrameEncryptor_nativeCreate(
     JNIEnv* env,
     jobject /*thiz*/,
     jbyteArray seed,
@@ -101,7 +101,7 @@ Java_me_lakko_sframe_LakkoFrameEncryptor_00024Companion_nativeCreate(
 }
 
 JNIEXPORT void JNICALL
-Java_me_lakko_sframe_LakkoFrameEncryptor_00024Companion_nativeRelease(
+Java_me_lakko_sframe_LakkoFrameEncryptor_nativeRelease(
     JNIEnv* /*env*/,
     jobject /*thiz*/,
     jlong native_ptr) {
@@ -119,7 +119,7 @@ Java_me_lakko_sframe_LakkoFrameEncryptor_00024Companion_nativeRelease(
 // plaintext, invariant #4). Thread-safe against a concurrent Encrypt on
 // the codec thread (the bridge guards the seal key with a mutex).
 JNIEXPORT jboolean JNICALL
-Java_me_lakko_sframe_LakkoFrameEncryptor_00024Companion_nativeRekey(
+Java_me_lakko_sframe_LakkoFrameEncryptor_nativeRekey(
     JNIEnv* env,
     jobject /*thiz*/,
     jlong native_ptr,
@@ -148,7 +148,7 @@ Java_me_lakko_sframe_LakkoFrameEncryptor_00024Companion_nativeRekey(
 // ---------------------------------------------------------------
 
 JNIEXPORT jlong JNICALL
-Java_me_lakko_sframe_LakkoFrameDecryptor_00024Companion_nativeCreate(
+Java_me_lakko_sframe_LakkoFrameDecryptor_nativeCreate(
     JNIEnv* env,
     jobject /*thiz*/,
     jbyteArray seed) {
@@ -185,7 +185,7 @@ Java_me_lakko_sframe_LakkoFrameDecryptor_00024Companion_nativeCreate(
 }
 
 JNIEXPORT void JNICALL
-Java_me_lakko_sframe_LakkoFrameDecryptor_00024Companion_nativeRelease(
+Java_me_lakko_sframe_LakkoFrameDecryptor_nativeRelease(
     JNIEnv* /*env*/,
     jobject /*thiz*/,
     jlong native_ptr) {
@@ -203,7 +203,7 @@ Java_me_lakko_sframe_LakkoFrameDecryptor_00024Companion_nativeRelease(
 // (the ring keeps its current + previous keys). Thread-safe (the Rust
 // ring is Mutex-guarded internally).
 JNIEXPORT jboolean JNICALL
-Java_me_lakko_sframe_LakkoFrameDecryptor_00024Companion_nativeRekey(
+Java_me_lakko_sframe_LakkoFrameDecryptor_nativeRekey(
     JNIEnv* env,
     jobject /*thiz*/,
     jlong native_ptr,
@@ -235,7 +235,7 @@ Java_me_lakko_sframe_LakkoFrameDecryptor_00024Companion_nativeRekey(
 // key once it has expired at `now_ms`, restoring seed-boundary forward
 // secrecy. A null pointer is a no-op.
 JNIEXPORT void JNICALL
-Java_me_lakko_sframe_LakkoFrameDecryptor_00024Companion_nativePrune(
+Java_me_lakko_sframe_LakkoFrameDecryptor_nativePrune(
     JNIEnv* /*env*/,
     jobject /*thiz*/,
     jlong native_ptr,

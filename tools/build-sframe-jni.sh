@@ -139,6 +139,13 @@ for entry in "${ABIS[@]}"; do
     # size over micro-perf. The hot path goes straight to the
     # Rust .a which is already `--release`.
     # `-shared` produces .so.
+    # `-static-libstdc++` links libc++ into this .so. Without it
+    # clang links against `libc++_shared.so`, which nothing in the
+    # app packages, and `System.loadLibrary("sframe_jni")` fails on
+    # the device with "library libc++_shared.so not found" -- the
+    # first live group call on Android died exactly there. The
+    # bridge is the only C++ in the APK, so the static runtime has
+    # no second copy to collide with.
     # `-Wl,--exclude-libs,ALL` hides the Rust archive symbols
     # from the .so's dynamic symbol table so we don't pollute
     # the AAR consumer's namespace with internal Rust symbols.
@@ -150,6 +157,7 @@ for entry in "${ABIS[@]}"; do
         -Os \
         -Wall -Wextra -Wno-unused-parameter \
         -shared \
+        -static-libstdc++ \
         "${COMMON_INCLUDES[@]}" \
         "${SRC[@]}" \
         "$archive" \
