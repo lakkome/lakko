@@ -46,6 +46,7 @@ import me.lakko.app.contacts.AcceptedContact
 import me.lakko.app.contacts.ContactsRepository
 import me.lakko.app.profile.ProfileDirectory
 import me.lakko.app.ui.components.LakkoAvatar
+import me.lakko.app.ui.contacts.contactRouteKey
 
 /**
  * New group — docs/ux/new-group.md, the Android shape.
@@ -139,7 +140,10 @@ public fun NewGroupScreen(
                     modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 4.dp),
                 )
                 LazyColumn(modifier = Modifier.weight(1f)) {
-                    items(state.accepted, key = { it.request.messageId }) { contact ->
+                    items(
+                    state.accepted.distinctBy { contactRouteKey(it.request.fromPubkey) },
+                    key = { contactRouteKey(it.request.fromPubkey) },
+                ) { contact ->
                         val resolved = nameVersion.let { directory.resolve(contact.request.fromPubkey) }
                         val canPick = contact.request.fromAccountId != null
                         val checked = contact.request.messageId in picked.value

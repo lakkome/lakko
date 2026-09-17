@@ -38,6 +38,7 @@ import me.lakko.app.contacts.AcceptedContact
 import me.lakko.app.contacts.ContactsRepository
 import me.lakko.app.profile.ProfileDirectory
 import me.lakko.app.ui.components.LakkoAvatar
+import me.lakko.app.ui.contacts.contactRouteKey
 
 /**
  * New chat — the contact picker behind the Chats tab's compose action.
@@ -99,7 +100,10 @@ public fun NewChatScreen(
                     .fillMaxSize()
                     .padding(padding),
             ) {
-                items(state.accepted, key = { it.request.messageId }) { contact ->
+                items(
+                    state.accepted.distinctBy { contactRouteKey(it.request.fromPubkey) },
+                    key = { contactRouteKey(it.request.fromPubkey) },
+                ) { contact ->
                     val name = nameVersion.let { directory.resolve(contact.request.fromPubkey) }
                     ContactPickRow(
                         contact = contact,

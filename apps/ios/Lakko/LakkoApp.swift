@@ -650,7 +650,7 @@ private struct SessionRoot: View, Equatable {
                 )
                 .navigationDestination(for: TabRoute.self) { routeView($0, tab: .chats) }
             }
-            .tabItem { Label("Chats", systemImage: "bubble.left.and.bubble.right") }
+            .tabItem { Label("Chats", systemImage: "bubble.left") }
             .tag(SessionTab.chats)
 
             NavigationStack(path: $groupsPath) {

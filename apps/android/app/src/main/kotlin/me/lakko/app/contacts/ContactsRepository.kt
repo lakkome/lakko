@@ -3,6 +3,7 @@
 
 package me.lakko.app.contacts
 
+import android.util.Log
 import android.content.Context
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -506,13 +507,14 @@ public class ContactsRepository(
                 persistInboxCursor()
             }
         } catch (e: ContactsError) {
-            // Background long-polls surface failures on the
-            // `lastError` slot too — the UI renders a small
-            // inline hint without flipping `refreshing`. The
-            // caller (a `LaunchedEffect` loop) will retry on
-            // the next iteration.
+            // Background long-polls surface failures on the `lastError`
+            // slot too — the UI renders one plain sentence, never the
+            // transport's own message (endpoint paths and pseudonyms are
+            // not user copy). The raw error goes to the log; the caller
+            // (a `LaunchedEffect` loop) retries on the next iteration.
+            Log.w(TAG, "contacts inbox: poll failed", e)
             mutableState.update {
-                it.copy(refreshing = false, lastError = e.message)
+                it.copy(refreshing = false, lastError = INBOX_FETCH_FAILURE_MESSAGE)
             }
         }
     }
@@ -1131,6 +1133,12 @@ public class ContactsRepository(
 // =============================================================================
 
 /** Inline inbox error shown when a Welcome from a peer could not be joined. */
+private const val TAG = "ContactsRepository"
+
+/** Shown in place of a transport error when the inbox poll fails. */
+internal const val INBOX_FETCH_FAILURE_MESSAGE: String =
+    "Couldn't check for new contact requests. Trying again."
+
 internal const val WELCOME_JOIN_FAILED_MESSAGE: String =
     "Someone started a chat with you, but it could not be opened on this " +
         "device. Ask them to add you again."

@@ -360,11 +360,15 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
   return <MailboxContext.Provider value={api}>{props.children}</MailboxContext.Provider>;
 }
 
+/// One plain sentence for the inbox pane. The transport's own message
+/// (endpoint paths, pseudonyms, status codes) is not user copy; it goes to
+/// the console instead.
 function formatMailboxError(err: unknown): string {
   if (err instanceof ContactsError && err.variant.kind === "no-identity-secrets") {
     return "please sign in again to check for new requests";
   }
-  return err instanceof Error ? err.message : String(err);
+  console.warn("contacts inbox: poll failed", err);
+  return "Couldn't check for new contact requests. Trying again.";
 }
 
 export function useMailbox(): MailboxApi {

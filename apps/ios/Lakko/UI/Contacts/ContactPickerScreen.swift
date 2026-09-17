@@ -32,7 +32,7 @@ struct ContactPickerScreen: View {
                 }
             } else {
                 Section {
-                    ForEach(viewModel.repositoryState.accepted, id: \.request.messageId) { entry in
+                    ForEach(viewModel.repositoryState.accepted, id: \.request.fromPubkey) { entry in
                         ResolvedName(signatureKey: entry.request.fromPubkey) { resolved in
                             Button {
                                 if let groupIdHex = entry.groupIdHex { onPick(groupIdHex) }

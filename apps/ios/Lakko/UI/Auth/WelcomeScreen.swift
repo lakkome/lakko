@@ -49,23 +49,18 @@ struct WelcomeScreen: View {
     }
 }
 
-/// The logo tile: the brand gradient (design system section 1, the one
-/// surface allowed to carry it) under a script "L". Used once, here; the
-/// app icon carries the same mark.
+/// The logo tile: the brand mark itself (the same PNG the web client and
+/// Android ship, `LakkoBrandMark` in the asset catalogue), never a glyph
+/// drawn in code, so the three clients show one logo.
 struct LakkoBrandMark: View {
     var size: CGFloat = 96
 
     var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
-                .fill(LakkoBrand.gradient)
-            Text("L")
-                .font(.system(size: size * 0.6, weight: .bold, design: .serif))
-                .italic()
-                .foregroundStyle(.white)
-                .offset(x: -size * 0.02, y: -size * 0.03)
-        }
-        .frame(width: size, height: size)
-        .accessibilityLabel("Lakko")
+        Image("LakkoBrandMark")
+            .resizable()
+            .interpolation(.high)
+            .scaledToFit()
+            .frame(width: size, height: size)
+            .accessibilityLabel("Lakko")
     }
 }

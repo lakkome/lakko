@@ -220,6 +220,22 @@ public final class ContactsRepository: ObservableObject {
 
     /// User-visible copy for a Welcome this device could not join. Short
     /// enough for the inbox footer's two-line limit.
+    /// Shown in place of a transport error when the inbox poll fails.
+    static let inboxFetchFailureMessage =
+        "Couldn't check for new contact requests. Trying again."
+
+    /// `true` when `error` is a cancellation of the poll itself rather than
+    /// a failure of it: Swift's `CancellationError`, a `URLError.cancelled`,
+    /// or a `DsClientError.network` wrapping one.
+    static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let url = error as? URLError, url.code == .cancelled { return true }
+        if case .network(_, let underlying) = error as? DsClientError {
+            return isCancellation(underlying)
+        }
+        return false
+    }
+
     static let welcomeJoinFailureMessage =
         "A chat you were added to could not be opened. Ask to be added again."
 
@@ -398,15 +414,20 @@ public final class ContactsRepository: ObservableObject {
                 lastError: welcomeJoinFailure ?? carriedJoinFailure
             )
         } catch {
-            // Background long-polls surface failures on the
-            // `lastError` slot too — the UI renders a small inline
-            // hint without flipping `refreshing`. The caller (a
-            // polling loop) will retry on the next iteration.
-            state = state.with(
-                refreshing: false,
-                lastError: (error as? LocalizedError)?.errorDescription
-                    ?? String(describing: error)
-            )
+            // A cancelled poll (the screen was left, the session ended, the
+            // long-poll was superseded) is not a failure: keep whatever the
+            // slot held and let the next iteration run.
+            if Self.isCancellation(error) {
+                state = state.with(refreshing: false, lastError: state.lastError)
+                return
+            }
+            // Background long-polls surface failures on the `lastError`
+            // slot too — the UI renders one plain sentence, never the
+            // transport's own description (endpoint paths and pseudonyms
+            // are not user copy). The raw error goes to the log; the
+            // polling loop retries on its next iteration.
+            NSLog("contacts inbox: poll failed: \(error)")
+            state = state.with(refreshing: false, lastError: Self.inboxFetchFailureMessage)
         }
     }
 
