@@ -18,9 +18,13 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import me.lakko.app.chat.AttachmentBridge
 import me.lakko.app.chat.AttachmentBridgeException
+import me.lakko.app.chat.AttachmentMediaMeta
 import me.lakko.app.chat.UploadStage
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.ChatRepository
@@ -2190,8 +2194,9 @@ public class ChatViewModel(
             sending = composer.sending,
             sendError = composer.sendError,
             pendingAttachments = composer.pendingAttachments,
-            uploading = composer.uploading,
-            uploadStage = composer.uploadStage,
+            uploading = composer.inFlight.isNotEmpty(),
+            inFlightUploads = composer.inFlight,
+            pendingPreviews = composer.pendingPreviews,
             // ADR-0024 — typing indicator + read-state surface.
             typingText = typingIndicatorText(thread?.typingMembers ?: emptySet()),
             readUpToByMember = thread?.readUpToByMember ?: emptyMap(),
@@ -2286,6 +2291,7 @@ public class ChatViewModel(
                         sendError = null,
                         draft = "",
                         pendingAttachments = emptyList(),
+                        pendingPreviews = emptyMap(),
                     )
                 }
             } catch (err: Throwable) {
@@ -2391,72 +2397,174 @@ public class ChatViewModel(
             ?: emptySet()
     }
 
+    /** Serializes picked-item uploads: every item shows its chip at once,
+     *  but the encrypt + PUT runs one at a time so the chips stay honest. */
+    private val attachmentUploadLock = kotlinx.coroutines.sync.Mutex()
+    private val nextPickId = java.util.concurrent.atomic.AtomicLong(1)
+
+    /** Preview decoding runs here, detached from the pick coroutine, so a
+     *  native decoder that never returns cannot hold the send (UX spec §10). */
+    private val visualPrepScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
+    )
+
     /**
-     * Drive the encrypt + upload flow for one picked item.
-     * Called by the screen layer after the OS-level picker
-     * resolves a URI to raw bytes + MIME + display name.
-     * Sequential — one item at a time — keeps the
-     * upload-state flag honest.
+     * UX spec §10 — attach picked items. Each item gets its upload chip
+     * IMMEDIATELY, before it is read or previewed, and leaves the tray only as
+     * a staged attachment or with a readable error; never silently.
      */
-    public fun onAttachmentPicked(bytes: ByteArray, mime: String?, name: String?) {
-        val displayName = name?.takeUnless { it.isNullOrEmpty() } ?: "attachment"
-        composer.update {
-            it.copy(
-                uploading = true,
-                sendError = null,
-                // Polish 1.x — drive `uploadStage` immediately
-                // so the composer doesn't show a generic spinner
-                // for the brief encrypt window. The
-                // `AttachmentBridge.encryptAndUpload` callback
-                // flips this to `Uploading` once it reaches the
-                // PUT path.
-                uploadStage = UploadProgress(
-                    fileName = displayName,
-                    stage = UploadStage.Encrypting,
-                ),
-            )
-        }
+    public fun onPickedUris(uris: List<android.net.Uri>) {
+        for (uri in uris) onPickedUri(uri)
+    }
+
+    private fun onPickedUri(uri: android.net.Uri) {
+        val id = nextPickId.getAndIncrement()
+        addInFlight(UploadProgress(id = id, fileName = me.lakko.app.media.PICKED_ITEM_PLACEHOLDER, stage = null))
         viewModelScope.launch {
-            try {
+            val read = try {
+                withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    me.lakko.app.media.readPickedUri(repo.context, uri, AttachmentBridge.MAX_ATTACHMENT_BYTES)
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                removeInFlight(id)
+                throw e
+            }
+            when (read) {
+                is me.lakko.app.media.PickedRead.Failed -> failPick(id, read.name, read.error)
+                is me.lakko.app.media.PickedRead.Ok -> {
+                    val payload = read.payload
+                    updateInFlight(id) { it.copy(fileName = payload.name ?: "attachment") }
+                    val visual = prepareVisualBounded(payload.bytes, payload.mime)
+                    updateInFlight(id) { it.copy(previewBytes = visual?.thumb) }
+                    uploadPicked(id, payload.bytes, payload.mime, payload.name, visual)
+                }
+            }
+        }
+    }
+
+    /**
+     * Drive the encrypt + upload flow for one item whose bytes are already
+     * read. Kept for callers that resolve the bytes themselves.
+     */
+    public fun onAttachmentPicked(
+        bytes: ByteArray,
+        mime: String?,
+        name: String?,
+        /** UX spec §10 — pixel size and thumb for a photo or video; `null`
+         *  for a plain file. */
+        visual: me.lakko.app.media.VisualPrep? = null,
+    ) {
+        val id = nextPickId.getAndIncrement()
+        addInFlight(
+            UploadProgress(
+                id = id,
+                fileName = name?.takeUnless { it.isEmpty() } ?: "attachment",
+                stage = null,
+                previewBytes = visual?.thumb,
+            ),
+        )
+        viewModelScope.launch { uploadPicked(id, bytes, mime, name, visual) }
+    }
+
+    /** The §10 size + thumb, bounded by [me.lakko.app.media.VISUAL_PREP_TIMEOUT_MS];
+     *  on timeout the item is sent without them. */
+    private suspend fun prepareVisualBounded(bytes: ByteArray, mime: String?): me.lakko.app.media.VisualPrep? {
+        if (me.lakko.app.media.inlineKindOf(mime, me.lakko.app.media.coreAllowlist) == null) return null
+        val scratch = repo.context.cacheDir
+        val prep = me.lakko.app.media.awaitBounded(visualPrepScope, me.lakko.app.media.VISUAL_PREP_TIMEOUT_MS) {
+            me.lakko.app.media.prepareVisualMedia(bytes, mime, scratch)
+        }
+        if (prep == null) {
+            android.util.Log.w("ChatViewModel", "preview preparation timed out or failed; sending without it")
+        }
+        return prep
+    }
+
+    private suspend fun uploadPicked(
+        id: Long,
+        bytes: ByteArray,
+        mime: String?,
+        name: String?,
+        visual: me.lakko.app.media.VisualPrep?,
+    ) {
+        try {
+            attachmentUploadLock.withLock {
+                // UX spec §10 — the thumb goes up first so the ref can carry
+                // it. A thumb that fails to upload is dropped; the send goes
+                // ahead without it.
+                val thumbRef = visual?.thumb?.let { thumb ->
+                    try {
+                        AttachmentBridge.encryptAndUploadThumb(
+                            bytes = thumb,
+                            mime = "image/jpeg",
+                            width = visual.thumbSize?.width?.toUInt(),
+                            height = visual.thumbSize?.height?.toUInt(),
+                        )
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Throwable) {
+                        android.util.Log.w("ChatViewModel", "thumb upload failed: ${e.javaClass.simpleName}")
+                        null
+                    }
+                }
+                val meta = if (visual != null && (visual.size != null || thumbRef != null)) {
+                    AttachmentMediaMeta(
+                        width = visual.size?.width?.toUInt(),
+                        height = visual.size?.height?.toUInt(),
+                        thumb = thumbRef,
+                    )
+                } else {
+                    null
+                }
                 val ref = AttachmentBridge.encryptAndUpload(
                     bytes = bytes,
                     mime = mime,
                     name = name,
-                    onStage = { stage ->
-                        composer.update {
-                            it.copy(
-                                uploadStage = UploadProgress(
-                                    fileName = displayName,
-                                    stage = stage,
-                                ),
-                            )
-                        }
-                    },
+                    media = meta,
+                    onStage = { stage -> updateInFlight(id) { it.copy(stage = stage) } },
                 )
-                composer.update {
-                    it.copy(
-                        uploading = false,
-                        uploadStage = null,
-                        pendingAttachments = it.pendingAttachments + ref,
-                    )
-                }
-            } catch (err: AttachmentBridgeException) {
-                composer.update {
-                    it.copy(
-                        uploading = false,
-                        uploadStage = null,
-                        sendError = err.message ?: "Attachment failed.",
-                    )
-                }
-            } catch (err: Throwable) {
-                composer.update {
-                    it.copy(
-                        uploading = false,
-                        uploadStage = null,
-                        sendError = "Attachment failed: ${err.message ?: err}",
+                composer.update { state ->
+                    val thumb = visual?.thumb
+                    state.copy(
+                        inFlight = state.inFlight.filterNot { it.id == id },
+                        pendingAttachments = state.pendingAttachments + ref,
+                        pendingPreviews = if (thumb != null) {
+                            state.pendingPreviews + (AttachmentBridge.hex(ref.blobId) to thumb)
+                        } else {
+                            state.pendingPreviews
+                        },
                     )
                 }
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            removeInFlight(id)
+            throw e
+        } catch (e: Throwable) {
+            android.util.Log.w("ChatViewModel", "attachment failed: ${e.javaClass.simpleName}")
+            failPick(id, name, e)
+        }
+    }
+
+    private fun addInFlight(item: UploadProgress) {
+        composer.update { it.copy(inFlight = it.inFlight + item, sendError = null) }
+    }
+
+    private fun updateInFlight(id: Long, change: (UploadProgress) -> UploadProgress) {
+        composer.update { state ->
+            state.copy(inFlight = state.inFlight.map { if (it.id == id) change(it) else it })
+        }
+    }
+
+    private fun removeInFlight(id: Long) {
+        composer.update { state -> state.copy(inFlight = state.inFlight.filterNot { it.id == id }) }
+    }
+
+    private fun failPick(id: Long, name: String?, error: Throwable?) {
+        composer.update { state ->
+            state.copy(
+                inFlight = state.inFlight.filterNot { it.id == id },
+                sendError = me.lakko.app.media.attachFailureMessage(name, error),
+            )
         }
     }
 
@@ -2470,6 +2578,7 @@ public class ChatViewModel(
                 pendingAttachments = it.pendingAttachments.toMutableList().apply {
                     removeAt(index)
                 },
+                pendingPreviews = it.pendingPreviews - AttachmentBridge.hex(it.pendingAttachments[index].blobId),
             )
         }
     }
@@ -2702,6 +2811,7 @@ public class ChatViewModel(
     }
 
     override fun onCleared() {
+        visualPrepScope.cancel()
         super.onCleared()
         // Every call deliberately outlives the chat it started in (it lives in
         // the app-level call host), so nothing here touches one.
@@ -2737,15 +2847,12 @@ public class ChatViewModel(
          *  Send, on per-chip remove, and on screen disposal
          *  (ViewModel.onCleared). */
         val pendingAttachments: List<AttachmentRef> = emptyList(),
-        /** `true` while one or more picked items are being
-         *  encrypted + uploaded. The composer disables Send +
-         *  the picker buttons until it flips back. */
-        val uploading: Boolean = false,
-        /** Polish 1.x — per-pick upload-progress detail.
-         *  `null` when no upload is in flight; otherwise carries
-         *  the file name + which stage of the encrypt / upload
-         *  pipeline the in-flight pick is at. */
-        val uploadStage: UploadProgress? = null,
+        /** Every picked item not yet staged: being read, previewed,
+         *  encrypted or uploaded. Send is disabled while non-empty. */
+        val inFlight: List<UploadProgress> = emptyList(),
+        /** UX spec §10 — thumbs of staged photos / videos, keyed by the
+         *  hex blob id, for the composer chips. */
+        val pendingPreviews: Map<String, ByteArray> = emptyMap(),
     )
 }
 
@@ -2753,10 +2860,15 @@ public class ChatViewModel(
  *  Mirror of the iOS `ChatViewModel.UploadStage` enum and the
  *  web client's `uploadProgress` signal. */
 public data class UploadProgress(
+    /** Identifies one picked item across its stages. */
+    val id: Long = 0,
     /** Display name of the file currently being processed. */
     val fileName: String,
-    /** Which pipeline stage the bridge is in. */
-    val stage: UploadStage,
+    /** Which pipeline stage the bridge is in; `null` while the item is
+     *  still being read and previewed. */
+    val stage: UploadStage?,
+    /** UX spec §10 — the photo / video thumb shown in the upload chip. */
+    val previewBytes: ByteArray? = null,
 )
 
 /** Combined snapshot the [ChatScreen] renders. */
@@ -2771,9 +2883,10 @@ public data class ChatScreenUiState(
     /** 1.19c4 — `true` while a picked item is being encrypted
      *  + uploaded. */
     val uploading: Boolean = false,
-    /** Polish 1.x — per-pick upload-progress detail. `null`
-     *  when no upload is in flight. */
-    val uploadStage: UploadProgress? = null,
+    /** Every picked item still in flight, in pick order. */
+    val inFlightUploads: List<UploadProgress> = emptyList(),
+    /** UX spec §10 — thumbs of staged attachments, by hex blob id. */
+    val pendingPreviews: Map<String, ByteArray> = emptyMap(),
     /** `false` when the repository has no thread for this
      *  groupIdHex — e.g. immediately after process restart
      *  before snapshot rehydration has rebuilt the per-group

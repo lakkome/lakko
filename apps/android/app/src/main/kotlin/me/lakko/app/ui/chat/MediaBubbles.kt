@@ -70,7 +70,7 @@ internal const val NOT_SENT_RETRY = "Not sent · Retry"
 
 /**
  * One attachment in a bubble: a voice player, a round video note, an
- * animation, or the plain file chip — chosen by [renderDecision], which needs
+ * animation, a photo or video (UX spec §10), or the plain file chip — chosen by [renderDecision], which needs
  * BOTH the sender's `kind` and a matching allowlisted MIME class (ADR-0047 §1).
  */
 @Composable
@@ -79,6 +79,14 @@ internal fun AttachmentView(
     hub: ChatMediaHub,
     isOwn: Boolean,
     contentColor: Color,
+    /** UX spec §10 — Save from the photo viewer / video player. */
+    onSave: (AttachmentRef) -> Unit = {},
+    /** The bubble's long-press menu, forwarded by photo and video bubbles
+     *  (their own tap handler would otherwise swallow the long press);
+     *  `null` when no menu is offered. */
+    onLongPress: (() -> Unit)? = null,
+    /** UX spec §10 — the time / ticks pill drawn on a photo or video. */
+    mediaOverlay: (@Composable androidx.compose.foundation.layout.BoxScope.() -> Unit)? = null,
     fileChip: @Composable () -> Unit,
 ) {
     val decision = remember(ref.kind, ref.mime) { renderDecision(ref, hub.allowlist) }
@@ -86,6 +94,8 @@ internal fun AttachmentView(
         MediaBubble.VOICE -> VoiceBubble(ref, hub, isOwn, contentColor)
         MediaBubble.VIDEO_NOTE -> VideoNoteBubble(ref, hub)
         MediaBubble.GIF -> GifBubble(ref, hub, decision.inline)
+        MediaBubble.PHOTO -> PhotoBubble(ref, hub, onSave, onLongPress, mediaOverlay)
+        MediaBubble.VIDEO -> VideoBubble(ref, hub, onSave, onLongPress, mediaOverlay)
         MediaBubble.FILE -> fileChip()
     }
 }

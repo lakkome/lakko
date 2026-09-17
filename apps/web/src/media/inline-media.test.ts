@@ -79,7 +79,21 @@ describe("renderDecision", () => {
     expect(renderDecision({ kind: "gif", mime: "image/webp" }, allowlist).bubble).toBe("gif");
   });
 
-  it("no kind or an unknown kind is a file chip that may still preview inline", () => {
+  it("no kind with an image type is a photo bubble, with video/mp4 a video bubble", () => {
+    for (const mime of ["image/jpeg", "image/png", "image/gif", "image/webp"]) {
+      expect(renderDecision({ mime }, allowlist)).toEqual({ bubble: "photo", inline: "image" });
+    }
+    expect(renderDecision({ mime: "video/mp4" }, allowlist)).toEqual({ bubble: "video", inline: "video" });
+  });
+
+  it("HEIC, SVG, an absent type and a non-media type stay file chips", () => {
+    expect(renderDecision({ mime: "image/heic" }, allowlist).bubble).toBe("file");
+    expect(renderDecision({ mime: "image/svg+xml" }, allowlist).bubble).toBe("file");
+    expect(renderDecision({ mime: undefined }, allowlist).bubble).toBe("file");
+    expect(renderDecision({ mime: "application/pdf" }, allowlist).bubble).toBe("file");
+  });
+
+  it("no kind with audio, or an unknown kind, is a file chip that may still preview inline", () => {
     expect(renderDecision({ mime: "audio/mp4" }, allowlist)).toEqual({ bubble: "file", inline: "audio" });
     expect(renderDecision({ kind: "sticker", mime: "image/png" }, allowlist)).toEqual({
       bubble: "file",

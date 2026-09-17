@@ -29,7 +29,12 @@ import uniffi.lakko_ffi_uniffi.AttachmentRef
  */
 public enum class InlineKind { IMAGE, AUDIO, VIDEO }
 
-public enum class MediaBubble { VOICE, VIDEO_NOTE, GIF, FILE }
+/**
+ * [PHOTO] and [VIDEO] are the UX spec §10 bubbles for an attachment with NO
+ * `kind`: an image on the allowlist is a photo, an allowlisted video is a
+ * video. A present-but-unknown `kind` stays a file chip.
+ */
+public enum class MediaBubble { VOICE, VIDEO_NOTE, GIF, PHOTO, VIDEO, FILE }
 
 public typealias MediaAllowlist = (String) -> InlineKind?
 
@@ -72,6 +77,8 @@ public fun renderDecision(kind: String?, mime: String?, allowlist: MediaAllowlis
         kind == KIND_VIDEO_NOTE && inline == InlineKind.VIDEO -> MediaBubble.VIDEO_NOTE
         kind == KIND_GIF && (inline == InlineKind.IMAGE || inline == InlineKind.VIDEO) ->
             MediaBubble.GIF
+        kind == null && inline == InlineKind.IMAGE -> MediaBubble.PHOTO
+        kind == null && inline == InlineKind.VIDEO -> MediaBubble.VIDEO
         else -> MediaBubble.FILE
     }
     return RenderDecision(bubble, inline)

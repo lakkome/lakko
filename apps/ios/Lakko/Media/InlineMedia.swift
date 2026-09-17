@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import CoreGraphics
 import Foundation
 import LakkoCore
 
@@ -26,6 +27,11 @@ public enum InlineMedia {
         case voice
         case videoNote
         case gif
+        /// UX spec section 10 — an allowlisted image with no `kind`.
+        case photo
+        /// UX spec section 10 — `video/mp4` (the allowlisted video class) with
+        /// no `kind`.
+        case video
         case file
     }
 
@@ -63,6 +69,12 @@ public enum InlineMedia {
             return Decision(bubble: .videoNote, inline: inline)
         case ("gif", .image?), ("gif", .video?):
             return Decision(bubble: .gif, inline: inline)
+        // A plain photo or video carries no kind; an unknown kind stays a file
+        // so a future shape is never guessed at.
+        case (nil, .image?):
+            return Decision(bubble: .photo, inline: inline)
+        case (nil, .video?):
+            return Decision(bubble: .video, inline: inline)
         default:
             return Decision(bubble: .file, inline: inline)
         }
@@ -78,5 +90,53 @@ public enum InlineMedia {
     /// Whether a poster thumb may be decoded as an image at all.
     public static func isImageThumb(_ thumb: ThumbRef, allowlist: Allowlist = coreAllowlist) -> Bool {
         inlineType(mime: thumb.mime, allowlist: allowlist) == .image
+    }
+
+    // MARK: - Photo and video bubble size (UX spec section 10)
+
+    public static let mediaMaxWidth: Double = 260
+    public static let mediaMaxHeight: Double = 360
+    /// Keeps an extreme panorama or a sliver still tappable.
+    public static let mediaMinSide: Double = 72
+    /// Sender side: the `width` / `height` carried on the wire fit this box.
+    public static let maxWireDimension: UInt32 = 4096
+
+    /// The bubble box for a photo or video, known before any byte downloads:
+    /// the attachment's `width` / `height`, else the thumb's, else 4:3; fit
+    /// into 260 x 360 with the aspect preserved.
+    public static func bubbleSize(
+        width: UInt32?,
+        height: UInt32?,
+        thumbWidth: UInt32? = nil,
+        thumbHeight: UInt32? = nil
+    ) -> CGSize {
+        let aspect: Double
+        if let w = width, let h = height, w > 0, h > 0 {
+            aspect = Double(h) / Double(w)
+        } else if let w = thumbWidth, let h = thumbHeight, w > 0, h > 0 {
+            aspect = Double(h) / Double(w)
+        } else {
+            aspect = 3.0 / 4.0
+        }
+        var w = mediaMaxWidth
+        var h = w * aspect
+        if h > mediaMaxHeight {
+            h = mediaMaxHeight
+            w = h / aspect
+        }
+        return CGSize(width: max(mediaMinSide, min(mediaMaxWidth, w)), height: max(mediaMinSide, min(mediaMaxHeight, h)))
+    }
+
+    /// Sender side: a pixel size scaled down proportionally to fit
+    /// ``maxWireDimension``, never up. `nil` for a zero dimension.
+    public static func wireDimensions(width: Int, height: Int) -> (width: UInt32, height: UInt32)? {
+        guard width > 0, height > 0 else { return nil }
+        let longest = max(width, height)
+        let limit = Int(maxWireDimension)
+        guard longest > limit else { return (UInt32(width), UInt32(height)) }
+        let scale = Double(limit) / Double(longest)
+        let w = max(1, min(limit, Int((Double(width) * scale).rounded())))
+        let h = max(1, min(limit, Int((Double(height) * scale).rounded())))
+        return (UInt32(w), UInt32(h))
     }
 }

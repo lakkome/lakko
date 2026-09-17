@@ -2640,6 +2640,146 @@ a.ghost.small:hover {
 .lk-bubble-media.after-text {
   margin-top: 6px;
 }
+/* UX spec docs/ux/media-messages.md section 10 — photo and video bubbles. */
+.lk-visual {
+  position: relative;
+  display: block;
+  max-width: 100%;
+  height: auto;
+  padding: 0;
+  border: none;
+  border-radius: calc(var(--radius-lg) - 4px);
+  overflow: hidden;
+  background: var(--surface-border);
+  color: #fff;
+  cursor: pointer;
+}
+.lk-visual img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.lk-visual img.thumb {
+  filter: blur(6px);
+  transform: scale(1.08);
+}
+.lk-visual-corner {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: inline-flex;
+  padding: 5px;
+  border-radius: var(--radius-pill);
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  pointer-events: none;
+}
+.lk-visual-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  pointer-events: none;
+}
+.lk-visual-play {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-pill);
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 18px;
+}
+.lk-visual-note {
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: var(--text-xs, 12px);
+}
+.lk-visual-size {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 11px;
+  line-height: 16px;
+  pointer-events: none;
+}
+.lk-bubble.media-only {
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+}
+.lk-bubble.media-only > .lk-sender {
+  order: 0;
+  padding: 2px 8px 0;
+}
+.lk-bubble.media-only > .lk-bubble-media {
+  order: 1;
+}
+.lk-bubble.lk-bubble.media-only > .lk-bubble-meta {
+  order: 2;
+  position: relative;
+  align-self: flex-end;
+  margin: -26px 8px 8px 0;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  opacity: 1;
+  pointer-events: none;
+}
+.lk-bubble.media-only > .lk-reactions {
+  order: 3;
+  margin: 0 4px 2px;
+}
+.lk-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+}
+.lk-viewer img,
+.lk-viewer video {
+  max-width: 100vw;
+  max-height: calc(100vh - 64px);
+  object-fit: contain;
+}
+.lk-viewer-bar {
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  display: flex;
+  gap: 8px;
+  z-index: 1;
+}
+.lk-viewer-bar button {
+  height: 40px;
+  padding: 0 16px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.lk-viewer-bar button:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
 .lk-bubble-meta {
   display: flex;
   align-items: center;

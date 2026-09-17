@@ -181,9 +181,19 @@ export async function encryptAndUploadFile(
   // a fresh Uint8Array.
   const enc = wasm.encryptAttachment(plaintext);
 
+  // Every getter copies out of the wasm handle, so all of them are read
+  // BEFORE `free()`. A getter on a freed handle throws "null pointer passed
+  // to rust" — this function used to read `blobId` / `key` / `nonce` after
+  // the free, which failed every composer file send.
+  let blobId: Uint8Array;
+  let key: Uint8Array;
+  let nonce: Uint8Array;
   try {
+    blobId = enc.blobId;
+    key = enc.key;
+    nonce = enc.nonce;
     onStage?.("uploading");
-    await storage.putBlob(enc.blobId, enc.ciphertext);
+    await storage.putBlob(blobId, enc.ciphertext);
   } finally {
     // Even on PUT failure we still want to drop the wasm handle
     // — the encrypted bytes only live in JS heap as the
@@ -201,9 +211,9 @@ export async function encryptAndUploadFile(
   const name = file.name.length > 0 ? file.name : undefined;
 
   return {
-    blobId: enc.blobId,
-    key: enc.key,
-    nonce: enc.nonce,
+    blobId,
+    key,
+    nonce,
     mime,
     size: file.size,
     name,

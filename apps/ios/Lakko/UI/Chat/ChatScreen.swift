@@ -298,7 +298,8 @@ public struct ChatScreen: View {
             isPresented: $photoPickerOpenRequested,
             selection: $photoPickerItems,
             maxSelectionCount: 10,
-            matching: .images
+            // UX spec section 10 — photos and videos both become media bubbles.
+            matching: .any(of: [.images, .videos])
         )
         .onChange(of: photoPickerItems) { _, newItems in
             // Resolve each picked photo on a Task → bytes +
@@ -309,15 +310,7 @@ public struct ChatScreen: View {
             let items = newItems
             photoPickerItems = []
             for item in items {
-                Task {
-                    if let payload = await resolvePhoto(item) {
-                        await viewModel.onAttachmentPicked(
-                            bytes: payload.bytes,
-                            mime: payload.mime,
-                            name: payload.name
-                        )
-                    }
-                }
+                Task { await sendPicked(item) }
             }
         }
         // File importer for arbitrary files.
@@ -865,8 +858,14 @@ public struct ChatScreen: View {
                     id: \.offset
                 ) { idx, ref in
                     HStack(spacing: 6) {
-                        Image(systemName: pendingChipIcon(ref))
-                            .foregroundStyle(.secondary)
+                        if let thumb = ref.thumb.flatMap({
+                            MediaSessionCache.shared.cachedData(MediaSessionCache.key(for: $0))
+                        }), let image = UIImage(data: thumb) {
+                            TrayThumbnail(image: image)
+                        } else {
+                            Image(systemName: pendingChipIcon(ref))
+                                .foregroundStyle(.secondary)
+                        }
                         VStack(alignment: .leading, spacing: 0) {
                             Text(ref.name ?? "(unnamed)")
                                 .font(.caption)
@@ -891,6 +890,9 @@ public struct ChatScreen: View {
                 }
                 if viewModel.uploading {
                     HStack(spacing: 6) {
+                        if let data = viewModel.uploadingThumbnail, let image = UIImage(data: data) {
+                            TrayThumbnail(image: image)
+                        }
                         ProgressView().controlSize(.small)
                         // Polish 1.x — surface the active pick's
                         // file name + stage instead of a generic
@@ -913,10 +915,11 @@ public struct ChatScreen: View {
     }
 
     private func pendingChipIcon(_ ref: AttachmentRef) -> String {
-        if AttachmentBridge.isInlinePreviewable(ref) {
-            return "photo"
+        switch InlineMedia.decision(for: ref).bubble {
+        case .video: return "video"
+        case .photo: return "photo"
+        default: return AttachmentBridge.isInlinePreviewable(ref) ? "photo" : "doc"
         }
-        return "doc"
     }
 
     /// Map [``ChatViewModel/UploadStage``] to the caption shown
@@ -934,34 +937,47 @@ public struct ChatScreen: View {
         }
     }
 
-    /// PhotosPicker handoff — resolve a single
-    /// `PhotosPickerItem` to `(bytes, mime, name)`. iOS 17
-    /// gives us `loadTransferable(type: Data.self)` directly +
-    /// `loadTransferable(type: ImageInfo.self)` for richer
-    /// metadata; the plain Data path is enough for 1.19c3.
-    private func resolvePhoto(
-        _ item: PhotosPickerItem
-    ) async -> AttachmentPayload? {
-        // `loadTransferable(type: Data.self)` returns
-        // `Data?` directly in recent SDKs (was double-
-        // Optional in an earlier signature where one level
-        // came from `try?`). The single guard-let unwraps
-        // both the throw-or-nil result of `try?` and the
-        // optional-payload Data in one step.
-        guard let bytes = try? await item.loadTransferable(type: Data.self),
-              !bytes.isEmpty
-        else { return nil }
-        // PhotosPickerItem doesn't expose a filename, and the
-        // MIME comes from `supportedContentTypes` only on a
-        // separate transferable type. For 1.19c3 we sniff the
-        // type from the first bytes — JPEG vs PNG vs HEIC vs
-        // GIF — and use a placeholder filename. The recipient
-        // surfaces the MIME-icon fallback when none of these
-        // match.
-        let mime = sniffImageMime(bytes) ?? "image/jpeg"
-        let name = "photo-\(Int(Date().timeIntervalSince1970))"
-            + (mime == "image/png" ? ".png" : ".jpg")
-        return AttachmentPayload(bytes: bytes, mime: mime, name: name)
+    /// UX spec section 10 — a picked library item becomes a photo or video
+    /// bubble: the video is exported to MP4 and the photo converted to an
+    /// inline format (HEIC to JPEG) off the main actor, each with its size and
+    /// a preview. An image ImageIO cannot decode is sent as a plain file.
+    private func sendPicked(_ item: PhotosPickerItem) async {
+        let stamp = Self.pickStamp()
+        let isVideo = item.supportedContentTypes.contains { $0.conforms(to: .movie) }
+        if isVideo {
+            guard let movie = try? await item.loadTransferable(type: PickedMovie.self) else {
+                viewModel.reportAttachmentProblem("Couldn't open this video. Try again.")
+                return
+            }
+            let prepared = await PhotoVideoPrep.prepareVideo(movie.url, stamp: stamp)
+            try? FileManager.default.removeItem(at: movie.url.deletingLastPathComponent())
+            guard let prepared else {
+                viewModel.reportAttachmentProblem("Couldn't prepare this video. Videos up to 50 MB can be sent.")
+                return
+            }
+            await viewModel.onMediaPrepared(prepared)
+            return
+        }
+        guard let bytes = try? await item.loadTransferable(type: Data.self), !bytes.isEmpty else {
+            viewModel.reportAttachmentProblem("Couldn't open this photo. Try again.")
+            return
+        }
+        let prepared = await Task.detached(priority: .userInitiated) {
+            PhotoVideoPrep.preparePhoto(bytes, stamp: stamp)
+        }.value
+        if let prepared {
+            await viewModel.onMediaPrepared(prepared)
+        } else {
+            let mime = PhotoVideoPrep.sniffInlineImageMime(bytes)
+            await viewModel.onAttachmentPicked(bytes: bytes, mime: mime, name: "file-\(stamp)")
+        }
+    }
+
+    private static func pickStamp() -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyyMMdd-HHmmss"
+        return f.string(from: Date()) + "-" + String(UUID().uuidString.prefix(4)).lowercased()
     }
 
     /// File-importer handoff — read the URL's bytes + sniff
@@ -984,33 +1000,6 @@ public struct ChatScreen: View {
         return AttachmentPayload(bytes: bytes, mime: mime, name: name)
     }
 
-    /// Magic-byte sniff for the four web image formats. Used
-    /// as a fallback when the `PhotosPickerItem` transferable
-    /// path doesn't carry an explicit MIME. Returns `nil` for
-    /// non-image bytes so the recipient sees no MIME → no
-    /// inline-preview hint.
-    private func sniffImageMime(_ bytes: Data) -> String? {
-        guard bytes.count >= 12 else { return nil }
-        let b = [UInt8](bytes.prefix(12))
-        // JPEG SOI: FF D8 FF
-        if b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF { return "image/jpeg" }
-        // PNG signature: 89 50 4E 47 0D 0A 1A 0A
-        if b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47 {
-            return "image/png"
-        }
-        // GIF87a / GIF89a: "GIF8(7|9)a"
-        if b[0] == 0x47 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x38
-            && (b[4] == 0x37 || b[4] == 0x39) && b[5] == 0x61 {
-            return "image/gif"
-        }
-        // WebP: "RIFF????WEBP"
-        if b[0] == 0x52 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x46
-            && b[8] == 0x57 && b[9] == 0x45 && b[10] == 0x42 && b[11] == 0x50 {
-            return "image/webp"
-        }
-        return nil
-    }
-
     /// Trigger the download + decrypt flow for an incoming
     /// attachment chip's "Open" tap. Routes the bytes into
     /// `previewImageData` so the body-level `.sheet` modifier
@@ -1029,6 +1018,21 @@ public struct ChatScreen: View {
                 print("preview download failed: \(error)")
             }
         }
+    }
+}
+
+/// UX spec section 10 — the preview of a photo or video in the composer's
+/// attachment tray.
+private struct TrayThumbnail: View {
+    let image: UIImage
+
+    var body: some View {
+        Image(uiImage: image)
+            .resizable()
+            .scaledToFill()
+            .frame(width: 32, height: 32)
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .accessibilityHidden(true)
     }
 }
 
@@ -1116,6 +1120,29 @@ private struct MessageRow: View {
         return InlineMedia.decision(for: ref).bubble == .videoNote
     }
 
+    /// UX spec section 10 — a message that is exactly one photo or video
+    /// renders as the media itself, the time in a pill on top of it.
+    private var bareVisualMedia: AttachmentRef? {
+        guard !message.deleted, message.text.isEmpty, message.attachments.count == 1,
+              let ref = message.attachments.first else { return nil }
+        switch InlineMedia.decision(for: ref).bubble {
+        case .photo, .video: return ref
+        default: return nil
+        }
+    }
+
+    @ViewBuilder
+    private func visualMedia(_ ref: AttachmentRef) -> some View {
+        Group {
+            if InlineMedia.decision(for: ref).bubble == .video {
+                VideoBubble(ref: ref, overlay: AnyView(mediaMetaPill))
+            } else {
+                PhotoBubble(ref: ref, overlay: AnyView(mediaMetaPill))
+            }
+        }
+        .contextMenu { menuItems }
+    }
+
     /// Edit / Delete are offered only on our own outgoing
     /// messages that carry a server-assigned id and are not
     /// already deleted (the receive-side author gate is the real
@@ -1149,6 +1176,8 @@ private struct MessageRow: View {
                             metaRow
                         }
                         .contextMenu { menuItems }
+                    } else if let ref = bareVisualMedia {
+                        visualMedia(ref)
                     } else {
                         bubble
                     }
@@ -1183,6 +1212,8 @@ private struct MessageRow: View {
                             metaRow
                         }
                         .contextMenu { menuItems }
+                    } else if let ref = bareVisualMedia {
+                        visualMedia(ref)
                     } else {
                         bubble
                     }
@@ -1279,6 +1310,25 @@ private struct MessageRow: View {
     /// "(edited)", the time, and — on own messages — the delivery glyph.
     @ViewBuilder
     private var metaRow: some View {
+        metaContent
+            .foregroundStyle(isOutgoing ? Color.lakkoAccentForeground : Color.lakkoTextMuted)
+            .opacity(isOutgoing ? 0.85 : 1)
+            .padding(.bottom, 1)
+    }
+
+    /// UX spec section 10 — the time, ticks and edited marker on a photo or
+    /// video, in a small translucent pill.
+    private var mediaMetaPill: some View {
+        metaContent
+            .foregroundStyle(Color.white)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(Color.black.opacity(0.5)))
+            .padding(6)
+    }
+
+    @ViewBuilder
+    private var metaContent: some View {
         HStack(spacing: 3) {
             if message.edited, !message.deleted {
                 Text("edited")
@@ -1293,9 +1343,6 @@ private struct MessageRow: View {
                 deliveryGlyph
             }
         }
-        .foregroundStyle(isOutgoing ? Color.lakkoAccentForeground : Color.lakkoTextMuted)
-        .opacity(isOutgoing ? 0.85 : 1)
-        .padding(.bottom, 1)
     }
 
     @ViewBuilder

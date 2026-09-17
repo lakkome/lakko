@@ -15,14 +15,16 @@
  *     `kind: "voice"` carrying `mime: "text/html"` is a file chip.
  *
  * So a media bubble needs BOTH: the kind asks for the shape, and the
- * allowlisted MIME type must be of the matching media class. Anything else —
- * no kind, an unknown kind, a mismatched class, an absent or refused MIME —
- * is a file chip, which may still offer an inline preview if (and only if) its
- * MIME type is allowlisted.
+ * allowlisted MIME type must be of the matching media class.
+ *
+ * UX spec section 10 adds the one case with NO kind: a plain attachment whose
+ * allowlisted class is an image is a photo bubble, and one whose class is
+ * video (`video/mp4`) is a video bubble. Anything else — an unknown kind, a
+ * mismatched class, an absent or refused MIME (HEIC, SVG) — is a file chip.
  */
 
 export type InlineType = "image" | "audio" | "video";
-export type MediaBubble = "voice" | "video_note" | "gif" | "file";
+export type MediaBubble = "voice" | "video_note" | "gif" | "photo" | "video" | "file";
 
 /**
  * The wasm `InlineMediaType` enum values (`Image = 0`, `Audio = 1`,
@@ -77,6 +79,10 @@ export function renderDecision(
   if (ref.kind === "video_note" && inline === "video") return { bubble: "video_note", inline };
   if (ref.kind === "gif" && (inline === "image" || inline === "video")) {
     return { bubble: "gif", inline };
+  }
+  if (ref.kind === undefined) {
+    if (inline === "image") return { bubble: "photo", inline };
+    if (inline === "video") return { bubble: "video", inline };
   }
   return { bubble: "file", inline };
 }

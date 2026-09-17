@@ -229,6 +229,12 @@ targets:
           choose to send. The mic is only on while you are in a
           call or recording a message, and everything it captures
           is encrypted on your device before it is sent.
+        # Media messages, UX spec section 10 — the photo and video viewers'
+        # Save goes through the share sheet, whose "Save Image" / "Save
+        # Video" writes to the library and needs this string.
+        NSPhotoLibraryAddUsageDescription: >-
+          Lakko saves photos and videos to your library only when
+          you choose Save.
         # `UIRequiredDeviceCapabilities` left at default — every
         # device the deployment target accepts has the same
         # baseline (arm64, OpenGL ES 2.0).

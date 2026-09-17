@@ -288,6 +288,15 @@ function ChatBubbleBody(
     props.attachments.length === 1 &&
     props.attachments[0] !== undefined &&
     props.hub.decision(props.attachments[0]).bubble === "video_note";
+  // UX spec section 10 — a lone photo or video fills its bubble, and the time
+  // and ticks sit on the media in a translucent pill.
+  const mediaOnly = (): boolean => {
+    const only = props.attachments[0];
+    if (only === undefined || props.attachments.length !== 1) return false;
+    if (displayText().length > 0 || isDeleted() || isEditing()) return false;
+    const bubble = props.hub.decision(only).bubble;
+    return bubble === "photo" || bubble === "video";
+  };
   const keyFor = (ref: AttachmentRefBytes): string =>
     ref.blobId.length === 0 && props.mediaLocalKey !== undefined
       ? props.mediaLocalKey
@@ -319,6 +328,7 @@ function ChatBubbleBody(
           incoming: isIncoming,
           outgoing: !isIncoming,
           chromeless: chromeless(),
+          "media-only": mediaOnly(),
           pending: pending(),
           "run-start": props.startsRun,
           "run-end": props.endsRun,

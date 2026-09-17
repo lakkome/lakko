@@ -72,6 +72,8 @@ public enum ChatListFormatting {
         case .voice: return "Voice message"
         case .videoNote: return "Video message"
         case .gif: return "GIF"
+        case .photo: return "Photo"
+        case .video: return "Video"
         case .file:
             switch decision.inline {
             case .image?: return "Photo"

@@ -57,11 +57,42 @@ class InlineMediaTest {
     }
 
     @Test
-    fun unknownOrAbsentKindIsAFileChipThatMayStillPreview() {
+    fun unknownKindIsAFileChipThatMayStillPreview() {
         val d = renderDecision("sticker", "image/png", fake)
         assertEquals(MediaBubble.FILE, d.bubble)
         assertEquals(InlineKind.IMAGE, d.inline)
+        assertEquals(MediaBubble.FILE, renderDecision("sticker", "video/mp4", fake).bubble)
         assertEquals(MediaBubble.FILE, renderDecision(null, "audio/mp4", fake).bubble)
+    }
+
+    @Test
+    fun noKindWithAnAllowlistedImageIsAPhoto() {
+        for (mime in listOf("image/jpeg", "image/png", "image/gif", "image/webp", "IMAGE/JPEG; q=1")) {
+            val d = renderDecision(null, mime, fake)
+            assertEquals(mime, MediaBubble.PHOTO, d.bubble)
+            assertEquals(InlineKind.IMAGE, d.inline)
+        }
+    }
+
+    @Test
+    fun noKindWithAnAllowlistedVideoIsAVideo() {
+        val d = renderDecision(null, "video/mp4", fake)
+        assertEquals(MediaBubble.VIDEO, d.bubble)
+        assertEquals(InlineKind.VIDEO, d.inline)
+    }
+
+    @Test
+    fun heicSvgAndOtherVideoTypesStayFileChips() {
+        for (mime in listOf("image/heic", "image/svg+xml", "video/webm", "video/quicktime", "application/pdf")) {
+            assertEquals(mime, MediaBubble.FILE, renderDecision(null, mime, fake).bubble)
+        }
+        assertEquals(MediaBubble.FILE, renderDecision(null, null, fake).bubble)
+    }
+
+    @Test
+    fun aThrowingAllowlistNeverYieldsAPhoto() {
+        val throwing: MediaAllowlist = { throw IllegalStateException("native core missing") }
+        assertEquals(MediaBubble.FILE, renderDecision(null, "image/jpeg", throwing).bubble)
     }
 
     @Test

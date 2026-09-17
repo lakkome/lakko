@@ -20,6 +20,7 @@ import { ProgressRing } from "./MediaComposer";
 import type { MediaHub } from "./media-hub";
 import { nextPlaybackRate, rateLabel } from "./playback-queue";
 import { formatClock, spokenDuration } from "./recording-machine";
+import { PhotoBubble, VideoBubble } from "./VisualBubbles";
 import { waveformBars } from "./waveform";
 
 /** Upload state of an outgoing media message: a completed fraction while
@@ -584,6 +585,12 @@ export function MediaAttachment(props: MediaBubbleProps): JSX.Element {
       </Show>
       <Show when={decision() === "gif"}>
         <GifBubble {...props} />
+      </Show>
+      <Show when={decision() === "photo"}>
+        <PhotoBubble {...props} />
+      </Show>
+      <Show when={decision() === "video"}>
+        <VideoBubble {...props} />
       </Show>
     </>
   );

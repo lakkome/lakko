@@ -612,6 +612,7 @@ public final class ChatMediaController: ObservableObject {
     public func mediaFile(for ref: AttachmentRef) async throws -> URL {
         let key = Self.key(for: ref)
         if let url = temp.url(for: key) { return url }
+        if let url = MediaSessionCache.shared.videoFile(key) { return url }
         guard InlineMedia.decision(for: ref).bubble != .file else { throw MediaCaptureError.startFailed }
         return try await single(key) { [temp] in
             let bytes = try await AttachmentBridge.downloadAndDecrypt(ref: ref)

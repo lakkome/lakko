@@ -67,6 +67,8 @@ internal fun AnimatedImage(
     source: AnimatedSource,
     contentDescription: String,
     modifier: Modifier = Modifier,
+    /** Letterbox instead of cropping (the full-screen viewer). */
+    fit: Boolean = false,
     onFailed: () -> Unit = {},
 ) {
     var drawable by remember(source) { mutableStateOf<Drawable?>(null) }
@@ -89,7 +91,7 @@ internal fun AnimatedImage(
     AndroidView(
         factory = { ctx ->
             ImageView(ctx).apply {
-                scaleType = ImageView.ScaleType.CENTER_CROP
+                scaleType = if (fit) ImageView.ScaleType.FIT_CENTER else ImageView.ScaleType.CENTER_CROP
                 this.contentDescription = contentDescription
             }
         },

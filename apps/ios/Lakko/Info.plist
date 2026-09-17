@@ -62,6 +62,8 @@
 	<string>Lakko uses the camera to scan QR codes from devices you want to link to your account, to capture video for in-call streams, and to record video messages you choose to send. Everything the camera captures is end-to-end encrypted on your device before it is sent.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Lakko uses the microphone for end-to-end-encrypted calls and to record voice messages and video messages you choose to send. The mic is only on while you are in a call or recording a message, and everything it captures is encrypted on your device before it is sent.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Lakko saves photos and videos to your library only when you choose Save.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>fetch</string>

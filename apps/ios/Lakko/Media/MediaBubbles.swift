@@ -41,6 +41,10 @@ struct MediaAttachmentView: View {
             VideoNoteBubble(ref: ref, mediaKey: mediaKey, incoming: incoming, upload: upload, onRetry: onRetry)
         case .gif:
             GifBubble(ref: ref, mediaKey: mediaKey, upload: upload, localReady: localReady, onRetry: onRetry)
+        case .photo:
+            PhotoBubble(ref: ref)
+        case .video:
+            VideoBubble(ref: ref)
         case .file:
             EmptyView()
         }

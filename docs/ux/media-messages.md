@@ -250,3 +250,68 @@ to GIPHY's hosts with a size cap; session-token auth; a per-account rate limit; 
 Stickers (the previous app had packs; not requested), trimming a recording, transcribing
 voice messages, raise-to-listen on native, sending a GIF with a caption, a GIF favourites
 list, and video notes longer than 60 s.
+
+## 10. Photos and videos in the timeline
+
+Added 2026-09-17 after a live check: a photo sent from iOS reached Android and web as a
+file chip with **Open** / **Save**, and a picked video had no way to play in the app.
+A photo or a video is shown in the chat window itself, like every mainstream messenger.
+
+### Which attachments get a media bubble
+
+- **Photo bubble**: MIME on the inline allowlist as an image (`image/jpeg`, `image/png`,
+  `image/gif`, `image/webp`) and no `kind`. Decided by MIME, never by `kind` or name (§8).
+- **Video bubble**: MIME `video/mp4` and no `kind`.
+- Anything else, including HEIC and SVG, stays a file chip. The iOS photo picker converts
+  HEIC to JPEG before sending so an iPhone photo is always a photo bubble everywhere.
+- Several photos sent together still render as separate bubbles in v1.
+
+### Sending
+
+The sender attaches, next to the original, everything the receiver needs before download:
+
+| Field | Photo | Video |
+|---|---|---|
+| `width`, `height` | Pixel size of the image, scaled down proportionally to fit 4096 if larger | Pixel size of the first video track, same scaling |
+| `thumb` | JPEG, longest side 320 px, quality chosen so the blob is under 64 KiB (hard wire cap 256 KiB) | JPEG poster of the first frame, same size rule |
+
+If a thumb cannot be produced (decoder failure, unsupported codec) the attachment is sent
+without it; never block a send on a preview. The composer shows the same thumbnail in the
+upload chip while the upload runs.
+
+### Receiving: states of the bubble
+
+The bubble has a fixed size from `width` / `height` before anything is downloaded: width
+at most 260 pt/dp (web 320 px), height at most 360, aspect preserved, never upscaled past
+the thumb's native size by more than the bubble box. Without dimensions the bubble uses
+the thumb's aspect, and without both a 4:3 placeholder.
+
+| State | Photo | Video |
+|---|---|---|
+| Thumb loading | Neutral placeholder of the final size | Same, plus a play glyph |
+| Thumb ready | Thumb scaled to fill, lightly blurred | Poster with a centred play button and the file size |
+| Full loading | Thumb stays, a small progress ring in the corner | Unchanged until tapped |
+| Full ready | The photo replaces the thumb in place | n/a |
+| Failed | Thumb (or placeholder) with `Couldn't load photo`, tap retries | `Couldn't load video`, tap retries |
+
+- **Photos load automatically** when the bubble comes on screen: first the thumb, then
+  the full image. Decrypted bytes are cached for the session so scrolling back does not
+  download again.
+- **Videos load only on tap.** Tap downloads with a progress ring on the poster, then
+  opens the full-screen player.
+- Time, ticks and edited marker sit on the media in a small translucent pill, bottom right.
+- Only bytes that decrypted and authenticated are ever shown (§4 failure rule).
+
+### Viewer
+
+Tap a photo: full-screen viewer, black background, pinch/scroll zoom on native, close by
+swipe down or a close button, **Save** (native share sheet / browser download). Tap a
+video: full-screen player with the platform's standard controls and the same Save.
+Long-press (native) or right-click (web) keeps the existing message menu (react, reply,
+delete own).
+
+### Cross-platform shape
+
+One mental model on all three: the same allowlist decision (the shared `inlineMediaType`
+FFI call), the same sizing box, the same auto-load rule (photos yes, videos on tap), the
+same viewer. The file chip remains only for non-media files.

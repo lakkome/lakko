@@ -418,8 +418,9 @@ public enum AttachmentBridge {
 /// field is bounded by `lakko-attachments`, which drops an out-of-bound value
 /// rather than failing the envelope; this client never produces one.
 public struct MediaAttachmentMeta: Equatable, Sendable {
-    /// `voice`, `video_note` or `gif`.
-    public var kind: String
+    /// `voice`, `video_note` or `gif`; `nil` for a plain photo or video,
+    /// whose bubble is decided by its MIME type alone (UX spec section 10).
+    public var kind: String?
     public var durationMs: UInt32?
     /// At most 128 amplitude bytes.
     public var waveform: Data?
@@ -428,7 +429,7 @@ public struct MediaAttachmentMeta: Equatable, Sendable {
     public var thumb: ThumbRef?
 
     public init(
-        kind: String,
+        kind: String?,
         durationMs: UInt32? = nil,
         waveform: Data? = nil,
         width: UInt32? = nil,

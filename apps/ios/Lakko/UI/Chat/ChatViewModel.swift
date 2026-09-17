@@ -60,6 +60,10 @@ public final class ChatViewModel: ObservableObject {
     /// the index is always 1.
     @Published public private(set) var uploadStage: UploadStage?
 
+    /// UX spec section 10 — the preview of the photo or video being uploaded,
+    /// shown in the composer's upload chip while the upload runs.
+    @Published public private(set) var uploadingThumbnail: Data?
+
     /// Stage of a single pick's encrypt+upload pipeline. Mirror
     /// of the web client's `uploadProgress.stage` discriminator.
     public enum UploadStage: Equatable {
@@ -2466,6 +2470,92 @@ public final class ChatViewModel: ObservableObject {
                     }
                 }
             )
+            pendingAttachments.append(ref)
+        } catch let err as AttachmentBridgeError {
+            sendError = err.errorDescription
+        } catch {
+            sendError = "Attachment failed: \(error)"
+        }
+    }
+
+    /// A picked item that could not be prepared for sending: one sentence
+    /// in the composer's error line, nothing sent.
+    public func reportAttachmentProblem(_ copy: String) {
+        sendError = copy
+    }
+
+    /// UX spec section 10 — encrypt and upload a picked photo or video with
+    /// the metadata the receiver needs before downloading: pixel size and a
+    /// small JPEG preview uploaded as its own encrypted blob. The attachment
+    /// carries no `kind`; its MIME type makes it a photo or video bubble. A
+    /// preview that fails to upload is dropped, never the send.
+    public func onMediaPrepared(_ prepared: PhotoVideoPrep.Prepared) async {
+        uploading = true
+        sendError = nil
+        uploadingThumbnail = prepared.thumb
+        let displayName = prepared.name
+        uploadStage = .encrypting(fileName: displayName)
+        defer {
+            uploading = false
+            uploadStage = nil
+            uploadingThumbnail = nil
+            if let file = prepared.fileURL {
+                try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+            }
+        }
+        var thumbRef: ThumbRef?
+        if let thumb = prepared.thumb {
+            do {
+                thumbRef = try await AttachmentBridge.encryptAndUploadThumb(
+                    bytes: thumb,
+                    mime: "image/jpeg",
+                    width: prepared.thumbWidth,
+                    height: prepared.thumbHeight
+                )
+            } catch {
+                thumbRef = nil
+            }
+        }
+        let meta = MediaAttachmentMeta(
+            kind: nil,
+            width: prepared.width,
+            height: prepared.height,
+            thumb: thumbRef
+        )
+        do {
+            let ref: AttachmentRef
+            if let bytes = prepared.bytes {
+                ref = try await AttachmentBridge.encryptAndUpload(
+                    bytes: bytes,
+                    mime: prepared.mime,
+                    name: prepared.name,
+                    media: meta,
+                    onStage: { [weak self] stage in
+                        Task { @MainActor in
+                            switch stage {
+                            case .encrypting: self?.uploadStage = .encrypting(fileName: displayName)
+                            case .uploading: self?.uploadStage = .uploading(fileName: displayName)
+                            }
+                        }
+                    }
+                )
+                // Our own bytes: the sent bubble shows them without a download.
+                MediaSessionCache.shared.store(bytes, key: MediaSessionCache.key(for: ref))
+            } else if let file = prepared.fileURL {
+                uploadStage = .uploading(fileName: displayName)
+                ref = try await AttachmentBridge.encryptAndUpload(
+                    fileURL: file,
+                    mime: prepared.mime,
+                    name: prepared.name,
+                    media: meta
+                )
+                MediaSessionCache.shared.adoptVideoFile(file, key: MediaSessionCache.key(for: ref))
+            } else {
+                return
+            }
+            if let thumbRef, let thumb = prepared.thumb {
+                MediaSessionCache.shared.store(thumb, key: MediaSessionCache.key(for: thumbRef))
+            }
             pendingAttachments.append(ref)
         } catch let err as AttachmentBridgeError {
             sendError = err.errorDescription

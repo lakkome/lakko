@@ -11,7 +11,6 @@ package me.lakko.app.ui.chat
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -84,6 +83,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
@@ -224,22 +224,19 @@ public fun ChatScreen(
     val pickFilesLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments(),
     ) { uris: List<Uri> ->
-        for (uri in uris) {
-            // Hand off to a coroutine — the resolver work
-            // (openInputStream + ContentResolver query) needs
-            // to go off the main thread, and the encrypt +
-            // upload is async too.
-            scope.launch {
-                val payload = withContext(Dispatchers.IO) {
-                    readPickedUri(context, uri)
-                } ?: return@launch
-                viewModel.onAttachmentPicked(
-                    bytes = payload.bytes,
-                    mime = payload.mime,
-                    name = payload.name,
-                )
-            }
-        }
+        // Each item gets its upload chip at once in the view model, which
+        // reads, previews and uploads it (UX spec §10).
+        viewModel.onPickedUris(uris)
+    }
+    // UX spec §10 — the gallery pick for photos and videos, next to the
+    // document pick above. Both paths attach size + thumb when the MIME type
+    // is an allowlisted image or video.
+    val pickVisualLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickMultipleVisualMedia(),
+    ) { uris: List<Uri> ->
+        // Each item gets its upload chip at once in the view model, which
+        // reads, previews and uploads it (UX spec §10).
+        viewModel.onPickedUris(uris)
     }
 
     LaunchedEffect(Unit) {
@@ -593,9 +590,15 @@ public fun ChatScreen(
                             },
                             onSave = { ref ->
                                 scope.launch {
+                                    // A photo or video already opened in this
+                                    // chat is in the media cache; reuse it
+                                    // instead of downloading it again.
+                                    val cached = mediaHub.fileFor(
+                                        me.lakko.app.media.ChatMediaHub.mediaKey(ref.blobId),
+                                    )
                                     val bytes = withContext(Dispatchers.IO) {
                                         runCatching {
-                                            AttachmentBridge.downloadAndDecrypt(ref)
+                                            cached?.readBytes() ?: AttachmentBridge.downloadAndDecrypt(ref)
                                         }.getOrNull()
                                     } ?: return@launch
                                     withContext(Dispatchers.IO) {
@@ -659,15 +662,21 @@ public fun ChatScreen(
                 sendError = state.sendError,
                 pendingAttachments = state.pendingAttachments,
                 uploading = state.uploading,
-                uploadStage = state.uploadStage,
+                inFlightUploads = state.inFlightUploads,
+                pendingPreviews = state.pendingPreviews,
                 onDraftChange = viewModel::onDraftChange,
                 onSendClicked = viewModel::onSendClicked,
                 onFocusChanged = viewModel::onComposerFocusChanged,
+                onPickMedia = {
+                    pickVisualLauncher.launch(
+                        androidx.activity.result.PickVisualMediaRequest(
+                            ActivityResultContracts.PickVisualMedia.ImageAndVideo,
+                        ),
+                    )
+                },
                 onAttachClicked = {
                     // ACTION_OPEN_DOCUMENT — pick any MIME. The
-                    // contract returns `Uri` per pick. Wildcard
-                    // `*/*` keeps both photos + arbitrary files in
-                    // the same flow.
+                    // contract returns `Uri` per pick.
                     pickFilesLauncher.launch(arrayOf("*/*"))
                 },
                 onRemoveAttachment = viewModel::onRemovePendingAttachment,
@@ -1091,11 +1100,27 @@ private fun Bubble(
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         // ADR-0047 §3 — a video note is a circle with no bubble chrome.
-        val chromeless = !msg.deleted && msg.text.isEmpty() && msg.attachments.size == 1 &&
-            remember(msg.messageId) {
-                me.lakko.app.media.renderDecision(msg.attachments[0], mediaHub.allowlist).bubble ==
-                    me.lakko.app.media.MediaBubble.VIDEO_NOTE
+        // UX spec §10 — a lone photo or video is the media itself, edge to
+        // edge, with the time / ticks pill drawn on it.
+        val soleBubble = if (!msg.deleted && msg.text.isEmpty() && msg.attachments.size == 1) {
+            remember(msg.messageId, msg.attachments[0].blobId) {
+                me.lakko.app.media.renderDecision(msg.attachments[0], mediaHub.allowlist).bubble
             }
+        } else {
+            null
+        }
+        val mediaOnly = soleBubble == me.lakko.app.media.MediaBubble.PHOTO ||
+            soleBubble == me.lakko.app.media.MediaBubble.VIDEO
+        val chromeless = soleBubble == me.lakko.app.media.MediaBubble.VIDEO_NOTE || mediaOnly
+        val menuAvailable = actionsAvailable && hasId && !msg.deleted
+        val openMenu: (() -> Unit)? = if (menuAvailable) {
+            {
+                pickingReaction = false
+                menuOpen = true
+            }
+        } else {
+            null
+        }
         Box {
             Surface(
                 // UX section 4 — radius 18 for bubbles.
@@ -1122,7 +1147,7 @@ private fun Bubble(
                     ),
             ) {
                 Column(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    modifier = if (mediaOnly) Modifier else Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     if (msg.deleted) {
@@ -1148,6 +1173,22 @@ private fun Bubble(
                                         hub = mediaHub,
                                         isOwn = isOwn,
                                         contentColor = contentColor,
+                                        onSave = onSave,
+                                        onLongPress = openMenu,
+                                        mediaOverlay = if (mediaOnly) {
+                                            {
+                                                MediaMetaPill(
+                                                    edited = msg.edited,
+                                                    time = time,
+                                                    readState = if (isOwn) readState else OwnReadState.None,
+                                                    modifier = Modifier
+                                                        .align(Alignment.BottomEnd)
+                                                        .padding(6.dp),
+                                                )
+                                            }
+                                        } else {
+                                            null
+                                        },
                                     ) {
                                         AttachmentChipRow(
                                             ref = ref,
@@ -1249,8 +1290,9 @@ private fun Bubble(
         }
 
         // A chromeless (video note) bubble has no surface to carry the meta
-        // line, so it sits under the circle.
-        if (chromeless) {
+        // line, so it sits under the circle. A photo or video carries it in
+        // the pill on the media (UX spec §10), so nothing is drawn here.
+        if (chromeless && !mediaOnly) {
             BubbleMeta(
                 edited = msg.edited,
                 time = time,
@@ -1276,14 +1318,16 @@ private fun BubbleMeta(
     readState: OwnReadState,
     contentColor: Color,
     modifier: Modifier = Modifier,
+    /** `false` inside the §10 media pill, which wraps its content. */
+    fillWidth: Boolean = true,
 ) {
     if (!edited && time == null && readState == OwnReadState.None) return
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
-        modifier = modifier.fillMaxWidth(),
+        modifier = if (fillWidth) modifier.fillMaxWidth() else modifier,
     ) {
-        Spacer(Modifier.weight(1f))
+        if (fillWidth) Spacer(Modifier.weight(1f))
         if (edited) {
             Text(
                 text = "edited",
@@ -1307,6 +1351,31 @@ private fun BubbleMeta(
                 modifier = Modifier.height(14.dp),
             )
         }
+    }
+}
+
+/** UX spec §10 — time, ticks and the edited marker on a photo or video, in
+ *  a small translucent pill that reads on any image in either theme. */
+@Composable
+private fun MediaMetaPill(
+    edited: Boolean,
+    time: String?,
+    readState: OwnReadState,
+    modifier: Modifier = Modifier,
+) {
+    if (!edited && time == null && readState == OwnReadState.None) return
+    Box(
+        modifier = modifier
+            .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(percent = 50))
+            .padding(horizontal = 8.dp, vertical = 2.dp),
+    ) {
+        BubbleMeta(
+            edited = edited,
+            time = time,
+            readState = readState,
+            contentColor = Color.White,
+            fillWidth = false,
+        )
     }
 }
 
@@ -1527,12 +1596,15 @@ private fun Composer(
     sendError: String?,
     pendingAttachments: List<AttachmentRef>,
     uploading: Boolean,
-    uploadStage: UploadProgress?,
+    inFlightUploads: List<UploadProgress>,
+    pendingPreviews: Map<String, ByteArray>,
     onDraftChange: (String) -> Unit,
     onSendClicked: () -> Unit,
     /** ADR-0024 — fired with the composer's focus state. On
      *  focus-loss the ViewModel publishes `typing:false` once. */
     onFocusChanged: (Boolean) -> Unit,
+    /** UX spec §10 — the gallery pick (photos and videos). */
+    onPickMedia: () -> Unit,
     onAttachClicked: () -> Unit,
     onRemoveAttachment: (Int) -> Unit,
 ) {
@@ -1598,8 +1670,8 @@ private fun Composer(
         if ((pendingAttachments.isNotEmpty() || uploading) && !recording) {
             PendingAttachmentsTray(
                 attachments = pendingAttachments,
-                uploading = uploading,
-                uploadStage = uploadStage,
+                inFlight = inFlightUploads,
+                previews = pendingPreviews,
                 onRemove = onRemoveAttachment,
             )
         }
@@ -1619,11 +1691,30 @@ private fun Composer(
                 // ACTION_OPEN_DOCUMENT picker via the launcher
                 // wired in [ChatScreen]; the contract surfaces both
                 // photos and arbitrary files behind a single tap.
-                IconButton(
-                    onClick = onAttachClicked,
-                    enabled = !sending && !uploading,
-                ) {
-                    Icon(Icons.Filled.AttachFile, contentDescription = "Attach")
+                var attachMenu by remember { mutableStateOf(false) }
+                Box {
+                    IconButton(
+                        onClick = { attachMenu = true },
+                        enabled = !sending && !uploading,
+                    ) {
+                        Icon(Icons.Filled.AttachFile, contentDescription = "Attach")
+                    }
+                    DropdownMenu(expanded = attachMenu, onDismissRequest = { attachMenu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Photo or video") },
+                            onClick = {
+                                attachMenu = false
+                                onPickMedia()
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("File") },
+                            onClick = {
+                                attachMenu = false
+                                onAttachClicked()
+                            },
+                        )
+                    }
                 }
                 // UX 5.2 — a pill field on the sunken surface that grows to
                 // five lines and then scrolls; the IME resizes the screen
@@ -1800,8 +1891,8 @@ private fun WithdrawnComposer(slot: me.lakko.app.chat.ComposerSlot.Withdrawn) {
 @Composable
 private fun PendingAttachmentsTray(
     attachments: List<AttachmentRef>,
-    uploading: Boolean,
-    uploadStage: UploadProgress?,
+    inFlight: List<UploadProgress>,
+    previews: Map<String, ByteArray>,
     onRemove: (Int) -> Unit,
 ) {
     val scrollState = rememberScrollState()
@@ -1814,8 +1905,10 @@ private fun PendingAttachmentsTray(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         attachments.forEachIndexed { index, ref ->
+            val preview = previews[AttachmentBridge.hex(ref.blobId)]
             AssistChip(
                 onClick = { onRemove(index) },
+                leadingIcon = preview?.let { bytes -> { TrayThumb(bytes, 24) } },
                 label = {
                     Column {
                         Text(
@@ -1830,12 +1923,23 @@ private fun PendingAttachmentsTray(
                         )
                     }
                 },
-                trailingIcon = { Text("×") },
+                trailingIcon = {
+                    Text("×", modifier = Modifier.semantics { contentDescription = "Remove ${ref.name ?: "attachment"}" })
+                },
                 colors = AssistChipDefaults.assistChipColors(),
             )
         }
-        if (uploading) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+        // UX spec §10 — one chip per picked item still in flight, shown from
+        // the moment it was picked, with its thumb once one exists.
+        for (item in inFlight) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.semantics(mergeDescendants = true) {},
+            ) {
+                item.previewBytes?.let { bytes ->
+                    TrayThumb(bytes)
+                    Spacer(Modifier.width(6.dp))
+                }
                 CircularProgressIndicator(
                     modifier = Modifier
                         .height(16.dp)
@@ -1844,26 +1948,33 @@ private fun PendingAttachmentsTray(
                 )
                 Spacer(Modifier.width(6.dp))
                 Text(
-                    // Polish 1.x — surface the active pick's
-                    // file name + stage. Falls back to the
-                    // generic "Encrypting…" copy when the stage
-                    // hasn't landed yet (brief race window
-                    // between flipping `uploading` and the first
-                    // `uploadStage` mutation).
-                    text = uploadStage?.let { stage ->
-                        when (stage.stage) {
-                            UploadStage.Encrypting ->
-                                "Encrypting ${stage.fileName}…"
-                            UploadStage.Uploading ->
-                                "Uploading ${stage.fileName}…"
-                        }
-                    } ?: "Encrypting…",
+                    text = when (item.stage) {
+                        null -> "Preparing ${item.fileName}…"
+                        UploadStage.Encrypting -> "Encrypting ${item.fileName}…"
+                        UploadStage.Uploading -> "Uploading ${item.fileName}…"
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
                 )
             }
         }
     }
+}
+
+/** UX spec §10 — the photo / video thumb in a composer chip. */
+@Composable
+private fun TrayThumb(bytes: ByteArray, sizeDp: Int = 32) {
+    val bitmap = remember(bytes) { decodeImageBitmap(bytes) } ?: return
+    androidx.compose.foundation.Image(
+        bitmap = bitmap,
+        contentDescription = null,
+        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+        modifier = Modifier
+            .height(sizeDp.dp)
+            .width(sizeDp.dp)
+            .clip(RoundedCornerShape(6.dp)),
+    )
 }
 
 /** Back-off delay between failed long-poll iterations. 5s
@@ -1875,44 +1986,6 @@ private const val POLL_RETRY_BACKOFF_MS: Long = 5_000L
 // =============================================================================
 // 1.19c4 — picker / share helpers
 // =============================================================================
-
-/** Bytes + metadata pulled from a picker URI; the screen
- *  layer hands this to the view model. */
-private data class PickedPayload(
-    val bytes: ByteArray,
-    val mime: String?,
-    val name: String?,
-)
-
-/** Resolve a `content://` URI from `ACTION_OPEN_DOCUMENT` to
- *  raw bytes + MIME + display name. MIME comes from
- *  `ContentResolver.getType(uri)` (the picker contract
- *  guarantees this matches the actual file type); display
- *  name comes from the `OpenableColumns.DISPLAY_NAME` cursor.
- *  Returns `null` on any IO failure — the caller drops the
- *  pick silently. Must run off the main thread. */
-private fun readPickedUri(context: Context, uri: Uri): PickedPayload? {
-    val resolver = context.contentResolver
-    val mime = resolver.getType(uri)
-    var displayName: String? = null
-    runCatching {
-        resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-            ?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    if (idx >= 0) displayName = cursor.getString(idx)
-                }
-            }
-    }
-    val bytes = runCatching {
-        resolver.openInputStream(uri)?.use { it.readBytes() }
-    }.getOrNull() ?: return null
-    return PickedPayload(
-        bytes = bytes,
-        mime = mime?.takeUnless { it.isEmpty() },
-        name = displayName?.takeUnless { it.isEmpty() },
-    )
-}
 
 /** Decode an arbitrary byte buffer to a Compose `ImageBitmap`
  *  for the inline preview sheet. Uses Android's built-in

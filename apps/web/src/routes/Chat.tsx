@@ -108,6 +108,7 @@ import {
   recorderBusy,
 } from "../media/MediaComposer";
 import { createMediaHub, mediaKey, type MediaHub } from "../media/media-hub";
+import { describeImage, describeVideo, type VisualPreview } from "../media/visual-thumb";
 import { createRecorder } from "../media/recording-controller";
 import type { CaptureResult } from "../media/media-capture";
 import { isSingleEmojiGrapheme } from "../media/emoji/emoji-index";
@@ -874,6 +875,9 @@ function ChatView(props: {
         total: number;
         fileName: string;
         stage: "encrypting" | "uploading";
+        /** UX spec section 10 — the local thumb shown while a photo or
+         *  video uploads, filed in the media hub under this key. */
+        previewKey?: string;
       }
     | null
   >(null);
@@ -3626,18 +3630,39 @@ function ChatView(props: {
           // stage indicator. The encrypt-vs-upload split lets
           // the user see the slow phase (network) separately
           // from the fast one (in-memory AEAD).
-          const ref = await encryptAndUploadFile(
-            file,
-            undefined,
-            (stage) => {
-              setUploadProgress({
-                fileIndex: i,
-                total: list.length,
-                fileName: file.name,
-                stage,
-              });
-            },
-          );
+          // UX spec section 10 — a photo or video carries its pixel size
+          // and a JPEG thumb so the receiver can lay the bubble out before
+          // downloading. Produced before the upload so the composer shows
+          // the thumb meanwhile; any failure sends the file without them.
+          const inline = hub.inlineType(file.type.length > 0 ? file.type : undefined);
+          let preview: VisualPreview | null = null;
+          let previewKey: string | undefined;
+          if (inline === "image" || inline === "video") {
+            preview = inline === "image" ? await describeImage(file) : await describeVideo(file);
+            if (preview.thumb !== null) {
+              previewKey = `compose-preview:${nextTempId++}`;
+              hub.fileLocal(previewKey, preview.thumb.blob, "image/jpeg");
+            }
+          }
+          let ref: AttachmentRefBytes;
+          try {
+            ref = await encryptAndUploadFile(
+              file,
+              undefined,
+              (stage) => {
+                setUploadProgress({
+                  fileIndex: i,
+                  total: list.length,
+                  fileName: file.name,
+                  stage,
+                  ...(previewKey === undefined ? {} : { previewKey }),
+                });
+              },
+            );
+            if (preview !== null) ref = await withVisualPreview(ref, file, preview);
+          } finally {
+            if (previewKey !== undefined) hub.revoke(previewKey);
+          }
           setPendingAttachments([...pendingAttachments(), ref]);
         } catch (err) {
           if (err instanceof AttachmentSizeError) {
@@ -3657,6 +3682,44 @@ function ChatView(props: {
       setUploading(false);
       setUploadProgress(null);
     }
+  }
+
+  /**
+   * UX spec section 10 — attach the pixel size and upload the thumb of a
+   * photo or video, then file the local bytes in the media hub so this
+   * device's own bubble shows them without downloading its own upload. A
+   * failed thumb upload sends the attachment without a thumb.
+   */
+  async function withVisualPreview(
+    ref: AttachmentRefBytes,
+    file: File,
+    preview: VisualPreview,
+  ): Promise<AttachmentRefBytes> {
+    let thumb: ThumbRefBytes | undefined;
+    if (preview.thumb !== null) {
+      try {
+        const bytes = new Uint8Array(await preview.thumb.blob.arrayBuffer());
+        const t = await encryptAndUploadBytes(bytes, { mime: "image/jpeg", name: undefined });
+        thumb = {
+          blobId: t.blobId,
+          key: t.key,
+          nonce: t.nonce,
+          mime: "image/jpeg",
+          size: bytes.length,
+          width: preview.thumb.width,
+          height: preview.thumb.height,
+        };
+        hub.fileLocal(`thumb:${mediaKey(t.blobId)}`, preview.thumb.blob, "image/jpeg");
+      } catch (err) {
+        console.warn("attachment thumb upload failed; sending without a thumb", err);
+      }
+    }
+    hub.fileLocal(mediaKey(ref.blobId), file, ref.mime);
+    return {
+      ...ref,
+      ...(preview.size === null ? {} : { width: preview.size.width, height: preview.size.height }),
+      ...(thumb === undefined ? {} : { thumb }),
+    };
   }
 
   /**
@@ -6461,11 +6524,9 @@ function ChatView(props: {
 
       {/* 1.19c2 — pending-attachments tray. Renders above the
          text composer when ≥1 file is staged; each chip shows
-         the filename + size with a × to drop it. The chips
-         carry no preview because the local bytes have been
-         GC'd after encrypt — re-decrypt would round-trip
-         through storage, which is overkill for a composer
-         scratch row. */}
+         the filename + size with a × to drop it. A photo or
+         video chip shows its thumb (UX spec section 10), filed
+         in the media hub from the local bytes before upload. */}
       <Show when={pendingAttachments().length > 0 || uploading()}>
         <div
           style={{
@@ -6492,6 +6553,26 @@ function ChatView(props: {
                   "font-size": "0.8rem",
                 }}
               >
+                <Show
+                  when={
+                    ref.thumb !== undefined
+                      ? hub.urlFor(`thumb:${mediaKey(ref.thumb.blobId)}`)
+                      : null
+                  }
+                >
+                  {(url) => (
+                    <img
+                      src={url()}
+                      alt=""
+                      style={{
+                        width: "28px",
+                        height: "28px",
+                        "object-fit": "cover",
+                        "border-radius": "4px",
+                      }}
+                    />
+                  )}
+                </Show>
                 <span>{ref.name ?? "(unnamed)"}</span>
                 <span style={{ color: "var(--surface-muted)" }}>
                   · {formatAttachmentSize(ref.size)}
@@ -6516,6 +6597,26 @@ function ChatView(props: {
             )}
           </For>
           <Show when={uploading()}>
+            <Show
+              when={(() => {
+                const key = uploadProgress()?.previewKey;
+                return key === undefined ? null : hub.urlFor(key);
+              })()}
+            >
+              {(url) => (
+                <img
+                  src={url()}
+                  alt=""
+                  style={{
+                    width: "36px",
+                    height: "36px",
+                    "object-fit": "cover",
+                    "border-radius": "var(--radius-sm)",
+                    "align-self": "center",
+                  }}
+                />
+              )}
+            </Show>
             <span
               style={{
                 color: "var(--surface-muted)",
