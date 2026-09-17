@@ -419,61 +419,29 @@ public class ChatClient(
 
 /** Phase 3a10 — cheap byte-sniff for the
  *  `CallSignalingPayload` proto. Returns `true` when the
- *  payload opens with one of the oneof body tags:
- *
- *   * fields 10..13 (the 1x1 bodies): one tag byte,
- *     0x52 / 0x5A / 0x62 / 0x6A;
- *   * fields 14 and 15 (`GroupCallStart` / `GroupCallJoin`): one
- *     tag byte, 0x72 / 0x7A;
- *   * field 16 (`GroupCallLeave`): TWO tag bytes, 0x82 0x01 — a
- *     field number above 15 no longer fits the single-byte varint,
- *     which is exactly how a first-byte sniff silently misses it.
+ *  payload opens with one of the oneof body tags.
  *
  *  Chat envelopes start with `{` (0x7B), disjoint from every tag.
  *
- *  Before the group tags were added here, a group-control body fell
+ *  Before the group tags were added, a group-control body fell
  *  through to `parseBodyEnvelope`, whose deliberate lossy-UTF-8
  *  fallback rendered it as a garbage chat bubble (foreground) or a
  *  garbage notification (background, which reuses this function).
  *
- *  The group tags additionally require the body's first field to be
- *  the 16-byte `call_id` (`len`, then 0x0A 0x10). 0x72 and 0x7A are
- *  the ASCII letters `r` and `z`, so a legacy plain-UTF-8 message
- *  opening with either letter would otherwise be swallowed as call
- *  signaling; 0x10 is a control byte no typed text carries at that
- *  offset. Every group body is composed by the one Rust encoder
- *  (prost writes fields in number order, and `call_id` is mandatory
- *  and exactly 16 bytes), and its whole body is far below 128 bytes,
- *  so the length is always one varint byte. The 1x1 tags keep their
- *  first-byte-only test unchanged.
- *
  *  `internal` rather than `private` ONLY so the background
  *  push-preview path can reuse this exact sniff instead of
  *  duplicating the tag set — see
- *  `me.lakko.app.push.isServiceEnvelope`. The proto oneof tags
- *  must have exactly one definition; a second copy would drift
- *  silently the next time a field number moves. */
-internal fun looksLikeCallSignaling(bytes: ByteArray): Boolean {
-    if (bytes.isEmpty()) return false
-    val first = bytes[0].toInt() and 0xFF
-    if (first == 0x52 || first == 0x5A || first == 0x62 || first == 0x6A) return true
-    val lengthAt = when {
-        first == 0x72 || first == 0x7A -> 1
-        first == 0x82 && bytes.size > 1 && (bytes[1].toInt() and 0xFF) == 0x01 -> 2
-        else -> return false
-    }
-    return opensWithCallId(bytes, lengthAt)
-}
-
-/** `bytes[lengthAt]` is a one-byte body length, followed by the `call_id`
- *  field header: tag 0x0A (field 1, length-delimited), length 0x10 (16). */
-private fun opensWithCallId(bytes: ByteArray, lengthAt: Int): Boolean {
-    if (bytes.size < lengthAt + 3) return false
-    val bodyLength = bytes[lengthAt].toInt() and 0xFF
-    if (bodyLength >= 0x80) return false
-    return (bytes[lengthAt + 1].toInt() and 0xFF) == 0x0A &&
-        (bytes[lengthAt + 2].toInt() and 0xFF) == 0x10
-}
+ *  `me.lakko.app.push.isServiceEnvelope`.
+ *
+ *  The tag table itself moved to
+ *  [me.lakko.app.calls.callSignalingBodyKind] when the outbound
+ *  wake decision needed to tell an offer from a candidate rather
+ *  than merely recognise both: the proto oneof tags must have
+ *  exactly one definition, and a second copy would drift silently
+ *  the next time a field number moves. This is the same predicate
+ *  it always was — "is this call signaling at all". */
+internal fun looksLikeCallSignaling(bytes: ByteArray): Boolean =
+    me.lakko.app.calls.callSignalingBodyKind(bytes) != null
 
 /** First byte of the ADR-0045 committer-beacon domain separator (`'l'` of
  *  `"lakko/committer-beacon/v1"` plus a trailing NUL, written out in words and

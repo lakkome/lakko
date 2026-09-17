@@ -32,6 +32,7 @@ import { Router, type RouteSectionProps } from "@solidjs/router";
 import { AuthProvider } from "./auth/AuthContext";
 import { ChatProvider } from "./chat/ChatContext";
 import { BackgroundReceiveProvider } from "./chat/BackgroundReceiveContext";
+import { CallActionListener } from "./calls/CallActionListener";
 import { CallHostProvider, CallHostView } from "./calls/CallHostContext";
 import { ChannelsHydration } from "./channels/ChannelsHydration";
 import { DeviceGroupSyncProvider } from "./devices/sync/DeviceGroupSyncContext";
@@ -65,6 +66,13 @@ import { ConfirmDialog } from "./ui/ConfirmDialog";
 const RootLayout: Component<RouteSectionProps> = (props) => (
   <>
     <WakeNavigator />
+    {/*
+     * Accept / Decline pressed on a ringing background notification. Here for
+     * the same reason as the reader above — it must survive the cold-open
+     * login bounce, because on that path the user pressed Accept before the
+     * app existed and the call has not reached the slot yet.
+     */}
+    <CallActionListener />
     {props.children}
     <CallHostView />
   </>

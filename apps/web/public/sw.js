@@ -211,7 +211,15 @@ async function networkFirstWithCacheFallback(req) {
  * behalf, we receive the plaintext JSON). The body shape is
  * defined by `WakeBody` in `services/push-gw/src/providers/webpush.rs`:
  *
- *     { v: 1, d: <device_hex>, g: <push_gid_or_legacy_group_hex>?, p: <pointer>? }
+ *     { v: 1, d: <device_hex>, g: <push_gid_or_legacy_group_hex>?, p: <pointer>?, k: "c"? }
+ *
+ * `k` is the wake KIND: `"c"` marks a call, absent marks a message.
+ * It rides inside the RFC 8291 encryption, so the browser's push
+ * service never sees it. The kind alone cannot ring — it names no
+ * call, no caller and no media — so the ring still comes from the
+ * decrypt of the journal row it points at. What it is good for is
+ * honesty when that decrypt yields nothing: a call must not be
+ * announced as "New message".
  *
  * Unknown versions / malformed JSON / missing fields collapse into
  * a generic notification — the user still gets a wake, just without
@@ -227,6 +235,9 @@ function parseWakeBody(data) {
       deviceHex: typeof json.d === "string" ? json.d : null,
       groupHex: typeof json.g === "string" ? json.g : null,
       pointer: typeof json.p === "number" ? json.p : null,
+      // Anything that is not the call tag is a message, so an older
+      // push-gw (which sends no `k` at all) behaves exactly as before.
+      isCall: json.k === "c",
     };
   } catch {
     return null;
@@ -297,10 +308,27 @@ async function handlePush(wake) {
   const tapGroupHex =
     wake?.groupHex != null ? await resolveTapGroupHex(wake.groupHex) : null;
 
+  // (c2) A call the decrypt classified: ring, or take a ring down. Handled
+  //      before the message path because a call is neither a message nor a
+  //      preview of one — it is an interruption with its own shape, its own
+  //      tag (keyed on the call id, not the group) and its own buttons.
+  //      Everything about it is decided in `sw-call-notification.js`, which
+  //      the decrypt core re-exports so this costs no second import.
+  if (preview?.call != null) {
+    await handleCallNotice(preview.call);
+    return;
+  }
+
   // (d) Show the notification. Real preview when we have one; the
-  //     generic "New message" fallback otherwise (unchanged behavior).
+  //     generic fallback otherwise (unchanged behavior, except that a
+  //     wake tagged as a call says so rather than claiming a message
+  //     arrived — reached when the decrypt could not run at all, e.g. a
+  //     classic service worker, or could not name the call). It carries no
+  //     Accept / Decline: without the decrypt there is no call id to
+  //     address, so the honest offer is to open the app, where the
+  //     full-screen incoming call is waiting.
   const title = preview?.title ?? "Lakko";
-  const body = preview?.body ?? "New message";
+  const body = preview?.body ?? (wake?.isCall === true ? "Incoming call" : "New message");
   const tag = preview?.tag ?? wake?.groupHex ?? "lakko-default";
   const data =
     wake !== null
@@ -323,6 +351,52 @@ async function handlePush(wake) {
     // Some browsers + private modes don't allow showing notifications
     // from a push event under certain conditions — best-effort, don't
     // throw past `waitUntil`.
+  }
+}
+
+/**
+ * Ring, or stop ringing.
+ *
+ * `docs/ux/calls.md` §2.1: on web a call arrives as a notification with
+ * Accept and Decline. Two kinds reach here:
+ *
+ *   * **ring** — an offer. The shape (title, `Voice call` / `Video call`,
+ *     `requireInteraction`, vibration, the two buttons, and the precomputed
+ *     per-button intents) comes from `callRingNotification`, so what a button
+ *     means is decided in a pure, tested function rather than in the click
+ *     handler.
+ *   * **end** — the caller cancelled, the callee answered elsewhere, or the
+ *     call was declined. Any ring showing for THAT call id is closed. Nothing
+ *     new is shown: a notification saying a call is over is not something
+ *     anyone can act on, and a stuck ring is the one failure
+ *     `requireInteraction: true` would otherwise make permanent.
+ *
+ * Caveat worth stating: a push that shows no notification at all can make
+ * some browsers substitute their own "this site was updated in the
+ * background" notice. An end wake takes that risk deliberately — the
+ * alternative is leaving a ring on screen for a call that has ended.
+ *
+ * Never throws: like every other path out of `push`, a failure here must not
+ * drop the event.
+ */
+async function handleCallNotice(call) {
+  let core;
+  try {
+    core = await loadDecryptModule();
+  } catch {
+    return; // Cannot shape a ring without the module; stay silent.
+  }
+  try {
+    if (call.kind === "end") {
+      const tag = core.callNotificationTag(call.callIdHex);
+      const showing = await self.registration.getNotifications({ tag });
+      for (const n of showing) n.close();
+      return;
+    }
+    const { title, options } = core.callRingNotification(call);
+    await self.registration.showNotification(title, options);
+  } catch {
+    // Best-effort, exactly as the message path is.
   }
 }
 
@@ -656,6 +730,22 @@ self.addEventListener("notificationclick", (event) => {
   // it linger after the click.
   event.notification.close();
 
+  // A ringing notification carries its own per-button meaning, decided at
+  // PUSH time by `callNotificationIntents` and stored in `data`. Reading it
+  // here is a plain lookup — no import, no decision — because this handler
+  // must reach `clients.openWindow` with as few awaits as possible or the
+  // browser withholds the user activation that permits it. The lookup mirrors
+  // `intentForAction` in `public/sw-call-notification.js`, which is the
+  // canonical definition and is what the tests pin; the two must stay in
+  // step (the same convention `looksLikeCallSignaling` follows between
+  // `src/chat/client.ts` and `sw-push-decrypt.js`).
+  const callIntent =
+    event.notification.data?.call?.intents?.[event.action ?? ""] ?? null;
+  if (callIntent !== null) {
+    event.waitUntil(handleCallClick(callIntent));
+    return;
+  }
+
   const wake = event.notification.data?.wake;
   // ADR-0042 — `wake.groupHex` is the OPAQUE `push_gid`, which no SPA
   // surface can match against a group. `handlePush` already resolved it
@@ -719,6 +809,90 @@ self.addEventListener("notificationclick", (event) => {
     })(),
   );
 });
+
+/**
+ * Act on a press of Accept / Decline, or a click on a ringing notification's
+ * body.
+ *
+ * The worker CANNOT answer or decline a call itself: publishing either means
+ * sealing an MLS application message, and this path is read-only by
+ * construction (C-59 / ADR-0041). So every outcome routes to a page — the
+ * question is only which page, and whether it has to be raised.
+ *
+ * `callClickPlan` decides that (it is pure and tested); this function is the
+ * effects. The plan's three rules:
+ *
+ *   - **Decline** posts to whatever window exists and does NOT raise it.
+ *     Refusing a call is a request to be left alone; opening the app to
+ *     complete the refusal would be the opposite. Only with no window at all
+ *     does a decline have to open one.
+ *   - **Accept** posts and raises: answering means arriving in the call.
+ *   - **Open** posts and raises without answering — the full-screen incoming
+ *     call is mounted app-wide, so raising is enough to show who is calling.
+ *
+ * Posting happens BEFORE the focus, for the reason the tap path documents: a
+ * `focus()` some browsers refuse without user activation must not swallow the
+ * action itself.
+ */
+async function handleCallClick(intent) {
+  let core = null;
+  try {
+    core = await loadDecryptModule();
+  } catch {
+    core = null;
+  }
+
+  let clients = [];
+  try {
+    clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+  } catch {
+    clients = [];
+  }
+  const ours = clients.filter((c) => c.url.startsWith(self.location.origin));
+
+  // Without the module the pure plan is unavailable; fall back to the shape
+  // it would have produced for the commonest case rather than doing nothing.
+  const plan =
+    core !== null
+      ? core.callClickPlan(intent, ours.length > 0)
+      : {
+          post: ours.length > 0,
+          focus: ours.length > 0 && intent.kind !== "decline",
+          openUrl: ours.length > 0 ? null : "/",
+        };
+
+  if (plan.post) {
+    const message = {
+      type: core !== null ? core.CALL_ACTION_MESSAGE : "LAKKO_CALL_ACTION",
+      intent,
+    };
+    for (const c of ours) {
+      try {
+        c.postMessage(message);
+      } catch {
+        // The client went away between `matchAll` and here.
+      }
+    }
+  }
+  if (plan.focus) {
+    for (const c of ours) {
+      try {
+        await c.focus();
+        break;
+      } catch {
+        // Some browsers refuse `focus()` without user activation; the action
+        // has already been posted, so the page still acts on it.
+      }
+    }
+  }
+  if (plan.openUrl !== null) {
+    try {
+      await self.clients.openWindow(plan.openUrl);
+    } catch {
+      // Nothing further we can do from here.
+    }
+  }
+}
 
 // ----- message (skip-waiting handshake) ------------------------
 

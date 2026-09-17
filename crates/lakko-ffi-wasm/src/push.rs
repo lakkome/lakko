@@ -12,10 +12,13 @@ fn push_err(e: PushError) -> JsError {
     JsError::new(&format!("{e}"))
 }
 
-/// Mirror of [`lakko_push::PushPayload`]. Three discriminated variants
+/// Mirror of [`lakko_push::PushPayload`]. Four discriminated variants
 /// addressed via `kind`:
 ///
 /// - `"GroupMessage"` — `groupPseudonym` + `envelopePointer` set
+/// - `"CallSignal"` — same two fields as `"GroupMessage"`; the kind is
+///   what tells the service worker to ring instead of showing a
+///   message preview
 /// - `"MailboxMessage"` — only `envelopePointer` set
 /// - `"Wakeup"` — neither set
 #[wasm_bindgen]
@@ -40,6 +43,28 @@ impl PushPayload {
         id.copy_from_slice(group_pseudonym);
         Ok(Self {
             inner: RustPushPayload::GroupMessage {
+                group_pseudonym: id,
+                envelope_pointer,
+            },
+        })
+    }
+
+    /// Construct a `CallSignal` payload — a call offer / accept /
+    /// decline / hang-up landed on this group's journal.
+    #[wasm_bindgen(js_name = callSignal)]
+    pub fn call_signal(
+        group_pseudonym: &[u8],
+        envelope_pointer: u64,
+    ) -> Result<PushPayload, JsError> {
+        if group_pseudonym.len() != PSEUDONYM_LEN {
+            return Err(JsError::new(&format!(
+                "groupPseudonym must be {PSEUDONYM_LEN} bytes",
+            )));
+        }
+        let mut id = [0u8; PSEUDONYM_LEN];
+        id.copy_from_slice(group_pseudonym);
+        Ok(Self {
+            inner: RustPushPayload::CallSignal {
                 group_pseudonym: id,
                 envelope_pointer,
             },
@@ -76,21 +101,43 @@ impl PushPayload {
         self.inner.encode_json()
     }
 
-    /// Discriminator. `"GroupMessage" | "MailboxMessage" | "Wakeup"`.
+    /// Discriminator.
+    /// `"GroupMessage" | "CallSignal" | "MailboxMessage" | "Wakeup"`.
     #[wasm_bindgen(getter)]
     pub fn kind(&self) -> String {
         match &self.inner {
             RustPushPayload::GroupMessage { .. } => "GroupMessage".into(),
+            RustPushPayload::CallSignal { .. } => "CallSignal".into(),
             RustPushPayload::MailboxMessage { .. } => "MailboxMessage".into(),
             RustPushPayload::Wakeup => "Wakeup".into(),
         }
     }
 
-    /// Group pseudonym bytes — present iff `kind == "GroupMessage"`.
+    /// `true` iff this wake is a call signal. Sugar over reading
+    /// [`Self::kind`] — the service worker branches on this before it
+    /// decides between ringing and a message preview, so spelling it
+    /// as a string comparison at every call site invites a typo that
+    /// silently degrades a call to a notification.
+    ///
+    /// Not `const` despite being trivially so: `#[wasm_bindgen]`
+    /// refuses to export a `const fn` ("can only #[wasm_bindgen]
+    /// non-const functions"), so `clippy::missing_const_for_fn` is
+    /// suppressed here rather than obeyed.
+    #[allow(clippy::missing_const_for_fn)]
+    #[wasm_bindgen(getter, js_name = isCall)]
+    pub fn is_call(&self) -> bool {
+        matches!(self.inner, RustPushPayload::CallSignal { .. })
+    }
+
+    /// Group pseudonym bytes — present iff `kind` is `"GroupMessage"`
+    /// or `"CallSignal"`.
     #[wasm_bindgen(getter, js_name = groupPseudonym)]
     pub fn group_pseudonym(&self) -> Option<Vec<u8>> {
         match &self.inner {
             RustPushPayload::GroupMessage {
+                group_pseudonym, ..
+            }
+            | RustPushPayload::CallSignal {
                 group_pseudonym, ..
             } => Some(group_pseudonym.to_vec()),
             _ => None,
@@ -102,6 +149,9 @@ impl PushPayload {
     pub fn envelope_pointer(&self) -> Option<u64> {
         match &self.inner {
             RustPushPayload::GroupMessage {
+                envelope_pointer, ..
+            }
+            | RustPushPayload::CallSignal {
                 envelope_pointer, ..
             }
             | RustPushPayload::MailboxMessage { envelope_pointer } => Some(*envelope_pointer),
@@ -126,6 +176,28 @@ mod tests {
         assert_eq!(decoded.kind(), "GroupMessage");
         assert_eq!(decoded.envelope_pointer(), Some(1234));
         assert_eq!(decoded.group_pseudonym().as_deref(), Some(&[0xAA; 32][..]));
+    }
+
+    #[test]
+    fn call_signal_roundtrip() {
+        let p = PushPayload::call_signal(&[0xBB; 32], 4321).unwrap();
+        assert_eq!(p.kind(), "CallSignal");
+        assert!(p.is_call());
+        assert_eq!(p.envelope_pointer(), Some(4321));
+        assert_eq!(p.group_pseudonym().as_deref(), Some(&[0xBB; 32][..]));
+
+        let decoded = PushPayload::decode_json(&p.encode_json()).unwrap();
+        assert_eq!(decoded.kind(), "CallSignal");
+        assert!(decoded.is_call());
+        assert_eq!(decoded.envelope_pointer(), Some(4321));
+        assert_eq!(decoded.group_pseudonym().as_deref(), Some(&[0xBB; 32][..]));
+    }
+
+    #[test]
+    fn only_a_call_signal_reports_is_call() {
+        assert!(!PushPayload::group_message(&[0u8; 32], 1).unwrap().is_call());
+        assert!(!PushPayload::mailbox_message(1).is_call());
+        assert!(!PushPayload::wakeup().is_call());
     }
 
     #[test]

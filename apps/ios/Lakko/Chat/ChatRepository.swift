@@ -2439,16 +2439,41 @@ public final class ChatRepository: ObservableObject {
     /// as ``sendMessage`` but skips the chat-envelope
     /// composer and the timeline append — call signaling
     /// rides this channel out-of-band.
+    ///
+    /// - Parameter wake: Which push wake to fan out after a successful
+    ///   publish. `nil` (the default) fans out none, which is the ADR-0042
+    ///   rule for a control envelope and what every caller of this method
+    ///   wants: a typing signal, a read receipt, a routing-secret handshake
+    ///   and a group-call announcement must not wake anybody's device.
+    ///   ``PushClient/WakeKind/call`` is the single exception, asked for by
+    ///   the 1x1 call publisher for an offer and an end only
+    ///   (``CallSignalingWake``), because those two are the whole of
+    ///   `docs/ux/calls.md` §2.1 — the ring starting and the ring stopping on
+    ///   a device whose app is closed.
+    ///
+    /// The wake is fired from a detached task AFTER the publish returns, so a
+    /// slow or failing push-gw — the PoW solve alone is a visible cost —
+    /// cannot delay or fail the call. That is the same posture ``sendMessage``
+    /// has used for its own wake since 1.20e, for the same reason.
     public func publishApplicationMessage(
         groupIdHex: String,
-        plaintextBytes: Data
+        plaintextBytes: Data,
+        wake: PushClient.WakeKind? = nil
     ) async throws {
         // ADR-0045 — the seal and the publish are SERIALIZED against the
         // regions that move this group's epoch. See ``sealAndPublishLocked``.
-        _ = try await withCommitLock(groupIdHex: groupIdHex) { [self] in
+        let result = try await withCommitLock(groupIdHex: groupIdHex) { [self] in
             try await sealAndPublishLocked(groupIdHex: groupIdHex, plaintextBytes: plaintextBytes)
         }
         persistSnapshotBestEffort()
+        guard let wake else { return }
+        Task { @MainActor [weak self, groupIdHex, messageId = result.messageId] in
+            await self?.notifyPushGroupBestEffort(
+                groupIdHex: groupIdHex,
+                messageId: messageId,
+                kind: wake
+            )
+        }
     }
 
     /// The serialized body every application send shares: seal at the live
@@ -2567,9 +2592,18 @@ public final class ChatRepository: ObservableObject {
     /// push-gw (invariant #5) — recipients still receive the message on
     /// their next foreground poll. A publisher is a member, so it normally
     /// holds the secret. Best-effort, off the critical path.
+    ///
+    /// - Parameter kind: Which class of wake to request. `nil` — every
+    ///   caller but the 1x1 call publisher — sends no `kind` field, which
+    ///   the server reads as the message wake it has always sent.
+    ///   ``PushClient/WakeKind/call`` raises the provider urgency so a
+    ///   closed app rings. The wake payload is identical either way: a
+    ///   group pseudonym and a journal pointer, nothing about the call
+    ///   (invariants #2 and #5).
     private func notifyPushGroupBestEffort(
         groupIdHex: String,
-        messageId: Int64
+        messageId: Int64,
+        kind: PushClient.WakeKind? = nil
     ) async {
         guard let accountIdB64 = currentAccountIdB64,
               let pushGid = pushRouting.pushGid(
@@ -2580,7 +2614,8 @@ public final class ChatRepository: ObservableObject {
         do {
             _ = try await PushClient().notifyGroup(
                 groupPseudonym: pushGid,
-                envelopePointer: messageId
+                envelopePointer: messageId,
+                kind: kind
             )
         } catch {
             NSLog("push notify-group failed: \(error)")

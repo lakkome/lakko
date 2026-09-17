@@ -16,6 +16,18 @@
 //! invalid tokens (app uninstalls, backup restores, etc.) and the
 //! cleanest place to garbage-collect is at the moment we see the
 //! provider reject one.
+//!
+//! ## What a wake carries
+//!
+//! A wake is a pointer and nothing else: a 32-byte pseudonym, an
+//! optional journal cursor, and — since calls — a kind tag saying
+//! whether the woken device should ring or show a message. The
+//! service never sees, and never forwards, a sender, a message body,
+//! a caller identity, a call id, or a media kind; all of that stays
+//! inside the E2EE journal row the device fetches for itself after
+//! waking (invariants #2 and #5). Adding a call kind does not change
+//! that: it adds one bit of visible metadata and no new content. See
+//! [`crate::provider::WakeKind`] for the disclosure argument.
 
 use std::collections::HashSet;
 
@@ -24,7 +36,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use crate::provider::{DeliverError, ProviderKind, WakePayload};
+use crate::provider::{DeliverError, ProviderKind, WakeKind, WakePayload};
 use crate::AppState;
 
 const PSEUDONYM_LEN: usize = 32;
@@ -138,6 +150,10 @@ pub(crate) async fn notify(
         device_pseudonym: device,
         group_pseudonym: group,
         envelope_pointer: payload.envelope_pointer,
+        // The per-device route has no call kind: a call signal rides
+        // the chat group's journal, so it always fans out through
+        // `/push/notify-group`.
+        kind: WakeKind::Message,
     };
 
     let mut deliveries = Vec::with_capacity(rows.len());
@@ -179,6 +195,21 @@ pub(crate) struct NotifyGroupRequest {
     /// the woken client can jump to the exact row.
     #[serde(default)]
     pub(crate) envelope_pointer: Option<u64>,
+    /// Optional — what the woken device is being told about.
+    ///
+    /// Absent (or `"message"`) is the pre-call behaviour, unchanged.
+    /// `"call"` marks the wake as a call signal: the providers raise
+    /// their urgency headers and shorten their expiry, and the
+    /// delivered payload carries the `k` tag the background handler
+    /// needs to ring rather than render a message preview. An
+    /// unrecognised value is rejected by the extractor rather than
+    /// quietly demoted to a message — a call that silently arrives
+    /// as a notification is the failure this field exists to stop.
+    ///
+    /// It changes nothing about *who* may notify: the PoW gate and
+    /// the subscription join are exactly as they were.
+    #[serde(default)]
+    pub(crate) kind: WakeKind,
 }
 
 #[derive(Serialize)]
@@ -202,6 +233,14 @@ pub(crate) struct NotifyGroupResponse {
 /// via the subscription table; same metadata DS already has via
 /// the cursor-fetch pattern. Documented in
 /// `migrations/0002_push_group_subscriptions.sql`.
+///
+/// The optional `kind` field marks a wake as a call signal, which
+/// raises the per-provider urgency headers and tags the delivered
+/// payload. It does not change who may call this endpoint: the PoW
+/// gate and the `push_group_subscriptions` join are untouched, so a
+/// caller who could already fan a message wake to a group can now
+/// also fan a call wake to it — no new authority, and the existing
+/// ringing-bound is the client's 45-second window, not this gate.
 pub(crate) async fn notify_group(
     State(state): State<AppState>,
     Json(payload): Json<NotifyGroupRequest>,
@@ -262,6 +301,7 @@ pub(crate) async fn notify_group(
             device_pseudonym: device_arr,
             group_pseudonym: Some(group),
             envelope_pointer: payload.envelope_pointer,
+            kind: payload.kind,
         };
 
         let outcome = dispatch_one(&state, kind, &token, &wake_payload).await;
@@ -313,5 +353,55 @@ async fn dispatch_one(
             status: "transport",
             detail: Some(msg),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NotifyGroupRequest, WakeKind};
+
+    fn parse(kind_json: &str) -> Result<NotifyGroupRequest, serde_json::Error> {
+        let body = format!(
+            r#"{{"pow":{{"seed":"AA","nonce":"BB","solution":"CC"}},
+                 "group_pseudonym":"{}","envelope_pointer":7{kind_json}}}"#,
+            "ab".repeat(32),
+        );
+        serde_json::from_str(&body)
+    }
+
+    #[test]
+    fn a_request_without_a_kind_is_a_message_wake() {
+        // The pre-call request shape must keep working byte-for-byte:
+        // every client that has not been rebuilt still sends this.
+        let req = parse("").unwrap();
+        assert_eq!(req.kind, WakeKind::Message);
+    }
+
+    #[test]
+    fn an_explicit_message_kind_is_accepted() {
+        let req = parse(r#","kind":"message""#).unwrap();
+        assert_eq!(req.kind, WakeKind::Message);
+    }
+
+    #[test]
+    fn a_call_kind_is_accepted() {
+        let req = parse(r#","kind":"call""#).unwrap();
+        assert_eq!(req.kind, WakeKind::Call);
+    }
+
+    #[test]
+    fn an_unknown_kind_is_refused_not_demoted() {
+        // Fail closed. Silently treating an unrecognised kind as a
+        // message would turn a future call variant into a
+        // notification that never rings — the exact failure this
+        // field exists to remove.
+        for bad in [
+            r#","kind":"ring""#,
+            r#","kind":"Call""#,
+            r#","kind":"voip""#,
+            r#","kind":1"#,
+        ] {
+            assert!(parse(bad).is_err(), "expected refusal for {bad}");
+        }
     }
 }

@@ -89,6 +89,7 @@ import {
   type AttachmentRefBytes,
 } from "./attachments";
 import { tryDecodeSecretEnvelope } from "../push/group-routing";
+import { looksLikeCallSignaling as looksLikeCallSignalingBytes } from "../calls/call-signaling-wake";
 import { DurableCursorGate } from "./durable-cursor";
 import {
   consumeOwnPublished,
@@ -490,6 +491,30 @@ export interface ChatClientOptions {
   pushGidResolver?: (groupId: Uint8Array) => Promise<Uint8Array | null>;
 }
 
+/**
+ * Whether a published application message fans a push wake out, and of what
+ * class.
+ *
+ *   * `"message"` — the ordinary message wake `sendMessage` has always fired.
+ *   * `"call"` — a ring. Same transport and same best-effort discipline, but
+ *     push-gw is asked for its highest priority and a short TTL, because a
+ *     late ring is worse than no ring (`docs/ux/calls.md` §7).
+ *   * `null` — no wake at all: the ADR-0042 rule for control envelopes, and
+ *     still the default for every one of them but call signaling.
+ */
+type OutboundWake = "message" | "call" | null;
+
+/** Options for {@link ChatClient.broadcastControl}. */
+export interface BroadcastControlOptions {
+  /**
+   * Fan a wake out for this control frame. Omitted means silence — the
+   * ADR-0042 default every existing caller relies on. The call-signaling
+   * publisher is the one caller that sets it, and only for the two frames
+   * `calls/call-signaling-wake.ts` names.
+   */
+  readonly wake?: Exclude<OutboundWake, null | "message">;
+}
+
 export class ChatClient {
   /** Track DS message ids we ourselves just published, so the
    *  next poll can drop the echo. Cleared per `ChatClient`
@@ -660,7 +685,7 @@ export class ChatClient {
     }
 
     return withGroupMlsLock(base64Encode(groupId), async () =>
-      this.sealAndPublish(myIdentity, group, groupId, plaintext, true),
+      this.sealAndPublish(myIdentity, group, groupId, plaintext, "message"),
     );
   }
 
@@ -669,15 +694,19 @@ export class ChatClient {
    * {@link broadcastControl}: seal at the live epoch, persist fail-closed,
    * publish. Runs under `withGroupMlsLock`; never call it directly.
    *
-   * `notifyPush` is the ONLY difference between the two callers — a control
-   * envelope fires no user-facing wake.
+   * `wake` is the ONLY difference between the two callers. `sendMessage`
+   * always passes `"message"`. `broadcastControl` passes `null` for the
+   * control envelopes ADR-0042 rules must wake nobody — a routing-secret
+   * handshake, a liveness beacon, a profile, a group name — and `"call"` for
+   * the two signaling frames that must ring a closed tab (see
+   * `calls/call-signaling-wake.ts` for which two, and why only those).
    */
   private async sealAndPublish(
     myIdentity: WasmIdentity,
     group: WasmGroup,
     groupId: Uint8Array,
     plaintext: Uint8Array,
-    notifyPush: boolean,
+    wake: OutboundWake,
   ): Promise<SendMessageResult> {
     // `createApplicationMessage` ADVANCES the MLS sender ratchet:
     // it consumes the current generation N (deriving the AEAD
@@ -714,7 +743,7 @@ export class ChatClient {
     } catch (err) {
       throw new ChatError(
         `MLS snapshot persist failed — ${
-          notifyPush ? "send" : "control broadcast"
+          wake === "message" ? "send" : "control broadcast"
         } aborted to prevent nonce reuse`,
         err,
       );
@@ -739,9 +768,11 @@ export class ChatClient {
     // No await; the function returns the DS receipt
     // immediately while the wake fans out in the background.
     //
-    // ADR-0042 — a CONTROL envelope skips it: a routing-secret handshake or a
-    // liveness beacon should not wake devices.
-    if (notifyPush) this.notifyPushGroupBestEffort(groupId, publish.id);
+    // ADR-0042 — most CONTROL envelopes skip it: a routing-secret handshake or
+    // a liveness beacon should not wake devices. A call offer and a call end
+    // are the exception, opted into per frame by the caller (`"call"`), so the
+    // rule stays "control is silent unless it is a ring".
+    if (wake !== null) this.notifyPushGroupBestEffort(groupId, publish.id, wake);
 
     return { messageId: publish.id, createdAt: publish.createdAt };
   }
@@ -759,15 +790,26 @@ export class ChatClient {
    * (invariant #5). A publisher is a member, so it normally holds the
    * secret. When no resolver is wired (tests) the raw `group_id` is used,
    * matching the `identityProvider`/`resolveIdentity` fallback convention.
+   *
+   * `wake` names the class. A CALL wake travels the identical path — same
+   * PoW, same opaque `push_gid`, same off-the-critical-path dispatch, same
+   * swallow-every-failure discipline — and differs only in the `kind` field
+   * push-gw reads to raise the transport's priority. That sameness is
+   * load-bearing: a failed or skipped wake must never fail the call. The
+   * offer is already on the DS when this runs, so the worst case for a ring
+   * is the pre-existing one, where the callee learns about the call on its
+   * next foreground poll.
    */
   private notifyPushGroupBestEffort(
     groupId: Uint8Array,
     messageId: number,
+    wake: Exclude<OutboundWake, null>,
   ): void {
     // The notifyGroup call drives a PoW solve, which takes
     // 100-500 ms; running it inline in sendMessage would
     // double the user-visible send latency. Off the critical
-    // path:
+    // path — and for a call offer that matters more, not less: the
+    // ringing UI must not wait on a proof of work.
     void (async (): Promise<void> => {
       let target = groupId;
       if (this.pushGidResolver !== undefined) {
@@ -780,7 +822,11 @@ export class ChatClient {
         }
         target = pushGid;
       }
-      await this.pushClient.notifyGroup(target, messageId);
+      await this.pushClient.notifyGroup(
+        target,
+        messageId,
+        wake === "call" ? "call" : undefined,
+      );
     })().catch((err) => {
       // eslint-disable-next-line no-console
       console.warn("push notify-group failed", err);
@@ -819,10 +865,25 @@ export class ChatClient {
    * — `createApplicationMessage` advances the sender ratchet, so the
    * post-advance state MUST be durably persisted before the ciphertext
    * reaches the DS (the AEAD nonce-reuse-on-crash class). Unlike
-   * `sendMessage` it fires NO user-facing push wake: a routing-secret
-   * handshake should not wake devices (a member without the secret cannot
-   * be woken under `push_gid` yet anyway — they catch up on the next
-   * foreground poll).
+   * `sendMessage` it fires NO user-facing push wake BY DEFAULT: a
+   * routing-secret handshake should not wake devices (a member without the
+   * secret cannot be woken under `push_gid` yet anyway — they catch up on the
+   * next foreground poll).
+   *
+   * ## The opt-in wake
+   *
+   * `options.wake` is how a caller says this particular control frame IS
+   * worth a wake. It exists for one caller — the call-signaling publisher,
+   * for a call offer and a call end (`calls/call-signaling-wake.ts`) — because
+   * a ring that only arrives on the next foreground poll is not a ring at
+   * all (`docs/ux/calls.md` §2.1). It is opt-IN rather than opt-out on
+   * purpose: every existing caller keeps its silence without being edited,
+   * and a new control envelope is silent until someone deliberately decides
+   * otherwise, which is the ADR-0042 default stated as a default.
+   *
+   * The wake is fanned out AFTER the DS publish, unawaited, with every
+   * failure swallowed, exactly as a message wake is — so opting in cannot
+   * make a publish slower or a call fail.
    *
    * Records the DS id in `ownPublishedIds` so the broadcaster's own next
    * poll drops the echo (the owner already holds the secret it minted).
@@ -843,6 +904,7 @@ export class ChatClient {
     identity: IdentitySecrets | null,
     group: WasmGroup,
     controlBytes: Uint8Array,
+    options: BroadcastControlOptions = {},
   ): Promise<{ messageId: number }> {
     if (controlBytes.length === 0) {
       throw new ChatClientArgError("controlBytes must be non-empty");
@@ -857,7 +919,7 @@ export class ChatClient {
     }
 
     const result = await withGroupMlsLock(base64Encode(groupId), async () =>
-      this.sealAndPublish(myIdentity, group, groupId, controlBytes, false),
+      this.sealAndPublish(myIdentity, group, groupId, controlBytes, options.wake ?? null),
     );
     return { messageId: result.messageId };
   }
@@ -1311,22 +1373,14 @@ export async function toEvent(
  * overlaps. A false positive on some future non-JSON shape is
  * harmless — the call dispatcher's `parseCallSignaling`
  * rejects it and the row is dropped.
+ *
+ * The tag table itself moved to `calls/call-signaling-wake.ts`
+ * when the SEND path started needing the same reading (which of
+ * these frames is worth a push wake). Two readers of one table
+ * is one definition; the third, `public/sw-push-decrypt.js`,
+ * cannot import from `src/` and keeps its documented copy.
  */
-function looksLikeCallSignaling(bytes: Uint8Array): boolean {
-  if (bytes.length === 0) return false;
-  const first = bytes[0] as number;
-  if (
-    first === 0x52 ||
-    first === 0x5a ||
-    first === 0x62 ||
-    first === 0x6a ||
-    first === 0x72 ||
-    first === 0x7a
-  ) {
-    return true;
-  }
-  return first === 0x82 && bytes.length > 1 && bytes[1] === 0x01;
-}
+const looksLikeCallSignaling = looksLikeCallSignalingBytes;
 
 /**
  * First byte of the ADR-0045 committer-beacon domain separator (`'l'` of

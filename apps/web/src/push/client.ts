@@ -44,6 +44,21 @@ export const DEVICE_PSEUDONYM_LEN = 32;
  *  `ProviderKind` in `services/push-gw/src/provider.rs`. */
 export type ProviderKind = "apns" | "fcm" | "web_push" | "unified_push";
 
+/**
+ * Optional wake class on `/push/notify-group`.
+ *
+ * Absent means an ordinary message wake — the only shape that existed before
+ * calls needed to ring a closed tab, and still the default. `"call"` is the
+ * one named class: push-gw raises Web Push to `Urgency: high` with a `TTL` of
+ * 60 s, which is both halves of what a ring needs — deliver it now, and do not
+ * deliver it at all once the call it announces is over.
+ *
+ * The delivered payload is unchanged either way: the wake still carries only a
+ * group pseudonym and a journal pointer, so the provider learns nothing more
+ * from a call than from a message (invariant #5).
+ */
+export type PushWakeKind = "call";
+
 /** Programmer error — wrong-length pseudonym, empty token, etc. */
 export class PushClientArgError extends Error {
   override name = "PushClientArgError";
@@ -241,10 +256,20 @@ export class PushClient {
    * @param envelopePointer Optional DS message id; lets the
    *                        woken client jump to the exact row
    *                        instead of polling.
+   * @param kind           Optional wake class. Omitted (the default)
+   *                       sends byte-for-byte the pre-existing
+   *                       request, an ordinary message wake.
+   *                       `"call"` asks push-gw to deliver at the
+   *                       highest priority the transport offers
+   *                       (Web Push `Urgency: high`, `TTL: 60`),
+   *                       because a ring is worth the battery and is
+   *                       worthless once the call is over
+   *                       (`docs/ux/calls.md` §7).
    */
   async notifyGroup(
     groupPseudonym: Uint8Array,
     envelopePointer?: number,
+    kind?: PushWakeKind,
   ): Promise<{ devicesWoken: number }> {
     const groupHex = pseudonymHex(groupPseudonym, "groupPseudonym");
 
@@ -255,6 +280,7 @@ export class PushClient {
       pow: PowProofPayload;
       group_pseudonym: string;
       envelope_pointer?: number;
+      kind?: PushWakeKind;
     }
     const req: NotifyGroupReq = {
       pow,
@@ -262,6 +288,11 @@ export class PushClient {
     };
     if (envelopePointer !== undefined) {
       req.envelope_pointer = envelopePointer;
+    }
+    // Set ONLY when a caller asked for it, so a message wake keeps producing
+    // the exact request body it produced before this field existed.
+    if (kind !== undefined) {
+      req.kind = kind;
     }
     const resp = await this.post<
       NotifyGroupReq,

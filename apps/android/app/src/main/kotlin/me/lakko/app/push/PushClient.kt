@@ -78,6 +78,33 @@ public class PushClient(
         client.close()
     }
 
+    /**
+     * Optional wake class on `/push/notify-group` — must match the snake_case
+     * `serde` rename on `WakeKind` in `services/push-gw/src/provider.rs`.
+     *
+     * Absent means an ordinary message wake: the only shape that existed
+     * before a call had to ring a closed app, and still the default. [CALL] is
+     * the one named class, and push-gw answers it by raising FCM to
+     * `android.priority: high` with a 60-second TTL — both halves of what a
+     * ring needs: deliver it now, and do not deliver it at all once the call it
+     * announces is over.
+     *
+     * An unrecognised value is refused by the server rather than quietly
+     * demoted to a message, so this enum can only ever name a class push-gw
+     * actually implements.
+     *
+     * The delivered payload is unchanged either way: the wake still carries
+     * only a group pseudonym and a journal pointer, so the provider learns
+     * nothing more from a call than from a message beyond the single bit that
+     * this wake is a call — a bit the raised priority discloses regardless
+     * (invariants #2 and #5).
+     */
+    @Serializable
+    public enum class WakeKind {
+        @SerialName("call")
+        CALL,
+    }
+
     /** Provider names — must match the snake_case `serde`
      *  rename on `ProviderKind` in
      *  `services/push-gw/src/provider.rs`. */
@@ -231,10 +258,19 @@ public class PushClient(
      * Fan a wake out to every device subscribed to
      * `groupPseudonym`. Phase 1.20e: the publisher's client
      * calls this after a successful `DsClient.publishGroup`.
+     *
+     * @param kind Optional wake class. `null` (the default) sends byte-for-byte
+     *             the pre-existing request — an ordinary message wake — because
+     *             the client's `Json` is configured `explicitNulls = false` and
+     *             omits the field entirely. [WakeKind.CALL] asks push-gw to
+     *             deliver at the highest priority the transport offers, because
+     *             a ring is worth the battery and is worthless once the call is
+     *             over (`docs/ux/calls.md` §7).
      */
     public suspend fun notifyGroup(
         groupPseudonym: ByteArray,
         envelopePointer: Long? = null,
+        kind: WakeKind? = null,
     ): Int {
         require(groupPseudonym.size == PSEUDONYM_LEN)
         val challenge = fetchChallenge()
@@ -243,6 +279,7 @@ public class PushClient(
             pow = pow,
             group_pseudonym = pseudonymHex(groupPseudonym),
             envelope_pointer = envelopePointer?.toULong(),
+            kind = kind,
         )
         val response: HttpResponse = try {
             client.post("$baseUrl/push/notify-group") {
@@ -429,6 +466,9 @@ private data class NotifyGroupRequest(
     val pow: PowProofPayload,
     val group_pseudonym: String,
     val envelope_pointer: ULong?,
+    /** Omitted from the JSON when `null` (`explicitNulls = false`), so a
+     *  message wake produces the exact body it produced before calls existed. */
+    val kind: PushClient.WakeKind? = null,
 )
 
 @Serializable

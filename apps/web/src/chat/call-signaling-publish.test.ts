@@ -328,3 +328,105 @@ describe("call signaling publishes through the locked, persisting seam", () => {
     expect(g.processIncomingVerifyingRoles).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * The push wake, which is what makes a call ring a closed or backgrounded tab
+ * at all (`docs/ux/calls.md` §2.1). `broadcastControl` wakes nobody by
+ * default; this publisher opts in per frame.
+ *
+ * The frames here are raw leading tag bytes rather than composed ones on
+ * purpose: `calls/call-signaling-wake.test.ts` already pins the tag table
+ * against frames the REAL core composed, so repeating that here would test the
+ * same thing twice and pay a wasm init for it. What is pinned here is the
+ * wiring — that the decision reaches `notifyGroup`, with the right `kind`, off
+ * the critical path, and that its failure cannot reach the caller.
+ */
+describe("a call offer and a call end wake the group; nothing else does", () => {
+  /** Leading `CallSignalingPayload.body` oneof tags. */
+  const OFFER = new Uint8Array([0x52, 0x00]);
+  const ANSWER = new Uint8Array([0x5a, 0x00]);
+  const CANDIDATE = new Uint8Array([0x62, 0x00]);
+  const END = new Uint8Array([0x6a, 0x00]);
+  const GROUP_START = new Uint8Array([0x72, 0x00]);
+
+  async function publishAndDrain(
+    frame: Uint8Array,
+    push: PushClient,
+  ): Promise<void> {
+    const g = stampingGroup(freshGid(), 5);
+    const { ds } = journalDs();
+    const chat = new ChatClient(ds, { identityProvider: () => IDENTITY_TOKEN }, push);
+    const publish = makeCallSignalingPublisher({
+      chat,
+      identity: () => null,
+      group: () => g.group,
+      onError: () => {},
+    });
+    await within(1000, publish(frame), "signaling publish");
+    // The wake is deliberately unawaited, so give it a turn to land.
+    await settle();
+  }
+
+  it("wakes for an offer, at call priority", async () => {
+    const push = mockPush();
+    await publishAndDrain(OFFER, push);
+    expect(push.notifyGroup).toHaveBeenCalledTimes(1);
+    // (groupPseudonym, envelopePointer, kind)
+    expect(vi.mocked(push.notifyGroup).mock.calls[0]?.[2]).toBe("call");
+  });
+
+  it("wakes for an end, so a cancelled call stops ringing a closed tab", async () => {
+    const push = mockPush();
+    await publishAndDrain(END, push);
+    expect(push.notifyGroup).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(push.notifyGroup).mock.calls[0]?.[2]).toBe("call");
+  });
+
+  it("stays silent for answer, candidate and group control", async () => {
+    for (const frame of [ANSWER, CANDIDATE, GROUP_START]) {
+      const push = mockPush();
+      await publishAndDrain(frame, push);
+      expect(push.notifyGroup).not.toHaveBeenCalled();
+    }
+  });
+
+  it("does not wait on the wake — the DS publish returns first", async () => {
+    // A ring must not sit behind a proof of work. The wake is dispatched
+    // without an await, so a wake that never settles still lets the publish
+    // resolve; if it were awaited this case would hang and `within` would
+    // report a deadlock rather than a failure.
+    const push = {
+      notifyGroup: vi.fn(() => new Promise<{ devicesWoken: number }>(() => {})),
+    } as unknown as PushClient;
+    await publishAndDrain(OFFER, push);
+    expect(push.notifyGroup).toHaveBeenCalledTimes(1);
+  });
+
+  it("a failed wake never fails the call", async () => {
+    // The offer is already on the DS by the time the wake runs, so a push-gw
+    // outage costs the ring's promptness and nothing else: the callee still
+    // sees the call on its next foreground poll, exactly as before the wake
+    // existed.
+    const push = {
+      notifyGroup: vi.fn(async () => {
+        throw new Error("push-gw is down");
+      }),
+    } as unknown as PushClient;
+    const errors: unknown[] = [];
+    const g = stampingGroup(freshGid(), 5);
+    const { ds, journal } = journalDs();
+    const chat = new ChatClient(ds, { identityProvider: () => IDENTITY_TOKEN }, push);
+    const publish = makeCallSignalingPublisher({
+      chat,
+      identity: () => null,
+      group: () => g.group,
+      onError: (err) => errors.push(err),
+    });
+
+    await within(1000, publish(OFFER), "signaling publish");
+    await settle();
+
+    expect(journal.length).toBe(1);
+    expect(errors).toEqual([]);
+  });
+});

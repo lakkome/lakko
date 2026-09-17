@@ -80,6 +80,75 @@ impl ProviderKind {
     }
 }
 
+/// What kind of thing the woken device is being told about.
+///
+/// A call offer travels as an ordinary MLS application message on the
+/// chat group's DS journal, so at the pointer level a call wake and a
+/// message wake are byte-identical. This tag is the only thing that
+/// separates them, and it exists for two reasons that both need it
+/// *before* any ciphertext is fetched:
+///
+///   * **Delivery.** A call is worth spending battery on. Each
+///     provider has its own knob (APNs `apns-priority: 10` + a short
+///     `apns-expiration`, FCM `android.priority: "high"`, Web Push
+///     `Urgency: high`) that stops the wake being delayed, batched or
+///     coalesced the way a message wake legitimately may be.
+///   * **Behaviour.** The woken background handler must report the
+///     call to the OS within its budget — the iOS system call screen,
+///     the Android full-screen call notification — rather than render
+///     a message preview. It cannot decide that from a cursor.
+///
+/// ## Disclosure
+///
+/// The tag is visible to Apple / Google / Mozilla. They learn exactly
+/// one extra bit: *this wake is a call*. They do **not** learn who is
+/// calling, the call id, or whether it is voice or video — the wake
+/// still carries only a pseudonym and a cursor, and every call detail
+/// stays inside the E2EE journal row the device fetches after waking
+/// (invariants #2 and #5). The bit is unavoidable: the raised
+/// priority and shortened expiry a ringing call needs are themselves
+/// visible to the provider, so hiding the tag would buy nothing.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WakeKind {
+    /// An ordinary message wake. The default, and byte-for-byte the
+    /// behaviour that shipped before calls existed.
+    #[default]
+    Message,
+    /// A call signal (offer / accept / decline / hang-up).
+    Call,
+}
+
+impl WakeKind {
+    /// `true` for a call wake. Reads better than a `matches!` at each
+    /// of the four provider call sites.
+    pub(crate) const fn is_call(self) -> bool {
+        matches!(self, WakeKind::Call)
+    }
+
+    /// Single-letter tag placed in the delivered payload body,
+    /// mirroring `lakko-push`'s `k` field so a client that decodes
+    /// either shape branches on the same letter.
+    ///
+    /// `None` for a message: omitting the field keeps today's
+    /// message payload byte-identical, so a client built before calls
+    /// existed sees no change at all, and "no `k`" means "message".
+    pub(crate) const fn wire_tag(self) -> Option<&'static str> {
+        match self {
+            WakeKind::Message => None,
+            WakeKind::Call => Some("c"),
+        }
+    }
+
+    /// Lowercase canonical name for log lines.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            WakeKind::Message => "message",
+            WakeKind::Call => "call",
+        }
+    }
+}
+
 /// What we ask a provider to deliver. Strictly metadata pointers — no
 /// plaintext, no preview. The recipient device wakes up, fetches
 /// ciphertext from `services/ds`, decrypts locally and builds the
@@ -95,6 +164,9 @@ pub(crate) struct WakePayload {
     /// Optional: server-assigned cursor id past which the client
     /// should fetch (`?after=<envelope_pointer>`).
     pub(crate) envelope_pointer: Option<u64>,
+    /// Message or call. Drives per-provider urgency headers and the
+    /// payload's kind tag; see [`WakeKind`] for what it discloses.
+    pub(crate) kind: WakeKind,
 }
 
 /// Errors a provider can return. Most distinguishable failure modes
@@ -168,6 +240,7 @@ impl Provider for LogOnlyProvider {
         let token_prefix = hex::encode(&token[..token.len().min(4)]);
         tracing::info!(
             provider = self.kind.as_str(),
+            wake_kind = payload.kind.as_str(),
             token_len = token.len(),
             token_prefix = %token_prefix,
             device_prefix = %hex::encode(&payload.device_pseudonym[..4]),
@@ -249,6 +322,7 @@ mod tests {
             device_pseudonym: [0xAB; 32],
             group_pseudonym: Some([0xCD; 32]),
             envelope_pointer: Some(42),
+            kind: WakeKind::Message,
         };
         p.deliver(b"fake-apns-token", &payload).await.unwrap();
     }
@@ -262,6 +336,7 @@ mod tests {
             device_pseudonym: [0; 32],
             group_pseudonym: None,
             envelope_pointer: None,
+            kind: WakeKind::Message,
         };
         let err = p.deliver(b"x", &payload).await.unwrap_err();
         assert!(matches!(err, DeliverError::TokenInvalid));
@@ -276,6 +351,7 @@ mod tests {
             device_pseudonym: [0; 32],
             group_pseudonym: None,
             envelope_pointer: None,
+            kind: WakeKind::Message,
         };
         let err = p.deliver(b"x", &payload).await.unwrap_err();
         assert!(matches!(err, DeliverError::Transport(_)));

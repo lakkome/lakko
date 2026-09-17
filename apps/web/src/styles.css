@@ -3198,7 +3198,8 @@ button.lk-reaction {
    4 / 5.7): the root carries the dark half of the token table, so everything
    inside reads the same tokens as the rest of the app and no second palette
    exists. Values are the dark column of `:root` above. */
-.lk-call {
+.lk-call,
+.lk-incoming-call {
   color-scheme: dark;
   --surface-bg: #0f1220;
   --surface-elevated: #171b2e;
@@ -3234,6 +3235,85 @@ button.lk-reaction {
   color: var(--surface-fg);
   display: flex;
   flex-direction: column;
+}
+
+/* The full-screen incoming call (docs/ux/calls.md section 2.2). It shares the
+   call surface's dark token block above, so answering a call is a continuation
+   of the same screen rather than a jump between two palettes. One layer above
+   the call itself: a second call can only ever arrive while the first is up. */
+.lk-incoming-call {
+  z-index: 1050;
+  justify-content: space-between;
+  align-items: center;
+  padding: 48px 24px 40px;
+  gap: 24px;
+  text-align: center;
+}
+.lk-incoming-call-who {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  /* Centres the caller in the space above the actions, which the parent's
+     space-between keeps pinned to the bottom of the screen. */
+  margin-top: auto;
+  margin-bottom: auto;
+}
+.lk-incoming-call-name {
+  margin: 4px 0 0;
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+.lk-incoming-call-kind {
+  margin: 0;
+  font-size: 15px;
+  color: var(--surface-muted);
+}
+/* Section 2.2: a small lock with one word under it. No digits, no code —
+   the safety number lives in the call's own encryption sheet (section 5). */
+.lk-incoming-call-lock {
+  margin: 4px 0 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-sunken);
+  color: var(--surface-muted);
+  font-size: 13px;
+}
+.lk-incoming-call-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  width: min(520px, 100%);
+}
+.lk-incoming-call-actions button {
+  min-height: 52px;
+  padding: 0 24px;
+  border-radius: var(--radius-pill);
+  font-size: 15px;
+}
+/* Section 2.2 puts "Accept without video" BETWEEN Decline and Accept, and
+   that is where it sits whenever three buttons fit. On a narrow screen they
+   do not, and wrapping would leave Decline beside the quiet option with
+   Accept stranded below — so there it drops to its own row and the two
+   decisions stay paired. Quieter either way: it is the ghost, at the normal
+   control height rather than the ring's 52. */
+.lk-incoming-call-actions button.ghost {
+  order: 1;
+  flex-basis: 100%;
+  min-height: var(--control-h);
+}
+@media (min-width: 520px) {
+  .lk-incoming-call-actions button.ghost {
+    order: 0;
+    flex-basis: auto;
+  }
 }
 
 /* Top bar: the safety-number pill left, the quality dot right. */

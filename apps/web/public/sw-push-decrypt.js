@@ -63,8 +63,35 @@
  * it never throws out of the push handler.
  */
 
+/**
+ * The ringing-notification shape and its button intents, re-exported so
+ * `public/sw.js` reaches them through the ONE dynamic import it already
+ * performs at push time rather than a second one.
+ */
+export {
+  callRingNotification,
+  callNotificationTag,
+  isCallNotificationTag,
+  callClickPlan,
+  callIntentUrl,
+  intentForAction,
+  CALL_ACTION_MESSAGE,
+} from "./sw-call-notification.js";
+
 /** Max characters of decrypted text shown in the notification body. */
 const PREVIEW_MAX_CHARS = 140;
+
+/**
+ * An offer whose DS row is older than this does not ring.
+ *
+ * Mirrors `STALE_OFFER_MS` in `src/calls/call-signaling-dispatch.ts`, which
+ * this file cannot import (see the header on why it lives in `public/`), and
+ * exists for the same reason: a wake can be delivered late, or replayed to a
+ * device that was offline, and a phone must not start ringing for a call that
+ * ended minutes ago. Judged on the DS row's SERVER timestamp, never on
+ * anything the caller stamped.
+ */
+const STALE_OFFER_MS = 60_000;
 
 /**
  * @typedef {object} PushWake
@@ -120,6 +147,14 @@ const PREVIEW_MAX_CHARS = 140;
  *   group name; `wrongDomain` is the only "not a group name" answer. Used
  *   ONLY to classify the row out of the preview path — the SW never stores
  *   a received name (C-59). Optional so an older deps object still loads.
+ * @property {(bytes: Uint8Array) => any} [parseCallSignaling]
+ *   Phase 3a3 — the prost `CallSignalingPayload` codec. THROWS on bytes that
+ *   are not one. Used to tell an OFFER (ring) and an END (stop ringing) apart
+ *   from the answer / candidate / group-control frames, which stay
+ *   suppressed. Classification ONLY: the worker reads the call id and the
+ *   media flags to shape a notification and never applies, answers or stores
+ *   anything (C-59). Optional — absent means every call frame is suppressed,
+ *   i.e. exactly the pre-ring behaviour.
  * @property {() => number} [committerBeaconEnvelopeLen]
  *   ADR-0045 — the exact on-wire length of a beacon envelope, read from
  *   the FFI rather than hand-copied into each client (the drift class
@@ -161,9 +196,31 @@ const PREVIEW_MAX_CHARS = 140;
  *   (local rename, profile name, verified username), from the encrypted
  *   profile row the app wrote. `null` when nothing is known. Never fetches or
  *   verifies anything. Optional; any throw is treated as unknown.
+ * @property {() => number} [nowMs]
+ *   Wall clock, for the stale-offer gate. Defaults to `Date.now()`; injected
+ *   only so the tests can place a row on either side of the window without
+ *   sleeping. A READ of the clock, nothing else.
  * @property {(...args: any[]) => any} [saveSnapshot]     FORBIDDEN — never called (test guard).
  * @property {(...args: any[]) => any} [saveMessageLog]   FORBIDDEN — never called (test guard).
  * @property {(...args: any[]) => any} [advanceCursor]    FORBIDDEN — never called (test guard).
+ */
+
+/**
+ * A call this wake's rows announced, when one did.
+ *
+ * `"ring"` is an offer the device should ring for; `"end"` is that same call
+ * being cancelled, declined or hung up, and asks the worker to take any ring
+ * for it down. Only ever a classification — the worker never answers, never
+ * publishes, never stores (C-59).
+ *
+ * @typedef {object} CallNotice
+ * @property {"ring" | "end"} kind
+ * @property {string} callIdHex  Lowercase hex of the 16-byte call id.
+ * @property {string} groupHex   REAL DS group hex, for the deep link.
+ * @property {boolean} video     The kind the CALLER chose, off the offer's own
+ *   media flags. Meaningless for `"end"`.
+ * @property {string | null} callerName  A name this device already resolves for
+ *   the sender, or `null`. Never looked up, never verified here.
  */
 
 /**
@@ -171,6 +228,9 @@ const PREVIEW_MAX_CHARS = 140;
  * @property {string} title  Notification title.
  * @property {string} body   Decrypted preview body (truncated).
  * @property {string} tag    Notification tag (the group hex — collapses a burst).
+ * @property {CallNotice} [call]  Present ONLY when the newest relevant row was
+ *   call signalling. A message preview carries no `call` key at all, so the
+ *   message shape is byte-for-byte what it was before calls could ring.
  */
 
 /**
@@ -319,10 +379,23 @@ export async function decryptPushPreview(wake, deps) {
     //    frame that yields a user-visible preview. A frame that will
     //    not decrypt/authenticate (wrong epoch, our own echo, a control
     //    frame, a role-refused commit) is skipped — never guessed.
+    //
+    //    Call signalling is classified rather than dropped (it used to be
+    //    suppressed wholesale, which is why a closed tab never rang): an
+    //    offer becomes a ring, an end cancels one, and the four other
+    //    bodies stay silent. `latestCall` keeps the LAST such row of the
+    //    batch, so an end that arrives after its own offer — the ordinary
+    //    cancelled-call shape, and both rows can land in one wake — wins
+    //    and the device does not start ringing for a call that is over.
     /** @type {PushPreview | null} */
     let latest = null;
     /** @type {string | null} */
     let latestSenderKeyB64 = null;
+    /** @type {{ notice: CallNotice, senderKeyB64: string | null } | null} */
+    let latestCall = null;
+    // One reading for the whole batch, so two rows a millisecond apart cannot
+    // be judged stale differently.
+    const now = typeof deps.nowMs === "function" ? deps.nowMs() : Date.now();
     for (const message of messages) {
       let processed;
       try {
@@ -331,6 +404,11 @@ export async function decryptPushPreview(wake, deps) {
         // Bad frame / wrong epoch / own echo / role-refused commit —
         // fail-closed skip. NOTE: this mutates the THROWAWAY provider
         // only; it is never persisted (read-only-throwaway discipline).
+        continue;
+      }
+      const call = callNoticeFrom(deps.wasm, processed, message, groupHex, now);
+      if (call !== null) {
+        latestCall = { notice: call, senderKeyB64: senderKeyOf(group, processed) };
         continue;
       }
       const preview = previewFromProcessed(deps.wasm, processed);
@@ -342,6 +420,41 @@ export async function decryptPushPreview(wake, deps) {
         latestSenderKeyB64 = senderKeyOf(group, processed);
       }
     }
+
+    // A call outranks a message preview: one is an interruption the user is
+    // expected to answer within seconds, the other waits. The ring's title is
+    // the caller's name by the same read the message path uses.
+    if (latestCall !== null) {
+      let callerName = null;
+      if (
+        latestCall.senderKeyB64 !== null &&
+        typeof deps.lookupSenderName === "function"
+      ) {
+        try {
+          callerName = await deps.lookupSenderName(
+            accountId,
+            deviceKey,
+            latestCall.senderKeyB64,
+          );
+        } catch {
+          callerName = null;
+        }
+      }
+      const notice = {
+        ...latestCall.notice,
+        callerName: typeof callerName === "string" && callerName.length > 0 ? callerName : null,
+      };
+      // `title` / `body` / `tag` are carried for a caller that ignores `call`
+      // entirely; `public/sw.js` reads `call` and builds the real ring shape
+      // through `callRingNotification`.
+      return {
+        title: notice.callerName ?? "Lakko",
+        body: notice.video ? "Video call" : "Voice call",
+        tag: groupHex,
+        call: notice,
+      };
+    }
+
     // ADR-0048 UX §5 — title the notification with a name this device
     // already knows. A read of what the app stored; never a lookup.
     if (
@@ -440,6 +553,95 @@ function looksLikeCallSignaling(bytes) {
 }
 
 /**
+ * Classify a processed row as a call this device should ring for, or stop
+ * ringing for, or `null` for everything else.
+ *
+ * ## What changed, and why it is a branch rather than a filter
+ *
+ * Call signalling used to be suppressed outright by {@link isServiceEnvelope}
+ * — correct for the preview path, because a raw prost frame rendered through
+ * `parseBodyEnvelope`'s lossy-UTF-8 fallback is binary garbage in a
+ * notification body, but it also meant a closed or backgrounded tab never
+ * learned a call was happening (`docs/ux/calls.md` §2.1, §7). The frames are
+ * now classified instead: an offer rings, an end cancels, and answer,
+ * candidate and the three group-control bodies stay exactly as silent as
+ * they were. `isServiceEnvelope` is untouched, so any call frame that gets
+ * past this function still cannot render as text.
+ *
+ * ## Fail-closed, in the ringing direction
+ *
+ * Every uncertainty resolves to "do not ring": no codec, a frame that will
+ * not parse, a call id that is not usable as a tag, an unreadable or missing
+ * DS timestamp, an offer older than {@link STALE_OFFER_MS}. A missed ring
+ * degrades to the pre-existing behaviour (the callee sees the call on its
+ * next foreground poll); a spurious ring would wake someone for a call that
+ * is not there, which is worse.
+ *
+ * An END is deliberately NOT stale-gated: cancelling a ring that is no longer
+ * showing is a no-op, and refusing a late end would leave a stuck ring on
+ * screen — which is the one outcome `requireInteraction: true` makes
+ * permanent.
+ *
+ * Classification ONLY: nothing is applied, answered, persisted, or
+ * cursor-advanced (C-59 / ADR-0041).
+ *
+ * @param {DecryptWasm} wasm
+ * @param {any} processed
+ * @param {{ createdAt?: string }} message
+ * @param {string} groupHex
+ * @param {number} nowMs
+ * @returns {CallNotice | null}
+ */
+function callNoticeFrom(wasm, processed, message, groupHex, nowMs) {
+  if (
+    processed === null ||
+    processed === undefined ||
+    processed.kind !== "Application" ||
+    !(processed.applicationData instanceof Uint8Array)
+  ) {
+    return null;
+  }
+  const bytes = processed.applicationData;
+  if (!looksLikeCallSignaling(bytes)) return null;
+  if (typeof wasm.parseCallSignaling !== "function") return null;
+
+  let parsed;
+  try {
+    parsed = wasm.parseCallSignaling(bytes);
+  } catch {
+    return null;
+  }
+  try {
+    const kind = parsed?.kind;
+    if (kind !== "offer" && kind !== "end") return null;
+    const callId = parsed.callId;
+    if (!(callId instanceof Uint8Array) || callId.length === 0) return null;
+    const callIdHex = bytesToHex(callId);
+    if (kind === "end") {
+      return { kind: "end", callIdHex, groupHex, video: false, callerName: null };
+    }
+    // The DS row's SERVER timestamp, never `parsed.createdAtMs`, which the
+    // caller stamped and could be anything.
+    const createdAt = message?.createdAt;
+    if (typeof createdAt !== "string") return null;
+    const createdMs = Date.parse(createdAt);
+    if (Number.isNaN(createdMs)) return null;
+    if (nowMs - createdMs > STALE_OFFER_MS) return null;
+    return {
+      kind: "ring",
+      callIdHex,
+      groupHex,
+      video: parsed.mediaVideo === true,
+      callerName: null,
+    };
+  } catch {
+    return null;
+  } finally {
+    freeQuietly(parsed);
+  }
+}
+
+/**
  * Is this Application plaintext a SERVICE envelope rather than a
  * user-visible message?
  *
@@ -464,6 +666,11 @@ function looksLikeCallSignaling(bytes) {
  */
 function isServiceEnvelope(wasm, bytes) {
   // 1. Call signaling (prost `CallSignalingPayload`) — a pure byte check.
+  //    Still suppressed HERE, and that is still right: a prost frame has no
+  //    text to preview. What changed is that `callNoticeFrom` runs BEFORE
+  //    this and may have already turned the frame into a ring; anything it
+  //    declined (an answer, a candidate, a group-control body, a stale
+  //    offer) falls through to here and stays silent, as it always did.
   if (looksLikeCallSignaling(bytes)) return true;
   // 2. Push-routing secret (ADR-0042 / ADR-0044).
   if (isPushRoutingSecretEnvelope(wasm, bytes)) return true;

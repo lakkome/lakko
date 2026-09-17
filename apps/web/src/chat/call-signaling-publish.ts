@@ -34,8 +34,20 @@
  * Living in a `.ts` module rather than inside the `.tsx` component is what
  * makes the rule testable: vitest here runs in plain node with no JSX
  * transform, so nothing reachable only from `Chat.tsx` can be asserted at all.
+ *
+ * ## The push wake
+ *
+ * `broadcastControl` fires no wake by default — the ADR-0042 rule that a
+ * control envelope must not wake devices. That rule swept up the call offer,
+ * so a callee with a closed or backgrounded tab never rang
+ * (`docs/ux/calls.md` §2.1). This publisher is the one caller that opts back
+ * in, and only for the two frames `shouldWakeForCallSignaling` names: the
+ * offer that starts the ring and the end that stops it. The decision is made
+ * from the composed bytes rather than passed in by the session, so there is
+ * no second place a caller could get it wrong.
  */
 import type { ChatClient } from "./client";
+import { shouldWakeForCallSignaling } from "../calls/call-signaling-wake";
 import type { IdentitySecrets } from "../auth/AuthContext";
 import type { Group as WasmGroup } from "../../wasm/lakko_ffi_wasm";
 
@@ -64,7 +76,15 @@ export function makeCallSignalingPublisher(
 ): (bytes: Uint8Array) => Promise<void> {
   return async (bytes: Uint8Array): Promise<void> => {
     try {
-      await deps.chat.broadcastControl(deps.identity(), deps.group(), bytes);
+      // The wake is fanned out by `broadcastControl` after the DS publish,
+      // unawaited and with every failure swallowed, so asking for one here
+      // cannot slow the publish down and cannot fail the call.
+      await deps.chat.broadcastControl(
+        deps.identity(),
+        deps.group(),
+        bytes,
+        shouldWakeForCallSignaling(bytes) ? { wake: "call" } : {},
+      );
     } catch (err) {
       if (deps.onError !== undefined) {
         deps.onError(err);

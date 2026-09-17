@@ -50,6 +50,27 @@
 //! notification on-device via `NotificationManagerCompat`. Google
 //! never sees plaintext.
 //!
+//! ## Call wakes
+//!
+//! A [`WakeKind::Call`] wake adds an `android` block and one `data`
+//! key; the `data` metadata shape is otherwise unchanged:
+//!
+//! ```json
+//! { "message": {
+//!     "token": "<device_token>",
+//!     "android": { "priority": "high", "ttl": "60s" },
+//!     "data": { "d": "…", "g": "…", "p": "…", "k": "c" } } }
+//! ```
+//!
+//! `android.priority: "high"` is what lets the wake escape Doze and
+//! app-standby batching — a normal-priority data message can be held
+//! for minutes, which for a call means it arrives after the caller
+//! gave up. `ttl: "60s"` is FCM's Duration string form and stops a
+//! queued call wake ringing a phone long after the fact.
+//!
+//! A message wake sends **no** `android` block at all, exactly as
+//! before calls existed, so its delivery behaviour is unchanged.
+//!
 //! ## Status mapping
 //!
 //! - `200` — delivered to FCM.
@@ -70,7 +91,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
-use crate::provider::{DeliverError, Provider, ProviderKind, WakePayload};
+use crate::provider::{DeliverError, Provider, ProviderKind, WakeKind, WakePayload};
+
+/// `android.ttl` for a call wake, in FCM's Duration string form.
+/// Matches the APNs `apns-expiration` window: past this a call wake
+/// would ring a phone for a call nobody is on.
+const CALL_TTL: &str = "60s";
 
 /// Refresh the OAuth2 token a minute before the server-stated TTL.
 /// Google's tokens nominally live 60 minutes; subtracting 60 s gives
@@ -270,6 +296,7 @@ impl Provider for FcmProvider {
         let body = SendBody {
             message: Message {
                 token: device_token.to_string(),
+                android: AndroidConfig::for_kind(payload.kind),
                 data: WakeData::from_payload(payload),
             },
         };
@@ -344,9 +371,39 @@ struct SendBody {
 #[derive(Serialize)]
 struct Message {
     token: String,
+    /// Android delivery options. Absent for a message wake — that is
+    /// the pre-call behaviour, preserved byte-for-byte — and present
+    /// only to raise a call out of Doze batching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    android: Option<AndroidConfig>,
     /// FCM HTTP v1 requires every `data` value to be a string. We
     /// stringify the integer envelope pointer accordingly.
     data: WakeData,
+}
+
+/// FCM HTTP v1 `AndroidConfig`, the subset we set.
+#[derive(Serialize)]
+struct AndroidConfig {
+    /// `"high"` or `"normal"`. High-priority data messages are
+    /// delivered through Doze; normal ones may be batched for minutes.
+    priority: &'static str,
+    /// Duration string (`"60s"`). How long FCM may keep trying.
+    ttl: &'static str,
+}
+
+impl AndroidConfig {
+    const fn for_kind(kind: WakeKind) -> Option<Self> {
+        if kind.is_call() {
+            Some(Self {
+                priority: "high",
+                ttl: CALL_TTL,
+            })
+        } else {
+            // Deliberately no block: a message wake keeps FCM's
+            // defaults, unchanged from before calls existed.
+            None
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -360,6 +417,13 @@ struct WakeData {
     /// Envelope pointer as decimal string (optional).
     #[serde(skip_serializing_if = "Option::is_none")]
     p: Option<String>,
+    /// Wake kind tag, mirroring `lakko-push`'s `k` field: `"c"` for a
+    /// call, absent for a message. `FirebaseMessagingService` reads
+    /// this to decide whether to raise the full-screen call
+    /// notification instead of a message preview, before any
+    /// ciphertext is fetched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    k: Option<&'static str>,
 }
 
 impl WakeData {
@@ -368,6 +432,7 @@ impl WakeData {
             d: hex::encode(p.device_pseudonym),
             g: p.group_pseudonym.map(hex::encode),
             p: p.envelope_pointer.map(|n| n.to_string()),
+            k: p.kind.wire_tag(),
         }
     }
 }
@@ -401,15 +466,31 @@ fn truncate(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
+    fn wake(kind: WakeKind) -> WakePayload {
+        WakePayload {
+            device_pseudonym: [0x01; 32],
+            group_pseudonym: Some([0x02; 32]),
+            envelope_pointer: Some(99),
+            kind,
+        }
+    }
+
+    fn send_body(kind: WakeKind) -> String {
+        let body = SendBody {
+            message: Message {
+                token: "tok".to_string(),
+                android: AndroidConfig::for_kind(kind),
+                data: WakeData::from_payload(&wake(kind)),
+            },
+        };
+        serde_json::to_string(&body).unwrap()
+    }
+
     #[test]
     fn wake_data_serialises_with_string_pointer() {
         // FCM HTTP v1 rejects non-string `data` values. The integer
         // envelope pointer must marshal as a decimal string.
-        let data = WakeData::from_payload(&WakePayload {
-            device_pseudonym: [0x01; 32],
-            group_pseudonym: Some([0x02; 32]),
-            envelope_pointer: Some(99),
-        });
+        let data = WakeData::from_payload(&wake(WakeKind::Message));
         let json = serde_json::to_string(&data).unwrap();
         assert!(json.contains(r#""p":"99""#), "got {json}");
     }
@@ -420,10 +501,41 @@ mod tests {
             device_pseudonym: [0; 32],
             group_pseudonym: None,
             envelope_pointer: None,
+            kind: WakeKind::Message,
         });
         let json = serde_json::to_string(&data).unwrap();
         assert!(!json.contains(r#""g""#));
         assert!(!json.contains(r#""p""#));
+        assert!(!json.contains(r#""k""#));
+    }
+
+    #[test]
+    fn a_message_wake_sends_no_android_block() {
+        // Unchanged from before calls existed — FCM defaults apply.
+        assert!(AndroidConfig::for_kind(WakeKind::Message).is_none());
+        let json = send_body(WakeKind::Message);
+        assert!(!json.contains("android"), "got {json}");
+        assert!(!json.contains(r#""k""#), "got {json}");
+    }
+
+    #[test]
+    fn a_call_wake_is_high_priority_with_a_minute_ttl() {
+        let json = send_body(WakeKind::Call);
+        assert!(
+            json.contains(r#""android":{"priority":"high","ttl":"60s"}"#),
+            "got {json}"
+        );
+        assert!(json.contains(r#""k":"c""#), "got {json}");
+    }
+
+    #[test]
+    fn a_call_wake_discloses_no_extra_data_key() {
+        // The only `data` difference must be the kind tag. No caller,
+        // no call id, no media kind.
+        let call = serde_json::to_string(&WakeData::from_payload(&wake(WakeKind::Call))).unwrap();
+        let message =
+            serde_json::to_string(&WakeData::from_payload(&wake(WakeKind::Message))).unwrap();
+        assert_eq!(call.replace(r#","k":"c""#, ""), message);
     }
 
     #[test]

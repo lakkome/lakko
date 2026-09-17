@@ -269,8 +269,33 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     return globalThis.document?.visibilityState === "hidden";
   }
 
+  /**
+   * How long a push wake keeps a HIDDEN tab sweeping.
+   *
+   * A hidden tab parks its sweep, which is the right default — it is nobody's
+   * foreground and polling it burns battery for nothing. But it makes a wake
+   * inert in the one case a wake exists for, and for a call that is a defect
+   * rather than a delay: the offer never reaches the tab, so nothing rings
+   * in-app, and Decline pressed on the background notification (which
+   * deliberately does NOT raise the window — see
+   * `public/sw-call-notification.js`) has no call to refuse and the caller
+   * goes on ringing for the full 45 s.
+   *
+   * Sized to the stale-offer window: past 60 s an offer no longer rings
+   * anyway, so a longer window could only poll for a call nobody would
+   * answer. Accept does not depend on this — focusing the window makes the
+   * tab visible and the sweep resumes on its own — which is exactly why the
+   * window exists for the button that does not focus.
+   */
+  const WAKE_ACTIVE_MS = 60_000;
+  /** Wall-clock deadline of the current wake window; 0 when none is open. */
+  let wakeUntilMs = 0;
+
   function isActive(): boolean {
-    return activeAccount !== null && (!isHidden() || callHost.anyCallInProgress());
+    return (
+      activeAccount !== null &&
+      (!isHidden() || callHost.anyCallInProgress() || Date.now() < wakeUntilMs)
+    );
   }
 
   function isExcluded(groupIdB64: string): boolean {
@@ -886,8 +911,34 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
 
   const onVisibility = (): void => resume.wake();
   globalThis.document?.addEventListener("visibilitychange", onVisibility);
+
+  // A push wake means something landed that this tab has not seen. Open the
+  // window above and un-park the sweep, so a hidden tab actually catches up
+  // instead of ignoring the wake it was sent. Both of the worker's messages
+  // count: the arrival broadcast, and a call button the user pressed (which
+  // for Decline is the only signal the tab gets, since that press
+  // deliberately leaves the window unfocused).
+  //
+  // Read-only and idempotent: it moves a deadline and pokes a latch, nothing
+  // else. Nothing here trusts the message's contents — an unknown `type`
+  // simply does not open the window.
+  const swContainer = globalThis.navigator?.serviceWorker;
+  const onSwMessage = (event: MessageEvent): void => {
+    const type = (event.data as { type?: unknown } | null)?.type;
+    if (type !== "LAKKO_PUSH_WAKE" && type !== "LAKKO_CALL_ACTION") return;
+    wakeUntilMs = Date.now() + WAKE_ACTIVE_MS;
+    resume.wake();
+  };
+  swContainer?.addEventListener("message", onSwMessage);
+  // A `ServiceWorkerContainer` only starts dispatching queued messages once
+  // `onmessage` is assigned or `startMessages()` is called; we register with
+  // `addEventListener` so as not to clobber another listener (the same
+  // load-bearing call `WakeNavigator` and `CallActionListener` make).
+  if (typeof swContainer?.startMessages === "function") swContainer.startMessages();
+
   onCleanup(() => {
     globalThis.document?.removeEventListener("visibilitychange", onVisibility);
+    swContainer?.removeEventListener("message", onSwMessage);
     stop();
   });
 

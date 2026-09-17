@@ -169,6 +169,17 @@ public class ChatRepositoryCallPort(
         repository.deriveCallKey(groupIdHex = groupIdHex, callId = callId)
             ?.let { OneToOneCallKey(seed = it.seed, localLeaf = it.localLeaf) }
 
+    /**
+     * The single outbound sink for every 1x1 signaling frame — offer, answer,
+     * ICE candidate, end — drained by [OneToOneCallHost]'s outbound queue.
+     *
+     * The push wake that makes a closed callee ring (`docs/ux/calls.md` §2.1)
+     * is fired inside [ChatRepository.publishApplicationMessage], decided from
+     * these very bytes by [shouldWakeForCallSignaling], not chosen here: this
+     * sink sees all four 1x1 frames and only two of them may wake anyone, so
+     * asking it to pass a flag would put the rule in a place that has no way to
+     * tell them apart without re-reading the bytes anyway.
+     */
     override suspend fun publish(groupIdHex: String, bytes: ByteArray) {
         repository.publishApplicationMessage(groupIdHex = groupIdHex, plaintextBytes = bytes)
     }

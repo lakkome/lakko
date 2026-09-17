@@ -74,6 +74,19 @@
 //!
 //! The `\x02` padding-delimiter byte marks the END of the payload
 //! per RFC 8188 (vs. `\x01` for "more records follow").
+//!
+//! ## Call wakes
+//!
+//! A call wake sends `Urgency: high` (RFC 8030 §5.3) and `TTL: 60`
+//! instead of `Urgency: normal` / `TTL: 14400`, and adds `"k":"c"` to
+//! the encrypted body. Urgency is the only lever we have over a push
+//! service that may hold a low-urgency message while the browser is
+//! offline or the device is saving power; the short TTL stops a queued
+//! call wake surfacing long after the caller gave up.
+//!
+//! Urgency and TTL are **plaintext headers** — the push service sees
+//! them. The body, including the `k` tag, is inside the RFC 8291
+//! encryption, so the service learns urgency but not the kind tag.
 
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes128Gcm, KeyInit, Nonce};
@@ -91,12 +104,16 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::time::Duration;
 
-use crate::provider::{DeliverError, Provider, ProviderKind, WakePayload};
+use crate::provider::{DeliverError, Provider, ProviderKind, WakeKind, WakePayload};
 
 /// Browser-pushed message TTL — 4 hours mirrors the UnifiedPush
 /// default. Long enough for off-line tabs to wake up; short enough
 /// that an offline subscriber doesn't accumulate stale wake-ups.
 const TTL_SECONDS: u32 = 4 * 60 * 60;
+
+/// TTL for a call wake. A call is worthless once the caller has hung
+/// up, and a stale ring is worse than a missed one.
+const CALL_TTL_SECONDS: u32 = 60;
 
 /// VAPID JWT validity. RFC 8292 caps it at 24 h; 12 h leaves headroom
 /// against subscriber-side clock skew.
@@ -261,6 +278,7 @@ impl Provider for WebPushProvider {
         let aud = subscription_audience(&subscription.endpoint)?;
         let jwt = self.sign_vapid_jwt(&aud)?;
         let auth_header = format!("vapid t={jwt}, k={}", self.config.public_key_b64url);
+        let delivery = DeliveryHeaders::for_kind(payload.kind);
 
         let resp = match self
             .http
@@ -268,8 +286,8 @@ impl Provider for WebPushProvider {
             .header(header::AUTHORIZATION, auth_header)
             .header(header::CONTENT_TYPE, "application/octet-stream")
             .header(header::CONTENT_ENCODING, "aes128gcm")
-            .header("TTL", TTL_SECONDS.to_string())
-            .header("Urgency", "normal")
+            .header("TTL", delivery.ttl_seconds.to_string())
+            .header("Urgency", delivery.urgency)
             .body(encrypted)
             .send()
             .await
@@ -290,6 +308,34 @@ impl Provider for WebPushProvider {
                     truncate(&body, 256),
                 )))
             },
+        }
+    }
+}
+
+/// The two plaintext delivery headers that differ between a message
+/// wake and a call wake. Split out of [`WebPushProvider::deliver`] so
+/// the choice is unit-testable without a live push service.
+#[derive(Debug, Eq, PartialEq)]
+struct DeliveryHeaders {
+    /// RFC 8030 §5.3 `Urgency`. `normal` may be held while the
+    /// subscriber is offline or power-saving; `high` may not.
+    urgency: &'static str,
+    /// RFC 8030 §5.2 `TTL`, in seconds.
+    ttl_seconds: u32,
+}
+
+impl DeliveryHeaders {
+    const fn for_kind(kind: WakeKind) -> Self {
+        if kind.is_call() {
+            Self {
+                urgency: "high",
+                ttl_seconds: CALL_TTL_SECONDS,
+            }
+        } else {
+            Self {
+                urgency: "normal",
+                ttl_seconds: TTL_SECONDS,
+            }
         }
     }
 }
@@ -410,6 +456,14 @@ struct WakeBody {
     g: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     p: Option<u64>,
+    /// Wake kind tag, mirroring `lakko-push`'s `k` field: `"c"` for a
+    /// call, absent for a message. The service worker reads this to
+    /// decide whether to show a call notification with Accept /
+    /// Decline actions instead of a message preview. Unlike the
+    /// `Urgency` header this rides inside the RFC 8291 encryption,
+    /// so the browser's push service never sees it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    k: Option<&'static str>,
 }
 
 impl From<&WakePayload> for WakeBody {
@@ -419,6 +473,7 @@ impl From<&WakePayload> for WakeBody {
             d: hex::encode(p.device_pseudonym),
             g: p.group_pseudonym.map(hex::encode),
             p: p.envelope_pointer,
+            k: p.kind.wire_tag(),
         }
     }
 }
@@ -447,6 +502,39 @@ mod tests {
     fn subscription_audience_keeps_port() {
         let aud = subscription_audience("https://example.test:8443/push/x").unwrap();
         assert_eq!(aud, "https://example.test:8443");
+    }
+
+    fn wake(kind: WakeKind) -> WakePayload {
+        WakePayload {
+            device_pseudonym: [0x07; 32],
+            group_pseudonym: Some([0x08; 32]),
+            envelope_pointer: Some(5),
+            kind,
+        }
+    }
+
+    #[test]
+    fn message_wake_keeps_normal_urgency_and_the_long_ttl() {
+        let h = DeliveryHeaders::for_kind(WakeKind::Message);
+        assert_eq!(h.urgency, "normal");
+        assert_eq!(h.ttl_seconds, 4 * 60 * 60);
+    }
+
+    #[test]
+    fn call_wake_is_high_urgency_with_a_minute_ttl() {
+        let h = DeliveryHeaders::for_kind(WakeKind::Call);
+        assert_eq!(h.urgency, "high");
+        assert_eq!(h.ttl_seconds, 60);
+    }
+
+    #[test]
+    fn wake_body_tags_only_a_call() {
+        let message = serde_json::to_string(&WakeBody::from(&wake(WakeKind::Message))).unwrap();
+        let call = serde_json::to_string(&WakeBody::from(&wake(WakeKind::Call))).unwrap();
+        assert!(!message.contains(r#""k""#), "got {message}");
+        assert!(call.contains(r#""k":"c""#), "got {call}");
+        // ...and discloses nothing else a message body does not.
+        assert_eq!(call.replace(r#","k":"c""#, ""), message);
     }
 
     #[test]

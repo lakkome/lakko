@@ -441,8 +441,14 @@ extension CallHost {
             publish: { [weak repository] groupIdHex, bytes in
                 guard let repository else { return false }
                 do {
+                    // The wake is decided from the composed bytes rather than
+                    // passed in by the session, so there is no second place a
+                    // caller could get it wrong. Two of the seven bodies ask
+                    // for one; see ``CallSignalingWake``.
                     try await repository.publishApplicationMessage(
-                        groupIdHex: groupIdHex, plaintextBytes: bytes)
+                        groupIdHex: groupIdHex,
+                        plaintextBytes: bytes,
+                        wake: CallSignalingWake.shouldWake(bytes) ? .call : nil)
                     return true
                 } catch {
                     NSLog("CallHost publish failed: %@", error.localizedDescription)

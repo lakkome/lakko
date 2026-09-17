@@ -20,12 +20,15 @@ Environment=LAKKO_BIND=127.0.0.1:8085
 # `LAKKO_PUSH_GW_DATABASE_URL` is read from /etc/lakko/lakko.env above.
 # Each service has its own DB — sqlx migration tracking does not collide.
 #
-# Phase 1.6 ships only `LogOnlyProvider`; the .p8 / service-account /
-# VAPID env vars below are placeholders for Phase 1.6b drop-in real
-# providers. Until then they're unused.
-Environment=APNS_KEY_PATH=/etc/lakko/secrets/apns_key.p8
-Environment=FCM_SERVICE_ACCOUNT=/etc/lakko/secrets/fcm_sa.json
-Environment=VAPID_PRIVATE_KEY=/etc/lakko/secrets/vapid_priv.pem
+# Provider credentials. The service reads these exact names and falls
+# back to the log-only provider for any provider whose set is missing,
+# so a phone receives nothing until the matching secret is in place.
+# APNs also needs LAKKO_APNS_KEY_ID, LAKKO_APNS_TEAM_ID and
+# LAKKO_APNS_TOPIC; Web Push needs LAKKO_WEBPUSH_VAPID_PRIVATE_KEY_PEM,
+# LAKKO_WEBPUSH_VAPID_PUBLIC_KEY_B64URL and LAKKO_WEBPUSH_VAPID_SUBJECT.
+# Those, being secrets or per-deployment values, live in lakko.env.
+Environment=LAKKO_APNS_KEY_PATH=/etc/lakko/secrets/apns_key.p8
+Environment=LAKKO_FCM_SA_PATH=/etc/lakko/secrets/fcm_sa.json
 
 ExecStart=/usr/local/bin/lakko-svc-push-gw
 Restart=on-failure

@@ -116,6 +116,7 @@ import {
 import { loadWasm } from "../wasm";
 import Call from "../routes/Call";
 import { Icon } from "../ui/icons";
+import { IncomingCallScreen } from "./IncomingCallScreen";
 import type { ParsedCallSignaling } from "../../wasm/lakko_ffi_wasm";
 import {
   CallSession,
@@ -186,6 +187,20 @@ export interface CallHostApi {
   inCall(): boolean;
   /** The group of the ringing / dialing / live 1x1 call, or `null`. */
   activeGroupIdB64(): string | null;
+  /**
+   * Lowercase hex of the call id of the 1x1 call RINGING on this device, or
+   * `null` when nothing is ringing.
+   *
+   * Exists so a press of Accept or Decline on a background notification can
+   * be matched to the call it names before it is acted on — see
+   * `call-notification-intent.ts`, where that match is the whole security
+   * boundary around an attacker-influenceable input.
+   */
+  readonly ringingCallIdHex: Accessor<string | null>;
+  /** Answer the ringing 1x1 call. No-op when nothing is ringing. */
+  acceptIncomingCall(withVideo: boolean): Promise<void>;
+  /** Refuse the ringing 1x1 call. No-op when nothing is ringing. */
+  declineIncomingCall(): Promise<void>;
   /** Hand over one decrypted call-signaling row from any receive path. Rows
    *  are delivered exactly once per `(group, messageId)`, in order. */
   ingestSignaling(groupIdB64: string, row: InboundSignalingRow): void;
@@ -1540,6 +1555,19 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     lastEnded,
     inCall,
     activeGroupIdB64: () => (inCall() ? callGroup() : null),
+    // Keyed on `state()` so it re-reads whenever the slot moves. `activeCall`
+    // is assigned by `occupy` BEFORE the session reports `ringing`, so by the
+    // time this reads `"ringing"` the call is there.
+    ringingCallIdHex: () =>
+      state() === "ringing" && activeCall !== null ? callIdHex(activeCall.callId) : null,
+    acceptIncomingCall: (withVideo) =>
+      activeCall !== null && activeCall.getState() === "ringing"
+        ? accept(withVideo)
+        : Promise.resolve(),
+    declineIncomingCall: () =>
+      activeCall !== null && activeCall.getState() === "ringing"
+        ? decline()
+        : Promise.resolve(),
     ingestSignaling(groupIdB64, row) {
       queue.enqueue({ groupIdB64, row });
     },
@@ -1671,31 +1699,16 @@ export function CallHostView(): JSX.Element {
         <audio ref={(el) => setAudioEl(el)} autoplay style={{ display: "none" }} />
       </Show>
 
+      {/* `docs/ux/calls.md` §2.2 — a ringing call takes the whole screen, not
+          a strip at the top of whatever the user was reading. */}
       <Show when={host.state() === "ringing"}>
-        <div class="lk-call-incoming" role="alertdialog" aria-label="Incoming call">
-          <span class="lk-call-incoming-icon" aria-hidden="true">
-            <Icon name={internals.remoteWantsVideo() ? "video" : "phone"} size={20} />
-          </span>
-          <div class="lk-call-incoming-text">
-            <strong>{internals.nameFor(host.callGroupIdB64())}</strong>
-            <span>{internals.remoteWantsVideo() ? "Incoming video call" : "Incoming call"}</span>
-          </div>
-          <div class="lk-call-incoming-actions">
-            <button type="button" class="ghost" onClick={() => void internals.decline()}>
-              Decline
-            </button>
-            <Show when={internals.remoteWantsVideo()}>
-              <button type="button" onClick={() => void internals.accept(true)}>
-                <Icon name="video" size={18} />
-                Video
-              </button>
-            </Show>
-            <button type="button" class="primary" onClick={() => void internals.accept(false)}>
-              <Icon name="phone" size={18} />
-              Accept
-            </button>
-          </div>
-        </div>
+        <IncomingCallScreen
+          callerName={internals.nameFor(host.callGroupIdB64())}
+          callerId={host.callGroupIdB64()}
+          video={internals.remoteWantsVideo()}
+          onAccept={(withVideo) => void internals.accept(withVideo)}
+          onDecline={() => void internals.decline()}
+        />
       </Show>
 
       <Show when={overlayVisible()}>

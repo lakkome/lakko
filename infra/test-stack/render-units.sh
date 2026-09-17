@@ -28,7 +28,8 @@ for svc in "${SERVICES[@]}"; do
     -e 's#^ExecStart=/usr/local/bin/#ExecStart=/opt/lakko-test/bin/#' \
     -e 's/lakko\.target/lakko-test.target/g' \
     -e '/^Environment=RUST_LOG=/d' \
-    -e '/^Environment=(APNS_KEY_PATH|FCM_SERVICE_ACCOUNT|VAPID_PRIVATE_KEY)=/d' \
+    -e '/^Environment=LAKKO_APNS_KEY_PATH=/d' \
+    -e '/^Environment=LAKKO_FCM_SA_PATH=/d' \
     -e 's#^Environment=LAKKO_BLOB_DIR=.*#Environment=LAKKO_BLOB_DIR=/var/lib/lakko-test/blobs#' \
     -e 's#^ReadWritePaths=/var/lib/lakko/blobs$#ReadWritePaths=/var/lib/lakko-test/blobs#' \
     -e 's#^ReadOnlyPaths=/etc/lakko$#ReadOnlyPaths=/etc/lakko-test#' \

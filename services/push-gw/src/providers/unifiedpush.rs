@@ -53,7 +53,7 @@
 use async_trait::async_trait;
 use reqwest::StatusCode;
 
-use crate::provider::{DeliverError, Provider, ProviderKind, WakePayload};
+use crate::provider::{DeliverError, Provider, ProviderKind, WakeKind, WakePayload};
 
 /// UnifiedPush wake-payload TTL in seconds. The distributor is
 /// allowed to drop the message if it can't deliver within the TTL —
@@ -63,6 +63,14 @@ use crate::provider::{DeliverError, Provider, ProviderKind, WakePayload};
 /// later (the Lakko client will catch up via the DS journal in any
 /// case).
 const TTL_SECONDS: u32 = 4 * 60 * 60;
+
+/// TTL for a call wake. UnifiedPush has no priority knob — the TTL is
+/// the only delivery lever a distributor honours — so a call gets the
+/// same one-minute window the other three providers use, which at
+/// least stops a queued wake ringing a phone after the caller gave
+/// up. A de-Googled Android device must be able to ring like any
+/// other, so the kind tag is carried here too.
+const CALL_TTL_SECONDS: u32 = 60;
 
 /// UnifiedPush provider. Stateless — the subscriber's endpoint URL
 /// (stored in `push_tokens.token` as UTF-8 bytes) is the only
@@ -76,6 +84,15 @@ impl UnifiedPushProvider {
         Self {
             http: super::shared_http_client(),
         }
+    }
+}
+
+/// How long a distributor may keep retrying this wake.
+const fn ttl_seconds_for(kind: WakeKind) -> u32 {
+    if kind.is_call() {
+        CALL_TTL_SECONDS
+    } else {
+        TTL_SECONDS
     }
 }
 
@@ -106,7 +123,7 @@ impl Provider for UnifiedPushProvider {
             .http
             .post(endpoint)
             .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-            .header("TTL", TTL_SECONDS.to_string())
+            .header("TTL", ttl_seconds_for(payload.kind).to_string())
             .body(body)
             .send()
             .await
@@ -164,6 +181,11 @@ mod wire {
         /// client should fetch.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub(super) p: Option<u64>,
+        /// Wake kind tag, mirroring `lakko-push`'s `k` field: `"c"`
+        /// for a call, absent for a message. Lets the woken client
+        /// ring instead of rendering a message preview.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(super) k: Option<&'static str>,
     }
 
     impl From<&WakePayload> for WakeBody {
@@ -173,6 +195,7 @@ mod wire {
                 d: hex::encode(p.device_pseudonym),
                 g: p.group_pseudonym.map(hex::encode),
                 p: p.envelope_pointer,
+                k: p.kind.wire_tag(),
             }
         }
     }
@@ -189,6 +212,7 @@ mod tests {
             device_pseudonym: [0; 32],
             group_pseudonym: None,
             envelope_pointer: None,
+            kind: WakeKind::Message,
         };
         let err = provider
             .deliver(b"http://insecure.example.com/upx", &payload)
@@ -207,6 +231,7 @@ mod tests {
             device_pseudonym: [0; 32],
             group_pseudonym: None,
             envelope_pointer: None,
+            kind: WakeKind::Message,
         };
         // Invalid UTF-8 (lone 0xC0 byte).
         let err = provider.deliver(&[0xC0], &payload).await.unwrap_err();
@@ -214,5 +239,26 @@ mod tests {
             panic!("expected Transport, got {err:?}");
         };
         assert!(msg.contains("UTF-8"));
+    }
+
+    #[test]
+    fn a_call_wake_shortens_the_ttl_and_carries_the_kind_tag() {
+        assert_eq!(ttl_seconds_for(super::WakeKind::Message), 4 * 60 * 60);
+        assert_eq!(ttl_seconds_for(super::WakeKind::Call), 60);
+
+        let body = |kind| {
+            serde_json::to_string(&wire::WakeBody::from(&WakePayload {
+                device_pseudonym: [0x03; 32],
+                group_pseudonym: Some([0x04; 32]),
+                envelope_pointer: Some(11),
+                kind,
+            }))
+            .unwrap()
+        };
+        let message = body(super::WakeKind::Message);
+        let call = body(super::WakeKind::Call);
+        assert!(!message.contains(r#""k""#), "got {message}");
+        assert!(call.contains(r#""k":"c""#), "got {call}");
+        assert_eq!(call.replace(r#","k":"c""#, ""), message);
     }
 }

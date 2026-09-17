@@ -21,10 +21,11 @@
 //!
 //! Compact JSON, since both APNs and FCM speak JSON natively and
 //! the bytes-per-push budget (4 KiB) is far above what we need.
-//! Three discriminated kinds:
+//! Four discriminated kinds:
 //!
 //! ```json
 //! {"v":1,"k":"g","gp":"<base64 32B>","ep":1234}     // GroupMessage
+//! {"v":1,"k":"c","gp":"<base64 32B>","ep":1234}     // CallSignal
 //! {"v":1,"k":"m","ep":5678}                          // MailboxMessage
 //! {"v":1,"k":"w"}                                    // Wakeup
 //! ```
@@ -33,7 +34,7 @@
 //!     legacy clients receive v2 → drop the push silently and rely
 //!     on the next long-poll round to catch up).
 //!   * `k` — kind tag (1 char to keep payload tight): `g` group,
-//!     `m` mailbox, `w` generic wake.
+//!     `c` call signal, `m` mailbox, `w` generic wake.
 //!   * `gp` — group pseudonym, standard base64 (no URL-safe variant
 //!     because APNs / FCM both pass JSON values verbatim and the `+`
 //!     and `/` are JSON-safe).
@@ -45,6 +46,37 @@
 //! `MailboxMessage` deliberately omits a device pseudonym — the
 //! client already knows its own. Including it would just inflate
 //! every push by 44 bytes.
+//!
+//! `c` is **additive within v1**: it carries exactly the fields `g`
+//! carries, and a client built before `c` existed rejects it through
+//! the pre-existing unknown-kind arm ([`PushError::InvalidKind`]) —
+//! the same clean failure it already gives for any tag it does not
+//! know, followed by the next long-poll round catching up. So no
+//! schema bump, and no new failure mode for old clients.
+//!
+//! ## Why a call needs its own kind
+//!
+//! A call offer travels as an ordinary MLS application message on the
+//! chat group's DS journal, so at the pointer level a call wake and a
+//! message wake are indistinguishable. The kind tag is the **only**
+//! thing that lets a woken device decide to ring — raise the platform
+//! call UI, start the ringtone — instead of rendering a message
+//! preview, and it must be readable *before* the ciphertext is
+//! fetched and decrypted, because on iOS and Android the call has to
+//! be reported to the OS within the wake handler's budget.
+//!
+//! ### What the kind tag does and does not disclose
+//!
+//! A `c` wake carries the same two fields a `g` wake carries — a
+//! 32-byte pseudonym and an integer cursor — and nothing else. The
+//! push provider (Apple / Google / Mozilla) learns exactly one extra
+//! bit over a message wake: *this wake is a call*. It does **not**
+//! learn who is calling, the call id, whether it is voice or video,
+//! or any call key material; all of that stays inside the E2EE
+//! journal row the device fetches after waking (invariants #2 / #5).
+//! That one bit is unavoidable — the platform push priority and
+//! expiry a ringing call requires are themselves visible to the
+//! provider — and it is stated here rather than hidden.
 //!
 //! ## What's NOT here
 //!
@@ -112,6 +144,24 @@ pub enum PushPayload {
     GroupMessage {
         /// 32-byte group pseudonym matching what's stored in
         /// `services/ds.ds_group_messages`.
+        group_pseudonym: [u8; PSEUDONYM_LEN],
+        /// Server-assigned `id` from `services/ds`. Use as
+        /// `?after = envelope_pointer - 1`.
+        envelope_pointer: u64,
+    },
+    /// A call signal (offer / accept / decline / hang-up) has landed
+    /// in a group's fan-out journal. The pointer shape is identical
+    /// to [`Self::GroupMessage`] — the call rides the same journal as
+    /// an ordinary MLS application message — and the separate kind is
+    /// what tells the woken device to ring rather than render a
+    /// message preview, before any ciphertext has been fetched.
+    ///
+    /// The tag carries no call detail: not the caller, not the call
+    /// id, not whether it is voice or video. Those live in the E2EE
+    /// row the device pulls from `services/ds` on wake.
+    CallSignal {
+        /// 32-byte group pseudonym, exactly as in
+        /// [`Self::GroupMessage`].
         group_pseudonym: [u8; PSEUDONYM_LEN],
         /// Server-assigned `id` from `services/ds`. Use as
         /// `?after = envelope_pointer - 1`.
@@ -188,6 +238,15 @@ impl From<&PushPayload> for WireV1 {
                 gp: Some(B64.encode(group_pseudonym)),
                 ep: Some(*envelope_pointer),
             },
+            PushPayload::CallSignal {
+                group_pseudonym,
+                envelope_pointer,
+            } => Self {
+                v: SCHEMA_VERSION,
+                k: "c".to_string(),
+                gp: Some(B64.encode(group_pseudonym)),
+                ep: Some(*envelope_pointer),
+            },
             PushPayload::MailboxMessage { envelope_pointer } => Self {
                 v: SCHEMA_VERSION,
                 k: "m".to_string(),
@@ -215,17 +274,27 @@ impl TryFrom<WireV1> for PushPayload {
             });
         }
         match wire.k.as_str() {
-            "g" => {
+            // `g` and `c` share one field shape — a group pseudonym
+            // plus a cursor — and differ only in what the woken
+            // client does with them, so they share one decode arm.
+            tag @ ("g" | "c") => {
                 let gp_b64 = wire
                     .gp
-                    .ok_or_else(|| PushError::InvalidKind("k=g requires gp field".to_string()))?;
+                    .ok_or_else(|| PushError::InvalidKind(format!("k={tag} requires gp field")))?;
                 let ep = wire
                     .ep
-                    .ok_or_else(|| PushError::InvalidKind("k=g requires ep field".to_string()))?;
+                    .ok_or_else(|| PushError::InvalidKind(format!("k={tag} requires ep field")))?;
                 let group_pseudonym = decode_pseudonym_b64(&gp_b64)?;
-                Ok(PushPayload::GroupMessage {
-                    group_pseudonym,
-                    envelope_pointer: ep,
+                Ok(if tag == "c" {
+                    PushPayload::CallSignal {
+                        group_pseudonym,
+                        envelope_pointer: ep,
+                    }
+                } else {
+                    PushPayload::GroupMessage {
+                        group_pseudonym,
+                        envelope_pointer: ep,
+                    }
                 })
             },
             "m" => {
@@ -282,7 +351,8 @@ pub mod fuzz_api {
     /// FCM / UnifiedPush) and reaches this JSON parser on the device
     /// before any further processing, so the input is fully untrusted: it
     /// exercises `serde_json::from_slice` → the schema-version gate → the
-    /// kind dispatch → the base64 pseudonym decode + 32-byte length check.
+    /// kind dispatch (`g` / `c` / `m` / `w` + their field-presence rules)
+    /// → the base64 pseudonym decode + 32-byte length check.
     /// Any panic / overflow / slice-out-of-bounds here is a vulnerability.
     #[must_use]
     pub fn decode_push_payload(bytes: &[u8]) -> bool {
@@ -311,6 +381,107 @@ mod tests {
         let bytes = original.encode_json();
         let decoded = PushPayload::decode_json(&bytes).unwrap();
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn call_signal_roundtrip() {
+        let original = PushPayload::CallSignal {
+            group_pseudonym: [0x5C; PSEUDONYM_LEN],
+            envelope_pointer: 777,
+        };
+        let bytes = original.encode_json();
+        let decoded = PushPayload::decode_json(&bytes).unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn call_signal_wire_tag_is_pinned() {
+        // The client agents (web service worker, iOS NSE, Android
+        // FirebaseMessagingService) branch on this exact tag to decide
+        // whether to ring. Changing it is a wire break, so pin it.
+        let gp = [0u8; PSEUDONYM_LEN];
+        let json = String::from_utf8(
+            PushPayload::CallSignal {
+                group_pseudonym: gp,
+                envelope_pointer: 1,
+            }
+            .encode_json(),
+        )
+        .unwrap();
+        assert_eq!(
+            json,
+            format!(r#"{{"v":1,"k":"c","gp":"{}","ep":1}}"#, B64.encode(gp)),
+        );
+    }
+
+    #[test]
+    fn call_signal_and_group_message_differ_only_by_tag() {
+        // A call wake must disclose nothing a message wake does not.
+        // If this ever fails, some call-specific field crept onto the
+        // wire and the provider learned more than one bit.
+        let gp = [0x11; PSEUDONYM_LEN];
+        let call = String::from_utf8(
+            PushPayload::CallSignal {
+                group_pseudonym: gp,
+                envelope_pointer: 9,
+            }
+            .encode_json(),
+        )
+        .unwrap();
+        let message = String::from_utf8(
+            PushPayload::GroupMessage {
+                group_pseudonym: gp,
+                envelope_pointer: 9,
+            }
+            .encode_json(),
+        )
+        .unwrap();
+        assert_eq!(call.replace(r#""k":"c""#, r#""k":"g""#), message);
+    }
+
+    #[test]
+    fn call_kind_without_gp_rejected() {
+        let json = br#"{"v":1,"k":"c","ep":1}"#;
+        let err = PushPayload::decode_json(json).unwrap_err();
+        assert!(matches!(err, PushError::InvalidKind(_)));
+    }
+
+    #[test]
+    fn call_kind_without_ep_rejected() {
+        let gp = B64.encode([0u8; PSEUDONYM_LEN]);
+        let json = format!(r#"{{"v":1,"k":"c","gp":"{gp}"}}"#);
+        let err = PushPayload::decode_json(json.as_bytes()).unwrap_err();
+        assert!(matches!(err, PushError::InvalidKind(_)));
+    }
+
+    #[test]
+    fn call_kind_with_malformed_pseudonym_rejected() {
+        let short = B64.encode([0u8; 16]);
+        let json = format!(r#"{{"v":1,"k":"c","gp":"{short}","ep":1}}"#);
+        let err = PushPayload::decode_json(json.as_bytes()).unwrap_err();
+        assert!(matches!(err, PushError::InvalidPseudonym(_)));
+    }
+
+    #[test]
+    fn a_client_that_does_not_know_a_tag_fails_the_same_clean_way() {
+        // `c` is additive within schema v1: a build that predates it
+        // hits the unknown-kind arm, exactly as it would for any tag
+        // it has never seen, and falls back to long-poll catch-up. We
+        // cannot run an old build here, so assert the arm that old
+        // build shares with this one is still the one that fires, and
+        // that it is NOT a version error (which would be a hard fork).
+        for json in [
+            &br#"{"v":1,"k":"z"}"#[..],
+            &br#"{"v":1,"k":"call"}"#[..],
+            &br#"{"v":1,"k":"C"}"#[..],
+        ] {
+            let err = PushPayload::decode_json(json).unwrap_err();
+            assert!(
+                matches!(err, PushError::InvalidKind(_)),
+                "expected InvalidKind for {}, got {err:?}",
+                String::from_utf8_lossy(json),
+            );
+        }
     }
 
     #[test]

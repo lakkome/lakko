@@ -56,6 +56,27 @@ public final class PushClient {
         case unifiedPush = "unified_push"
     }
 
+    /// What class of wake `POST /push/notify-group` is being asked for.
+    ///
+    /// Mirror of `WakeKind` in `services/push-gw/src/notify.rs` and of
+    /// `PushWakeKind` in `apps/web/src/push/client.ts`. Only the call
+    /// value exists: a message wake is the server's default and is
+    /// requested by omitting the field entirely, which is also what
+    /// every pre-call caller already sends. The server refuses an
+    /// unrecognised value rather than demoting it to a message, so a
+    /// string typed by hand somewhere would fail loudly; this enum is
+    /// what keeps the value from being typed by hand at all.
+    ///
+    /// `"call"` raises the per-provider urgency (APNs priority 10 with
+    /// a 60 s expiration, FCM high, Web Push urgency high) and tags the
+    /// delivered payload so the background handler rings instead of
+    /// rendering a message preview. The payload itself still carries
+    /// nothing but the group pseudonym and a journal pointer — no
+    /// caller, no call id, no media kind (invariants #2 and #5).
+    public enum WakeKind: String, Encodable {
+        case call
+    }
+
     public let baseURL: String
     private let session: URLSession
     private let encoder: JSONEncoder
@@ -191,9 +212,17 @@ public final class PushClient {
     /// `groupPseudonym`. Phase 1.20e: the publisher's client
     /// fires this immediately after a successful
     /// `DsClient.publishGroup` so peers' devices wake.
+    ///
+    /// - Parameter kind: Which class of wake to ask for. `nil` (the
+    ///   default) sends no `kind` field at all, which the server reads
+    ///   as a message wake — byte-for-byte the request every caller
+    ///   sent before calls existed, so no existing path changes. Pass
+    ///   ``WakeKind/call`` for a call signal that must arrive while the
+    ///   app is closed (`docs/ux/calls.md` §2.1).
     public func notifyGroup(
         groupPseudonym: Data,
-        envelopePointer: Int64? = nil
+        envelopePointer: Int64? = nil,
+        kind: WakeKind? = nil
     ) async throws -> Int {
         guard groupPseudonym.count == Self.devicePseudonymLength else {
             throw PushClientError.argument(
@@ -208,7 +237,8 @@ public final class PushClient {
         let req = NotifyGroupRequest(
             pow: pow,
             group_pseudonym: Self.pseudonymHex(groupPseudonym),
-            envelope_pointer: envelopePointer.map(UInt64.init)
+            envelope_pointer: envelopePointer.map(UInt64.init),
+            kind: kind
         )
         let resp: NotifyGroupResponse = try await post(
             endpoint: "/push/notify-group",
@@ -420,6 +450,12 @@ private struct NotifyGroupRequest: Encodable {
     let pow: PowProofPayload
     let group_pseudonym: String
     let envelope_pointer: UInt64?
+    /// Omitted entirely when `nil` — the synthesised `Encodable`
+    /// conformance uses `encodeIfPresent` for an optional, and the
+    /// server's `#[serde(default)]` reads an absent field as a message
+    /// wake. That is what keeps every pre-call caller's request
+    /// byte-identical to what it was.
+    let kind: PushClient.WakeKind?
 }
 
 private struct NotifyGroupResponse: Decodable {

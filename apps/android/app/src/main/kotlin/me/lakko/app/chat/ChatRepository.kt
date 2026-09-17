@@ -2676,6 +2676,20 @@ public class ChatRepository(
         return null
     }
 
+    /**
+     * Publish a raw application payload — a call-signaling frame, a service
+     * envelope — with no chat bubble and no message log entry.
+     *
+     * Fires a push wake for exactly the two call-signaling frames
+     * [me.lakko.app.calls.shouldWakeForCallSignaling] names (an offer and an
+     * end) and for nothing else, so a backgrounded or closed callee rings
+     * (`docs/ux/calls.md` §2.1 / §7). The decision is taken from the composed
+     * bytes here rather than passed in by the caller, so there is no second
+     * place a caller could get it wrong: the group-call control frames that
+     * reach this same method through [publishGroupCallSignal] stay silent
+     * because their tag is not an offer or an end, not because someone
+     * remembered to say so.
+     */
     public suspend fun publishApplicationMessage(
         groupIdHex: String,
         plaintextBytes: ByteArray,
@@ -2718,7 +2732,22 @@ public class ChatRepository(
             // [runGroupSend]): a message sealed at one epoch and published on the
             // far side of a commit is permanently undecryptable for every
             // recipient, because `lakko-mls` retains no past-epoch secrets.
-            chatClient.publishPreparedSend(prepared)
+            val result = chatClient.publishPreparedSend(prepared)
+            // docs/ux/calls.md §2.1 — a call must arrive when the app is closed.
+            // Off the critical path exactly as `sendMessage`'s wake is: LAUNCHED
+            // onto `pushScope`, never awaited, so neither the PoW solve nor a
+            // dead push-gw can delay or fail the call. A dropped wake costs the
+            // ring, not the call: a foregrounded peer still receives the offer
+            // on its poll.
+            if (me.lakko.app.calls.shouldWakeForCallSignaling(plaintextBytes)) {
+                pushScope.launch {
+                    notifyPushGroupBestEffort(
+                        groupIdHex = groupIdHex,
+                        messageId = result.messageId,
+                        kind = PushClient.WakeKind.CALL,
+                    )
+                }
+            }
         }
     }
 
@@ -3092,10 +3121,17 @@ public class ChatRepository(
      *  UNDER the opaque `push_gid` (not the DS `group_id`). When this device
      *  holds no secret for the group yet the wake is SKIPPED rather than
      *  leaking `group_id` to push-gw (invariant #5); recipients still receive
-     *  the message on their next foreground poll. Logged-and-swallowed. */
+     *  the message on their next foreground poll. Logged-and-swallowed.
+     *
+     *  [kind] is `null` for a message wake — the shape that shipped — and
+     *  [PushClient.WakeKind.CALL] for the two call-signaling frames that have
+     *  to ring a closed app (`docs/ux/calls.md` §7). It changes only the
+     *  delivery priority the provider is asked for; the pseudonym and the
+     *  cursor are identical either way. */
     private suspend fun notifyPushGroupBestEffort(
         groupIdHex: String,
         messageId: Long,
+        kind: PushClient.WakeKind? = null,
     ) {
         try {
             val pushGid = pushGidForGroupOrNull(groupIdHex) ?: return
@@ -3103,6 +3139,7 @@ public class ChatRepository(
                 client.notifyGroup(
                     groupPseudonym = pushGid,
                     envelopePointer = messageId,
+                    kind = kind,
                 )
             }
         } catch (cause: Throwable) {
