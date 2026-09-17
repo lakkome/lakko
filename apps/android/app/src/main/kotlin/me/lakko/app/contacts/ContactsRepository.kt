@@ -416,6 +416,9 @@ public class ContactsRepository(
                 val welcomes = result.events.filterIsInstance<
                     IncomingMailboxEvent.Welcome>(
                 )
+                val acks = result.events.filterIsInstance<
+                    IncomingMailboxEvent.ContactAck>(
+                ).map { it.ack }
                 // Forward Welcomes to the chat repository so the
                 // peer's startGroupWith lands a live 1×1 chat.
                 // Best-effort: a single bad Welcome doesn't
@@ -463,17 +466,24 @@ public class ContactsRepository(
                 if (boundInboxAccountB64 != accountB64) return@useClientWith
 
                 var dropped: List<IncomingContactRequest> = emptyList()
+                var acceptedChanged = false
                 mutableState.update { state ->
+                    // Someone accepted one of this device's requests: they are
+                    // a contact here too, with their account id.
+                    val applied = applyContactAcks(state.accepted, state.sent, acks)
+                    acceptedChanged = applied.acceptedChanged
                     // Dedupe: a row already pending (same DS messageId) or a
                     // sender already accepted is not a new request.
                     val merged = mergeFetchedRequests(
                         pending = state.pending,
-                        accepted = state.accepted,
+                        accepted = applied.accepted,
                         fetched = newIncoming,
                     )
                     dropped = merged.dropped
                     state.copy(
-                        pending = merged.pending,
+                        accepted = applied.accepted,
+                        sent = applied.sent,
+                        pending = withoutAcceptedSenders(merged.pending, applied.accepted),
                         // Never backwards: a stale batch cannot re-arm a
                         // re-fetch of rows this device already handled.
                         cursor = advanceInboxCursor(state.cursor, result.cursor),
@@ -503,7 +513,8 @@ public class ContactsRepository(
                 // Both writes strictly after the batch landed in state: a
                 // crash between the poll and here re-fetches the batch (the
                 // dedupe above absorbs it) rather than losing it.
-                if (newIncoming.isNotEmpty()) persistInboxPending()
+                if (acceptedChanged) persistAccepted()
+                if (newIncoming.isNotEmpty() || acceptedChanged) persistInboxPending()
                 persistInboxCursor()
             }
         } catch (e: ContactsError) {

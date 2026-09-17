@@ -1230,9 +1230,13 @@ public struct CallScreen: View {
                 )
             }
 
-            // Centre overlay when alone.
+            // Centre overlay when alone. The ZStack aligns its children to the
+            // top, so the overlay needs its own full-size frame to sit in the
+            // centre; without it the message covered the safety number.
             if state.isAlone && state.phase == .connected {
                 WaitingMessageOverlay()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .allowsHitTesting(false)
             }
 
             // Top-centre phase banner.

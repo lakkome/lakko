@@ -85,8 +85,14 @@ public fun BoxScope.OneToOneCallOverlay(
                 usePlatformDefaultWidth = false,
                 dismissOnBackPress = false,
                 dismissOnClickOutside = false,
+                // Full-screen and edge to edge: with the default the dialog is
+                // placed below the status bar but keeps the full screen height,
+                // so the controls row ran off the bottom edge. The call screen
+                // pads itself with the safe-drawing insets.
+                decorFitsSystemWindows = false,
             ),
         ) {
+            EdgeToEdgeDialogWindow()
             Box(modifier = Modifier.fillMaxSize()) {
                 CallScreen(
                     onExit = { host.clearFinished() },

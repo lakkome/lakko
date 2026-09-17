@@ -178,6 +178,75 @@ public fun withoutAcceptedSenders(
     return pending.filterNot { it.fromPubkey.toList() in acceptedKeys }
 }
 
+/** The contact list after a batch of accept acknowledgements was applied. */
+public data class AppliedContactAcks(
+    val accepted: List<AcceptedContact>,
+    val sent: List<SentContactRequest>,
+    /** `true` when [accepted] differs from the input and must be persisted. */
+    val acceptedChanged: Boolean,
+)
+
+/**
+ * Fold verified `ContactAck`s into the contact list: the person who pressed
+ * Accept on one of this device's outgoing requests becomes a contact on this
+ * side too, keyed on their signature key, carrying their account id, and the
+ * matching sent request is retired.
+ *
+ * Without this the requester never learned the accepter's account id. The
+ * chat arrived by Welcome, but the contact row came only from the requester's
+ * own records, which carry no account id, so everything keyed on it failed
+ * for that person: a group call named them by a short pseudonym instead of
+ * their name, and they could not be picked for a new group.
+ *
+ * An already-known contact without an account id gets the one from the ack
+ * (the ack's signature was verified against the same key, so the binding is
+ * the accepter's own claim, exactly as for a received request). A contact that
+ * already carries an account id is left alone. Mirrors the iOS
+ * `ContactsRepository` ack handling.
+ */
+public fun applyContactAcks(
+    accepted: List<AcceptedContact>,
+    sent: List<SentContactRequest>,
+    acks: List<IncomingContactAck>,
+): AppliedContactAcks {
+    if (acks.isEmpty()) return AppliedContactAcks(accepted, sent, acceptedChanged = false)
+    val encoder = java.util.Base64.getEncoder()
+    var nextAccepted = accepted
+    var nextSent = sent
+    var changed = false
+    for (ack in acks) {
+        val accepterAccountIdB64 = encoder.encodeToString(ack.accepterAccountId)
+        nextSent = nextSent.filterNot { it.recipientAccountIdB64 == accepterAccountIdB64 }
+        val index = nextAccepted.indexOfFirst { it.request.fromPubkey.contentEquals(ack.accepterPubkey) }
+        if (index >= 0) {
+            val known = nextAccepted[index]
+            if (known.request.fromAccountId == null) {
+                nextAccepted = nextAccepted.toMutableList().also {
+                    it[index] = known.copy(
+                        request = known.request.copy(fromAccountId = ack.accepterAccountId),
+                    )
+                }
+                changed = true
+            }
+            continue
+        }
+        nextAccepted = nextAccepted + AcceptedContact(
+            request = IncomingContactRequest(
+                messageId = ack.messageId,
+                fromPubkey = ack.accepterPubkey,
+                fromAccountId = ack.accepterAccountId,
+                fromPseudonym = ack.ackToPseudonym,
+                validAfterMs = ack.acceptedAtMs,
+                intro = null,
+                createdAt = ack.createdAt,
+            ),
+            groupIdHex = null,
+        )
+        changed = true
+    }
+    return AppliedContactAcks(nextAccepted, nextSent, changed)
+}
+
 // =============================================================================
 // Codec — the same field shape as the accepted store's record, minus the
 // accepted-only fields (`groupIdHex`, `displayName`). Kept separate so the

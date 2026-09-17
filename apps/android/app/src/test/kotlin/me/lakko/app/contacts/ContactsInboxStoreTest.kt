@@ -193,4 +193,75 @@ class ContactsInboxStoreTest {
         assertEquals(listOf(1L, 3L), result.map { it.messageId })
         assertEquals(pending, withoutAcceptedSenders(pending, emptyList()))
     }
+
+    // -----------------------------------------------------------------
+    // Accept acknowledgements
+    // -----------------------------------------------------------------
+
+    private fun ack(pubkeyByte: Int, messageId: Long = 7_000L + pubkeyByte) = IncomingContactAck(
+        messageId = messageId,
+        accepterPubkey = ByteArray(32) { pubkeyByte.toByte() },
+        accepterAccountId = ByteArray(16) { (pubkeyByte + 40).toByte() },
+        accepterX25519Pubkey = ByteArray(32) { 9 },
+        ackToPseudonym = ByteArray(32) { 3 },
+        acceptedAtMs = 1_700_000_000_000uL,
+        createdAt = "2026-09-17T10:00:00Z",
+    )
+
+    private fun sentTo(pubkeyByte: Int) = SentContactRequest(
+        recipientUsername = "user$pubkeyByte",
+        recipientAccountIdB64 = java.util.Base64.getEncoder()
+            .encodeToString(ByteArray(16) { (pubkeyByte + 40).toByte() }),
+        messageId = 1L,
+        createdAt = "2026-09-17T09:00:00Z",
+    )
+
+    @Test
+    fun an_ack_from_a_stranger_adds_a_contact_with_their_account_id_and_retires_the_sent_request() {
+        val applied = applyContactAcks(
+            accepted = listOf(accepted(1)),
+            sent = listOf(sentTo(5), sentTo(6)),
+            acks = listOf(ack(5)),
+        )
+        assertTrue(applied.acceptedChanged)
+        assertEquals(2, applied.accepted.size)
+        val added = applied.accepted.last().request
+        assertTrue(added.fromPubkey.contentEquals(ByteArray(32) { 5 }))
+        assertTrue(added.fromAccountId!!.contentEquals(ByteArray(16) { 45 }))
+        assertEquals(listOf(sentTo(6)), applied.sent)
+    }
+
+    @Test
+    fun an_ack_fills_the_missing_account_id_of_a_known_contact() {
+        val known = AcceptedContact(request = request(messageId = 1L, pubkeyByte = 5, accountId = null))
+        val applied = applyContactAcks(accepted = listOf(known), sent = emptyList(), acks = listOf(ack(5)))
+        assertTrue(applied.acceptedChanged)
+        assertEquals(1, applied.accepted.size)
+        assertTrue(applied.accepted.single().request.fromAccountId!!.contentEquals(ByteArray(16) { 45 }))
+    }
+
+    @Test
+    fun an_ack_never_overwrites_an_account_id_a_contact_already_has() {
+        val known = accepted(5)
+        val applied = applyContactAcks(accepted = listOf(known), sent = emptyList(), acks = listOf(ack(5)))
+        assertEquals(false, applied.acceptedChanged)
+        assertEquals(listOf(known), applied.accepted)
+    }
+
+    @Test
+    fun a_repeated_ack_adds_the_person_once() {
+        val applied = applyContactAcks(
+            accepted = emptyList(),
+            sent = emptyList(),
+            acks = listOf(ack(5, messageId = 1L), ack(5, messageId = 2L)),
+        )
+        assertEquals(1, applied.accepted.size)
+    }
+
+    @Test
+    fun no_acks_change_nothing() {
+        val applied = applyContactAcks(listOf(accepted(1)), listOf(sentTo(2)), emptyList())
+        assertEquals(false, applied.acceptedChanged)
+        assertEquals(listOf(sentTo(2)), applied.sent)
+    }
 }

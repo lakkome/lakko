@@ -56,6 +56,8 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material.icons.Icons
+import androidx.compose.runtime.key
+import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Group
@@ -533,34 +535,47 @@ private fun InCallView(
                         }
                     },
             ) {
-                @Suppress("UNUSED_VARIABLE") val _participants_dep = participants
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize().padding(16.dp),
+                // Derived from the COLLECTED list. Reading `state.participants.value`
+                // inside a lazy list's content lambda is not observed, so the tiles
+                // froze at whatever the roster was on first composition (an empty
+                // screen when the overlay opened before the SFU welcome arrived).
+                val active = remember(participants) { state.activeSpeaker() }
+                val gallery = remember(participants, active) {
+                    participants.filter { it.id != active?.id }
+                }
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    state.activeSpeaker()?.let { active ->
-                        item("active-${active.id}") {
-                            ParticipantTile(
-                                participant = active,
-                                large = true,
-                                state = state,
-                            )
-                        }
+                    if (active != null) {
+                        ParticipantTile(
+                            participant = active,
+                            large = true,
+                            state = state,
+                        )
                     }
-                    item("gallery") {
-                        LazyVerticalGrid(
-                            columns = GridCells.Adaptive(minSize = 180.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                    gallery.chunked(2).forEach { row ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            modifier = Modifier.height(((state.galleryParticipants().size + 1) / 2 * 160).dp.coerceAtLeast(0.dp)),
-                            contentPadding = PaddingValues(0.dp),
                         ) {
-                            gridItems(state.galleryParticipants(), key = { it.id }) { p ->
-                                ParticipantTile(
-                                    participant = p,
-                                    large = false,
-                                    state = state,
-                                )
+                            row.forEach { p ->
+                                key(p.id) {
+                                    Box(modifier = Modifier.weight(1f)) {
+                                        ParticipantTile(
+                                            participant = p,
+                                            large = false,
+                                            state = state,
+                                        )
+                                    }
+                                }
+                            }
+                            // Keep a lone gallery tile half width, like the grid did.
+                            if (row.size == 1) {
+                                Spacer(modifier = Modifier.weight(1f))
                             }
                         }
                     }
@@ -850,48 +865,8 @@ private fun SettingsToggleRow(
 }
 
 // ============================================================
-// ChatToggleButton + ChatSheet (S-3-A-chat)
+// ChatSheet (S-3-A-chat)
 // ============================================================
-
-/** CircleButton with an overlaid unread-count badge. The
- *  badge surfaces only when there is something unread AND the
- *  panel is closed. */
-@Composable
-private fun ChatToggleButton(state: CallUiState) {
-    val chatOpen by state.chatOpen.collectAsState()
-    val unread by state.chatUnreadCount.collectAsState()
-
-    Box {
-        CircleButton(
-            icon = Icons.Filled.Chat,
-            active = chatOpen,
-            description = when {
-                chatOpen -> "Close chat"
-                unread > 0 -> "Chat ($unread unread)"
-                else -> "Chat"
-            },
-            onClick = { state.setChatOpen(!chatOpen) },
-        )
-        if (unread > 0 && !chatOpen) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .offset(x = 2.dp, y = (-2).dp)
-                    .background(LakkoDark.danger, CircleShape)
-                    .padding(horizontal = 5.dp, vertical = 1.dp)
-                    .widthIn(min = 18.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    if (unread > 99) "99+" else unread.toString(),
-                    color = LakkoDark.dangerFg,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                )
-            }
-        }
-    }
-}
 
 /** Bottom-sheet chat panel. Text-only; system events
  *  ("Alice joined") rendered as grey italic centred lines.
@@ -1405,15 +1380,21 @@ private fun ControlsBar(
     val videoPublishState by state.videoPublishState.collectAsState()
     val cameraStarting = videoPublishState == CallUiState.VideoPublishState.Starting
 
-    // docs/ux/client-redesign.md 5.7 — a bottom row of 56 dp round buttons on
-    // the sunken dark surface; it wraps rather than clips on a narrow phone.
-    FlowRow(
+    val chatOpen by state.chatOpen.collectAsState()
+    val chatUnread by state.chatUnreadCount.collectAsState()
+    var moreOpen by remember { mutableStateOf(false) }
+
+    // docs/ux/client-redesign.md 5.7 — one row of 56 dp round buttons on the
+    // sunken dark surface: microphone, camera, More, End call. Everything else
+    // lives in the More menu, the same shape as the iOS phone-width layout, so
+    // End call is always on screen.
+    Row(
         modifier = Modifier
             .fillMaxWidth()
             .background(LakkoDark.sunken)
             .padding(horizontal = 16.dp, vertical = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterHorizontally),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         CircleButton(
             icon = if (local?.micOn == true) Icons.Filled.Mic else Icons.Filled.MicOff,
@@ -1433,39 +1414,80 @@ private fun ControlsBar(
             busy = cameraStarting,
             enabled = !cameraStarting,
         )
-        if (hasMultipleCams && local?.camOn == true) {
+        Box {
             CircleButton(
-                icon = Icons.Filled.FlipCameraAndroid,
-                active = false,
-                description = "Switch camera",
-                onClick = { /* WebRTC pod owns facingMode toggle (3a-pod-followup) */ },
+                icon = Icons.Filled.MoreHoriz,
+                active = local?.handRaised == true || local?.screenSharing == true,
+                description = if (chatUnread > 0 && !chatOpen) {
+                    "More controls, $chatUnread unread chat messages"
+                } else {
+                    "More controls"
+                },
+                onClick = { moreOpen = true },
             )
+            if (chatUnread > 0 && !chatOpen) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .size(12.dp)
+                        .background(LakkoDark.danger, CircleShape),
+                )
+            }
+            DropdownMenu(expanded = moreOpen, onDismissRequest = { moreOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text("Participants") },
+                    leadingIcon = { Icon(Icons.Filled.Group, contentDescription = null) },
+                    onClick = {
+                        moreOpen = false
+                        state.setParticipantListOpen(!drawerOpen)
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text(if (chatUnread > 0) "Chat ($chatUnread unread)" else "Chat") },
+                    leadingIcon = { Icon(Icons.Filled.Chat, contentDescription = null) },
+                    onClick = {
+                        moreOpen = false
+                        state.setChatOpen(!chatOpen)
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text(if (local?.handRaised == true) "Lower hand" else "Raise hand") },
+                    leadingIcon = { Icon(Icons.Filled.PanTool, contentDescription = null) },
+                    onClick = {
+                        moreOpen = false
+                        state.setHandRaised(local?.handRaised != true)
+                    },
+                )
+                DropdownMenuItem(
+                    text = {
+                        Text(if (local?.screenSharing == true) "Stop sharing screen" else "Share screen")
+                    },
+                    leadingIcon = { Icon(Icons.Filled.ScreenShare, contentDescription = null) },
+                    onClick = {
+                        moreOpen = false
+                        state.setScreenSharing(local?.screenSharing != true)
+                    },
+                )
+                if (hasMultipleCams && local?.camOn == true) {
+                    DropdownMenuItem(
+                        text = { Text("Switch camera") },
+                        leadingIcon = { Icon(Icons.Filled.FlipCameraAndroid, contentDescription = null) },
+                        onClick = {
+                            moreOpen = false
+                            /* WebRTC pod owns facingMode toggle (3a-pod-followup) */
+                        },
+                    )
+                }
+                DropdownMenuItem(
+                    text = { Text("Settings") },
+                    leadingIcon = { Icon(Icons.Filled.Settings, contentDescription = null) },
+                    onClick = {
+                        moreOpen = false
+                        state.setSettingsOpen(!settingsOpen)
+                    },
+                )
+            }
         }
-        CircleButton(
-            icon = Icons.Filled.Group,
-            active = drawerOpen,
-            description = "Participants",
-            onClick = { state.setParticipantListOpen(!drawerOpen) },
-        )
-        CircleButton(
-            icon = Icons.Filled.PanTool,
-            active = local?.handRaised == true,
-            description = if (local?.handRaised == true) "Lower hand" else "Raise hand",
-            onClick = { state.setHandRaised(local?.handRaised != true) },
-        )
-        CircleButton(
-            icon = Icons.Filled.ScreenShare,
-            active = local?.screenSharing == true,
-            description = if (local?.screenSharing == true) "Stop sharing screen" else "Share screen",
-            onClick = { state.setScreenSharing(local?.screenSharing != true) },
-        )
-        ChatToggleButton(state)
-        CircleButton(
-            icon = Icons.Filled.Settings,
-            active = settingsOpen,
-            description = "Settings",
-            onClick = { state.setSettingsOpen(!settingsOpen) },
-        )
         CircleButton(
             icon = Icons.Filled.CallEnd,
             active = false,

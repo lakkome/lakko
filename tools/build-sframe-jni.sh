@@ -139,6 +139,20 @@ for entry in "${ABIS[@]}"; do
     # size over micro-perf. The hot path goes straight to the
     # Rust .a which is already `--release`.
     # `-shared` produces .so.
+    # `-fexperimental-relative-c++-abi-vtables` matches the C++ ABI
+    # of the prebuilt `libjingle_peerconnection_so.so` shipped by
+    # `io.github.webrtc-sdk:android`: that binary is built with
+    # relative vtables (its `nativeSetFrameEncryptor` reads a 32-bit
+    # offset from the encryptor's vtable and adds it to the vtable
+    # address before branching). Our `LakkoFrameEncryptor` /
+    # `LakkoFrameDecryptor` objects are handed to it by pointer and
+    # their virtuals are called through that convention, so their
+    # vtables must be laid out the same way. Built with the default
+    # absolute vtables, the first `AddRef()` libwebrtc makes on our
+    # object jumps to `vtable + low32(function address)` and the
+    # process dies with SIGSEGV. The Rust archive carries no C++
+    # vtables and the bridge uses no polymorphic libc++ types, so
+    # the flag is confined to these two translation units.
     # `-static-libstdc++` links libc++ into this .so. Without it
     # clang links against `libc++_shared.so`, which nothing in the
     # app packages, and `System.loadLibrary("sframe_jni")` fails on
@@ -158,6 +172,7 @@ for entry in "${ABIS[@]}"; do
         -Wall -Wextra -Wno-unused-parameter \
         -shared \
         -static-libstdc++ \
+        -fexperimental-relative-c++-abi-vtables \
         "${COMMON_INCLUDES[@]}" \
         "${SRC[@]}" \
         "$archive" \

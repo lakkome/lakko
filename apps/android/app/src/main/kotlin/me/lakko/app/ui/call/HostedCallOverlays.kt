@@ -83,10 +83,61 @@ private fun HostedCallDialog(state: CallUiState, onEndCall: () -> Unit, onExit: 
             usePlatformDefaultWidth = false,
             dismissOnBackPress = false,
             dismissOnClickOutside = false,
+            // Full-screen and edge to edge: with the default the dialog is
+            // placed below the status bar but keeps the full screen height,
+            // so the controls row ran off the bottom edge. The call screen
+            // pads itself with the safe-drawing insets.
+            decorFitsSystemWindows = false,
         ),
     ) {
+        EdgeToEdgeDialogWindow()
         Box(modifier = Modifier.fillMaxSize()) {
             CallScreen(onExit = onExit, state = state, onEndCall = onEndCall)
+        }
+    }
+}
+
+/**
+ * Make the enclosing dialog window full screen and edge to edge, so the call
+ * screen's safe-drawing padding is the only thing that keeps its content off
+ * the system bars.
+ *
+ * Setting `DialogProperties.decorFitsSystemWindows = false` alone did not
+ * change the window on the Compose version in use (observed on an API 35
+ * emulator: the dialog window kept its fit-insets types), so the window is
+ * configured directly. Doing so lets the safe-drawing inset reach the call
+ * screen and lifted the controls row by the navigation bar height.
+
+ */
+@Composable
+internal fun EdgeToEdgeDialogWindow() {
+    val view = androidx.compose.ui.platform.LocalView.current
+    androidx.compose.runtime.SideEffect {
+        var provider: android.view.ViewParent? = view.parent
+        while (provider != null && provider !is androidx.compose.ui.window.DialogWindowProvider) {
+            provider = provider.parent
+        }
+        val window = (provider as? androidx.compose.ui.window.DialogWindowProvider)?.window
+        if (window == null) return@SideEffect
+        androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.setLayout(
+            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+        )
+        window.attributes = window.attributes.apply {
+            if (android.os.Build.VERSION.SDK_INT >= 30) {
+                fitInsetsTypes = 0
+                // Lay the window out over the display cutout too. A dialog
+                // window defaults to keeping out of a short-edge cutout, and the
+                // window manager then moved the full-height window down by the
+                // status-bar height, pushing the controls row past the bottom
+                // edge. The activity window already uses this mode.
+                layoutInDisplayCutoutMode =
+                    android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            } else if (android.os.Build.VERSION.SDK_INT >= 28) {
+                layoutInDisplayCutoutMode =
+                    android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
         }
     }
 }

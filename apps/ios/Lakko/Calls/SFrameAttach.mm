@@ -17,6 +17,7 @@
 // N-4-build follow-up sub-sprint (cross-compile + Xcode "Link
 // Binary With Libraries" entry).
 #include "../../../shared/sframe-bridge/sframe-bridge.h"
+#include "api/scoped_refptr.h"
 
 // MARK: - Selector probe
 
@@ -77,11 +78,20 @@ NSString * const kDecryptorAssociationKey = @"lakko.sframe.decryptor.wrapper";
 // argument in `x1` / `rsi` and the receiver in `x0` / `rdi` — the
 // `void*` cast covers both.
 //
-// IMPORTANT: this trampoline ONLY hands ownership of one refcount
-// to the framework. The framework's `setFrameEncryptor:`
-// implementation copies the scoped_refptr (which AddRef's), so our
-// AddRef before the call balances the framework's Release on
-// detach.
+// IMPORTANT: the `void *` is the ADDRESS OF A `rtc::scoped_refptr`,
+// never the C++ object pointer. The framework declares both methods
+// as taking `rtc::scoped_refptr<webrtc::Frame{En,De}cryptorInterface>`
+// BY VALUE (the Obj-C type encoding in the binary is
+// `{scoped_refptr<webrtc::FrameEncryptorInterface>=^{...}}`), and on
+// arm64 a class that is non-trivial for the purposes of calls is
+// passed indirectly: the caller materialises a temporary and passes
+// a pointer to it. Passing the object pointer itself made the
+// framework read our object's vptr as the FrameEncryptorInterface*
+// and jump through whatever the first vtable slot pointed at
+// (SIGBUS, "possible pointer authentication failure" in the first
+// live group call). The callee copy-constructs from the temporary
+// (AddRef), so our own AddRef before the call is the wrapper's
+// retain and balances the framework's Release on detach.
 using SetFrameEncryptorIMP = void (*)(id, SEL, void *);
 using SetFrameDecryptorIMP = void (*)(id, SEL, void *);
 
@@ -208,11 +218,14 @@ using SetFrameDecryptorIMP = void (*)(id, SEL, void *);
                              nil,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-    // objc_msgSend: handing the C++ pointer through.
+    // Hand the framework a pointer to a caller-owned scoped_refptr
+    // temporary (the arm64 calling convention for a by-value
+    // scoped_refptr argument, see SetFrameEncryptorIMP above).
     //
-    // The framework's `setFrameEncryptor:` copies the scoped_refptr
-    // internally (which AddRef's again, taking the count to 2);
-    // ours retains 1 for the lifetime of the wrapper. When the
+    // The framework's `setFrameEncryptor:` copy-constructs its own
+    // scoped_refptr from the temporary (AddRef); the temporary
+    // itself releases at the end of this scope, leaving the count
+    // at 2: ours retains 1 for the lifetime of the wrapper. When the
     // sender drops the encryptor (call ends, framework releases
     // its scoped_refptr → count back to 1), our wrapper still
     // retains; when the sender object itself deallocs and our
@@ -231,7 +244,10 @@ using SetFrameDecryptorIMP = void (*)(id, SEL, void *);
         return LakkoSFrameAttachStatusSelectorMissing;
     }
     auto setEncryptor = reinterpret_cast<SetFrameEncryptorIMP>(imp);
-    setEncryptor(sender, selector, static_cast<void *>(enc));
+    {
+        rtc::scoped_refptr<webrtc::FrameEncryptorInterface> holder(enc);
+        setEncryptor(sender, selector, static_cast<void *>(&holder));
+    }
 
     objc_setAssociatedObject(sender,
                              (__bridge const void *)kEncryptorAssociationKey,
@@ -276,7 +292,12 @@ using SetFrameDecryptorIMP = void (*)(id, SEL, void *);
         return LakkoSFrameAttachStatusSelectorMissing;
     }
     auto setDecryptor = reinterpret_cast<SetFrameDecryptorIMP>(imp);
-    setDecryptor(receiver, selector, static_cast<void *>(dec));
+    {
+        // Same calling convention as the encryptor: the address of a
+        // caller-owned scoped_refptr temporary, never the raw pointer.
+        rtc::scoped_refptr<webrtc::FrameDecryptorInterface> holder(dec);
+        setDecryptor(receiver, selector, static_cast<void *>(&holder));
+    }
 
     objc_setAssociatedObject(receiver,
                              (__bridge const void *)kDecryptorAssociationKey,
