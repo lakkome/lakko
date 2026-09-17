@@ -209,6 +209,16 @@ public enum RecordingMachine {
         return "\(minutes):" + (seconds < 10 ? "0\(seconds)" : "\(seconds)")
     }
 
+    /// The TOTAL duration of a recording or received media message: rounds UP
+    /// to the next whole second, so any non-zero duration below one second
+    /// reads `0:01` instead of `0:00`. Elapsed / playback-position counters
+    /// keep `formatClock` (rounded down). Display only — never the wire value.
+    public static func formatTotalClock(ms: Int64) -> String {
+        guard ms > 0 else { return formatClock(ms: 0) }
+        let (quotient, remainder) = ms.quotientAndRemainder(dividingBy: 1000)
+        return formatClock(ms: (remainder == 0 ? quotient : quotient + 1) * 1000)
+    }
+
     /// Spoken duration for accessibility labels: "12 seconds", "1 minute 5 seconds".
     public static func spokenDuration(ms: Int64) -> String {
         let total = max(0, Int64((Double(ms) / 1000).rounded()))

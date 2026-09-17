@@ -19,7 +19,7 @@ import { autoplayVideoNotes } from "./media-prefs";
 import { ProgressRing } from "./MediaComposer";
 import type { MediaHub } from "./media-hub";
 import { nextPlaybackRate, rateLabel } from "./playback-queue";
-import { formatClock, spokenDuration } from "./recording-machine";
+import { formatClock, formatTotalClock, spokenDuration } from "./recording-machine";
 import { PhotoBubble, VideoBubble } from "./VisualBubbles";
 import { waveformBars } from "./waveform";
 
@@ -256,7 +256,7 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
           <Show when={unplayed()}>
             <span class="lakko-unplayed" aria-label="Not played" />
           </Show>
-          {formatClock(playing() || position() > 0 ? position() : duration())}
+          {playing() || position() > 0 ? formatClock(position()) : formatTotalClock(duration())}
         </span>
         <button
           type="button"
@@ -435,7 +435,7 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
           </Show>
         </span>
         <Show when={props.attachment.durationMs !== undefined && mode() !== "sound"}>
-          <span class="lakko-vn-corner">{formatClock(props.attachment.durationMs ?? 0)}</span>
+          <span class="lakko-vn-corner">{formatTotalClock(props.attachment.durationMs ?? 0)}</span>
         </Show>
       </button>
       <Show when={status() === "error"}>

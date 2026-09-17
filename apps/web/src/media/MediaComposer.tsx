@@ -13,7 +13,7 @@
 import { createEffect, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 import { Icon } from "../ui/icons";
 
-import { formatClock, capFor, spokenDuration, type RecState } from "./recording-machine";
+import { formatClock, formatTotalClock, capFor, spokenDuration, type RecState } from "./recording-machine";
 import { DENIED_COPY, NOTICE_COPY, type Recorder } from "./recording-controller";
 import { waveformBars } from "./waveform";
 
@@ -197,7 +197,7 @@ function VoicePreview(props: { recorder: Recorder }): JSX.Element {
           )}
         </For>
       </span>
-      <span>{formatClock(playing() ? position() : duration())}</span>
+      <span>{playing() ? formatClock(position()) : formatTotalClock(duration())}</span>
       <button type="button" onClick={() => r.remove()}>
         Delete
       </button>
@@ -348,7 +348,7 @@ function PreviewCircle(props: { recorder: Recorder }): JSX.Element {
         </Show>
       </button>
       <div class="lakko-vn-controls">
-        <span>{formatClock(r.preview()?.result.durationMs ?? 0)}</span>
+        <span>{formatTotalClock(r.preview()?.result.durationMs ?? 0)}</span>
         <button type="button" onClick={() => r.remove()}>
           Delete
         </button>

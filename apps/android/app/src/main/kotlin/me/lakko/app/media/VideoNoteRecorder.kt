@@ -30,7 +30,9 @@ import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.File
 import kotlin.coroutines.resume
@@ -55,6 +57,12 @@ import kotlin.coroutines.resume
  *
  * Every failure is reported as `false` / `null`; the controller discards the
  * take on a failure, it never sends a partial one.
+ *
+ * Threading: CameraX requires [bind], [flip] and [release] on the main thread,
+ * and its `Recording.start` / `stop` are asynchronous (the encoder runs on
+ * CameraX's own executors, completion arrives via the Finalize event), so
+ * none of them blocks main. The one blocking step, reading the finished file
+ * for metadata and the poster frame, runs on `Dispatchers.IO` in [finish].
  */
 @SuppressLint("MissingPermission") // The controller only starts after RECORD_AUDIO + CAMERA are granted.
 @OptIn(ExperimentalPersistentRecording::class)
@@ -171,6 +179,11 @@ public class VideoNoteRecorder(
             file?.delete()
             return null
         }
+        // Metadata and poster decoding read the file: off the main thread.
+        return withContext(Dispatchers.IO) { measureTake(file, elapsedMs) }
+    }
+
+    private fun measureTake(file: File, elapsedMs: Long): RecordedTake? {
         val retriever = MediaMetadataRetriever()
         return try {
             retriever.setDataSource(file.absolutePath)

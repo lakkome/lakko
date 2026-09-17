@@ -23,6 +23,9 @@ import java.io.File
  * controller turns that into a `capture-failed` event, which discards the take.
  * Nothing partial is ever handed back as a finished take — `MediaRecorder.stop`
  * throws when no valid data was written, and that is a discard.
+ *
+ * Thread-confined: every method is called on [RecorderThread.dispatcher],
+ * never the main thread (they block on binder calls).
  */
 public class VoiceRecorder(private val context: Context) {
 

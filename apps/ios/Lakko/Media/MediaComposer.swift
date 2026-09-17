@@ -142,7 +142,7 @@ struct RecordingBar: View {
                 if kind == .voice, let take = media.previewTake {
                     voicePreview(take: take, durationMs: durationMs)
                 } else {
-                    Text("Video message \(RecordingMachine.formatClock(ms: durationMs))")
+                    Text("Video message \(RecordingMachine.formatTotalClock(ms: durationMs))")
                         .font(.footnote.monospacedDigit())
                     Spacer()
                 }
@@ -187,7 +187,8 @@ struct RecordingBar: View {
         )
         .frame(height: 24)
         .accessibilityHidden(true)
-        Text(RecordingMachine.formatClock(ms: active?.positionMs ?? durationMs))
+        Text(active.map { RecordingMachine.formatClock(ms: $0.positionMs) }
+            ?? RecordingMachine.formatTotalClock(ms: durationMs))
             .font(.footnote.monospacedDigit())
     }
 }

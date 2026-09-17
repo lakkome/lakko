@@ -59,6 +59,7 @@ import me.lakko.app.media.KIND_VOICE
 import me.lakko.app.media.MediaBubble
 import me.lakko.app.media.PendingMediaRow
 import me.lakko.app.media.formatClock
+import me.lakko.app.media.formatTotalClock
 import me.lakko.app.media.rateLabel
 import me.lakko.app.media.renderDecision
 import me.lakko.app.media.spokenDuration
@@ -162,7 +163,7 @@ internal fun VoiceBubble(ref: AttachmentRef, hub: ChatMediaHub, isOwn: Boolean, 
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = formatClock(if (isCurrent && voice.playing) voice.positionMs else duration),
+                text = if (isCurrent && voice.playing) formatClock(voice.positionMs) else formatTotalClock(duration),
                 style = MaterialTheme.typography.labelSmall,
                 modifier = Modifier.padding(start = 8.dp),
             )
@@ -302,7 +303,7 @@ internal fun VideoNoteBubble(ref: AttachmentRef, hub: ChatMediaHub) {
                 )
             }
         }
-        Text(formatClock(duration), style = MaterialTheme.typography.labelSmall)
+        Text(formatTotalClock(duration), style = MaterialTheme.typography.labelSmall)
         if (failed) {
             Text(
                 COULD_NOT_PLAY,
@@ -443,7 +444,7 @@ internal fun PendingMediaBubble(
                             onSeek = {},
                         )
                         Spacer(Modifier.width(6.dp))
-                        Text(formatClock(row.durationMs ?: 0L), style = MaterialTheme.typography.labelSmall)
+                        Text(formatTotalClock(row.durationMs ?: 0L), style = MaterialTheme.typography.labelSmall)
                     }
                     KIND_VIDEO_NOTE -> {
                         row.posterBytes?.let { bytes ->

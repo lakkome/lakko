@@ -186,7 +186,15 @@ public class ChatViewModel(
     private val teardownLatch = me.lakko.app.chat.EndedTeardownLatch()
 
     private val derived: MutableStateFlow<ChatScreenUiState> =
-        MutableStateFlow(buildState(repo.state.value, composer.value))
+        MutableStateFlow(buildState(repo.state.value, composer.value, typingText = null))
+
+    /**
+     * The typing line last computed off the main thread by the repository and
+     * profile collectors. The composer collector runs on every keystroke and
+     * reuses it rather than reading the live roster (a Rust call that waits on
+     * the group's mutex) on the main thread.
+     */
+    private var lastTypingText: String? = null
 
     public val state: StateFlow<ChatScreenUiState> = derived.asStateFlow()
 
@@ -227,15 +235,26 @@ public class ChatViewModel(
         }
         viewModelScope.launch {
             repo.state.collect { repoState ->
-                derived.value = buildState(repoState, composer.value)
-                mutableOtherMemberIdentities.value = otherChatIdentities()
+                // The live roster reads below are synchronous Rust calls that
+                // take the group's mutex, which a poll or sweep on the MLS
+                // dispatcher may be holding: never on the main thread.
+                val live = withContext(kotlinx.coroutines.Dispatchers.Default) {
+                    LiveGroupRead(
+                        typingText = typingTextFor(repoState),
+                        otherIdentities = otherChatIdentities(),
+                        isActive = repo.isGroupActive(groupIdHex),
+                    )
+                }
+                lastTypingText = live.typingText
+                derived.value = buildState(repoState, composer.value, live.typingText)
+                mutableOtherMemberIdentities.value = live.otherIdentities
                 // ADR-0045 UX §6.2 — re-read the core's own membership
                 // predicate after every repository emission. Nothing in the
                 // receive path announces the transition
                 // (`processIncomingVerifyingRoles` returns the same
                 // content-less `Commit` for a removing commit as for any
                 // other), so this is the only place it can be noticed.
-                refreshMembership()
+                applyMembership(live.isActive)
                 // ADR-0045 UX §7 — a repository emission follows every poll,
                 // and a poll is how this device learns that somebody ELSE's
                 // sweep drained the queue. `refreshMembers` covers the local
@@ -261,14 +280,17 @@ public class ChatViewModel(
         }
         viewModelScope.launch {
             composer.collect { composerState ->
-                derived.value = buildState(repo.state.value, composerState)
+                derived.value = buildState(repo.state.value, composerState, lastTypingText)
             }
         }
         // ADR-0048 — a profile arriving or a username verifying changes the
         // typing line's name; rebuild so it updates in place.
         viewModelScope.launch {
             profileNames.version.collect {
-                derived.value = buildState(repo.state.value, composer.value)
+                val repoState = repo.state.value
+                val typing = withContext(kotlinx.coroutines.Dispatchers.Default) { typingTextFor(repoState) }
+                lastTypingText = typing
+                derived.value = buildState(repoState, composer.value, typing)
             }
         }
         // ADR-0024 — read-receipt SEND. Each time the thread's
@@ -1025,8 +1047,13 @@ public class ChatViewModel(
     }
 
     private fun refreshMembership() {
+        applyMembership(repo.isGroupActive(groupIdHex))
+    }
+
+    /** [refreshMembership] with the core's `isActive` already read (off main). */
+    private fun applyMembership(isActive: Boolean?) {
         mutableMembership.value = me.lakko.app.chat.membershipState(
-            isActive = repo.isGroupActive(groupIdHex),
+            isActive = isActive,
             leaveRequestedAtMs = leaveRequestedAtMs,
         )
     }
@@ -2181,9 +2208,25 @@ public class ChatViewModel(
         return profileNames.resolve(member.signaturePublicKey).primary
     }
 
+    /** The roster reads one repository emission needs, taken together off the
+     *  main thread. */
+    private class LiveGroupRead(
+        val typingText: String?,
+        val otherIdentities: Set<me.lakko.app.chat.MemberIdentity>,
+        val isActive: Boolean?,
+    )
+
+    /** The typing line for [repoState]. Reads the live roster: call it off
+     *  the main thread. */
+    private fun typingTextFor(repoState: me.lakko.app.chat.ChatRepositoryState): String? =
+        typingIndicatorText(
+            repoState.threads.firstOrNull { it.groupIdHex == groupIdHex }?.typingMembers ?: emptySet(),
+        )
+
     private fun buildState(
         repoState: me.lakko.app.chat.ChatRepositoryState,
         composer: ComposerState,
+        typingText: String?,
     ): ChatScreenUiState {
         val thread: ChatThread? =
             repoState.threads.firstOrNull { it.groupIdHex == groupIdHex }
@@ -2198,7 +2241,7 @@ public class ChatViewModel(
             inFlightUploads = composer.inFlight,
             pendingPreviews = composer.pendingPreviews,
             // ADR-0024 — typing indicator + read-state surface.
-            typingText = typingIndicatorText(thread?.typingMembers ?: emptySet()),
+            typingText = typingText,
             readUpToByMember = thread?.readUpToByMember ?: emptyMap(),
             // We always render the screen as "exists" — if the
             // repo doesn't carry this thread (no Group handle

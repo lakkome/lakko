@@ -205,4 +205,36 @@ class RecordingMachineTest {
         assertEquals("1 minute 5 seconds", spokenDuration(65_000))
         assertEquals("2 minutes", spokenDuration(120_000))
     }
+
+    @Test
+    fun totalClockRoundsAnyPositiveDurationUp() {
+        assertEquals("0:00", formatTotalClock(0))
+        assertEquals("0:00", formatTotalClock(-250))
+        assertEquals("0:01", formatTotalClock(1))
+        assertEquals("0:01", formatTotalClock(500))
+        assertEquals("0:01", formatTotalClock(999))
+        assertEquals("0:01", formatTotalClock(1_000))
+        assertEquals("0:02", formatTotalClock(1_001))
+        assertEquals("1:00", formatTotalClock(59_001))
+        assertEquals("15:00", formatTotalClock(VOICE_CAP_MS))
+        // The live counter keeps rounding down.
+        assertEquals("0:00", formatClock(999))
+    }
+
+    /** §2.8 — a release that landed while the recorder was still starting: the
+     *  reducer judges the hold from the press and sends; the take is judged
+     *  again once the recorder has stopped. */
+    @Test
+    fun releaseDuringSlowStartIsJudgedAgainAfterStop() {
+        val (state, effects) = run(press(at = 0), RecEvent.Release(at = 3_500))
+        assertEquals(RecState.Idle, state)
+        assertEquals(RecEffect.Finish(FinishDisposition.SEND), effects.last())
+        // Start finished just before the stop: nothing written.
+        assertEquals(SentTakeOutcome.HOLD_TO_RECORD, sentTakeOutcome(null, captureStarted = true))
+        // A little audio, still under the minimum.
+        assertEquals(SentTakeOutcome.HOLD_TO_RECORD, sentTakeOutcome(MIN_TAKE_MS - 1, captureStarted = true))
+        assertEquals(SentTakeOutcome.SEND, sentTakeOutcome(MIN_TAKE_MS, captureStarted = true))
+        // The start itself failed.
+        assertEquals(SentTakeOutcome.START_FAILED, sentTakeOutcome(null, captureStarted = false))
+    }
 }

@@ -88,7 +88,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -105,10 +109,14 @@ import me.lakko.app.media.RecEvent
 import me.lakko.app.media.RecHint
 import me.lakko.app.media.RecState
 import me.lakko.app.media.RecordedTake
+import me.lakko.app.media.RecorderThread
+import me.lakko.app.media.SentTakeOutcome
+import me.lakko.app.media.sentTakeOutcome
 import me.lakko.app.media.VideoNoteRecorder
 import me.lakko.app.media.VoiceRecorder
 import me.lakko.app.media.capFor
 import me.lakko.app.media.formatClock
+import me.lakko.app.media.formatTotalClock
 import me.lakko.app.media.isCapturing
 import me.lakko.app.media.reduce
 import me.lakko.app.media.spokenDuration
@@ -185,6 +193,10 @@ internal class RecordController(
     internal var requestPermissions: ((Array<String>) -> Unit)? = null
 
     private var voice: VoiceRecorder? = null
+    /** The voice recorder's start, running on [RecorderThread]; `true` once it
+     *  is recording. Everything that touches [voice] afterwards awaits it, so
+     *  a release that lands while start is still blocked is applied after. */
+    private var voiceStart: Deferred<Boolean>? = null
     private var video: VideoNoteRecorder? = null
     private var previewView: PreviewView? = null
     private var tickJob: Job? = null
@@ -344,14 +356,33 @@ internal class RecordController(
         val stamp = System.currentTimeMillis()
         if (kind == CaptureKind.VOICE) {
             val file = hub.newEntryFile("take-${UUID.randomUUID()}", "voice-$stamp.m4a")
-            val rec = VoiceRecorder(context)
-            if (file == null || !rec.start(file) { scope.launch { dispatch(RecEvent.CaptureFailed) } }) {
+            if (file == null) {
                 showNotice(RecordCopy.START_FAILED)
                 dispatch(RecEvent.CaptureFailed)
                 return
             }
+            val rec = VoiceRecorder(context)
             voice = rec
+            // prepare() + start() block on the media server: never on main.
+            val started = RecorderThread.scope.async {
+                rec.start(file) {
+                    scope.launch { if (voice === rec) dispatch(RecEvent.CaptureFailed) }
+                }
+            }
+            voiceStart = started
             startTick()
+            startJob = scope.launch {
+                val ok = started.await()
+                // Released, cancelled or disposed meanwhile: finish() owns the
+                // recorder now and applies the outcome after this start.
+                if (voice !== rec) return@launch
+                if (ok) {
+                    captureStartedAt = now()
+                } else {
+                    showNotice(RecordCopy.START_FAILED)
+                    dispatch(RecEvent.CaptureFailed)
+                }
+            }
         } else {
             val rec = VideoNoteRecorder(context, lifecycleOwner)
             video = rec
@@ -385,8 +416,12 @@ internal class RecordController(
             while (isActive) {
                 delay(TICK_MS)
                 val kind = currentKind() ?: break
-                elapsedMs = now() - captureStartedAt
-                voice?.let { level = it.sampleLevel().toFloat() }
+                val v = voice
+                val starting = v != null && voiceStart?.isCompleted != true
+                elapsedMs = if (starting) 0L else now() - captureStartedAt
+                if (v != null && !starting) {
+                    level = withContext(RecorderThread.dispatcher) { v.sampleLevel() }.toFloat()
+                }
                 if (!requiredPermissions(kind).all(::isGranted)) {
                     dispatch(RecEvent.Revoked)
                     break
@@ -402,45 +437,98 @@ internal class RecordController(
         startJob?.cancel()
         startJob = null
         val v = voice
+        val vStart = voiceStart
         val vn = video
         voice = null
+        voiceStart = null
         video = null
         val elapsed = now() - captureStartedAt
         when (disposition) {
             FinishDisposition.DISCARD -> {
-                v?.discard()
+                if (v != null) {
+                    RecorderThread.scope.launch {
+                        vStart?.let { runCatching { it.await() } }
+                        v.discard()
+                    }
+                }
                 vn?.release()
             }
-            FinishDisposition.SEND, FinishDisposition.PREVIEW -> scope.launch {
-                val take = when {
-                    v != null -> v.finish()
-                    vn != null -> vn.finish(elapsed).also { vn.release() }
-                    else -> null
-                }
-                if (disposition == FinishDisposition.PREVIEW) {
-                    if (take == null) {
-                        dispatch(RecEvent.PreviewFailed)
-                    } else {
-                        preview = take
-                        dispatch(RecEvent.PreviewReady(take.durationMs))
+            FinishDisposition.SEND, FinishDisposition.PREVIEW -> {
+                // The voice stop runs in the process-wide recorder scope, not in
+                // this screen's: if the screen goes away while it waits for a
+                // slow start, the microphone is still stopped and released.
+                // It waits for a start still in progress, so a release during a
+                // slow start never leaves a recording running.
+                val voiceTake: Deferred<VoiceFinish>? = v?.let { rec ->
+                    RecorderThread.scope.async {
+                        val ok = vStart?.let { runCatching { it.await() }.getOrDefault(false) } ?: true
+                        VoiceFinish(started = ok, take = if (ok) rec.finish() else null)
                     }
-                } else if (take == null || take.durationMs < MIN_TAKE_MS) {
-                    // The reducer already let a >= 0.5 s hold go; a file the
-                    // recorder measured shorter than that is still an accident.
-                    take?.file?.delete()
-                    if (take == null) showNotice(RecordCopy.START_FAILED) else showNotice(RecordCopy.HOLD_TO_RECORD)
-                } else {
-                    onSend(take)
+                }
+                scope.launch {
+                    var captureStarted = false
+                    val take = try {
+                        when {
+                            voiceTake != null -> voiceTake.await().also { captureStarted = it.started }.take
+                            vn != null -> try {
+                                vn.finish(elapsed)
+                            } finally {
+                                vn.release()
+                            }
+                            else -> null
+                        }
+                    } catch (e: CancellationException) {
+                        // Screen disposed mid-finish: nothing will send or preview
+                        // this take, so its file must not linger.
+                        voiceTake?.let { d ->
+                            RecorderThread.scope.launch { d.await().take?.file?.delete() }
+                        }
+                        throw e
+                    }
+                    if (disposition == FinishDisposition.PREVIEW) {
+                        if (take == null) {
+                            dispatch(RecEvent.PreviewFailed)
+                        } else {
+                            preview = take
+                            dispatch(RecEvent.PreviewReady(take.durationMs))
+                        }
+                        return@launch
+                    }
+                    when (sentTakeOutcome(take?.durationMs, captureStarted)) {
+                        SentTakeOutcome.SEND -> if (take != null) onSend(take)
+                        SentTakeOutcome.HOLD_TO_RECORD -> {
+                            deleteOffMain(take?.file)
+                            showNotice(RecordCopy.HOLD_TO_RECORD)
+                        }
+                        SentTakeOutcome.START_FAILED -> {
+                            deleteOffMain(take?.file)
+                            showNotice(RecordCopy.START_FAILED)
+                        }
+                    }
                 }
             }
         }
+    }
+
+    /** What the recorder thread hands back for a voice take. */
+    private class VoiceFinish(val started: Boolean, val take: RecordedTake?)
+
+    private fun deleteOffMain(file: java.io.File?) {
+        if (file != null) RecorderThread.scope.launch { file.delete() }
     }
 
     fun dispose() {
         tickJob?.cancel()
         startJob?.cancel()
         noticeJob?.cancel()
-        voice?.discard()
+        voice?.let { v ->
+            val s = voiceStart
+            RecorderThread.scope.launch {
+                s?.let { runCatching { it.await() } }
+                v.discard()
+            }
+        }
+        voiceStart = null
         video?.release()
         voice = null
         video = null
@@ -637,7 +725,7 @@ internal fun RecordingBar(controller: RecordController, modifier: Modifier = Mod
                 VoiceTakePreview(take, Modifier.weight(1f))
             } else {
                 Text(
-                    text = formatClock(s.durationMs),
+                    text = formatTotalClock(s.durationMs),
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.weight(1f),
                 )
@@ -724,7 +812,7 @@ private fun VoiceTakePreview(take: RecordedTake, modifier: Modifier) {
             },
         )
         Spacer(Modifier.width(6.dp))
-        Text(formatClock(take.durationMs), style = MaterialTheme.typography.labelMedium)
+        Text(formatTotalClock(take.durationMs), style = MaterialTheme.typography.labelMedium)
     }
 }
 

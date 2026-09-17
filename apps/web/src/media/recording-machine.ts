@@ -435,6 +435,17 @@ export function formatClock(ms: number): string {
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
+/**
+ * The TOTAL duration of a recording or received media message: rounds UP to
+ * the next whole second, so any non-zero duration below one second reads
+ * `0:01` instead of `0:00`. Elapsed / playback-position counters keep
+ * `formatClock` (rounded down). Display only — never the wire value.
+ */
+export function formatTotalClock(ms: number): string {
+  if (!(ms > 0)) return formatClock(0);
+  return formatClock(Math.ceil(ms / 1000) * 1000);
+}
+
 /** Spoken duration for labels: "12 seconds", "1 minute 5 seconds". */
 export function spokenDuration(ms: number): string {
   const total = Math.max(0, Math.round(ms / 1000));

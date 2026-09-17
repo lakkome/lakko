@@ -407,12 +407,43 @@ private fun fromPreview(state: RecState.Preview, event: RecEvent): RecStep = whe
     else -> step(state)
 }
 
+/** What a released (SEND) take becomes once the recorder has stopped. */
+public enum class SentTakeOutcome { SEND, HOLD_TO_RECORD, START_FAILED }
+
+/**
+ * §2.8, applied AFTER the recorder stopped. The reducer judged the hold from
+ * the press; the recorder may have spent part of it starting (a slow
+ * `MediaRecorder.start`), so the take it hands back is judged again:
+ *
+ *   * a take of at least [MIN_TAKE_MS] is sent;
+ *   * a shorter take, or none at all from a capture that DID start (stopped
+ *     before any audio was written), is a too-short hold: `Hold to record`;
+ *   * no take from a capture that never started is a start failure.
+ */
+public fun sentTakeOutcome(takeDurationMs: Long?, captureStarted: Boolean): SentTakeOutcome = when {
+    takeDurationMs == null ->
+        if (captureStarted) SentTakeOutcome.HOLD_TO_RECORD else SentTakeOutcome.START_FAILED
+    takeDurationMs < MIN_TAKE_MS -> SentTakeOutcome.HOLD_TO_RECORD
+    else -> SentTakeOutcome.SEND
+}
+
 /** `0:07`, `1:02`, `15:00` — the recording bar and bubble duration format. */
 public fun formatClock(ms: Long): String {
     val total = maxOf(0L, ms / 1000L)
     val minutes = total / 60L
     val seconds = total % 60L
     return "$minutes:${seconds.toString().padStart(2, '0')}"
+}
+
+/**
+ * A TOTAL duration (a voice message or video note as a whole): any positive
+ * length rounds UP to whole seconds, so a 0.7 s take reads `0:01`, not `0:00`.
+ * Zero or negative reads `0:00`. Live / elapsed counters keep [formatClock].
+ */
+public fun formatTotalClock(ms: Long): String {
+    if (ms <= 0L) return formatClock(0L)
+    val seconds = ms / 1000L + if (ms % 1000L == 0L) 0L else 1L
+    return formatClock(seconds * 1000L)
 }
 
 /** Spoken duration for labels: "12 seconds", "1 minute 5 seconds". */

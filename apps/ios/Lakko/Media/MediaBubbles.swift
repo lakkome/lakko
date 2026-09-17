@@ -112,7 +112,8 @@ struct VoiceBubble: View {
                     waveform
                         .frame(height: 26)
                     HStack(spacing: 6) {
-                        Text(RecordingMachine.formatClock(ms: active.map { $0.positionMs } ?? durationMs))
+                        Text(active.map { RecordingMachine.formatClock(ms: $0.positionMs) }
+                            ?? RecordingMachine.formatTotalClock(ms: durationMs))
                             .font(.caption2.monospacedDigit())
                             .foregroundStyle(tint.opacity(0.8))
                         if incoming, !media.isPlayed(mediaKey) {
@@ -391,7 +392,7 @@ struct VideoNoteBubble: View {
             .accessibilityLabel(accessibilityLabel)
             HStack(spacing: 6) {
                 if let d = ref.durationMs {
-                    Text(RecordingMachine.formatClock(ms: Int64(d)))
+                    Text(RecordingMachine.formatTotalClock(ms: Int64(d)))
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }

@@ -134,6 +134,20 @@ final class RecordingMachineTests: XCTestCase {
         XCTAssertEqual(e, [.finish(.discard), .hint(.cancelled)])
     }
 
+    func testTotalClockRoundsUpSubSecondDurations() {
+        XCTAssertEqual(RecordingMachine.formatTotalClock(ms: 0), "0:00")
+        XCTAssertEqual(RecordingMachine.formatTotalClock(ms: -5), "0:00")
+        XCTAssertEqual(RecordingMachine.formatTotalClock(ms: 1), "0:01")
+        XCTAssertEqual(RecordingMachine.formatTotalClock(ms: 480), "0:01")
+        XCTAssertEqual(RecordingMachine.formatTotalClock(ms: 999), "0:01")
+        XCTAssertEqual(RecordingMachine.formatTotalClock(ms: 1_000), "0:01")
+        XCTAssertEqual(RecordingMachine.formatTotalClock(ms: 1_001), "0:02")
+        XCTAssertEqual(RecordingMachine.formatTotalClock(ms: 59_500), "1:00")
+        XCTAssertEqual(RecordingMachine.formatTotalClock(ms: 900_000), "15:00")
+        // The elapsed / position clock stays rounded down.
+        XCTAssertEqual(RecordingMachine.formatClock(ms: 480), "0:00")
+    }
+
     func testClockAndSpokenDuration() {
         XCTAssertEqual(RecordingMachine.formatClock(ms: 7_400), "0:07")
         XCTAssertEqual(RecordingMachine.formatClock(ms: 62_000), "1:02")

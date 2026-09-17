@@ -20,6 +20,7 @@ import {
   VIDEO_NOTE_CAP_MS,
   VOICE_CAP_MS,
   formatClock,
+  formatTotalClock,
   reduce,
   spokenDuration,
   type RecEffect,
@@ -231,6 +232,21 @@ describe("permissions", () => {
 });
 
 describe("formatting", () => {
+  it("rounds a total duration up so a sub-second message never reads 0:00", () => {
+    expect(formatTotalClock(0)).toBe("0:00");
+    expect(formatTotalClock(-5)).toBe("0:00");
+    expect(formatTotalClock(Number.NaN)).toBe("0:00");
+    expect(formatTotalClock(1)).toBe("0:01");
+    expect(formatTotalClock(480)).toBe("0:01");
+    expect(formatTotalClock(999)).toBe("0:01");
+    expect(formatTotalClock(1_000)).toBe("0:01");
+    expect(formatTotalClock(1_001)).toBe("0:02");
+    expect(formatTotalClock(59_500)).toBe("1:00");
+    expect(formatTotalClock(VOICE_CAP_MS)).toBe("15:00");
+    // The elapsed / position clock stays rounded down.
+    expect(formatClock(480)).toBe("0:00");
+  });
+
   it("formats the clock and the spoken duration", () => {
     expect(formatClock(7_400)).toBe("0:07");
     expect(formatClock(62_000)).toBe("1:02");
