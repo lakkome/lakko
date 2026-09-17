@@ -26,15 +26,28 @@ import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
  *    already live, the call that stays is the lowest `(startedAtMs, callIdHex)`,
  *    so every device that observes the same two starts converges on the same
  *    call regardless of arrival order.
- *  - `GroupCallJoin` / `GroupCallLeave` update `joinedLeaves`, and only for the
- *    call the record is about. A body naming any other `call_id` is dropped
- *    (C-12).
+ *  - `GroupCallJoin` / `GroupCallLeave` update `joinedMembers`, and only for
+ *    the call the record is about. A body naming any other `call_id` is dropped
+ *    (C-12). A participant re-publishes its `GroupCallJoin` every
+ *    [GROUP_CALL_HEARTBEAT_MS] while it is in the call, so a Join is both
+ *    "I joined" and "I am still here".
+ *  - `joinedMembers` is keyed on the sender leaf's own (device) signature key,
+ *    resolved from the MLS sender leaf AT RECEIPT
+ *    (`chat/AuthorIdentity.kt` `resolveLeafSignatureKey`, the same moment
+ *    message authorship is resolved), never on a leaf index: OpenMLS hands a vacated
+ *    leaf to the next member added, and a leaf-keyed set would let that member
+ *    inherit a departed participant's place in the call (C-68). A Join / Leave
+ *    whose sender could not be resolved is dropped. The value is the DS row
+ *    time of that member's newest Join; a Join never lowers it, a Leave removes
+ *    the member.
  *  - `CallEnd` for the recorded call clears the record.
- *  - LIVE means started within the last [GROUP_CALL_MAX_AGE_MS] AND either
- *    somebody has joined or it was started within the last
- *    [GROUP_CALL_UNJOINED_GRACE_MS]. An announced call nobody connected to stops
- *    advertising itself after the grace; a call whose last leaver crashed
- *    before publishing `GroupCallLeave` stops after the maximum age.
+ *  - A joined member counts only while its newest Join is at most
+ *    [GROUP_CALL_MEMBER_FRESH_MS] old ([freshGroupCallMembers]). A participant
+ *    whose app was killed mid-call never publishes a Leave; it stops counting
+ *    once its heartbeats stop arriving.
+ *  - LIVE means started within the last [GROUP_CALL_MAX_AGE_MS] AND either at
+ *    least one member is fresh or it was started within the last
+ *    [GROUP_CALL_UNJOINED_GRACE_MS].
  *
  * ## C-11
  *
@@ -53,6 +66,16 @@ internal const val GROUP_CALL_MAX_AGE_MS: Long = 4L * 60L * 60L * 1000L
 /** An announced call with nobody joined stays live for this long. */
 internal const val GROUP_CALL_UNJOINED_GRACE_MS: Long = 60_000L
 
+/** A participant re-publishes its `GroupCallJoin` this often while in the call. */
+public const val GROUP_CALL_HEARTBEAT_MS: Long = 60_000L
+
+/**
+ * A joined member counts for this long after its newest Join: two heartbeat
+ * intervals (one lost heartbeat is tolerated) plus a poll's worth of delivery
+ * slack. Identical on web, iOS and Android.
+ */
+internal const val GROUP_CALL_MEMBER_FRESH_MS: Long = 150_000L
+
 /** One chat's recorded group call. */
 internal data class GroupCallRecord(
     /** Lowercase hex of the 16-byte `call_id`. */
@@ -66,8 +89,22 @@ internal data class GroupCallRecord(
      * its liveness), never newer than the moment the server saw the row.
      */
     val startedAtMs: Long,
-    val joinedLeaves: Set<UInt>,
+    /**
+     * Device signature key (base64, resolved at receipt) -> that device's
+     * person key and the DS row time of its newest Join / heartbeat. Includes
+     * devices that are no longer fresh; read it through [freshGroupCallMembers].
+     */
+    val joinedMembers: Map<String, GroupCallMember>,
     val lastActivityMs: Long,
+)
+
+/** One joined device of a [GroupCallRecord]. */
+internal data class GroupCallMember(
+    /** The person (account) key the sender leaf resolved to at receipt, the
+     *  same resolution authorship uses; the device key when that did not
+     *  resolve, so the device still counts as someone. */
+    val personKey: String,
+    val lastSeenMs: Long,
 )
 
 /** A group-call body reduced to what the ledger reads. */
@@ -82,11 +119,38 @@ internal sealed interface GroupCallSignal {
         val video: Boolean,
     ) : GroupCallSignal
 
-    data class Join(override val callIdHex: String, val leaf: UInt) : GroupCallSignal
+    /**
+     * @property leaf the leaf the body names (checked against the row's MLS
+     *   sender leaf by [groupCallSignalSpeaksForSender]).
+     * @property memberKey the sender leaf's own (device) signature key resolved
+     *   at receipt; `null` until attached with [withSender], and a Join without
+     *   one changes nothing.
+     * @property personKey the sender's person key resolved at receipt; `null`
+     *   falls back to [memberKey].
+     */
+    data class Join(
+        override val callIdHex: String,
+        val leaf: UInt,
+        val memberKey: String? = null,
+        val personKey: String? = null,
+    ) : GroupCallSignal
 
-    data class Leave(override val callIdHex: String, val leaf: UInt) : GroupCallSignal
+    /** See [Join]. A Leave removes the device named by [memberKey]. */
+    data class Leave(
+        override val callIdHex: String,
+        val leaf: UInt,
+        val memberKey: String? = null,
+        val personKey: String? = null,
+    ) : GroupCallSignal
 
     data class End(override val callIdHex: String) : GroupCallSignal
+}
+
+/** [this] with the sender identity attached to a Join / Leave; Start and End carry none. */
+internal fun GroupCallSignal.withSender(memberKey: String?, personKey: String?): GroupCallSignal = when (this) {
+    is GroupCallSignal.Join -> copy(memberKey = memberKey, personKey = personKey)
+    is GroupCallSignal.Leave -> copy(memberKey = memberKey, personKey = personKey)
+    is GroupCallSignal.Start, is GroupCallSignal.End -> this
 }
 
 /** Where a decoded call-signaling body goes. */
@@ -163,12 +227,20 @@ internal fun groupCallSignalSpeaksForSender(signal: GroupCallSignal, senderLeaf:
 
 /**
  * The ledger signal a received group-control [body] may contribute, given the
- * MLS sender leaf of its row — [groupCallSignalOf] gated by
- * [groupCallSignalSpeaksForSender]. `null` for a body the ledger does not read
- * AND for one claiming a leaf that is not its sender's.
+ * MLS sender leaf of its row and the identity that leaf resolved to at receipt
+ * — [groupCallSignalOf] gated by [groupCallSignalSpeaksForSender], with
+ * [senderKey] attached. `null` for a body the ledger does not read AND for one
+ * claiming a leaf that is not its sender's.
  */
-internal fun groupCallSignalForRow(body: FfiCallSignalingBody, senderLeaf: UInt?): GroupCallSignal? =
-    groupCallSignalOf(body)?.takeIf { groupCallSignalSpeaksForSender(it, senderLeaf) }
+internal fun groupCallSignalForRow(
+    body: FfiCallSignalingBody,
+    senderLeaf: UInt?,
+    senderKey: String? = null,
+    senderPersonKey: String? = null,
+): GroupCallSignal? =
+    groupCallSignalOf(body)
+        ?.takeIf { groupCallSignalSpeaksForSender(it, senderLeaf) }
+        ?.withSender(senderKey, senderPersonKey)
 
 /** Lowercase hex, the one spelling every comparison in the ledger uses. */
 internal fun callIdHexOf(callId: ByteArray): String =
@@ -192,11 +264,55 @@ internal fun callIdBytesOf(hex: String): ByteArray? {
 private fun ulongMillisToLong(value: ULong): Long =
     if (value > Long.MAX_VALUE.toULong()) Long.MAX_VALUE else value.toLong()
 
+/**
+ * The device keys of [record] whose newest Join is at most
+ * [GROUP_CALL_MEMBER_FRESH_MS] old at [nowMs], minus [ignoreDeviceKey]. A row
+ * time ahead of the local clock (skew) counts as fresh.
+ *
+ * @param ignoreDeviceKey this device's own key when it is NOT in the call
+ *   ([groupCallIgnoredDeviceKey]): an entry left by this device's own session
+ *   before a relaunch is a dead session, never a participant.
+ */
+internal fun freshGroupCallMembers(
+    record: GroupCallRecord,
+    nowMs: Long,
+    ignoreDeviceKey: String? = null,
+): Set<String> =
+    record.joinedMembers
+        .filter { (key, member) ->
+            key != ignoreDeviceKey && nowMs - member.lastSeenMs <= GROUP_CALL_MEMBER_FRESH_MS
+        }
+        .keys
+
+/** "N people in the call": DISTINCT person keys among the fresh devices, so two
+ *  devices of one account count once. */
+internal fun freshGroupCallPeopleCount(
+    record: GroupCallRecord,
+    nowMs: Long,
+    ignoreDeviceKey: String? = null,
+): Int =
+    freshGroupCallMembers(record, nowMs, ignoreDeviceKey)
+        .mapNotNull { record.joinedMembers[it]?.personKey }
+        .toSet()
+        .size
+
+/**
+ * The device key a liveness / count read of [record] must ignore: this
+ * device's own [ownDeviceKey] unless this device is currently in that very
+ * call ([activeGroupCallIdHex] is the host slot's call id).
+ */
+internal fun groupCallIgnoredDeviceKey(
+    record: GroupCallRecord,
+    ownDeviceKey: String?,
+    activeGroupCallIdHex: String?,
+): String? = if (activeGroupCallIdHex == record.callIdHex) null else ownDeviceKey
+
 /** Is [record] a call a member could still join at [nowMs]? */
-internal fun isGroupCallLive(record: GroupCallRecord, nowMs: Long): Boolean {
+internal fun isGroupCallLive(record: GroupCallRecord, nowMs: Long, ignoreDeviceKey: String? = null): Boolean {
     val age = nowMs - record.startedAtMs
     if (age >= GROUP_CALL_MAX_AGE_MS) return false
-    return record.joinedLeaves.isNotEmpty() || age < GROUP_CALL_UNJOINED_GRACE_MS
+    return age < GROUP_CALL_UNJOINED_GRACE_MS ||
+        freshGroupCallMembers(record, nowMs, ignoreDeviceKey).isNotEmpty()
 }
 
 /**
@@ -223,7 +339,7 @@ internal fun reduceGroupCall(
             video = signal.video,
             initiatorLeaf = signal.initiatorLeaf,
             startedAtMs = minOf(signal.createdAtMs, observedAtMs),
-            joinedLeaves = emptySet(),
+            joinedMembers = emptyMap(),
             lastActivityMs = observedAtMs,
         )
         when {
@@ -241,24 +357,32 @@ internal fun reduceGroupCall(
             else -> current
         }
     }
-    is GroupCallSignal.Join ->
-        if (current != null && current.callIdHex == signal.callIdHex) {
+    is GroupCallSignal.Join -> {
+        val key = signal.memberKey
+        if (current != null && current.callIdHex == signal.callIdHex && key != null) {
+            val previous = current.joinedMembers[key]
+            val lastSeen = if (previous == null) observedAtMs else maxOf(previous.lastSeenMs, observedAtMs)
+            val person = signal.personKey ?: previous?.personKey ?: key
+            val next = current.copy(
+                joinedMembers = current.joinedMembers + (key to GroupCallMember(person, lastSeen)),
+                lastActivityMs = maxOf(current.lastActivityMs, observedAtMs),
+            )
+            if (next == current) current else next
+        } else {
+            current
+        }
+    }
+    is GroupCallSignal.Leave -> {
+        val key = signal.memberKey
+        if (current != null && current.callIdHex == signal.callIdHex && key != null) {
             current.copy(
-                joinedLeaves = current.joinedLeaves + signal.leaf,
+                joinedMembers = current.joinedMembers - key,
                 lastActivityMs = maxOf(current.lastActivityMs, observedAtMs),
             )
         } else {
             current
         }
-    is GroupCallSignal.Leave ->
-        if (current != null && current.callIdHex == signal.callIdHex) {
-            current.copy(
-                joinedLeaves = current.joinedLeaves - signal.leaf,
-                lastActivityMs = maxOf(current.lastActivityMs, observedAtMs),
-            )
-        } else {
-            current
-        }
+    }
     is GroupCallSignal.End ->
         if (current != null && current.callIdHex == signal.callIdHex) null else current
 }
@@ -281,10 +405,12 @@ internal fun joinableGroupCall(
     nowMs: Long,
     anyCallActive: Boolean,
     activeGroupCallIdHex: String?,
+    ownDeviceKey: String? = null,
 ): GroupCallRecord? {
     if (record == null || anyCallActive) return null
     if (record.callIdHex == activeGroupCallIdHex) return null
-    return record.takeIf { isGroupCallLive(it, nowMs) }
+    // Not in this call, so this device's own entry is a dead session.
+    return record.takeIf { isGroupCallLive(it, nowMs, ignoreDeviceKey = ownDeviceKey) }
 }
 
 /** What the chat's call buttons do. */
@@ -302,17 +428,29 @@ internal fun callButtonAction(liveRecord: GroupCallRecord?, isGroupChat: Boolean
     }
 
 /**
+ * The FRESH members of the recorded call [callIdHex] other than [ownMemberKey],
+ * or `null` when [record] is absent or about another call. What "nobody else
+ * joined" reads when this device leaves.
+ */
+internal fun otherFreshGroupCallMembers(
+    record: GroupCallRecord?,
+    callIdHex: String,
+    ownMemberKey: String?,
+    nowMs: Long,
+): Set<String>? {
+    if (record == null || record.callIdHex != callIdHex) return null
+    return freshGroupCallMembers(record, nowMs, ignoreDeviceKey = ownMemberKey)
+}
+
+/**
  * After this device's own `GroupCallLeave`, should it also publish `CallEnd`?
- * Only when the recorded call is the one it left and nobody else is recorded
- * as joined. A record about a different call (this device's start lost the
- * tie-break) carries no knowledge of who is in the call it left, so it ends
- * nothing.
+ * Only when the recorded call is the one it left and no OTHER member is fresh.
+ * A record about a different call (this device's start lost the tie-break)
+ * carries no knowledge of who is in the call it left, so it ends nothing.
  */
 internal fun shouldEndGroupCallAfterLeave(
     record: GroupCallRecord?,
     leftCallIdHex: String,
-    ownLeaf: UInt,
-): Boolean =
-    record != null &&
-        record.callIdHex == leftCallIdHex &&
-        (record.joinedLeaves - ownLeaf).isEmpty()
+    ownMemberKey: String?,
+    nowMs: Long,
+): Boolean = otherFreshGroupCallMembers(record, leftCallIdHex, ownMemberKey, nowMs)?.isEmpty() == true

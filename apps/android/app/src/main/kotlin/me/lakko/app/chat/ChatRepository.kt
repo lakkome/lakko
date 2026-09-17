@@ -18,6 +18,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import me.lakko.app.calls.toRow
+import me.lakko.app.calls.withSender
 import me.lakko.app.profile.toFfi
 import me.lakko.app.push.DevicePushId
 import me.lakko.app.push.GroupPushRouting
@@ -158,6 +160,11 @@ public class ChatRepository(
      *  written off the MLS locks after a batch that carried a receipt. */
     private val readWatermarkStore: ReadWatermarkStore =
         SharedPreferencesReadWatermarkStore(applicationContext),
+    /** Durable per-group group-call records, so an ongoing call survives a
+     *  relaunch (the poll resumes past its announce). Seeded at bootstrap;
+     *  written off the MLS locks whenever a record changes. */
+    private val groupCallStore: me.lakko.app.calls.GroupCallStore =
+        me.lakko.app.calls.SharedPreferencesGroupCallStore(applicationContext),
 ) : AutoCloseable {
 
     /**
@@ -508,6 +515,16 @@ public class ChatRepository(
             android.util.Log.w("ChatRepository", "read watermarks not loaded", cause)
             emptyMap()
         }
+        // Same reason, same place: the persisted group-call records.
+        val persistedGroupCalls: Map<String, me.lakko.app.calls.GroupCallRecord> = try {
+            me.lakko.app.calls.groupCallRecordsToSeed(
+                groupCallStore.loadAccount(newAccountIdB64),
+                System.currentTimeMillis(),
+            )
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "group call records not loaded", cause)
+            emptyMap()
+        }
         // Under the provider lock: `restoreStorage` replaces the WHOLE
         // provider and the per-group `loadGroup` / log seeding must land
         // before any poll's apply (which takes this same lock) can run
@@ -553,6 +570,7 @@ public class ChatRepository(
             canonicalIdentity.set(identity)
             accountIdentity.getAndSet(account)?.close()
             currentAccountIdB64.set(newAccountIdB64)
+            seedGroupCalls(persistedGroupCalls)
 
             // Eagerly rebuild `Group` handles for every previously-
             // known group id (1.15f5). `restoreStorage` laid down
@@ -941,9 +959,9 @@ public class ChatRepository(
      * it, and the chat would never learn the call exists. The ledger is fed by
      * every poll of every group ([routeParsedCallSignaling]), open or not.
      *
-     * In memory only. A restart loses the records (the cursor is already past the
-     * announce), so a call started before the restart is not offered until
-     * someone publishes a fresh start.
+     * Persisted per account in [groupCallStore] and seeded at bootstrap, so a
+     * call started before a restart is still offered after it (the cursor is
+     * already past the announce and would never deliver it again).
      */
     internal val groupCalls: StateFlow<Map<String, me.lakko.app.calls.GroupCallRecord>> =
         mutableGroupCalls.asStateFlow()
@@ -962,16 +980,79 @@ public class ChatRepository(
         observedAtMs: Long,
         nowMs: Long = System.currentTimeMillis(),
     ) {
+        var changed = false
         mutableGroupCalls.update { calls ->
             val before = calls[groupIdHex]
             val after = me.lakko.app.calls.reduceGroupCall(before, signal, observedAtMs, nowMs)
+            changed = after != before
             when {
                 after == before -> calls
                 after == null -> calls - groupIdHex
                 else -> calls + (groupIdHex to after)
             }
         }
+        if (changed) persistGroupCall(groupIdHex)
     }
+
+    /** Guards the read-then-write in [persistGroupCall], so two writes landing
+     *  out of order on the IO pool can never leave an older record on disk. */
+    private val groupCallPersistLock = Any()
+
+    /**
+     * Write [groupIdHex]'s CURRENT record to [groupCallStore]. LAUNCHED onto
+     * [pushScope] (`Dispatchers.IO`): callers run inside the poll's locked apply
+     * region, and neither the main thread nor a per-group / provider lock may be
+     * held across disk I/O (G-37). The value written is read at write time under
+     * [groupCallPersistLock], so the last write always stores the latest state.
+     * The account is captured now and re-checked, so a write that outlives a
+     * logout / forget-device does not resurrect wiped rows.
+     */
+    private fun persistGroupCall(groupIdHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        pushScope.launch {
+            synchronized(groupCallPersistLock) {
+                if (currentAccountIdB64.get() != accountIdB64) return@launch
+                val row = mutableGroupCalls.value[groupIdHex]?.toRow()
+                try {
+                    groupCallStore.save(accountIdB64, groupIdHex, row)
+                } catch (cause: Throwable) {
+                    android.util.Log.w("ChatRepository", "group call record not persisted", cause)
+                }
+            }
+        }
+    }
+
+    /** Seed the ledger from the persisted records at bootstrap. Signals already
+     *  folded for a group this session win over its stored record. */
+    private fun seedGroupCalls(stored: Map<String, me.lakko.app.calls.GroupCallRecord>) {
+        if (stored.isEmpty()) return
+        mutableGroupCalls.update { calls -> stored + calls }
+    }
+
+    /** This device's identity as the group-call ledger keys it: its own leaf
+     *  signature key, which is what [resolveLeafSignatureKey] resolves this
+     *  device's rows to on every other member. Per device, not per person, so
+     *  another device of this account in the same call still counts as someone
+     *  else. */
+    internal fun ownGroupCallMemberKey(): MemberIdentity? =
+        canonicalIdentity.get()?.let { identity ->
+            try {
+                outboxB64(identity.signaturePublicKey())
+            } catch (cause: Throwable) {
+                null
+            }
+        }
+
+    /** This device's person key, the way [resolveMemberIdentity] resolves its
+     *  rows on every other member. */
+    private fun ownGroupCallPersonKey(): MemberIdentity? =
+        canonicalIdentity.get()?.let { identity ->
+            try {
+                ownPersonKeyOf(identity)
+            } catch (cause: Throwable) {
+                null
+            }
+        }
 
     /**
      * Route one received call-signaling payload: parse, then
@@ -986,6 +1067,8 @@ public class ChatRepository(
         payload: ByteArray,
         createdAt: String,
         senderLeaf: UInt?,
+        senderKey: MemberIdentity?,
+        senderPersonKey: MemberIdentity?,
     ) {
         val body = try {
             uniffi.lakko_ffi_uniffi.parseCallSignaling(payload)
@@ -993,7 +1076,7 @@ public class ChatRepository(
             android.util.Log.w("ChatRepository", "call signaling: parse failed, dropped", cause)
             return
         }
-        routeParsedCallSignaling(groupIdHex, messageId, body, createdAt, senderLeaf)
+        routeParsedCallSignaling(groupIdHex, messageId, body, createdAt, senderLeaf, senderKey, senderPersonKey)
     }
 
     /**
@@ -1009,13 +1092,19 @@ public class ChatRepository(
         body: uniffi.lakko_ffi_uniffi.FfiCallSignalingBody,
         createdAt: String,
         senderLeaf: UInt?,
+        /** The sender leaf's own signature key resolved at receipt. A Join /
+         *  Leave without one changes no record. */
+        senderKey: MemberIdentity? = null,
+        /** The sender's person key resolved at receipt; `null` counts the
+         *  device as its own person. */
+        senderPersonKey: MemberIdentity? = null,
     ) {
         val route = me.lakko.app.calls.callSignalingRoute(body)
         if (route != me.lakko.app.calls.CallSignalingRoute.ONE_TO_ONE_ONLY) {
             // A group-control body may only speak for its own sender: the leaf
             // it names is an unauthenticated field, the MLS sender leaf of the
             // row is not. A mismatch is dropped (web parity).
-            me.lakko.app.calls.groupCallSignalForRow(body, senderLeaf)
+            me.lakko.app.calls.groupCallSignalForRow(body, senderLeaf, senderKey, senderPersonKey)
                 ?.let { signal ->
                     val now = System.currentTimeMillis()
                     applyGroupCallSignal(
@@ -1158,16 +1247,27 @@ public class ChatRepository(
         }
     }
 
-    /** Is the recorded group call [callIdHex] in [groupIdHex] still live? */
+    /**
+     * Is the recorded group call [callIdHex] in [groupIdHex] still live for a
+     * device that is about to JOIN it? This device is not in that call yet, so
+     * its own entry (a session from before a relaunch) is ignored.
+     */
     internal fun isGroupCallLive(groupIdHex: String, callIdHex: String, nowMs: Long): Boolean {
         val record = groupCalls.value[groupIdHex] ?: return false
-        return record.callIdHex == callIdHex && me.lakko.app.calls.isGroupCallLive(record, nowMs)
+        return record.callIdHex == callIdHex &&
+            me.lakko.app.calls.isGroupCallLive(record, nowMs, ignoreDeviceKey = ownGroupCallMemberKey())
     }
 
-    /** The joined leaves of the recorded group call [callIdHex], or `null` when
-     *  the record is gone or names another call. */
-    internal fun groupCallJoinedLeaves(groupIdHex: String, callIdHex: String): Set<UInt>? =
-        groupCalls.value[groupIdHex]?.takeIf { it.callIdHex == callIdHex }?.joinedLeaves
+    /** The fresh members of the recorded group call [callIdHex] other than this
+     *  device's own identity, or `null` when the record is gone or names another
+     *  call. */
+    internal fun groupCallOtherFreshMembers(groupIdHex: String, callIdHex: String, nowMs: Long): Set<String>? =
+        me.lakko.app.calls.otherFreshGroupCallMembers(
+            groupCalls.value[groupIdHex],
+            callIdHex,
+            ownGroupCallMemberKey(),
+            nowMs,
+        )
 
     /**
      * Compose + publish one group-call body through the locked call-signaling
@@ -1201,7 +1301,11 @@ public class ChatRepository(
             return false
         }
         me.lakko.app.calls.groupCallSignalOf(body)?.let { signal ->
-            applyGroupCallSignal(groupIdHex, signal, System.currentTimeMillis())
+            applyGroupCallSignal(
+                groupIdHex,
+                signal.withSender(ownGroupCallMemberKey(), ownGroupCallPersonKey()),
+                System.currentTimeMillis(),
+            )
         }
         return true
     }
@@ -3902,8 +4006,10 @@ public class ChatRepository(
             )
             record.consumeEvents(
                 events = result.events,
-                callSignalingSink = { messageId, payload, createdAt, senderLeaf ->
-                    routeIncomingCallSignaling(groupIdHex, messageId, payload, createdAt, senderLeaf)
+                callSignalingSink = { messageId, payload, createdAt, senderLeaf, senderKey, senderPersonKey ->
+                    routeIncomingCallSignaling(
+                        groupIdHex, messageId, payload, createdAt, senderLeaf, senderKey, senderPersonKey,
+                    )
                 },
                 profileSink = { senderKey, profile -> receiveProfileBestEffort(senderKey, profile) },
                 groupNameSink = { senderKey, name ->
@@ -4524,6 +4630,8 @@ public class ChatRepository(
                 GroupNameStore.deleteAccount(applicationContext, accountIdB64)
                 // ADR-0024 — and the persisted read watermarks.
                 readWatermarkStore.deleteAccount(accountIdB64)
+                // And the persisted group-call records.
+                groupCallStore.deleteAccount(accountIdB64)
             }
         } catch (_: Throwable) {
             // best-effort
@@ -5775,12 +5883,15 @@ public class ChatRepository(
                             resolveSender = { leaf ->
                                 resolveMemberIdentity(rosterOf(record.group), leaf)
                             },
+                            resolveLeafSignatureKey = { leaf ->
+                                resolveLeafSignatureKey(rosterOf(record.group), leaf)
+                            },
                         )
                         record.consumeEvents(
                             events = listOf(sweptEvent),
-                            callSignalingSink = { messageId, payload, createdAt, senderLeaf ->
+                            callSignalingSink = { messageId, payload, createdAt, senderLeaf, senderKey, senderPersonKey ->
                                 routeIncomingCallSignaling(
-                                    groupIdHex, messageId, payload, createdAt, senderLeaf,
+                                    groupIdHex, messageId, payload, createdAt, senderLeaf, senderKey, senderPersonKey,
                                 )
                             },
                             profileSink = { senderKey, profile ->
@@ -6577,7 +6688,7 @@ private class GroupRecord(
      */
     fun consumeEvents(
         events: List<IncomingChatEvent>,
-        callSignalingSink: ((Long, ByteArray, String, UInt?) -> Unit)? = null,
+        callSignalingSink: ((Long, ByteArray, String, UInt?, MemberIdentity?, MemberIdentity?) -> Unit)? = null,
         pushRoutingSecretSink: ((ByteArray, ULong, UInt?) -> Unit)? = null,
         committerBeaconSink: ((UInt?, String) -> Unit)? = null,
         membershipProposalSink: ((ProposalRecord, String) -> Unit)? = null,
@@ -6645,6 +6756,8 @@ private class GroupRecord(
                         event.payloadBytes,
                         event.createdAt,
                         event.senderLeaf,
+                        event.senderKey,
+                        event.senderPersonKey,
                     )
                 }
                 is IncomingChatEvent.Profile -> {

@@ -92,6 +92,22 @@ export function resolveMemberIdentity(
 }
 
 /**
+ * Resolve one MLS leaf index to that leaf's OWN signature key (the device
+ * key, ADR-0050), not the person key {@link resolveMemberIdentity} returns.
+ *
+ * For state that is per device rather than per person: the group-call roster
+ * (`calls/group-call-record.ts`), where each device joins and leaves on its
+ * own. Same rule otherwise — resolve at receipt, `undefined` on a miss.
+ */
+export function resolveLeafSignatureKey(
+  roster: readonly RosterMember[],
+  leafIndex: number,
+): string | undefined {
+  const hit = roster.find((m) => m.leafIndex === leafIndex);
+  return hit === undefined ? undefined : base64Encode(hit.signaturePublicKey);
+}
+
+/**
  * Read an author identity back off a persisted message-log row.
  *
  * The stored field is `string | null` in a v2 row and **absent

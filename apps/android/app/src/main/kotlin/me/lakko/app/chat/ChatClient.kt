@@ -403,6 +403,7 @@ public class ChatClient(
                     createdAt = message.createdAt,
                     processed = processed,
                     resolveSender = { leaf -> resolveMemberIdentity(rosterOf(group), leaf) },
+                    resolveLeafSignatureKey = { leaf -> resolveLeafSignatureKey(rosterOf(group), leaf) },
                 ),
             )
         }
@@ -627,6 +628,10 @@ private fun decodeGroupNameOrNull(bytes: ByteArray): FfiGroupName? =
  *   never during). Resolving later, from a stored leaf, is what lets a member
  *   added into a departed member's vacated leaf inherit that member's
  *   authorship. See `AuthorIdentity.kt`.
+ * @param resolveLeafSignatureKey maps an MLS leaf index to that leaf's own
+ *   (device) signature key, at the same moment and for the same reason as
+ *   [resolveSender]; the group-call ledger keys joined devices on it. No
+ *   default, for the same reason.
  * @param isCommitterBeacon the ADR-0045 beacon arm (cheap peek + authoritative
  *   decode). Defaults to the real FFI-backed [committerBeaconArm].
  * @param parseBody the ADR-0023 structured body parser. Defaults to the real
@@ -641,6 +646,7 @@ internal fun toEvent(
     createdAt: String,
     processed: ProcessedMessage,
     resolveSender: (UInt) -> MemberIdentity?,
+    resolveLeafSignatureKey: (UInt) -> MemberIdentity?,
     isCommitterBeacon: (ByteArray) -> Boolean = ::committerBeaconArm,
     parseBody: (ByteArray) -> ParsedBody = ::parseBodyEnvelope,
     decodeProfile: (ByteArray) -> FfiProfile? = ::decodeProfileOrNull,
@@ -687,6 +693,13 @@ internal fun toEvent(
                     // that does not match this (a member may only speak for
                     // itself).
                     senderLeaf = processed.senderLeaf,
+                    // Resolved NOW, at the epoch this row decrypted at: the
+                    // group-call ledger keys joined devices on this leaf's own
+                    // signature key, never on the leaf index (C-68).
+                    senderKey = processed.senderLeaf?.let(resolveLeafSignatureKey),
+                    // ...and the person that device belongs to, the way
+                    // authorship resolves it, for the "N people" count.
+                    senderPersonKey = processed.senderLeaf?.let(resolveSender),
                     createdAt = createdAt,
                 )
             } else if (routingSecret != null) {
@@ -1060,6 +1073,13 @@ public sealed interface IncomingChatEvent {
          *  sender. A group-control body is refused unless the leaf it claims
          *  equals this one. */
         val senderLeaf: UInt? = null,
+        /** The sender leaf's own (device) signature key resolved from
+         *  [senderLeaf] at receipt ([resolveLeafSignatureKey]), `null` when it
+         *  did not resolve. */
+        val senderKey: MemberIdentity? = null,
+        /** The sender's person key resolved from [senderLeaf] at receipt
+         *  ([resolveMemberIdentity]), `null` when it did not resolve. */
+        val senderPersonKey: MemberIdentity? = null,
     ) : IncomingChatEvent {
         // Override equals / hashCode for the payload
         // ByteArray — default reference equality would
@@ -1070,7 +1090,9 @@ public sealed interface IncomingChatEvent {
             return messageId == other.messageId &&
                 payloadBytes.contentEquals(other.payloadBytes) &&
                 createdAt == other.createdAt &&
-                senderLeaf == other.senderLeaf
+                senderLeaf == other.senderLeaf &&
+                senderKey == other.senderKey &&
+                senderPersonKey == other.senderPersonKey
         }
 
         override fun hashCode(): Int {
@@ -1078,6 +1100,8 @@ public sealed interface IncomingChatEvent {
             result = 31 * result + payloadBytes.contentHashCode()
             result = 31 * result + createdAt.hashCode()
             result = 31 * result + (senderLeaf?.hashCode() ?: 0)
+            result = 31 * result + (senderKey?.hashCode() ?: 0)
+            result = 31 * result + (senderPersonKey?.hashCode() ?: 0)
             return result
         }
     }

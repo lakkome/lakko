@@ -57,7 +57,9 @@ import { groupCallsFor } from "../calls/group-call-store";
 import { chatCallAffordance, type ChatCallAffordance } from "../calls/group-call-host";
 import {
   NO_GROUP_CALLS,
+  freshParticipantCount,
   selectLiveGroupCall,
+  type GroupCallViewer,
   type GroupCallRecord,
   type GroupCallRecords,
 } from "../calls/group-call-record";
@@ -639,8 +641,18 @@ function ChatView(props: {
   const [groupCallClock, setGroupCallClock] = createSignal(Date.now());
   const groupCallClockTimer = setInterval(() => setGroupCallClock(Date.now()), 10_000);
   onCleanup(() => clearInterval(groupCallClockTimer));
+  /** This device's own entry counts only while it is in that call, so a
+   *  session that died before a reload never reads as someone in the call. */
+  const groupCallViewer = (): GroupCallViewer | undefined => {
+    const id = chats.identity();
+    if (id === null) return undefined;
+    return {
+      ownMemberKey: base64Encode(id.signaturePublicKey),
+      inCallIdHex: callHost.groupCall()?.callIdHex ?? null,
+    };
+  };
   const liveGroupCall = createMemo<GroupCallRecord | null>(() =>
-    selectLiveGroupCall(groupCalls(), groupCallClock()),
+    selectLiveGroupCall(groupCalls(), groupCallClock(), groupCallViewer()),
   );
 
   /** Best name for this chat (ADR-0048 §5) — `chat/peer-name.ts`, shared with
@@ -2895,6 +2907,8 @@ function ChatView(props: {
           createdAt: e.createdAt,
           payloadBytes: e.payloadBytes,
           ...(e.senderLeaf === undefined ? {} : { senderLeaf: e.senderLeaf }),
+          ...(e.senderMemberKey === undefined ? {} : { senderMemberKey: e.senderMemberKey }),
+          ...(e.senderKey === undefined ? {} : { senderPersonKey: e.senderKey }),
         });
         continue;
       }
@@ -5121,7 +5135,7 @@ function ChatView(props: {
 
       {/* Group call in progress that this device is not in. Announced by
           the initiator's GroupCallStart and kept current by every
-          participant's Join / Leave (see calls/group-call-record.ts). */}
+          participant's Join heartbeat / Leave (see calls/group-call-record.ts). */}
       <Show when={callAffordance() === "join-group"}>
         <div
           role="status"
@@ -5145,7 +5159,8 @@ function ChatView(props: {
             <strong>Group call in progress</strong>
             <div style={{ "font-size": "0.85rem", "margin-top": "0.2rem" }}>
               {(() => {
-                const n = liveGroupCall()?.joinedLeaves.size ?? 0;
+                const live = liveGroupCall();
+                const n = live === null ? 0 : freshParticipantCount(live, groupCallClock(), groupCallViewer());
                 if (n === 0) return "Starting…";
                 return n === 1 ? "1 person in the call" : `${n} people in the call`;
               })()}

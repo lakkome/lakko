@@ -176,6 +176,7 @@ class ChatServiceEnvelopeTest {
             // below. The attribution rule has its own suite
             // (`AuthorIdentityTest`).
             resolveSender = { null },
+            resolveLeafSignatureKey = { null },
             isCommitterBeacon = ::fakeBeaconArm,
             parseBody = ::lossyParseBody,
         )

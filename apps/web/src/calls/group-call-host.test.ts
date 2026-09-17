@@ -20,8 +20,8 @@ function leave(over: Partial<GroupCallLeaveInput>): GroupCallLeaveInput {
     sessionFailed: false,
     joinPublished: true,
     initiator: false,
-    ownLeaf: 3,
-    recordJoinedLeaves: new Set([3]),
+    ownMemberKey: "own",
+    recordFreshMemberKeys: new Set(["own"]),
     ...over,
   };
 }
@@ -36,7 +36,7 @@ describe("planGroupCallLeave", () => {
   });
 
   it("does not end a call somebody else is still in", () => {
-    const plan = planGroupCallLeave(leave({ recordJoinedLeaves: new Set([3, 7]) }));
+    const plan = planGroupCallLeave(leave({ recordFreshMemberKeys: new Set(["own", "other"]) }));
     expect(plan.publishLeave).toBe(true);
     expect(plan.publishEnd).toBe(false);
   });
@@ -44,7 +44,7 @@ describe("planGroupCallLeave", () => {
   it("a joiner whose connection failed before it ever joined tells nobody anything", () => {
     // It must not end a call other members may be about to enter.
     const plan = planGroupCallLeave(
-      leave({ joinPublished: false, recordJoinedLeaves: new Set<number>(), reason: "error" }),
+      leave({ joinPublished: false, recordFreshMemberKeys: new Set<string>(), reason: "error" }),
     );
     expect(plan.publishLeave).toBe(false);
     expect(plan.publishEnd).toBe(false);
@@ -52,14 +52,14 @@ describe("planGroupCallLeave", () => {
 
   it("an initiator whose session never connected still owes the End of the call it announced", () => {
     const plan = planGroupCallLeave(
-      leave({ joinPublished: false, initiator: true, recordJoinedLeaves: new Set<number>() }),
+      leave({ joinPublished: false, initiator: true, recordFreshMemberKeys: new Set<string>() }),
     );
     expect(plan.publishLeave).toBe(false);
     expect(plan.publishEnd).toBe(true);
   });
 
   it("a record already gone (someone else ended it) counts as nobody else joined", () => {
-    expect(planGroupCallLeave(leave({ recordJoinedLeaves: null })).publishEnd).toBe(true);
+    expect(planGroupCallLeave(leave({ recordFreshMemberKeys: null })).publishEnd).toBe(true);
   });
 
   it("a failed session overrides the requested reason", () => {
@@ -210,5 +210,15 @@ describe("chatCallAffordance", () => {
   it("otherwise starts a group call for more than two members and a 1x1 call for two", () => {
     expect(chatCallAffordance(affordance({ memberCount: 3 }))).toBe("start-group");
     expect(chatCallAffordance(affordance({ memberCount: 2 }))).toBe("start-one-to-one");
+  });
+});
+
+describe("planGroupCallLeave and the person's other device", () => {
+  it("excludes only this device's key, so another device of the same person keeps the call", () => {
+    const plan = planGroupCallLeave(
+      leave({ recordFreshMemberKeys: new Set(["own", "own-person-laptop"]) }),
+    );
+    expect(plan.publishLeave).toBe(true);
+    expect(plan.publishEnd).toBe(false);
   });
 });

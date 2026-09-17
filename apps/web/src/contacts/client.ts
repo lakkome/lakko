@@ -106,7 +106,7 @@ import type { ActingCommitter } from "../chat/committer-beacon";
 // never fetch again, so it has to build events for them, and it has to build
 // them the same way the poll does.
 import { rosterOf, toEvent } from "../chat/client";
-import { resolveMemberIdentity } from "../chat/author-identity";
+import { resolveLeafSignatureKey, resolveMemberIdentity } from "../chat/author-identity";
 import type { IncomingChatEvent } from "../chat/client";
 // ADR-0045 UX §6 — the seventh refusal string, defined ONCE beside the rest of
 // the §6.1 copy. Both C-65 directions reuse it verbatim (a pending role change
@@ -655,8 +655,12 @@ function sweepPortsFor(
           // is the epoch this row decrypted at — a leaf resolved any later
           // can name whoever was added into a vacated slot since.
           onSweptEvent(
-            await toEvent(row.id, row.createdAt, processed, (leaf) =>
-              resolveMemberIdentity(rosterOf(group), leaf),
+            await toEvent(
+              row.id,
+              row.createdAt,
+              processed,
+              (leaf) => resolveMemberIdentity(rosterOf(group), leaf),
+              (leaf) => resolveLeafSignatureKey(rosterOf(group), leaf),
             ),
           );
         } catch (err) {

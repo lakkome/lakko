@@ -44,7 +44,9 @@ enum GroupCallHostRules {
     /// Decide what leaving announces.
     ///
     /// A Leave only if this device announced a Join. A `CallEnd` only when the
-    /// chat's record shows nobody else joined, and only from a device that was
+    /// chat's record shows no FRESH device other than this one (a device whose
+    /// heartbeats stopped — its app was killed — no longer keeps the call open;
+    /// another device of the same person still does), and only from a device that was
     /// actually in the call (joined) or that started it: a joiner whose
     /// connection failed before it ever joined must not end a call other members
     /// may be about to enter.
@@ -56,14 +58,20 @@ enum GroupCallHostRules {
     ///
     /// - Parameters:
     ///   - hungUp: the user ended it (`false` when the session failed).
+    ///   - ownDeviceKey: this device's own leaf signature key (the key its own
+    ///     joins are recorded under). `nil` excludes nothing, so a fresh own
+    ///     entry then reads as someone else still in — the direction that never
+    ///     ends a call wrongly.
     ///   - record: the chat's group-call record at leave time.
+    ///   - nowMs: the instant freshness is judged at.
     static func planLeave(
         hungUp: Bool,
         joinPublished: Bool,
         initiator: Bool,
         callId: Data,
-        ownLeaf: UInt32,
-        record: OngoingGroupCall?
+        ownDeviceKey: MemberIdentity?,
+        record: OngoingGroupCall?,
+        nowMs: Int64
     ) -> LeavePlan {
         let reason: FfiCallEndReason = hungUp ? .hungUp : .error
         var publishEnd = false
@@ -71,7 +79,7 @@ enum GroupCallHostRules {
             let othersJoined: Bool
             if let record {
                 othersJoined = record.callId != callId
-                    || !record.joinedLeaves.subtracting([ownLeaf]).isEmpty
+                    || !record.freshDevices(nowMs: nowMs, ignoringDevice: ownDeviceKey).isEmpty
             } else {
                 othersJoined = false
             }

@@ -56,28 +56,27 @@ class CallSlotRulesTest {
             sessionFailed = false,
             joinPublished = true,
             initiator = false,
-            ownLeaf = 2u,
-            recordJoinedLeaves = setOf(2u),
+            recordOtherFreshMembers = emptySet(),
         )
         assertEquals(GroupCallLeavePlan(GroupLeaveReason.HUNG_UP, publishLeave = true, publishEnd = true), plan)
     }
 
     @Test
     fun `leaving a call others are still in publishes only the Leave`() {
-        val plan = planGroupCallLeave(GroupLeaveReason.HUNG_UP, false, true, true, 2u, setOf(2u, 5u))
+        val plan = planGroupCallLeave(GroupLeaveReason.HUNG_UP, false, true, true, setOf("bob"))
         assertTrue(plan.publishLeave)
         assertEquals(false, plan.publishEnd)
     }
 
     @Test
     fun `a joiner that never joined ends nothing, even when the record is empty`() {
-        val plan = planGroupCallLeave(GroupLeaveReason.ERROR, false, false, false, 2u, emptySet())
+        val plan = planGroupCallLeave(GroupLeaveReason.ERROR, false, false, false, emptySet())
         assertEquals(GroupCallLeavePlan(GroupLeaveReason.ERROR, publishLeave = false, publishEnd = false), plan)
     }
 
     @Test
     fun `an initiator whose connection failed before joining ends the call it announced`() {
-        val plan = planGroupCallLeave(GroupLeaveReason.HUNG_UP, true, false, true, 1u, null)
+        val plan = planGroupCallLeave(GroupLeaveReason.HUNG_UP, true, false, true, null)
         assertEquals(GroupCallLeavePlan(GroupLeaveReason.ERROR, publishLeave = false, publishEnd = true), plan)
     }
 

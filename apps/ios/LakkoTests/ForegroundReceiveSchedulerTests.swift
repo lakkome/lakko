@@ -277,7 +277,7 @@ final class UnreadCountingTests: XCTestCase {
         let events: [IncomingChatEvent] = [
             message(1),
             .system(messageId: 2, systemKind: .commit, createdAt: ""),
-            .callSignaling(messageId: 3, payloadBytes: Data(), createdAt: "", senderLeaf: nil),
+            .callSignaling(messageId: 3, payloadBytes: Data(), createdAt: "", senderLeaf: nil, senderDeviceKey: nil, senderKey: nil),
             message(4),
         ]
         XCTAssertEqual(UnreadCounting.incomingMessages(in: events), 2)

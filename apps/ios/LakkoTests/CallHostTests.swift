@@ -111,7 +111,7 @@ final class CallHostTests: XCTestCase {
 
         let bytes = try composeCallSignaling(body: offer(callA, video: true))
         repo.routeCallSignaling(
-            groupIdHex: groupA, messageId: 7, payload: bytes, createdAt: dsTime(t0 - 2_000), senderLeaf: 1)
+            groupIdHex: groupA, messageId: 7, payload: bytes, createdAt: dsTime(t0 - 2_000), senderLeaf: 1, senderDeviceKey: "device-1", senderKey: "member-1")
 
         XCTAssertEqual(host.activeCall?.state, .ringing)
         XCTAssertEqual(host.activeCallState, .ringing)
@@ -134,7 +134,7 @@ final class CallHostTests: XCTestCase {
         XCTAssertNotNil(model)
         let bytes = try composeCallSignaling(body: offer(callA))
         repo.routeCallSignaling(
-            groupIdHex: groupA, messageId: 1, payload: bytes, createdAt: dsTime(t0), senderLeaf: 1)
+            groupIdHex: groupA, messageId: 1, payload: bytes, createdAt: dsTime(t0), senderLeaf: 1, senderDeviceKey: "device-1", senderKey: "member-1")
         XCTAssertEqual(host.activeCall?.state, .ringing, "an offer on another chat must still ring")
 
         // The view model going away (leaving the chat, a SwiftUI rebuild) does
@@ -282,7 +282,7 @@ final class CallHostTests: XCTestCase {
             body: .groupStart(callId: callA, initiatorLeaf: 1, createdAtMs: UInt64(t0),
                               media: FfiCallMediaFlags(audio: true, video: false)))
         repo.routeCallSignaling(
-            groupIdHex: groupA, messageId: 2, payload: start, createdAt: dsTime(t0), senderLeaf: 1)
+            groupIdHex: groupA, messageId: 2, payload: start, createdAt: dsTime(t0), senderLeaf: 1, senderDeviceKey: "device-1", senderKey: "member-1")
         XCTAssertEqual(host.activeCall?.state, .ringing)
 
         // And the pure rule drops them even if a caller mis-routed one.

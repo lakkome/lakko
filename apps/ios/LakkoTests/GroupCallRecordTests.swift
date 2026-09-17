@@ -43,9 +43,22 @@ final class GroupCallRecordTests: XCTestCase {
         from initial: OngoingGroupCall? = nil
     ) -> OngoingGroupCall? {
         signals.reduce(initial) { current, step in
-            GroupCallReducer.apply(step.0, to: current, rowCreatedAtMs: step.1)
+            GroupCallReducer.apply(
+                step.0, participant: step.0.claimedLeaf.map(participant), to: current,
+                rowCreatedAtMs: step.1)
         }
     }
+
+    /// The fixture DEVICE key of the leaf: in these reducer tests a leaf
+    /// resolves to one fixed key, as it does within one epoch.
+    private func member(_ leaf: UInt32) -> MemberIdentity { "member-\(leaf)" }
+
+    /// The leaf as a participant: its device key, and a person of its own.
+    private func participant(_ leaf: UInt32) -> GroupCallParticipant {
+        GroupCallParticipant(deviceKey: member(leaf), personKey: "person-\(leaf)")
+    }
+
+    private func members(_ leaves: UInt32...) -> Set<MemberIdentity> { Set(leaves.map(member)) }
 
     // MARK: - Create / join / leave / end
 
@@ -55,7 +68,7 @@ final class GroupCallRecordTests: XCTestCase {
         XCTAssertEqual(r.initiatorLeaf, 4)
         XCTAssertTrue(r.video)
         XCTAssertEqual(r.startedAtMs, t0)
-        XCTAssertTrue(r.joinedLeaves.isEmpty)
+        XCTAssertTrue(r.joined.isEmpty)
     }
 
     func testStartTimeIsBoundedByTheServerRowTime() throws {
@@ -75,7 +88,7 @@ final class GroupCallRecordTests: XCTestCase {
             (.join(callId: callA, leafIndex: 2), t0 + 2_000),
             (.leave(callId: callA, leafIndex: 1), t0 + 3_000),
         ]))
-        XCTAssertEqual(r.joinedLeaves, [2])
+        XCTAssertEqual(Set(r.joined.keys), members(2))
         XCTAssertEqual(r.lastActivityMs, t0 + 3_000)
     }
 
@@ -90,7 +103,7 @@ final class GroupCallRecordTests: XCTestCase {
             (.end(callId: callB), t0 + 4_000),
         ]))
         XCTAssertEqual(r.callId, callA)
-        XCTAssertEqual(r.joinedLeaves, [1])
+        XCTAssertEqual(Set(r.joined.keys), members(1))
     }
 
     func testJoinWithNoRecordCreatesNothing() {
@@ -111,7 +124,7 @@ final class GroupCallRecordTests: XCTestCase {
             (.join(callId: callA, leafIndex: 3), t0 + 1_000),
             (start(callA, at: t0 + 5_000), t0 + 5_000),
         ]))
-        XCTAssertEqual(r.joinedLeaves, [3])
+        XCTAssertEqual(Set(r.joined.keys), members(3))
         XCTAssertEqual(r.startedAtMs, t0)
     }
 
@@ -124,14 +137,175 @@ final class GroupCallRecordTests: XCTestCase {
         XCTAssertFalse(GroupCallReducer.isLive(r, nowMs: t0 + GroupCallReducer.unjoinedGraceMs + 1))
     }
 
-    func testAJoinedCallStaysLiveUntilTheMaxAge() throws {
+    /// A member that keeps its heartbeat going keeps the call live up to the
+    /// max age, and not a millisecond past it.
+    func testAHeartbeatingCallStaysLiveUntilTheMaxAge() throws {
+        let beats = stride(
+            from: t0 + 1_000, through: t0 + GroupCallReducer.maxLiveAgeMs + 60_000,
+            by: Int(GroupCallReducer.heartbeatMs)
+        ).map { (GroupCallSignal.join(callId: callA, leafIndex: 1), $0) }
+        let r = try XCTUnwrap(record([(start(callA, at: t0), t0)] + beats))
+        XCTAssertTrue(GroupCallReducer.isLive(r, nowMs: t0 + 2 * 60 * 60 * 1000))
+        XCTAssertTrue(GroupCallReducer.isLive(r, nowMs: t0 + GroupCallReducer.maxLiveAgeMs))
+        XCTAssertFalse(GroupCallReducer.isLive(r, nowMs: t0 + GroupCallReducer.maxLiveAgeMs + 1))
+    }
+
+    /// The live defect: a participant whose app was killed never publishes a
+    /// Leave. Its join stops counting once it is older than the fresh window,
+    /// and the call stops being live on its own — no new row needed.
+    func testAMemberWhoseHeartbeatsStoppedStopsCountingAndTheGhostCallDies() throws {
         let r = try XCTUnwrap(record([
             (start(callA, at: t0), t0),
             (.join(callId: callA, leafIndex: 1), t0 + 1_000),
         ]))
-        XCTAssertTrue(GroupCallReducer.isLive(r, nowMs: t0 + 2 * 60 * 60 * 1000))
-        XCTAssertTrue(GroupCallReducer.isLive(r, nowMs: t0 + GroupCallReducer.maxLiveAgeMs))
-        XCTAssertFalse(GroupCallReducer.isLive(r, nowMs: t0 + GroupCallReducer.maxLiveAgeMs + 1))
+        let lastSeen = t0 + 1_000
+        XCTAssertEqual(r.freshDevices(nowMs: lastSeen + GroupCallReducer.memberFreshMs), members(1))
+        XCTAssertTrue(GroupCallReducer.isLive(r, nowMs: lastSeen + GroupCallReducer.memberFreshMs))
+        XCTAssertEqual(r.freshDevices(nowMs: lastSeen + GroupCallReducer.memberFreshMs + 1), [])
+        XCTAssertFalse(GroupCallReducer.isLive(r, nowMs: lastSeen + GroupCallReducer.memberFreshMs + 1))
+        XCTAssertEqual(
+            GroupCallAffordance.of(record: r, activeGroupCallId: nil, ownDeviceKey: nil, nowMs: lastSeen + GroupCallReducer.memberFreshMs + 1),
+            .none)
+    }
+
+    /// Fresh and stale members side by side: only the fresh one is counted.
+    func testTheCountIsFreshMembersOnly() throws {
+        let now = t0 + 10 * 60_000
+        let r = try XCTUnwrap(record([
+            (start(callA, at: t0), t0),
+            (.join(callId: callA, leafIndex: 1), t0 + 1_000),        // stale by `now`
+            (.join(callId: callA, leafIndex: 2), now - 30_000),      // fresh
+        ]))
+        XCTAssertEqual(Set(r.joined.keys), members(1, 2), "a stale member is kept, just not counted")
+        XCTAssertEqual(r.freshDevices(nowMs: now), members(2))
+        XCTAssertEqual(
+            GroupCallAffordance.of(record: r, activeGroupCallId: nil, ownDeviceKey: nil, nowMs: now),
+            .joinable(callId: callA, joinedCount: 1, video: false))
+    }
+
+    /// A heartbeat advances a member's last-seen time; an older row (a replay,
+    /// or a join that arrived late) never lowers it.
+    func testAHeartbeatAdvancesLastSeenAndAnOlderRowNeverLowersIt() throws {
+        let r = try XCTUnwrap(record([
+            (start(callA, at: t0), t0),
+            (.join(callId: callA, leafIndex: 1), t0 + 1_000),
+            (.join(callId: callA, leafIndex: 1), t0 + 61_000),
+        ]))
+        XCTAssertEqual(r.joined[member(1)]?.lastSeenMs, t0 + 61_000)
+        let replay = try XCTUnwrap(record([(.join(callId: callA, leafIndex: 1), t0 + 5_000)], from: r))
+        XCTAssertEqual(replay.joined[member(1)]?.lastSeenMs, t0 + 61_000)
+    }
+
+    func testALeaveRemovesTheMemberAndAnEndRemovesTheRecord() throws {
+        let r = try XCTUnwrap(record([
+            (start(callA, at: t0), t0),
+            (.join(callId: callA, leafIndex: 1), t0 + 1_000),
+            (.join(callId: callA, leafIndex: 2), t0 + 2_000),
+            (.leave(callId: callA, leafIndex: 1), t0 + 3_000),
+        ]))
+        XCTAssertNil(r.joined[member(1)])
+        XCTAssertEqual(r.freshDevices(nowMs: t0 + 3_000), members(2))
+        XCTAssertNil(record([(.end(callId: callA), t0 + 4_000)], from: r))
+    }
+
+    /// A join or leave whose MLS sender did not resolve to a signature key names
+    /// nobody, and is dropped.
+    func testAJoinOrLeaveWithAnUnresolvableSenderIsDropped() throws {
+        let started = try XCTUnwrap(record([
+            (start(callA, at: t0), t0),
+            (.join(callId: callA, leafIndex: 1), t0 + 1_000),
+        ]))
+        let join = GroupCallReducer.apply(
+            .join(callId: callA, leafIndex: 2), participant: nil, to: started, rowCreatedAtMs: t0 + 2_000)
+        XCTAssertEqual(join, started)
+        let leave = GroupCallReducer.apply(
+            .leave(callId: callA, leafIndex: 1), participant: nil, to: started, rowCreatedAtMs: t0 + 2_000)
+        XCTAssertEqual(leave, started)
+    }
+
+    /// C-68: leaf 1 is removed and the next member added inherits leaf 1. The
+    /// newcomer resolves to its OWN key, so it does not inherit the departed
+    /// member's place in the call, and the departed member's stale entry does
+    /// not keep counting for the newcomer.
+    func testAMemberAddedIntoAVacatedLeafDoesNotInheritMembership() throws {
+        var r = try XCTUnwrap(record([
+            (start(callA, at: t0), t0),
+            (.join(callId: callA, leafIndex: 1), t0 + 1_000),
+        ]))
+        // Bob (leaf 1) is removed from the group without leaving the call; Dave
+        // is added into leaf 1 and leaves a call he never joined.
+        r = try XCTUnwrap(GroupCallReducer.apply(
+            .leave(callId: callA, leafIndex: 1), participant: GroupCallParticipant(deviceKey: "dave", personKey: "person-dave"), to: r, rowCreatedAtMs: t0 + 2_000))
+        XCTAssertEqual(Set(r.joined.keys), members(1), "Dave's leave cannot remove Bob")
+        r = try XCTUnwrap(GroupCallReducer.apply(
+            .join(callId: callA, leafIndex: 1), participant: GroupCallParticipant(deviceKey: "dave", personKey: "person-dave"), to: r, rowCreatedAtMs: t0 + 3_000))
+        XCTAssertEqual(Set(r.joined.keys), members(1).union(["dave"]))
+        // Bob's heartbeats stopped with his removal: only Dave is still counted.
+        let later = t0 + 1_000 + GroupCallReducer.memberFreshMs + 1
+        XCTAssertEqual(r.freshDevices(nowMs: later), ["dave"])
+    }
+
+    /// Two devices of one person in the call: one device leaves, the other keeps
+    /// the call live, and the banner still counts one person.
+    func testTwoDevicesOfOnePersonCountOnceAndOneLeavingKeepsTheCall() throws {
+        let phone = GroupCallParticipant(deviceKey: "alice-phone", personKey: "alice")
+        let tablet = GroupCallParticipant(deviceKey: "alice-tablet", personKey: "alice")
+        var r = try XCTUnwrap(record([(start(callA, at: t0), t0)]))
+        r = try XCTUnwrap(GroupCallReducer.apply(
+            .join(callId: callA, leafIndex: 1), participant: phone, to: r, rowCreatedAtMs: t0 + 1_000))
+        r = try XCTUnwrap(GroupCallReducer.apply(
+            .join(callId: callA, leafIndex: 2), participant: tablet, to: r, rowCreatedAtMs: t0 + 2_000))
+        XCTAssertEqual(r.freshPeopleCount(nowMs: t0 + 3_000), 1)
+        XCTAssertEqual(
+            GroupCallAffordance.of(record: r, activeGroupCallId: nil, ownDeviceKey: nil, nowMs: t0 + 3_000),
+            .joinable(callId: callA, joinedCount: 1, video: false))
+
+        r = try XCTUnwrap(GroupCallReducer.apply(
+            .leave(callId: callA, leafIndex: 1), participant: phone, to: r, rowCreatedAtMs: t0 + 4_000))
+        let now = t0 + 5 * 60_000
+        XCTAssertEqual(r.freshDevices(nowMs: t0 + 5_000), ["alice-tablet"])
+        XCTAssertTrue(GroupCallReducer.isLive(r, nowMs: t0 + 5_000))
+        XCTAssertEqual(
+            GroupCallAffordance.of(record: r, activeGroupCallId: nil, ownDeviceKey: nil, nowMs: t0 + 5_000),
+            .joinable(callId: callA, joinedCount: 1, video: false))
+        // And, with no heartbeat from the tablet, it too ages out.
+        XCTAssertFalse(GroupCallReducer.isLive(r, nowMs: now))
+
+        // The leaving device's plan does not end the call its other device is in.
+        let plan = GroupCallHostRules.planLeave(
+            hungUp: true, joinPublished: true, initiator: false, callId: callA,
+            ownDeviceKey: "alice-phone", record: r, nowMs: t0 + 5_000)
+        XCTAssertEqual(plan.publishEnd, false)
+    }
+
+    /// After a relaunch mid-call this device is not in the call, and the entry
+    /// it left behind is neither liveness nor a person in the count.
+    func testOwnStaleEntryAfterRelaunchIsNotCountedOrLive() throws {
+        let r = try XCTUnwrap(record([
+            (start(callA, at: t0), t0),
+            (.join(callId: callA, leafIndex: 3), t0 + 120_000),
+        ]))
+        let now = t0 + 150_000
+        XCTAssertEqual(
+            GroupCallAffordance.of(record: r, activeGroupCallId: nil, ownDeviceKey: member(3), nowMs: now),
+            .none, "only this device's own entry: no call to join")
+        XCTAssertEqual(
+            GroupCallAffordance.of(record: r, activeGroupCallId: nil, ownDeviceKey: member(4), nowMs: now),
+            .joinable(callId: callA, joinedCount: 1, video: false))
+        // With another fresh participant it is joinable, counted without this device.
+        let withOther = try XCTUnwrap(record([(.join(callId: callA, leafIndex: 5), now)], from: r))
+        XCTAssertEqual(
+            GroupCallAffordance.of(record: withOther, activeGroupCallId: nil, ownDeviceKey: member(3), nowMs: now),
+            .joinable(callId: callA, joinedCount: 1, video: false))
+        // While in the call, the own entry counts as before.
+        XCTAssertEqual(
+            GroupCallAffordance.of(record: r, activeGroupCallId: callA, ownDeviceKey: member(3), nowMs: now),
+            .inCall)
+    }
+
+    func testTheHeartbeatConstantsAreTheContractValues() {
+        XCTAssertEqual(GroupCallReducer.heartbeatMs, 60_000)
+        XCTAssertEqual(GroupCallReducer.memberFreshMs, 150_000)
     }
 
     func testTheLastLeaveEndsLivenessAfterTheGraceWindow() throws {
@@ -146,6 +320,56 @@ final class GroupCallRecordTests: XCTestCase {
     func testTheWindowsAreTheContractValues() {
         XCTAssertEqual(GroupCallReducer.maxLiveAgeMs, 4 * 60 * 60 * 1000)
         XCTAssertEqual(GroupCallReducer.unjoinedGraceMs, 60 * 1000)
+    }
+
+    // MARK: - Persistence
+
+    private func isolatedDefaults() -> UserDefaults {
+        let name = "GroupCallStoreTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+        return defaults
+    }
+
+    func testTheStoreRoundTripsRecordsPerAccount() throws {
+        let store = GroupCallStore(defaults: isolatedDefaults())
+        let r = try XCTUnwrap(record([
+            (start(callA, at: t0, leaf: 4, video: true), t0),
+            (.join(callId: callA, leafIndex: 4), t0 + 1_000),
+        ]))
+        store.save(accountIdB64: "acct", records: ["g1": r])
+        XCTAssertEqual(store.load(accountIdB64: "acct", nowMs: t0 + 2_000), ["g1": r])
+        XCTAssertEqual(store.load(accountIdB64: "other", nowMs: t0 + 2_000), [:])
+        store.clear(accountIdB64: "acct")
+        XCTAssertEqual(store.load(accountIdB64: "acct", nowMs: t0 + 2_000), [:])
+    }
+
+    func testTheStoreDropsRecordsPastTheMaxAgeOnLoad() throws {
+        let store = GroupCallStore(defaults: isolatedDefaults())
+        let old = try XCTUnwrap(record([(start(callA, at: t0), t0)]))
+        let recent = try XCTUnwrap(record([(start(callB, at: t0 + 3_600_000), t0 + 3_600_000)]))
+        store.save(accountIdB64: "acct", records: ["old": old, "recent": recent])
+        let loaded = store.load(accountIdB64: "acct", nowMs: t0 + GroupCallReducer.maxLiveAgeMs + 1)
+        XCTAssertEqual(loaded, ["recent": recent])
+    }
+
+    /// After a relaunch a reloaded record shows the Join banner only while its
+    /// participants are still heartbeating, never for a call that died.
+    func testAReloadedRecordIsJoinableOnlyWhileItsMembersAreFresh() throws {
+        let store = GroupCallStore(defaults: isolatedDefaults())
+        let r = try XCTUnwrap(record([
+            (start(callA, at: t0), t0),
+            (.join(callId: callA, leafIndex: 1), t0 + 120_000),
+        ]))
+        store.save(accountIdB64: "acct", records: ["g": r])
+        let reloaded = store.load(accountIdB64: "acct", nowMs: t0 + 180_000)["g"]
+        XCTAssertEqual(
+            GroupCallAffordance.of(record: reloaded, activeGroupCallId: nil, ownDeviceKey: nil, nowMs: t0 + 180_000),
+            .joinable(callId: callA, joinedCount: 1, video: false))
+        XCTAssertEqual(
+            GroupCallAffordance.of(record: reloaded, activeGroupCallId: nil, ownDeviceKey: nil,
+                nowMs: t0 + 120_000 + GroupCallReducer.memberFreshMs + 1),
+            .none)
     }
 
     // MARK: - Two call ids
@@ -185,7 +409,7 @@ final class GroupCallRecordTests: XCTestCase {
             (start(callA, at: t0 - 3_600_000), t0 + 2_000),
         ]))
         XCTAssertEqual(r.callId, callB)
-        XCTAssertEqual(r.joinedLeaves, [1])
+        XCTAssertEqual(Set(r.joined.keys), members(1))
     }
 
     // MARK: - C-11 routing
@@ -235,29 +459,29 @@ final class GroupCallRecordTests: XCTestCase {
                 callId: callA, initiatorLeaf: 2, createdAtMs: UInt64(t0),
                 media: FfiCallMediaFlags(audio: true, video: true)))
         repo.routeCallSignaling(
-            groupIdHex: group, messageId: 1, payload: startBytes, createdAt: "2027-01-15T08:00:00Z", senderLeaf: 2)
+            groupIdHex: group, messageId: 1, payload: startBytes, createdAt: "2027-01-15T08:00:00Z", senderLeaf: 2, senderDeviceKey: member(2), senderKey: "person-2")
         let joinBytes = try composeCallSignaling(
             body: .groupJoin(callId: callA, leafIndex: 2, joinedAtMs: UInt64(t0)))
         repo.routeCallSignaling(
-            groupIdHex: group, messageId: 2, payload: joinBytes, createdAt: "2027-01-15T08:00:01Z", senderLeaf: 2)
+            groupIdHex: group, messageId: 2, payload: joinBytes, createdAt: "2027-01-15T08:00:01Z", senderLeaf: 2, senderDeviceKey: member(2), senderKey: "person-2")
 
         XCTAssertTrue(forwarded.isEmpty, "group bodies reached the 1x1 sink: \(forwarded)")
         let r = try XCTUnwrap(repo.groupCalls[group])
         XCTAssertEqual(r.callId, callA)
-        XCTAssertEqual(r.joinedLeaves, [2])
+        XCTAssertEqual(Set(r.joined.keys), members(2))
 
         let offerBytes = try composeCallSignaling(
             body: .offer(
                 callId: callB, sdp: "v=0", createdAtMs: 1,
                 media: FfiCallMediaFlags(audio: true, video: false)))
         repo.routeCallSignaling(
-            groupIdHex: group, messageId: 3, payload: offerBytes, createdAt: "2027-01-15T08:00:02Z", senderLeaf: 3)
+            groupIdHex: group, messageId: 3, payload: offerBytes, createdAt: "2027-01-15T08:00:02Z", senderLeaf: 3, senderDeviceKey: member(3), senderKey: "person-3")
         XCTAssertEqual(forwarded.count, 1)
-        XCTAssertEqual(repo.groupCalls[group]?.joinedLeaves, [2])
+        XCTAssertEqual(repo.groupCalls[group].map { Set($0.joined.keys) }, members(2))
 
         let endBytes = try composeCallSignaling(body: .end(callId: callA, reason: .hungUp))
         repo.routeCallSignaling(
-            groupIdHex: group, messageId: 4, payload: endBytes, createdAt: "2027-01-15T08:00:03Z", senderLeaf: 3)
+            groupIdHex: group, messageId: 4, payload: endBytes, createdAt: "2027-01-15T08:00:03Z", senderLeaf: 3, senderDeviceKey: member(3), senderKey: "person-3")
         XCTAssertEqual(forwarded.count, 2)
         XCTAssertNil(repo.groupCalls[group])
     }
@@ -269,7 +493,7 @@ final class GroupCallRecordTests: XCTestCase {
                 callId: callA, initiatorLeaf: 2, createdAtMs: UInt64(t0),
                 media: FfiCallMediaFlags(audio: true, video: false)))
         repo.routeCallSignaling(
-            groupIdHex: "ab", messageId: 5, payload: startBytes, createdAt: "not a time", senderLeaf: 2)
+            groupIdHex: "ab", messageId: 5, payload: startBytes, createdAt: "not a time", senderLeaf: 2, senderDeviceKey: member(2), senderKey: "person-2")
         XCTAssertNil(repo.groupCalls["ab"])
     }
 
@@ -305,30 +529,30 @@ final class GroupCallRecordTests: XCTestCase {
                 callId: callA, initiatorLeaf: 2, createdAtMs: UInt64(t0),
                 media: FfiCallMediaFlags(audio: true, video: false)))
         repo.routeCallSignaling(
-            groupIdHex: group, messageId: 6, payload: forgedStart, createdAt: "2027-01-15T08:00:00Z", senderLeaf: 7)
+            groupIdHex: group, messageId: 6, payload: forgedStart, createdAt: "2027-01-15T08:00:00Z", senderLeaf: 7, senderDeviceKey: member(7), senderKey: "person-7")
         XCTAssertNil(repo.groupCalls[group], "a start naming leaf 2, sent by leaf 7, must not create a call")
         repo.routeCallSignaling(
-            groupIdHex: group, messageId: 7, payload: forgedStart, createdAt: "2027-01-15T08:00:00Z", senderLeaf: nil)
+            groupIdHex: group, messageId: 7, payload: forgedStart, createdAt: "2027-01-15T08:00:00Z", senderLeaf: nil, senderDeviceKey: nil, senderKey: nil)
         XCTAssertNil(repo.groupCalls[group], "a start with no member sender must not create a call")
 
         repo.routeCallSignaling(
-            groupIdHex: group, messageId: 8, payload: forgedStart, createdAt: "2027-01-15T08:00:00Z", senderLeaf: 2)
+            groupIdHex: group, messageId: 8, payload: forgedStart, createdAt: "2027-01-15T08:00:00Z", senderLeaf: 2, senderDeviceKey: member(2), senderKey: "person-2")
         XCTAssertEqual(repo.groupCalls[group]?.callId, callA)
 
         let forgedJoin = try composeCallSignaling(
             body: .groupJoin(callId: callA, leafIndex: 3, joinedAtMs: UInt64(t0)))
         repo.routeCallSignaling(
-            groupIdHex: group, messageId: 9, payload: forgedJoin, createdAt: "2027-01-15T08:00:01Z", senderLeaf: 2)
-        XCTAssertEqual(repo.groupCalls[group]?.joinedLeaves, [], "leaf 2 cannot join leaf 3 into the call")
+            groupIdHex: group, messageId: 9, payload: forgedJoin, createdAt: "2027-01-15T08:00:01Z", senderLeaf: 2, senderDeviceKey: member(2), senderKey: "person-2")
+        XCTAssertEqual(repo.groupCalls[group]?.joined.isEmpty, true, "leaf 2 cannot join leaf 3 into the call")
         repo.routeCallSignaling(
-            groupIdHex: group, messageId: 10, payload: forgedJoin, createdAt: "2027-01-15T08:00:01Z", senderLeaf: 3)
-        XCTAssertEqual(repo.groupCalls[group]?.joinedLeaves, [3])
+            groupIdHex: group, messageId: 10, payload: forgedJoin, createdAt: "2027-01-15T08:00:01Z", senderLeaf: 3, senderDeviceKey: member(3), senderKey: "person-3")
+        XCTAssertEqual(repo.groupCalls[group].map { Set($0.joined.keys) }, members(3))
 
         let forgedLeave = try composeCallSignaling(
             body: .groupLeave(callId: callA, leafIndex: 3, reason: .hungUp))
         repo.routeCallSignaling(
-            groupIdHex: group, messageId: 11, payload: forgedLeave, createdAt: "2027-01-15T08:00:02Z", senderLeaf: 2)
-        XCTAssertEqual(repo.groupCalls[group]?.joinedLeaves, [3], "leaf 2 cannot leave leaf 3 out of the call")
+            groupIdHex: group, messageId: 11, payload: forgedLeave, createdAt: "2027-01-15T08:00:02Z", senderLeaf: 2, senderDeviceKey: member(2), senderKey: "person-2")
+        XCTAssertEqual(repo.groupCalls[group].map { Set($0.joined.keys) }, members(3), "leaf 2 cannot leave leaf 3 out of the call")
     }
 
     // MARK: - Banner decision
@@ -340,11 +564,11 @@ final class GroupCallRecordTests: XCTestCase {
             (.join(callId: callA, leafIndex: 2), t0 + 2_000),
         ]))
         XCTAssertEqual(
-            GroupCallAffordance.of(record: r, activeGroupCallId: nil, nowMs: t0 + 10_000),
+            GroupCallAffordance.of(record: r, activeGroupCallId: nil, ownDeviceKey: nil, nowMs: t0 + 10_000),
             .joinable(callId: callA, joinedCount: 2, video: true)
         )
         XCTAssertEqual(
-            GroupCallAffordance.of(record: r, activeGroupCallId: callA, nowMs: t0 + 10_000),
+            GroupCallAffordance.of(record: r, activeGroupCallId: callA, ownDeviceKey: nil, nowMs: t0 + 10_000),
             .inCall
         )
     }
@@ -352,12 +576,11 @@ final class GroupCallRecordTests: XCTestCase {
     func testADeadRecordOffersNothing() throws {
         let r = try XCTUnwrap(record([(start(callA, at: t0), t0)]))
         XCTAssertEqual(
-            GroupCallAffordance.of(
-                record: r, activeGroupCallId: nil,
+            GroupCallAffordance.of(record: r, activeGroupCallId: nil, ownDeviceKey: nil,
                 nowMs: t0 + GroupCallReducer.unjoinedGraceMs + 1),
             .none
         )
-        XCTAssertEqual(GroupCallAffordance.of(record: nil, activeGroupCallId: nil, nowMs: t0), .none)
+        XCTAssertEqual(GroupCallAffordance.of(record: nil, activeGroupCallId: nil, ownDeviceKey: nil, nowMs: t0), .none)
     }
 
     // MARK: - Sniffers (timeline + notification)

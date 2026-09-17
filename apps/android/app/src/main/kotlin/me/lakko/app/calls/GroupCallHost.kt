@@ -6,7 +6,10 @@ package me.lakko.app.calls
 import java.security.SecureRandom
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -15,6 +18,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import uniffi.lakko_ffi_uniffi.FfiCallEndReason
 import uniffi.lakko_ffi_uniffi.FfiCallMediaFlags
 import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
@@ -116,7 +120,12 @@ public interface GroupCallPort {
 
     public fun isCallLive(groupIdHex: String, callIdHex: String, nowMs: Long): Boolean
 
-    public fun recordJoinedLeaves(groupIdHex: String, callIdHex: String): Set<UInt>?
+    /**
+     * The fresh members of the recorded call [callIdHex] other than this
+     * device's own identity, at [nowMs]; `null` when the record is gone or
+     * names another call.
+     */
+    public fun recordOtherFreshMembers(groupIdHex: String, callIdHex: String, nowMs: Long): Set<String>?
 
     public suspend fun readSettledGroup(groupIdHex: String, callId: ByteArray): SettledGroupRead
 
@@ -193,11 +202,24 @@ public class GroupCallHost(
         var joinPublished: Boolean = false,
         var keyedEpoch: ULong?,
         var connected: Boolean = false,
+        /** Re-publishes the Join every [GROUP_CALL_HEARTBEAT_MS]; cancelled by [release]. */
+        var heartbeat: Job? = null,
+        /** Set by [release]: no Join may be published for this call any more. */
+        @Volatile var stopped: Boolean = false,
     )
 
     private var active: Active? = null
     private var handle: GroupCallSessionHandle? = null
     private var starting = false
+
+    /**
+     * Serialises every Join (first and heartbeat) with the Leave / End of the
+     * same device, so the Leave always lands on the journal AFTER the last Join
+     * this device published. A Join that has not taken the lock by the time
+     * the call is released is skipped ([Active.stopped]); one already holding
+     * it finishes first and the Leave waits for it ([Mutex] is fair).
+     */
+    private val publishLock = Mutex()
 
     /** Bumped by [reset]: a start that straddles it abandons itself. */
     private var generation = 0L
@@ -217,15 +239,17 @@ public class GroupCallHost(
                     CallUiState.CallPhase.Connected -> if (!a.joinPublished) {
                         a.joinPublished = true
                         val p = port ?: return@collect
-                        scope.launch {
-                            p.publishSignal(
-                                a.groupIdHex,
-                                FfiCallSignalingBody.GroupJoin(
-                                    callId = a.callId,
-                                    leafIndex = a.ownLeaf,
-                                    joinedAtMs = clock().toULong(),
-                                ),
-                            )
+                        a.heartbeat = scope.launch {
+                            publishJoin(p, a)
+                            // The heartbeat: the same Join, re-published while
+                            // this device is in the call, so members who never
+                            // see a Leave (this app killed mid-call) stop
+                            // counting it once the heartbeats stop.
+                            while (active === a) {
+                                delay(GROUP_CALL_HEARTBEAT_MS)
+                                if (active !== a) break
+                                publishJoin(p, a)
+                            }
                         }
                     }
                     // The session closed or failed on its own (the user's End
@@ -467,6 +491,32 @@ public class GroupCallHost(
         }
     }
 
+    /** One Join (the first or a heartbeat), under [publishLock]. NonCancellable:
+     *  [release] cancels the heartbeat, and a publish already under way
+     *  completes rather than being cut between the ratchet advance and the DS
+     *  publish — the Leave then waits for it. */
+    private suspend fun publishJoin(p: GroupCallPort, a: Active) {
+        try {
+            withContext(NonCancellable) {
+                publishLock.withLock {
+                    if (a.stopped) return@withLock
+                    p.publishSignal(
+                        a.groupIdHex,
+                        FfiCallSignalingBody.GroupJoin(
+                            callId = a.callId,
+                            leafIndex = a.ownLeaf,
+                            joinedAtMs = clock().toULong(),
+                        ),
+                    )
+                }
+            }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Throwable) {
+            warn("group call: Join publish failed", error)
+        }
+    }
+
     /** Leave the call and tell the group what [planGroupCallLeave] decides. */
     private fun leaveWith(reason: GroupLeaveReason) {
         val p = port
@@ -475,15 +525,14 @@ public class GroupCallHost(
             return
         }
         val failed = handle?.failed == true
-        val joinedLeaves = p?.recordJoinedLeaves(a.groupIdHex, a.callIdHex)
+        val otherFresh = p?.recordOtherFreshMembers(a.groupIdHex, a.callIdHex, clock())
         release()
         val plan = planGroupCallLeave(
             reason = reason,
             sessionFailed = failed,
             joinPublished = a.joinPublished,
             initiator = a.initiator,
-            ownLeaf = a.ownLeaf,
-            recordJoinedLeaves = joinedLeaves,
+            recordOtherFreshMembers = otherFresh,
         )
         if (p == null || (!plan.publishLeave && !plan.publishEnd)) return
         val ffiReason = when (plan.leaveReason) {
@@ -491,11 +540,14 @@ public class GroupCallHost(
             GroupLeaveReason.ERROR -> FfiCallEndReason.ERROR
         }
         scope.launch {
-            if (plan.publishLeave) {
-                p.publishSignal(a.groupIdHex, FfiCallSignalingBody.GroupLeave(a.callId, a.ownLeaf, ffiReason))
-            }
-            if (plan.publishEnd) {
-                p.publishSignal(a.groupIdHex, FfiCallSignalingBody.End(a.callId, ffiReason))
+            // After any Join of this call still being published (see [publishLock]).
+            publishLock.withLock {
+                if (plan.publishLeave) {
+                    p.publishSignal(a.groupIdHex, FfiCallSignalingBody.GroupLeave(a.callId, a.ownLeaf, ffiReason))
+                }
+                if (plan.publishEnd) {
+                    p.publishSignal(a.groupIdHex, FfiCallSignalingBody.End(a.callId, ffiReason))
+                }
             }
         }
     }
@@ -504,6 +556,10 @@ public class GroupCallHost(
      *  idempotent, so the several paths that can end a call act once. */
     private fun release() {
         val h = handle
+        active?.let {
+            it.stopped = true
+            it.heartbeat?.cancel()
+        }
         active = null
         // Cleared BEFORE `hangUp`: the session's closed transition moves the UI
         // to Ended, and the phase observer must find no handle left.

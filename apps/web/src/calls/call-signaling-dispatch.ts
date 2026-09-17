@@ -37,6 +37,11 @@ export interface InboundSignalingRow {
   readonly payloadBytes: Uint8Array;
   /** MLS-authenticated sender leaf, when the frame named one. */
   readonly senderLeaf?: number;
+  /** The sender leaf's own signature key (base64), resolved at receipt. A
+   *  group Join / Leave without it is dropped. */
+  readonly senderMemberKey?: string;
+  /** The sender's person key (base64), resolved at receipt. */
+  readonly senderPersonKey?: string;
 }
 
 /**

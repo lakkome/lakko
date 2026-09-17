@@ -205,8 +205,8 @@ internal class ChatRepositoryGroupCallPort(
     override fun isCallLive(groupIdHex: String, callIdHex: String, nowMs: Long): Boolean =
         repository.isGroupCallLive(groupIdHex, callIdHex, nowMs)
 
-    override fun recordJoinedLeaves(groupIdHex: String, callIdHex: String): Set<UInt>? =
-        repository.groupCallJoinedLeaves(groupIdHex, callIdHex)
+    override fun recordOtherFreshMembers(groupIdHex: String, callIdHex: String, nowMs: Long): Set<String>? =
+        repository.groupCallOtherFreshMembers(groupIdHex, callIdHex, nowMs)
 
     override suspend fun readSettledGroup(groupIdHex: String, callId: ByteArray): SettledGroupRead =
         repository.readSettledCallKey(groupIdHex, callId)

@@ -63,8 +63,14 @@ final class GroupCallHost: ObservableObject {
         var membershipEnded: @MainActor (_ groupIdHex: String) -> Bool
         /// The chat's group-call record.
         var record: @MainActor (_ groupIdHex: String) -> OngoingGroupCall?
-        /// Fold this device's own signal into the record (never echoed back).
+        /// Fold this device's own signal into the record (never echoed back),
+        /// under this device's own device and person keys.
         var applySignal: @MainActor (_ groupIdHex: String, _ signal: GroupCallSignal, _ atMs: Int64) -> Void
+        /// This device's own leaf signature key in the group — the key its own
+        /// joins are recorded under — or `nil` when it cannot be resolved.
+        var ownDeviceKey: @MainActor (_ groupIdHex: String) -> MemberIdentity?
+        /// Sleep for `ms`; `false` when the sleep was cancelled.
+        var sleepMs: @MainActor (_ ms: Int64) async -> Bool
         /// Publish call-signaling plaintext through the serialized send path.
         var publish: @MainActor (_ groupIdHex: String, _ bytes: Data) async -> Bool
         /// Poll the group once (no long poll), so the epoch and the record are
@@ -135,6 +141,9 @@ final class GroupCallHost: ObservableObject {
     /// Tail of the group-control publish chain: a Leave never overtakes its own
     /// Join, and an End never overtakes the Leave.
     private var controlTail: Task<Bool, Never>?
+    /// The participant heartbeat of the live call (see ``runHeartbeat(callId:)``).
+    /// Cancelled with the session, so it never outlives the call.
+    private var heartbeatTask: Task<Void, Never>?
 
     init(ports: Ports) {
         self.ports = ports
@@ -221,8 +230,12 @@ final class GroupCallHost: ObservableObject {
             await ports.syncGroup(groupIdHex)
             guard isCurrent(attempt) else { return }
             let record = ports.record(groupIdHex)
+            // This device is not in the call yet: its own entry (left by a
+            // relaunch mid-call) does not make the call joinable.
             guard let record, record.callId == joinCallId,
-                  GroupCallReducer.isLive(record, nowMs: ports.nowMs()) else {
+                  GroupCallReducer.isLive(
+                      record, nowMs: ports.nowMs(),
+                      ignoringDevice: ports.ownDeviceKey(groupIdHex)) else {
                 callNotice = "That group call has ended."
                 return
             }
@@ -345,12 +358,60 @@ final class GroupCallHost: ObservableObject {
         activeCall = call
         ports.applySignal(groupIdHex, .join(callId: call.callId, leafIndex: call.ownLeaf), ports.nowMs())
         _ = enqueueControl(groupIdHex: groupIdHex, bytes: joinBytes)
+        startHeartbeat(callId: call.callId)
+    }
+
+    // MARK: - Heartbeat
+
+    /// Re-publish this device's `GroupCallJoin` every
+    /// ``GroupCallReducer/heartbeatMs`` while it is in the call.
+    ///
+    /// A participant whose app is killed or reinstalled mid-call never
+    /// publishes its Leave. Without a heartbeat every other member kept counting
+    /// it, and showed "Group call in progress" for a call nobody was in until
+    /// the four-hour cap. With it, a member counts only while its newest join is
+    /// fresh (``GroupCallReducer/memberFreshMs``). Same body as the first join;
+    /// no wire change.
+    ///
+    /// Runs exactly as long as the session: ``releaseSession()`` cancels it, so
+    /// it never runs for a call that is not running (in the background or not).
+    private func startHeartbeat(callId: Data) {
+        heartbeatTask?.cancel()
+        heartbeatTask = Task { @MainActor [weak self] in
+            await self?.runHeartbeat(callId: callId)
+        }
+    }
+
+    private func runHeartbeat(callId: Data) async {
+        let sleepMs = ports.sleepMs
+        while !Task.isCancelled {
+            guard await sleepMs(GroupCallReducer.heartbeatMs), !Task.isCancelled else { return }
+            guard let call = activeCall, call.callId == callId, call.joinPublished,
+                  let handle else { return }
+            switch handle.sessionState {
+            case .failed, .closed:
+                // The phase observer turns this into a leave; nothing to renew.
+                return
+            case .idle, .connecting, .connected:
+                break
+            }
+            let nowMs = ports.nowMs()
+            guard let bytes = try? composeCallSignaling(
+                body: .groupJoin(
+                    callId: call.callId,
+                    leafIndex: call.ownLeaf,
+                    joinedAtMs: UInt64(max(0, nowMs))
+                )
+            ) else { continue }
+            ports.applySignal(call.groupIdHex, .join(callId: call.callId, leafIndex: call.ownLeaf), nowMs)
+            _ = enqueueControl(groupIdHex: call.groupIdHex, bytes: bytes)
+        }
     }
 
     // MARK: - Leaving
 
     /// Leave the group call this device is in: tear the SFU session down and
-    /// tell the group what ``GroupCallHostRules/planLeave(hungUp:joinPublished:initiator:callId:ownLeaf:record:)``
+    /// tell the group what ``GroupCallHostRules/planLeave(hungUp:joinPublished:initiator:callId:ownDeviceKey:record:nowMs:)``
     /// decides. Idempotent. The presentation stays until the call screen is
     /// dismissed.
     func leave(hungUp: Bool = true) {
@@ -372,8 +433,9 @@ final class GroupCallHost: ObservableObject {
             joinPublished: call.joinPublished,
             initiator: call.initiator,
             callId: call.callId,
-            ownLeaf: call.ownLeaf,
-            record: ports.record(call.groupIdHex)
+            ownDeviceKey: ports.ownDeviceKey(call.groupIdHex),
+            record: ports.record(call.groupIdHex),
+            nowMs: ports.nowMs()
         )
         if plan.publishLeave,
            let bytes = try? composeCallSignaling(
@@ -399,6 +461,8 @@ final class GroupCallHost: ObservableObject {
         attempt = nil
         startingGroupIdHex = nil
         controls.removeAll()
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
         let h = handle
         // Cleared BEFORE `hangUp`: the session's `closed` transition moves the
         // screen to `ended`, whose observer must find no handle left.
@@ -587,7 +651,16 @@ extension GroupCallHost {
             },
             record: { [weak repository] in repository?.groupCalls[$0] },
             applySignal: { [weak repository] groupIdHex, signal, atMs in
-                repository?.applyGroupCallSignal(groupIdHex: groupIdHex, signal: signal, atMs: atMs)
+                repository?.applyOwnGroupCallSignal(groupIdHex: groupIdHex, signal: signal, atMs: atMs)
+            },
+            ownDeviceKey: { [weak repository] in repository?.ownDeviceKeyB64(groupIdHex: $0) },
+            sleepMs: { ms in
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(max(0, ms)) * 1_000_000)
+                    return true
+                } catch {
+                    return false
+                }
             },
             publish: { [weak repository] groupIdHex, bytes in
                 guard let repository else { return false }

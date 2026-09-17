@@ -112,6 +112,23 @@ internal fun resolveMemberIdentity(
 }
 
 /**
+ * Resolve one MLS leaf index to that leaf's OWN signature key (the device key,
+ * ADR-0050), not the person key [resolveMemberIdentity] returns.
+ *
+ * For state that is per DEVICE rather than per person: the group-call roster
+ * (`calls/GroupCallLedger.kt`), where each device joins, heartbeats and leaves
+ * on its own. Same rule otherwise — resolve at receipt (C-68), `null` on a miss.
+ */
+internal fun resolveLeafSignatureKey(
+    roster: List<GroupMember>,
+    leafIndex: UInt?,
+): MemberIdentity? {
+    if (leafIndex == null) return null
+    val hit = roster.firstOrNull { it.leafIndex == leafIndex } ?: return null
+    return outboxB64(hit.signaturePublicKey)
+}
+
+/**
  * ADR-0050 — the key that names a PERSON in a roster: the leaf's resolved
  * account key, else (a leaf whose credential did not resolve) its own leaf key
  * so it still renders.

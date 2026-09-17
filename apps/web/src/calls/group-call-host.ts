@@ -42,11 +42,12 @@ export interface GroupCallLeaveInput {
   readonly joinPublished: boolean;
   /** This device published the `GroupCallStart`. */
   readonly initiator: boolean;
-  /** This device's leaf in the group. */
-  readonly ownLeaf: number;
-  /** Joined leaves of the call's record at leave time, `null` when the record
-   *  is gone (another member already ended it). */
-  readonly recordJoinedLeaves: ReadonlySet<number> | null;
+  /** This device's signature key (base64), as the record keys members. */
+  readonly ownMemberKey: string;
+  /** FRESH members of the call's record at leave time (`freshMemberKeys`),
+   *  `null` when the record is gone (another member already ended it). A
+   *  member whose heartbeat stopped does not keep the call alive. */
+  readonly recordFreshMemberKeys: ReadonlySet<string> | null;
 }
 
 export interface GroupCallLeavePlan {
@@ -62,7 +63,7 @@ export interface GroupCallLeavePlan {
  * What leaving a group call has to tell the group.
  *
  * A Leave only if this device announced a Join. A `CallEnd` only when the local
- * record shows nobody else joined, and only from a device that was actually in
+ * record shows nobody else freshly joined, and only from a device that was actually in
  * the call (joined) or that started it: a joiner whose connection failed before
  * it ever joined must not end a call other members may be about to enter.
  */
@@ -72,8 +73,8 @@ export function planGroupCallLeave(input: GroupCallLeaveInput): GroupCallLeavePl
   let publishEnd = false;
   if (input.joinPublished || input.initiator) {
     const othersJoined =
-      input.recordJoinedLeaves !== null &&
-      [...input.recordJoinedLeaves].some((leaf) => leaf !== input.ownLeaf);
+      input.recordFreshMemberKeys !== null &&
+      [...input.recordFreshMemberKeys].some((key) => key !== input.ownMemberKey);
     publishEnd = !othersJoined;
   }
   return { leaveReason, publishLeave, publishEnd };

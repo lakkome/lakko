@@ -65,6 +65,7 @@ class ProfileEnvelopeClassificationTest {
         createdAt = "2026-09-13T00:00:00Z",
         processed = ProcessedMessage.Application(payload, senderLeaf, null),
         resolveSender = resolveSender,
+        resolveLeafSignatureKey = { null },
         isCommitterBeacon = { false },
         parseBody = ::lossyParseBody,
         decodeProfile = decodeProfile,

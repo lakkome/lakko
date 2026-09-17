@@ -98,6 +98,31 @@ class OneToOneCallInboundRoutingTest {
     }
 
     @Test
+    fun `a group Join records the identity resolved at receipt, and an unresolved one records nothing`() {
+        val (repo, _) = repoWithRecorder()
+        try {
+            repo.routeParsedCallSignaling(
+                groupA,
+                1,
+                FfiCallSignalingBody.GroupStart(callId, 2u, now.toULong(), media),
+                createdAt,
+                senderLeaf = 2u,
+                senderKey = "alice",
+            )
+            repo.routeParsedCallSignaling(
+                groupA, 2, FfiCallSignalingBody.GroupJoin(callId, 3u, 1uL), createdAt, 3u, senderKey = null,
+            )
+            assertTrue(repo.groupCalls.value[groupA]!!.joinedMembers.isEmpty())
+            repo.routeParsedCallSignaling(
+                groupA, 3, FfiCallSignalingBody.GroupJoin(callId, 3u, 1uL), createdAt, 3u, senderKey = "bob",
+            )
+            assertEquals(setOf("bob"), repo.groupCalls.value[groupA]!!.joinedMembers.keys)
+        } finally {
+            repo.close()
+        }
+    }
+
+    @Test
     fun `End goes to both the ledger and the call hook, each filtering on its own call`() {
         val (repo, seen) = repoWithRecorder()
         try {

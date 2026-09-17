@@ -96,6 +96,7 @@ import { ChatClient } from "../chat/client";
 import { makeCallSignalingPublisher } from "../chat/call-signaling-publish";
 import { readIsActive } from "../chat/membership-ended";
 import { memberKeysOf, peerName } from "../chat/peer-name";
+import { ownPersonKeyB64 } from "../chat/person-key";
 import { base64Decode, base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { loadAccepted } from "../contacts/local-store";
 import { onGroupMlsIdle } from "../mls/group-lock";
@@ -138,7 +139,14 @@ import {
   selectGroupCallBanner,
   type GroupLeaveReason,
 } from "./group-call-host";
-import { hexToBytes, isGroupCallLive, type GroupCallEvent } from "./group-call-record";
+import {
+  freshMemberKeys,
+  GROUP_CALL_HEARTBEAT_MS,
+  hexToBytes,
+  isGroupCallLive,
+  type GroupCallEvent,
+  type GroupCallViewer,
+} from "./group-call-record";
 import { callBusyMessage, callSlotOccupant, type CallKind } from "./call-slot";
 import {
   decideLinkCallStart,
@@ -610,19 +618,27 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         );
         return;
       case "groupJoin":
-      case "groupLeave":
+      case "groupLeave": {
+        // The roster keys members on the sender's signature key resolved at
+        // receipt, never on the leaf (C-68). Unresolvable sender: dropped.
+        const memberKey = row.senderMemberKey;
+        if (memberKey === undefined || memberKey.length === 0) return;
         applyGroupCallEventFor(
           account,
           groupIdB64,
-          {
-            kind: parsed.kind === "groupJoin" ? "join" : "leave",
-            callIdHex: hex,
-            leafIndex: parsed.leafIndex,
-            observedAtMs,
-          },
+          parsed.kind === "groupJoin"
+            ? {
+                kind: "join",
+                callIdHex: hex,
+                memberKey,
+                personKey: row.senderPersonKey ?? memberKey,
+                observedAtMs,
+              }
+            : { kind: "leave", callIdHex: hex, memberKey, observedAtMs },
           now,
         );
         return;
+      }
       default:
         return;
     }
@@ -750,8 +766,15 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     readonly callId: Uint8Array;
     readonly callIdHex: string;
     readonly ownLeaf: number;
+    /** This device's signature key and person key (base64) — how the
+     *  group-call record files this device. */
+    readonly ownMemberKey: string;
+    readonly ownPersonKey: string;
     readonly initiator: boolean;
     joinPublished: boolean;
+    /** Re-publishes the Join every `GROUP_CALL_HEARTBEAT_MS` once it was
+     *  published; cleared when the call leaves the slot. */
+    heartbeat: ReturnType<typeof setInterval> | null;
     /** The MLS epoch the session's current seed was derived at. */
     keyedEpoch: bigint | null;
   }
@@ -889,7 +912,14 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         await queue.whenIdle();
         const account = accountId();
         const still = account === null ? undefined : groupCallsFor(account, groupIdB64).get(hex);
-        if (still === undefined || !isGroupCallLive(still, Date.now())) {
+        // Not in this call yet: this device's own stale entry (a session that
+        // died before a reload) must not make a finished call look joinable.
+        const ownId = chats.identity();
+        const viewer: GroupCallViewer | undefined =
+          ownId === null
+            ? undefined
+            : { ownMemberKey: base64Encode(ownId.signaturePublicKey), inCallIdHex: null };
+        if (still === undefined || !isGroupCallLive(still, Date.now(), viewer)) {
           return { kind: "ended" };
         }
       }
@@ -974,8 +1004,11 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         callId,
         callIdHex: hex,
         ownLeaf: localLeaf,
+        ownMemberKey: base64Encode(id.signaturePublicKey),
+        ownPersonKey: ownPersonKeyB64(id) ?? base64Encode(id.signaturePublicKey),
         initiator,
         joinPublished: false,
+        heartbeat: null,
         keyedEpoch,
       };
       const handle = createSfuCallUi(
@@ -1026,19 +1059,51 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     if (g === null || g.callIdHex !== hex) return;
     if (state === "connected" && !g.joinPublished) {
       g.joinPublished = true;
-      applyGroupCallEvent(g.groupIdB64, {
-        kind: "join",
-        callIdHex: hex,
-        leafIndex: g.ownLeaf,
-        observedAtMs: Date.now(),
-      });
-      void publishGroupControl(g.groupIdB64, (w) =>
-        w.composeGroupCallJoinSignaling(g.callId, g.ownLeaf, BigInt(Date.now())),
-      );
+      publishGroupJoin(g);
+      // Heartbeat: the same Join, re-published while this device is in the
+      // call, so a participant whose app dies without a Leave stops counting
+      // on every other device once its Join goes stale.
+      g.heartbeat = setInterval(() => {
+        if (activeGroupCall !== g) {
+          stopGroupHeartbeat(g);
+          return;
+        }
+        publishGroupJoin(g);
+      }, GROUP_CALL_HEARTBEAT_MS);
     } else if (state === "failed") {
       // Normally already handled: the adapter moves the store to `ended` first,
       // and the ended-phase effect leaves. This covers the case where it did not.
       void leaveGroupCall("error");
+    }
+  }
+
+  /** Publish this device's `GroupCallJoin` (first Join or heartbeat) and apply
+   *  it locally: our own publish never comes back through the poll. */
+  function publishGroupJoin(g: ActiveGroupCall): void {
+    // The leaf the receivers check the body against is the sender leaf of
+    // the frame, so name the leaf this device holds NOW.
+    let leaf = g.ownLeaf;
+    try {
+      leaf = groupEntry(g.groupIdB64)?.group.ownLeafIndex ?? g.ownLeaf;
+    } catch {
+      leaf = g.ownLeaf;
+    }
+    applyGroupCallEvent(g.groupIdB64, {
+      kind: "join",
+      callIdHex: g.callIdHex,
+      memberKey: g.ownMemberKey,
+      personKey: g.ownPersonKey,
+      observedAtMs: Date.now(),
+    });
+    void publishGroupControl(g.groupIdB64, (w) =>
+      w.composeGroupCallJoinSignaling(g.callId, leaf, BigInt(Date.now())),
+    );
+  }
+
+  function stopGroupHeartbeat(g: ActiveGroupCall): void {
+    if (g.heartbeat !== null) {
+      clearInterval(g.heartbeat);
+      g.heartbeat = null;
     }
   }
 
@@ -1047,6 +1112,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   function releaseGroupSlot(): { readonly call: ActiveGroupCall | null; readonly failed: boolean } {
     const g = activeGroupCall;
     activeGroupCall = null;
+    if (g !== null) stopGroupHeartbeat(g);
     const h = groupHandle();
     const failed = h?.session.getState() === "failed";
     if (h !== null) {
@@ -1074,8 +1140,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       sessionFailed: failed,
       joinPublished: g.joinPublished,
       initiator: g.initiator,
-      ownLeaf: g.ownLeaf,
-      recordJoinedLeaves: rec === undefined ? null : rec.joinedLeaves,
+      ownMemberKey: g.ownMemberKey,
+      recordFreshMemberKeys: rec === undefined ? null : freshMemberKeys(rec, Date.now()),
     });
     // Hanging up on a call is not a reason to be told about it again on the
     // next screen. A call whose session failed stays announced, so the user can
@@ -1085,7 +1151,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       applyGroupCallEvent(g.groupIdB64, {
         kind: "leave",
         callIdHex: g.callIdHex,
-        leafIndex: g.ownLeaf,
+        memberKey: g.ownMemberKey,
         observedAtMs: Date.now(),
       });
       void publishGroupControl(g.groupIdB64, (w) =>
@@ -1142,6 +1208,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     }
   }
   onCleanup(onGroupMlsIdle(onGroupMlsSettled));
+  onCleanup(() => {
+    if (activeGroupCall !== null) stopGroupHeartbeat(activeGroupCall);
+  });
 
   // A chat deleted from the registry while its group call runs: the group's
   // lock may never drain again, so watch the registry itself.
@@ -1785,10 +1854,19 @@ function GroupCallBanner(): JSX.Element {
     if (s.kind !== "session") return null;
     foregroundVersion();
     const groups = chats.groups();
+    const ownId = chats.identity();
+    const viewer: GroupCallViewer | undefined =
+      ownId === null
+        ? undefined
+        : {
+            ownMemberKey: base64Encode(ownId.signaturePublicKey),
+            inCallIdHex: host.groupCall()?.callIdHex ?? null,
+          };
     const live = liveGroupCallsFor(
       s.account.accountId,
       groups.map((g) => g.groupIdB64),
       clock(),
+      viewer,
     ).map((l) => ({ groupIdB64: l.groupIdB64, callIdHex: l.call.callIdHex }));
     return selectGroupCallBanner({
       live,

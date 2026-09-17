@@ -372,20 +372,34 @@ public class ChatViewModel(
                 .collectLatest { (record, occupant, groupSlot) ->
                     while (true) {
                         val now = System.currentTimeMillis()
+                        val ownDeviceKey = repo.ownGroupCallMemberKey()
                         val joinable = me.lakko.app.calls.joinableGroupCall(
                             record = record,
                             nowMs = now,
                             anyCallActive = occupant != null,
                             activeGroupCallIdHex = groupSlot?.callIdHex,
+                            ownDeviceKey = ownDeviceKey,
                         )
                         mutableJoinableGroupCall.value = joinable?.let {
                             JoinableGroupCall(
                                 callIdHex = it.callIdHex,
-                                joinedCount = it.joinedLeaves.size,
+                                // Not in this call (else no banner), so this
+                                // device's own entry is never counted.
+                                joinedCount = me.lakko.app.calls.freshGroupCallPeopleCount(
+                                    it,
+                                    now,
+                                    ignoreDeviceKey = ownDeviceKey,
+                                ),
                                 video = it.video,
                             )
                         }
-                        if (record == null || !me.lakko.app.calls.isGroupCallLive(record, now)) break
+                        if (record == null) break
+                        val ignored = me.lakko.app.calls.groupCallIgnoredDeviceKey(
+                            record,
+                            ownDeviceKey,
+                            groupSlot?.callIdHex,
+                        )
+                        if (!me.lakko.app.calls.isGroupCallLive(record, now, ignored)) break
                         delay(GROUP_CALL_BANNER_TICK_MS)
                     }
                 }
@@ -1835,8 +1849,13 @@ public class ChatViewModel(
 
     private fun liveGroupCallRecord(): me.lakko.app.calls.GroupCallRecord? {
         val record = repo.groupCalls.value[groupIdHex] ?: return null
+        val ignored = me.lakko.app.calls.groupCallIgnoredDeviceKey(
+            record,
+            repo.ownGroupCallMemberKey(),
+            groupCallHost?.slot?.value?.callIdHex,
+        )
         return record.takeIf {
-            me.lakko.app.calls.isGroupCallLive(it, System.currentTimeMillis())
+            me.lakko.app.calls.isGroupCallLive(it, System.currentTimeMillis(), ignored)
         }
     }
 
@@ -2817,7 +2836,7 @@ private const val GROUP_CALL_BANNER_TICK_MS: Long = 5_000L
 /** The chat's Join banner: a live group call this device is not in. */
 public data class JoinableGroupCall(
     val callIdHex: String,
-    /** Devices the ledger records as in the call (by MLS leaf). */
+    /** Distinct people (person keys) with a fresh device in the call at the last tick. */
     val joinedCount: Int,
     /** The initiator announced a video call. */
     val video: Boolean,

@@ -83,6 +83,17 @@ public enum AuthorIdentity {
         resolve(roster: roster(of: group), leafIndex: leafIndex)
     }
 
+    /// The DEVICE a leaf is: the leaf's own signature key (base64), not the
+    /// ADR-0050 person key ``resolve(group:leafIndex:)`` returns. For the rare
+    /// rule that must tell two devices of one person apart — a group call's
+    /// participants, where one device leaving must not remove the other.
+    /// Resolved at receipt for the same reason; `nil` on a miss.
+    public static func resolveDevice(group: Group, leafIndex: UInt32) -> MemberIdentity? {
+        guard let members = try? group.members(),
+              let hit = members.first(where: { $0.leafIndex == leafIndex }) else { return nil }
+        return base64Encode(hit.signaturePublicKey)
+    }
+
     /// This device's own identity in `group`, resolved THROUGH the roster
     /// rather than stored, so a leaf renumber cannot make it name someone else.
     ///

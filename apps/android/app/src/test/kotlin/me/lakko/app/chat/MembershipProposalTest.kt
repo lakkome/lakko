@@ -124,6 +124,7 @@ class MembershipProposalTest {
             createdAt = "2026-08-31T10:00:00Z",
             processed = ProcessedMessage.Proposal(record),
             resolveSender = { null },
+            resolveLeafSignatureKey = { null },
         )
 
         assertTrue(
@@ -162,6 +163,7 @@ class MembershipProposalTest {
             createdAt = "2026-08-31T10:00:01Z",
             processed = ProcessedMessage.Commit,
             resolveSender = { null },
+            resolveLeafSignatureKey = { null },
         )
 
         assertEquals(

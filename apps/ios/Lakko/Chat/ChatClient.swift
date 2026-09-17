@@ -452,7 +452,8 @@ public final class ChatClient {
             messageId: messageId,
             createdAt: createdAt,
             processed: processed,
-            resolveSender: { AuthorIdentity.resolve(group: group, leafIndex: $0) }
+            resolveSender: { AuthorIdentity.resolve(group: group, leafIndex: $0) },
+            resolveDevice: { AuthorIdentity.resolveDevice(group: group, leafIndex: $0) }
         )
     }
 
@@ -476,7 +477,8 @@ public final class ChatClient {
         messageId: Int64,
         createdAt: String,
         processed: ProcessedMessage,
-        resolveSender: (UInt32) -> MemberIdentity?
+        resolveSender: (UInt32) -> MemberIdentity?,
+        resolveDevice: (UInt32) -> MemberIdentity? = { _ in nil }
     ) -> IncomingChatEvent {
         switch processed {
         case .application(let data, let senderLeaf, _):
@@ -492,7 +494,9 @@ public final class ChatClient {
                     messageId: messageId,
                     payloadBytes: data,
                     createdAt: createdAt,
-                    senderLeaf: senderLeaf
+                    senderLeaf: senderLeaf,
+                    senderDeviceKey: senderLeaf.flatMap(resolveDevice),
+                    senderKey: senderLeaf.flatMap(resolveSender)
                 )
             }
             // ADR-0042 — sniff for a push-routing-secret distribution
@@ -926,7 +930,14 @@ public enum IncomingChatEvent: Equatable {
     ///
     /// `senderLeaf` is the MLS-authenticated sender of the row: a group-call
     /// body naming any other leaf is dropped by the record's router.
-    case callSignaling(messageId: Int64, payloadBytes: Data, createdAt: String, senderLeaf: UInt32?)
+    /// `senderDeviceKey` (the leaf's own signature key) and `senderKey` (its
+    /// ADR-0050 person key) are that leaf resolved AT RECEIPT (C-68) — the only
+    /// identities the group-call record keys a participant on, so a member
+    /// added into a vacated leaf never inherits a departed member's place in
+    /// the call.
+    case callSignaling(
+        messageId: Int64, payloadBytes: Data, createdAt: String, senderLeaf: UInt32?,
+        senderDeviceKey: MemberIdentity?, senderKey: MemberIdentity?)
     /// ADR-0027 (G-3) — an external-join *request*: a non-member posted an
     /// external Add proposal to this group's journal and the MLS core retained
     /// it pending an owner / admin approval. Carries the joiner's leaf

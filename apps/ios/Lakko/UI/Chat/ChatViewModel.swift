@@ -600,6 +600,7 @@ public final class ChatViewModel: ObservableObject {
         GroupCallAffordance.of(
             record: ongoingGroupCall,
             activeGroupCallId: groupCallHost.activeCallId(groupIdHex: groupIdHex),
+            ownDeviceKey: repository.ownDeviceKeyB64(groupIdHex: groupIdHex),
             nowMs: nowMs
         )
     }

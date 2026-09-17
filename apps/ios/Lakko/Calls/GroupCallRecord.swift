@@ -99,6 +99,27 @@ struct CallSignalingRoute: Equatable {
 
 // MARK: - The record
 
+/// Who a group-call join / leave row came from, resolved from the MLS sender
+/// leaf AT RECEIPT (C-68) — never a leaf index, which OpenMLS hands to the next
+/// member added after a remove.
+struct GroupCallParticipant: Equatable {
+    /// The leaf's own signature key (base64): one DEVICE. Membership in the call
+    /// is keyed on this, so a Leave from one device never removes another
+    /// device of the same person.
+    let deviceKey: MemberIdentity
+    /// The ADR-0050 person (account) key (base64) of that leaf, for counting
+    /// people rather than devices.
+    let personKey: MemberIdentity
+}
+
+/// One device's place in a call: when it was last seen and whose device it is.
+struct JoinedDevice: Equatable, Codable {
+    /// DS row time of this device's newest join / heartbeat.
+    var lastSeenMs: Int64
+    /// The person (account) key the device belongs to.
+    let personKey: MemberIdentity
+}
+
 /// One chat's ongoing group call, as this device has observed it on the group
 /// journal.
 ///
@@ -106,7 +127,11 @@ struct CallSignalingRoute: Equatable {
 /// authorisation: joining still needs the MLS exporter seed (only a current
 /// member derives it) and a call-admission JWT, so a wrong record can at worst
 /// show or hide a banner.
-struct OngoingGroupCall: Equatable {
+///
+/// Codable because it is persisted per account (``GroupCallStore``): the DS
+/// poll resumes from its cursor, so a record held only in memory was forgotten
+/// on relaunch and the chat offered to start a second call beside a running one.
+struct OngoingGroupCall: Equatable, Codable {
     let callId: Data
     let audio: Bool
     let video: Bool
@@ -115,14 +140,43 @@ struct OngoingGroupCall: Equatable {
     /// server-assigned `created_at` — a sender cannot keep its call "fresh" by
     /// claiming a future start.
     let startedAtMs: Int64
-    /// Leaves that announced a join and have not announced a leave.
-    var joinedLeaves: Set<UInt32>
+    /// Devices that announced a join (or a heartbeat re-join) and have not
+    /// announced a leave, keyed on the device's own leaf signature key resolved
+    /// at receipt (``GroupCallParticipant``).
+    ///
+    /// A device only counts while its last-seen time is fresh
+    /// (``GroupCallReducer/memberFreshMs``): a participant whose app was killed
+    /// never publishes its Leave, and its entry must stop keeping the call alive
+    /// once its heartbeats stop.
+    var joined: [MemberIdentity: JoinedDevice]
     /// Newest DS row time that touched this record.
     var lastActivityMs: Int64
 
     /// Lowercase hex of ``callId`` — the tie-break key and the JWT `call_id`.
     var callIdHex: String {
         callId.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The joined devices whose newest join / heartbeat is fresh at `nowMs`,
+    /// minus `ignoringDevice`. A time slightly in the future of the local clock
+    /// (server/device skew) is fresh.
+    ///
+    /// `ignoringDevice` is this device's own key when it is NOT in the call: an
+    /// entry it left behind before a relaunch must not make the call look live,
+    /// or be counted, to the device that wrote it.
+    func freshDevices(nowMs: Int64, ignoringDevice: MemberIdentity? = nil) -> Set<MemberIdentity> {
+        Set(joined.compactMap { device, entry in
+            guard device != ignoringDevice,
+                  nowMs &- entry.lastSeenMs <= GroupCallReducer.memberFreshMs else { return nil }
+            return device
+        })
+    }
+
+    /// The number of distinct PEOPLE among the fresh devices — what "N people in
+    /// the call" shows. Two devices of one person count once.
+    func freshPeopleCount(nowMs: Int64, ignoringDevice: MemberIdentity? = nil) -> Int {
+        Set(freshDevices(nowMs: nowMs, ignoringDevice: ignoringDevice)
+            .compactMap { joined[$0]?.personKey }).count
     }
 }
 
@@ -131,33 +185,48 @@ struct OngoingGroupCall: Equatable {
 /// own, so the tests drive every branch with explicit times.
 enum GroupCallReducer {
 
-    /// A record older than this is never live, joined leaves or not — a
-    /// member that crashed without a `GroupCallLeave` must not pin a banner
-    /// for ever.
+    /// A record older than this is never live, joined members or not.
     static let maxLiveAgeMs: Int64 = 4 * 60 * 60 * 1000
 
     /// How long a call with nobody joined yet still counts as live — the
     /// window between the initiator's announce and its own join landing.
     static let unjoinedGraceMs: Int64 = 60 * 1000
 
-    /// LIVE = started within the last 4 h AND (somebody is joined OR it was
-    /// started within the last 60 s). A start stamped slightly in the future
-    /// of the local clock (server/device skew) reads as age 0.
-    static func isLive(_ call: OngoingGroupCall, nowMs: Int64) -> Bool {
+    /// A device in a group call re-publishes its own `GroupCallJoin` this often
+    /// (`groupCallHeartbeatMs`), for as long as it is in the call.
+    static let heartbeatMs: Int64 = 60 * 1000
+
+    /// A joined member counts only while its newest join / heartbeat is at most
+    /// this old (`groupCallMemberFreshMs`): two heartbeat intervals plus a poll's
+    /// worth of slack, so one lost heartbeat does not drop a member.
+    static let memberFreshMs: Int64 = 150 * 1000
+
+    /// LIVE = started within the last 4 h AND (some device other than
+    /// `ignoringDevice` is FRESH OR it was started within the last 60 s). A
+    /// start stamped slightly in the future of the local clock (server/device
+    /// skew) reads as age 0.
+    static func isLive(
+        _ call: OngoingGroupCall, nowMs: Int64, ignoringDevice: MemberIdentity? = nil
+    ) -> Bool {
         let age = max(0, nowMs &- call.startedAtMs)
         guard age <= maxLiveAgeMs else { return false }
-        return !call.joinedLeaves.isEmpty || age <= unjoinedGraceMs
+        return !call.freshDevices(nowMs: nowMs, ignoringDevice: ignoringDevice).isEmpty
+            || age <= unjoinedGraceMs
     }
 
     /// Fold one signal into the chat's record.
     ///
     /// - Parameters:
+    ///   - participant: the row's MLS sender resolved at receipt. A join or
+    ///     leave with no resolvable sender is dropped; a start and an end do not
+    ///     need one.
     ///   - rowCreatedAtMs: the DS row's server-assigned time (or, for this
     ///     device's own signals, which are never echoed back, the local time of
     ///     the publish). Also the instant at which a competing start is judged,
     ///     so two devices replaying the same journal reach the same record.
     static func apply(
         _ signal: GroupCallSignal,
+        participant: GroupCallParticipant?,
         to current: OngoingGroupCall?,
         rowCreatedAtMs: Int64
     ) -> OngoingGroupCall? {
@@ -170,7 +239,7 @@ enum GroupCallReducer {
                 video: video,
                 initiatorLeaf: initiatorLeaf,
                 startedAtMs: min(claimed, rowCreatedAtMs),
-                joinedLeaves: [],
+                joined: [:],
                 lastActivityMs: rowCreatedAtMs
             )
             guard var existing = current else { return candidate }
@@ -188,16 +257,23 @@ enum GroupCallReducer {
             // wins, so every member converges on one call.
             return precedes(candidate, existing) ? candidate : existing
 
-        case .join(let callId, let leafIndex):
+        case .join(let callId, _):
             // C-12 — a join for a call id we do not track is dropped.
             guard var existing = current, existing.callId == callId else { return current }
-            existing.joinedLeaves.insert(leafIndex)
+            guard let participant else { return current }
+            // A join or heartbeat advances the device's last-seen time; an older
+            // row never lowers it.
+            let lastSeen = max(existing.joined[participant.deviceKey]?.lastSeenMs ?? rowCreatedAtMs, rowCreatedAtMs)
+            existing.joined[participant.deviceKey] = JoinedDevice(
+                lastSeenMs: lastSeen, personKey: participant.personKey)
             existing.lastActivityMs = max(existing.lastActivityMs, rowCreatedAtMs)
             return existing
 
-        case .leave(let callId, let leafIndex):
+        case .leave(let callId, _):
             guard var existing = current, existing.callId == callId else { return current }
-            existing.joinedLeaves.remove(leafIndex)
+            guard let participant else { return current }
+            // Only that device leaves; another device of the same person stays.
+            existing.joined[participant.deviceKey] = nil
             existing.lastActivityMs = max(existing.lastActivityMs, rowCreatedAtMs)
             return existing
 
@@ -226,18 +302,27 @@ enum GroupCallAffordance: Equatable {
     /// This device is already in the live call.
     case inCall
 
+    /// - Parameter ownDeviceKey: this device's own leaf signature key in the
+    ///   group. While this device is not in the call, its own entry (left behind
+    ///   by a relaunch mid-call) is ignored in liveness and in the count.
     static func of(
         record: OngoingGroupCall?,
         activeGroupCallId: Data?,
+        ownDeviceKey: MemberIdentity?,
         nowMs: Int64
     ) -> GroupCallAffordance {
-        guard let record, GroupCallReducer.isLive(record, nowMs: nowMs) else {
+        if let record, activeGroupCallId == record.callId,
+           GroupCallReducer.isLive(record, nowMs: nowMs) {
+            return .inCall
+        }
+        guard let record,
+              GroupCallReducer.isLive(record, nowMs: nowMs, ignoringDevice: ownDeviceKey) else {
             return activeGroupCallId == nil ? .none : .inCall
         }
         if activeGroupCallId == record.callId { return .inCall }
         return .joinable(
             callId: record.callId,
-            joinedCount: record.joinedLeaves.count,
+            joinedCount: record.freshPeopleCount(nowMs: nowMs, ignoringDevice: ownDeviceKey),
             video: record.video
         )
     }

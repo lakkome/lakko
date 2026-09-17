@@ -101,6 +101,8 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
           createdAt: e.createdAt,
           payloadBytes: e.payloadBytes,
           ...(e.senderLeaf === undefined ? {} : { senderLeaf: e.senderLeaf }),
+          ...(e.senderMemberKey === undefined ? {} : { senderMemberKey: e.senderMemberKey }),
+          ...(e.senderKey === undefined ? {} : { senderPersonKey: e.senderKey }),
         });
         break;
       case "profile":

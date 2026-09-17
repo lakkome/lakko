@@ -189,16 +189,21 @@ public struct ChatScreen: View {
             // E2EE session, and there is not one.
             if !viewModel.membershipHasEnded {
             ToolbarItem(placement: .navigationBarTrailing) {
-                Button {
-                    // A live group call this device is not in is JOINED; else
-                    // a group chat (>2 members) starts an SFU call (multi-party
-                    // + SFrame) and a 1×1 chat stays P2P.
-                    viewModel.onCallButton(video: false)
-                } label: {
-                    Image(systemName: "phone")
+                // Re-evaluated on the banner's tick: whether the tap joins a
+                // live call changes with time (a ghost call stops being live
+                // without a new journal row).
+                TimelineView(.periodic(from: .now, by: 10)) { _ in
+                    Button {
+                        // A live group call this device is not in is JOINED; else
+                        // a group chat (>2 members) starts an SFU call (multi-party
+                        // + SFrame) and a 1×1 chat stays P2P.
+                        viewModel.onCallButton(video: false)
+                    } label: {
+                        Image(systemName: "phone")
+                    }
+                    .accessibilityLabel(callButtonLabel(video: false))
+                    .disabled(viewModel.chatCallAction == .unavailable)
                 }
-                .accessibilityLabel(callButtonLabel(video: false))
-                .disabled(viewModel.chatCallAction == .unavailable)
             }
             // Video-call button — starts the call with the local
             // camera published (`config.video`). Group chats publish
@@ -206,13 +211,15 @@ public struct ChatScreen: View {
             // P2P video call. Withdrawn with its sibling above once the
             // membership has ended (§6.2.8 item 4).
             ToolbarItem(placement: .navigationBarTrailing) {
-                Button {
-                    viewModel.onCallButton(video: true)
-                } label: {
-                    Image(systemName: "video")
+                TimelineView(.periodic(from: .now, by: 10)) { _ in
+                    Button {
+                        viewModel.onCallButton(video: true)
+                    } label: {
+                        Image(systemName: "video")
+                    }
+                    .accessibilityLabel(callButtonLabel(video: true))
+                    .disabled(viewModel.chatCallAction == .unavailable)
                 }
-                .accessibilityLabel(callButtonLabel(video: true))
-                .disabled(viewModel.chatCallAction == .unavailable)
             }
             }
             // A4 — the Members sheet (roster + add / remove) lives in the

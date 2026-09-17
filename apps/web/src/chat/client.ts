@@ -99,6 +99,7 @@ import { sniffProfile, type ReceivedProfile } from "../profile/profile-envelope"
 import { sniffGroupName } from "./group-name-envelope";
 import type { StoredGroupName } from "./group-name-store";
 import {
+  resolveLeafSignatureKey,
   resolveMemberIdentity,
   type MemberIdentity,
   type RosterMember,
@@ -300,6 +301,11 @@ export type IncomingChatEvent =
        *  one. The group-call record refuses a `groupStart` /
        *  `groupJoin` / `groupLeave` whose claimed leaf differs. */
       senderLeaf?: number | undefined;
+      /** The sender leaf's own (device) signature key, resolved at receipt
+       *  (C-68) — the key the group-call roster files a member under. */
+      senderMemberKey?: string | undefined;
+      /** The sender's person key, resolved at receipt (C-68). */
+      senderKey?: MemberIdentity | undefined;
       createdAt: string;
     }
   | {
@@ -1009,8 +1015,12 @@ export class ChatClient {
       // resolve the cached wasm module promise on first call,
       // then synchronous thereafter). System rows skip it.
       events.push(
-        await toEvent(message.id, message.createdAt, processed, (leaf) =>
-          resolveMemberIdentity(rosterOf(group), leaf),
+        await toEvent(
+          message.id,
+          message.createdAt,
+          processed,
+          (leaf) => resolveMemberIdentity(rosterOf(group), leaf),
+          (leaf) => resolveLeafSignatureKey(rosterOf(group), leaf),
         ),
       );
     }
@@ -1090,6 +1100,7 @@ export async function toEvent(
   createdAt: string,
   processed: ReturnType<WasmGroup["processIncoming"]>,
   resolveSender: (leafIndex: number) => MemberIdentity | undefined,
+  resolveSenderDevice?: (leafIndex: number) => string | undefined,
 ): Promise<IncomingChatEvent> {
   // The WASM `ProcessedMessage.kind` is a PascalCase string
   // discriminator: "Application" | "Commit" | "Proposal" |
@@ -1122,6 +1133,13 @@ export async function toEvent(
         // The MLS-authenticated sender, so a group-control body that
         // names a leaf other than its own sender can be refused.
         senderLeaf,
+        // Resolved HERE, at the epoch the body was sealed at: the group-call
+        // roster keys members on these, never on the leaf (C-68).
+        senderMemberKey:
+          senderLeaf === undefined || resolveSenderDevice === undefined
+            ? undefined
+            : resolveSenderDevice(senderLeaf),
+        senderKey,
         createdAt,
       };
     }

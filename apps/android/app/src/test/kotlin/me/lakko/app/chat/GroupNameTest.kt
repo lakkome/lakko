@@ -157,6 +157,7 @@ class GroupNameTest {
         createdAt = "2026-09-17T00:00:00Z",
         processed = ProcessedMessage.Application(payload, senderLeaf, null),
         resolveSender = { leaf -> "KEY_OF_LEAF_$leaf" },
+        resolveLeafSignatureKey = { null },
         isCommitterBeacon = { false },
         parseBody = ::lossyParseBody,
         decodeProfile = { null },

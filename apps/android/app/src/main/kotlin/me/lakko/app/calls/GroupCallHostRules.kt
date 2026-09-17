@@ -48,7 +48,8 @@ public data class GroupCallLeavePlan(
  * it ever joined must not end a call other members may be about to enter.
  *
  * @param sessionFailed the SFU session itself failed — overrides [reason].
- * @param recordJoinedLeaves joined leaves of the call's record at leave time,
+ * @param recordOtherFreshMembers the FRESH members of the call's record other
+ *   than this device's own identity, at leave time ([otherFreshGroupCallMembers]);
  *   `null` when the record is gone or names another call.
  */
 public fun planGroupCallLeave(
@@ -56,13 +57,12 @@ public fun planGroupCallLeave(
     sessionFailed: Boolean,
     joinPublished: Boolean,
     initiator: Boolean,
-    ownLeaf: UInt,
-    recordJoinedLeaves: Set<UInt>?,
+    recordOtherFreshMembers: Set<String>?,
 ): GroupCallLeavePlan {
     val leaveReason = if (sessionFailed) GroupLeaveReason.ERROR else reason
     var publishEnd = false
     if (joinPublished || initiator) {
-        val othersJoined = recordJoinedLeaves != null && recordJoinedLeaves.any { it != ownLeaf }
+        val othersJoined = !recordOtherFreshMembers.isNullOrEmpty()
         publishEnd = !othersJoined
     }
     return GroupCallLeavePlan(leaveReason = leaveReason, publishLeave = joinPublished, publishEnd = publishEnd)

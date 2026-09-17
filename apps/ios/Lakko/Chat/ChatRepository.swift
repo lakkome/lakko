@@ -260,6 +260,10 @@ public final class ChatRepository: ObservableObject {
     /// survives a relaunch (the DS poll never replays an applied row).
     public let readWatermarkStore: ReadWatermarkStore
 
+    /// The per-account group-call records behind ``groupCalls``, so a relaunched
+    /// device still shows the Join banner for a call that is running.
+    let groupCallStore: GroupCallStore
+
     /// ADR-0024 — the in-memory mirror of ``readWatermarkStore`` for the
     /// current account, keyed by group hex. Populated on every advancing
     /// receipt (the rest is read through ``readWatermarks(groupIdHex:)``); the
@@ -340,8 +344,10 @@ public final class ChatRepository: ObservableObject {
         leaveRequestStore: LeaveRequestStore = LeaveRequestStore(),
         conversationKindStore: ConversationKindStore = ConversationKindStore(),
         groupNameStore: GroupNameStore = GroupNameStore(),
-        readWatermarkStore: ReadWatermarkStore = ReadWatermarkStore()
+        readWatermarkStore: ReadWatermarkStore = ReadWatermarkStore(),
+        groupCallStore: GroupCallStore = GroupCallStore()
     ) {
+        self.groupCallStore = groupCallStore
         self.conversationKindStore = conversationKindStore
         self.groupNameStore = groupNameStore
         self.readWatermarkStore = readWatermarkStore
@@ -449,6 +455,9 @@ public final class ChatRepository: ObservableObject {
         canonicalIdentity = identity
         accountIdentity = account
         currentAccountIdB64 = newAccountIdB64
+        // Ongoing group calls this device observed before the relaunch; records
+        // past the max age are dropped on load.
+        groupCalls = groupCallStore.load(accountIdB64: newAccountIdB64, nowMs: Self.nowMs())
 
         // Eagerly rebuild `Group` handles for every previously-
         // known group id (1.14f5). `restoreStorage` laid down
@@ -524,6 +533,8 @@ public final class ChatRepository: ObservableObject {
             conversationKindStore.clear(accountIdB64: accountIdB64)
             // ADR-0024 — who read what, in which group.
             readWatermarkStore.clear(accountIdB64: accountIdB64)
+            // Which calls were running in which chat.
+            groupCallStore.clear(accountIdB64: accountIdB64)
             DeviceReadmissionMemory.clearForAccount(accountIdB64: accountIdB64)
             // ADR-0040 (G-35) — drop any pending-commit outbox entries for the
             // account alongside the snapshot they were paired with, so a wiped
@@ -1235,6 +1246,9 @@ public final class ChatRepository: ObservableObject {
         leaveRequestStore.clear(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
         readWatermarkStore.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         readWatermarksByGroup.removeValue(forKey: groupIdHex)
+        if groupCalls.removeValue(forKey: groupIdHex) != nil {
+            groupCallStore.save(accountIdB64: accountIdB64, records: groupCalls)
+        }
         // LAST, and in this order: the registry is what a relaunch rehydrates
         // from, so dropping it after the live handle means a crash between the
         // two leaves the chat present rather than half-gone.
@@ -3070,10 +3084,11 @@ public final class ChatRepository: ObservableObject {
         record.consumeEvents(
             result.events,
             ownAuthorKey: AuthorIdentity.own(group: record.group),
-            callSignalingSink: { [weak self] messageId, payload, createdAt, senderLeaf in
+            callSignalingSink: { [weak self] messageId, payload, createdAt, senderLeaf, senderDeviceKey, senderKey in
                 self?.routeCallSignaling(
                     groupIdHex: groupIdHex, messageId: messageId, payload: payload,
-                    createdAt: createdAt, senderLeaf: senderLeaf)
+                    createdAt: createdAt, senderLeaf: senderLeaf,
+                    senderDeviceKey: senderDeviceKey, senderKey: senderKey)
             },
             readReceiptSink: { [weak self] sender, upTo in
                 self?.recordReadReceipt(groupIdHex: groupIdHex, sender: sender, upTo: upTo)
@@ -3183,8 +3198,12 @@ public final class ChatRepository: ObservableObject {
     ///
     /// Held HERE rather than on a view model so it is fed by every receive
     /// path — the open chat's long poll and the foreground receive of every
-    /// other group alike. In memory only: a relaunch forgets an in-progress call
-    /// until its next journal activity.
+    /// other group alike. Persisted per account (``groupCallStore``) and
+    /// reloaded at bootstrap: the DS poll resumes from its cursor, so a record
+    /// held only in memory was lost on relaunch and the chat then offered to
+    /// start a second call beside a running one. The participant heartbeat
+    /// (``GroupCallHost``) keeps a reloaded record honest: a call whose
+    /// participants stopped renewing their joins stops being live on its own.
     @Published private(set) var groupCalls: [String: OngoingGroupCall] = [:]
 
     /// Classify one decrypted call-signaling payload and deliver it.
@@ -3196,7 +3215,10 @@ public final class ChatRepository: ObservableObject {
     /// `senderLeaf` is the MLS sender leaf of the journal row that carried the
     /// payload. A group-control body naming a different leaf is dropped
     /// (``GroupCallSignal/speaksFor(senderLeaf:)``); it never reaches the
-    /// record.
+    /// record. `senderDeviceKey` / `senderKey` are that leaf resolved at receipt
+    /// to its own signature key and its person key; a join or leave whose
+    /// device did not resolve is dropped by the reducer (C-68: a leaf index is
+    /// never a participant's identity).
     ///
     /// This is the ONE funnel every receive path reaches (the poll's apply and
     /// the ADR-0045 sweep's verdict read both call it, and the foreground
@@ -3207,7 +3229,9 @@ public final class ChatRepository: ObservableObject {
         messageId: Int64,
         payload: Data,
         createdAt: String,
-        senderLeaf: UInt32?
+        senderLeaf: UInt32?,
+        senderDeviceKey: MemberIdentity?,
+        senderKey: MemberIdentity?
     ) {
         let body: FfiCallSignalingBody
         do {
@@ -3231,6 +3255,9 @@ public final class ChatRepository: ObservableObject {
                 applyGroupCallSignal(
                     groupIdHex: groupIdHex,
                     signal: signal,
+                    participant: senderDeviceKey.map {
+                        GroupCallParticipant(deviceKey: $0, personKey: senderKey ?? $0)
+                    },
                     atMs: rowMs ?? Self.nowMs()
                 )
             }
@@ -3242,14 +3269,40 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
-    /// Fold one group-call signal into ``groupCalls``. Also the path for this
-    /// device's OWN signals, which MLS never echoes back to their sender.
-    func applyGroupCallSignal(groupIdHex: String, signal: GroupCallSignal, atMs: Int64) {
+    /// Fold one group-call signal from `participant` into ``groupCalls``, and
+    /// persist the per-account records when the chat's record changed.
+    func applyGroupCallSignal(
+        groupIdHex: String, signal: GroupCallSignal, participant: GroupCallParticipant?, atMs: Int64
+    ) {
         let next = GroupCallReducer.apply(
-            signal, to: groupCalls[groupIdHex], rowCreatedAtMs: atMs)
-        if next != groupCalls[groupIdHex] {
-            groupCalls[groupIdHex] = next
+            signal, participant: participant, to: groupCalls[groupIdHex], rowCreatedAtMs: atMs)
+        guard next != groupCalls[groupIdHex] else { return }
+        groupCalls[groupIdHex] = next
+        if let accountIdB64 = currentAccountIdB64 {
+            groupCallStore.save(accountIdB64: accountIdB64, records: groupCalls)
         }
+    }
+
+    /// This device's OWN group-call signal, which MLS never echoes back to its
+    /// sender: folded under this device's own device and person keys, resolved
+    /// through the roster exactly like a received row's sender.
+    func applyOwnGroupCallSignal(groupIdHex: String, signal: GroupCallSignal, atMs: Int64) {
+        let device = ownDeviceKeyB64(groupIdHex: groupIdHex)
+        applyGroupCallSignal(
+            groupIdHex: groupIdHex, signal: signal,
+            participant: device.map {
+                GroupCallParticipant(
+                    deviceKey: $0, personKey: ownSignatureKeyB64(groupIdHex: groupIdHex) ?? $0)
+            },
+            atMs: atMs)
+    }
+
+    /// This device's own leaf signature key in `groupIdHex` (base64) — the
+    /// DEVICE, not the person. What the group-call record keys this device on.
+    func ownDeviceKeyB64(groupIdHex: String) -> MemberIdentity? {
+        guard let record = groups[groupIdHex],
+              let leaf = try? record.group.ownLeafIndex() else { return nil }
+        return AuthorIdentity.resolveDevice(group: record.group, leafIndex: leaf)
     }
 
     /// ADR-0024 — closure the chat view model attaches to receive
@@ -4021,10 +4074,11 @@ public final class ChatRepository: ObservableObject {
                     record.consumeEvents(
                         [event],
                         ownAuthorKey: AuthorIdentity.own(group: record.group),
-                        callSignalingSink: { [weak self] messageId, payload, createdAt, senderLeaf in
+                        callSignalingSink: { [weak self] messageId, payload, createdAt, senderLeaf, senderDeviceKey, senderKey in
                             self?.routeCallSignaling(
                                 groupIdHex: groupIdHex, messageId: messageId, payload: payload,
-                                createdAt: createdAt, senderLeaf: senderLeaf)
+                                createdAt: createdAt, senderLeaf: senderLeaf,
+                    senderDeviceKey: senderDeviceKey, senderKey: senderKey)
                         },
                         readReceiptSink: { [weak self] sender, upTo in
                             self?.recordReadReceipt(
@@ -5332,7 +5386,7 @@ private final class GroupRecord {
     func consumeEvents(
         _ events: [IncomingChatEvent],
         ownAuthorKey: MemberIdentity? = nil,
-        callSignalingSink: ((Int64, Data, String, UInt32?) -> Void)? = nil,
+        callSignalingSink: ((Int64, Data, String, UInt32?, MemberIdentity?, MemberIdentity?) -> Void)? = nil,
         readReceiptSink: ((MemberIdentity, Int64) -> Void)? = nil,
         chatStatusSink: ((ChatStatusEvent) -> Void)? = nil,
         pushRoutingSecretSink: ((Data, UInt64, UInt32?) -> Void)? = nil,
@@ -5407,12 +5461,14 @@ private final class GroupRecord {
                         createdAt: createdAt
                     )
                 )
-            case .callSignaling(let messageId, let payloadBytes, let createdAt, let senderLeaf):
+            case .callSignaling(
+                let messageId, let payloadBytes, let createdAt, let senderLeaf, let senderDeviceKey,
+                let senderKey):
                 // Phase 3a9 — route into the app-level call host (1x1) or the
                 // group-call record (group bodies). Out-of-band — never touches
                 // the chat timeline. The DS message id rides along: it is half
                 // of the call host's exactly-once key.
-                callSignalingSink?(messageId, payloadBytes, createdAt, senderLeaf)
+                callSignalingSink?(messageId, payloadBytes, createdAt, senderLeaf, senderDeviceKey, senderKey)
             case .externalJoinRequest(_, _, let retained, _):
                 // ADR-0027 (G-3) — a non-member's external Add proposal,
                 // retained pending an owner/admin approval. Not a timeline

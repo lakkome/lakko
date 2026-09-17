@@ -40,30 +40,36 @@ final class GroupCallHostRulesTests: XCTestCase {
     private let callA = Data(repeating: 0x0A, count: 16)
     private let callB = Data(repeating: 0x0B, count: 16)
 
-    private func record(_ callId: Data, joined: Set<UInt32>) -> OngoingGroupCall {
+    /// A record whose `joined` members were all last seen at 0, so every one is
+    /// fresh at `now` (0) unless a test says otherwise.
+    private func record(_ callId: Data, joined: Set<UInt32>, lastSeenMs: Int64 = 0) -> OngoingGroupCall {
         OngoingGroupCall(
             callId: callId, audio: true, video: false, initiatorLeaf: 1,
-            startedAtMs: 0, joinedLeaves: joined, lastActivityMs: 0)
+            startedAtMs: 0,
+            joined: Dictionary(uniqueKeysWithValues: joined.map {
+                ("member-\($0)", JoinedDevice(lastSeenMs: lastSeenMs, personKey: "person-\($0)"))
+            }),
+            lastActivityMs: 0)
     }
 
     func testLeavingAnnouncesALeaveOnlyAfterAJoin() {
         let plan = GroupCallHostRules.planLeave(
             hungUp: true, joinPublished: false, initiator: false,
-            callId: callA, ownLeaf: 3, record: record(callA, joined: [1]))
+            callId: callA, ownDeviceKey: "member-3", record: record(callA, joined: [1]), nowMs: 0)
         XCTAssertEqual(plan, .init(reason: .hungUp, publishLeave: false, publishEnd: false))
     }
 
     func testTheLastOneOutEndsTheCall() {
         let plan = GroupCallHostRules.planLeave(
             hungUp: true, joinPublished: true, initiator: false,
-            callId: callA, ownLeaf: 3, record: record(callA, joined: [3]))
+            callId: callA, ownDeviceKey: "member-3", record: record(callA, joined: [3]), nowMs: 0)
         XCTAssertEqual(plan, .init(reason: .hungUp, publishLeave: true, publishEnd: true))
     }
 
     func testSomeoneStillInKeepsTheCallAlive() {
         let plan = GroupCallHostRules.planLeave(
             hungUp: true, joinPublished: true, initiator: true,
-            callId: callA, ownLeaf: 3, record: record(callA, joined: [3, 4]))
+            callId: callA, ownDeviceKey: "member-3", record: record(callA, joined: [3, 4]), nowMs: 0)
         XCTAssertEqual(plan, .init(reason: .hungUp, publishLeave: true, publishEnd: false))
     }
 
@@ -72,15 +78,46 @@ final class GroupCallHostRulesTests: XCTestCase {
     func testAJoinerThatNeverJoinedNeverEndsTheCall() {
         let plan = GroupCallHostRules.planLeave(
             hungUp: false, joinPublished: false, initiator: false,
-            callId: callA, ownLeaf: 3, record: nil)
+            callId: callA, ownDeviceKey: "member-3", record: nil, nowMs: 0)
         XCTAssertEqual(plan, .init(reason: .error, publishLeave: false, publishEnd: false))
     }
 
     func testAnInitiatorThatNeverConnectedStillEndsItsAnnouncedCall() {
         let plan = GroupCallHostRules.planLeave(
             hungUp: false, joinPublished: false, initiator: true,
-            callId: callA, ownLeaf: 3, record: record(callA, joined: []))
+            callId: callA, ownDeviceKey: "member-3", record: record(callA, joined: []), nowMs: 0)
         XCTAssertEqual(plan, .init(reason: .error, publishLeave: false, publishEnd: true))
+    }
+
+    /// The live defect's leave half: the only other member was killed mid-call
+    /// and never left. Its stale entry must not stop the last real participant
+    /// from ending the call.
+    func testAStaleOtherMemberDoesNotKeepTheCallOpen() {
+        let r = OngoingGroupCall(
+            callId: callA, audio: true, video: false, initiatorLeaf: 1, startedAtMs: 0,
+            joined: [
+                "member-3": JoinedDevice(lastSeenMs: 200_000, personKey: "person-3"),
+                "member-4": JoinedDevice(lastSeenMs: 0, personKey: "person-4"),
+            ],
+            lastActivityMs: 200_000)
+        let stale = GroupCallHostRules.planLeave(
+            hungUp: true, joinPublished: true, initiator: false,
+            callId: callA, ownDeviceKey: "member-3", record: r, nowMs: 200_000)
+        XCTAssertEqual(stale, .init(reason: .hungUp, publishLeave: true, publishEnd: true))
+        let fresh = GroupCallHostRules.planLeave(
+            hungUp: true, joinPublished: true, initiator: false,
+            callId: callA, ownDeviceKey: "member-3", record: r,
+            nowMs: GroupCallReducer.memberFreshMs)
+        XCTAssertFalse(fresh.publishEnd, "member-4 is still fresh here")
+    }
+
+    /// An unresolvable own identity excludes nothing: the own fresh entry reads
+    /// as someone else still in, which never ends a call wrongly.
+    func testAnUnresolvedOwnMemberNeverEndsTheCall() {
+        let plan = GroupCallHostRules.planLeave(
+            hungUp: true, joinPublished: true, initiator: false,
+            callId: callA, ownDeviceKey: nil, record: record(callA, joined: [3]), nowMs: 0)
+        XCTAssertFalse(plan.publishEnd)
     }
 
     /// The record names a different call: this call lost the start tie-break,
@@ -88,7 +125,7 @@ final class GroupCallHostRulesTests: XCTestCase {
     func testARecordForAnotherCallNeverEndsThisOne() {
         let plan = GroupCallHostRules.planLeave(
             hungUp: true, joinPublished: true, initiator: true,
-            callId: callA, ownLeaf: 3, record: record(callB, joined: []))
+            callId: callA, ownDeviceKey: "member-3", record: record(callB, joined: []), nowMs: 0)
         XCTAssertFalse(plan.publishEnd)
         XCTAssertTrue(plan.publishLeave)
     }
@@ -420,6 +457,10 @@ final class GroupCallHostTests: XCTestCase {
         var handles: [FakeGroupCallHandle] = []
         var connectError: Error?
         var nowMs: Int64 = 0
+        /// Heartbeat sleeps the test has allowed to finish.
+        var heartbeatTicks = 0
+        /// Heartbeat sleeps started so far.
+        var heartbeatSleeps = 0
         /// The seed a given epoch derives, so a rekey is checkable.
         static func seed(_ epoch: UInt64?) -> Data {
             Data(repeating: UInt8(truncatingIfNeeded: epoch ?? 0), count: 32)
@@ -435,7 +476,21 @@ final class GroupCallHostTests: XCTestCase {
             membershipEnded: { _ in false },
             record: { _ in h.record },
             applySignal: { _, signal, atMs in
-                h.record = GroupCallReducer.apply(signal, to: h.record, rowCreatedAtMs: atMs)
+                h.record = GroupCallReducer.apply(
+                    signal, participant: GroupCallParticipant(deviceKey: "own", personKey: "me"),
+                    to: h.record, rowCreatedAtMs: atMs)
+            },
+            ownDeviceKey: { _ in "own" },
+            sleepMs: { ms in
+                // A heartbeat sleep finishes only when the test grants a tick.
+                guard ms == GroupCallReducer.heartbeatMs else { return true }
+                h.heartbeatSleeps += 1
+                let granted = h.heartbeatSleeps
+                while !Task.isCancelled {
+                    if h.heartbeatTicks >= granted { return true }
+                    try? await Task.sleep(nanoseconds: 2_000_000)
+                }
+                return false
             },
             publish: { _, bytes in
                 if let body = try? parseCallSignaling(plaintext: bytes) { h.published.append(body) }
@@ -578,6 +633,38 @@ final class GroupCallHostTests: XCTestCase {
         XCTAssertNotNil(host.presentation, "the screen stays for its \"Call ended\" overlay")
         host.dismissPresentation()
         XCTAssertNil(host.presentation)
+    }
+
+    /// The participant heartbeat: every interval the live call re-publishes its
+    /// own Join and advances its own last-seen time; hanging up stops it.
+    func testTheLiveCallHeartbeatsItsJoinUntilItEnds() async throws {
+        let h = Harness()
+        let host = makeHost(h)
+        _ = try await startLiveCall(host, h)
+        XCTAssertEqual(kinds(h.published), ["start", "join"])
+        try await waitUntil { h.heartbeatSleeps == 1 }
+        XCTAssertEqual(h.record?.joined["own"]?.lastSeenMs, t0)
+
+        h.nowMs = t0 + GroupCallReducer.heartbeatMs
+        h.heartbeatTicks = 1
+        try await waitUntil { self.kinds(h.published) == ["start", "join", "join"] }
+        await host.whenControlPublishesSettle()
+        XCTAssertEqual(h.record?.joined["own"]?.lastSeenMs, t0 + GroupCallReducer.heartbeatMs)
+        if case .groupJoin(let callId, let leaf, _) = h.published[2] {
+            XCTAssertEqual(callId, callA)
+            XCTAssertEqual(leaf, 3)
+        } else {
+            XCTFail("the heartbeat is the same GroupCallJoin body")
+        }
+
+        try await waitUntil { h.heartbeatSleeps == 2 }
+        host.leave()
+        h.heartbeatTicks = 10
+        try await waitUntil { self.kinds(h.published).last == "end" }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(kinds(h.published), ["start", "join", "join", "leave", "end"],
+                       "no heartbeat after the call ended")
+        XCTAssertEqual(h.heartbeatSleeps, 2)
     }
 
     /// The mute button used to flip only the screen's state.

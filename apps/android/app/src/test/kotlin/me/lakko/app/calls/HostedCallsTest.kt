@@ -3,8 +3,10 @@
 
 package me.lakko.app.calls
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -65,7 +67,7 @@ class HostedCallsTest {
     class FakeGroupPort : GroupCallPort {
         var active: Boolean? = true
         var live = true
-        var joinedLeaves: Set<UInt>? = emptySet()
+        var otherFreshMembers: Set<String>? = emptySet()
         var read = read(epoch = 5u, seedByte = 5)
         var connectError: Throwable? = null
         val published = mutableListOf<Pair<String, FfiCallSignalingBody>>()
@@ -79,10 +81,15 @@ class HostedCallsTest {
             synced += 1
         }
         override fun isCallLive(groupIdHex: String, callIdHex: String, nowMs: Long): Boolean = live
-        override fun recordJoinedLeaves(groupIdHex: String, callIdHex: String): Set<UInt>? = joinedLeaves
+        override fun recordOtherFreshMembers(groupIdHex: String, callIdHex: String, nowMs: Long): Set<String>? =
+            otherFreshMembers
         override suspend fun readSettledGroup(groupIdHex: String, callId: ByteArray): SettledGroupRead = read
         override suspend fun mintCallJwt(sessionToken: String, callIdHex: String): String = "jwt"
+        /** When set, a Join publish suspends here BEFORE it is recorded. */
+        var joinGate: CompletableDeferred<Unit>? = null
+
         override suspend fun publishSignal(groupIdHex: String, body: FfiCallSignalingBody): Boolean {
+            if (body is FfiCallSignalingBody.GroupJoin) joinGate?.await()
             published += groupIdHex to body
             return true
         }
@@ -162,6 +169,72 @@ class HostedCallsTest {
     }
 
     @Test
+    fun `a joined device re-publishes its Join every heartbeat interval until it leaves`() = runTest {
+        val h = groupHarness()
+        h.host.start(groupA, video = false, joinCallIdHex = null)
+        runCurrent()
+        assertEquals(listOf("GroupStart", "GroupJoin"), h.port.kinds())
+
+        advanceTimeBy(GROUP_CALL_HEARTBEAT_MS - 1)
+        runCurrent()
+        assertEquals("no heartbeat before the interval", 1, h.port.kinds().count { it == "GroupJoin" })
+
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(2, h.port.kinds().count { it == "GroupJoin" })
+        advanceTimeBy(GROUP_CALL_HEARTBEAT_MS)
+        runCurrent()
+        assertEquals(3, h.port.kinds().count { it == "GroupJoin" })
+        val heartbeat = h.port.published.last().second as FfiCallSignalingBody.GroupJoin
+        assertEquals("the heartbeat is the same Join body", 2u, heartbeat.leafIndex)
+
+        h.port.otherFreshMembers = setOf("other-member")
+        h.host.leave()
+        runCurrent()
+        val afterLeave = h.port.published.size
+        advanceTimeBy(5 * GROUP_CALL_HEARTBEAT_MS)
+        runCurrent()
+        assertEquals("the heartbeat stops with the call", afterLeave, h.port.published.size)
+        assertEquals("GroupLeave", h.port.kinds().last())
+    }
+
+    @Test
+    fun `a Leave never lands before a heartbeat that was already being published`() = runTest {
+        val h = groupHarness()
+        h.host.start(groupA, video = false, joinCallIdHex = null)
+        runCurrent()
+        assertEquals(listOf("GroupStart", "GroupJoin"), h.port.kinds())
+
+        // The heartbeat starts publishing and is held mid-publish.
+        val gate = CompletableDeferred<Unit>()
+        h.port.joinGate = gate
+        advanceTimeBy(GROUP_CALL_HEARTBEAT_MS)
+        runCurrent()
+        assertEquals(listOf("GroupStart", "GroupJoin"), h.port.kinds())
+
+        h.port.otherFreshMembers = setOf("other-device")
+        h.host.leave()
+        runCurrent()
+        assertEquals("the Leave waits for the in-flight heartbeat", listOf("GroupStart", "GroupJoin"), h.port.kinds())
+
+        gate.complete(Unit)
+        runCurrent()
+        assertEquals(listOf("GroupStart", "GroupJoin", "GroupJoin", "GroupLeave"), h.port.kinds())
+    }
+
+    @Test
+    fun `a heartbeat that had not started publishing is skipped once the device left`() = runTest {
+        val h = groupHarness()
+        h.host.start(groupA, video = false, joinCallIdHex = null)
+        runCurrent()
+        h.port.otherFreshMembers = setOf("other-device")
+        h.host.leave()
+        advanceTimeBy(3 * GROUP_CALL_HEARTBEAT_MS)
+        runCurrent()
+        assertEquals(listOf("GroupStart", "GroupJoin", "GroupLeave"), h.port.kinds())
+    }
+
+    @Test
     fun `returning to the live call's chat is not a second call`() = runTest {
         val h = groupHarness()
         h.host.start(groupA, video = false, joinCallIdHex = null)
@@ -231,7 +304,7 @@ class HostedCallsTest {
         val h = groupHarness()
         h.host.start(groupA, video = false, joinCallIdHex = null)
         runCurrent()
-        h.port.joinedLeaves = setOf(2u)
+        h.port.otherFreshMembers = emptySet()
         h.host.leave()
         runCurrent()
         assertEquals(listOf("GroupStart", "GroupJoin", "GroupLeave", "End"), h.port.kinds())
@@ -248,7 +321,7 @@ class HostedCallsTest {
         val h = groupHarness()
         h.host.start(groupA, video = false, joinCallIdHex = null)
         runCurrent()
-        h.port.joinedLeaves = setOf(2u, 3u)
+        h.port.otherFreshMembers = setOf("other-member")
         h.host.leave()
         runCurrent()
         assertEquals(listOf("GroupStart", "GroupJoin", "GroupLeave"), h.port.kinds())

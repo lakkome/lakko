@@ -172,6 +172,7 @@ class AuthorIdentityTest {
         createdAt = createdAt,
         processed = ProcessedMessage.Application(ByteArray(0), senderLeaf, null),
         resolveSender = { leaf -> resolveMemberIdentity(roster, leaf) },
+        resolveLeafSignatureKey = { leaf -> resolveLeafSignatureKey(roster, leaf) },
         isCommitterBeacon = { false },
         parseBody = { parsed },
     )

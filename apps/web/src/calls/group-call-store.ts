@@ -29,6 +29,7 @@ import {
   type GroupCallEvent,
   type GroupCallRecord,
   type GroupCallRecords,
+  type GroupCallViewer,
 } from "./group-call-record";
 
 const records = new Map<string, GroupCallRecords>();
@@ -92,11 +93,12 @@ export function liveGroupCallsFor(
   accountId: string,
   groupIdB64s: readonly string[],
   nowMs: number,
+  viewer?: GroupCallViewer,
 ): { readonly groupIdB64: string; readonly call: GroupCallRecord }[] {
   version();
   const out: { groupIdB64: string; call: GroupCallRecord }[] = [];
   for (const g of groupIdB64s) {
-    const live = selectLiveGroupCall(load(accountId, g), nowMs);
+    const live = selectLiveGroupCall(load(accountId, g), nowMs, viewer);
     if (live !== null) out.push({ groupIdB64: g, call: live });
   }
   return out;
