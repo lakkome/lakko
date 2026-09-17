@@ -1248,10 +1248,12 @@ public class ChatViewModel(
      * keyed on the member's signature public key.
      */
     public fun memberLabel(member: GroupMember): String {
-        val suffix = if (ownLeafIndex() == member.leafIndex) " (you)" else ""
+        // The local leaf is not in the contact directory, so the resolver
+        // would fall back to "Member"; the row is simply "You".
+        if (ownLeafIndex() == member.leafIndex) return "You"
         // ADR-0048 UX §3 — the one resolver: rename, profile name, verified
         // @username, fingerprint (never `@` + hex).
-        return profileNames.resolve(member.signaturePublicKey).listLabel + suffix
+        return profileNames.resolve(member.signaturePublicKey).listLabel
     }
 
     /**

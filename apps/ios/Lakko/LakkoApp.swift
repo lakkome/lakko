@@ -696,6 +696,24 @@ private struct SessionRoot: View, Equatable {
         // (a tap while signed in), and pick up one already parked (a tap
         // while anonymous that the sign-in just completed).
         .onAppear { pushPendingDeepLinks() }
+        // The inbox long-poll for the whole session, not one screen: contact
+        // requests, acknowledgements and the Welcomes that create chats and
+        // groups arrive on the account and device mailboxes, and a user who
+        // never opens Contacts must still see a group they were added to.
+        // SwiftUI cancels the task with the session root (logout, forget).
+        .task {
+            while !Task.isCancelled {
+                let started = Date()
+                await contactsRepository.refreshInbox(
+                    waitSecs: ContactsViewModel.defaultLongPollSecs)
+                // A long-poll holds the connection itself; a poll that returned
+                // at once (no secrets yet, a refused request) must not spin.
+                if Date().timeIntervalSince(started) < 1 {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                }
+                await Task.yield()
+            }
+        }
         .onChange(of: inviteIntake.pendingSlug) { _, _ in pushPendingDeepLinks() }
         .onChange(of: inviteIntake.pendingGroupJoinSlug) { _, _ in pushPendingDeepLinks() }
         .onChange(of: inviteIntake.pendingCallJoinSlug) { _, _ in pushPendingDeepLinks() }

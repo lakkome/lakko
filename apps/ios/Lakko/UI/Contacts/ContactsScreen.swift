@@ -158,22 +158,15 @@ public struct ContactsScreen: View {
                 }
             )
         }
-        // Foreground continuous polling (1.14e5). The `while !Task.isCancelled`
-        // loop runs while the screen is on-screen and cancels on disappear.
-        // Long-poll budget = 30s (server-clamped); on each server-reported
-        // batch we loop immediately, so a dropped connection / catch-up cursor
-        // lands on the UI within at most ~30s + a round-trip.
+        // The inbox long-poll runs for the whole session in `SessionRoot`,
+        // so a chat or group created elsewhere lands whether or not this
+        // screen is open. A visit only loads the invite links and asks for
+        // one quick fetch so the list is current on arrival.
         .task {
             // The server-side list of live invite links, loaded once per
             // visit so the invite-links sheet opens populated.
             await viewModel.loadActiveInvites()
-            while !Task.isCancelled {
-                await viewModel.pollOnceLongPoll()
-                // No sleep: the long-poll holds the connection itself.
-                // `Task.yield` gives the runloop a tick so a tight error
-                // loop doesn't starve the main actor.
-                await Task.yield()
-            }
+            await viewModel.pollOnceLongPoll(waitSecs: 0)
         }
     }
 

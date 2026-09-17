@@ -1199,19 +1199,30 @@ private fun SubscriberChannelView(
             } else {
                 bootstrap = SubscribeBootstrap.Waiting
             }
-            if (catchUp(pubHex)) {
+            // Runs until the screen is left (the effect is cancelled). Before
+            // the current epoch's seed lands: catch up every 3 s. After it:
+            // reload the posts every 5 s so a post published while the reader
+            // is open appears, and re-check the epoch about every 30 s so a
+            // rotation is noticed without fetching the envelope set per tick.
+            var haveCurrent = catchUp(pubHex)
+            if (haveCurrent) {
                 bootstrap = SubscribeBootstrap.Active
                 loadAndDecodePosts()
-                return@LaunchedEffect
             }
+            var ticks = 0
             while (true) {
-                delay(3_000L)
+                delay(if (haveCurrent) READER_REFRESH_MS else SEED_WAIT_MS)
+                ticks += 1
                 try {
-                    if (catchUp(pubHex)) {
+                    if (!haveCurrent || ticks % EPOCH_RECHECK_EVERY_TICKS == 0) {
+                        haveCurrent = catchUp(pubHex)
+                    }
+                    if (state.subscribedSeeds(channelId).isNotEmpty()) {
                         bootstrap = SubscribeBootstrap.Active
                         loadAndDecodePosts()
-                        break
                     }
+                } catch (cause: kotlinx.coroutines.CancellationException) {
+                    throw cause
                 } catch (_: Throwable) {
                     // Transient — keep polling.
                 }
@@ -1267,6 +1278,9 @@ private fun StatusLine(text: String) {
 
 /** Fan-out cadence: the owner re-lists subscribers and seals the key for each new one. */
 private const val SUBSCRIBERS_POLL_INTERVAL_MS: Long = 5_000L
+private const val SEED_WAIT_MS: Long = 3_000L
+private const val READER_REFRESH_MS: Long = 5_000L
+private const val EPOCH_RECHECK_EVERY_TICKS: Int = 6
 
 internal enum class DeliveryStatus { Sent, Failed }
 

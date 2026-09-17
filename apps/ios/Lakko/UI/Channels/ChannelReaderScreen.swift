@@ -274,37 +274,44 @@ struct ChannelReaderScreen: View {
             // We can read at least one epoch's posts now.
             bootstrap = .active
             await loadAndDecodePosts()
-            // Keep polling until the current epoch's seed lands so brand-new
-            // posts become readable too.
-            if !haveCurrent {
-                startPollingTask(pubHex: pubHex)
+            // Keep polling while the screen is up: for the current epoch's
+            // seed until it lands, and for posts published while reading.
+            startPollingTask(pubHex: pubHex)
+        }
+    }
+
+    /// Runs until the screen disappears. Before the current epoch's seed
+    /// lands: catch up every 3 s (the publisher's fan-out is what we wait
+    /// for). After it: reload the posts every 5 s so a post published while
+    /// the reader is open appears, and re-check the epoch about every 30 s so
+    /// a rotation is noticed without a fetch of the envelope set per tick.
+    private func startPollingTask(pubHex: String) {
+        pollTask?.cancel()
+        pollTask = Task {
+            var ticks = 0
+            while !Task.isCancelled {
+                let haveCurrent: Bool = {
+                    guard let cur = state.epochByChannel[channelId] else { return false }
+                    return state.subscribedSeeds(channelId: channelId)[cur] != nil
+                }()
+                try? await Task.sleep(
+                    nanoseconds: haveCurrent ? Self.readerRefreshNanos : Self.seedWaitNanos)
+                if Task.isCancelled { return }
+                ticks += 1
+                if !haveCurrent || ticks % Self.epochRecheckEveryTicks == 0 {
+                    await catchUp(pubHex: pubHex)
+                }
+                if !state.subscribedSeeds(channelId: channelId).isEmpty {
+                    bootstrap = .active
+                    await loadAndDecodePosts()
+                }
             }
         }
     }
 
-    private func startPollingTask(pubHex: String) {
-        pollTask?.cancel()
-        pollTask = Task {
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
-                if Task.isCancelled { return }
-                await catchUp(pubHex: pubHex)
-                let seeds = state.subscribedSeeds(channelId: channelId)
-                if !seeds.isEmpty {
-                    bootstrap = .active
-                    await loadAndDecodePosts()
-                }
-                // Stop once we hold the current epoch's seed — new posts are
-                // now readable; older ones stay the placeholder. A permanent
-                // failure (unknown-channel etc.) would already have surfaced
-                // from register.
-                if let cur = state.epochByChannel[channelId],
-                    seeds[cur] != nil {
-                    return
-                }
-            }
-        }
-    }
+    private static let seedWaitNanos: UInt64 = 3_000_000_000
+    private static let readerRefreshNanos: UInt64 = 5_000_000_000
+    private static let epochRecheckEveryTicks = 6
 
     /// ADR-0031 catch-up: refresh the current epoch, pull the whole retained
     /// envelope set, and open each into the per-channel `epoch -> seed` map.

@@ -1115,12 +1115,13 @@ public final class ChatViewModel: ObservableObject {
     /// appended for the local leaf. Mirrors the ADR-0021 resolution the call
     /// roster uses, keyed on the member's signature public key.
     func memberLabel(_ member: GroupMember) -> String {
-        let isYou = ownLeafIndex == member.leafIndex
-        let suffix = isYou ? " (you)" : ""
+        // The local leaf is not in the contact directory, so the resolver
+        // would fall back to "Member"; the row is simply "You".
+        if ownLeafIndex == member.leafIndex { return "You" }
         // ADR-0048 — the member list has room for the verified username under
         // the name, so it shows the list form (`Alice Petrova · @alice`); the
         // resolver already falls back to the fingerprint WITHOUT `@`.
-        return ProfileDirectory.shared.resolve(signatureKey: member.signaturePublicKey).listLabel + suffix
+        return ProfileDirectory.shared.resolve(signatureKey: member.signaturePublicKey).listLabel
     }
 
     /// ADR-0048 — the bare resolved name for a signature key (base64), for
