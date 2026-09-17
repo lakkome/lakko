@@ -139,6 +139,7 @@ internal object RecordCopy {
     const val HOLD_TO_RECORD = "Hold to record"
     const val CANCELLED = "Cancelled"
     const val NO_CAMERA = "No camera found"
+    const val NO_COMPATIBLE_FORMAT = "Video messages can't be recorded on this device"
     const val START_FAILED = "Couldn't start recording"
     const val FLIP_FAILED = "Couldn't switch camera"
     const val STARTING_CAMERA = "Starting camera"
@@ -411,8 +412,11 @@ internal class RecordController(
 
     private fun showFailure(text: String) = showNotice(text, FAILURE_NOTICE_MS)
 
-    private fun videoFailureCopy(failure: VideoStartFailure): String =
-        if (failure == VideoStartFailure.NO_CAMERA) RecordCopy.NO_CAMERA else RecordCopy.START_FAILED
+    private fun videoFailureCopy(failure: VideoStartFailure): String = when (failure) {
+        VideoStartFailure.NO_CAMERA -> RecordCopy.NO_CAMERA
+        VideoStartFailure.NO_COMPATIBLE_FORMAT -> RecordCopy.NO_COMPATIBLE_FORMAT
+        VideoStartFailure.FAILED -> RecordCopy.START_FAILED
+    }
 
     private fun startCapture(kind: CaptureKind) {
         elapsedMs = 0L
@@ -477,6 +481,8 @@ internal class RecordController(
                 }
                 val failure = when (bound) {
                     VideoNoteRecorder.BindResult.NO_CAMERA -> VideoStartFailure.NO_CAMERA
+                    VideoNoteRecorder.BindResult.NO_COMPATIBLE_FORMAT ->
+                        VideoStartFailure.NO_COMPATIBLE_FORMAT
                     VideoNoteRecorder.BindResult.FAILED -> VideoStartFailure.FAILED
                     VideoNoteRecorder.BindResult.BOUND -> {
                         val file = hub.newEntryFile("take-${UUID.randomUUID()}", "video-note-$stamp.mp4")
@@ -603,6 +609,8 @@ internal class RecordController(
                             when (outcome) {
                                 VideoNoteOutcome.HOLD_TO_RECORD -> showNotice(RecordCopy.HOLD_TO_RECORD)
                                 VideoNoteOutcome.NO_CAMERA -> showFailure(RecordCopy.NO_CAMERA)
+                                VideoNoteOutcome.NO_COMPATIBLE_FORMAT ->
+                                    showFailure(RecordCopy.NO_COMPATIBLE_FORMAT)
                                 else -> showFailure(RecordCopy.START_FAILED)
                             }
                             if (disposition == FinishDisposition.PREVIEW) dispatch(RecEvent.PreviewFailed)

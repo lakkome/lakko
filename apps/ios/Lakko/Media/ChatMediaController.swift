@@ -638,6 +638,22 @@ public final class ChatMediaController: ObservableObject {
         }
     }
 
+    /// The decrypted file of a received video note, or `nil` when it cannot
+    /// be fetched or authenticated. The download is owned by the controller
+    /// (``single(_:_:)``), not by the bubble, so it survives the row being
+    /// recycled; `loadingKeys` tells any bubble for `key` that it is under way.
+    public func videoNoteFile(for ref: AttachmentRef, key: String) async -> URL? {
+        if let url = temp.url(for: key) { return url }
+        loadingKeys.insert(key)
+        defer { loadingKeys.remove(key) }
+        do {
+            return try await mediaFile(for: ref)
+        } catch {
+            Self.log.warning("video note download failed")
+            return nil
+        }
+    }
+
     /// A local key (an outgoing take not yet uploaded) resolves to its file.
     public func localFile(for key: String) -> URL? { temp.url(for: key) }
 

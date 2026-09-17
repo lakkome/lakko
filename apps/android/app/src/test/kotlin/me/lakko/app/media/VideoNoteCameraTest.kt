@@ -72,6 +72,14 @@ class VideoNoteCameraTest {
     }
 
     @Test
+    fun a_camera_with_no_interoperable_profile_says_so_rather_than_failing_vaguely() {
+        assertEquals(
+            VideoNoteOutcome.NO_COMPATIBLE_FORMAT,
+            outcome(failure = VideoStartFailure.NO_COMPATIBLE_FORMAT, sinceStartMs = 6_000),
+        )
+    }
+
+    @Test
     fun a_start_that_failed_says_so_even_on_a_short_hold() {
         assertEquals(VideoNoteOutcome.FAILED, outcome(failure = VideoStartFailure.FAILED, sinceStartMs = 100))
     }

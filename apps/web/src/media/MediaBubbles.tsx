@@ -18,6 +18,7 @@ import type { AttachmentRefBytes } from "../chat/attachments";
 import { autoplayVideoNotes } from "./media-prefs";
 import { ProgressRing } from "./MediaComposer";
 import type { MediaHub } from "./media-hub";
+import { errorName, mediaErrorIsReal, playRejectionOutcome, waitForMetadata } from "./playback-outcome";
 import { nextPlaybackRate, rateLabel } from "./playback-queue";
 import { formatClock, formatTotalClock, spokenDuration } from "./recording-machine";
 import { PhotoBubble, VideoBubble } from "./VisualBubbles";
@@ -101,18 +102,23 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
       });
       a.addEventListener("error", () => {
         setPlaying(false);
+        // An aborted load (the source cleared on cleanup) is not a broken
+        // message; only a real media error shows "Couldn't play".
+        if (!mediaErrorIsReal(a.error?.code)) return;
+        console.warn("[voice] media error", a.error?.code ?? "none");
         setStatus("error");
       });
       audio = a;
       setStatus("idle");
       return a;
-    } catch {
+    } catch (err) {
+      console.warn("[voice] download or decrypt failed", errorName(err) ?? "unnamed");
       setStatus("error");
       return null;
     }
   }
 
-  async function play(): Promise<void> {
+  async function play(retries = 0): Promise<void> {
     const a = await ensureAudio();
     if (a === null) return;
     props.hub.claim(props.mediaKey, () => a.pause());
@@ -120,8 +126,20 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
     try {
       await a.play();
       props.hub.markPlayed(props.mediaKey);
-    } catch {
-      setStatus("error");
+    } catch (err) {
+      const name = errorName(err);
+      // Sound is the whole message, so there is no muted fallback: a refused
+      // or interrupted start returns to the play button without error copy.
+      const outcome = playRejectionOutcome(name, { retries, muted: false, canPlayMuted: false });
+      console.warn("[voice] play rejected", name ?? "unnamed", "outcome", outcome);
+      if (outcome === "retry") {
+        await play(retries + 1);
+      } else if (outcome === "error") {
+        setStatus("error");
+      } else {
+        setPlaying(false);
+        props.hub.release(props.mediaKey);
+      }
     }
   }
 
@@ -276,15 +294,31 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
 
 // ----- video note ----------------------------------------------------------
 
+/** How long a start waits for the element's metadata before calling `play()`
+ *  anyway (`play()` waits for data itself; this only avoids racing a fresh
+ *  load when setting `currentTime`). */
+const VIDEO_NOTE_READY_TIMEOUT_MS = 4000;
+
 export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
   const [posterUrl, setPosterUrl] = createSignal<string | null>(null);
   const [status, setStatus] = createSignal<"idle" | "loading" | "error">("idle");
   const [mode, setMode] = createSignal<"poster" | "muted" | "sound">("poster");
-  const [paused, setPaused] = createSignal(false);
+  const [paused, setPaused] = createSignal(true);
   const [progress, setProgress] = createSignal(0);
   const [videoUrl, setVideoUrl] = createSignal<string | null>(null);
+  // Once playback has been started the <video> stays mounted — through pause,
+  // end and the return to the poster — so a later tap plays an element that
+  // already has its metadata instead of a brand-new one. Only a real media
+  // error unmounts it, so a retry gets a fresh element.
+  const [mounted, setMounted] = createSignal(false);
+  // Playback with sound was refused (NotAllowedError) and the note fell back
+  // to muted: offer "Tap for sound".
+  const [soundHint, setSoundHint] = createSignal(false);
   let video: HTMLVideoElement | undefined;
   let root: HTMLButtonElement | undefined;
+  // Bumped by every start, stop and failure: an async step that finds the
+  // token moved on belongs to a superseded start and does nothing.
+  let playToken = 0;
   const uploading = (): boolean => typeof props.upload === "number";
 
   onMount(() => {
@@ -311,48 +345,121 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
       setVideoUrl(url);
       setStatus("idle");
       return url;
-    } catch {
+    } catch (err) {
+      console.warn("[video-note] download or decrypt failed", errorName(err) ?? "unnamed");
       setStatus("error");
       return null;
     }
   }
 
-  async function startMuted(): Promise<void> {
-    if (mode() !== "poster" || uploading()) return;
-    if ((await ensureUrl()) === null) return;
-    setMode("muted");
-    queueMicrotask(() => {
-      if (video === undefined) return;
-      video.muted = true;
-      video.loop = true;
-      void video.play().catch(() => undefined);
-    });
+  /** "Couldn't play this message": a failed download/decrypt or a real media
+   *  error — nothing else reaches here. */
+  function fail(): void {
+    playToken++;
+    video?.pause();
+    props.hub.release(props.mediaKey);
+    setSoundHint(false);
+    setMode("poster");
+    setMounted(false);
+    setStatus("error");
   }
 
-  async function onTap(): Promise<void> {
+  function backToPoster(): void {
+    playToken++;
+    video?.pause();
+    props.hub.release(props.mediaKey);
+    setSoundHint(false);
+    setProgress(0);
+    setMode("poster");
+  }
+
+  async function playWithFallback(v: HTMLVideoElement, token: number, retries: number): Promise<void> {
+    try {
+      await v.play();
+      if (token === playToken && !v.muted) props.hub.markPlayed(props.mediaKey);
+    } catch (err) {
+      if (token !== playToken) return;
+      const name = errorName(err);
+      const outcome = playRejectionOutcome(name, { retries, muted: v.muted, canPlayMuted: true });
+      console.warn("[video-note] play rejected", name ?? "unnamed", "outcome", outcome);
+      switch (outcome) {
+        case "retry":
+          await waitForMetadata(v, VIDEO_NOTE_READY_TIMEOUT_MS);
+          if (token !== playToken) return;
+          await playWithFallback(v, token, retries + 1);
+          return;
+        case "muted-fallback":
+          props.hub.release(props.mediaKey);
+          v.muted = true;
+          v.loop = true;
+          setMode("muted");
+          setSoundHint(true);
+          await playWithFallback(v, token, 0);
+          return;
+        case "tap-to-play":
+          backToPoster();
+          return;
+        case "error":
+          fail();
+          return;
+      }
+    }
+  }
+
+  async function startPlayback(withSound: boolean): Promise<void> {
+    const token = ++playToken;
+    if ((await ensureUrl()) === null) return;
+    if (token !== playToken) return;
+    setMounted(true);
+    // The element mounts in the reactive update above; let it settle.
+    await Promise.resolve();
+    const v = video;
+    if (v === undefined || token !== playToken) return;
+    setSoundHint(false);
+    setMode(withSound ? "sound" : "muted");
+    v.muted = !withSound;
+    v.loop = !withSound;
+    const ready = await waitForMetadata(v, VIDEO_NOTE_READY_TIMEOUT_MS);
+    if (token !== playToken) return;
+    if (ready === "error") {
+      console.warn("[video-note] media error before playback", v.error?.code ?? "none");
+      fail();
+      return;
+    }
+    if (withSound) {
+      props.hub.claim(props.mediaKey, () => backToPoster());
+      if (ready === "ready") {
+        try {
+          v.currentTime = 0;
+        } catch {
+          // Seeking before data is optional; playback starts from where it is.
+        }
+      }
+    }
+    await playWithFallback(v, token, 0);
+  }
+
+  function startMuted(): void {
+    if (mode() !== "poster" || uploading() || status() === "error") return;
+    void startPlayback(false);
+  }
+
+  function onTap(): void {
     if (uploading()) return;
     if (mode() === "sound" && video !== undefined) {
-      if (video.paused) {
-        props.hub.claim(props.mediaKey, () => video?.pause());
-        void video.play().catch(() => setStatus("error"));
+      const v = video;
+      if (v.paused) {
+        props.hub.claim(props.mediaKey, () => backToPoster());
+        void playWithFallback(v, playToken, 0);
       } else {
-        video.pause();
+        v.pause();
       }
       return;
     }
-    if ((await ensureUrl()) === null) return;
-    setMode("sound");
-    queueMicrotask(() => {
-      if (video === undefined) return;
-      props.hub.claim(props.mediaKey, () => video?.pause());
-      video.muted = false;
-      video.loop = false;
-      video.currentTime = 0;
-      void video.play().then(
-        () => props.hub.markPlayed(props.mediaKey),
-        () => setStatus("error"),
-      );
-    });
+    // Poster, or a muted loop (autoplay or the NotAllowed fallback): this tap
+    // is a fresh user gesture, so play with sound from the start.
+    setStatus((s) => (s === "error" ? "idle" : s));
+    void startPlayback(true);
   }
 
   // UX spec §3 — autoplay muted and looping only when scrolled into view, and
@@ -361,7 +468,7 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
     if (typeof IntersectionObserver === "undefined" || root === undefined) return;
     const observer = new IntersectionObserver((entries) => {
       const visible = entries.some((e) => e.isIntersecting);
-      if (visible && autoplayVideoNotes() && mode() === "poster") void startMuted();
+      if (visible && autoplayVideoNotes() && mode() === "poster") startMuted();
       if (!visible && mode() === "muted") {
         video?.pause();
       } else if (visible && mode() === "muted") {
@@ -373,6 +480,7 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
   });
 
   onCleanup(() => {
+    playToken++;
     video?.pause();
     props.hub.release(props.mediaKey);
   });
@@ -380,44 +488,52 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
   const label = (): string => {
     const d = spokenDuration(props.attachment.durationMs ?? 0);
     if (mode() === "sound" && !paused()) return "Pause video message";
+    if (mode() === "muted") return `Play video message with sound, ${d}`;
     return `Play video message, ${d}`;
   };
 
   return (
     <div style={{ display: "flex", "flex-direction": "column", "align-items": "center", gap: "0.2rem" }}>
-      <button ref={root} type="button" class="lakko-vn-bubble" aria-label={label()} onClick={() => void onTap()}>
-        <Show
-          when={mode() !== "poster" && videoUrl() !== null}
-          fallback={
-            <Show when={posterUrl()} fallback={<span style={{ display: "block", width: "100%", height: "100%" }} />}>
-              {(url) => <img src={url()} alt="" draggable={false} />}
-            </Show>
-          }
-        >
+      <button ref={root} type="button" class="lakko-vn-bubble" aria-label={label()} onClick={onTap}>
+        <Show when={mounted() && videoUrl() !== null}>
           <video
             ref={video}
-            src={videoUrl() ?? ""}
+            src={videoUrl() ?? undefined}
             playsinline
-            muted={mode() === "muted"}
+            preload="auto"
             poster={posterUrl() ?? undefined}
+            style={{ visibility: mode() === "poster" ? "hidden" : "visible" }}
             onPlay={() => setPaused(false)}
             onPause={() => setPaused(true)}
             onTimeUpdate={(e) => {
               const v = e.currentTarget;
               if (Number.isFinite(v.duration) && v.duration > 0) setProgress(v.currentTime / v.duration);
             }}
-            onEnded={() => {
-              setProgress(0);
-              props.hub.release(props.mediaKey);
-              if (autoplayVideoNotes()) {
-                setMode("poster");
-                void startMuted();
-              } else {
-                setMode("poster");
+            onEnded={(e) => {
+              if (mode() !== "sound") return;
+              backToPoster();
+              try {
+                e.currentTarget.currentTime = 0;
+              } catch {
+                // Optional.
               }
+              if (autoplayVideoNotes()) startMuted();
             }}
-            onError={() => setStatus("error")}
+            onError={(e) => {
+              const code = e.currentTarget.error?.code;
+              if (!mediaErrorIsReal(code)) return;
+              console.warn("[video-note] media error", code ?? "none");
+              fail();
+            }}
           />
+        </Show>
+        <Show when={mode() === "poster" || !mounted()}>
+          <Show
+            when={posterUrl()}
+            fallback={<span style={{ position: "absolute", inset: 0, display: "block", width: "100%", height: "100%" }} />}
+          >
+            {(url) => <img src={url()} alt="" draggable={false} style={{ position: "absolute", inset: 0 }} />}
+          </Show>
         </Show>
         <Show when={mode() === "sound"}>
           <ProgressRing fraction={progress()} stroke="#fff" width={3} />
@@ -434,8 +550,15 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
             <span style={{ position: "absolute", top: "1rem", right: "2.2rem", "font-size": "1rem" }}>🔇</span>
           </Show>
         </span>
-        <Show when={props.attachment.durationMs !== undefined && mode() !== "sound"}>
-          <span class="lakko-vn-corner">{formatTotalClock(props.attachment.durationMs ?? 0)}</span>
+        <Show
+          when={soundHint() && mode() === "muted"}
+          fallback={
+            <Show when={props.attachment.durationMs !== undefined && mode() !== "sound"}>
+              <span class="lakko-vn-corner">{formatTotalClock(props.attachment.durationMs ?? 0)}</span>
+            </Show>
+          }
+        >
+          <span class="lakko-vn-corner">Tap for sound</span>
         </Show>
       </button>
       <Show when={status() === "error"}>
@@ -443,8 +566,7 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
           type="button"
           onClick={() => {
             setStatus("idle");
-            setMode("poster");
-            void onTap();
+            void startPlayback(true);
           }}
           style={{ border: "none", background: "transparent", color: "inherit", padding: 0, "font-size": "0.75rem", "text-decoration": "underline" }}
         >

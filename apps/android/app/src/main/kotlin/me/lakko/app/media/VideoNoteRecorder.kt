@@ -7,19 +7,21 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.util.Log
 import android.util.Rational
 import android.view.Surface
 import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.DynamicRange
 import androidx.camera.core.MirrorMode
 import androidx.camera.core.Preview
 import androidx.camera.core.UseCaseGroup
 import androidx.camera.core.ViewPort
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.ExperimentalPersistentRecording
-import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.FileOutputOptions
 import androidx.camera.video.Quality
 import androidx.camera.video.QualitySelector
@@ -46,10 +48,20 @@ import kotlin.coroutines.resume
  *
  *   * **Square.** The preview and the video capture are bound in one
  *     `UseCaseGroup` with a 1:1 `ViewPort`, so CameraX crops both to the same
- *     centred square. SD quality (480p) then bounds the square's side at 480.
+ *     centred square; the selected profile's short side bounds that square.
  *     This is the documented CameraX mechanism; it has not been observed on a
  *     device in this change (nothing ran on one), which the receiving side
  *     tolerates: the bubble draws the clip through a circle either way.
+ *   * **Format.** The quality is not asked for by name — it is chosen by
+ *     reading each supported quality's `EncoderProfiles` and keeping only
+ *     H.264 + AAC ([chooseVideoNoteProfile]). CameraX has no audio-codec
+ *     setter: it takes the audio mime type from the selected quality's
+ *     profile, so asking for `Quality.SD` blind is how this recorder shipped
+ *     AMR-NB audio that iOS refuses to play at all. A camera with no
+ *     interoperable profile yields `NO_COMPATIBLE_FORMAT` and records nothing.
+ *   * **Verification.** The finished file's real track codecs are read back in
+ *     [measureTake] and logged; a mismatch is a warning naming the actual mime
+ *     types (nothing else about the take is logged).
  *   * **Camera choice.** The front camera, else the back camera, else any
  *     camera ([chooseVideoNoteLens]); [bind] reports `NO_CAMERA` only when
  *     CameraX lists none, so a device with a single rear camera records.
@@ -82,6 +94,7 @@ public class VideoNoteRecorder(
     private var output: File? = null
     private var finalized: CompletableDeferred<Boolean>? = null
     private var previewView: PreviewView? = null
+    private var selectedQuality: Quality? = null
 
     /** The lens bound right now, or `null` before a successful bind. */
     public var lens: CameraLens? = null
@@ -92,12 +105,20 @@ public class VideoNoteRecorder(
         private set
 
     /** The outcome of [bind]. */
-    public enum class BindResult { BOUND, NO_CAMERA, FAILED }
+    public enum class BindResult {
+        BOUND,
+        NO_CAMERA,
+
+        /** The camera offers no H.264 + AAC profile: recording is refused. */
+        NO_COMPATIBLE_FORMAT,
+        FAILED,
+    }
 
     /**
      * Bind a camera to [view] and prepare the recorder: the front camera when
      * there is one, else the back camera, else any camera
-     * ([chooseVideoNoteLens]).
+     * ([chooseVideoNoteLens]), recording at the smallest H.264 + AAC profile
+     * that camera offers ([chooseVideoNoteProfile]).
      */
     public suspend fun bind(view: PreviewView): BindResult {
         previewView = view
@@ -113,21 +134,31 @@ public class VideoNoteRecorder(
             Log.w(TAG, "no camera available to bind")
             return BindResult.NO_CAMERA
         }
+        val info = infos[chosen] ?: return BindResult.FAILED
+        val profile = chooseVideoNoteProfile(videoNoteProfileOptions(info)) ?: run {
+            // UX spec §8: refuse rather than send a clip only some clients play.
+            Log.w(TAG, "no H.264 + AAC camcorder profile on this camera: video notes unavailable")
+            return BindResult.NO_COMPATIBLE_FORMAT
+        }
+        Log.i(
+            TAG,
+            "video note profile: ${profile.width}x${profile.height} " +
+                "video=${profile.videoMime} audio=${profile.audioMime}",
+        )
         if (preview == null) {
             preview = Preview.Builder().build()
         }
-        if (capture == null) {
+        if (capture == null || selectedQuality != profile.quality) {
+            // No FallbackStrategy on purpose: a fallback re-opens the defect
+            // this selection closes by wandering onto a neighbouring quality
+            // whose profile may carry AMR-NB audio.
             val recorder = Recorder.Builder()
-                .setQualitySelector(
-                    QualitySelector.from(
-                        Quality.SD,
-                        FallbackStrategy.lowerQualityOrHigherThan(Quality.SD),
-                    ),
-                )
+                .setQualitySelector(QualitySelector.from(profile.quality))
                 .build()
             capture = VideoCapture.Builder(recorder)
                 .setMirrorMode(MirrorMode.MIRROR_MODE_ON_FRONT_ONLY)
                 .build()
+            selectedQuality = profile.quality
         }
         preview?.setSurfaceProvider(view.surfaceProvider)
         return if (rebind(p, chosen)) BindResult.BOUND else BindResult.FAILED
@@ -217,6 +248,7 @@ public class VideoNoteRecorder(
     }
 
     private fun measureTake(file: File, elapsedMs: Long): RecordedTake? {
+        verifyCodecs(file)
         val retriever = MediaMetadataRetriever()
         return try {
             retriever.setDataSource(file.absolutePath)
@@ -277,6 +309,74 @@ public class VideoNoteRecorder(
 
         public fun hasAnyCamera(context: Context): Boolean =
             context.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)
+
+        /**
+         * Every quality [info]'s camera supports, described by the codecs and
+         * frame size its `EncoderProfiles` declares — the input
+         * [chooseVideoNoteProfile] decides on. A quality whose profile cannot
+         * be read is left out rather than guessed at.
+         */
+        internal fun videoNoteProfileOptions(info: CameraInfo): List<VideoNoteProfileOption<Quality>> {
+            val caps = runCatching { Recorder.getVideoCapabilities(info) }.getOrElse {
+                Log.w(TAG, "video capabilities unavailable: ${it.javaClass.simpleName}")
+                return emptyList()
+            }
+            val range = DynamicRange.SDR
+            val qualities = runCatching { caps.getSupportedQualities(range) }.getOrElse {
+                Log.w(TAG, "quality enumeration failed: ${it.javaClass.simpleName}")
+                return emptyList()
+            }
+            return qualities.mapNotNull { quality ->
+                val profiles = runCatching { caps.getProfiles(quality, range) }.getOrNull()
+                val video = profiles?.defaultVideoProfile ?: return@mapNotNull null
+                VideoNoteProfileOption(
+                    quality = quality,
+                    videoMime = video.mediaType,
+                    audioMime = profiles.defaultAudioProfile?.mediaType,
+                    width = video.width,
+                    height = video.height,
+                )
+            }
+        }
+
+        /**
+         * Read the finished file's real track codecs back and say what they
+         * are. The profile selection says what the device promised; this says
+         * what it produced, and a device that produced something else is worth
+         * a warning even though the take is still handed on (the user recorded
+         * it; dropping it silently would be worse than a clip that may not
+         * play everywhere). Only mime types are logged.
+         */
+        private fun verifyCodecs(file: File) {
+            val extractor = MediaExtractor()
+            var video: String? = null
+            var audio: String? = null
+            try {
+                extractor.setDataSource(file.absolutePath)
+                for (track in 0 until extractor.trackCount) {
+                    val mime = runCatching { extractor.getTrackFormat(track).getString(MediaFormat.KEY_MIME) }
+                        .getOrNull() ?: continue
+                    when {
+                        video == null && mime.startsWith("video/") -> video = mime
+                        audio == null && mime.startsWith("audio/") -> audio = mime
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "video note codec check failed: ${e.javaClass.simpleName}")
+                return
+            } finally {
+                runCatching { extractor.release() }
+            }
+            if (videoNoteCodecsInteroperable(video, audio)) {
+                Log.i(TAG, "video note codecs: video=$video audio=$audio")
+            } else {
+                Log.w(
+                    TAG,
+                    "video note codecs are not interoperable: video=$video audio=$audio " +
+                        "(expected $VIDEO_NOTE_VIDEO_CODEC + $VIDEO_NOTE_AUDIO_CODEC)",
+                )
+            }
+        }
 
         /**
          * The process CameraX provider, or `null` when initialization failed

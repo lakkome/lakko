@@ -58,6 +58,12 @@ public enum class VideoStartFailure {
     /** No camera could be found to bind. */
     NO_CAMERA,
 
+    /**
+     * A camera exists, but offers no H.264 + AAC profile, so a note it
+     * recorded would not play on the other clients (UX spec §8).
+     */
+    NO_COMPATIBLE_FORMAT,
+
     /** A camera exists, but binding or starting the recording failed. */
     FAILED,
 }
@@ -72,6 +78,9 @@ public enum class VideoNoteOutcome {
 
     /** `No camera found`. */
     NO_CAMERA,
+
+    /** `Video messages can't be recorded on this device`. */
+    NO_COMPATIBLE_FORMAT,
 
     /** `Couldn't start recording`. */
     FAILED,
@@ -109,6 +118,7 @@ public fun videoNoteFinishOutcome(
     takeDurationMs != null ->
         if (takeDurationMs >= MIN_TAKE_MS) VideoNoteOutcome.USABLE else VideoNoteOutcome.HOLD_TO_RECORD
     startFailure == VideoStartFailure.NO_CAMERA -> VideoNoteOutcome.NO_CAMERA
+    startFailure == VideoStartFailure.NO_COMPATIBLE_FORMAT -> VideoNoteOutcome.NO_COMPATIBLE_FORMAT
     startFailure == VideoStartFailure.FAILED -> VideoNoteOutcome.FAILED
     recording ->
         if (recordedMs < MIN_TAKE_MS) VideoNoteOutcome.HOLD_TO_RECORD else VideoNoteOutcome.FAILED

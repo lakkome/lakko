@@ -4,6 +4,7 @@
 import AVFoundation
 import Combine
 import LakkoCore
+import os
 import SwiftUI
 
 /// ADR-0047 / UX spec §2, §3, §5 — the timeline bubbles for voice messages,
@@ -202,19 +203,36 @@ struct VoiceBubble: View {
 
 @MainActor
 final class VideoNotePlayerModel: ObservableObject {
-    enum Mode { case poster, muted, sound }
+    typealias Mode = VideoNotePlayback.Mode
+
+    /// How long a downloaded note may take to become playable.
+    static let readyTimeout: Duration = .seconds(15)
+    /// How long a ready note may take to actually start playing.
+    static let startTimeout: Duration = .seconds(10)
+
+    private static let log = Logger(subsystem: "me.lakko.media", category: "video-note")
 
     @Published var mode: Mode = .poster
     @Published var paused = false
     @Published var progress: Double = 0
-    @Published var loading = false
+    /// A tap is downloading or preparing the note.
+    @Published var starting = false
     @Published var failed = false
     @Published var poster: URL?
     @Published private(set) var player: AVPlayer?
 
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
-    private var fileURL: URL?
+    private var failedToEndObserver: NSObjectProtocol?
+    private var statusObservation: NSKeyValueObservation?
+    private var timeControlObservation: NSKeyValueObservation?
+    /// Bumped by every teardown, so an await that resumes after the bubble
+    /// went away does not start playback on a model nobody shows.
+    private var generation = 0
+    /// Marks the note played the first time sound playback actually runs.
+    private var onSoundStarted: (() -> Void)?
+    private var key: String?
+    private weak var media: ChatMediaController?
 
     func loadPoster(_ thumb: ThumbRef?, media: ChatMediaController) async {
         guard poster == nil, let thumb else { return }
@@ -222,21 +240,26 @@ final class VideoNotePlayerModel: ObservableObject {
     }
 
     private func ensurePlayer(ref: AttachmentRef, key: String, pending: Bool, media: ChatMediaController) async -> AVPlayer? {
-        if let player { return player }
-        loading = true
-        defer { loading = false }
+        if let player, player.currentItem?.status != .failed { return player }
+        discardPlayer()
+        let gen = generation
         let url: URL?
         if pending {
             url = media.localFile(for: key)
         } else {
-            url = try? await media.mediaFile(for: ref)
+            url = await media.videoNoteFile(for: ref, key: key)
         }
-        guard let url else {
-            failed = true
+        guard gen == generation else {
+            Self.log.info("video note bubble went away while the file was loading")
             return nil
         }
-        failed = false
-        fileURL = url
+        if let player { return player }
+        guard let url else {
+            fail("file-unavailable", error: nil, surface: true)
+            return nil
+        }
+        self.key = key
+        self.media = media
         let item = AVPlayerItem(asset: AVURLAsset(url: url, options: [AVURLAssetOverrideMIMETypeKey: "video/mp4"]))
         let player = AVPlayer(playerItem: item)
         player.actionAtItemEnd = .pause
@@ -244,8 +267,16 @@ final class VideoNotePlayerModel: ObservableObject {
             MainActor.assumeIsolated {
                 guard let self, let d = player.currentItem?.duration, d.isNumeric, CMTimeGetSeconds(d) > 0 else { return }
                 self.progress = CMTimeGetSeconds(time) / CMTimeGetSeconds(d)
-                if player.currentItem?.status == .failed { self.failed = true }
             }
+        }
+        statusObservation = item.observe(\.status, options: [.new]) { [weak self] observed, _ in
+            guard observed.status == .failed else { return }
+            let error = observed.error as NSError?
+            Task { @MainActor in self?.itemFailed(gen: gen, error: error) }
+        }
+        timeControlObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self] observed, _ in
+            guard observed.timeControlStatus == .playing else { return }
+            Task { @MainActor in self?.playbackRunning(gen: gen) }
         }
         endObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
@@ -254,12 +285,21 @@ final class VideoNotePlayerModel: ObservableObject {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.ended(key: key, media: media) }
         }
+        failedToEndObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self] note in
+            let error = note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? NSError
+            MainActor.assumeIsolated { self?.itemFailed(gen: gen, error: error) }
+        }
         self.player = player
         return player
     }
 
     func autoplayMuted(ref: AttachmentRef, key: String, media: ChatMediaController) async {
-        guard mode == .poster, let player = await ensurePlayer(ref: ref, key: key, pending: false, media: media) else { return }
+        guard mode == .poster, !starting, let player = await ensurePlayer(ref: ref, key: key, pending: false, media: media) else { return }
+        guard mode == .poster, !starting else { return }
         player.isMuted = true
         mode = .muted
         paused = false
@@ -267,28 +307,107 @@ final class VideoNotePlayerModel: ObservableObject {
     }
 
     func tap(ref: AttachmentRef, key: String, pending: Bool, media: ChatMediaController) async {
-        if mode == .sound, let player {
-            if paused {
-                media.claim(key) { [weak self] in self?.pauseForOther() }
-                player.play()
-                paused = false
-            } else {
-                player.pause()
-                paused = true
-                media.releaseClaim(key)
-            }
+        let action = VideoNotePlayback.tapAction(mode: mode, paused: paused, starting: starting, hasPlayer: player != nil)
+        Self.log.info("video note tap: action=\(String(describing: action), privacy: .public) pending=\(pending, privacy: .public)")
+        switch action {
+        case .ignore:
             return
+        case .pause:
+            player?.pause()
+            paused = true
+            media.releaseClaim(key)
+        case .resume:
+            media.claim(key) { [weak self] in self?.pauseForOther() }
+            player?.play()
+            paused = false
+        case .start:
+            await start(ref: ref, key: key, pending: pending, media: media)
         }
-        guard let player = await ensurePlayer(ref: ref, key: key, pending: pending, media: media) else { return }
+    }
+
+    private func start(ref: AttachmentRef, key: String, pending: Bool, media: ChatMediaController) async {
+        guard let player = await prepare(ref: ref, key: key, pending: pending, media: media) else { return }
+        let gen = generation
         media.stopPlayback()
         media.claim(key) { [weak self] in self?.pauseForOther() }
         _ = try? MediaAudioSession.begin(.playback, callActive: media.callActive)
         player.isMuted = false
-        await player.seek(to: .zero)
+        // The item is ready, so the seek completes.
+        if CMTimeCompare(player.currentTime(), .zero) != 0 {
+            await player.seek(to: .zero)
+        }
+        guard gen == generation, self.player === player else {
+            media.releaseClaim(key)
+            MediaAudioSession.end(.playback)
+            return
+        }
         mode = .sound
         paused = false
+        progress = 0
+        onSoundStarted = pending ? nil : { [weak media] in media?.markPlayed(key) }
         player.play()
-        if !pending { media.markPlayed(key) }
+        let observed = await KeyValueWait.first(of: player, \.timeControlStatus, timeout: Self.startTimeout) { $0 == .playing }
+        let stillWanted = gen == generation && self.player === player && mode == .sound && !paused
+        if VideoNotePlayback.startFailed(observed: observed, stillWanted: stillWanted) {
+            let reason = player.reasonForWaitingToPlay?.rawValue ?? "none"
+            Self.log.error("video note did not start playing: waiting=\(reason, privacy: .public)")
+            fail("start-timeout", error: player.currentItem?.error as NSError?, surface: true)
+        } else if observed == .playing {
+            playbackRunning(gen: gen)
+        }
+    }
+
+    /// Downloads if needed and waits until the item is ready to play. Shows the
+    /// spinner meanwhile; on failure or timeout sets `failed`.
+    private func prepare(ref: AttachmentRef, key: String, pending: Bool, media: ChatMediaController) async -> AVPlayer? {
+        starting = true
+        failed = false
+        defer { starting = false }
+        let gen = generation
+        guard let player = await ensurePlayer(ref: ref, key: key, pending: pending, media: media),
+              let item = player.currentItem else { return nil }
+        let status = await KeyValueWait.first(of: item, \.status, timeout: Self.readyTimeout) { $0 != .unknown }
+        guard gen == generation, self.player === player else { return nil }
+        switch VideoNotePlayback.readiness(status) {
+        case .ready:
+            Self.log.info("video note ready to play")
+            return player
+        case .failed:
+            fail("item-failed", error: item.error as NSError?, surface: true)
+            return nil
+        case .timedOut:
+            fail("ready-timeout", error: nil, surface: true)
+            return nil
+        }
+    }
+
+    private func playbackRunning(gen: Int) {
+        guard gen == generation, mode == .sound, let onSoundStarted else { return }
+        self.onSoundStarted = nil
+        Self.log.info("video note playback started")
+        onSoundStarted()
+    }
+
+    private func itemFailed(gen: Int, error: NSError?) {
+        guard gen == generation, player != nil else { return }
+        // A muted autoplay that fails falls back to the poster quietly; a tap
+        // the user is waiting on says so.
+        fail("item-failed", error: error, surface: mode == .sound || starting)
+    }
+
+    private func fail(_ reason: String, error: NSError?, surface: Bool) {
+        let domain = error?.domain ?? "none"
+        let code = error?.code ?? 0
+        Self.log.error("video note playback failed: reason=\(reason, privacy: .public) domain=\(domain, privacy: .public) code=\(code, privacy: .public)")
+        if mode == .sound, let key, let media {
+            media.releaseClaim(key)
+            MediaAudioSession.end(.playback)
+        }
+        discardPlayer()
+        mode = .poster
+        paused = false
+        progress = 0
+        if surface { failed = true }
     }
 
     private func pauseForOther() {
@@ -314,22 +433,40 @@ final class VideoNotePlayerModel: ObservableObject {
             mode = .muted
             player.play()
         } else {
+            player.pause()
             mode = .poster
         }
     }
 
-    func tearDown(key: String, media: ChatMediaController) {
+    private func discardPlayer() {
         player?.pause()
         if let timeObserver { player?.removeTimeObserver(timeObserver) }
         timeObserver = nil
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         endObserver = nil
+        if let failedToEndObserver { NotificationCenter.default.removeObserver(failedToEndObserver) }
+        failedToEndObserver = nil
+        statusObservation?.invalidate()
+        statusObservation = nil
+        timeControlObservation?.invalidate()
+        timeControlObservation = nil
+        onSoundStarted = nil
+        player = nil
+    }
+
+    /// The bubble left the screen. A download already under way keeps going
+    /// in ``ChatMediaController``; the next tap finds the file.
+    func tearDown(key: String, media: ChatMediaController) {
+        generation += 1
         if mode == .sound {
             media.releaseClaim(key)
             MediaAudioSession.end(.playback)
         }
-        player = nil
+        discardPlayer()
         mode = .poster
+        paused = false
+        progress = 0
+        starting = false
     }
 }
 
@@ -346,6 +483,8 @@ struct VideoNoteBubble: View {
     @StateObject private var model = VideoNotePlayerModel()
     @AppStorage(MediaPrefs.autoplayKey) private var autoplay = false
 
+    private var busy: Bool { model.starting || media.loadingKeys.contains(mediaKey) }
+
     var body: some View {
         VStack(alignment: incoming ? .leading : .trailing, spacing: 4) {
             Button {
@@ -353,40 +492,51 @@ struct VideoNoteBubble: View {
             } label: {
                 ZStack {
                     Circle().fill(Color(.secondarySystemBackground))
+                    // The UIKit-backed layers are display only: they must not
+                    // take the touch from the button.
                     if let poster = model.poster, model.mode == .poster {
                         AnimatedImageView(source: .file(poster))
                             .clipShape(Circle())
+                            .allowsHitTesting(false)
                     }
                     if model.mode != .poster {
                         PlayerLayerView(player: model.player)
                             .clipShape(Circle())
+                            .allowsHitTesting(false)
                     }
-                    if model.loading {
-                        ProgressView()
-                    } else if model.mode == .poster || (model.mode == .sound && model.paused) {
-                        Image(systemName: "play.fill")
-                            .font(.title)
-                            .foregroundStyle(.white)
-                            .padding(18)
-                            .background(Circle().fill(Color.black.opacity(0.45)))
+                    Group {
+                        if busy {
+                            ProgressView()
+                                .tint(.white)
+                                .padding(18)
+                                .background(Circle().fill(Color.black.opacity(0.45)))
+                        } else if model.mode == .poster || (model.mode == .sound && model.paused) {
+                            Image(systemName: "play.fill")
+                                .font(.title)
+                                .foregroundStyle(.white)
+                                .padding(18)
+                                .background(Circle().fill(Color.black.opacity(0.45)))
+                        }
+                        if model.mode == .muted {
+                            Image(systemName: "speaker.slash.fill")
+                                .font(.caption)
+                                .foregroundStyle(.white)
+                                .padding(6)
+                                .background(Circle().fill(Color.black.opacity(0.45)))
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                                .padding(16)
+                        }
+                        if model.mode == .sound {
+                            ProgressRing(fraction: model.progress, lineWidth: 4, color: Color.lakkoAccent)
+                        }
+                        if case .uploading(let fraction) = upload {
+                            ProgressRing(fraction: fraction, lineWidth: 4, color: Color.lakkoAccent)
+                        }
                     }
-                    if model.mode == .muted {
-                        Image(systemName: "speaker.slash.fill")
-                            .font(.caption)
-                            .foregroundStyle(.white)
-                            .padding(6)
-                            .background(Circle().fill(Color.black.opacity(0.45)))
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                            .padding(16)
-                    }
-                    if model.mode == .sound {
-                        ProgressRing(fraction: model.progress, lineWidth: 4, color: Color.lakkoAccent)
-                    }
-                    if case .uploading(let fraction) = upload {
-                        ProgressRing(fraction: fraction, lineWidth: 4, color: Color.lakkoAccent)
-                    }
+                    .allowsHitTesting(false)
                 }
                 .frame(width: Self.diameter, height: Self.diameter)
+                .contentShape(Circle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(accessibilityLabel)
@@ -418,6 +568,7 @@ struct VideoNoteBubble: View {
 
     private var accessibilityLabel: String {
         let spoken = RecordingMachine.spokenDuration(ms: Int64(ref.durationMs ?? 0))
+        if busy { return "Video message, loading" }
         switch model.mode {
         case .sound: return model.paused ? "Play video message, \(spoken)" : "Pause video message"
         case .muted, .poster: return "Play video message with sound, \(spoken)"
