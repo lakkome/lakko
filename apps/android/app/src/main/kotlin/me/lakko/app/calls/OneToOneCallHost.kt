@@ -113,6 +113,15 @@ public interface OneToOneCallPort<S : OneToOneCallSession> {
 
     /** Compose an `End` body, or `null` when composing failed. */
     public fun composeEnd(callId: ByteArray, reason: FfiCallEndReason): ByteArray?
+
+    /**
+     * The other person's name in [groupIdHex] as this device already knows it,
+     * for the ring's title (`docs/ux/calls.md` section 2.2), or `null`.
+     *
+     * Defaulted rather than required: a host driven by fake sessions has no
+     * contacts to resolve against, and a ring with no name still rings.
+     */
+    public fun peerName(groupIdHex: String): String? = null
 }
 
 /** The call occupying the slot, as the UI renders it. */
@@ -235,6 +244,20 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         this.port = port
     }
 
+    @Volatile
+    private var ringPort: IncomingCallRingPort? = null
+
+    /**
+     * Install what makes the phone ring ([IncomingCallRinger] in production).
+     *
+     * Separate from [attach] because the ring outlives the activity that
+     * attached the port, and because a host driven by fakes must be able to
+     * observe the ring without an Android notification manager.
+     */
+    public fun attachRinger(ringer: IncomingCallRingPort?) {
+        this.ringPort = ringer
+    }
+
     private val mutableActive = MutableStateFlow<OneToOneCall<S>?>(null)
 
     /** The call in the slot (any state, including ended until cleared), or `null`. */
@@ -292,6 +315,36 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
     /** Decline the ringing call. */
     public fun decline(): Unit = send(Event.Decline)
 
+    /**
+     * Accept the call named by [callIdHex], from the ring screen.
+     *
+     * Named rather than implicit because the ring can be answered before this
+     * device has a session for it: an offer that arrived while the app was
+     * backgrounded is only HELD, and a cold start has not polled yet. Either
+     * way the request is remembered and taken the moment that call rings in the
+     * app, and a request for a call that never arrives simply expires with it.
+     */
+    public fun acceptRinging(callIdHex: String, withVideo: Boolean): Unit =
+        send(Event.AcceptRinging(callIdHex, withVideo))
+
+    /**
+     * Decline the call named by [callIdHex] on [groupIdHex], from the ring
+     * screen or the notification action.
+     *
+     * Also publishes the `End` for a call this device only holds, which is the
+     * whole point: a held offer has no session to decline through, and without
+     * the `End` the caller rings on to its own timeout.
+     */
+    public fun declineRinging(groupIdHex: String, callIdHex: String): Unit =
+        send(Event.DeclineRinging(groupIdHex, callIdHex))
+
+    /**
+     * The ring window ran out for [callIdHex]. Forget a held offer for it, so
+     * that bringing the app to the foreground later cannot ring for a call the
+     * user has already watched time out.
+     */
+    public fun dismissRingingOffer(callIdHex: String): Unit = send(Event.DismissRinging(callIdHex))
+
     /** Hang up the call in the slot. */
     public fun hangUp(): Unit = send(Event.HangUp)
 
@@ -330,6 +383,9 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         data object CancelPrepared : Event
         data class Accept(val withVideo: Boolean) : Event
         data object Decline : Event
+        data class AcceptRinging(val callIdHex: String, val withVideo: Boolean) : Event
+        data class DeclineRinging(val groupIdHex: String, val callIdHex: String) : Event
+        data class DismissRinging(val callIdHex: String) : Event
         data object HangUp : Event
         data object ClearFinished : Event
         data class Foreground(val foreground: Boolean) : Event
@@ -374,6 +430,14 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
     private var foreground: Boolean = false
     private val ended = LinkedHashSet<String>()
 
+    /**
+     * An answer taken on the ring screen for a call this device has no session
+     * for yet, kept until that call rings in the app. Dropped whenever the
+     * ring's call is declined or another call takes the slot, so it can never
+     * answer a later, unrelated call.
+     */
+    private var pendingAccept: Pair<String, Boolean>? = null
+
     private fun send(event: Event) {
         ensureStarted()
         events.trySend(event)
@@ -413,6 +477,9 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
             is Event.Dial -> onDial(event)
             Event.CancelPrepared -> onCancelPrepared()
             is Event.Accept -> onAccept(event.withVideo)
+            is Event.AcceptRinging -> onAcceptRinging(event)
+            is Event.DeclineRinging -> onDeclineRinging(event)
+            is Event.DismissRinging -> onDismissRinging(event.callIdHex)
             Event.Decline -> liveSlot()?.takeIf { it.call.incoming && isRinging(it) }?.call?.session?.declineCall()
             Event.HangUp -> liveSlot()?.call?.session?.hangUp(CallSession.WebCallEndReason.HungUp)
             Event.ClearFinished -> slot?.takeIf { it.call.session.state.value == CallSession.WebCallState.Done }
@@ -455,8 +522,81 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
             OneToOneRoute.DROP -> Unit
             OneToOneRoute.APPLY -> applyToOccupant(row)
             OneToOneRoute.BUSY -> publishEnd(row.groupIdHex, callIdOfBody(row.body), FfiCallEndReason.BUSY)
-            OneToOneRoute.RING -> if (foreground) ring(row) else holdOffer(row)
+            OneToOneRoute.RING -> {
+                // Ring the phone whatever screen is showing, including none.
+                // The notification channel is the only thing on Android that
+                // produces a ringtone and a lock-screen answer button, and the
+                // in-app banner has never produced either; with the app open
+                // the platform renders it as a heads-up above that banner
+                // rather than as the full-screen ring screen.
+                startRinging(row)
+                if (foreground) ring(row) else holdOffer(row)
+            }
         }
+    }
+
+    /** An offer arrived: ring for it. The other half of the pair is [stopRinging]. */
+    private fun startRinging(row: Event.Row) {
+        val ringer = ringPort ?: return
+        val offer = row.body as? FfiCallSignalingBody.Offer ?: return
+        ringer.startRinging(
+            IncomingCallRing(
+                groupIdHex = row.groupIdHex,
+                callIdHex = callIdHexOf(offer.callId),
+                callerName = try {
+                    port?.peerName(row.groupIdHex)
+                } catch (error: Throwable) {
+                    warn("call host: resolving the caller's name failed", error)
+                    null
+                },
+                video = offer.media.video,
+                // The offer's own stamp, not this device's clock: a wake that
+                // took twenty seconds to arrive has twenty-five seconds of
+                // ringing left, not forty-five.
+                offeredAtMs = offer.createdAtMs.toLong(),
+            ),
+        )
+    }
+
+    /** Stop ringing for this call id. */
+    private fun stopRinging(callIdHex: String) {
+        ringPort?.stopRinging(callIdHex)
+    }
+
+    private suspend fun onAcceptRinging(event: Event.AcceptRinging) {
+        stopRinging(event.callIdHex)
+        val live = liveSlot()
+        if (live != null && live.callIdHex == event.callIdHex) {
+            onAccept(event.withVideo)
+            return
+        }
+        // No session for it yet: the offer is held (backgrounded), or this
+        // process has not polled since a cold start. Remember the answer and
+        // take it the moment that call rings in the app.
+        pendingAccept = event.callIdHex to event.withVideo
+        // A held offer rings in-app on the next foreground; nothing else to do.
+    }
+
+    private fun onDeclineRinging(event: Event.DeclineRinging) {
+        stopRinging(event.callIdHex)
+        pendingAccept = null
+        val live = liveSlot()
+        if (live != null && live.callIdHex == event.callIdHex) {
+            live.call.session.declineCall()
+            return
+        }
+        // A held offer has no session to decline through, so the End is
+        // published straight to the offering group.
+        if (deferred?.let { callIdHexOfBody(it.body) } == event.callIdHex) clearDeferred()
+        rememberEnded(event.callIdHex)
+        val callId = callIdBytesFromHex(event.callIdHex) ?: return
+        publishEnd(event.groupIdHex, callId, FfiCallEndReason.DECLINED)
+    }
+
+    private fun onDismissRinging(callIdHex: String) {
+        if (deferred?.let { callIdHexOfBody(it.body) } != callIdHex) return
+        clearDeferred()
+        rememberEnded(callIdHex)
     }
 
     private fun holdOffer(row: Event.Row) {
@@ -481,8 +621,14 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         val held = deferred ?: return
         when (row.body) {
             is FfiCallSignalingBody.End -> {
+                val heldCallIdHex = callIdHexOfBody(held.body)
                 clearDeferred()
-                rememberEnded(callIdHexOfBody(held.body))
+                rememberEnded(heldCallIdHex)
+                // The caller gave up (or another of this account's devices
+                // answered): the phone must stop ringing now, not at the
+                // window's end.
+                stopRinging(heldCallIdHex)
+                if (pendingAccept?.first == heldCallIdHex) pendingAccept = null
             }
             is FfiCallSignalingBody.IceCandidate ->
                 if (deferredCandidates.size < RemoteCandidateBuffer.DEFAULT_CAPACITY) {
@@ -522,6 +668,12 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
                 keyArmed = key != null,
             ),
         )
+        // An answer already taken on the ring screen, for exactly this call.
+        val pending = pendingAccept
+        if (pending != null && pending.first == callIdHexOf(offer.callId)) {
+            pendingAccept = null
+            onAccept(pending.second)
+        }
     }
 
     private suspend fun onStartOutgoing(groupIdHex: String) {
@@ -560,6 +712,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
     private suspend fun onAccept(withVideo: Boolean) {
         val s = liveSlot() ?: return
         if (!s.call.incoming || s.accepted || !isRinging(s)) return
+        stopRinging(s.callIdHex)
         s.accepted = true
         s.call = s.call.copy(accepted = true)
         mutableActive.value = s.call
@@ -605,6 +758,9 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
     }
 
     private fun onReset() {
+        slot?.let { stopRinging(it.callIdHex) }
+        deferred?.let { stopRinging(callIdHexOfBody(it.body)) }
+        pendingAccept = null
         liveSlot()?.call?.session?.hangUp(CallSession.WebCallEndReason.HungUp)
         clearSlot()
         clearDeferred()
@@ -632,6 +788,10 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
             CallSession.WebCallState.Done -> {
                 cancelTimer(s)
                 rememberEnded(s.callIdHex)
+                // Declined, answered, timed out, or the caller hung up: every
+                // way a call ends is a reason to stop ringing for it.
+                stopRinging(s.callIdHex)
+                if (pendingAccept?.first == s.callIdHex) pendingAccept = null
                 // An incoming call that ended before it was accepted (declined,
                 // timed out, the caller hung up) was only ever a banner: there
                 // is no in-call screen to dismiss, so the slot clears itself.

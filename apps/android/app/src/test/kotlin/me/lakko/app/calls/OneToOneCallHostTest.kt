@@ -118,7 +118,26 @@ class OneToOneCallHostTest {
             "end:$reason:${callIdHexOf(callId)}".toByteArray()
     }
 
-    private class Harness(val host: OneToOneCallHost<FakeSession>, val port: FakePort, var now: Long)
+    /** Records the two verbs that make the phone ring and stop it. */
+    class FakeRinger : IncomingCallRingPort {
+        val started = mutableListOf<IncomingCallRing>()
+        val stopped = mutableListOf<String>()
+
+        override fun startRinging(ring: IncomingCallRing) {
+            started += ring
+        }
+
+        override fun stopRinging(callIdHex: String) {
+            stopped += callIdHex
+        }
+    }
+
+    private class Harness(
+        val host: OneToOneCallHost<FakeSession>,
+        val port: FakePort,
+        val ringer: FakeRinger,
+        var now: Long,
+    )
 
     private fun TestScope.harness(foreground: Boolean = true): Harness {
         val port = FakePort()
@@ -128,8 +147,10 @@ class OneToOneCallHostTest {
             clock = { h.now },
             warn = { _, _ -> },
         )
-        h = Harness(host, port, t0)
+        val ringer = FakeRinger()
+        h = Harness(host, port, ringer, t0)
         host.attach(port)
+        host.attachRinger(ringer)
         host.setForeground(foreground)
         runCurrent()
         return h
@@ -571,5 +592,147 @@ class OneToOneCallHostTest {
             OneToOneRoute.DROP,
             route(FfiCallSignalingBody.GroupJoin(call1, 1u, 1uL)),
         )
+    }
+
+    // ---- The phone ringing --------------------------------------------------
+    //
+    // docs/ux/calls.md section 2.1. These tests drive the path the test stack
+    // actually exercises: the app's own poll. The FCM wake reaches the same two
+    // verbs through the same port, and the emulator never receives a push
+    // because the test stack has no FCM credentials, so a ring wired only to
+    // the wake would be a ring nobody could check.
+
+    @Test
+    fun `an offer rings the phone with no screen showing`() = runTest {
+        val h = harness(foreground = false)
+        h.host.deliver(groupA, 1, offer(call1, video = true), iso(t0))
+        runCurrent()
+
+        assertEquals(1, h.ringer.started.size)
+        val ring = h.ringer.started.single()
+        assertEquals(callIdHexOf(call1), ring.callIdHex)
+        assertEquals(groupA, ring.groupIdHex)
+        assertTrue("the ring says what kind of call it is", ring.video)
+        // Backgrounded, the offer is still only HELD: nothing rings on a screen
+        // nobody is looking at, and the ring window is not burned off-screen.
+        assertNull(h.host.active.value)
+    }
+
+    @Test
+    fun `an offer rings the phone with the app open too`() = runTest {
+        // The in-app banner has never made a sound; the notification channel is
+        // the only thing on Android that produces a ringtone.
+        val h = harness(foreground = true)
+        h.host.deliver(groupA, 1, offer(call1), iso(t0))
+        runCurrent()
+
+        assertEquals(listOf(callIdHexOf(call1)), h.ringer.started.map { it.callIdHex })
+        assertNotNull("and the call is live in the app", h.host.active.value)
+    }
+
+    @Test
+    fun `answering in the app stops the ring`() = runTest {
+        val h = harness()
+        h.host.deliver(groupA, 1, offer(call1), iso(t0))
+        runCurrent()
+        h.host.accept(withVideo = false)
+        runCurrent()
+
+        assertTrue(callIdHexOf(call1) in h.ringer.stopped)
+        assertEquals(false, h.session()!!.acceptedWithVideo)
+    }
+
+    @Test
+    fun `the caller hanging up stops the ring of an offer this device only holds`() = runTest {
+        val h = harness(foreground = false)
+        h.host.deliver(groupA, 1, offer(call1), iso(t0))
+        h.host.deliver(groupA, 2, end(call1), iso(t0))
+        runCurrent()
+
+        assertEquals(listOf(callIdHexOf(call1)), h.ringer.stopped)
+        // And it must not ring later, when the app comes back.
+        h.host.setForeground(true)
+        runCurrent()
+        assertNull(h.host.active.value)
+    }
+
+    @Test
+    fun `answering from the ring screen takes the call the app has not rung yet`() = runTest {
+        val h = harness(foreground = false)
+        h.host.deliver(groupA, 1, offer(call1, video = true), iso(t0))
+        runCurrent()
+        // The user answers on the lock screen: there is no session yet.
+        h.host.acceptRinging(callIdHexOf(call1), withVideo = true)
+        runCurrent()
+        assertNull(h.host.active.value)
+
+        // Answering brought the app forward; the held offer rings there and the
+        // answer already taken is applied to it.
+        h.host.setForeground(true)
+        runCurrent()
+
+        val call = h.host.active.value
+        assertNotNull(call)
+        assertTrue(call!!.accepted)
+        assertEquals(true, h.session()!!.acceptedWithVideo)
+    }
+
+    @Test
+    fun `an answer from the ring screen never answers a later, unrelated call`() = runTest {
+        val h = harness(foreground = false)
+        h.host.acceptRinging(callIdHexOf(call1), withVideo = false)
+        runCurrent()
+        h.host.deliver(groupA, 1, offer(call2), iso(t0))
+        h.host.setForeground(true)
+        runCurrent()
+
+        assertNotNull(h.host.active.value)
+        assertNull("call2 was never answered on the ring screen", h.session()!!.acceptedWithVideo)
+    }
+
+    @Test
+    fun `declining from the notification publishes the End with no session`() = runTest {
+        val h = harness(foreground = false)
+        h.host.deliver(groupA, 1, offer(call1), iso(t0))
+        runCurrent()
+        h.host.declineRinging(groupA, callIdHexOf(call1))
+        runCurrent()
+
+        assertEquals(
+            listOf(groupA to "end:DECLINED:${callIdHexOf(call1)}"),
+            h.port.published,
+        )
+        assertTrue(callIdHexOf(call1) in h.ringer.stopped)
+        // The refused call must not ring when the app is next opened.
+        h.host.setForeground(true)
+        runCurrent()
+        assertNull(h.host.active.value)
+    }
+
+    @Test
+    fun `declining a ringing call in the app goes through its session`() = runTest {
+        val h = harness()
+        h.host.deliver(groupA, 1, offer(call1), iso(t0))
+        runCurrent()
+        val session = h.session()
+        h.host.declineRinging(groupA, callIdHexOf(call1))
+        runCurrent()
+
+        assertTrue("the session publishes its own End", session?.declined == true)
+        assertTrue(h.port.published.isEmpty())
+    }
+
+    @Test
+    fun `a ring that timed out does not ring again on the next foreground`() = runTest {
+        val h = harness(foreground = false)
+        h.host.deliver(groupA, 1, offer(call1), iso(t0))
+        runCurrent()
+        // The ringer's window ran out while the app was away.
+        h.host.dismissRingingOffer(callIdHexOf(call1))
+        runCurrent()
+
+        h.host.setForeground(true)
+        runCurrent()
+        assertNull(h.host.active.value)
     }
 }

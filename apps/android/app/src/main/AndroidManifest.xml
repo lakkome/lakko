@@ -65,6 +65,21 @@
     -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <!--
+      docs/ux/calls.md section 2.1 — an incoming call takes the whole
+      screen, over the lock screen. `USE_FULL_SCREEN_INTENT` is what
+      lets the call notification launch
+      `me.lakko.app.ui.call.IncomingCallActivity` instead of merely
+      showing a heads-up. It is install-time (auto-granted) for an app
+      whose notification is `CATEGORY_CALL`, which ours is; on Android
+      14+ the platform additionally restricts the permission to calling
+      and alarm apps, and a call notification qualifies. When the grant
+      is absent the notification still rings and still carries Accept
+      and Decline — the user just taps it rather than being taken
+      straight to the call screen, so there is no silent failure.
+    -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-feature
         android:name="android.hardware.microphone"
         android:required="false" />
@@ -122,6 +137,42 @@
                 <data android:pathPrefix="/c/" />
             </intent-filter>
         </activity>
+
+        <!--
+          docs/ux/calls.md section 2.2 — the incoming call screen, raised
+          by the call notification's full-screen intent.
+
+          `showWhenLocked` + `turnScreenOn` are what make a call reach a
+          locked phone: the window draws over the keyguard and wakes the
+          screen, so the call can be answered without unlocking (the
+          Activity sets both in code as well, for the pre-API-27 window
+          flags and because some OEM builds need the runtime call).
+
+          `excludeFromRecents` + an empty `taskAffinity` keep the ring in
+          its own task: a declined call must leave nothing behind in the
+          recents list, and answering starts MainActivity in the app's own
+          task rather than stacking the app under a ring screen.
+
+          `exported="false"` — only this app's own notification and its
+          own ringer ever launch it.
+        -->
+        <activity
+            android:name=".ui.call.IncomingCallActivity"
+            android:exported="false"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.Lakko" />
+
+        <!--
+          `Decline` from the call notification. A receiver, not an
+          activity: refusing a call must not open the app.
+        -->
+        <receiver
+            android:name=".calls.IncomingCallActionReceiver"
+            android:exported="false" />
 
         <!--
           Phase 1.20d — FirebaseMessagingService subclass that

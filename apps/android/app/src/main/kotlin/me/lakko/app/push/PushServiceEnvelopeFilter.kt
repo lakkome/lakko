@@ -20,7 +20,10 @@ import me.lakko.app.chat.looksLikeProfileEnvelope
  *      envelope (70 bytes, domain `lakko/push-routing-secret/v1` plus a
  *      trailing NUL -- written out in words, never as a raw NUL byte,
  *      which would make git treat this file as binary),
- *   2. the **call-signaling** `CallSignalingPayload` proto, and
+ *   2. the **call-signaling** `CallSignalingPayload` proto — which since
+ *      `docs/ux/calls.md` section 2.1 is classified rather than merely dropped:
+ *      it is still never previewed as a message, but an OFFER now rings the
+ *      phone instead of vanishing (see [BackgroundPayloadKind]), and
  *   3. the ADR-0045 **committer-liveness beacon** (27 bytes, domain
  *      `lakko/committer-beacon/v1` plus a trailing NUL), and
  *   4. the ADR-0048 **profile** envelope (variable length, domain
@@ -112,15 +115,78 @@ internal fun isServiceEnvelope(
     decodesAsRoutingSecret: (ByteArray) -> Boolean,
     decodesAsCommitterBeacon: (ByteArray) -> Boolean,
     committerBeaconEnvelopeLen: Int,
-): Boolean {
+): Boolean = classifyBackgroundPayload(
+    payload,
+    decodesAsRoutingSecret,
+    decodesAsCommitterBeacon,
+    committerBeaconEnvelopeLen,
+) != BackgroundPayloadKind.MESSAGE
+
+/**
+ * What a decrypted background payload IS, rather than merely whether it may be
+ * rendered.
+ *
+ * ## Why this replaced a yes/no
+ *
+ * [isServiceEnvelope] answered one question — "must this stay off the user's
+ * screen?" — and call signaling answered yes, so the background path dropped it
+ * on the floor. That is precisely why a closed app never rang: the wake arrived,
+ * the offer decrypted, and the filter threw it away
+ * (`docs/ux/calls.md` section 7).
+ *
+ * A call offer is not a message and must never be previewed as one, so the old
+ * answer was right as far as it went; it just had nowhere to say "this is a
+ * call". Now the same peeks produce a KIND, and the two consequences separate:
+ * a service envelope is dropped, while call signaling is handed to the ring
+ * ([me.lakko.app.calls.IncomingCallRinger]). [isServiceEnvelope] stays as the
+ * "not a message" question, which is still exactly what the chat-preview path
+ * asks.
+ */
+internal enum class BackgroundPayloadKind {
+    /** A call offer / end / answer / candidate. Never rendered; an offer rings. */
+    CALL_SIGNALING,
+
+    /** Machine-to-machine: routing secret, committer beacon, profile, group name. */
+    SERVICE_ENVELOPE,
+
+    /** Anything else — a real chat envelope, or legacy plain UTF-8 text. */
+    MESSAGE,
+}
+
+/** Classify one decrypted MLS Application plaintext. See [isServiceEnvelope]
+ *  for the parameters and the two-step-peek reasoning. */
+internal fun classifyBackgroundPayload(
+    payload: ByteArray,
+    decodesAsRoutingSecret: (ByteArray) -> Boolean,
+    decodesAsCommitterBeacon: (ByteArray) -> Boolean,
+    committerBeaconEnvelopeLen: Int,
+): BackgroundPayloadKind {
     // Cheap unambiguous discriminator: the CallSignalingPayload oneof
     // body tags, fields 10..16 (0x52/0x5A/0x62/0x6A, the group-control
     // 0x72/0x7A, and the two-byte 0x82 0x01 for field 16 — see
     // `looksLikeCallSignaling` for why the group tags also check the
     // `call_id` header). Disjoint from both the chat `{` (0x7B) and the
     // `l` (0x6C) both in-group envelope domains open with.
-    if (looksLikeCallSignaling(payload)) return true
+    if (looksLikeCallSignaling(payload)) return BackgroundPayloadKind.CALL_SIGNALING
+    return if (isServiceEnvelopeOtherThanCall(
+            payload,
+            decodesAsRoutingSecret,
+            decodesAsCommitterBeacon,
+            committerBeaconEnvelopeLen,
+        )
+    ) {
+        BackgroundPayloadKind.SERVICE_ENVELOPE
+    } else {
+        BackgroundPayloadKind.MESSAGE
+    }
+}
 
+private fun isServiceEnvelopeOtherThanCall(
+    payload: ByteArray,
+    decodesAsRoutingSecret: (ByteArray) -> Boolean,
+    decodesAsCommitterBeacon: (ByteArray) -> Boolean,
+    committerBeaconEnvelopeLen: Int,
+): Boolean {
     // Kind 1 — cheap pre-filter (exact 70-byte length + leading `l`)
     // before the throwing codec, so a real chat message never costs an
     // exception. Authoritative + fail-closed: a retired v1 (62-byte)

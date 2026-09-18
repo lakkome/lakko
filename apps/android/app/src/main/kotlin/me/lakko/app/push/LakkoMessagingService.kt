@@ -21,6 +21,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import me.lakko.app.MainActivity
+import me.lakko.app.calls.IncomingCallRinger
 import me.lakko.app.ds.DsClient
 
 /**
@@ -106,7 +107,7 @@ public class LakkoMessagingService : FirebaseMessagingService() {
         //     decrypt for the real newest-message text.
         // `isAppForegrounded` fails toward `false` (background), so a
         // probe error never suppresses the real preview.
-        val preview: PushPreview? =
+        val outcome: PushWakeOutcome? =
             if (wake?.groupHex != null &&
                 wake.pointer != null &&
                 !isAppForegrounded(applicationContext)
@@ -115,7 +116,34 @@ public class LakkoMessagingService : FirebaseMessagingService() {
             } else {
                 null
             }
-        showWakeNotification(wake, preview)
+        if (outcome != null && handledAsCall(outcome)) return
+        showWakeNotification(wake, outcome?.preview)
+    }
+
+    /**
+     * `docs/ux/calls.md` section 2.1 — a call wake rings the phone instead of
+     * showing a message banner.
+     *
+     * Ends are applied before the offer so that a batch carrying both halves of
+     * a finished call stops rather than starts; the fold
+     * ([me.lakko.app.calls.foldCallRingSignals]) has already removed an offer
+     * this batch also ended, so what is left is either a live call or nothing.
+     *
+     * @return `true` when this wake was a call and no message notification
+     *   should be shown for it.
+     */
+    private fun handledAsCall(outcome: PushWakeOutcome): Boolean {
+        if (outcome.ring == null && outcome.cancelledCallIds.isEmpty()) return false
+        IncomingCallRinger.attach(applicationContext)
+        outcome.cancelledCallIds.forEach { IncomingCallRinger.stopRinging(it) }
+        val ring = outcome.ring ?: return false
+        IncomingCallRinger.startRinging(ring)
+        // A ringing phone is the whole notification. A message that arrived in
+        // the same batch waits for the app rather than stacking a second banner
+        // under a call the user is being asked to answer right now; a batch that
+        // only ENDED a call is not a call at all any more, so its preview still
+        // shows.
+        return true
     }
 
     /**
@@ -127,15 +155,16 @@ public class LakkoMessagingService : FirebaseMessagingService() {
      * keeps us well inside the FMS window; a timeout or ANY failure
      * degrades to the generic notification (returns `null`).
      */
-    private fun backgroundPreviewBlocking(wake: WakeBody): PushPreview? {
+    private fun backgroundPreviewBlocking(wake: WakeBody): PushWakeOutcome? {
         return try {
             runBlocking {
                 withTimeoutOrNull(BACKGROUND_DECRYPT_BUDGET_MS) {
                     DsClient().use { ds ->
                         val deps = buildBackgroundDecryptDeps(applicationContext, ds)
-                        decryptPushPreview(
+                        decryptPushWake(
                             PushWake(groupHex = wake.groupHex, pointer = wake.pointer),
                             deps,
+                            nowMs = System.currentTimeMillis(),
                         )
                     }
                 }

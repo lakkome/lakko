@@ -126,7 +126,18 @@ public data class FetchedRow(
 /** Classification of a decrypted application message (mirror of the
  *  UniFFI `MessageBodyKind`), kept native-free so it can be produced by
  *  the fake in the unit test. */
-public enum class ProcessedKind { CHAT, EDIT, DELETE, REACTION, TYPING, READ_RECEIPT }
+public enum class ProcessedKind {
+    CHAT,
+    EDIT,
+    DELETE,
+    REACTION,
+    TYPING,
+    READ_RECEIPT,
+
+    /** A call offer or end. Never a preview; it rings the phone instead
+     *  (`docs/ux/calls.md` section 2.1). */
+    CALL_SIGNALING,
+}
 
 /** A decoded application row (post MLS-decrypt + envelope-parse). */
 public data class ProcessedRow(
@@ -139,6 +150,9 @@ public data class ProcessedRow(
      *  better than a fingerprint (read from the stored profiles; never
      *  fetched or verified here). `null` otherwise. */
     val senderName: String? = null,
+    /** Set only for [ProcessedKind.CALL_SIGNALING]: the offer or end this
+     *  row carried, as much of it as the ring needs. */
+    val callSignal: me.lakko.app.calls.CallRingSignal? = null,
 )
 
 /** The notification preview the FMS renders when the decrypt succeeds. */
@@ -225,13 +239,43 @@ public interface PushDecryptDeps {
 public suspend fun decryptPushPreview(
     wake: PushWake?,
     deps: PushDecryptDeps,
-): PushPreview? {
+): PushPreview? = decryptPushWake(wake, deps, nowMs = System.currentTimeMillis()).preview
+
+/**
+ * Everything one wake means: a message preview, a call to ring for, and the
+ * calls that have stopped.
+ *
+ * @param nowMs the caller's clock, injected so the ring window is testable.
+ */
+public data class PushWakeOutcome(
+    val preview: PushPreview?,
+    /** An offer still inside its ring window, or `null`. */
+    val ring: me.lakko.app.calls.IncomingCallRing?,
+    /** Call ids whose `End` arrived in this batch — stop ringing for them. */
+    val cancelledCallIds: List<String>,
+) {
+    internal companion object {
+        val EMPTY = PushWakeOutcome(preview = null, ring = null, cancelledCallIds = emptyList())
+    }
+}
+
+/**
+ * The full read-only background pass over one wake.
+ *
+ * [decryptPushPreview] is this function's message half, kept because the chat
+ * preview is what most wakes are.
+ */
+public suspend fun decryptPushWake(
+    wake: PushWake?,
+    deps: PushDecryptDeps,
+    nowMs: Long,
+): PushWakeOutcome {
     // 1. Only GroupMessage wakes carry a 64-hex group + a pointer. A
     //    Wakeup / MailboxMessage wake is not handled in this slice.
-    val rawGroupHex = wake?.groupHex ?: return null
-    val pointer = wake.pointer ?: return null
+    val rawGroupHex = wake?.groupHex ?: return PushWakeOutcome.EMPTY
+    val pointer = wake.pointer ?: return PushWakeOutcome.EMPTY
     val groupHex = rawGroupHex.lowercase()
-    if (groupHex.length != GROUP_HEX_LEN || !isLowerHex(groupHex)) return null
+    if (groupHex.length != GROUP_HEX_LEN || !isLowerHex(groupHex)) return PushWakeOutcome.EMPTY
 
     // 2. Resolve the wake's `g` to a locally-stored account + the REAL
     //    DS group_id. ADR-0042 (Sprint 4): post-Sprint-3, notify sends
@@ -269,16 +313,16 @@ public suspend fun decryptPushPreview(
         // Legacy path: treat `g` as the raw group_id (also validates
         // the wake's group is one we actually know — a stray wake →
         // null).
-        account = deps.resolveAccount(groupHex) ?: return null
+        account = deps.resolveAccount(groupHex) ?: return PushWakeOutcome.EMPTY
         realGroupHex = groupHex
     }
 
     // 3. The AccountIdentity seed → the throwaway Identity.
-    val seed = deps.loadIdentitySeed(account.accountIdB64) ?: return null
+    val seed = deps.loadIdentitySeed(account.accountIdB64) ?: return PushWakeOutcome.EMPTY
 
     // 4. The last-persisted MLS provider snapshot (the ratchet state
     //    the foreground app relies on — we only READ it).
-    val snapshot = deps.loadSnapshot(account.accountIdB64) ?: return null
+    val snapshot = deps.loadSnapshot(account.accountIdB64) ?: return PushWakeOutcome.EMPTY
 
     // 5. Build a TEMPORARY, in-memory group from the snapshot.
     //    Everything from here is throwaway — never snapshotted back.
@@ -290,7 +334,7 @@ public suspend fun decryptPushPreview(
         // The throwaway Identity has copied the seed; zero our view of
         // it (mirrors the seed-store caller contract).
         seed.fill(0)
-    } ?: return null
+    } ?: return PushWakeOutcome.EMPTY
 
     try {
         // 6. Fetch DS rows after a READ-ONLY start cursor. Prefer the
@@ -312,7 +356,7 @@ public suspend fun decryptPushPreview(
         val rows = try {
             deps.dsFetch(account.groupIdBytes, after)
         } catch (_: Throwable) {
-            return null
+            return PushWakeOutcome.EMPTY
         }
 
         // 7. Process each row through the TEMP group and keep the
@@ -322,18 +366,33 @@ public suspend fun decryptPushPreview(
         //    never guessed. NOTE: `process` mutates the THROWAWAY
         //    provider ONLY; it is never persisted.
         var latest: PushPreview? = null
+        // The batch's call signaling, in arrival order. Folded once at the end
+        // rather than acted on per row: a batch routinely carries both halves
+        // of a finished call, and ringing for a call whose End is three rows
+        // later leaves a phone the user has to silence by hand.
+        val callSignals = ArrayList<me.lakko.app.calls.CallRingSignal>()
         for (row in rows) {
             val processed = try {
                 group.process(row.payload)
             } catch (_: Throwable) {
                 continue
             }
+            processed?.callSignal?.let { callSignals += it }
             val body = previewBodyOf(processed) ?: continue
             // ADR-0048 UX §5 — the sender's resolved name when it is already
             // known on this device; the generic title otherwise.
             latest = PushPreview(title = processed?.senderName ?: "Lakko", body = body, tag = realGroupHex)
         }
-        return latest
+        val calls = me.lakko.app.calls.foldCallRingSignals(
+            groupIdHex = realGroupHex,
+            signals = callSignals,
+            nowMs = nowMs,
+        )
+        return PushWakeOutcome(
+            preview = latest,
+            ring = calls.ring,
+            cancelledCallIds = calls.cancelled,
+        )
     } finally {
         // Discard the throwaway MLS state. We NEVER snapshot it back —
         // doing so would desync the foreground app's ratchet.
@@ -373,6 +432,9 @@ private fun previewBodyOf(row: ProcessedRow?): String? {
         ProcessedKind.REACTION,
         ProcessedKind.TYPING,
         ProcessedKind.READ_RECEIPT,
+        // A call is not a message preview. It leaves this function with
+        // nothing and leaves `decryptPushWake` with a ring.
+        ProcessedKind.CALL_SIGNALING,
         -> null
     }
 }

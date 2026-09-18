@@ -10,6 +10,7 @@ import me.lakko.app.chat.IdentitySnapshotStore
 import me.lakko.app.chat.KnownGroupsStore
 import me.lakko.app.chat.MessageLogStore
 import me.lakko.app.ds.DsClient
+import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
 import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.MessageBodyKind
@@ -19,6 +20,7 @@ import uniffi.lakko_ffi_uniffi.decodeCommitterBeacon
 import uniffi.lakko_ffi_uniffi.decodePushRoutingSecret
 import uniffi.lakko_ffi_uniffi.loadGroup
 import uniffi.lakko_ffi_uniffi.parseBodyEnvelope
+import uniffi.lakko_ffi_uniffi.parseCallSignaling
 
 /**
  * Production wiring for the FCM silent-push background decrypt — the
@@ -223,8 +225,8 @@ private class RealThrowawayGroup(
         // Commit / Proposal / ExternalJoinProposal advances state (in
         // the THROWAWAY provider only) but has no body to show.
         val app = processed as? ProcessedMessage.Application ?: return null
-        // A SERVICE envelope (ADR-0042/0044 push-routing-secret, a
-        // call-signaling proto, or an ADR-0045 committer beacon) is
+        // A SERVICE envelope (ADR-0042/0044 push-routing-secret, an
+        // ADR-0045 committer beacon, a profile, a group name) is
         // machine-to-machine traffic with no user-visible body. It MUST
         // be rejected before `parseBodyEnvelope`, whose deliberate
         // legacy fallback would otherwise degrade the raw bytes to
@@ -233,14 +235,22 @@ private class RealThrowawayGroup(
         // caller's loop fall back to the newest REAL chat message (and,
         // when there is none, to the generic "New message" banner). Same
         // filter the foreground `ChatClient` dispatch uses.
-        if (isServiceEnvelope(
+        //
+        // Call signaling is the one kind that is classified rather than
+        // dropped: it is still never a preview, but an offer rings the
+        // phone (docs/ux/calls.md section 2.1).
+        when (
+            classifyBackgroundPayload(
                 app.data,
                 ::decodesAsRoutingSecret,
                 ::decodesAsCommitterBeacon,
                 committerBeaconEnvelopeLenCached,
             )
         ) {
-            return null
+            BackgroundPayloadKind.SERVICE_ENVELOPE -> return null
+            BackgroundPayloadKind.CALL_SIGNALING ->
+                return callSignalingRow(app.data, senderNameOf(app.senderLeaf))
+            BackgroundPayloadKind.MESSAGE -> Unit
         }
         val body = try {
             parseBodyEnvelope(app.data)
@@ -298,6 +308,48 @@ private class RealThrowawayGroup(
             // best-effort
         }
     }
+}
+
+/**
+ * Turn a call-signaling frame into the row the ring fold consumes, or `null`
+ * when it is a frame nobody needs to be woken for.
+ *
+ * Only an offer and an end are kept — the two
+ * [me.lakko.app.calls.shouldWakeForCallSignaling] sends a wake for. An answer,
+ * an ICE candidate and the group-control bodies belong to a call whose peer is
+ * already awake, so a wake carrying one of those means only that a batch was
+ * fetched, and nothing should ring.
+ *
+ * The decode is the FFI's, so this lives in the production wiring rather than
+ * in the pure core; a frame that will not parse is dropped (fail-closed,
+ * invariant #4), never guessed at.
+ */
+private fun callSignalingRow(payload: ByteArray, senderName: String?): ProcessedRow? {
+    val body = try {
+        parseCallSignaling(payload)
+    } catch (_: Throwable) {
+        return null
+    }
+    val signal = when (body) {
+        is FfiCallSignalingBody.Offer -> me.lakko.app.calls.CallRingSignal.Offer(
+            callIdHex = me.lakko.app.calls.callIdHexOf(body.callId),
+            video = body.media.video,
+            // The offer's own stamp, so the ring window is measured from when
+            // the caller started ringing, not from when this device woke up.
+            offeredAtMs = body.createdAtMs.toLong(),
+            callerName = senderName,
+        )
+        is FfiCallSignalingBody.End ->
+            me.lakko.app.calls.CallRingSignal.End(me.lakko.app.calls.callIdHexOf(body.callId))
+        else -> return null
+    }
+    return ProcessedRow(
+        kind = ProcessedKind.CALL_SIGNALING,
+        text = "",
+        attachmentCount = 0,
+        senderName = senderName,
+        callSignal = signal,
+    )
 }
 
 /**

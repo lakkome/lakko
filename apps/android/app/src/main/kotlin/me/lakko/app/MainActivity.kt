@@ -240,6 +240,7 @@ class MainActivity : ComponentActivity() {
         handleGroupJoinIntent(intent)
         handleCallJoinIntent(intent)
         handleWakeIntent(intent)
+        handleCallRingIntent(intent)
 
         setContent {
             LakkoTheme {
@@ -293,6 +294,7 @@ class MainActivity : ComponentActivity() {
         handleGroupJoinIntent(intent)
         handleCallJoinIntent(intent)
         handleWakeIntent(intent)
+        handleCallRingIntent(intent)
     }
 
     /**
@@ -394,6 +396,33 @@ class MainActivity : ComponentActivity() {
         val rawPointer = intent.getLongExtra(LakkoMessagingService.EXTRA_WAKE_POINTER, -1L)
         val pointer = if (rawPointer >= 0L) rawPointer else null
         pushIntake.publish(PushIntake.Wake(groupHex = groupHex, pointer = pointer))
+    }
+
+    /**
+     * `docs/ux/calls.md` section 2.2 — the user answered on the ring screen,
+     * which then started the app. Hand the choice to the call host.
+     *
+     * The host may not have a session for that call yet: an offer that arrived
+     * while the app was backgrounded is only HELD, and a cold start has not
+     * polled at all. It therefore remembers the answer and takes it the moment
+     * the call rings there, which is what makes answering from a locked screen
+     * work with the app closed.
+     */
+    private fun handleCallRingIntent(intent: Intent) {
+        val command = me.lakko.app.calls.callRingCommand(
+            action = intent.action,
+            groupIdHex = intent.getStringExtra(me.lakko.app.calls.CALL_RING_EXTRA_GROUP),
+            callIdHex = intent.getStringExtra(me.lakko.app.calls.CALL_RING_EXTRA_CALL_ID),
+        ) ?: return
+        when (command.action) {
+            me.lakko.app.calls.CallRingAction.ACCEPT,
+            me.lakko.app.calls.CallRingAction.ACCEPT_AUDIO_ONLY,
+            -> me.lakko.app.calls.AppCallHost.instance
+                .acceptRinging(command.callIdHex, command.withVideo)
+            // Declining never reaches here: it is handled without opening the
+            // app (`IncomingCallActionReceiver`).
+            me.lakko.app.calls.CallRingAction.DECLINE -> Unit
+        }
     }
 }
 

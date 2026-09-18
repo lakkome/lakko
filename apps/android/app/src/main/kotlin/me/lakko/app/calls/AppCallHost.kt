@@ -114,6 +114,11 @@ public object AppCallHost {
         sessionTokenProvider: () -> String?,
     ) {
         instance.attach(ChatRepositoryCallPort(applicationContext, repository))
+        // docs/ux/calls.md section 2.1 — the phone rings for an offer this
+        // path delivers, not only for one a push wake carries. On the test
+        // stack, which has no FCM credentials, this is the ONLY path that runs.
+        IncomingCallRinger.attach(applicationContext)
+        instance.attachRinger(IncomingCallRinger)
         repository.oneToOneCallInbound = instance::deliver
         group.attach(ChatRepositoryGroupCallPort(applicationContext, repository, scope, sessionTokenProvider))
         link.attach(MultiJoinerLinkCallPort(applicationContext, scope))
@@ -143,6 +148,7 @@ public object AppCallHost {
 
     /** Logout / forget device: end every call locally and start clean. */
     public fun reset() {
+        IncomingCallRinger.stopAll()
         instance.reset()
         group.reset()
         link.reset()
@@ -191,6 +197,24 @@ public class ChatRepositoryCallPort(
             android.util.Log.w("ChatRepositoryCallPort", "compose End failed", error)
             null
         }
+
+    /**
+     * The caller's name for the ring, resolved the same way every other screen
+     * resolves it (ADR-0048): the 1x1 peer's signature key, then the profile
+     * directory. A group with no resolvable peer, or a name this device has
+     * never learned, yields `null` and the ring says `Someone`.
+     */
+    override fun peerName(groupIdHex: String): String? = try {
+        repository.oneToOnePeerKey(groupIdHex)?.let { key ->
+            val resolved = me.lakko.app.profile.ProfileDirectory.get(applicationContext).resolve(key)
+            // A key fingerprint is not a name: on a locked screen it says
+            // nothing and reads as noise, so the ring falls back to `Someone`.
+            resolved.primary.takeIf { !resolved.isPlaceholder }
+        }
+    } catch (error: Throwable) {
+        android.util.Log.w("ChatRepositoryCallPort", "resolving the caller's name failed", error)
+        null
+    }
 }
 
 /** The production [GroupCallPort]: the chat repository, the SFU, [SfuCallUi]. */
