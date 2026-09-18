@@ -317,6 +317,80 @@ mod tests {
         assert!(decode_device(&"a".repeat(65)).is_err());
     }
 
+    fn register_body(provider: &str) -> String {
+        format!(
+            r#"{{"pow":{{"seed":"AA","nonce":"BB","solution":"CC"}},
+                 "device_pseudonym":"{}","provider":"{provider}","token":"{}"}}"#,
+            "ab".repeat(32),
+            B64.encode([7u8; 32]),
+        )
+    }
+
+    /// The five provider names, and the row each is stored under.
+    ///
+    /// These are the exact strings the three clients send — iOS
+    /// `PushClient.Provider`, Android `PushClient.kt`, web
+    /// `push/client.ts`. A device that cannot register is a device that
+    /// is never woken, so the wire names and the column values are
+    /// pinned together here rather than assumed from the enum.
+    const WIRE_NAMES: [(&str, ProviderKind, u8); 5] = [
+        ("apns", ProviderKind::Apns, 1),
+        ("fcm", ProviderKind::Fcm, 2),
+        ("web_push", ProviderKind::WebPush, 3),
+        ("unified_push", ProviderKind::UnifiedPush, 4),
+        ("apns_voip", ProviderKind::ApnsVoip, 5),
+    ];
+
+    #[test]
+    fn every_provider_kind_can_be_registered() {
+        for (wire, kind, db) in WIRE_NAMES {
+            let req: RegisterRequest = serde_json::from_str(&register_body(wire))
+                .unwrap_or_else(|e| panic!("{wire} rejected by the extractor: {e}"));
+            assert_eq!(req.provider, kind);
+            assert_eq!(req.provider.as_db(), db);
+            // The handler's own two decode gates, which run before the
+            // UPSERT and are the rest of what a register has to clear.
+            assert!(decode_device(&req.device_pseudonym).is_ok());
+            assert!(decode_token(&req.token).is_ok());
+        }
+    }
+
+    #[test]
+    fn every_provider_kind_can_be_unregistered() {
+        for (wire, kind, _) in WIRE_NAMES {
+            let body = format!(
+                r#"{{"pow":{{"seed":"AA","nonce":"BB","solution":"CC"}},
+                     "device_pseudonym":"{}","provider":"{wire}"}}"#,
+                "ab".repeat(32),
+            );
+            let req: UnregisterRequest = serde_json::from_str(&body)
+                .unwrap_or_else(|e| panic!("{wire} rejected by the extractor: {e}"));
+            assert_eq!(req.provider, kind);
+        }
+    }
+
+    #[test]
+    fn the_two_apple_tokens_are_separate_rows_of_one_device() {
+        // The composite PK is `(device_id, provider)`, so this pair of
+        // distinct column values is exactly what keeps a fresh call
+        // token from evicting the alert token, and vice versa.
+        assert_ne!(
+            ProviderKind::Apns.as_db(),
+            ProviderKind::ApnsVoip.as_db(),
+            "one device's two Apple tokens would collide on the primary key",
+        );
+    }
+
+    #[test]
+    fn an_unknown_provider_name_is_refused() {
+        for bad in ["voip", "apnsvoip", "ApnsVoip", "pushkit", "apns_alert"] {
+            assert!(
+                serde_json::from_str::<RegisterRequest>(&register_body(bad)).is_err(),
+                "expected refusal for {bad}",
+            );
+        }
+    }
+
     #[test]
     fn decode_token_validates_size() {
         assert!(decode_token(&B64.encode([0u8; 32])).is_ok());

@@ -15,6 +15,18 @@ mkdir -p "$OUT"
 
 SERVICES=(auth ds storage discovery push-gw gif-proxy channels sfu)
 
+# The `Environment=LAKKO_*_KEY_PATH` lines dropped below point into
+# /etc/lakko/secrets, which the test stack does not have. The test server
+# supplies them from /etc/lakko-test/lakko.env instead, if at all:
+#
+#   LAKKO_APNS_KEY_PATH       - alert token: message wakes
+#   LAKKO_APNS_VOIP_KEY_PATH  - call token: a closed iPhone rings only with
+#                               this one, plus LAKKO_APNS_VOIP_{KEY_ID,
+#                               TEAM_ID,TOPIC} (topic = <bundle id>.voip)
+#   LAKKO_FCM_SA_PATH         - Android
+#
+# Absent, push-gw logs a warning per provider and keeps running with the
+# log-only sender for it; see infra/systemd/lakko-svc-push-gw.service.
 for svc in "${SERVICES[@]}"; do
   if [[ $svc == sfu ]]; then src=lakko-sfu.service; else src="lakko-svc-$svc.service"; fi
   {
@@ -29,6 +41,7 @@ for svc in "${SERVICES[@]}"; do
     -e 's/lakko\.target/lakko-test.target/g' \
     -e '/^Environment=RUST_LOG=/d' \
     -e '/^Environment=LAKKO_APNS_KEY_PATH=/d' \
+    -e '/^Environment=LAKKO_APNS_VOIP_KEY_PATH=/d' \
     -e '/^Environment=LAKKO_FCM_SA_PATH=/d' \
     -e 's#^Environment=LAKKO_BLOB_DIR=.*#Environment=LAKKO_BLOB_DIR=/var/lib/lakko-test/blobs#' \
     -e 's#^ReadWritePaths=/var/lib/lakko/blobs$#ReadWritePaths=/var/lib/lakko-test/blobs#' \

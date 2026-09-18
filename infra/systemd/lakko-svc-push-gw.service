@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 [Unit]
-Description=Lakko push gateway (APNs / FCM / Web Push VAPID)
+Description=Lakko push gateway (APNs alert + VoIP / FCM / Web Push VAPID)
 Documentation=https://github.com/lakkome/lakko
 PartOf=lakko.target
 After=network-online.target mariadb.service
@@ -29,6 +29,35 @@ Environment=LAKKO_BIND=127.0.0.1:8085
 # Those, being secrets or per-deployment values, live in lakko.env.
 Environment=LAKKO_APNS_KEY_PATH=/etc/lakko/secrets/apns_key.p8
 Environment=LAKKO_FCM_SA_PATH=/etc/lakko/secrets/fcm_sa.json
+#
+# --- What an iPhone needs in order to ring ---------------------------------
+#
+# An iOS device holds two APNs tokens. The alert token above carries
+# message wakes and reaches a backgrounded app. Only an
+# `apns-push-type: voip` push may launch a TERMINATED app and let it
+# report the call to the system call screen before its handler returns
+# (docs/ux/calls.md section 2.1), and Apple issues authority for that
+# under its OWN credential with its own topic. So a deployment where a
+# closed iPhone rings must provide ALL of:
+#
+#   LAKKO_APNS_VOIP_KEY_PATH  - the VoIP .p8, set below; put the file
+#                               in place with the same ownership and
+#                               0400 mode as apns_key.p8
+#   LAKKO_APNS_VOIP_KEY_ID    - 10-char key id for THAT key
+#   LAKKO_APNS_VOIP_TEAM_ID   - 10-char Apple team id
+#   LAKKO_APNS_VOIP_TOPIC     - <bundle id>.voip, e.g. me.lakko.dev.voip.
+#                               APNs refuses a VoIP push sent to the bare
+#                               bundle id, so the service refuses a topic
+#                               without the .voip suffix at startup.
+#   LAKKO_APNS_VOIP_ENDPOINT  - optional; `sandbox` for development and
+#                               TestFlight builds, unset = production.
+#
+# The three that are secrets or per-deployment values live in
+# /etc/lakko/lakko.env alongside the alert ones. With any of them
+# missing the service logs a warning naming the variable and keeps
+# running: call wakes then fall back to the alert token, which rings a
+# backgrounded app and does NOT ring a closed one.
+Environment=LAKKO_APNS_VOIP_KEY_PATH=/etc/lakko/secrets/apns_voip_key.p8
 
 ExecStart=/usr/local/bin/lakko-svc-push-gw
 Restart=on-failure

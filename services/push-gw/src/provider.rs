@@ -36,10 +36,32 @@ use thiserror::Error;
 
 /// Mapping between the integer column value in `push_tokens.provider`
 /// and the platform name. Wire-format-stable: never renumber.
+///
+/// ## Two token classes, not five platforms
+///
+/// Four of the five variants are platforms. [`ProviderKind::ApnsVoip`]
+/// is not: it is a **second token for a device that already holds an
+/// [`ProviderKind::Apns`] one**, issued by a different system facility
+/// (`PKPushRegistry` rather than `registerForRemoteNotifications`),
+/// addressed with a different topic and a different `apns-push-type`,
+/// and signed by a different credential. Neither token can deliver the
+/// other's pushes, so they are two rows of one device rather than one
+/// row overwritten.
+///
+/// That split is what makes a terminated iPhone ring at all: only an
+/// `apns-push-type: voip` push may launch a terminated app and let it
+/// report a call to CallKit before its handler returns
+/// (`docs/ux/calls.md` section 2.1).
+///
+/// Which class a given wake reaches is decided by
+/// [`crate::notify::delivers_to`]; the rule is written out in that
+/// module's docs.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ProviderKind {
     /// Apple Push Notification service (iOS / iPadOS / macOS / watchOS).
+    /// The **alert** token — mutable-alert message wakes, decrypted by
+    /// the notification-service extension.
     Apns,
     /// Firebase Cloud Messaging (Android with Google services).
     Fcm,
@@ -47,15 +69,30 @@ pub(crate) enum ProviderKind {
     WebPush,
     /// UnifiedPush (self-hosted, for CN / RU and de-Googled Android).
     UnifiedPush,
+    /// Apple PushKit — the **call** token of an iOS device.
+    ///
+    /// Registered from `PKPushRegistry`, delivered to with
+    /// `apns-push-type: voip` on the `<bundle id>.voip` topic under a
+    /// credential of its own. Only ever carries a [`WakeKind::Call`]
+    /// wake: Apple terminates an app that takes a VoIP push without
+    /// reporting a call, so sending a message wake here would be a
+    /// crash, not a mis-styled notification.
+    ApnsVoip,
 }
 
 impl ProviderKind {
+    /// Integer stored in `push_tokens.provider`.
+    ///
+    /// **Never renumber.** Rows written under the four original values
+    /// are live; a new kind takes the next free integer and nothing
+    /// else moves.
     pub(crate) const fn as_db(self) -> u8 {
         match self {
             ProviderKind::Apns => 1,
             ProviderKind::Fcm => 2,
             ProviderKind::WebPush => 3,
             ProviderKind::UnifiedPush => 4,
+            ProviderKind::ApnsVoip => 5,
         }
     }
 
@@ -65,6 +102,7 @@ impl ProviderKind {
             2 => Some(ProviderKind::Fcm),
             3 => Some(ProviderKind::WebPush),
             4 => Some(ProviderKind::UnifiedPush),
+            5 => Some(ProviderKind::ApnsVoip),
             _ => None,
         }
     }
@@ -76,7 +114,16 @@ impl ProviderKind {
             ProviderKind::Fcm => "fcm",
             ProviderKind::WebPush => "webpush",
             ProviderKind::UnifiedPush => "unifiedpush",
+            ProviderKind::ApnsVoip => "apns_voip",
         }
+    }
+
+    /// `true` for a token that exists only to make a device ring.
+    ///
+    /// A call token is never an alternative route for a message wake —
+    /// see [`crate::notify::delivers_to`].
+    pub(crate) const fn is_call_token(self) -> bool {
+        matches!(self, ProviderKind::ApnsVoip)
     }
 }
 
@@ -292,25 +339,69 @@ impl Provider for AlwaysTransportFailProvider {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Every kind, so a new variant has to be added here rather than
+    /// quietly skipping the round-trip and wire-name assertions.
+    pub(crate) const ALL_KINDS: [ProviderKind; 5] = [
+        ProviderKind::Apns,
+        ProviderKind::Fcm,
+        ProviderKind::WebPush,
+        ProviderKind::UnifiedPush,
+        ProviderKind::ApnsVoip,
+    ];
 
     #[test]
     fn provider_kind_db_values_are_stable() {
+        // The four original values are live in `push_tokens.provider`.
+        // Renumbering any of them re-points every stored row at the
+        // wrong platform, so they are pinned literally.
         assert_eq!(ProviderKind::Apns.as_db(), 1);
         assert_eq!(ProviderKind::Fcm.as_db(), 2);
         assert_eq!(ProviderKind::WebPush.as_db(), 3);
         assert_eq!(ProviderKind::UnifiedPush.as_db(), 4);
-        for kind in [
-            ProviderKind::Apns,
-            ProviderKind::Fcm,
-            ProviderKind::WebPush,
-            ProviderKind::UnifiedPush,
-        ] {
+        // The call token took the next free integer and moved nothing.
+        assert_eq!(ProviderKind::ApnsVoip.as_db(), 5);
+        for kind in ALL_KINDS {
             assert_eq!(ProviderKind::from_db(kind.as_db()), Some(kind));
         }
         assert_eq!(ProviderKind::from_db(0), None);
+        assert_eq!(ProviderKind::from_db(6), None);
         assert_eq!(ProviderKind::from_db(99), None);
+    }
+
+    #[test]
+    fn only_the_voip_token_is_a_call_token() {
+        for kind in ALL_KINDS {
+            assert_eq!(
+                kind.is_call_token(),
+                kind == ProviderKind::ApnsVoip,
+                "{} misclassified",
+                kind.as_str(),
+            );
+        }
+    }
+
+    #[test]
+    fn provider_wire_names_are_the_ones_the_clients_send() {
+        // These strings are hand-mirrored in `PushClient.Provider`
+        // (iOS), `PushClient.kt` (Android) and `push/client.ts` (web).
+        // A rename here is a silent 400 on every register from a
+        // client that was not rebuilt.
+        for (kind, wire) in [
+            (ProviderKind::Apns, "apns"),
+            (ProviderKind::Fcm, "fcm"),
+            (ProviderKind::WebPush, "web_push"),
+            (ProviderKind::UnifiedPush, "unified_push"),
+            (ProviderKind::ApnsVoip, "apns_voip"),
+        ] {
+            assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{wire}\""));
+            assert_eq!(
+                serde_json::from_str::<ProviderKind>(&format!("\"{wire}\"")).unwrap(),
+                kind,
+            );
+        }
     }
 
     #[tokio::test]

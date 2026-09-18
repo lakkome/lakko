@@ -28,8 +28,36 @@
 //! waking (invariants #2 and #5). Adding a call kind does not change
 //! that: it adds one bit of visible metadata and no new content. See
 //! [`crate::provider::WakeKind`] for the disclosure argument.
+//!
+//! ## Which of a device's tokens a wake reaches
+//!
+//! An iOS device holds **two** APNs tokens — an alert token
+//! ([`ProviderKind::Apns`]) and a call token
+//! ([`ProviderKind::ApnsVoip`]) — and they are not interchangeable.
+//! The rule, in three sentences:
+//!
+//!   1. **A call wake goes to the device's call token when it has one,
+//!      and to its alert token otherwise — never to both.** The call
+//!      token is what rings a terminated phone; the alert token is the
+//!      fallback for a device that has not registered one (an older
+//!      build, a user who declined, a deployment with no VoIP
+//!      credential). Sending to both would ring the phone through
+//!      CallKit *and* post a notification for the same call.
+//!   2. **A message wake never goes to a call token.** Apple terminates
+//!      an app that takes a VoIP push without reporting a call, so a
+//!      message delivered there is a crash rather than a mis-styled
+//!      notification.
+//!   3. **Every non-Apple token is untouched by both.** FCM, Web Push
+//!      and UnifiedPush each carry one token per device and receive
+//!      every wake they did before.
+//!
+//! [`delivers_to`] is that rule and the only place it is written as
+//! code; both `/push/notify` and `/push/notify-group` route through it.
+//! Note rule 1 makes the decision depend on the device's *whole*
+//! registered set, not on the row in hand — which is why the fan-out
+//! collects each device's kinds before delivering anything.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -96,6 +124,32 @@ pub(crate) struct DeliveryOutcome {
     pub(crate) detail: Option<String>,
 }
 
+/// The one rule deciding which of a device's tokens a wake reaches.
+///
+/// `registered` is every [`ProviderKind`] that device has a token
+/// under; `provider` is the row being considered. See this module's
+/// docs for the reasoning behind each arm.
+///
+/// Pure and total, so the rule is pinned by tests rather than by
+/// whichever query happened to return the rows in which order.
+pub(crate) fn delivers_to(
+    wake: WakeKind,
+    provider: ProviderKind,
+    registered: &[ProviderKind],
+) -> bool {
+    if provider.is_call_token() {
+        // Rule 2: a call token only ever carries a call.
+        return wake.is_call();
+    }
+    if provider == ProviderKind::Apns && wake.is_call() {
+        // Rule 1: the alert token is the call fallback, used only when
+        // this device registered no call token.
+        return !registered.iter().any(|k| k.is_call_token());
+    }
+    // Rule 3: everything else is unchanged by calls existing.
+    true
+}
+
 /// Strip a token row that the platform rejected. Errors here are
 /// non-fatal — we just log and move on.
 async fn drop_invalid_token(state: &AppState, device: &[u8; PSEUDONYM_LEN], provider_db: u8) {
@@ -156,12 +210,23 @@ pub(crate) async fn notify(
         kind: WakeKind::Message,
     };
 
+    // Every kind this device is registered under, so the selection rule
+    // can see the whole set rather than one row at a time.
+    let registered: Vec<ProviderKind> = rows
+        .iter()
+        .filter_map(|(provider_db, _)| ProviderKind::from_db(*provider_db))
+        .collect();
+
     let mut deliveries = Vec::with_capacity(rows.len());
     for (provider_db, token) in rows {
         let Some(kind) = ProviderKind::from_db(provider_db) else {
             tracing::warn!(provider_db, "unknown provider in DB row — skipping");
             continue;
         };
+        if !delivers_to(payload.kind, kind, &registered) {
+            // A message wake never reaches a call token.
+            continue;
+        }
         let outcome = dispatch_one(&state, kind, &token, &payload).await;
         deliveries.push(outcome);
 
@@ -271,11 +336,26 @@ pub(crate) async fn notify_group(
         )
     })?;
 
-    // Deduplicate by `(device_id, provider)` — the JOIN
-    // produces one row per token, and the same device can carry
-    // tokens for multiple providers; both get fanned to, which
-    // is the right behaviour. We just count `devices_woken` as
-    // distinct `device_id` values for the operator-side metric.
+    // The JOIN produces one row per token, and the same device can
+    // carry tokens for several providers. A first pass collects each
+    // device's full registered set, because the selection rule for a
+    // call wake depends on it: the alert token is the fallback only
+    // when the device holds no call token, and that is not knowable
+    // from the row in hand.
+    let mut registered: HashMap<Vec<u8>, Vec<ProviderKind>> = HashMap::new();
+    for (device_bytes, provider_db, _) in &rows {
+        if let Some(kind) = ProviderKind::from_db(*provider_db) {
+            registered
+                .entry(device_bytes.clone())
+                .or_default()
+                .push(kind);
+        }
+    }
+
+    // `devices_woken` counts distinct `device_id` values actually
+    // delivered to — a device whose only token the rule skipped was
+    // not woken, and saying otherwise would hide the skip from the
+    // operator-side metric.
     let mut woken: HashSet<Vec<u8>> = HashSet::new();
     let mut deliveries = Vec::with_capacity(rows.len());
 
@@ -293,6 +373,16 @@ pub(crate) async fn notify_group(
             tracing::warn!(provider_db, "unknown provider in DB row — skipping");
             continue;
         };
+        let device_kinds = registered.get(&device_bytes).map_or(&[][..], Vec::as_slice);
+        if !delivers_to(payload.kind, kind, device_kinds) {
+            tracing::debug!(
+                provider = kind.as_str(),
+                wake_kind = payload.kind.as_str(),
+                device_prefix = %hex::encode(&device_arr[..4]),
+                "token not eligible for this wake kind — skipping",
+            );
+            continue;
+        }
         // Wake payload — same shape `/push/notify` uses. Note
         // `device_pseudonym` is the receiver, not the
         // publisher; the receiver's client looks at this to
@@ -358,7 +448,88 @@ async fn dispatch_one(
 
 #[cfg(test)]
 mod tests {
-    use super::{NotifyGroupRequest, WakeKind};
+    use super::{delivers_to, NotifyGroupRequest, ProviderKind, WakeKind};
+
+    /// Every kind that is delivered to for `wake`, given a device
+    /// registered under `registered`. Reads like the fan-out loop so a
+    /// test states an outcome rather than a sequence of predicates.
+    fn reached(wake: WakeKind, registered: &[ProviderKind]) -> Vec<ProviderKind> {
+        registered
+            .iter()
+            .copied()
+            .filter(|k| delivers_to(wake, *k, registered))
+            .collect()
+    }
+
+    const ALERT: ProviderKind = ProviderKind::Apns;
+    const CALL: ProviderKind = ProviderKind::ApnsVoip;
+
+    #[test]
+    fn a_call_reaches_the_call_token_and_not_the_alert_one() {
+        // The whole point: a phone that registered a call token rings
+        // through CallKit, and does NOT also get a notification for
+        // the same call.
+        assert_eq!(reached(WakeKind::Call, &[ALERT, CALL]), vec![CALL]);
+        // Registration order is not a factor.
+        assert_eq!(reached(WakeKind::Call, &[CALL, ALERT]), vec![CALL]);
+    }
+
+    #[test]
+    fn a_call_falls_back_to_the_alert_token_when_there_is_no_call_token() {
+        // An older build, a user who declined, or a deployment with no
+        // VoIP credential. The call still has to arrive somehow.
+        assert_eq!(reached(WakeKind::Call, &[ALERT]), vec![ALERT]);
+    }
+
+    #[test]
+    fn a_message_never_reaches_a_call_token() {
+        // Apple terminates an app that takes a VoIP push without
+        // reporting a call, so this is a crash, not a styling choice.
+        assert_eq!(reached(WakeKind::Message, &[ALERT, CALL]), vec![ALERT]);
+        assert_eq!(reached(WakeKind::Message, &[CALL]), vec![]);
+    }
+
+    #[test]
+    fn a_call_token_alone_still_receives_the_call() {
+        assert_eq!(reached(WakeKind::Call, &[CALL]), vec![CALL]);
+    }
+
+    #[test]
+    fn the_non_apple_providers_are_untouched_by_either_kind() {
+        let others = [
+            ProviderKind::Fcm,
+            ProviderKind::WebPush,
+            ProviderKind::UnifiedPush,
+        ];
+        for wake in [WakeKind::Message, WakeKind::Call] {
+            for provider in others {
+                // Alone, and alongside both Apple tokens — neither the
+                // presence of a call token nor the wake kind may gate
+                // a provider that has only one token per device.
+                assert!(delivers_to(wake, provider, &[provider]));
+                assert!(delivers_to(wake, provider, &[provider, ALERT, CALL]));
+            }
+        }
+    }
+
+    #[test]
+    fn a_wake_never_reaches_both_apple_tokens() {
+        // The "never both" half of the rule, stated directly so it
+        // cannot be lost to a refactor of the individual arms.
+        for wake in [WakeKind::Message, WakeKind::Call] {
+            let apple: Vec<ProviderKind> = reached(wake, &[ALERT, CALL])
+                .into_iter()
+                .filter(|k| matches!(k, ProviderKind::Apns | ProviderKind::ApnsVoip))
+                .collect();
+            assert!(apple.len() <= 1, "{wake:?} reached {apple:?}");
+        }
+    }
+
+    #[test]
+    fn a_device_with_no_tokens_is_reached_by_nothing() {
+        assert_eq!(reached(WakeKind::Call, &[]), vec![]);
+        assert_eq!(reached(WakeKind::Message, &[]), vec![]);
+    }
 
     fn parse(kind_json: &str) -> Result<NotifyGroupRequest, serde_json::Error> {
         let body = format!(

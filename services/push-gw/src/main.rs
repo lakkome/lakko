@@ -165,13 +165,25 @@ async fn main() -> Result<()> {
 ///
 /// Required env vars per kind:
 ///
-/// - APNs (`ProviderKind::Apns`):
+/// - APNs alert token (`ProviderKind::Apns`):
 ///     - `LAKKO_APNS_KEY_PATH` — path to the .p8 file Apple issues.
 ///     - `LAKKO_APNS_KEY_ID` — 10-char key id (e.g. `ABCDE12345`).
 ///     - `LAKKO_APNS_TEAM_ID` — 10-char team id (e.g. `1A2B3C4D5E`).
 ///     - `LAKKO_APNS_TOPIC` — bundle id (e.g. `me.lakko.dev`).
 ///     - `LAKKO_APNS_ENDPOINT` — `sandbox` for TestFlight builds,
 ///       anything else (or unset) = production.
+/// - APNs call token (`ProviderKind::ApnsVoip`) — a SEPARATE Apple
+///   credential from the alert one, so a separate variable set. Without
+///   it a terminated iPhone cannot be made to ring at all
+///   (`docs/ux/calls.md` section 2.1); the service falls back to the
+///   alert token for call wakes, which reaches a backgrounded app but
+///   not a closed one.
+///     - `LAKKO_APNS_VOIP_KEY_PATH` — path to the VoIP .p8 file.
+///     - `LAKKO_APNS_VOIP_KEY_ID` — 10-char key id.
+///     - `LAKKO_APNS_VOIP_TEAM_ID` — 10-char team id.
+///     - `LAKKO_APNS_VOIP_TOPIC` — `<bundle id>.voip`; APNs refuses a
+///       VoIP push to the bare bundle id.
+///     - `LAKKO_APNS_VOIP_ENDPOINT` — `sandbox` / production, as above.
 /// - FCM (`ProviderKind::Fcm`):
 ///     - `LAKKO_FCM_SA_PATH` — path to the service-account JSON
 ///       Google Cloud issues.
@@ -199,6 +211,27 @@ fn resolve_providers() -> HashMap<ProviderKind, Box<dyn Provider>> {
         })
     };
     map.insert(ProviderKind::Apns, apns);
+
+    // APNs call token (PushKit). Its own Apple credential, so its own
+    // variable set — see `providers::apns` on why it is not the alert
+    // one. Falling back to LogOnly here does not break calls outright:
+    // `notify::delivers_to` routes a call wake to the alert token for
+    // any device with no call token registered, and a device that DID
+    // register one keeps sending its calls into this LogOnly provider
+    // until the credential lands. So the warning says what it costs.
+    let apns_voip: Box<dyn Provider> = if let Some(cfg) = ApnsConfig::voip_from_env() {
+        tracing::info!("APNs VoIP provider configured from env");
+        Box::new(ApnsProvider::new(cfg))
+    } else {
+        tracing::warn!(
+            "APNs VoIP provider falling back to LogOnly — LAKKO_APNS_VOIP_* not configured; \
+             a terminated iPhone will not ring",
+        );
+        Box::new(LogOnlyProvider {
+            kind: ProviderKind::ApnsVoip,
+        })
+    };
+    map.insert(ProviderKind::ApnsVoip, apns_voip);
 
     let fcm: Box<dyn Provider> = if let Some(cfg) = FcmConfig::from_env() {
         tracing::info!("FCM provider configured from env");
@@ -362,14 +395,10 @@ mod tests {
     #[test]
     fn resolve_providers_covers_every_kind() {
         let map = resolve_providers();
-        for kind in [
-            ProviderKind::Apns,
-            ProviderKind::Fcm,
-            ProviderKind::WebPush,
-            ProviderKind::UnifiedPush,
-        ] {
+        for kind in crate::provider::tests::ALL_KINDS {
             let provider = map.get(&kind).expect("provider missing");
             assert_eq!(provider.kind(), kind);
         }
+        assert_eq!(map.len(), crate::provider::tests::ALL_KINDS.len());
     }
 }
