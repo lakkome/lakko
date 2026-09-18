@@ -813,6 +813,66 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
+    // MARK: - Calls
+
+    /// The conversation's title, as the chat list and the chat header write it
+    /// (ADR-0051 §5): the shared group name when one is held, else the other
+    /// person's resolved name in a 1x1, else the members' names. Never a hex
+    /// id.
+    ///
+    /// Lives here, rather than only on the view models that used to own a copy
+    /// each, because a call outlives every chat screen: ``CallHost`` needs the
+    /// name with no view model in existence (`docs/ux/calls.md` section 4).
+    public func conversationTitle(groupIdHex: String) -> String {
+        if let shared = groupName(groupIdHex: groupIdHex) { return shared }
+        if let peer = oneToOnePeerSignatureKey(groupIdHex: groupIdHex) {
+            let resolved = ProfileDirectory.shared.resolve(signatureKey: peer)
+            if !resolved.isPlaceholder { return resolved.name }
+        }
+        let members = self.members(groupIdHex: groupIdHex) ?? []
+        let own = ownLeafIndex(groupIdHex: groupIdHex)
+        return ConversationTitle.groupTitle(
+            otherMemberNames: members
+                .filter { $0.leafIndex != own }
+                .map { member in
+                    let resolved = ProfileDirectory.shared.resolve(
+                        signatureKey: member.signaturePublicKey)
+                    return resolved.isPlaceholder ? nil : resolved.name
+                })
+    }
+
+    /// `docs/ux/calls.md` section 6 — write a finished call's row into the
+    /// conversation.
+    ///
+    /// Local to this device and never sent: both ends were in the same call
+    /// and each writes what it saw, so there is nothing to agree on. The row
+    /// is an ordinary system row in the timeline, which is what makes it
+    /// survive a relaunch — the encrypted message log persists it with every
+    /// other message, by the same route and with no new store.
+    ///
+    /// Its id is **negative**, below every id already in this group. DS ids are
+    /// positive and monotone, so a local row can never collide with one, can
+    /// never be the target of an edit / delete / reaction arriving from the
+    /// wire, and cannot move the journal cursor.
+    public func appendCallRow(groupIdHex: String, row: CallTranscriptRow, atMs: Int64? = nil) {
+        guard let record = groups[groupIdHex] else { return }
+        let lowest = record.messages.map(\.messageId).min() ?? 0
+        record.appendLocalRow(
+            text: row.marker,
+            messageId: min(0, lowest) - 1,
+            createdAt: Self.isoTimestamp(ms: atMs ?? Self.nowMs()))
+        persistMessageLogBestEffort()
+        state = state.with(threads: buildThreadList())
+    }
+
+    /// An ISO-8601 stamp in the shape ``parseDsTimestampMs`` reads, for the
+    /// rows this device writes itself.
+    nonisolated static func isoTimestamp(ms: Int64) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: Date(timeIntervalSince1970: Double(ms) / 1000))
+    }
+
     // MARK: - ADR-0051 group name
 
     /// ADR-0051 §5 — the shared group name this device holds for
@@ -5368,6 +5428,20 @@ private final class GroupRecord {
                 attachments: attachments,
                 createdAt: createdAt,
                 authorKeyB64: authorKeyB64
+            )
+        )
+    }
+
+    /// `docs/ux/calls.md` section 6 — append a row this device wrote itself
+    /// (today: a finished call). A system row with no author: nobody sent it,
+    /// so nobody may edit or delete it.
+    func appendLocalRow(text: String, messageId: Int64, createdAt: String) {
+        messages.append(
+            ChatMessage(
+                messageId: messageId,
+                direction: .system,
+                text: text,
+                createdAt: createdAt
             )
         )
     }

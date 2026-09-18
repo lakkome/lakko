@@ -20,8 +20,11 @@
  *     mount-time `reset()` (the host owns lifecycle) and routes end-call +
  *     the ended-overlay dismissal through `onExit`.
  *
- * The safety-number pill shows exactly when there IS a number to show
- * (`calls/safety-pill.ts`), never on a layout flag.
+ * Encryption is one chip reading `Encrypted` (docs/ux/calls.md section 4),
+ * shown exactly when there IS a safety number to show
+ * (`calls/encryption-chip.ts`), never on a layout flag. The digits themselves
+ * live behind it in the encryption sheet (section 5) and never sit on the call
+ * screen.
  */
 
 import {
@@ -48,7 +51,18 @@ import {
   type QualityTier,
 } from "../state/call-state";
 import { CallSoundController } from "../calls/CallSoundController";
-import { showsSafetyNumber } from "../calls/safety-pill";
+import {
+  encryptionSheetSentence,
+  safetyNumberGroups,
+  safetyNumberSpokenLabel,
+  showsEncryptionChip,
+} from "../calls/encryption-chip";
+import {
+  mediaForPrejoin,
+  prejoinDefaults,
+  type CallMediaChoice,
+  type CallStartKind,
+} from "../calls/call-media-choice";
 import { paths } from "./paths";
 import { Icon } from "../ui/icons";
 import { initialsOf, toneOf } from "../ui/Avatar";
@@ -82,32 +96,141 @@ const QualityDot: Component<QualityDotProps> = (props) => (
 );
 
 // ============================================================================
-// E2eePill — the safety number the two sides can compare. Shown only when
-// there is a number; while keying is still being established the pill says
-// so rather than claiming protection.
+// EncryptionChip — one lock and the word `Encrypted` (docs/ux/calls.md
+// section 4). It replaces the strip of sixteen digits that used to occupy the
+// most valuable line on the screen; the digits are one tap away, in the sheet
+// below, and never on the call itself.
+//
+// Shown only when the call's own encryption is armed AND a number exists to
+// compare — the chip is a promise that tapping it produces one.
 // ============================================================================
 
-const E2eePill: Component = () => {
-  const e = (): ReturnType<typeof callState.e2ee> => callState.e2ee();
-  return (
-    <Show
-      when={showsSafetyNumber(e())}
-      fallback={
-        <div class="lk-call-pill negotiating" role="status" title="Setting up encryption">
-          <Icon name="lock" size={14} />
-          <span>Setting up...</span>
-        </div>
-      }
-    >
-      <div
-        class="lk-call-pill secure"
-        role="status"
-        title="End-to-end encrypted. Compare this safety number with the other side."
-      >
+const EncryptionChip: Component<{ onOpen: () => void }> = (props) => (
+  <Show
+    when={showsEncryptionChip(callState.e2ee())}
+    fallback={
+      // Not armed yet. Says so rather than claiming protection, and is not a
+      // button: there is nothing to show behind it.
+      <div class="lk-call-pill negotiating" role="status">
         <Icon name="lock" size={14} />
-        <span class="lk-call-pill-number">{e().shortFingerprint}</span>
+        <span>Setting up...</span>
       </div>
-    </Show>
+    }
+  >
+    <button
+      type="button"
+      class="lk-call-pill secure"
+      aria-label="This call is encrypted. Show the safety number"
+      aria-haspopup="dialog"
+      onClick={() => props.onOpen()}
+    >
+      <Icon name="lock" size={14} />
+      <span>Encrypted</span>
+    </button>
+  </Show>
+);
+
+// ============================================================================
+// EncryptionSheet — the safety number, on request only (section 5).
+//
+// One plain sentence naming the other person, the number in four groups of
+// four, one line saying what to do with it, and Copy / Done. No protocol
+// words: section 5 is explicit that the code means nothing to anyone who has
+// not been told what it is, so the sheet is where being told happens.
+// ============================================================================
+
+const EncryptionSheet: Component<{ peerName: string | null; onClose: () => void }> = (props) => {
+  const [copied, setCopied] = createSignal(false);
+  let doneButton: HTMLButtonElement | undefined;
+
+  const number = (): string | null => callState.e2ee().shortFingerprint;
+
+  // Focus the safe, obvious way out as the sheet appears; Escape does the
+  // same, which is the conventional dismissal and costs nothing here.
+  createEffect(() => {
+    doneButton?.focus();
+  });
+  createEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      props.onClose();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    onCleanup(() => document.removeEventListener("keydown", onKeyDown));
+  });
+
+  let copiedTimer: number | null = null;
+  onCleanup(() => {
+    if (copiedTimer !== null) window.clearTimeout(copiedTimer);
+  });
+
+  const copy = (): void => {
+    const value = number();
+    if (value === null) return;
+    void navigator.clipboard
+      ?.writeText(value)
+      .then(() => {
+        setCopied(true);
+        if (copiedTimer !== null) window.clearTimeout(copiedTimer);
+        copiedTimer = window.setTimeout(() => setCopied(false), 2000);
+      })
+      .catch(() => {
+        // A refused clipboard is not worth an error dialog: the number is on
+        // screen and readable, which is what it is for.
+      });
+  };
+
+  return (
+    <div
+      class="lk-call-modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="lk-encryption-sheet-title"
+      onClick={(e): void => {
+        if (e.target === e.currentTarget) props.onClose();
+      }}
+    >
+      <div class="lk-call-modal lk-encryption-sheet">
+        <h2 id="lk-encryption-sheet-title">This call is encrypted</h2>
+        <p class="lk-encryption-sheet-lead">{encryptionSheetSentence(props.peerName)}</p>
+
+        {/* One atomic thing to a screen reader: `role="img"` with a label
+            that pauses between the groups (section 8, "the safety number is
+            read in groups of four"), rather than sixteen digits run together
+            or four unexplained numbers. */}
+        <p
+          class="lk-encryption-sheet-number"
+          role="img"
+          aria-label={safetyNumberSpokenLabel(number())}
+        >
+          <For each={safetyNumberGroups(number())}>
+            {(group) => <span aria-hidden="true">{group}</span>}
+          </For>
+        </p>
+
+        <p class="lk-encryption-sheet-hint">
+          Read these numbers aloud. If they match on both phones, no one is listening.
+        </p>
+
+        <div class="lk-encryption-sheet-actions">
+          <button type="button" class="ghost" onClick={copy}>
+            <Icon name="copy" size={16} />
+            {copied() ? "Copied" : "Copy"}
+          </button>
+          <button
+            type="button"
+            class="primary"
+            ref={(el) => {
+              doneButton = el;
+            }}
+            onClick={() => props.onClose()}
+          >
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
   );
 };
 
@@ -294,13 +417,27 @@ const ParticipantTile: Component<TileProps> = (props) => {
 
 // ============================================================================
 // PrejoinScreen — a card with the preview and two toggles.
+//
+// docs/ux/calls.md section 3: "A voice call never turns the camera on. The
+// pre-join screen opens with the camera off for a voice call and on for a
+// video call, and the toggles there change the call that is actually placed."
+//
+// Both halves are `calls/call-media-choice.ts`: the screen opens at
+// `prejoinDefaults(kind)` and hands `mediaForPrejoin(toggles)` to Join, so the
+// camera switch changes the offer rather than only the preview. The screen
+// used to open the camera on whatever the caller had pressed, which is the
+// defect that section names.
 // ============================================================================
 
-const PrejoinScreen: Component<{ onJoin: () => void }> = (props) => {
+const PrejoinScreen: Component<{
+  kind: CallStartKind;
+  onJoin: (media: CallMediaChoice) => void;
+}> = (props) => {
   // Local toggles for camera / mic preview. Once the user joins, these copy
-  // into the participant entry's flags so the post-join state matches.
-  const [previewCamOn, setPreviewCamOn] = createSignal(true);
-  const [previewMicOn, setPreviewMicOn] = createSignal(true);
+  // into the participant entry's flags so the post-join state matches — and
+  // into the media the call is placed with.
+  const [previewCamOn, setPreviewCamOn] = createSignal(prejoinDefaults(props.kind).camOn);
+  const [previewMicOn, setPreviewMicOn] = createSignal(prejoinDefaults(props.kind).micOn);
 
   return (
     <div class="lk-call lk-call-prejoin" role="region" aria-label="Before you join">
@@ -347,11 +484,13 @@ const PrejoinScreen: Component<{ onJoin: () => void }> = (props) => {
           class="primary lk-call-join"
           onClick={(): void => {
             // Carry the preview toggles into the post-join participant
-            // state, then transition.
+            // state AND into the media the call is placed with, then
+            // transition.
+            const media = mediaForPrejoin({ micOn: previewMicOn(), camOn: previewCamOn() });
             callActions.setMic(previewMicOn());
-            callActions.setCamera(previewCamOn());
+            callActions.setCamera(media.video);
             callActions.join();
-            props.onJoin();
+            props.onJoin(media);
           }}
         >
           Join
@@ -1059,6 +1198,15 @@ function seedMockParticipants(): void {
 const Call: Component<{
   embedded?: boolean;
   onExit?: () => void;
+  /** Which of the chat header's two buttons started this call, so the pre-join
+   *  screen opens at the matching camera state (docs/ux/calls.md section 3).
+   *  Defaults to a voice call: the camera is never turned on by a screen that
+   *  was not asked to. */
+  startKind?: CallStartKind;
+  /** The other person, for the encryption sheet's one sentence (section 5).
+   *  Omitted on a group call and on the design route, where the sheet says the
+   *  same true thing without naming anyone. */
+  peerName?: string | null;
   /** SFU group-call only: resolve a roster participant id to its live remote
    *  `MediaStream` so the tile can render real video. Omitted on the 1x1 and
    *  mock paths (tiles fall back to the avatar / blank surface). */
@@ -1068,6 +1216,14 @@ const Call: Component<{
   localStream?: (() => MediaStream | undefined) | undefined;
 }> = (props) => {
   const navigate = useNavigate();
+  const [encryptionSheetOpen, setEncryptionSheetOpen] = createSignal(false);
+
+  // A call that loses its encryption (it ended, or the slot was handed to
+  // another call) must not leave the safety number of the previous one on
+  // screen behind a sheet the user has to notice and close.
+  createEffect(() => {
+    if (!showsEncryptionChip(callState.e2ee())) setEncryptionSheetOpen(false);
+  });
 
   // Sound cues — one controller per Call mount; disposed on unmount so cached
   // <audio> elements + their decoders are released cleanly.
@@ -1156,11 +1312,20 @@ const Call: Component<{
   // fires off this.
   const isAlone = (): boolean => callState.participants().filter((p) => !p.isLocal).length === 0;
 
+  /** The other person's name when there is exactly one — what the encryption
+   *  sheet's sentence names. A group call has no "other person", so it gets
+   *  `null` and the sentence that does not name anyone. */
+  const soleRemoteName = (): string | null => {
+    const remote = callState.participants().filter((p) => !p.isLocal);
+    return remote.length === 1 ? ((remote[0] as Participant).displayName ?? null) : null;
+  };
+
   return (
     <Show
       when={callState.phase().kind !== "prejoin"}
       fallback={
         <PrejoinScreen
+          kind={props.startKind ?? "audio"}
           onJoin={(): void => {
             // Synthesise the "connected" transition on the design route.
             seedMockParticipants();
@@ -1178,7 +1343,7 @@ const Call: Component<{
             quality dot with its popover (right). The phase banner floats
             over the centre. */}
         <header class="lk-call-head">
-          <E2eePill />
+          <EncryptionChip onOpen={() => setEncryptionSheetOpen(true)} />
           <QualityIndicator />
         </header>
 
@@ -1226,6 +1391,15 @@ const Call: Component<{
         <ParticipantList />
         <ChatPanel />
         <SettingsPanel />
+
+        <Show when={encryptionSheetOpen()}>
+          <EncryptionSheet
+            peerName={props.peerName ?? soleRemoteName()}
+            onClose={(): void => {
+              setEncryptionSheetOpen(false);
+            }}
+          />
+        </Show>
 
         <Show when={callState.phase().kind === "ended"}>
           <CallEndedOverlay

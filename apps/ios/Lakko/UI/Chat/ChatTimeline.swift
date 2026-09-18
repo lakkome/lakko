@@ -138,6 +138,19 @@ public enum ChatTimeline {
     /// them (UX spec section 6).
     public static func isHiddenSystemRow(_ message: ChatMessage) -> Bool {
         guard message.direction == .system else { return false }
-        return message.text == "[mls commit]" || message.text == "[mls external join]"
+        if message.text == "[mls commit]" || message.text == "[mls external join]" { return true }
+        // `docs/ux/calls.md` section 6 — a call row IS drawn; the sentence is
+        // rendered from its parsed marker. One this build cannot read is
+        // hidden rather than shown as the raw marker.
+        if CallTranscriptRow.isCallRow(message.text) {
+            return CallTranscriptRow.parse(message.text) == nil
+        }
+        return false
+    }
+
+    /// The finished call this row records, or `nil` when it is not a call row.
+    public static func callRow(_ message: ChatMessage) -> CallTranscriptRow? {
+        guard message.direction == .system else { return nil }
+        return CallTranscriptRow.parse(message.text)
     }
 }

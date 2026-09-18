@@ -96,8 +96,15 @@ class OneToOneCallHostTest {
     class FakePort : OneToOneCallPort<FakeSession> {
         val created = mutableListOf<Pair<String, FakeSession>>()
         val published = mutableListOf<Pair<String, String>>()
+
+        /** docs/ux/calls.md section 6 — the transcript rows the host wrote. */
+        val recorded = mutableListOf<Pair<String, CallTranscriptEntry>>()
         var keyDelayMs = 0L
         var keyAvailable = true
+
+        override fun recordCall(groupIdHex: String, entry: CallTranscriptEntry) {
+            recorded += groupIdHex to entry
+        }
 
         override fun createSession(
             groupIdHex: String,
@@ -734,5 +741,239 @@ class OneToOneCallHostTest {
         h.host.setForeground(true)
         runCurrent()
         assertNull(h.host.active.value)
+    }
+
+    // ---- What a finished call leaves behind (section 6) ----------------------
+
+    @Test
+    fun `an answered incoming call writes an incoming row with its duration`() = runTest {
+        val h = harness()
+        h.host.deliver(groupA, 1, offer(call1), iso(t0))
+        runCurrent()
+        h.host.accept(withVideo = false)
+        runCurrent()
+        h.session()!!.mutableState.value = CallSession.WebCallState.Connected
+        runCurrent()
+        h.now = t0 + 724_000L
+        h.host.hangUp()
+        runCurrent()
+
+        assertEquals(
+            listOf(groupA to CallTranscriptEntry(CallOutcome.INCOMING, video = false, durationSecs = 724)),
+            h.port.recorded,
+        )
+    }
+
+    @Test
+    fun `an incoming call that rang out writes a missed row`() = runTest {
+        val h = harness()
+        h.host.deliver(groupA, 1, offer(call1, video = true), iso(t0))
+        runCurrent()
+        advanceTimeBy(OneToOneCallTiming().ringTimeoutMs + 1)
+        runCurrent()
+
+        assertEquals(
+            listOf(groupA to CallTranscriptEntry(CallOutcome.MISSED, video = true, durationSecs = null)),
+            h.port.recorded,
+        )
+    }
+
+    @Test
+    fun `declining a ringing call writes a declined row, never a missed one`() = runTest {
+        val h = harness()
+        h.host.deliver(groupA, 1, offer(call1), iso(t0))
+        runCurrent()
+        h.host.decline()
+        runCurrent()
+
+        assertEquals(
+            listOf(groupA to CallTranscriptEntry(CallOutcome.DECLINED, video = false, durationSecs = null)),
+            h.port.recorded,
+        )
+    }
+
+    @Test
+    fun `an offer refused because this device is busy is still recorded as missed`() = runTest {
+        val h = harness()
+        h.host.deliver(groupA, 1, offer(call1), iso(t0))
+        runCurrent()
+        // A second call on another journal while the first occupies the slot.
+        h.host.deliver(groupB, 1, offer(call2), iso(t0))
+        runCurrent()
+
+        assertTrue(
+            h.port.recorded.contains(
+                groupB to CallTranscriptEntry(CallOutcome.MISSED, video = false, durationSecs = null),
+            ),
+        )
+    }
+
+    @Test
+    fun `an offer only ever held is recorded when its ring window runs out`() = runTest {
+        val h = harness(foreground = false)
+        h.host.deliver(groupA, 1, offer(call1), iso(t0))
+        runCurrent()
+        h.host.dismissRingingOffer(callIdHexOf(call1))
+        runCurrent()
+
+        assertEquals(
+            listOf(groupA to CallTranscriptEntry(CallOutcome.MISSED, video = false, durationSecs = null)),
+            h.port.recorded,
+        )
+    }
+
+    @Test
+    fun `an outgoing call the peer declined writes a declined row`() = runTest {
+        val h = harness()
+        h.host.startOutgoing(groupA, RequestedCallKind.VOICE)
+        runCurrent()
+        h.host.dial(audio = true, video = false)
+        runCurrent()
+        val callId = h.host.active.value!!.session.callId
+        h.host.deliver(
+            groupA,
+            1,
+            FfiCallSignalingBody.End(callId, FfiCallEndReason.DECLINED),
+            iso(t0),
+        )
+        runCurrent()
+
+        assertEquals(
+            listOf(groupA to CallTranscriptEntry(CallOutcome.DECLINED, video = false, durationSecs = null)),
+            h.port.recorded,
+        )
+    }
+
+    @Test
+    fun `a video call the caller placed records itself as a video call`() = runTest {
+        val h = harness()
+        h.host.startOutgoing(groupA, RequestedCallKind.VIDEO)
+        runCurrent()
+        h.host.dial(audio = true, video = true)
+        runCurrent()
+        h.host.hangUp()
+        runCurrent()
+
+        assertEquals(
+            listOf(groupA to CallTranscriptEntry(CallOutcome.OUTGOING, video = true, durationSecs = null)),
+            h.port.recorded,
+        )
+    }
+
+    @Test
+    fun `a pre-join the user cancelled is not a call and writes nothing`() = runTest {
+        val h = harness()
+        h.host.startOutgoing(groupA, RequestedCallKind.VIDEO)
+        runCurrent()
+        h.host.cancelPrepared()
+        runCurrent()
+
+        assertTrue(h.port.recorded.isEmpty())
+    }
+
+    @Test
+    fun `the kind the caller chose reaches the prepared call`() = runTest {
+        val h = harness()
+        h.host.startOutgoing(groupA, RequestedCallKind.VOICE)
+        runCurrent()
+        assertEquals(RequestedCallKind.VOICE, h.host.active.value?.requestedKind)
+        assertEquals(false, h.host.active.value?.let { prejoinCameraDefault(it.requestedKind) })
+
+        h.host.cancelPrepared()
+        runCurrent()
+        h.host.startOutgoing(groupA, RequestedCallKind.VIDEO)
+        runCurrent()
+        assertEquals(RequestedCallKind.VIDEO, h.host.active.value?.requestedKind)
+        assertEquals(true, h.host.active.value?.let { prejoinCameraDefault(it.requestedKind) })
+    }
+
+    // ---- The ring does not depend on which screen is open (section 2.1) ------
+
+    @Test
+    fun `an offer for a group with no chat screen open raises the ring`() = runTest {
+        // The live defect: the call rang only while its own chat was the visible
+        // screen. Nothing in this host knows about screens — an offer is
+        // delivered by whichever poll read it — so what has to hold is that a
+        // delivery carrying no screen context at all still rings the PHONE
+        // (the notification), not merely the in-app banner.
+        val h = harness()
+        h.host.deliver(groupB, messageId = 1, body = offer(call1), createdAt = iso(t0))
+        runCurrent()
+
+        assertEquals(1, h.ringer.started.size)
+        val ring = h.ringer.started.single()
+        assertEquals(groupB, ring.groupIdHex)
+        assertEquals(callIdHexOf(call1), ring.callIdHex)
+        assertEquals(CallSession.WebCallState.Ringing, h.session()?.state?.value)
+    }
+
+    @Test
+    fun `an offer still rings when it is read a whole sweep after it was published`() = runTest {
+        // The mechanism behind the defect. The app-level loop sweeps every group
+        // in waves, so an offer is read up to one sweep after the DS stamped it;
+        // what matters is whether that delay fits inside the window. Driven with
+        // the sweep the CURRENT policy produces for an account the size of the
+        // repro's, so a policy change that widened the sweep past the window
+        // would fail here rather than in someone's hand.
+        val h = harness()
+        val sweepSecs = me.lakko.app.chat.appPollSweepSecs(
+            groupCount = 7,
+            concurrency = me.lakko.app.chat.POLL_ALL_CONCURRENCY,
+            maxWaitSecs = 30,
+        )
+        val readAt = t0
+        val publishedAt = readAt - sweepSecs * 1_000L
+        h.now = readAt
+        h.host.deliver(groupB, messageId = 1, body = offer(call1), createdAt = iso(publishedAt))
+        runCurrent()
+
+        assertEquals(1, h.ringer.started.size)
+        assertEquals(CallSession.WebCallState.Ringing, h.session()?.state?.value)
+        // And it rings with time left to answer, not in the last instant. The
+        // bound is the policy's own: a sweep never exceeds its budget, so what
+        // is left is at least the window minus that budget. Derived rather than
+        // picked, so widening the budget fails here.
+        val remaining = callRingRemainingMs(publishedAt, readAt)
+        val guaranteed = CALL_RING_WINDOW_MS - me.lakko.app.chat.APP_POLL_SWEEP_BUDGET_SECS * 1_000L
+        assertTrue("only ${remaining}ms of ring window left", remaining >= guaranteed)
+        assertTrue("the guarantee is worth having", guaranteed >= 20_000L)
+    }
+
+    @Test
+    fun `the sweep the old fixed wait produced would never have rung at all`() = runTest {
+        // Seven chats, three waves, thirty seconds each: the offer is ninety
+        // seconds old by the time it is read, past the stale cut-off, and the
+        // host deliberately refuses to ring for it. This is the test that
+        // distinguishes the fix from the bug, and it must keep failing to ring.
+        val h = harness()
+        val legacySweepSecs = 3 * 30
+        h.now = t0
+        h.host.deliver(
+            groupB,
+            messageId = 1,
+            body = offer(call1),
+            createdAt = iso(t0 - legacySweepSecs * 1_000L),
+        )
+        runCurrent()
+
+        assertTrue(legacySweepSecs * 1_000L > STALE_OFFER_MS)
+        assertTrue("a stale offer must not ring", h.ringer.started.isEmpty())
+        assertNull(h.host.active.value)
+    }
+
+    @Test
+    fun `one call writes exactly one row`() = runTest {
+        val h = harness()
+        h.host.deliver(groupA, 1, offer(call1), iso(t0))
+        runCurrent()
+        h.host.decline()
+        runCurrent()
+        // Every later way of observing the same finished call is idempotent.
+        h.host.deliver(groupA, 2, end(call1), iso(t0))
+        h.host.hangUp()
+        h.host.clearFinished()
+        runCurrent()
+
+        assertEquals(1, h.port.recorded.size)
     }
 }

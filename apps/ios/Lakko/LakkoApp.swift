@@ -827,12 +827,14 @@ private struct SessionRoot: View, Equatable {
                 viewModel: contactsVM,
                 messageId: messageId,
                 onOpenChat: { groupIdHex in push(.chat(groupIdHex: groupIdHex), on: tab) },
-                onCall: { groupIdHex, _ in
+                onCall: { groupIdHex, video in
                     // The 1x1 entry point the chat header uses: the host
                     // builds the session without dialing and the prejoin
-                    // offers the camera toggle, so Call and Video land on the
-                    // same prejoin (the header's video button does the same).
-                    services.callHost.startOutgoingCall(groupIdHex: groupIdHex)
+                    // offers the camera toggle. `docs/ux/calls.md` section 3 —
+                    // the button decides what the prejoin opens with, so a
+                    // voice call never arrives with the camera already on.
+                    services.callHost.startOutgoingCall(
+                        groupIdHex: groupIdHex, button: CallMediaChoice.button(video: video))
                 }
             )
         case .safetyNumber(let messageId):

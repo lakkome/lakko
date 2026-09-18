@@ -474,7 +474,11 @@ public struct ChatScreen: View {
                                     // ADR-0047 §4 — the reaction bar's `+`.
                                     onMoreReactions: {
                                         picker = PickerRequest(mode: .reaction, message: entry.message)
-                                    }
+                                    },
+                                    // `docs/ux/calls.md` section 6 — tapping a
+                                    // call row calls back, the same way the
+                                    // header's phone button does.
+                                    onCallBack: { viewModel.onCallButton(video: false) }
                                 )
                                 // Tighter inside a run, a clear gap between runs.
                                 .padding(.top, entry.startsRun ? 10 : 2)
@@ -1106,6 +1110,8 @@ private struct MessageRow: View {
     let onReact: (String) -> Void
     /// ADR-0047 §4 — the reaction bar's trailing `+`: any single emoji.
     var onMoreReactions: () -> Void = {}
+    /// `docs/ux/calls.md` section 6 — tapping a call row calls back.
+    var onCallBack: () -> Void = {}
 
     /// ADR-0023 — emoji palette for the quick reaction picker.
     private static let reactionPalette = ["👍", "❤️", "😂", "😮", "😢", "🙏"]
@@ -1222,13 +1228,65 @@ private struct MessageRow: View {
                 Spacer(minLength: 0)
             }
         case .system:
-            // Small and centred (UX spec section 5.2).
-            Text(message.text)
-                .font(.caption)
-                .foregroundStyle(Color.lakkoTextMuted)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.vertical, 4)
+            if let call = ChatTimeline.callRow(message) {
+                callRow(call)
+            } else {
+                // Small and centred (UX spec section 5.2).
+                Text(message.text)
+                    .font(.caption)
+                    .foregroundStyle(Color.lakkoTextMuted)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 4)
+            }
+        }
+    }
+
+    /// `docs/ux/calls.md` section 6 — a finished call, centred like the other
+    /// system rows but tappable: a tap calls back. The arrow says which way
+    /// the call went, so the direction does not rest on the wording alone
+    /// (section 8).
+    @ViewBuilder
+    private func callRow(_ call: CallTranscriptRow) -> some View {
+        Button(action: onCallBack) {
+            HStack(spacing: 6) {
+                Image(systemName: glyph(for: call))
+                    .font(.caption2)
+                Text(call.text)
+                    .font(.caption)
+                if let timeLabel {
+                    Text(timeLabel)
+                        .font(.caption2)
+                        .foregroundStyle(Color.lakkoTextMuted)
+                }
+            }
+            .foregroundStyle(tint(for: call))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Color.lakkoSurfaceSunken)
+            .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .center)
+        .padding(.vertical, 4)
+        .accessibilityLabel(call.accessibilityLabel)
+    }
+
+    private func glyph(for call: CallTranscriptRow) -> String {
+        switch call.outcome {
+        case .answered:
+            return call.direction == .outgoing ? "phone.arrow.up.right" : "phone.arrow.down.left"
+        case .missed, .declined:
+            return "phone.down"
+        }
+    }
+
+    /// A missed call is the one outcome the reader may want to act on, so it
+    /// carries the danger tint; everything else stays muted.
+    private func tint(for call: CallTranscriptRow) -> Color {
+        switch call.outcome {
+        case .missed: return Color.lakkoDanger
+        case .answered, .declined: return Color.lakkoTextMuted
         }
     }
 

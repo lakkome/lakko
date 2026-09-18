@@ -48,47 +48,167 @@ private struct QualityDot: View {
     }
 }
 
-// MARK: - E2eePill
+// MARK: - EncryptionChip
 
-private struct E2eePill: View {
-    let state: CallUiState.E2eeState
+/// `docs/ux/calls.md` sections 4 and 5 — a lock and one word, next to the
+/// status line, on a sunken surface. It replaces the strip of sixteen digits
+/// that used to run across the top of every call: unreadable, meaningless to
+/// anyone who has not been told what it is, and occupying the most valuable
+/// line on the screen. The digits now live one tap away, in the encryption
+/// sheet, where there is room to say what they are for.
+///
+/// It appears only when the call's own encryption is armed. There is no
+/// "Securing..." state: an unarmed call has nothing true to claim, and a 1x1
+/// native call refuses to connect at all rather than run unencrypted
+/// (invariant #4).
+private struct EncryptionChip: View {
+    let onTap: () -> Void
 
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "lock.fill")
-                .font(.caption2)
-            Text(displayText)
-                .font(.system(.caption2, design: verified ? .monospaced : .default))
-                .fontWeight(.semibold)
+        Button(action: onTap) {
+            HStack(spacing: 5) {
+                Image(systemName: "lock.fill")
+                    .font(.caption2)
+                Text("Encrypted")
+                    .font(.caption2)
+                    .fontWeight(.semibold)
+            }
+            .foregroundColor(Color.lakkoSuccess)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Color.lakkoSurfaceSunken)
+            .overlay(Capsule().stroke(Color.lakkoBorder, lineWidth: 1))
+            .clipShape(Capsule())
         }
-        .foregroundColor(verified ? Color.lakkoSuccess : Color.lakkoWarning)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Color.lakkoSurfaceSunken)
-        .overlay(
-            Capsule().stroke(Color.lakkoBorder, lineWidth: 1)
-        )
-        .clipShape(Capsule())
-        .accessibilityLabel(
-            state.active
-                ? "End-to-end encrypted. Fingerprint \(state.shortFingerprint ?? "")"
-                : "Encryption negotiating"
-        )
+        .buttonStyle(.plain)
+        .accessibilityLabel("End-to-end encrypted")
+        .accessibilityHint("Shows the safety number to compare")
     }
+}
 
-    private var displayText: String {
-        if state.active, let fp = state.shortFingerprint {
-            return fp
+// MARK: - EncryptionSheet
+
+/// `docs/ux/calls.md` section 5 — what the chip opens: the title, one plain
+/// sentence naming the other person, the safety number in four groups of four,
+/// and the one line that says what comparing them proves.
+private struct EncryptionSheet: View {
+    let peerName: String?
+    let safetyNumber: String?
+    let onDone: () -> Void
+
+    @State private var copied = false
+
+    var body: some View {
+        VStack(spacing: 20) {
+            VStack(spacing: 8) {
+                Image(systemName: "lock.fill")
+                    .font(.title2)
+                    .foregroundColor(Color.lakkoSuccess)
+                Text("This call is encrypted")
+                    .font(.title3)
+                    .fontWeight(.semibold)
+                    .foregroundColor(Color.lakkoText)
+                Text(CallPeerName.encryptionSentence(peerName: peerName))
+                    .font(.subheadline)
+                    .foregroundColor(Color.lakkoTextMuted)
+                    .multilineTextAlignment(.center)
+            }
+
+            if let safetyNumber {
+                Text(safetyNumber)
+                    .font(.system(.title2, design: .monospaced).weight(.medium))
+                    .foregroundColor(Color.lakkoText)
+                    .multilineTextAlignment(.center)
+                    .padding(.vertical, 16)
+                    .frame(maxWidth: .infinity)
+                    .background(Color.lakkoSurfaceSunken)
+                    .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card, style: .continuous))
+                    // Section 8 — read in groups of four, not as one number.
+                    .accessibilityLabel(
+                        "Safety number: "
+                            + safetyNumber.split(separator: " ").joined(separator: ", "))
+
+                Text("Read these numbers aloud. If they match on both phones, no one is listening.")
+                    .font(.footnote)
+                    .foregroundColor(Color.lakkoTextMuted)
+                    .multilineTextAlignment(.center)
+            }
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: 12) {
+                if let safetyNumber {
+                    Button {
+                        UIPasteboard.general.string = safetyNumber
+                        copied = true
+                    } label: {
+                        Text(copied ? "Copied" : "Copy")
+                            .font(.headline)
+                            .foregroundColor(Color.lakkoText)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(Color.lakkoSurfaceSunken)
+                            .clipShape(
+                                RoundedRectangle(cornerRadius: LakkoRadius.control, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Copy the safety number")
+                }
+                Button(action: onDone) {
+                    Text("Done")
+                        .font(.headline)
+                        .foregroundColor(Color.lakkoAccentForeground)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(Color.lakkoAccent)
+                        .clipShape(
+                            RoundedRectangle(cornerRadius: LakkoRadius.control, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Close")
+            }
         }
-        return "Securing..."
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(Color.lakkoBackground.ignoresSafeArea())
+        .presentationDetents([.medium])
     }
+}
 
-    /// Green (verified-comparable) only when keying is real AND a safety
-    /// number is present to read out-of-band; otherwise yellow, so
-    /// "E2EE active but no comparable number" stays visually distinct
-    /// from "active + number present" (matches the web pill's gate).
-    private var verified: Bool {
-        state.active && state.shortFingerprint != nil
+// MARK: - CallStatusLine
+
+/// `docs/ux/calls.md` section 4 item 1 — who is on the call, and under it the
+/// running time once it is connected. The transient phase words
+/// (`Connecting...`, `Reconnecting...`) stay with ``PhaseBanner`` so they are
+/// never printed twice.
+private struct CallStatusLine: View {
+    let title: String?
+    let phase: CallUiState.CallPhase
+    let connectedAt: Date?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            if let title {
+                Text(title)
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                    .foregroundColor(Color.lakkoText)
+                    .lineLimit(1)
+            }
+            if case .connected = phase, let connectedAt {
+                // One tick a second while the call runs; the view is the only
+                // thing that needs a clock, so it owns it.
+                TimelineView(.periodic(from: connectedAt, by: 1)) { context in
+                    let elapsed = Int64(
+                        max(0, context.date.timeIntervalSince(connectedAt)) * 1000)
+                    Text(CallTranscriptRow.durationLabel(ms: elapsed))
+                        .font(.caption)
+                        .foregroundColor(Color.lakkoTextMuted)
+                        .monospacedDigit()
+                        .accessibilityLabel(CallTranscriptRow.spokenDuration(ms: elapsed))
+                }
+            }
+        }
     }
 }
 
@@ -354,9 +474,11 @@ private struct ParticipantTile: View {
         return s
     }
 
+    /// `docs/ux/calls.md` section 4 — who this tile is. "Unknown" is never an
+    /// answer (see ``CallPeerName``).
     private var displayLabel: String {
-        if !participant.displayName.isEmpty { return participant.displayName }
-        return participant.isLocal ? "You" : "Unknown"
+        CallPeerName.tileLabel(
+            displayName: participant.displayName, isLocal: participant.isLocal)
     }
 }
 
@@ -738,6 +860,10 @@ private struct ParticipantListDrawer: View {
 
 private struct PrejoinView: View {
     @ObservedObject var state: CallUiState
+    /// `docs/ux/calls.md` section 3 — what the camera toggle starts at: off
+    /// for a voice call, on for a video one. It used to be hard-coded on, so
+    /// the phone button opened a video call.
+    let cameraOn: Bool
     let onJoin: (_ displayName: String, _ micOn: Bool, _ camOn: Bool) -> Void
     /// G3-1-prejoin-join — when the screen is driven by a real
     /// session (presented over the chat before dialing), a Cancel
@@ -745,8 +871,21 @@ private struct PrejoinView: View {
     /// on the standalone design route (no session to abandon).
     var onCancel: (() -> Void)?
 
-    @State private var camOn: Bool = true
+    @State private var camOn: Bool
     @State private var micOn: Bool = true
+
+    init(
+        state: CallUiState,
+        cameraOn: Bool,
+        onJoin: @escaping (_ displayName: String, _ micOn: Bool, _ camOn: Bool) -> Void,
+        onCancel: (() -> Void)? = nil
+    ) {
+        self.state = state
+        self.cameraOn = cameraOn
+        self.onJoin = onJoin
+        self.onCancel = onCancel
+        _camOn = State(initialValue: cameraOn)
+    }
 
     var body: some View {
         ZStack {
@@ -761,7 +900,9 @@ private struct PrejoinView: View {
                             .font(.title2)
                             .fontWeight(.semibold)
                             .foregroundColor(Color.lakkoText)
-                        Text("Check your camera and microphone")
+                        // Says what there is to check: a voice call has no
+                        // camera to look at until the toggle turns one on.
+                        Text(camOn ? "Check your camera and microphone" : "Check your microphone")
                             .font(.subheadline)
                             .foregroundColor(Color.lakkoTextMuted)
                     }
@@ -960,15 +1101,32 @@ public struct CallScreen: View {
     /// A camera start this screen refused because camera access is denied
     /// (``CameraPermission``). Shown as an alert; `nil` when none.
     @State private var permissionMessage: String?
+    /// When media started flowing, for the status line's running time. `nil`
+    /// until the call is connected.
+    @State private var connectedAt: Date?
+    /// `docs/ux/calls.md` section 3 — which button opened this call, which is
+    /// what the pre-join's camera toggle starts at. The toggles then decide
+    /// what is actually offered.
+    private let button: CallButtonKind
+    /// The other person's name, resolved by the call's owner. Drives the
+    /// status line, the remote tile and the encryption sheet's sentence.
+    private let peerName: String?
 
     /// `true` when the camera controls drive a real call (a 1x1 session, or
     /// an externally driven SFU call), so turning the camera on must settle
     /// the camera permission first. The mock design route has no camera.
     private var gatesCamera: Bool { session != nil || externallyDriven }
 
-    public init(session: CallSession? = nil, onExit: @escaping () -> Void) {
+    public init(
+        session: CallSession? = nil,
+        button: CallButtonKind = .voice,
+        peerName: String? = nil,
+        onExit: @escaping () -> Void
+    ) {
         self.session = session
         self.externallyDriven = false
+        self.button = button
+        self.peerName = peerName
         self.onExit = onExit
     }
 
@@ -978,6 +1136,8 @@ public struct CallScreen: View {
         _state = StateObject(wrappedValue: externalState)
         self.session = nil
         self.externallyDriven = true
+        self.button = .voice
+        self.peerName = nil
         self.onExit = onExit
     }
 
@@ -987,6 +1147,7 @@ public struct CallScreen: View {
             case .prejoin where !externallyDriven:
                 PrejoinView(
                     state: state,
+                    cameraOn: CallMediaChoice.prejoinCameraOn(for: button),
                     onJoin: { displayName, micOn, camOn in
                         // G3-1-prejoin-join — with a real session the
                         // user picks mic / camera here and Join dials.
@@ -1005,7 +1166,12 @@ public struct CallScreen: View {
                                     permissionMessage = CameraPermission.deniedMessage
                                     return
                                 }
-                                session.dial(audio: micOn, video: camOn)
+                                // `docs/ux/calls.md` section 3 — the toggles
+                                // decide what is offered, so what the callee
+                                // is told is what this call actually carries.
+                                let media = CallMediaChoice.offeredMedia(
+                                    micOn: micOn, cameraOn: camOn)
+                                session.dial(audio: media.audio, video: media.video)
                             }
                             return
                         }
@@ -1040,6 +1206,13 @@ public struct CallScreen: View {
         // two-parameter `onChange` form (the single-parameter
         // form is deprecated in iOS 17).
         .onChange(of: state.phase) { _, newPhase in
+            // `docs/ux/calls.md` section 4 — the running time starts when
+            // media does, and only then ("Connected only when media flows").
+            if case .connected = newPhase {
+                if connectedAt == nil { connectedAt = Date() }
+            } else {
+                connectedAt = nil
+            }
             switch newPhase {
             case .prejoin:
                 sounds.controller.stopAll()
@@ -1084,8 +1257,15 @@ public struct CallScreen: View {
             // session when one is injected; otherwise the
             // prejoin → seedMockState() path runs as before.
             if let session, sessionBindings.isEmpty {
-                sessionBindings = state.driveFrom(session: session)
+                sessionBindings = state.driveFrom(session: session, peerName: peerName)
             }
+        }
+        // A name that resolves mid-call (their profile arrives while the call
+        // runs) reaches the status line straight away, and the tile at the
+        // next roster rebuild.
+        .onChange(of: peerName) { _, newValue in
+            guard !externallyDriven else { return }
+            state.setPeerName(newValue)
         }
         .onDisappear {
             sounds.controller.stopAll()
@@ -1148,11 +1328,18 @@ public struct CallScreen: View {
             Color.lakkoBackground.ignoresSafeArea()
 
             VStack(spacing: 0) {
-                // Header bar: E2EE pill on the left, quality dot
-                // (with popover) on the right.
-                HStack {
-                    E2eePill(state: state.e2ee)
-                    Spacer()
+                // Header bar (`docs/ux/calls.md` section 4): the status line
+                // with the encryption chip beside it, quality dot on the
+                // right.
+                HStack(spacing: 10) {
+                    CallStatusLine(
+                        title: state.peerName,
+                        phase: state.phase,
+                        connectedAt: connectedAt)
+                    if state.e2ee.active {
+                        EncryptionChip { state.setEncryptionSheetOpen(true) }
+                    }
+                    Spacer(minLength: 0)
                     QualityIndicator(state: state)
                 }
                 .padding(.horizontal, 14)
@@ -1284,6 +1471,18 @@ public struct CallScreen: View {
             )
         ) {
             ChatSheet(state: state)
+        }
+        // `docs/ux/calls.md` section 5 — the safety number, only when asked for.
+        .sheet(
+            isPresented: Binding(
+                get: { state.encryptionSheetOpen },
+                set: { state.setEncryptionSheetOpen($0) }
+            )
+        ) {
+            EncryptionSheet(
+                peerName: state.peerName,
+                safetyNumber: state.e2ee.shortFingerprint,
+                onDone: { state.setEncryptionSheetOpen(false) })
         }
     }
 }

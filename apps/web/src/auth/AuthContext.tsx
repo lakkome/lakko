@@ -135,6 +135,7 @@ import { clearConversationKinds } from "../chat/conversation-kind-store";
 import { deleteProfileRow } from "../profile/profile-idb";
 import { deleteGroupNameRow } from "../chat/group-name-idb";
 import { deleteReadWatermarkRow } from "../chat/read-watermark-idb";
+import { deleteCallLogRow } from "../calls/call-log-idb";
 import { clearOwnProfile } from "../profile/own-profile";
 import { rehydrateMlsState } from "../chat/rehydrate";
 import { subscribeToPush, unsubscribeFromPush } from "../push/subscribe";
@@ -3234,6 +3235,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // ADR-0024 — the encrypted read-watermark row, same contract.
         try {
           await deleteReadWatermarkRow(cached.accountIdB64);
+        } catch {
+          // best-effort
+        }
+        // docs/ux/calls.md section 6 — the encrypted call-log row. Who this
+        // device called, when, and for how long is exactly as revealing as the
+        // messages, so it leaves with them.
+        try {
+          await deleteCallLogRow(cached.accountIdB64);
         } catch {
           // best-effort
         }

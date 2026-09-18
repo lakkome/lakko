@@ -137,6 +137,9 @@ import { recordRemovedDevices } from "../chat/device-readmission";
 import { useProfiles } from "../profile/ProfileContext";
 import { useGroupNames } from "../chat/GroupNameContext";
 import { useReadWatermarks } from "../chat/ReadWatermarkContext";
+import { useCallLog } from "../calls/CallLogContext";
+import { callBackKind, type CallLogEntry } from "../calls/call-log";
+import { mergeConversationEntries } from "../chat/call-timeline";
 import {
   GROUP_NAME_LABEL,
   GROUP_NAME_ONLY_ADMINS,
@@ -325,6 +328,7 @@ import {
   type TimelineRow,
 } from "../chat/timeline-row";
 import { TimelineBubble } from "../chat/TimelineBubble";
+import { CallTimelineRow } from "../chat/CallTimelineRow";
 import {
   layoutTimeline,
   type TimelineItem,
@@ -439,6 +443,7 @@ function ChatView(props: {
   const groupNames = useGroupNames();
   // ADR-0024 — the durable read watermarks both receive paths feed.
   const readWatermarkStore = useReadWatermarks();
+  const callLog = useCallLog();
   // The app-level 1x1 call slot and signaling queue (`calls/CallHostContext`):
   // calls ring and survive on every screen, not just inside this view.
   const callHost = useCallHost();
@@ -520,14 +525,35 @@ function ChatView(props: {
   });
 
   const [rows, setRows] = createSignal<TimelineRow[]>([]);
+  /** docs/ux/calls.md section 6 — the calls this device was in, in this
+   *  conversation. Local to this device and never on the wire; the store is
+   *  `calls/call-log-store.ts`, so they survive a reload the way the
+   *  timeline's own rows do. */
+  const callRows = (): readonly CallLogEntry[] => callLog.of(props.entry.groupIdB64);
+  /** The conversation as the reader sees it: the journal's rows and this
+   *  device's call rows, in time order (`chat/call-timeline.ts`). Merged
+   *  BEFORE the layout, so a call on a new day carries that day's separator
+   *  and a call between two of someone's messages breaks their run. */
+  const timelineEntries = createMemo(() =>
+    mergeConversationEntries(rows(), callRows(), rowCreatedAt),
+  );
   // docs/ux section 5.2 — date separators + sender runs, one layout record
-  // per row (`chat/timeline-layout.ts`). An outgoing row and an incoming row
+  // per entry (`chat/timeline-layout.ts`). An outgoing row and an incoming row
   // from this person's other device (ADR-0050) are both "self", so they run
   // together on the right; every other incoming row runs by its sender key.
   const timelineLayout = createMemo<TimelineLayout[]>(() => {
     const own = ownPersonKeyB64(chats.identity()) ?? "self";
     return layoutTimeline(
-      rows().map((row): TimelineItem => {
+      timelineEntries().map((entry): TimelineItem => {
+        if (entry.kind === "call") {
+          // Nobody said it, so it joins no run and is centred.
+          return {
+            createdAt: new Date(entry.call.startedAtMs).toISOString(),
+            senderKey: undefined,
+            side: "system",
+          };
+        }
+        const row = entry.row;
         if (row.kind === "outgoing") {
           return { createdAt: row.createdAt, senderKey: own, side: "outgoing" };
         }
@@ -6391,7 +6417,7 @@ function ChatView(props: {
       {notice() !== null && <div class="form-notice">{notice()}</div>}
 
       <Show
-        when={rows().length > 0}
+        when={timelineEntries().length > 0}
         fallback={
           <p
             style={{
@@ -6410,8 +6436,8 @@ function ChatView(props: {
         }
       >
         <ol class="lk-timeline">
-          <For each={rows()}>
-            {(row, i) => {
+          <For each={timelineEntries()}>
+            {(entry, i) => {
               const place = (): TimelineLayout =>
                 timelineLayout()[i()] ?? { dayLabel: null, startsRun: true, endsRun: true };
               return (
@@ -6423,8 +6449,19 @@ function ChatView(props: {
                   </li>
                 )}
               </Show>
+              <Show when={entry.kind === "call" ? entry.call : undefined}>
+                {(call) => (
+                  <CallTimelineRow
+                    entry={call()}
+                    canCallBack={callAffordance() !== "hidden" && !callHost.anyCallInProgress()}
+                    onCallBack={(e) => onCallButton(callBackKind(e) === "video")}
+                  />
+                )}
+              </Show>
+              <Show when={entry.kind === "message" ? entry.row : undefined}>
+                {(row) => (
               <TimelineBubble
-                row={row}
+                row={row()}
                 isGroup={isGroupChat()}
                 startsRun={place().startsRun}
                 endsRun={place().endsRun}
@@ -6465,9 +6502,10 @@ function ChatView(props: {
                 onReact={onReact}
                 actionsAvailable={messageActionsAvailable()}
                 hub={hub}
-                mediaUpload={mediaUploadFor(row)}
+                mediaUpload={mediaUploadFor(row())}
                 onRetryMedia={() => {
-                  if (row.kind === "outgoing") retryMediaSend(row.tempId);
+                  const r = row();
+                  if (r.kind === "outgoing") retryMediaSend(r.tempId);
                 }}
                 fullReactPickerId={fullReactPickerId()}
                 onOpenFullReactPicker={(id) => {
@@ -6476,6 +6514,8 @@ function ChatView(props: {
                 }}
                 onCloseFullReactPicker={() => setFullReactPickerId(null)}
               />
+                )}
+              </Show>
               </>
               );
             }}

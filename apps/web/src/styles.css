@@ -2809,6 +2809,51 @@ a.ghost.small:hover {
   color: var(--surface-muted);
   text-align: center;
 }
+
+/* docs/ux/calls.md section 6 — a finished call in the conversation. Centred
+   like the other system rows (nobody said it), but a real button: tapping it
+   calls back. The missed variant is tinted AND says `Missed call` AND carries
+   a different arrow, so nothing rests on the colour (section 8). */
+.lk-call-row {
+  display: flex;
+  justify-content: center;
+  margin: 6px 0;
+}
+.lk-call-row-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 0 14px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--surface-border);
+  background: var(--surface-sunken);
+  color: var(--surface-muted);
+  font-family: inherit;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  cursor: pointer;
+}
+.lk-call-row-button:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--surface-fg);
+}
+.lk-call-row-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  outline-offset: 2px;
+}
+.lk-call-row-button:disabled {
+  cursor: default;
+  color: var(--surface-faint);
+}
+.lk-call-row.unanswered .lk-call-row-button {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--surface-border));
+}
+.lk-call-row.unanswered .lk-call-row-button:hover:not(:disabled) {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
 .lk-bubble-edit {
   display: flex;
   flex-direction: column;
@@ -3316,7 +3361,7 @@ button.lk-reaction {
   }
 }
 
-/* Top bar: the safety-number pill left, the quality dot right. */
+/* Top bar: the encryption chip left, the quality dot right. */
 .lk-call-head {
   display: flex;
   align-items: center;
@@ -3328,6 +3373,10 @@ button.lk-reaction {
   z-index: 5;
   flex: 0 0 auto;
 }
+/* docs/ux/calls.md section 4: "a single small lock chip ... a lock icon and
+   the word `Encrypted`, on a sunken surface". It is a BUTTON in the armed
+   state (it opens the encryption sheet) and a plain status line otherwise, so
+   the element carries the same rules either way. */
 .lk-call-pill {
   display: inline-flex;
   align-items: center;
@@ -3339,7 +3388,19 @@ button.lk-reaction {
   background: var(--surface-sunken);
   font-size: 12px;
   font-weight: 600;
+  font-family: inherit;
   color: var(--surface-muted);
+}
+button.lk-call-pill {
+  cursor: pointer;
+}
+button.lk-call-pill:hover {
+  background: var(--surface-hover);
+  border-color: var(--surface-faint);
+}
+button.lk-call-pill:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  outline-offset: 2px;
 }
 .lk-call-pill.secure {
   color: var(--success);
@@ -3347,9 +3408,56 @@ button.lk-reaction {
 .lk-call-pill.negotiating {
   color: var(--warning);
 }
-.lk-call-pill-number {
+
+/* The encryption sheet (section 5). The digits live HERE and nowhere else:
+   they are shown on request, grouped for reading aloud, and explained. */
+.lk-encryption-sheet {
+  width: min(400px, 100%);
+  gap: 12px;
+  text-align: center;
+}
+.lk-encryption-sheet h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+}
+.lk-encryption-sheet-lead {
+  margin: 0;
+  font-size: 15px;
+  color: var(--surface-fg);
+  overflow-wrap: anywhere;
+}
+.lk-encryption-sheet-number {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px 16px;
+  margin: 4px 0;
+  padding: 14px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  font-size: 22px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.08em;
+  color: var(--surface-fg);
+}
+.lk-encryption-sheet-hint {
+  margin: 0;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--surface-muted);
+}
+.lk-encryption-sheet-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+.lk-encryption-sheet-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 /* Quality dot + popover. */

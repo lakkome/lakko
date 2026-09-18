@@ -122,6 +122,19 @@ public interface OneToOneCallPort<S : OneToOneCallSession> {
      * contacts to resolve against, and a ring with no name still rings.
      */
     public fun peerName(groupIdHex: String): String? = null
+
+    /**
+     * A call in [groupIdHex] finished: write its row into that conversation
+     * (`docs/ux/calls.md` section 6, [CallTranscriptRow.kt]).
+     *
+     * Local to this device — nothing is composed and nothing is published, so
+     * this is a side effect on the transcript store and never on the wire.
+     * Defaulted to a no-op for the same reason as [peerName]: a host driven by
+     * fake sessions has no conversation to write into.
+     */
+    public fun recordCall(groupIdHex: String, entry: CallTranscriptEntry) {
+        // No conversation store attached.
+    }
 }
 
 /** The call occupying the slot, as the UI renders it. */
@@ -135,6 +148,13 @@ public data class OneToOneCall<S : OneToOneCallSession>(
     /** The user accepted this incoming call (the session may still read
      *  `Ringing` while its peer connection is being built). */
     val accepted: Boolean = false,
+    /**
+     * For an outgoing call, the kind the caller chose in the chat header
+     * (`docs/ux/calls.md` section 3). It decides one thing: whether the pre-join
+     * opens with the camera on. Meaningless for an incoming call, which skips
+     * the pre-join entirely, so it stays at the safe default there.
+     */
+    val requestedKind: RequestedCallKind = RequestedCallKind.VOICE,
 )
 
 /** Timeouts bounding a 1x1 call's non-terminal states. Web parity: chosen, not measured. */
@@ -297,9 +317,13 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
      * but not dialed (the prejoin). Returns `false` when a call already
      * occupies the slot or another kind of call is live; the consumer re-checks.
      */
-    public fun startOutgoing(groupIdHex: String): Boolean {
+    public fun startOutgoing(
+        groupIdHex: String,
+        /** What the caller asked for; opens the pre-join's camera toggle. */
+        kind: RequestedCallKind = RequestedCallKind.VOICE,
+    ): Boolean {
         if (hasCall || otherCalls.isNotEmpty()) return false
-        send(Event.StartOutgoing(groupIdHex))
+        send(Event.StartOutgoing(groupIdHex, kind))
         return true
     }
 
@@ -378,7 +402,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
 
     private sealed interface Event {
         data class Row(val groupIdHex: String, val body: FfiCallSignalingBody, val createdAtMs: Long?) : Event
-        data class StartOutgoing(val groupIdHex: String) : Event
+        data class StartOutgoing(val groupIdHex: String, val kind: RequestedCallKind) : Event
         data class Dial(val audio: Boolean, val video: Boolean) : Event
         data object CancelPrepared : Event
         data class Accept(val withVideo: Boolean) : Event
@@ -409,6 +433,30 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         var timerGeneration: Long = 0
         var timerJob: Job? = null
         var watchJob: Job? = null
+
+        // ---- What the transcript row is built from (section 6) --------------
+        // Everything below is observed by this host from events it already
+        // handles, so recording a call needs nothing new from the session.
+
+        /** The outgoing call was dialed. An undialed prepared session (the
+         *  pre-join, cancelled) is not a call and writes no row. */
+        var dialed: Boolean = false
+
+        /** Wall clock at the first `Connected`, or `null` if media never flowed.
+         *  The only source of a duration; its absence is what keeps an
+         *  unanswered call from being given one. */
+        var connectedAtMs: Long? = null
+
+        /** The user pressed Decline on this device. */
+        var declinedHere: Boolean = false
+
+        /** The other side answered with a decline. */
+        var declinedByPeer: Boolean = false
+
+        /** The row has been written. A call ends once, and several paths can
+         *  observe that (the terminal state, a decline, a reset), so the write
+         *  is latched rather than trusted to happen on exactly one of them. */
+        var recorded: Boolean = false
     }
 
     private val events = Channel<Event>(Channel.UNLIMITED)
@@ -473,14 +521,17 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
     private suspend fun handle(event: Event) {
         when (event) {
             is Event.Row -> onRow(event)
-            is Event.StartOutgoing -> onStartOutgoing(event.groupIdHex)
+            is Event.StartOutgoing -> onStartOutgoing(event.groupIdHex, event.kind)
             is Event.Dial -> onDial(event)
             Event.CancelPrepared -> onCancelPrepared()
             is Event.Accept -> onAccept(event.withVideo)
             is Event.AcceptRinging -> onAcceptRinging(event)
             is Event.DeclineRinging -> onDeclineRinging(event)
             is Event.DismissRinging -> onDismissRinging(event.callIdHex)
-            Event.Decline -> liveSlot()?.takeIf { it.call.incoming && isRinging(it) }?.call?.session?.declineCall()
+            Event.Decline -> liveSlot()?.takeIf { it.call.incoming && isRinging(it) }?.let { s ->
+                s.declinedHere = true
+                s.call.session.declineCall()
+            }
             Event.HangUp -> liveSlot()?.call?.session?.hangUp(CallSession.WebCallEndReason.HungUp)
             Event.ClearFinished -> slot?.takeIf { it.call.session.state.value == CallSession.WebCallState.Done }
                 ?.let { clearSlot() }
@@ -521,7 +572,13 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         when (route) {
             OneToOneRoute.DROP -> Unit
             OneToOneRoute.APPLY -> applyToOccupant(row)
-            OneToOneRoute.BUSY -> publishEnd(row.groupIdHex, callIdOfBody(row.body), FfiCallEndReason.BUSY)
+            OneToOneRoute.BUSY -> {
+                publishEnd(row.groupIdHex, callIdOfBody(row.body), FfiCallEndReason.BUSY)
+                // Refused because this device was already in a call. The user
+                // never saw it ring, which is exactly what makes the row worth
+                // writing: it is the only way they learn it happened.
+                recordSessionlessOffer(row, CallOutcome.MISSED)
+            }
             OneToOneRoute.RING -> {
                 // Ring the phone whatever screen is showing, including none.
                 // The notification channel is the only thing on Android that
@@ -582,20 +639,29 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         pendingAccept = null
         val live = liveSlot()
         if (live != null && live.callIdHex == event.callIdHex) {
+            live.declinedHere = true
             live.call.session.declineCall()
             return
         }
         // A held offer has no session to decline through, so the End is
-        // published straight to the offering group.
-        if (deferred?.let { callIdHexOfBody(it.body) } == event.callIdHex) clearDeferred()
+        // published straight to the offering group — and its row is written
+        // here, for the same reason.
+        val held = deferred?.takeIf { callIdHexOfBody(it.body) == event.callIdHex }
+        if (held != null) {
+            clearDeferred()
+            recordSessionlessOffer(held, CallOutcome.DECLINED)
+        }
         rememberEnded(event.callIdHex)
         val callId = callIdBytesFromHex(event.callIdHex) ?: return
         publishEnd(event.groupIdHex, callId, FfiCallEndReason.DECLINED)
     }
 
     private fun onDismissRinging(callIdHex: String) {
-        if (deferred?.let { callIdHexOfBody(it.body) } != callIdHex) return
+        val held = deferred?.takeIf { callIdHexOfBody(it.body) == callIdHex } ?: return
         clearDeferred()
+        // The ring window ran out on an offer that never got a session: a
+        // missed call, and the only trace of it this device will ever have.
+        recordSessionlessOffer(held, CallOutcome.MISSED)
         rememberEnded(callIdHex)
     }
 
@@ -612,6 +678,12 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
     private fun applyToOccupant(row: Event.Row) {
         val live = liveSlot()
         if (live != null) {
+            // The peer's own words for how it ended. Read here rather than off
+            // the session because the End body carries the reason and the
+            // session interface does not surface it — and `Declined` is the one
+            // outcome that cannot be inferred from the states this host sees.
+            val end = row.body as? FfiCallSignalingBody.End
+            if (end != null && end.reason == FfiCallEndReason.DECLINED) live.declinedByPeer = true
             live.call.session.applyIncomingSignaling(row.body)
             return
         }
@@ -623,6 +695,18 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
             is FfiCallSignalingBody.End -> {
                 val heldCallIdHex = callIdHexOfBody(held.body)
                 clearDeferred()
+                // The caller gave up on a call this device only held, or
+                // another of this account's devices refused it. Either way this
+                // device never took it, and the row is the only trace of it —
+                // the peer's own reason decides which of the two words it uses.
+                recordSessionlessOffer(
+                    held,
+                    if (row.body.reason == FfiCallEndReason.DECLINED) {
+                        CallOutcome.DECLINED
+                    } else {
+                        CallOutcome.MISSED
+                    },
+                )
                 rememberEnded(heldCallIdHex)
                 // The caller gave up (or another of this account's devices
                 // answered): the phone must stop ringing now, not at the
@@ -676,7 +760,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         }
     }
 
-    private suspend fun onStartOutgoing(groupIdHex: String) {
+    private suspend fun onStartOutgoing(groupIdHex: String, kind: RequestedCallKind) {
         if (occupant(clock()) != null || otherCalls.isNotEmpty()) return
         val p = port ?: return
         clearSlot()
@@ -688,7 +772,15 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         if (key != null) session.setCallKey(key.seed, key.localLeaf)
         install(
             Slot(
-                call = OneToOneCall(groupIdHex, session, incoming = false, remoteOffersVideo = false),
+                call = OneToOneCall(
+                    groupIdHex = groupIdHex,
+                    session = session,
+                    incoming = false,
+                    remoteOffersVideo = false,
+                    // Carried so the pre-join opens the way the caller asked
+                    // (section 3); it changes nothing about what is offered.
+                    requestedKind = kind,
+                ),
                 callIdHex = callIdHexOf(callId),
                 keyArmed = key != null,
             ),
@@ -699,6 +791,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         val s = liveSlot() ?: return
         if (s.call.incoming || s.call.session.state.value != CallSession.WebCallState.Idle) return
         armKeyIfMissing(s)
+        s.dialed = true
         s.call.session.dial(audio = event.audio, video = event.video)
     }
 
@@ -782,11 +875,17 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
             // An accept already armed the establish timer; a dial's keeps running.
             CallSession.WebCallState.Connecting ->
                 if (s.timerKind != TimerKind.ESTABLISH) armTimer(s, TimerKind.ESTABLISH, timing.establishTimeoutMs)
-            CallSession.WebCallState.Connected,
-            CallSession.WebCallState.Ending,
-            -> cancelTimer(s)
+            CallSession.WebCallState.Connected -> {
+                cancelTimer(s)
+                // The only place a duration can start. Latched: a reconnect
+                // passes through `Connected` again and must not restart the
+                // clock on a call that has been up for ten minutes.
+                if (s.connectedAtMs == null) s.connectedAtMs = clock()
+            }
+            CallSession.WebCallState.Ending -> cancelTimer(s)
             CallSession.WebCallState.Done -> {
                 cancelTimer(s)
+                recordFinishedCall(s)
                 rememberEnded(s.callIdHex)
                 // Declined, answered, timed out, or the caller hung up: every
                 // way a call ends is a reason to stop ringing for it.
@@ -815,6 +914,60 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         s.timerKind = null
         s.timerJob = null
         if (expired) s.call.session.hangUp(CallSession.WebCallEndReason.TimedOut)
+    }
+
+    /**
+     * Write the transcript row for a call that has ended (`docs/ux/calls.md`
+     * section 6).
+     *
+     * Two calls never write a row, and both are deliberate: a prepared but
+     * **undialed** outgoing session is a pre-join the user cancelled, not a
+     * call; and a slot already recorded is not recorded twice.
+     */
+    private fun recordFinishedCall(s: Slot) {
+        if (s.recorded) return
+        if (!s.call.incoming && !s.dialed) return
+        s.recorded = true
+        val outcome = callOutcome(
+            incoming = s.call.incoming,
+            answered = if (s.call.incoming) s.accepted else s.dialed,
+            declinedHere = s.declinedHere,
+            declinedByPeer = s.declinedByPeer,
+        )
+        recordCall(
+            groupIdHex = s.call.groupIdHex,
+            entry = CallTranscriptEntry(
+                outcome = outcome,
+                video = if (s.call.incoming) {
+                    s.call.remoteOffersVideo
+                } else {
+                    s.call.requestedKind == RequestedCallKind.VIDEO
+                },
+                durationSecs = callDurationSecs(s.connectedAtMs, clock()),
+            ),
+        )
+    }
+
+    /** Write one row, never letting a transcript failure break a call teardown. */
+    private fun recordCall(groupIdHex: String, entry: CallTranscriptEntry) {
+        try {
+            port?.recordCall(groupIdHex, entry)
+        } catch (error: Throwable) {
+            warn("call host: recording the call row failed", error)
+        }
+    }
+
+    /**
+     * An offer this device only ever HELD is over: there is no session and so no
+     * terminal transition to hang the row on, but the user did miss (or refuse)
+     * a real call and section 6 makes no exception for it.
+     */
+    private fun recordSessionlessOffer(row: Event.Row, outcome: CallOutcome) {
+        val offer = row.body as? FfiCallSignalingBody.Offer ?: return
+        recordCall(
+            groupIdHex = row.groupIdHex,
+            entry = CallTranscriptEntry(outcome = outcome, video = offer.media.video),
+        )
     }
 
     private fun install(s: Slot) {

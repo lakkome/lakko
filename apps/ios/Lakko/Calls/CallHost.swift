@@ -60,9 +60,15 @@ final class CallHost: ObservableObject {
         var schedule: @MainActor (_ afterMs: Int64, _ fire: @escaping @MainActor () -> Void) -> CallHostTimer
         var microphoneGranted: @MainActor () async -> Bool
         var cameraGranted: @MainActor (_ video: Bool) async -> Bool
-        /// The other person's resolved name for a 1x1 chat, for the banner.
+        /// The other person's resolved name for a 1x1 chat, for the banner,
+        /// the call screen's status line and the encryption sheet. Resolved
+        /// through ``CallPeerName``, so it is a name or nothing — never a
+        /// placeholder standing in for one.
         var peerName: @MainActor (_ groupIdHex: String) -> String?
         var mintCallId: () -> Data
+        /// `docs/ux/calls.md` section 6 — write the finished call's row into
+        /// the conversation. Local to this device; no wire format.
+        var recordCall: @MainActor (_ groupIdHex: String, _ row: CallTranscriptRow) -> Void = { _, _ in }
     }
 
     // MARK: - Published state
@@ -78,6 +84,10 @@ final class CallHost: ObservableObject {
     @Published private(set) var activeCallState: CallSession.WebCallState?
     /// `true` when the ringing offer asked for video — the banner says so.
     @Published private(set) var incomingVideo: Bool = false
+    /// `docs/ux/calls.md` section 3 — which button started the outgoing call,
+    /// so the pre-join opens with the camera the caller asked for. `nil` while
+    /// no outgoing call is being prepared.
+    @Published private(set) var outgoingButton: CallButtonKind?
     /// An entry point could not proceed (permission denied, key derivation).
     @Published private(set) var callError: String?
     /// A start is past its tap but not yet holding a session.
@@ -111,6 +121,21 @@ final class CallHost: ObservableObject {
     /// The session has shown the full-screen call (outgoing / connecting /
     /// connected), so its `.done` keeps the "Call ended" overlay up.
     private var sessionWasPresented = false
+
+    /// `docs/ux/calls.md` section 6 — what the transcript row needs, gathered
+    /// while the call runs because none of it is readable once it is over: the
+    /// side that placed it, and the moment media started flowing (`nil` for a
+    /// call that never connected, which is what separates a call from an
+    /// attempt).
+    private var activeCallDirection: CallTranscriptRow.Direction = .outgoing
+    private var connectedAtMs: Int64?
+    /// The call actually happened: it rang here, or it was dialed. A pre-join
+    /// the user cancelled was never a call and leaves no row.
+    private var callWasPlaced = false
+    /// The row for the session in the slot has been written. A session reaches
+    /// `.done` once, but the slot is cleared from several places; this keeps a
+    /// second pass from filing a duplicate row.
+    private var callRecorded = false
 
     /// Tail of the outbound publish chain: a call's offer, ICE candidates and
     /// end go out in the order the session produced them.
@@ -177,7 +202,7 @@ final class CallHost: ObservableObject {
             }
         case .ring:
             guard case .offer(let callId, _, _, let media) = row.body else { return }
-            let session = install(callId: callId, groupIdHex: row.groupIdHex)
+            let session = install(callId: callId, groupIdHex: row.groupIdHex, direction: .incoming)
             incomingVideo = media.video
             session.applyIncomingSignaling(row.body)
         }
@@ -188,7 +213,12 @@ final class CallHost: ObservableObject {
     /// Tap-to-call. Settles the microphone permission, then builds the session
     /// (deriving + arming the SFrame key) WITHOUT dialing: it sits in `.idle`,
     /// which the call screen shows as the prejoin; Join dials.
-    func startOutgoingCall(groupIdHex: String) {
+    ///
+    /// `button` is which of the header's two buttons was tapped. It decides
+    /// only what the pre-join opens with (`docs/ux/calls.md` section 3) — the
+    /// toggles there decide what is actually offered — so a caller who taps
+    /// the phone never finds the camera already running.
+    func startOutgoingCall(groupIdHex: String, button: CallButtonKind = .voice) {
         guard !hasLiveCall, !callStarting else { return }
         if let other = otherCallOccupant() {
             callError = CallSlot.busyMessage(other, verb: .start)
@@ -203,7 +233,11 @@ final class CallHost: ObservableObject {
                 return
             }
             guard !self.hasLiveCall, !self.otherCallBusy else { return }
-            _ = self.install(callId: self.ports.mintCallId(), groupIdHex: groupIdHex)
+            _ = self.install(
+                callId: self.ports.mintCallId(),
+                groupIdHex: groupIdHex,
+                direction: .outgoing,
+                button: button)
         }
     }
 
@@ -298,9 +332,16 @@ final class CallHost: ObservableObject {
 
     // MARK: - Slot + timers
 
-    private func install(callId: Data, groupIdHex: String) -> CallSession {
+    private func install(
+        callId: Data,
+        groupIdHex: String,
+        direction: CallTranscriptRow.Direction,
+        button: CallButtonKind? = nil
+    ) -> CallSession {
         // A `.done` session still on screen is replaced by the new call.
         clearSlot()
+        activeCallDirection = direction
+        outgoingButton = button
         let session = CallSession(callId: callId) { [weak self] bytes in
             self?.enqueuePublish(groupIdHex: groupIdHex, bytes: bytes)
         }
@@ -312,6 +353,9 @@ final class CallHost: ObservableObject {
         activeCall = session
         activeGroupIdHex = groupIdHex
         sessionWasPresented = false
+        connectedAtMs = nil
+        callWasPlaced = false
+        callRecorded = false
         stateSubscription = session.$state.sink { [weak self, weak session] next in
             guard let self, let session, self.activeCall === session else { return }
             self.onStateChange(next, session: session)
@@ -328,7 +372,40 @@ final class CallHost: ObservableObject {
         activeGroupIdHex = nil
         activeCallState = nil
         incomingVideo = false
+        outgoingButton = nil
         sessionWasPresented = false
+        connectedAtMs = nil
+        callWasPlaced = false
+        callRecorded = false
+    }
+
+    /// `docs/ux/calls.md` section 6 — file the finished call's row in the
+    /// conversation it happened in. Once per call: a pre-join the user
+    /// cancelled never rang anywhere and is not a call.
+    private func recordFinishedCall(_ session: CallSession) {
+        guard callWasPlaced, !callRecorded, let groupIdHex = activeGroupIdHex else { return }
+        callRecorded = true
+        let row = CallTranscriptRow(
+            direction: activeCallDirection,
+            outcome: CallTranscriptRow.outcome(
+                connectedAtMs: connectedAtMs,
+                endedAtMs: ports.nowMs(),
+                cause: Self.cause(session.endReason)))
+        ports.recordCall(groupIdHex, row)
+    }
+
+    /// The session's end reason as the transcript's own vocabulary. `error`
+    /// becomes `failed`: the row never says why, only that the call did not
+    /// happen.
+    private static func cause(_ reason: CallSession.WebCallEndReason?) -> CallTranscriptRow.Cause? {
+        switch reason {
+        case .hungUp: return .hungUp
+        case .busy: return .busy
+        case .declined: return .declined
+        case .timedOut: return .timedOut
+        case .error: return .failed
+        case nil: return nil
+        }
     }
 
     /// `@Published` emits in `willSet`, so `next` is the new value while
@@ -349,20 +426,24 @@ final class CallHost: ObservableObject {
         case .idle, .ending:
             break
         case .ringing:
+            callWasPlaced = true
             ringDeadlineMs = ports.nowMs() + timing.ringTimeoutMs
             armTimer(.ring, for: session)
         case .outgoing:
             sessionWasPresented = true
+            callWasPlaced = true
             armTimer(.establish, for: session)
         case .connecting:
             sessionWasPresented = true
             if timerPhase != .establish { armTimer(.establish, for: session) }
         case .connected:
             sessionWasPresented = true
+            if connectedAtMs == nil { connectedAtMs = ports.nowMs() }
             cancelTimer()
         case .done:
             cancelTimer()
             endedCallIds.insert(CallHostRouting.hex(session.callId))
+            recordFinishedCall(session)
             if !sessionWasPresented {
                 // Declined, timed out or ended remotely while ringing — nothing
                 // on screen needs dismissing, so free the slot now. Deferred a
@@ -465,10 +546,21 @@ extension CallHost {
             microphoneGranted: { await MicrophonePermission.ensureGranted() },
             cameraGranted: { video in await CameraPermission.ensureGranted(forVideo: video) },
             peerName: { [weak repository] groupIdHex in
-                repository?.oneToOnePeerSignatureKey(groupIdHex: groupIdHex)
-                    .map { ProfileDirectory.shared.resolve(signatureKey: $0).name }
+                guard let repository else { return nil }
+                // The resolver answers "Member" for a person nothing is known
+                // about; that is a placeholder, not a name, so it must fall
+                // through to the conversation's own title rather than be shown
+                // as who is on the call.
+                let resolved = repository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex)
+                    .map { ProfileDirectory.shared.resolve(signatureKey: $0) }
+                return CallPeerName.resolve(
+                    profileName: resolved.flatMap { $0.isPlaceholder ? nil : $0.name },
+                    chatTitle: repository.conversationTitle(groupIdHex: groupIdHex))
             },
-            mintCallId: { CallSession.mintCallId() }
+            mintCallId: { CallSession.mintCallId() },
+            recordCall: { [weak repository] groupIdHex, row in
+                repository?.appendCallRow(groupIdHex: groupIdHex, row: row)
+            }
         ))
     }
 }

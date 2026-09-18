@@ -89,14 +89,15 @@ public class ChatClient(
 ) : AutoCloseable {
 
     /**
-     * Track DS message ids we ourselves just published, so the
-     * next poll can drop the echo. `Collections.synchronizedSet`
-     * because [sendMessage] and [pollMessages] may run on
-     * different coroutines on different dispatchers; the set is
-     * mutated from both.
+     * Rows this device published itself, so the next poll drops the echo.
+     *
+     * Keyed on `(journal, id)` — see [OwnEchoRegistry]. It used to be a bare set
+     * of ids, and because a DS id is assigned per journal, an id published in
+     * one chat swallowed the next row numbered the same in a DIFFERENT chat.
+     * That is what stopped an incoming call ringing anywhere but the chat the
+     * user had open.
      */
-    private val ownPublishedIds: MutableSet<Long> =
-        Collections.synchronizedSet(mutableSetOf())
+    private val ownPublished: OwnEchoRegistry = OwnEchoRegistry()
 
     override fun close() {
         ds.close()
@@ -243,7 +244,7 @@ public class ChatClient(
         } catch (e: DsNetworkError) {
             throw ChatError("DS publish failed", e)
         }
-        ownPublishedIds.add(publish.id)
+        ownPublished.remember(DsClient.pseudonymHex(prepared.groupId), publish.id)
 
         return SendMessageResult(messageId = publish.id, createdAt = publish.createdAt)
     }
@@ -253,16 +254,20 @@ public class ChatClient(
      * a commit returned by `ContactsClient.addMemberToGroup`'s
      * broadcast step (1.18g equivalent). The next
      * [pollMessages] will see the id and drop it via the
-     * [ownPublishedIds] filter, same path
+     * [ownPublished] filter, same path
      * [sendMessage] uses for application messages.
      *
      * Without registration the sender's own [pollMessages]
      * would hit [Group.processIncoming] on its own outgoing
      * commit at the already-advanced epoch, fail, and emit a
      * phantom System row in the timeline.
+     *
+     * [groupIdHex] is REQUIRED, not convenience: a DS id is assigned per
+     * journal, so an id alone names a row in every group at once and would
+     * silence an unrelated chat's next row of that number.
      */
-    public fun markOwnPublishedCommit(messageId: Long) {
-        ownPublishedIds.add(messageId)
+    public fun markOwnPublishedCommit(groupIdHex: String, messageId: Long) {
+        ownPublished.remember(groupIdHex, messageId)
     }
 
     /**
@@ -291,7 +296,13 @@ public class ChatClient(
             throw ChatError("group.groupId unavailable", e)
         }
         val raw = fetchGroupJournal(groupId, after = after, waitSecs = waitSecs)
-        return applyFetchedMessages(identity, group, raw, after = after)
+        return applyFetchedMessages(
+            identity,
+            group,
+            raw,
+            after = after,
+            groupIdHex = DsClient.pseudonymHex(groupId),
+        )
     }
 
     /**
@@ -344,6 +355,12 @@ public class ChatClient(
         group: Group,
         raw: FetchResult,
         after: Long = 0,
+        /**
+         * The journal these rows came from. Required because the own-echo
+         * filter below is per journal: a DS id identifies a row only together
+         * with the group whose journal assigned it.
+         */
+        groupIdHex: String,
     ): PollMessagesResult {
         val events = mutableListOf<IncomingChatEvent>()
         var cursor = after
@@ -354,7 +371,13 @@ public class ChatClient(
             // Drop our own echoes — the DS doesn't dedupe and
             // OpenMLS can't decrypt them on the sender side at
             // the same epoch.
-            if (ownPublishedIds.remove(message.id)) {
+            //
+            // Matched on THIS journal's id, never on the id alone. Ids are
+            // per journal and every chat starts at 1, so an id-only match
+            // dropped another chat's row of the same number — a fetched row,
+            // silently discarded with the cursor advanced past it, which is
+            // what kept incoming calls from ringing outside the open chat.
+            if (ownPublished.consume(groupIdHex, message.id)) {
                 continue
             }
 

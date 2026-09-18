@@ -44,6 +44,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -84,8 +85,13 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
@@ -106,9 +112,18 @@ import androidx.compose.material.icons.filled.FrontHand
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
+import me.lakko.app.calls.CALL_ENCRYPTION_CHIP_LABEL
+import me.lakko.app.calls.CALL_ENCRYPTION_SHEET_HINT
+import me.lakko.app.calls.CALL_ENCRYPTION_SHEET_TITLE
 import me.lakko.app.calls.CallSoundController
 import me.lakko.app.calls.CallUiState
 import me.lakko.app.calls.LocalVideoPreviewView
+import me.lakko.app.calls.callEncryptionSentence
+import me.lakko.app.calls.callStatusSpokenLabel
+import me.lakko.app.calls.callStatusText
+import me.lakko.app.calls.safetyNumberGroups
+import me.lakko.app.calls.safetyNumberSpokenLabel
+import me.lakko.app.calls.showsCallEncryptionChip
 import me.lakko.app.calls.WebRtcPeerConnection
 import org.webrtc.RendererCommon
 
@@ -163,6 +178,14 @@ public fun CallScreen(
     // `null` on the mock design path (Join seeds mock state).
     onPrejoinJoin: ((micOn: Boolean, camOn: Boolean) -> Unit)? = null,
     onPrejoinCancel: (() -> Unit)? = null,
+    /**
+     * `docs/ux/calls.md` section 3 — how the pre-join's camera toggle opens:
+     * off for a voice call, on for a video one. It used to be hard-coded on, so
+     * the phone button placed video calls. Defaults to off, which is the safe
+     * direction: a camera that fails to turn on is a worse surprise than one
+     * the user has to switch on.
+     */
+    prejoinCameraOn: Boolean = false,
     /** ADR-0048 — the remote participant's resolved name for a 1x1 session. */
     remoteName: String? = null,
     /** The End button for a call the app-level host drives through [state]
@@ -263,12 +286,14 @@ public fun CallScreen(
         is CallUiState.CallPhase.Prejoin ->
             PrejoinScreen(
                 state = state,
+                initialCameraOn = prejoinCameraOn,
                 onPrejoinJoin = onPrejoinJoin,
                 onPrejoinCancel = onPrejoinCancel,
             )
         else -> InCallView(
             state = state,
             onExit = onExit,
+            remoteName = remoteName,
             // G3-2-session-bind / G3-2-call-controls — route the
             // end-call + mic/camera toggles to the real session
             // when one drives the screen; mock-state fallback
@@ -319,10 +344,13 @@ public fun CallScreen(
 @Composable
 private fun PrejoinScreen(
     state: CallUiState,
+    initialCameraOn: Boolean = false,
     onPrejoinJoin: ((micOn: Boolean, camOn: Boolean) -> Unit)? = null,
     onPrejoinCancel: (() -> Unit)? = null,
 ) {
-    var camOn by remember { mutableStateOf(true) }
+    // Keyed on the requested kind so a re-prepared call re-reads it; the user's
+    // own change inside one pre-join survives recomposition as before.
+    var camOn by remember(initialCameraOn) { mutableStateOf(initialCameraOn) }
     var micOn by remember { mutableStateOf(true) }
     // G3-2-video-ui-screen — observe the live local track for
     // the rare case where the host has armed the camera before
@@ -450,7 +478,15 @@ private fun PrejoinToggleRow(
     onCheckedChange: (Boolean) -> Unit,
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        // docs/ux/calls.md section 8 — the row is read as one control, and it
+        // says what the switch DOES rather than only naming the device: the
+        // pre-join is where the camera choice is made, so "Camera, on" alone
+        // would leave a screen-reader user to infer what turning it off means.
+        modifier = Modifier
+            .fillMaxWidth()
+            .semantics(mergeDescendants = true) {
+                contentDescription = "$label, ${if (checked) "on" else "off"}"
+            },
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -488,6 +524,7 @@ private fun PrejoinToggleRow(
 private fun InCallView(
     state: CallUiState,
     onExit: () -> Unit,
+    remoteName: String? = null,
     onEndCall: () -> Unit = { state.endCall() },
     onSetMic: (Boolean) -> Unit = { state.setMic(it) },
     onSetCamera: (Boolean) -> Unit = { state.setCamera(it) },
@@ -496,6 +533,10 @@ private fun InCallView(
     val phase by state.phase.collectAsState()
     val drawerOpen by state.participantListOpen.collectAsState()
     val e2ee by state.e2ee.collectAsState()
+    // docs/ux/calls.md section 5 — the digits are behind the chip, never on the
+    // call. Closed on every new call because the state object is reset with the
+    // screen, so a sheet can never open over a call it does not belong to.
+    var encryptionSheetOpen by remember { mutableStateOf(false) }
 
     LaunchedEffect(phase) {
         if (phase is CallUiState.CallPhase.Ended) {
@@ -506,7 +547,9 @@ private fun InCallView(
 
     Box(modifier = Modifier.fillMaxSize().background(LakkoDark.background)) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Header bar: E2EE pill + quality indicator.
+            // docs/ux/calls.md section 4 — the status line, the lock chip beside
+            // it, and the quality dot. The chip replaced the strip of sixteen
+            // digits that used to sit on this line.
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -514,9 +557,17 @@ private fun InCallView(
                     .border(1.dp, LakkoDark.border)
                     .padding(horizontal = 14.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                E2eePill(e2ee)
-                Spacer(Modifier.weight(1f))
+                CallStatusLine(
+                    state = state,
+                    phase = phase,
+                    remoteName = remoteName,
+                    modifier = Modifier.weight(1f),
+                )
+                if (showsCallEncryptionChip(e2ee.active, e2ee.shortFingerprint)) {
+                    CallEncryptionChip(onClick = { encryptionSheetOpen = true })
+                }
                 QualityIndicator(state)
             }
 
@@ -659,6 +710,14 @@ private fun InCallView(
         SettingsSheet(state)
         // Chat bottom sheet (S-3-A-chat).
         ChatSheet(state)
+        // docs/ux/calls.md section 5 — the safety number, only when asked for.
+        if (encryptionSheetOpen) {
+            CallEncryptionSheet(
+                safetyNumber = e2ee.shortFingerprint,
+                otherName = remoteName,
+                onDismiss = { encryptionSheetOpen = false },
+            )
+        }
     }
 }
 
@@ -1015,35 +1074,198 @@ private fun formatChatTimestamp(epochMs: Long): String {
 // Subcomponents
 // ============================================================
 
+/**
+ * `docs/ux/calls.md` section 4 item 1 — who the call is with, and what it is
+ * doing. The running time ticks from the moment this screen observes the call
+ * connect; before that there is a state word and never a zeroed clock.
+ */
 @Composable
-private fun E2eePill(state: CallUiState.E2eeState) {
-    // Green (verified-comparable) only when keying is real AND a safety
-    // number is present to read out-of-band; otherwise yellow, so "E2EE
-    // active but no comparable number" stays visually distinct from
-    // "active + number present" (matches the web pill's gate).
-    val verified = state.active && state.shortFingerprint != null
-    val activeColour = if (verified) LakkoDark.success else LakkoDark.warning
+private fun CallStatusLine(
+    state: CallUiState,
+    phase: CallUiState.CallPhase,
+    remoteName: String?,
+    modifier: Modifier = Modifier,
+) {
+    val connected = phase is CallUiState.CallPhase.Connected
+    // Wall clock at the transition, then a one-second tick. Cleared whenever the
+    // call leaves `Connected`, so a finished call's screen does not keep
+    // counting while it waits to dismiss itself.
+    var elapsedSecs by remember { mutableStateOf<Long?>(null) }
+    LaunchedEffect(connected) {
+        if (!connected) {
+            elapsedSecs = null
+            return@LaunchedEffect
+        }
+        val startedAt = System.currentTimeMillis()
+        while (true) {
+            elapsedSecs = ((System.currentTimeMillis() - startedAt) / 1_000L).coerceAtLeast(0L)
+            delay(1_000)
+        }
+    }
+
+    val participants by state.participants.collectAsState()
+    val title = remoteName?.trim()?.takeIf { it.isNotEmpty() }
+        ?: participants.firstOrNull { !it.isLocal }?.displayName
+        ?: "Call"
+    val status = callStatusText(
+        connecting = phase is CallUiState.CallPhase.Connecting,
+        connected = connected,
+        reconnecting = phase is CallUiState.CallPhase.Reconnecting,
+        ended = phase is CallUiState.CallPhase.Ended,
+        elapsedSecs = elapsedSecs,
+    )
+    val spoken = callStatusSpokenLabel(title, status, elapsedSecs)
+    Column(
+        modifier = modifier.semantics(mergeDescendants = true) { contentDescription = spoken },
+    ) {
+        Text(
+            text = title,
+            color = LakkoDark.text,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = status,
+            color = LakkoDark.textMuted,
+            fontSize = 12.sp,
+            maxLines = 1,
+        )
+    }
+}
+
+/**
+ * `docs/ux/calls.md` sections 4 and 5 — one small lock chip on a sunken surface,
+ * reading `Encrypted`. It replaced the permanent strip of sixteen digits; the
+ * digits now live in [CallEncryptionSheet], behind a tap.
+ *
+ * Rendered only when the call's encryption is actually armed, so its presence is
+ * the signal. There is deliberately no "pending" or "unavailable" variant: a
+ * call that cannot arm its key refuses to start (security invariant #4) rather
+ * than running with a lock the user would have to interpret.
+ */
+@Composable
+private fun CallEncryptionChip(onClick: () -> Unit) {
     Row(
         modifier = Modifier
-            .background(LakkoDark.surface, RoundedCornerShape(50))
+            .clip(RoundedCornerShape(50))
+            .background(LakkoDark.sunken, RoundedCornerShape(50))
             .border(1.dp, LakkoDark.border, RoundedCornerShape(50))
-            .padding(horizontal = 8.dp, vertical = 4.dp),
+            .clickable(onClick = onClick)
+            .semantics(mergeDescendants = true) {
+                contentDescription = "Encrypted call. Double tap to see the safety number."
+            }
+            .padding(horizontal = 10.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
     ) {
         Icon(
             Icons.Filled.Lock,
-            contentDescription = "End-to-end encryption indicator",
-            tint = activeColour,
+            contentDescription = null,
+            tint = LakkoDark.success,
             modifier = Modifier.size(12.dp),
         )
         Text(
-            text = if (state.active && state.shortFingerprint != null) state.shortFingerprint else "…",
-            color = activeColour,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
-            fontFamily = FontFamily.Monospace,
+            text = CALL_ENCRYPTION_CHIP_LABEL,
+            color = LakkoDark.text,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
         )
+    }
+}
+
+/**
+ * `docs/ux/calls.md` section 5 — the sheet behind the lock chip: what the call
+ * is, the safety number in four groups of four, what to do with it, Copy and
+ * Done. This is the only place the digits appear.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CallEncryptionSheet(
+    safetyNumber: String?,
+    otherName: String?,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val clipboard = LocalClipboardManager.current
+    val groups = remember(safetyNumber) { safetyNumberGroups(safetyNumber) }
+    val spoken = remember(safetyNumber) { safetyNumberSpokenLabel(safetyNumber) }
+    var copied by remember { mutableStateOf(false) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = LakkoDark.surface,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp)
+                .padding(bottom = 32.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Text(
+                CALL_ENCRYPTION_SHEET_TITLE,
+                color = LakkoDark.text,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                callEncryptionSentence(otherName),
+                color = LakkoDark.textMuted,
+                fontSize = 14.sp,
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(LakkoDark.sunken, RoundedCornerShape(12.dp))
+                    .padding(vertical = 18.dp)
+                    .semantics(mergeDescendants = true) { contentDescription = spoken },
+                horizontalArrangement = Arrangement.spacedBy(14.dp, Alignment.CenterHorizontally),
+            ) {
+                groups.forEach { group ->
+                    Text(
+                        group,
+                        color = LakkoDark.text,
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+            }
+            Text(
+                CALL_ENCRYPTION_SHEET_HINT,
+                color = LakkoDark.textMuted,
+                fontSize = 13.sp,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                OutlinedButton(
+                    onClick = {
+                        clipboard.setText(AnnotatedString(groups.joinToString(" ")))
+                        copied = true
+                    },
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(8.dp),
+                ) {
+                    Text(if (copied) "Copied" else "Copy", color = LakkoDark.text)
+                }
+                Button(
+                    onClick = onDismiss,
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = LakkoDark.accent,
+                        contentColor = LakkoDark.accentFg,
+                    ),
+                    shape = RoundedCornerShape(8.dp),
+                ) {
+                    Text("Done")
+                }
+            }
+        }
     }
 }
 
@@ -1623,10 +1845,13 @@ private fun ParticipantListDrawer(state: CallUiState) {
 
 @Composable
 private fun PhaseBanner(phase: CallUiState.CallPhase, modifier: Modifier = Modifier) {
+    // docs/ux/calls.md section 4 — the status line now carries `Connecting...`,
+    // so the floating pill is left with what the spec puts OVER the stage:
+    // reconnecting, and the ended state.
     val info: Pair<String, Color>? = when (phase) {
         is CallUiState.CallPhase.Prejoin -> null
         is CallUiState.CallPhase.Connected -> null
-        is CallUiState.CallPhase.Connecting -> "Connecting..." to LakkoDark.accent
+        is CallUiState.CallPhase.Connecting -> null
         is CallUiState.CallPhase.Reconnecting ->
             "Reconnecting..." to LakkoDark.warning
         is CallUiState.CallPhase.Ended -> "Call ended" to LakkoDark.danger

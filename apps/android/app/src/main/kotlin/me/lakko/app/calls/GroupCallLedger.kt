@@ -178,6 +178,23 @@ internal fun callSignalingRoute(body: FfiCallSignalingBody): CallSignalingRoute 
     is FfiCallSignalingBody.End -> CallSignalingRoute.BOTH
 }
 
+/**
+ * The frame's kind as one stable word, for the routing log line.
+ *
+ * Only the kind, never a field: the point of that line is to tell "the call
+ * frame never arrived" from "it arrived and was dropped", and the kind is all
+ * that distinguishes an offer worth ringing for from the candidates behind it.
+ */
+internal fun callSignalingBodyKindName(body: FfiCallSignalingBody): String = when (body) {
+    is FfiCallSignalingBody.Offer -> "offer"
+    is FfiCallSignalingBody.Answer -> "answer"
+    is FfiCallSignalingBody.IceCandidate -> "ice"
+    is FfiCallSignalingBody.End -> "end"
+    is FfiCallSignalingBody.GroupStart -> "group-start"
+    is FfiCallSignalingBody.GroupJoin -> "group-join"
+    is FfiCallSignalingBody.GroupLeave -> "group-leave"
+}
+
 /** The ledger view of [body], or `null` for a body the ledger does not read. */
 internal fun groupCallSignalOf(body: FfiCallSignalingBody): GroupCallSignal? = when (body) {
     is FfiCallSignalingBody.GroupStart -> GroupCallSignal.Start(

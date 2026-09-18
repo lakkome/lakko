@@ -133,6 +133,8 @@ import {
   type InboundSignalingRow,
 } from "./call-signaling-dispatch";
 import { decideInboundSignaling } from "./call-host-routing";
+import { classifyCallOutcome, type CallLogEntry } from "./call-log";
+import { useCallLog } from "./CallLogContext";
 import { CallJwtClient } from "./call-jwt-client";
 import {
   decideGroupCallEpochChange,
@@ -322,6 +324,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   const auth = useAuth();
   const chats = useChats();
   const profiles = useProfiles();
+  const callLog = useCallLog();
   const groupNames = useGroupNames();
 
   // Seals and publishes signaling through the locked, fail-closed-persisting
@@ -368,6 +371,77 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   let slotSession: CallSession | null = null;
   /** Call ids of 1x1 calls that ended here this session: never ring again. */
   const endedCallIds = new Set<string>();
+
+  /**
+   * What the call log needs to know about the call in the 1x1 slot
+   * (`docs/ux/calls.md` §6). Not a signal: nothing renders from it, and it
+   * must be readable from the terminal report without a reactive read.
+   */
+  interface CallJournal {
+    readonly session: CallSession;
+    readonly groupIdB64: string;
+    readonly callIdHex: string;
+    /** This device was being called. */
+    readonly incoming: boolean;
+    /** Whether the call was PLACED as a video call — the caller's choice, or
+     *  what the offer said for an incoming one. A camera turned on mid-call
+     *  does not retroactively make a voice call a video call. */
+    readonly video: boolean;
+    readonly startedAtMs: number;
+    /** When media first flowed, or `null` if it never did. */
+    connectedAtMs: number | null;
+    /** The reason the recorded row was written from, so a second terminal
+     *  report that carries no reason cannot overwrite one that did. */
+    recordedWithReason: boolean;
+  }
+  let callJournal: CallJournal | null = null;
+
+  /**
+   * Write the 1x1 call's row.
+   *
+   * `CallSession` reports `done` twice — once with no reason from `dispose()`,
+   * then again with the reason — and the order is not guaranteed, so a report
+   * carrying no reason must never replace a row written from one that did.
+   * Recording is otherwise idempotent on the call id (`call-log-store.ts`), so
+   * being called more than once costs nothing.
+   */
+  function recordOneToOneCall(reason: WebCallEndReason | undefined): void {
+    const j = callJournal;
+    if (j === null) return;
+    if (j.recordedWithReason && reason === undefined) return;
+    const connected = j.connectedAtMs !== null;
+    const entry: CallLogEntry = {
+      id: j.callIdHex,
+      outcome: classifyCallOutcome({ incoming: j.incoming, connected, reason }),
+      video: j.video,
+      // `null`, not zero: a call that never connected has no duration, and
+      // `Outgoing call, 0:00` would report a conversation that did not happen.
+      durationMs: connected ? Math.max(0, Date.now() - (j.connectedAtMs as number)) : null,
+      startedAtMs: j.startedAtMs,
+    };
+    callLog.record(j.groupIdB64, entry);
+    if (reason !== undefined) j.recordedWithReason = true;
+  }
+
+  /** Start the journal for a call this device is about to be in. */
+  function openCallJournal(
+    session: CallSession,
+    groupIdB64: string,
+    hex: string,
+    incoming: boolean,
+    video: boolean,
+  ): void {
+    callJournal = {
+      session,
+      groupIdB64,
+      callIdHex: hex,
+      incoming,
+      video,
+      startedAtMs: Date.now(),
+      connectedAtMs: null,
+      recordedWithReason: false,
+    };
+  }
 
   const accountId = (): string | null => {
     const s = auth.state();
@@ -455,7 +529,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         callActions.setPhase({ kind: "connecting" });
         callActions.setParticipants([localParticipant()]);
         // 1x1 web media is P2P DTLS-SRTP, not SFrame: no safety number, so no
-        // pill (see `safety-pill.ts`).
+        // chip (see `encryption-chip.ts`).
         callActions.setE2ee({ active: false, shortFingerprint: null });
         break;
       case "connected":
@@ -487,7 +561,13 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         if (slotSession !== session) return;
         setState(s);
         syncCallUiFromState(s);
+        // The one moment media is known to flow: what separates an answered
+        // call from a missed one in the conversation's history.
+        if (s === "connected" && callJournal?.session === session) {
+          callJournal.connectedAtMs ??= Date.now();
+        }
         if (s === "done") {
+          if (callJournal?.session === session) recordOneToOneCall(reason);
           endedCallIds.add(callIdHex(callId));
           activeCall = null;
           if (reason !== undefined) setLastEnded({ groupIdB64, reason });
@@ -587,6 +667,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
           return;
         case "ring": {
           const session = buildCallSession(item.groupIdB64, parsed.callId);
+          openCallJournal(session, item.groupIdB64, hex, true, parsed.mediaVideo);
           occupy(item.groupIdB64, session);
           setRemoteWantsVideo(parsed.mediaVideo);
           await session.applyIncomingSignaling(parsed);
@@ -665,7 +746,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     if (currentOccupant() !== null) return;
     if (groupEntry(groupIdB64) === undefined) return;
     setVideoCall(withVideo);
-    const session = buildCallSession(groupIdB64, mintCallId());
+    const callId = mintCallId();
+    const session = buildCallSession(groupIdB64, callId);
+    openCallJournal(session, groupIdB64, callIdHex(callId), false, withVideo);
     occupy(groupIdB64, session);
     try {
       await session.dial({
@@ -792,6 +875,12 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     heartbeat: ReturnType<typeof setInterval> | null;
     /** The MLS epoch the session's current seed was derived at. */
     keyedEpoch: bigint | null;
+    /** Whether this device asked for video when it started or joined. */
+    readonly video: boolean;
+    /** When this device entered the call (`docs/ux/calls.md` §6). */
+    readonly startedAtMs: number;
+    /** When this device's own media first flowed, or `null` if it never did. */
+    connectedAtMs: number | null;
   }
   let activeGroupCall: ActiveGroupCall | null = null;
   /** Synchronous latch so a double tap cannot open two SFU sessions. */
@@ -1025,6 +1114,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         joinPublished: false,
         heartbeat: null,
         keyedEpoch,
+        video: opts.withVideo,
+        startedAtMs: Date.now(),
+        connectedAtMs: null,
       };
       const handle = createSfuCallUi(
         {
@@ -1072,6 +1164,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   function onGroupSessionState(hex: string, state: SfuCallState): void {
     const g = activeGroupCall;
     if (g === null || g.callIdHex !== hex) return;
+    if (state === "connected") g.connectedAtMs ??= Date.now();
     if (state === "connected" && !g.joinPublished) {
       g.joinPublished = true;
       publishGroupJoin(g);
@@ -1145,9 +1238,34 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
    * Leave the group call this device is in: tear the SFU session down and tell
    * the group, as `planGroupCallLeave` decides. Idempotent.
    */
+  /**
+   * Write the group call's row (`docs/ux/calls.md` §6).
+   *
+   * Direction here is not who rang whom — nobody rings in a group call — but
+   * whose call it was from this device's side: one it started is `outgoing`,
+   * one it joined is `incoming`. There is deliberately no `missed` row for a
+   * group call this device never joined: nothing rang, so nothing was missed,
+   * and the group-call banner is what announces a live one.
+   */
+  function recordGroupCall(g: ActiveGroupCall): void {
+    const connected = g.connectedAtMs !== null;
+    callLog.record(g.groupIdB64, {
+      id: g.callIdHex,
+      // Nobody rings in a group call, so "which way it went" is whose call it
+      // was from this device's side: one it started is `outgoing`, one it
+      // joined is `incoming`. Never `missed` — nothing rang, so nothing was
+      // missed, and the group-call banner is what announces a live one.
+      outcome: g.initiator ? "outgoing" : "incoming",
+      video: g.video,
+      durationMs: connected ? Math.max(0, Date.now() - (g.connectedAtMs as number)) : null,
+      startedAtMs: g.startedAtMs,
+    });
+  }
+
   async function leaveGroupCall(reason: GroupLeaveReason): Promise<void> {
     const { call: g, failed } = releaseGroupSlot();
     if (g === null) return;
+    recordGroupCall(g);
     const account = accountId();
     const rec = account === null ? undefined : groupCallsFor(account, g.groupIdB64).get(g.callIdHex);
     const plan = planGroupCallLeave({
@@ -1715,6 +1833,10 @@ export function CallHostView(): JSX.Element {
         <Call
           embedded={true}
           onExit={() => void internals.hangUp()}
+          /* The encryption sheet's one sentence names the other person
+             (docs/ux/calls.md §5), and on a 1x1 call this device knows who
+             that is. */
+          peerName={internals.nameFor(host.callGroupIdB64())}
           remoteStreamFor={(participantId) =>
             participantId === "peer" ? (internals.remoteStream() ?? undefined) : undefined
           }

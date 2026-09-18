@@ -23,7 +23,8 @@
  * behaves better when the wasm chunk is the only big payload. We
  * revisit lazy loading in 1.16f together with the bundle pass.
  */
-import { Navigate, type RouteDefinition } from "@solidjs/router";
+import type { JSX } from "solid-js";
+import { Navigate, useSearchParams, type RouteDefinition } from "@solidjs/router";
 import { AppShell } from "../ui/AppShell";
 import { RequireAnonymous, RequireSession } from "../auth/guards";
 import Login from "./Login";
@@ -54,6 +55,12 @@ import {
   inviteRoutePattern,
   paths,
 } from "./paths";
+
+/** The standalone design route's Call, opened at the kind the URL asked for. */
+function StandaloneCall(): JSX.Element {
+  const [searchParams] = useSearchParams<{ call?: string }>();
+  return <Call startKind={searchParams.call === "video" ? "video" : "audio"} />;
+}
 
 /** All app routes. Consumed by `<Router>` in `App.tsx`. */
 export const routes: RouteDefinition[] = [
@@ -140,11 +147,18 @@ export const routes: RouteDefinition[] = [
       { path: "/settings/:section?", component: Settings },
       // The old profile URL lands on its Settings section.
       { path: "/profile", component: () => <Navigate href={paths.settingsSection("profile")} /> },
-      // Standalone design route — render Call with no props (its
-      // embedded/onExit props are only used when Chat.tsx presents
-      // it over a live call). Wrapping decouples Call's prop type
-      // from the router's RouteSectionProps signature.
-      { path: callRoutePattern, component: () => <Call /> },
+      // Standalone design route — render Call with no live-call props (its
+      // embedded/onExit props are only used when the call host presents it
+      // over a live call). Wrapping decouples Call's prop type from the
+      // router's RouteSectionProps signature.
+      //
+      // `?call=video` opens the pre-join screen at the video default, the same
+      // parameter the contact detail's Call / Video buttons already use to
+      // reach a chat (docs/ux/client-redesign.md section 5.3). Anything else,
+      // the parameter absent included, is a voice call: docs/ux/calls.md
+      // section 3 — the camera is never turned on by a screen that was not
+      // asked to.
+      { path: callRoutePattern, component: () => <StandaloneCall /> },
       // Channels: the list pane stays mounted across every /channels route.
       {
         path: paths.channels,

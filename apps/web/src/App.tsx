@@ -44,6 +44,7 @@ import { PowActivityIndicator } from "./ui/PowActivityIndicator";
 import { ProfileProvider } from "./profile/ProfileContext";
 import { GroupNameProvider } from "./chat/GroupNameContext";
 import { ReadWatermarkProvider } from "./chat/ReadWatermarkContext";
+import { CallLogProvider } from "./calls/CallLogContext";
 import { WakeNavigator } from "./push/WakeNavigator";
 import { routes } from "./routes/routes";
 import { SwUpdateBanner } from "./sw/SwUpdateBanner";
@@ -121,6 +122,12 @@ const RootLayout: Component<RouteSectionProps> = (props) => (
  *     per-group watermark store both receive paths feed, so "Read" survives
  *     a reload and a receipt applied while the chat was closed is kept.
  *
+ *   <CallLogProvider> — docs/ux/calls.md section 6: the durable per-group
+ *     record of the calls this device was in, so a finished call leaves a
+ *     row in the conversation. ABOVE the call host, which writes to it: a
+ *     call can end on any screen, and the row must be recorded there rather
+ *     than only where the chat happens to be open.
+ *
  *   <BackgroundReceiveProvider> — receives every joined group whose chat
  *     view is not open, feeding the call host and the message log. Inside
  *     the call host, which it hands call signaling to.
@@ -132,6 +139,7 @@ const App: Component = () => (
         <ProfileProvider>
         <GroupNameProvider>
         <ReadWatermarkProvider>
+        <CallLogProvider>
         <MailboxProvider>
         <CallHostProvider>
         <BackgroundReceiveProvider>
@@ -177,6 +185,7 @@ const App: Component = () => (
         </BackgroundReceiveProvider>
         </CallHostProvider>
         </MailboxProvider>
+        </CallLogProvider>
         </ReadWatermarkProvider>
         </GroupNameProvider>
         </ProfileProvider>

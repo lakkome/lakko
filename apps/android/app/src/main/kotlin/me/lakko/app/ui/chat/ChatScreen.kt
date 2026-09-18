@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.FlowRow
@@ -557,6 +558,14 @@ public fun ChatScreen(
                             onOpenReactionPicker = {
                                 picker = PickerRequest(PickerMode.REACTION, msg.messageId)
                             },
+                            // docs/ux/calls.md section 6 — tapping a call row
+                            // calls back, through the same permission gate and
+                            // the same routing as the header buttons.
+                            onCallBack = { video ->
+                                callPermissions.request(video = video) { granted ->
+                                    viewModel.onCallButton(video = granted)
+                                }
+                            },
                             ownIdentity = ownIdentity,
                             // ADR-0048 UX §5 — author labels in groups only;
                             // a 1x1 bubble needs no name. `nameVersion` is
@@ -914,6 +923,9 @@ private fun MessageRow(
     onEdit: () -> Unit,
     onDelete: () -> Unit,
     onReact: (String) -> Unit,
+    /** `docs/ux/calls.md` section 6 — tapping a finished call's row calls back,
+     *  with the same kind of call the row records. */
+    onCallBack: (video: Boolean) -> Unit,
 ) {
     val gapAbove = if (firstInRun) 8.dp else 2.dp
     when (msg.direction) {
@@ -1004,24 +1016,96 @@ private fun MessageRow(
             }
         }
 
-        // System rows stay centred and small (UX 5.2), in a quiet pill.
-        Direction.System -> Row(
+        // System rows stay centred and small (UX 5.2), in a quiet pill. A
+        // finished call is a system row too, but a tappable one.
+        Direction.System -> {
+            val callEntry = msg.call
+            if (callEntry != null) {
+                CallHistoryRow(entry = callEntry, time = time, onCallBack = onCallBack)
+            } else {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp),
+                    horizontalArrangement = Arrangement.Center,
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(percent = 50),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    ) {
+                        Text(
+                            text = msg.text,
+                            style = MaterialTheme.typography.labelMedium,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * `docs/ux/calls.md` section 6 — what a finished call leaves in the
+ * conversation: `Outgoing call, 12:04`, `Incoming call, 12:04`, `Missed call`,
+ * `Declined`. Tapping it calls back, with the kind of call it records.
+ *
+ * Centred like the other system rows so it reads as an event rather than as
+ * something somebody said, but on a tappable pill with a leading call icon. A
+ * missed or declined call takes the danger colour — the one thing on this row a
+ * user scans for — and carries its meaning in words as well, so nothing depends
+ * on the colour (section 8).
+ */
+@Composable
+private fun CallHistoryRow(
+    entry: me.lakko.app.calls.CallTranscriptEntry,
+    time: String?,
+    onCallBack: (video: Boolean) -> Unit,
+) {
+    val missed = entry.outcome == me.lakko.app.calls.CallOutcome.MISSED ||
+        entry.outcome == me.lakko.app.calls.CallOutcome.DECLINED
+    val tint = if (missed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+    val spoken = remember(entry) { me.lakko.app.calls.callRowSpokenLabel(entry) }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp),
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        Surface(
+            shape = RoundedCornerShape(percent = 50),
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 8.dp),
-            horizontalArrangement = Arrangement.Center,
+                .clickable { onCallBack(entry.video) }
+                .semantics(mergeDescendants = true) { contentDescription = spoken },
         ) {
-            Surface(
-                shape = RoundedCornerShape(percent = 50),
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
             ) {
-                Text(
-                    text = msg.text,
-                    style = MaterialTheme.typography.labelMedium,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                Icon(
+                    imageVector = if (entry.video) Icons.Filled.Videocam else Icons.Filled.Call,
+                    contentDescription = null,
+                    tint = tint,
+                    modifier = Modifier.size(16.dp),
                 )
+                Text(
+                    text = me.lakko.app.calls.callRowText(entry),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = tint,
+                    textAlign = TextAlign.Center,
+                )
+                if (time != null) {
+                    Text(
+                        text = time,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
     }

@@ -68,7 +68,26 @@ import uniffi.lakko_ffi_uniffi.loadGroup
  * poll) and one for an interactive publish — while still collapsing the
  * worst-case chat-list latency from `waitSecs * N` to `waitSecs * ceil(N / 3)`.
  */
-private const val POLL_ALL_CONCURRENCY: Int = 3
+internal const val POLL_ALL_CONCURRENCY: Int = 3
+
+/** Characters of a group's DS pseudonym that identify it in a log line. Enough
+ *  to follow one conversation through a run, never enough to name it. */
+private const val GROUP_LOG_PREFIX_CHARS: Int = 8
+
+/**
+ * The call-routing breadcrumb, guarded the way [me.lakko.app.calls.OneToOneCallHost]
+ * guards its own: `android.util.Log` is not mocked in the host test suite, so an
+ * unguarded call turns every test that crosses this line into a failure about
+ * logging. This line sits on a path four existing tests drive, which is how that
+ * was found.
+ */
+private fun logCallRoute(message: String) {
+    try {
+        android.util.Log.i("AppCallRoute", message)
+    } catch (_: Throwable) {
+        // No Android logger (host unit tests): nothing to report to.
+    }
+}
 
 /** Seconds-to-millis, for the one place a long-poll budget has to be honoured
  *  without an actual long poll behind it (ADR-0045 UX §6.2.8 item 1 — every
@@ -197,6 +216,18 @@ public class ChatRepository(
      *  failed leg doesn't tear down siblings; `Dispatchers.IO`
      *  because both legs are network-heavy. */
     private val pushScope: CoroutineScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * `docs/ux/calls.md` section 6 — process-lifetime scope for writing a
+     * finished call's transcript row to disk.
+     *
+     * Its own scope, and on [Dispatchers.IO], because the call host runs on the
+     * main dispatcher: a call teardown must not block the frame on a Keystore
+     * unwrap and a whole-transcript write, and it must not be cancelled by the
+     * screen the call happened to end on going away.
+     */
+    private val callRowScope: CoroutineScope =
         CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val canonicalIdentity = AtomicReference<Identity?>(null)
@@ -1116,6 +1147,23 @@ public class ChatRepository(
                 }
         }
         if (route != me.lakko.app.calls.CallSignalingRoute.GROUP_LEDGER_ONLY) {
+            // The one place that says a call frame reached the call host, so a
+            // live run can tell "never fetched" from "fetched and dropped" —
+            // which is the distinction the own-echo defect turned on, and which
+            // nothing in this chain reported. Kept rather than removed: the
+            // whole receive path is best-effort and silent by design, and the
+            // handover from the poll to the call host is the one hop where
+            // losing a frame is a call that never rings.
+            //
+            // Identifiers only, never content: the group is an 8-character
+            // prefix of its DS pseudonym (already a blinded id, and a prefix of
+            // it cannot be joined back to a conversation from a log), the DS row
+            // id, and the frame kind. No SDP, no candidates, no call id.
+            logCallRoute(
+                "call frame routed group=${groupIdHex.take(GROUP_LOG_PREFIX_CHARS)} " +
+                    "row=$messageId kind=${me.lakko.app.calls.callSignalingBodyKindName(body)} " +
+                    "sink=${if (oneToOneCallInbound != null) "attached" else "absent"}",
+            )
             oneToOneCallInbound?.invoke(groupIdHex, messageId, body, createdAt)
         }
     }
@@ -1593,7 +1641,7 @@ public class ChatRepository(
                     } catch (e: Throwable) {
                         throw ChatError("DS publishGroup (role change) failed", e)
                     }
-                    chatClient.markOwnPublishedCommit(commitPublish.id)
+                    chatClient.markOwnPublishedCommit(groupIdHex, commitPublish.id)
                     ackCommitBestEffort(entry.id, commitPublish.id, null)
                     publishThreadList()
                     MembershipOutcome.Committed(commitPublish.id, null) as MembershipOutcome
@@ -1936,7 +1984,7 @@ public class ChatRepository(
                     } catch (e: Throwable) {
                         throw ChatError("DS publishGroup (add-member commit) failed", e)
                     }
-                    chatClient.markOwnPublishedCommit(commitPublish.id)
+                    chatClient.markOwnPublishedCommit(groupIdHex, commitPublish.id)
                     val welcomePublish = try {
                         dsClient.publishMailbox(recipientPseudonym, welcomeEnvelope)
                     } catch (e: Throwable) {
@@ -2159,7 +2207,7 @@ public class ChatRepository(
                     } catch (e: Throwable) {
                         throw ChatError("DS publishGroup (remove-member commit) failed", e)
                     }
-                    chatClient.markOwnPublishedCommit(commitPublish.id)
+                    chatClient.markOwnPublishedCommit(groupIdHex, commitPublish.id)
                     ackCommitBestEffort(entry.id, commitPublish.id, null)
                     publishThreadList()
                     MembershipOutcome.Committed(commitPublish.id, null) as MembershipOutcome
@@ -2356,7 +2404,7 @@ public class ChatRepository(
             } catch (e: Throwable) {
                 throw ChatError("DS publishGroup (approve proposal) failed", e)
             }
-            chatClient.markOwnPublishedCommit(publish.id)
+            chatClient.markOwnPublishedCommit(groupIdHex, publish.id)
             // ADR-0045 S7 residual 1 — record the approval as OUR OWN request,
             // and flag where it came from. Only this device can know that: on
             // the wire an approved add is indistinguishable from an admin adding
@@ -4040,6 +4088,10 @@ public class ChatRepository(
                 group = record.group,
                 raw = raw,
                 after = after,
+                // The journal these rows came from. The own-echo filter is per
+                // journal: without it an id published in another chat dropped
+                // this chat's row of the same number, unread and unrecoverable.
+                groupIdHex = groupIdHex,
             )
             record.consumeEvents(
                 events = result.events,
@@ -4594,11 +4646,23 @@ public class ChatRepository(
             if (waitSecs > 0) delay(waitSecs.toLong() * MILLIS_PER_SECOND)
             return
         }
+        // docs/ux/calls.md section 2.1 — the fan-out is bounded, so a set larger
+        // than [POLL_ALL_CONCURRENCY] polls in WAVES and one sweep costs one
+        // wait per wave. At a fixed 30 s that put a group in the second wave out
+        // of reach of a 45 s ring window, so an incoming call rang only in the
+        // one chat whose screen was open and polling it directly. The wait is
+        // therefore divided across the waves; a single-wave set is unchanged.
+        // See [appPollWaitSecs].
+        val perGroupWait = appPollWaitSecs(
+            groupCount = active.size,
+            concurrency = POLL_ALL_CONCURRENCY,
+            maxWaitSecs = waitSecs,
+        )
         runPollAllGroups(
             groupIds = active,
             concurrency = POLL_ALL_CONCURRENCY,
         ) { groupIdHex ->
-            pollGroup(groupIdHex, waitSecs = waitSecs)
+            pollGroup(groupIdHex, waitSecs = perGroupWait)
         }
     }
 
@@ -6147,7 +6211,7 @@ public class ChatRepository(
             wrapRendezvous = { key, welcome ->
                 uniffi.lakko_ffi_uniffi.wrapWelcomeRendezvous(key, welcome)
             },
-            markOwnPublished = { id -> chatClient.markOwnPublishedCommit(id) },
+            markOwnPublished = { id -> chatClient.markOwnPublishedCommit(groupIdHex, id) },
             // `persistSnapshotBestEffort` calls `Identity.snapshotStorage()`,
             // which serialises the WHOLE provider — every group at once — so it
             // must hold the provider lock or it can capture a SIBLING group
@@ -6260,7 +6324,7 @@ public class ChatRepository(
                 currentEpoch = currentEpoch,
                 republishCommit = { commit -> dsClient.publishGroup(record.groupId, commit).id },
                 republishWelcome = { mailbox, bytes -> dsClient.publishMailbox(mailbox, bytes).id },
-                markOwnPublished = { id -> chatClient.markOwnPublishedCommit(id) },
+                markOwnPublished = { id -> chatClient.markOwnPublishedCommit(groupIdHex, id) },
                 onAck = { id, commitId, secondId -> ackCommitBestEffort(id, commitId, secondId) },
                 onDiscard = { id ->
                     try {
@@ -6317,6 +6381,32 @@ public class ChatRepository(
         } catch (cause: Throwable) {
             android.util.Log.w("ChatRepository", "read watermarks not seeded", cause)
         }
+    }
+
+    /**
+     * `docs/ux/calls.md` section 6 — a call in [groupIdHex] finished: write its
+     * row into that conversation.
+     *
+     * Local and terminal: it appends one row, republishes the thread list and
+     * persists. Nothing is composed, nothing is published to the DS journal, no
+     * MLS state is touched — which is why it needs neither the provider lock nor
+     * the per-group lock, only the timeline's own monitor
+     * ([GroupRecord.appendCallRow]).
+     *
+     * The append and the republish are synchronous, so the row is on screen the
+     * moment the call screen closes; the Keystore unwrap and the whole-transcript
+     * write go to [callRowScope], because the caller is the call host on the main
+     * dispatcher and a call teardown must not block a frame on disk.
+     *
+     * A group this device does not know is a no-op rather than an error: a call
+     * can outlive leaving the chat it was placed from, and losing the row is a
+     * better outcome than failing a call teardown.
+     */
+    public fun recordCallRow(groupIdHex: String, entry: me.lakko.app.calls.CallTranscriptEntry) {
+        val record = groups[groupIdHex] ?: return
+        record.appendCallRow(entry, createdAt = java.time.Instant.now().toString())
+        publishThreadList()
+        callRowScope.launch { persistMessageLogBestEffort() }
     }
 
     /** Capture `(cursor, messages)` per known group + write
@@ -6521,6 +6611,16 @@ public data class ChatMessage(
      *  Rendered as emoji chips with counts; re-sending the same
      *  `(reactor, emoji)` toggles it off. */
     val reactions: List<Reaction> = emptyList(),
+    /**
+     * `docs/ux/calls.md` section 6 — set when this row is a finished call
+     * rather than a message. Always a [Direction.System] row, so every existing
+     * rule that treats system rows specially (they never join a visual run, they
+     * carry no author, no op can target them) applies unchanged.
+     *
+     * Local to this device: written by the call host when a call ends, never
+     * received, never sent. `null` for every other row.
+     */
+    val call: me.lakko.app.calls.CallTranscriptEntry? = null,
 )
 
 /** ADR-0023 — one reaction on a [ChatMessage], attributed to its sender's
@@ -7012,6 +7112,37 @@ private class GroupRecord(
 
     /** Read-only snapshot for the persistence layer. */
     fun snapshot(): List<ChatMessage> = messages.toList()
+
+    /**
+     * `docs/ux/calls.md` section 6 — append this device's own record of a
+     * finished call to the end of the timeline.
+     *
+     * The row is local, so it needs an id no DS row will ever take. The DS
+     * assigns strictly positive message ids, so local rows count **downwards
+     * from zero**: a call row can therefore never collide with a journal row,
+     * can never be the target of a peer's edit or delete op (nothing addresses a
+     * negative id, and the row carries no author so the ADR-0023 gate would
+     * refuse anyway), and stays unique across a relaunch because the counter is
+     * re-derived from the lowest id already in the restored transcript.
+     *
+     * Appended rather than inserted by time: a call that has just ended is the
+     * newest thing in the conversation, which is where the DS journal order puts
+     * it too.
+     */
+    fun appendCallRow(entry: me.lakko.app.calls.CallTranscriptEntry, createdAt: String) {
+        synchronized(messages) {
+            val lowest = messages.minOfOrNull { it.messageId } ?: 0L
+            messages.add(
+                ChatMessage(
+                    messageId = minOf(0L, lowest) - 1L,
+                    direction = Direction.System,
+                    text = me.lakko.app.calls.callRowText(entry),
+                    createdAt = createdAt,
+                    call = entry,
+                ),
+            )
+        }
+    }
 
     /** Phase 2a3f1 — seed the in-memory timeline + cursor
      *  from a persistent snapshot. Called from

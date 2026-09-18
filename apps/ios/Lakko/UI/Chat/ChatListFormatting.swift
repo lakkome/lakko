@@ -99,6 +99,10 @@ public enum ChatListFormatting {
         let body: String
         if deleted {
             body = "Message deleted"
+        } else if let call = CallTranscriptRow.parse(text) {
+            // `docs/ux/calls.md` section 6 — the list shows the call the way
+            // the conversation does, never the stored marker.
+            body = call.text
         } else {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {

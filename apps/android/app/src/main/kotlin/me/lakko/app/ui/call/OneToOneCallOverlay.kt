@@ -41,7 +41,9 @@ import me.lakko.app.calls.CallSession
 import me.lakko.app.calls.OneToOneCall
 import me.lakko.app.calls.OneToOneCallHost
 import me.lakko.app.calls.OneToOneCallPresentation
+import me.lakko.app.calls.offeredCallMedia
 import me.lakko.app.calls.oneToOneCallPresentation
+import me.lakko.app.calls.prejoinCameraDefault
 
 /**
  * The app-wide presentation of the 1x1 call, mounted once above every session
@@ -99,12 +101,21 @@ public fun BoxScope.OneToOneCallOverlay(
                     session = call.session,
                     // ADR-0048 UX §5 — the other person's resolved name on their tile.
                     remoteName = name,
+                    // docs/ux/calls.md section 3 — the pre-join opens the way the
+                    // caller asked: camera off for the phone button, on for the
+                    // video one. The toggles still decide what is offered.
+                    prejoinCameraOn = prejoinCameraDefault(call.requestedKind),
                     // G3-2-prejoin-join — Join dials the prepared session with the
                     // chosen mic / camera; Cancel abandons it. The call button
                     // already asked for permissions, but the camera can be switched
                     // on in the prejoin and a grant can be revoked in between.
                     onPrejoinJoin = { mic, cam ->
-                        permissions.request(video = cam) { v -> host.dial(audio = mic, video = v) }
+                        permissions.request(video = cam) { granted ->
+                            // A camera the user asked for but the system refused
+                            // is not offered: `granted` is the truth, not `cam`.
+                            val media = offeredCallMedia(microphoneOn = mic, cameraOn = granted)
+                            host.dial(audio = media.audio, video = media.video)
+                        }
                     },
                     onPrejoinCancel = { host.cancelPrepared() },
                 )

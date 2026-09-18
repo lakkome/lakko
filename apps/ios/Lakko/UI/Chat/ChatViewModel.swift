@@ -515,8 +515,14 @@ public final class ChatViewModel: ObservableObject {
         // there is not one. The toolbar hides the buttons; this is the layered
         // half.
         guard !membershipHasEnded else { return }
-        _ = (audio, video)
-        callHost.startOutgoingCall(groupIdHex: groupIdHex)
+        // `docs/ux/calls.md` section 3 — the button the caller tapped decides
+        // what the pre-join opens with. It used to be dropped here (`_ =
+        // (audio, video)`), so the phone button opened the pre-join with the
+        // camera on and the callee was told "Video call". The microphone is
+        // always asked for; the pre-join's own toggles settle both.
+        _ = audio
+        callHost.startOutgoingCall(
+            groupIdHex: groupIdHex, button: CallMediaChoice.button(video: video))
     }
 
     /// ``ChatScreen``'s long-poll `.task` started: this chat is open and polls

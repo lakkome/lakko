@@ -41,6 +41,8 @@ final class CallHostTests: XCTestCase {
         var published: [(group: String, body: FfiCallSignalingBody)] = []
         var micGranted = true
         var camGranted = true
+        /// `docs/ux/calls.md` section 6 — the rows the host filed.
+        var recorded: [(group: String, row: CallTranscriptRow)] = []
         init(nowMs: Int64) { self.nowMs = nowMs }
 
         @MainActor
@@ -69,7 +71,8 @@ final class CallHostTests: XCTestCase {
             microphoneGranted: { h.micGranted },
             cameraGranted: { video in !video || h.camGranted },
             peerName: { _ in "Alice" },
-            mintCallId: { Data(repeating: 0x0C, count: 16) }
+            mintCallId: { Data(repeating: 0x0C, count: 16) },
+            recordCall: { group, row in h.recorded.append((group, row)) }
         ))
     }
 
@@ -354,6 +357,87 @@ final class CallHostTests: XCTestCase {
         XCTAssertEqual(host.callError, CameraPermission.deniedMessage)
         XCTAssertEqual(host.activeCall?.state, .ringing)
         XCTAssertEqual(h.timers.filter { !$0.cancelled }.map(\.afterMs), [15_000])
+    }
+
+    // MARK: - What the caller chose (docs/ux/calls.md section 3)
+
+    /// The defect: the phone button opened the pre-join with the camera on, so
+    /// the offer said video and the callee was told "Video call". The host
+    /// carries the button the caller tapped; the screen reads it.
+    func testThePhoneButtonPreparesAVoiceCall() async throws {
+        let h = Harness(nowMs: t0)
+        let host = makeHost(h)
+        host.startOutgoingCall(groupIdHex: groupA, button: .voice)
+        try await waitUntil { host.activeCall != nil }
+        XCTAssertEqual(host.outgoingButton, .voice)
+        XCTAssertFalse(CallMediaChoice.prejoinCameraOn(for: host.outgoingButton ?? .video))
+    }
+
+    func testTheVideoButtonPreparesAVideoCall() async throws {
+        let h = Harness(nowMs: t0)
+        let host = makeHost(h)
+        host.startOutgoingCall(groupIdHex: groupA, button: .video)
+        try await waitUntil { host.activeCall != nil }
+        XCTAssertEqual(host.outgoingButton, .video)
+        XCTAssertTrue(CallMediaChoice.prejoinCameraOn(for: host.outgoingButton ?? .voice))
+    }
+
+    /// An incoming call has no button of ours; the pre-join is skipped
+    /// entirely and the accept decides.
+    func testAnIncomingCallCarriesNoOutgoingButton() {
+        let h = Harness(nowMs: t0)
+        let host = makeHost(h)
+        host.receive(row(offer(callA, video: true), group: groupA, id: 1, atMs: t0))
+        XCTAssertNil(host.outgoingButton)
+        XCTAssertTrue(host.incomingVideo)
+    }
+
+    // MARK: - What the call leaves behind (docs/ux/calls.md section 6)
+
+    func testADeclinedIncomingCallIsRecordedInThatConversation() async throws {
+        let h = Harness(nowMs: t0)
+        let host = makeHost(h)
+        host.receive(row(offer(callA), group: groupA, id: 1, atMs: t0))
+        host.declineIncomingCall()
+        try await waitUntil { host.activeCall == nil }
+        XCTAssertEqual(h.recorded.count, 1)
+        XCTAssertEqual(h.recorded.first?.group, groupA)
+        XCTAssertEqual(h.recorded.first?.row.direction, .incoming)
+        XCTAssertEqual(h.recorded.first?.row.text, "Declined")
+    }
+
+    func testARingThatRanOutIsRecordedAsMissed() async throws {
+        let h = Harness(nowMs: t0)
+        let host = makeHost(h)
+        host.receive(row(offer(callA), group: groupA, id: 1, atMs: t0))
+        h.fireLiveTimers()
+        try await waitUntil { host.activeCall == nil }
+        XCTAssertEqual(h.recorded.first?.row.text, "Missed call")
+        XCTAssertEqual(h.recorded.first?.row.direction, .incoming)
+    }
+
+    /// A pre-join the user cancelled never rang anywhere: it is not a call and
+    /// leaves no row.
+    func testACancelledPreJoinLeavesNoRow() async throws {
+        let h = Harness(nowMs: t0)
+        let host = makeHost(h)
+        host.startOutgoingCall(groupIdHex: groupA, button: .voice)
+        try await waitUntil { host.activeCall != nil }
+        host.clearFinishedCall()
+        try await waitUntil { host.activeCall == nil }
+        XCTAssertTrue(h.recorded.isEmpty, "a call that was never placed leaves nothing behind")
+    }
+
+    /// One row per call, however many times the slot is cleared afterwards.
+    func testACallIsRecordedOnce() async throws {
+        let h = Harness(nowMs: t0)
+        let host = makeHost(h)
+        host.receive(row(offer(callA), group: groupA, id: 1, atMs: t0))
+        host.declineIncomingCall()
+        try await waitUntil { host.activeCall == nil }
+        host.clearFinishedCall()
+        host.reset()
+        XCTAssertEqual(h.recorded.count, 1)
     }
 
     // MARK: - Helpers

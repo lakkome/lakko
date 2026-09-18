@@ -330,11 +330,37 @@ public data class PersistedMessage(
     val deleted: Boolean = false,
     /** ADR-0023 — accumulated reactions. */
     val reactions: List<PersistedReaction> = emptyList(),
+    /**
+     * `docs/ux/calls.md` section 6 — the finished call this row records, when it
+     * records one.
+     *
+     * Nullable with a default, so a transcript written before call rows existed
+     * decodes unchanged and a client that predates them skips the key (the
+     * store already decodes with `ignoreUnknownKeys`). This is what makes a call
+     * row survive a relaunch the way a message does: no new store, no
+     * migration, the same encrypted per-account envelope.
+     */
+    val call: PersistedCall? = null,
 ) {
     /** Explicit companion so the conversion helpers below can
      *  attach as `PersistedMessage.Companion.from(msg)`. */
     public companion object
 }
+
+/**
+ * `docs/ux/calls.md` section 6 — a finished call as the transcript stores it.
+ *
+ * The row's TEXT is stored beside this in [PersistedMessage.text] and is what
+ * renders if the marker ever fails to decode, so a future outcome name costs a
+ * plain pill rather than a lost row.
+ */
+@Serializable
+public data class PersistedCall(
+    /** Lowercase name of a [me.lakko.app.calls.CallOutcome]. */
+    val outcome: String,
+    val video: Boolean = false,
+    val durationSecs: Long? = null,
+)
 
 @Serializable
 public data class PersistedReaction(
@@ -416,6 +442,13 @@ public fun PersistedMessage.Companion.from(msg: ChatMessage): PersistedMessage =
         reactions = msg.reactions.map {
             PersistedReaction(reactorKeyB64 = it.reactor, emoji = it.emoji)
         },
+        call = msg.call?.let {
+            PersistedCall(
+                outcome = it.outcome.name.lowercase(java.util.Locale.ROOT),
+                video = it.video,
+                durationSecs = it.durationSecs,
+            )
+        },
     )
 
 /** Inverse — reconstruct a runtime [ChatMessage] from the JSON
@@ -445,6 +478,22 @@ public fun PersistedMessage.toChatMessage(): ChatMessage? {
         reactions = reactions.mapNotNull { r ->
             r.reactorKeyB64?.let { Reaction(reactor = it, emoji = r.emoji) }
         },
+        // An outcome this build does not know reads back as `null`: the row
+        // survives and renders as the plain system pill its stored text already
+        // is, rather than being dropped or guessed at.
+        call = call?.toTranscriptEntry(),
+    )
+}
+
+/** `null` for an unrecognised outcome — see [PersistedMessage.toChatMessage]. */
+internal fun PersistedCall.toTranscriptEntry(): me.lakko.app.calls.CallTranscriptEntry? {
+    val parsed = me.lakko.app.calls.CallOutcome.entries.firstOrNull {
+        it.name.equals(outcome, ignoreCase = true)
+    } ?: return null
+    return me.lakko.app.calls.CallTranscriptEntry(
+        outcome = parsed,
+        video = video,
+        durationSecs = durationSecs?.takeIf { it >= 0L },
     )
 }
 

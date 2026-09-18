@@ -73,7 +73,14 @@ struct CallHostOverlay: ViewModifier {
             ) {
                 switch presented {
                 case .oneToOne(let session)?:
-                    CallScreen(session: session) {
+                    // `docs/ux/calls.md` sections 3 and 4 — the button the
+                    // caller tapped seeds the pre-join's camera, and the
+                    // resolved name is who the call screen says is on it.
+                    CallScreen(
+                        session: session,
+                        button: host.outgoingButton ?? .voice,
+                        peerName: host.activePeerName
+                    ) {
                         host.clearFinishedCall()
                     }
                 case .group(let ui, let id)?:
@@ -157,8 +164,10 @@ private struct IncomingCallBanner: View {
 
     /// The kind of call, then the one security word that is true here: the
     /// native 1x1 path refuses to connect unless its media keying is armed.
+    /// The kind comes from the offer's own media flags, so it says what the
+    /// caller chose (`docs/ux/calls.md` section 3).
     private var detail: String {
-        video ? "Video call. End-to-end encrypted." : "Voice call. End-to-end encrypted."
+        "\(CallMediaChoice.kindLabel(video: video)). End-to-end encrypted."
     }
 
     var body: some View {

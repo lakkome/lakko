@@ -203,6 +203,12 @@ public final class CallUiState: ObservableObject {
     @Published public private(set) var pinnedId: String?
     @Published public private(set) var participantListOpen: Bool = false
     @Published public private(set) var e2ee: E2eeState = .inactive
+    /// `docs/ux/calls.md` section 4 — the other person's name for the status
+    /// line, and for the encryption sheet's one sentence. `nil` in a group
+    /// call (there is no single other person) and while nobody is known.
+    @Published public private(set) var peerName: String?
+    /// `docs/ux/calls.md` sections 4 and 5 — the encryption sheet is open.
+    @Published public private(set) var encryptionSheetOpen: Bool = false
     @Published public private(set) var connectionDetail: ConnectionDetail = .unknown
     @Published public private(set) var qualityPopoverOpen: Bool = false
     @Published public private(set) var hasMultipleCameras: Bool = false
@@ -440,6 +446,19 @@ public final class CallUiState: ObservableObject {
         self.e2ee = state
     }
 
+    /// `docs/ux/calls.md` section 4 — name the other person on the call.
+    public func setPeerName(_ name: String?) {
+        guard self.peerName != name else { return }
+        self.peerName = name
+    }
+
+    /// `docs/ux/calls.md` section 5 — open / close the encryption sheet. It
+    /// can only open while encryption is armed: the chip that opens it is not
+    /// there otherwise, and a sheet with no code to show would say nothing.
+    public func setEncryptionSheetOpen(_ open: Bool) {
+        self.encryptionSheetOpen = open && e2ee.active
+    }
+
     public func setConnectionDetail(_ d: ConnectionDetail) {
         self.connectionDetail = d
     }
@@ -635,6 +654,8 @@ public final class CallUiState: ObservableObject {
         self.pinnedId = nil
         self.participantListOpen = false
         self.e2ee = .inactive
+        self.peerName = nil
+        self.encryptionSheetOpen = false
         self.connectionDetail = .unknown
         self.qualityPopoverOpen = false
         self.settingsOpen = false
@@ -769,7 +790,14 @@ extension CallUiState {
     ///
     /// Returns the owning `[AnyCancellable]`; store it on the
     /// SwiftUI host for the call's lifetime.
-    public func driveFrom(session: CallSession) -> [AnyCancellable] {
+    /// - Parameter peerName: the other person's name, resolved by the caller
+    ///   through ``CallPeerName`` (the call host owns the directory + the
+    ///   conversation title; this state object owns neither). It names the
+    ///   remote tile and the status line. `nil` leaves the tile on the neutral
+    ///   placeholder — never the word "Unknown", which is what the roster
+    ///   showed while nothing passed a name in at all.
+    public func driveFrom(session: CallSession, peerName: String? = nil) -> [AnyCancellable] {
+        setPeerName(peerName)
         let rebuild: () -> Void = { [weak self, weak session] in
             guard let self, let session else { return }
             self.setPhase(Self.mapSessionPhase(session.state))
@@ -789,7 +817,7 @@ extension CallUiState {
             if connected || remoteTrack != nil {
                 roster.append(
                     Participant(
-                        id: "remote", displayName: "", isLocal: false,
+                        id: "remote", displayName: self.peerName ?? "", isLocal: false,
                         micOn: true, camOn: remoteTrack != nil,
                         handRaised: false, quality: .good, speaking: false,
                         screenSharing: false

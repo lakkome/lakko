@@ -58,9 +58,13 @@ class ChatClientTest {
             // No-throw smoke. The observable suppression effect
             // requires a live Group + pollMessages round-trip,
             // exercised in the instrumented suite (1.15f5).
-            client.markOwnPublishedCommit(1L)
-            client.markOwnPublishedCommit(1L) // duplicate
-            client.markOwnPublishedCommit(Long.MAX_VALUE)
+            client.markOwnPublishedCommit(GROUP_A, 1L)
+            client.markOwnPublishedCommit(GROUP_A, 1L) // duplicate
+            client.markOwnPublishedCommit(GROUP_A, Long.MAX_VALUE)
         }
+    }
+
+    private companion object {
+        val GROUP_A: String = "aa".repeat(16)
     }
 }

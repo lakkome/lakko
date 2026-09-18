@@ -332,20 +332,28 @@ public class ChatViewModel(
     }
 
 
-    /** Tap-to-call from the chat header. G3-2-prejoin-join: this
-     *  now only PREPARES the session — it builds it and arms the
-     *  SFrame key, but does NOT dial. The session sits `Idle`
-     *  (mapped to the prejoin phase), the call screen presents the
-     *  prejoin (mic / camera preview), and the Join button calls
-     *  [dialActiveCall]. */
+    /**
+     * Tap-to-call from the chat header. G3-2-prejoin-join: this only PREPARES
+     * the session — it builds it and arms the SFrame key, but does NOT dial.
+     * The session sits `Idle` (mapped to the prejoin phase), the call screen
+     * presents the prejoin (mic / camera preview), and Join dials it.
+     *
+     * `docs/ux/calls.md` section 3 — [video] says which header button was
+     * pressed, and is carried through to the host so the pre-join opens with
+     * the camera off for a voice call and on for a video one. It used to be
+     * discarded here, so both buttons opened the pre-join with the camera on
+     * and every call went out as a video call; see [me.lakko.app.calls.RequestedCallKind].
+     */
     public fun startCall(audio: Boolean = true, video: Boolean = false) {
-        @Suppress("UNUSED_PARAMETER") val ignored = audio to video
+        // `audio` has no say before the pre-join: the microphone toggle there is
+        // what the offer carries, and it opens on for every kind of call.
+        @Suppress("UNUSED_PARAMETER") val ignoredAudio = audio
         val host = callHost ?: return
         // The host builds the session and arms the SFrame seed from the MLS
         // exporter (G3-2-call-key) so it is ready when the user taps Join in
         // the prejoin; the app-level overlay presents it. Refused while any
         // other call is up — one call at a time.
-        if (!host.startOutgoing(groupIdHex)) {
+        if (!host.startOutgoing(groupIdHex, me.lakko.app.calls.requestedCallKind(video))) {
             showBusyNotice(me.lakko.app.calls.CallVerb.START)
         }
     }

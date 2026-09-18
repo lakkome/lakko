@@ -204,6 +204,19 @@ public class ChatRepositoryCallPort(
      * directory. A group with no resolvable peer, or a name this device has
      * never learned, yields `null` and the ring says `Someone`.
      */
+    /**
+     * `docs/ux/calls.md` section 6 — the finished call's row, written into the
+     * conversation it happened in. Local to this device: the repository appends
+     * it to that group's timeline and persists it with the transcript.
+     */
+    override fun recordCall(groupIdHex: String, entry: CallTranscriptEntry) {
+        try {
+            repository.recordCallRow(groupIdHex, entry)
+        } catch (error: Throwable) {
+            android.util.Log.w("ChatRepositoryCallPort", "recording the call row failed", error)
+        }
+    }
+
     override fun peerName(groupIdHex: String): String? = try {
         repository.oneToOnePeerKey(groupIdHex)?.let { key ->
             val resolved = me.lakko.app.profile.ProfileDirectory.get(applicationContext).resolve(key)

@@ -772,31 +772,42 @@ private fun SessionRoot(
     // again, the loop fetches at once and a still-fresh offer rings.
     //
     // Groups an open chat screen is long-polling itself are left to that
-    // screen, and the loop restarts when that set changes, so no group is
-    // polled twice (the loser of the per-group race would return at once and
-    // spin) and none is left unpolled.
+    // screen, so no group is polled twice (the loser of the per-group race
+    // would return at once and spin) and none is left unpolled.
+    //
+    // The exclusion is READ PER PASS rather than collected, and that is a fix
+    // rather than a simplification. It used to drive `collectLatest`, so every
+    // chat the user opened or left CANCELLED the sweep in flight and started it
+    // again from the first wave. A set larger than the concurrency bound polls
+    // in waves, so a user moving between chats could keep restarting the sweep
+    // and the later waves would never be reached at all — and an incoming call
+    // for one of those groups was never read. Reading the current value at the
+    // top of each pass keeps ownership exactly as it was (an open chat's group
+    // is still skipped from the next pass on) without ever discarding a sweep
+    // that is part way through.
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     LaunchedEffect(lifecycleOwner, chatRepository, callHost) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
             callHost.setForeground(true)
             try {
-                chatRepository.screenPolledGroups.collectLatest { excluded ->
-                    while (true) {
-                        val startedAt = android.os.SystemClock.elapsedRealtime()
-                        try {
-                            chatRepository.pollAllGroups(waitSecs = APP_LONG_POLL_SECS, exclude = excluded)
-                        } catch (cancel: kotlinx.coroutines.CancellationException) {
-                            throw cancel
-                        } catch (_: Throwable) {
-                            kotlinx.coroutines.delay(APP_POLL_RETRY_BACKOFF_MS)
-                        }
-                        // A poll that returns at once (not bootstrapped yet, or a
-                        // group momentarily in flight elsewhere) must not become
-                        // a busy loop.
-                        val elapsed = android.os.SystemClock.elapsedRealtime() - startedAt
-                        if (elapsed < APP_POLL_MIN_ITERATION_MS) {
-                            kotlinx.coroutines.delay(APP_POLL_MIN_ITERATION_MS - elapsed)
-                        }
+                while (true) {
+                    val startedAt = android.os.SystemClock.elapsedRealtime()
+                    try {
+                        chatRepository.pollAllGroups(
+                            waitSecs = APP_LONG_POLL_SECS,
+                            exclude = chatRepository.screenPolledGroups.value,
+                        )
+                    } catch (cancel: kotlinx.coroutines.CancellationException) {
+                        throw cancel
+                    } catch (_: Throwable) {
+                        kotlinx.coroutines.delay(APP_POLL_RETRY_BACKOFF_MS)
+                    }
+                    // A poll that returns at once (not bootstrapped yet, or a
+                    // group momentarily in flight elsewhere) must not become
+                    // a busy loop.
+                    val elapsed = android.os.SystemClock.elapsedRealtime() - startedAt
+                    if (elapsed < APP_POLL_MIN_ITERATION_MS) {
+                        kotlinx.coroutines.delay(APP_POLL_MIN_ITERATION_MS - elapsed)
                     }
                 }
             } finally {
