@@ -38,11 +38,24 @@ workspace = true
 # `tracing`, `tracing-core`, `tracing-attributes`, `pin-project-lite`. No
 # tokio, no TLS, no async runtime, no transport. Re-run that measurement before
 # adding anything else here.
+#
+# `lakko-calls` was measured the same way, for the call-signalling CLASSIFIER
+# the NSE needs to ring (`crate::call_signaling`). Its whole dependency set —
+# `lakko-mls`, `lakko-crypto`, `lakko-proto`, `prost`, `lakko-contacts`,
+# `thiserror`, `zeroize` — is ALREADY in this tree, so
+# `cargo tree -p lakko-ffi-extension --edges normal --target aarch64-apple-ios`
+# grows by exactly ONE crate: 177 -> 178, `lakko-calls` itself. It pulls no
+# async runtime, no WebRTC, no SFU, no transport; SFrame + the jitter buffer +
+# the codec tables are unreferenced Rust that the linker dead-strips, since
+# this crate touches only `lakko_calls::signaling::parse_signaling_payload`.
+# That measurement is the reason the dep is acceptable here at all — re-run it
+# before adding anything else.
 [dependencies]
 thiserror.workspace = true
 lakko-mls.workspace = true
 lakko-attachments.workspace = true
 lakko-contacts.workspace = true
+lakko-calls.workspace = true
 
 # `build` powers the `uniffi::setup_scaffolding!()` proc-macro; `cli` enables
 # `uniffi::uniffi_bindgen_main()` in `src/bin/uniffi-bindgen.rs` so

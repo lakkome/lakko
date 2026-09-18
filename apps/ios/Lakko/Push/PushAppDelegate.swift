@@ -42,6 +42,13 @@ public final class PushAppDelegate: NSObject, UIApplicationDelegate,
         // about how to display lives in
         // `userNotificationCenter(_:willPresent:withCompletionHandler:)`.
         UNUserNotificationCenter.current().delegate = self
+        // `docs/ux/calls.md` section 2.1 — start receiving VoIP pushes at
+        // launch, not at sign-in: the token is device state, and the app has to
+        // be able to take a call push before it knows whether one is coming.
+        // iOS re-delivers the current token to the registrar's delegate on
+        // every launch, so this is also how a token that could not be
+        // registered last time (no device pseudonym yet) gets another chance.
+        VoipPushRegistrar.shared.start()
         return true
     }
 
@@ -80,11 +87,18 @@ public final class PushAppDelegate: NSObject, UIApplicationDelegate,
             UNNotificationPresentationOptions
         ) -> Void
     ) {
-        // 1.20c renders a generic "New message" — the SW-style
-        // decryption inside a `UNNotificationServiceExtension`
-        // is a future sub-sprint (1.20c2) once the extension
-        // target is wired through xcodegen + the App Group +
-        // the WASM linkage story is sorted.
+        // `docs/ux/calls.md` section 2.1, first row — with the app open, an
+        // incoming call takes over Lakko's own screen, not the notification
+        // shade. The extension's call alert is the fallback for a device whose
+        // app is NOT running; presenting it over a running app would double up
+        // with the in-app incoming-call surface that is already showing.
+        let content = notification.request.content
+        if content.categoryIdentifier == LakkoCallNotification.callCategoryIdentifier {
+            completionHandler([])
+            return
+        }
+        // Everything else: the decrypted message preview the NSE wrote
+        // (ADR-0041), or the generic fallback when it could not.
         completionHandler([.banner, .sound, .badge])
     }
 

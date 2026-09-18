@@ -116,13 +116,95 @@ public final class NotificationService: UNNotificationServiceExtension {
         // still guarded). On a real preview, rewrite the body; either way,
         // deliver exactly once.
         decryptTask = Task { [weak self] in
-            let preview = await decryptPushPreview(wake, NseRealDecryptDeps())
+            let outcome = await decryptPushOutcome(wake, NseRealDecryptDeps())
             guard let self else { return }
-            if let preview {
+            switch outcome {
+            case .preview(let preview):
                 best.body = preview.body
+                self.deliver(best)
+            case .callOffer(let alert):
+                self.deliverCallAlert(alert, into: best)
+            case .callEnded(let callIdHex):
+                await self.deliverCallEnded(callIdHex: callIdHex, into: best)
+            case .none:
+                self.deliver(best)
             }
-            self.deliver(best)
         }
+    }
+
+    // MARK: - Calls
+
+    /// A call is ringing and no VoIP push arrived (`docs/ux/calls.md` section
+    /// 2.1).
+    ///
+    /// This is the fallback, and it is honest about being one: only CallKit can
+    /// make a phone ring like a phone, only the app can reach CallKit, and a
+    /// notification extension can neither launch the app nor report a call. So
+    /// the best it can do is a call-shaped alert — the caller's name, what kind
+    /// of call it is, a ringtone rather than a message chime, and a time
+    /// sensitive level so it breaks through a Focus — which the user taps to
+    /// open the app, where the call is still ringing if it is still ringing.
+    ///
+    /// The call id rides in `userInfo` so two other things can find this alert:
+    /// the "call ended" arm below, and the app itself when the call is answered
+    /// or ended there (``CallKitBridge``).
+    private func deliverCallAlert(
+        _ alert: NseCallAlert,
+        into best: UNMutableNotificationContent
+    ) {
+        best.title = alert.title
+        best.body = alert.body
+        best.threadIdentifier = alert.tag
+        best.categoryIdentifier = LakkoCallNotification.callCategoryIdentifier
+        // A ringtone, not the message chime: this is a call.
+        best.sound = .defaultRingtone
+        // Breaks through Focus / Do Not Disturb when the user has allowed
+        // Lakko to. `docs/ux/calls.md` section 2.1 keeps a muted chat silent —
+        // and it stays silent, because a muted chat is not woken at all.
+        best.interruptionLevel = .timeSensitive
+        var info = best.userInfo
+        info[LakkoCallNotification.callIdUserInfoKey] = alert.callIdHex
+        best.userInfo = info
+        deliver(best)
+    }
+
+    /// A call this device may be showing an alert for is over.
+    ///
+    /// Takes the alert down, and then says as little as it can: the extension
+    /// MUST call `contentHandler` — skipping it drops the notification in a way
+    /// iOS counts against the app — so "show nothing" is not available.
+    /// ``nseEndedCallContent(hadDeliveredAlert:callerName:)`` decides what to
+    /// say instead, and the answer turns on whether the offer alert was still
+    /// on screen: still there means nobody dealt with the call here, which is a
+    /// missed call (section 6); already gone means it was answered or declined
+    /// here and there is nothing to report, so the notification is passive and
+    /// neither lights the screen nor makes a sound.
+    private func deliverCallEnded(
+        callIdHex: String,
+        into best: UNMutableNotificationContent
+    ) async {
+        let center = UNUserNotificationCenter.current()
+        let delivered = await center.deliveredNotifications()
+        let stale = delivered.filter {
+            $0.request.content.userInfo[LakkoCallNotification.callIdUserInfoKey]
+                as? String == callIdHex
+        }
+        if !stale.isEmpty {
+            center.removeDeliveredNotifications(withIdentifiers: stale.map(\.request.identifier))
+        }
+        let content = nseEndedCallContent(
+            hadDeliveredAlert: !stale.isEmpty,
+            callerName: stale.first?.request.content.title
+        )
+        best.title = content.title
+        best.body = content.body
+        best.categoryIdentifier = LakkoCallNotification.callCategoryIdentifier
+        best.sound = nil
+        best.interruptionLevel = content.passive ? .passive : .active
+        var info = best.userInfo
+        info[LakkoCallNotification.callIdUserInfoKey] = callIdHex
+        best.userInfo = info
+        deliver(best)
     }
 
     public override func serviceExtensionTimeWillExpire() {

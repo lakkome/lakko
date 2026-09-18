@@ -2607,6 +2607,7 @@ name = "lakko-ffi-extension"
 version = "0.0.0"
 dependencies = [
  "lakko-attachments",
+ "lakko-calls",
  "lakko-contacts",
  "lakko-mls",
  "thiserror 1.0.69",

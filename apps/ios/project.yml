@@ -200,10 +200,24 @@ targets:
         # allow-list, or the OS refuses to launch it. Opportunistic only —
         # iOS decides if/when to run it; an APNs `content-available` wake for
         # immediate surfacing is a separate follow-up.
+        # `docs/ux/calls.md` section 2.1 — `voip` is what lets PushKit hand this
+        # app a call push while it is backgrounded or terminated, and it is the
+        # only background mode that may launch the app for a call. Without it
+        # `PKPushRegistry` never issues a VoIP token, so `desiredPushTypes` is
+        # silently a no-op and a closed phone never rings.
         UIBackgroundModes:
           - fetch
+          - voip
         BGTaskSchedulerPermittedIdentifiers:
           - me.lakko.dev.contact-refresh
+        # CallKit files finished calls in the phone's own Recents (section 6,
+        # "tapping the row calls back"). Tapping one there hands the app an
+        # `INStartCallIntent` user activity, which iOS only delivers to an app
+        # that declares it. Declared now so the history rows are not inert; the
+        # handler that turns such an intent into an outgoing call is a follow-up
+        # (nothing else depends on it).
+        NSUserActivityTypes:
+          - INStartCallIntent
         # Phase 2a3b3-ui — camera access for the add-device QR
         # scanner + G3-1 video calls. Apple's permission dialog
         # surfaces this string verbatim; keep the wording
@@ -452,6 +466,13 @@ targets:
       # NSE only ever calls the read-only `lookupRoute` — the
       # Keychain-touching secret paths are app-side only.
       - path: Lakko/Push/PushRoutingStore.swift
+        type: file
+        buildPhase: sources
+      # `docs/ux/calls.md` section 2.1 — the App Group name mirror the app
+      # writes and this extension READS, so a ringing lock screen can say who
+      # is calling (the wake payload carries no caller, invariant #5), plus the
+      # notification keys both processes name one call by. Foundation only.
+      - path: Lakko/Calls/CallPeerNameMirror.swift
         type: file
         buildPhase: sources
     info:

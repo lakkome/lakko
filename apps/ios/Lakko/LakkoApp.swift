@@ -75,6 +75,14 @@ struct LakkoApp: App {
     /// `.onOpenURL` when iOS hands us a Universal Link.
     @StateObject private var inviteIntake: InviteIntake
 
+    /// `docs/ux/calls.md` section 2.1 — the adapter between the 1x1 call and
+    /// the phone's own call machinery, so an incoming call rings over the lock
+    /// screen, is answerable there, and lands in the call history. Held for the
+    /// process lifetime (it is what keeps the Combine subscription on
+    /// ``CallHost`` alive); nothing observes it, so it is a plain reference
+    /// rather than a `@StateObject`.
+    private let callKitBridge: CallKitBridge
+
     /// The same objects as plain references, for the shell views that hand
     /// them down without observing them (see ``AppServices``). Built once in
     /// `init` from the very instances the `@StateObject`s above own.
@@ -126,6 +134,29 @@ struct LakkoApp: App {
         let linkHost = LinkCallHost.live(authRepository: auth)
         // One call at a time, across the three kinds.
         CallSlotWiring.wire(oneToOne: host, group: groupHost, link: linkHost)
+        // `docs/ux/calls.md` section 2.1 — report the 1x1 call to the system,
+        // and let the system's Answer / End / Mute drive the same host entry
+        // points the in-app buttons use. Built here, next to the host it
+        // adapts; the `CXProvider` and the call registry it talks to are
+        // process-wide (see ``CallKitProvider``).
+        self.callKitBridge = CallKitBridge(host: host)
+        // A VoIP push rings the phone with a placeholder before anything is
+        // decrypted (the payload carries no caller — invariants #2 and #5).
+        // This is the other half: fetch the journal row the wake points at, so
+        // the offer arrives on the ordinary receive path and the system screen
+        // is corrected with the real caller and call kind.
+        VoipPushRegistrar.shared.onWake = { [weak chat] wake in
+            guard let chat, let wakeGroupHex = wake.groupHex else { return }
+            // The wake's `g` is the ADR-0042 opaque routing id; the DS journal
+            // is keyed on the real group id. A miss falls back to reading `g`
+            // as a group id, exactly as the notification extension does.
+            let groupIdHex = PushRoutingStore()
+                .lookupRoute(pushGidHex: wakeGroupHex.lowercased())?.groupIdHex
+                ?? wakeGroupHex.lowercased()
+            Task { @MainActor [weak chat] in
+                try? await chat?.pollGroup(groupIdHex: groupIdHex, waitSecs: 0)
+            }
+        }
         self._chatRepository = StateObject(wrappedValue: chat)
         self._callHost = StateObject(wrappedValue: host)
         self._groupCallHost = StateObject(wrappedValue: groupHost)
@@ -230,6 +261,12 @@ struct LakkoApp: App {
                     // becoming active again sweeps at once, so an offer that
                     // arrived while backgrounded rings if it is still fresh.
                     foregroundReceive.scheduler.setForeground(phase == .active)
+                    if phase == .active {
+                        // `docs/ux/calls.md` section 2.1 — refresh the names the
+                        // notification extension may have to put on a ringing
+                        // lock screen while this app is not running.
+                        services.chatRepository.mirrorCallPeerNames()
+                    }
                 }
                 .task {
                     foregroundReceive.scheduler.start()
@@ -409,6 +446,12 @@ struct AppRoot: View, Equatable {
                 services.callHost.reset()
                 services.groupCallHost.reset()
                 services.linkCallHost.reset()
+                // …and with it anything the phone is still showing as a call,
+                // plus the names mirrored for a lock screen that now belongs to
+                // no account (``CallPeerNameMirror``).
+                CallKitProvider.shared.endAll()
+                CallKitCallRegistry.shared.reset()
+                CallPeerNameMirror.clearAll()
             }
 
         case .session(let account) where pendingSignupPhrase != nil:
@@ -738,6 +781,9 @@ private struct SessionRoot: View, Equatable {
                     username: account.username
                 )
                 chatRepository.bootstrap(secrets: secrets)
+                // `docs/ux/calls.md` section 2.1 — the names a background
+                // process may have to show on a ringing lock screen.
+                chatRepository.mirrorCallPeerNames()
                 // Publish a KeyPackage minted on the long-lived identity
                 // the bootstrap just built, so a Welcome sent to it can be
                 // opened here. Every session start: discovery holds one

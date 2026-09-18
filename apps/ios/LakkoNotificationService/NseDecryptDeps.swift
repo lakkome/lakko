@@ -132,6 +132,14 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
         SharedStorage.isAntiCensorshipArmed()
     }
 
+    /// `docs/ux/calls.md` section 2.1 — the conversation's name for a ringing
+    /// lock screen, from the App Group mirror the APP writes
+    /// (``CallPeerNameMirror``). READ-ONLY; this process resolves no names and
+    /// writes nothing (C-59). Absent → the alert is unnamed.
+    func callerName(groupIdHex: String) -> String? {
+        CallPeerNameMirror.name(groupIdHex: groupIdHex)
+    }
+
     /// Decode a lowercase-hex string into bytes. `nil` on any malformed input
     /// (odd length, non-hex char).
     static func hexToData(_ hex: String) -> Data? {
@@ -183,6 +191,14 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         // Proposal / ExternalJoinProposal advances state (in the THROWAWAY
         // provider only) but has no body to show.
         guard case let .application(data, _, _) = processed else { return nil }
+        // CALL SIGNALING — asked FIRST, because this is the one kind of body
+        // that must produce something on the lock screen rather than be
+        // suppressed (`docs/ux/calls.md` section 2.1: a closed app has to be
+        // able to ring). A row this cannot read falls through to the
+        // service-envelope filter below, which drops it exactly as before.
+        if let call = nseClassifyCallSignaling(data, parser: Self.callParser) {
+            return call
+        }
         // SERVICE-ENVELOPE FILTER — the background half of the gate the
         // foreground `ChatClient.toEvent` has always run, in the same order.
         // Call-signaling proto bytes, ADR-0042/0044 push-routing-secret
@@ -222,6 +238,22 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
             singleAttachmentKind: body.attachments.count == 1 ? body.attachments[0].kind : nil
         )
     }
+
+    /// The call-signaling parse: the slim FFI's `parseCallSignal`
+    /// (`crates/lakko-ffi-extension/src/call_signaling.rs`), which is the ONE
+    /// decoder of that wire format, in Rust, shared with the app.
+    ///
+    /// Deliberately not a hand-rolled protobuf reader in Swift: this is the one
+    /// envelope whose misreading makes a phone ring for a call that is already
+    /// over, and a second decoder is the drift class ADR-0044 exists to
+    /// document. It is reached through the ``NseCallSignalingParser`` protocol
+    /// for the same reason the sibling codecs are injected — the decrypt core
+    /// compiles into the FFI-free unit-test target, where a fake drives it.
+    ///
+    /// `nil` would mean "this build cannot read call signaling", and the whole
+    /// call path above then suppresses call rows exactly as the extension did
+    /// before calls existed. That fail-safe stays reachable on purpose.
+    private static var callParser: NseCallSignalingParser? { NseSlimFfiCallParser() }
 
     /// The AUTHORITATIVE half of the push-routing-secret filter: the slim FFI's
     /// `decodePushRoutingSecret` (ADR-0042 v2, per ADR-0044), whose domain +
@@ -316,6 +348,57 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         // Intentionally empty — ARC + UniFFI `deinit` reclaim the handles.
         // The method exists for the ``NseThrowawayGroup`` contract + to make
         // the "discarded, never persisted" step explicit at the call site.
+    }
+}
+
+/// The slim FFI's call-signaling classifier, behind the
+/// ``NseCallSignalingParser`` seam the decrypt core is written against.
+///
+/// Maps the three Rust arms onto the three the extension acts on. The one
+/// mapping worth stating: a **group-call announce is an offer**, deliberately,
+/// because folding it into "some other call frame" would mean a group call
+/// never rings — the Rust side pins that choice with a test of its own. The
+/// alert wording is the same either way, and it is true either way: someone is
+/// calling, with or without video.
+///
+/// A malformed payload, or one whose call id is not the fixed 16 bytes, is
+/// refused rather than guessed at: `nil` makes the caller fall through to the
+/// filter that has always dropped these rows, so an unreadable frame is quiet
+/// rather than a phone ringing for something nobody could read.
+///
+/// READ-ONLY: a pure decode. This process never answers, declines or ends a
+/// call — all three are MLS application messages, which advance the sender
+/// ratchet, the write C-59 forbids here. The app answers; the extension rings.
+private struct NseSlimFfiCallParser: NseCallSignalingParser {
+
+    func parse(_ bytes: Data) -> NseCallSignal? {
+        guard let signal = try? parseCallSignal(plaintext: bytes) else { return nil }
+        switch signal {
+        case .offer(let callId, let video, _):
+            guard let hex = Self.callIdHex(callId) else { return nil }
+            return .offer(callIdHex: hex, video: video)
+        case .end(let callId):
+            guard let hex = Self.callIdHex(callId) else { return nil }
+            return .end(callIdHex: hex)
+        case .other:
+            return .other
+        }
+    }
+
+    /// Lowercase hex of a 16-byte call id — the same spelling the app stamps on
+    /// and reads back from a notification
+    /// (``LakkoCallNotification/callIdUserInfoKey``), so the two processes name
+    /// one call identically. A wrong-width id is refused, not padded.
+    private static func callIdHex(_ callId: Data) -> String? {
+        guard callId.count == 16 else { return nil }
+        let alphabet = Array("0123456789abcdef")
+        var out = String()
+        out.reserveCapacity(32)
+        for byte in callId {
+            out.append(alphabet[Int(byte >> 4)])
+            out.append(alphabet[Int(byte & 0x0F)])
+        }
+        return out
     }
 }
 

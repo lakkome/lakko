@@ -54,6 +54,25 @@ public final class PushClient {
         case fcm
         case webPush = "web_push"
         case unifiedPush = "unified_push"
+        /// PushKit VoIP tokens (`docs/ux/calls.md` section 2.1).
+        ///
+        /// A SECOND, separate token for the same device: a VoIP push must be
+        /// sent to the PushKit token with `apns-push-type: voip` and a VoIP
+        /// services certificate, and APNs refuses it for the alert token. So it
+        /// is its own provider row rather than an overwrite of ``apns``.
+        ///
+        /// **The server does not accept this value yet.** `ProviderKind` in
+        /// `services/push-gw/src/provider.rs` has four variants and no
+        /// `apns_voip`, so `POST /push/register` rejects the body outright.
+        /// The client is deliberately complete anyway — the registration is
+        /// best-effort and its failure is logged, never fatal — so that the
+        /// server work is a server change with no client change. What it needs:
+        /// a fifth `ProviderKind` (db value 5, never renumbering the four),
+        /// an `ApnsVoipProvider` (or a flag on the existing one) that sends
+        /// `apns-push-type: voip` to `<bundle id>.voip` as the topic with a
+        /// VoIP certificate, and a call wake fanning out to the VoIP row
+        /// *instead of* the alert row when one exists for the device.
+        case apnsVoip = "apns_voip"
     }
 
     /// What class of wake `POST /push/notify-group` is being asked for.

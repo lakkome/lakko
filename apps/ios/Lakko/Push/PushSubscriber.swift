@@ -128,6 +128,10 @@ public final class PushSubscriber {
                 NSLog("push unregister failed: \(error)")
             }
         }
+        // `docs/ux/calls.md` section 2.1 — the VoIP token is a SECOND
+        // registration under its own provider (``PushTokenKind``), so signing
+        // out has to drop it too; the alert unregister above does not touch it.
+        await VoipPushRegistrar.shared.unregister()
         // iOS doesn't expose a `unregisterForRemoteNotifications`
         // in 16+ (it was deprecated in 9 and removed). Apple's
         // canonical advice: just stop registering. The OS keeps

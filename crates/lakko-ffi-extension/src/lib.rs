@@ -22,8 +22,18 @@
 //! - [`load_group`] — rebuild a temporary `Group` handle by `group_id`.
 //! - [`Group::process_incoming_verifying_roles`] — decrypt a fetched frame
 //!   through the audited ADR-0022 role-verifying path.
+//! - [`Group::account_key_at`] — resolve a leaf to the account key that names
+//!   the person behind it (ADR-0050), so the extension can title a wake with a
+//!   contact's name instead of "Lakko". One leaf in, one key out; never the
+//!   roster.
 //! - [`attachments::parse_body_envelope`] — classify the decrypted application
 //!   body (ADR-0023/0024) into a [`attachments::ParsedBody`].
+//! - [`call_signaling::parse_call_signal`] — classify a decrypted payload as
+//!   call signalling, so the extension can RING (`docs/ux/calls.md` §2) instead
+//!   of suppressing every call frame as an unrecognised service envelope — the
+//!   single transport change §7 records the whole of §2 as depending on.
+//!   Classify only: there is no compose, so the extension can never answer,
+//!   decline or end a call, all of which would advance the sender ratchet.
 //! - [`push_routing::decode_push_routing_secret`] — recognise an ADR-0042 /
 //!   ADR-0044 push-routing-secret SERVICE envelope so the NSE filters it out
 //!   instead of rendering it. Service envelopes ride the same group journal as
@@ -65,6 +75,7 @@ use std::sync::{Arc, Mutex};
 use lakko_mls::{Group as MlsGroup, Identity as MlsIdentity, Incoming as MlsIncoming};
 
 pub mod attachments;
+pub mod call_signaling;
 pub mod committer_beacon;
 pub mod group_name;
 pub mod profile;
@@ -124,6 +135,19 @@ pub enum FfiError {
     /// Lock contention / poisoned mutex on the shared [`Group`] state.
     #[error("internal lock error")]
     LockPoisoned,
+
+    /// Call-signalling codec error — surfaced by
+    /// [`call_signaling::parse_call_signal`] when a plaintext is NOT a
+    /// well-formed call-signalling payload. As with [`Self::Contacts`], on the
+    /// NSE filter path this is the EXPECTED, common outcome (every chat message
+    /// lands here), not a fault.
+    ///
+    /// **Appended at the end on purpose.** `#[uniffi(flat_error)]` lowers a
+    /// variant as its ORDINAL, so inserting one mid-enum would make an older
+    /// binding decode unrelated errors as the wrong variant. New variants go
+    /// last, always.
+    #[error("call error: {0}")]
+    Call(String),
 }
 
 impl From<lakko_mls::Error> for FfiError {
@@ -289,6 +313,36 @@ impl Group {
     pub fn epoch(&self) -> Result<u64, FfiError> {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         Ok(g.epoch())
+    }
+
+    /// The **account key** the leaf at `leaf_index` resolves to, or `None` for
+    /// a leaf that is not in the roster or whose credential did not resolve.
+    ///
+    /// This is how the NSE names a caller without opening the chat: the app
+    /// side looks the returned 32-byte key up in its own accepted-contacts
+    /// store and gets the display name, so the system call screen can say who
+    /// is calling (`docs/ux/calls.md` §7, "caller identity in the wake,
+    /// resolved locally").
+    ///
+    /// **At receipt the key already comes with the message**, on
+    /// [`ProcessedMessage::Application`]'s `sender_account` — resolved from the
+    /// sender leaf at the one moment the roster IS the epoch the message was
+    /// sealed at, which is the C-68 rule. Prefer that field. This accessor is
+    /// for the case where a leaf index is held WITHOUT its receipt (a leaf
+    /// carried inside a payload, say), and is the narrowest read that answers
+    /// it: one leaf in, one key out, never the roster.
+    ///
+    /// It is an account key and not a leaf signature key deliberately: under
+    /// ADR-0050 a person has one leaf per device, and the account key is the
+    /// published, pinned identity a contact is stored under — so it names the
+    /// *person*, which is what a call screen must show, while a leaf key would
+    /// name one of their phones and miss on the others.
+    ///
+    /// Read-only, like everything else here: it consults the restored
+    /// throwaway roster and writes nothing (C-59).
+    pub fn account_key_at(&self, leaf_index: u32) -> Result<Option<Vec<u8>>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.account_key_at(leaf_index))
     }
 }
 

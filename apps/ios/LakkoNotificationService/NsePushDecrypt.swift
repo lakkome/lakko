@@ -120,8 +120,18 @@ public struct NseFetchedRow: Equatable {
 /// Classification of a decrypted application message (mirror of the slim FFI
 /// `MessageBodyKind`), kept FFI-free so it can be produced by the fake in the
 /// unit test.
+///
+/// The last two arms are not message bodies at all: they are call signaling
+/// (ADR-0009), which rides the same group journal. Until
+/// `docs/ux/calls.md` was written this path dropped call signaling outright,
+/// which is precisely why a closed iPhone never rang — see
+/// ``NseCallSignalingParser``.
 public enum NseProcessedKind: Equatable {
     case chat, edit, delete, reaction, typing, readReceipt
+    /// An incoming call offer, and whether the caller asked for video.
+    case callOffer(video: Bool)
+    /// A call ended (cancelled, declined, answered elsewhere, timed out).
+    case callEnd
 }
 
 /// A decoded application row (post MLS-decrypt + envelope-parse).
@@ -136,18 +146,98 @@ public struct NseProcessedRow: Equatable {
     /// NSE already decoded. `nil` when there is no single attachment. A LABEL
     /// only: the NSE never fetches or decrypts the media itself.
     public let singleAttachmentKind: String?
+    /// Lowercase hex of the 16-byte call id, for the two call kinds only. It is
+    /// what lets an "ended" row take down the alert an "offer" row raised, and
+    /// what the app reads back to clear that alert when the call is answered
+    /// here (``LakkoCallNotification/callIdUserInfoKey``).
+    public let callIdHex: String?
 
     public init(
         kind: NseProcessedKind,
         text: String,
         attachmentCount: Int,
-        singleAttachmentKind: String? = nil
+        singleAttachmentKind: String? = nil,
+        callIdHex: String? = nil
     ) {
         self.kind = kind
         self.text = text
         self.attachmentCount = attachmentCount
         self.singleAttachmentKind = attachmentCount == 1 ? singleAttachmentKind : nil
+        self.callIdHex = callIdHex
     }
+}
+
+/// What a decrypted call-signaling row says, as much of it as a background
+/// process needs.
+public enum NseCallSignal: Equatable {
+    /// Someone is calling, and whether they asked for video.
+    case offer(callIdHex: String, video: Bool)
+    /// A call is over — cancelled by the caller, declined, answered on another
+    /// device, or timed out. The extension does not learn which, and does not
+    /// need to: every one of them means "stop ringing".
+    case end(callIdHex: String)
+    /// Call signaling of a kind that is not a user-visible event (an answer, an
+    /// ICE candidate, a group-call control body).
+    case other
+}
+
+/// Reads a decrypted call-signaling body.
+///
+/// ## Why this is a protocol and not a function here
+///
+/// The wire format is a protobuf `CallSignalingPayload` and this repository is
+/// emphatic that a wire format has ONE decoder: the Rust core. The extension
+/// reaches it through the slim `LakkoCoreExtension` FFI, exactly as it reaches
+/// the push-routing, beacon, profile and group-name codecs. Writing a second
+/// decoder in Swift — even a small one — is the drift class ADR-0044 exists to
+/// document, and it would be a decoder for the one envelope whose misreading
+/// makes a phone ring for a call that is already over.
+///
+/// So the parse is INJECTED, for the same reason the other decoders are: this
+/// file compiles into the FFI-free unit-test target as well as into the
+/// extension, and a test drives it with a fake.
+///
+/// `parse` returns `nil` for "cannot tell" — an unavailable parser, or bytes
+/// the decoder refuses. The caller then does what this path did before calls
+/// existed: suppress the row. That is the fail-safe direction. An alert for a
+/// row nobody could read would be a phone ringing for something that may not be
+/// a call at all.
+public protocol NseCallSignalingParser {
+    func parse(_ bytes: Data) -> NseCallSignal?
+}
+
+/// The call-style alert the extension raises when a call arrives without a VoIP
+/// push — the best a notification extension can do, since only CallKit can ring
+/// a phone and only the app can reach CallKit.
+public struct NseCallAlert: Equatable {
+    /// The caller: a mirrored name, else the unnamed wording.
+    public let title: String
+    /// `Voice call` / `Video call` (`docs/ux/calls.md` section 2.2).
+    public let body: String
+    /// Lowercase hex of the call id, stamped on the notification so the app can
+    /// take this alert down when the call is answered or ends.
+    public let callIdHex: String
+    /// The group hex — groups a conversation's notifications.
+    public let tag: String
+
+    public init(title: String, body: String, callIdHex: String, tag: String) {
+        self.title = title
+        self.body = body
+        self.callIdHex = callIdHex
+        self.tag = tag
+    }
+}
+
+/// What the extension should show for this wake.
+public enum NsePushOutcome: Equatable {
+    /// A decrypted message preview (ADR-0041).
+    case preview(NsePushPreview)
+    /// A call is ringing.
+    case callOffer(NseCallAlert)
+    /// A call this device may be showing an alert for is over.
+    case callEnded(callIdHex: String)
+    /// Nothing to say — the extension shows its generic fallback.
+    case none
 }
 
 /// The notification preview the NSE renders when the decrypt succeeds.
@@ -229,6 +319,19 @@ public protocol NsePushDecryptDeps {
     /// fingerprintable connection to Lakko infra on a push wake — the decrypt
     /// short-circuits to the generic banner instead (ADR-0041 Finding-1).
     func isAntiCensorshipArmed() -> Bool
+
+    /// `docs/ux/calls.md` section 2.1 — the conversation's display name, for a
+    /// ringing lock screen, read from the App Group mirror the APP writes
+    /// (``CallPeerNameMirror``). READ-ONLY, like every other method here: this
+    /// process resolves no names and stores none (C-59).
+    ///
+    /// Defaulted so the decrypt core keeps compiling against a dependency
+    /// object that predates calls; `nil` simply means the alert is unnamed.
+    func callerName(groupIdHex: String) -> String?
+}
+
+public extension NsePushDecryptDeps {
+    func callerName(groupIdHex: String) -> String? { nil }
 }
 
 /// Produce a real decrypted notification preview for a GroupMessage wake, or
@@ -242,24 +345,48 @@ public func decryptPushPreview(
     _ wake: NsePushWake?,
     _ deps: NsePushDecryptDeps
 ) async -> NsePushPreview? {
+    if case let .preview(preview) = await decryptPushOutcome(wake, deps) { return preview }
+    return nil
+}
+
+/// Everything a wake can turn into: a message preview, a ringing call, a call
+/// that has just ended, or nothing.
+///
+/// The superset of ``decryptPushPreview(_:_:)``, which stays as the name for
+/// the message half.
+///
+/// ## Why a call outranks a message
+///
+/// One fetch can bring back both a chat message and a call offer. The call
+/// wins, whichever is newer: a call is an interruption that expires in seconds
+/// (`docs/ux/calls.md` section 1) and the message is still there afterwards,
+/// while a call announced 40 seconds late is worse than not announced at all.
+///
+/// A call that is already over never rings: within one batch an `end` for a
+/// call supersedes its own `offer`, which is the common case for a caller who
+/// gave up while this device was asleep.
+public func decryptPushOutcome(
+    _ wake: NsePushWake?,
+    _ deps: NsePushDecryptDeps
+) async -> NsePushOutcome {
     // 0. Anti-censorship gate (ADR-0041 Finding-1). If the user has ARMED
     //    anti-censorship (to avoid direct connections to Lakko infra in a
     //    hostile network), the NSE must NOT make a direct, fingerprintable DS
     //    connection on a push wake. Short-circuit BEFORE any store read or
-    //    network fetch and return nil, so the handler shows the generic
+    //    network fetch and return nothing, so the handler shows the generic
     //    "New message" banner — the armed user trades the rich preview for
     //    no-direct-connection, the correct anti-censorship posture. The flag
     //    is mirrored from the app's preference into the shared App Group
     //    suite (the NSE cannot read the app's private UserDefaults.standard).
-    if deps.isAntiCensorshipArmed() { return nil }
+    if deps.isAntiCensorshipArmed() { return .none }
 
     // 1. Only GroupMessage wakes carry a 64-hex group + a pointer. A Wakeup /
     //    MailboxMessage wake is not handled in this slice.
     guard let rawGroupHex = wake?.groupHex, let pointer = wake?.pointer else {
-        return nil
+        return .none
     }
     let groupHex = rawGroupHex.lowercased()
-    guard groupHex.count == groupHexLen, isLowerHex(groupHex) else { return nil }
+    guard groupHex.count == groupHexLen, isLowerHex(groupHex) else { return .none }
 
     // 2. Resolve the wake's `g` to a real (account, group_id). ADR-0042
     //    Sprint 4: post-Sprint-3 the notify path sends `g = hex(push_gid)` —
@@ -279,12 +406,12 @@ public func decryptPushPreview(
         account = legacy
         realGroupHex = groupHex
     } else {
-        return nil
+        return .none
     }
 
     // 3. The AccountIdentity seed → the throwaway Identity.
     guard var seed = deps.loadIdentitySeed(accountIdB64: account.accountIdB64) else {
-        return nil
+        return .none
     }
 
     // 4. The last-persisted MLS provider snapshot (the ratchet state the
@@ -292,7 +419,7 @@ public func decryptPushPreview(
     guard let snapshot = deps.loadSnapshot(accountIdB64: account.accountIdB64) else {
         // Zero our seed view before bailing (the identity was never built).
         seed.resetBytes(in: 0..<seed.count)
-        return nil
+        return .none
     }
 
     // 5. Build a TEMPORARY, in-memory group from the snapshot. Everything from
@@ -310,7 +437,7 @@ public func decryptPushPreview(
     // The throwaway Identity has copied the seed; zero our view of it
     // regardless of success (mirrors the seed-store caller contract).
     seed.resetBytes(in: 0..<seed.count)
-    guard let group = opened else { return nil }
+    guard let group = opened else { return .none }
 
     defer {
         // Discard the throwaway MLS state. We NEVER snapshot it back — doing
@@ -338,7 +465,7 @@ public func decryptPushPreview(
     do {
         rows = try await deps.dsFetch(groupIdBytes: account.groupIdBytes, afterId: after)
     } catch {
-        return nil
+        return .none
     }
 
     // 7. Process each row through the TEMP group and keep the NEWEST frame
@@ -346,13 +473,118 @@ public func decryptPushPreview(
     //    authenticate (wrong epoch, our own echo, a control frame, a
     //    role-refused commit) is skipped — never guessed. NOTE: `process`
     //    mutates the THROWAWAY provider ONLY; it is never persisted.
+    //    A call-signaling row is classified separately and OUTRANKS a message
+    //    (see this function's docs): the newest call event decides, and an
+    //    `end` for a call cancels its own `offer` from the same batch.
     var latest: NsePushPreview?
+    var latestCall: NseProcessedRow?
     for row in rows {
         guard let processed = group.process(row.payload) else { continue }
-        guard let body = previewBody(of: processed) else { continue }
-        latest = NsePushPreview(title: "Lakko", body: body, tag: realGroupHex)
+        switch processed.kind {
+        case .callOffer, .callEnd:
+            latestCall = processed
+        default:
+            guard let body = previewBody(of: processed) else { continue }
+            latest = NsePushPreview(title: "Lakko", body: body, tag: realGroupHex)
+        }
     }
-    return latest
+    if let latestCall, let callIdHex = latestCall.callIdHex {
+        switch latestCall.kind {
+        case .callOffer(let video):
+            return .callOffer(NseCallAlert(
+                title: deps.callerName(groupIdHex: realGroupHex) ?? nseUnknownCallerTitle,
+                body: nseCallKindLabel(video: video),
+                callIdHex: callIdHex,
+                tag: realGroupHex
+            ))
+        case .callEnd:
+            return .callEnded(callIdHex: callIdHex)
+        default:
+            break
+        }
+    }
+    if let latest { return .preview(latest) }
+    return .none
+}
+
+// MARK: - Call wording
+
+/// What a ringing lock screen says when this device has no mirrored name for
+/// the conversation.
+///
+/// The same words the app's own placeholder uses
+/// (`IncomingCallReport.unknownCaller`), stated again here rather than shared:
+/// the extension is a separate process that links neither the app module nor
+/// the full FFI, and the alternative — compiling the app's file into a third
+/// target — puts two copies of the same symbol in the unit-test target.
+public let nseUnknownCallerTitle = "Incoming call"
+
+/// `Voice call` / `Video call` (`docs/ux/calls.md` section 2.2). The
+/// extension's copy of ``CallKindLabel``; see ``nseUnknownCallerTitle`` for why
+/// it is a copy.
+public func nseCallKindLabel(video: Bool) -> String {
+    video ? "Video call" : "Voice call"
+}
+
+/// What the extension shows for a call that has ENDED, given whether it found
+/// its own alert still on screen.
+///
+/// The extension cannot decline to show anything: `contentHandler` must be
+/// called, and skipping it DROPS the notification in a way iOS counts against
+/// the app. So the question is only what to say, and the answer follows from
+/// whether the offer alert was still sitting there:
+///
+///   * **It was** — nobody dealt with this call on this device, and the alert
+///     has just been taken down. That is a missed call, and
+///     `docs/ux/calls.md` section 6 says a missed call raises a notification.
+///   * **It was not** — the call was answered or declined here (the app clears
+///     the alert when it takes a call, ``CallKitBridge``), or it never showed.
+///     There is nothing to tell the user, so the notification is `passive`:
+///     iOS files it without lighting the screen or playing a sound. That is the
+///     quietest an alert push can be made — an extension has no way to suppress
+///     one outright.
+public func nseEndedCallContent(
+    hadDeliveredAlert: Bool,
+    callerName: String?
+) -> (title: String, body: String, passive: Bool) {
+    if hadDeliveredAlert {
+        return (title: callerName ?? nseUnknownCallerTitle, body: "Missed call", passive: false)
+    }
+    return (title: "", body: "", passive: true)
+}
+
+/// Classify a decrypted application body as call signaling, or `nil` when it is
+/// not call signaling / cannot be read.
+///
+/// Two gates, in this order and for different reasons: the cheap byte peek
+/// (``nseLooksLikeCallSignaling(_:)``) keeps an FFI call off the path for every
+/// ordinary chat message, and the injected parser is the verdict. A `nil`
+/// parser — the state of a build whose slim FFI does not carry the call parse
+/// yet — makes every call row fall through to the service-envelope filter that
+/// has always dropped them, so an incomplete build is quiet rather than wrong.
+public func nseClassifyCallSignaling(
+    _ bytes: Data,
+    parser: NseCallSignalingParser?
+) -> NseProcessedRow? {
+    guard nseLooksLikeCallSignaling(bytes), let parser else { return nil }
+    switch parser.parse(bytes) {
+    case .offer(let callIdHex, let video):
+        return NseProcessedRow(
+            kind: .callOffer(video: video),
+            text: "",
+            attachmentCount: 0,
+            callIdHex: callIdHex
+        )
+    case .end(let callIdHex):
+        return NseProcessedRow(
+            kind: .callEnd,
+            text: "",
+            attachmentCount: 0,
+            callIdHex: callIdHex
+        )
+    case .other, nil:
+        return nil
+    }
 }
 
 /// Extract a user-visible preview string from a processed row, or `nil` for
@@ -374,6 +606,10 @@ private func previewBody(of row: NseProcessedRow) -> String? {
     // delete / reaction / typing / read-receipt carry no standalone preview —
     // skip so an older real message stays the preview.
     case .delete, .reaction, .typing, .readReceipt:
+        return nil
+    // A call is not a message preview — it is its own outcome, decided by the
+    // caller before this function is reached.
+    case .callOffer, .callEnd:
         return nil
     }
 }
@@ -580,6 +816,13 @@ public func nseLooksLikeGroupName(_ bytes: Data, envelopeLens: ClosedRange<Int>)
 /// (`ChatClient.toEvent`) has always filtered these; this is the background
 /// half of the same gate, in the same ORDER (call signaling first, then push
 /// routing) so the two paths cannot disagree.
+///
+/// Since `docs/ux/calls.md`, the caller asks ``nseClassifyCallSignaling(_:parser:)``
+/// BEFORE this function, and a call it can read becomes a ring rather than a
+/// drop. The call arm below is what remains for the rows that classifier cannot
+/// use — a frame it could not read, or a build with no parser at all — and it
+/// keeps doing what it always did with them: suppress, so an unreadable frame
+/// is quiet rather than rendered as a smear of SDP.
 ///
 /// Three kinds, each one arm below: call signaling, the ADR-0042 / ADR-0044
 /// push-routing secret, and the ADR-0045 committer-liveness beacon. The beacon

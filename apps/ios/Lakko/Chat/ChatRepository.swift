@@ -841,6 +841,31 @@ public final class ChatRepository: ObservableObject {
                 })
     }
 
+    /// `docs/ux/calls.md` section 2.1 — refresh the background name mirror for
+    /// every conversation this device knows.
+    ///
+    /// A ringing phone has to show a name before anything is open, and the
+    /// process that raises that alert — the notification-service extension —
+    /// cannot resolve one: it has no profile directory and no roster, by design
+    /// (C-59). So the app writes the names it has already resolved into the App
+    /// Group suite and the extension only reads them. See
+    /// ``CallPeerNameMirror`` for what that costs and what it deliberately is
+    /// not.
+    ///
+    /// Cheap and idempotent: a name that has not changed is a read and no
+    /// write. Called when the app becomes active and after the chat bootstrap,
+    /// which is often enough — a name that is one session stale costs the lock
+    /// screen an old name, and the system call screen is corrected by a call
+    /// update as soon as the app decrypts the offer.
+    public func mirrorCallPeerNames() {
+        for groupIdHex in groups.keys {
+            CallPeerNameMirror.mirror(
+                groupIdHex: groupIdHex,
+                name: conversationTitle(groupIdHex: groupIdHex)
+            )
+        }
+    }
+
     /// `docs/ux/calls.md` section 6 — write a finished call's row into the
     /// conversation.
     ///
