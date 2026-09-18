@@ -16,6 +16,20 @@
  * Keyed by group, because a DS message id is only unique within one group's
  * journal. In memory only — after a reload the echo is logged and skipped as
  * it always was.
+ *
+ * ## This is the ONLY registry
+ *
+ * `ChatClient` used to additionally keep a group-BLIND `Set<number>` of its own,
+ * checked first with an `||`, which is a message-loss hazard rather than a
+ * redundancy: one `ChatClient` serves every group (the background receive loop
+ * polls them all through a single instance), so "row N is my own echo" became
+ * true for every journal at once. A sweep commit at row N in chat A then made
+ * chat B's row N vanish — dropped inside the batch, after the cursor had
+ * already been moved to it, so no later poll ever fetches it again. Worse in
+ * both directions: B's poll then CONSUMED the entry, so A's own echo later
+ * reached OpenMLS and was refused as `CannotDecryptOwnMessage` with a phantom
+ * system row. Every mark and every lookup therefore goes through here, and
+ * every one of them names its group.
  */
 
 const published = new Map<string, Set<number>>();

@@ -399,6 +399,12 @@ public struct SweepPorts {
     public var wrapRendezvous: (Data, Data) throws -> Data
     /// Echo-suppress a row this device published, so its own next poll drops it
     /// instead of hitting `CannotDecryptOwnMessage`.
+    ///
+    /// Takes the id alone because the ports are built per group: the production
+    /// wiring binds `groupIdHex` at construction, and
+    /// ``ChatClient/markOwnPublishedCommit(groupIdHex:messageId:)`` will not
+    /// accept a bare id. The sweep publishes only to its own group's journal,
+    /// so there is nothing here for a second argument to vary over.
     public var markOwnPublished: (Int64) -> Void
     /// Best-effort MLS snapshot persist after a merge / abandon.
     public var persist: () -> Void

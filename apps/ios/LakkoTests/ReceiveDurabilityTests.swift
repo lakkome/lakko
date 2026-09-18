@@ -32,7 +32,7 @@ import LakkoCore
 ///
 /// Two production surfaces, not a paraphrase of them:
 ///
-///   1. ``ChatClient/applyFetchedMessages(identity:group:raw:after:)`` against a
+///   1. ``ChatClient/applyFetchedMessages(identity:group:groupIdHex:raw:after:)`` against a
 ///      REAL FFI `Identity` + `Group`, for the "which rows touched durable
 ///      state" half. It has to be real: the whole point is that a row which
 ///      THREW may still have written, because `process_message` decrypts and
@@ -90,6 +90,12 @@ final class ReceiveDurabilityTests: XCTestCase {
         return (identity, group)
     }
 
+    /// The journal these batches are applied from. The own-echo filter is keyed
+    /// on `(journal, id)`, so every apply has to name one.
+    private func journalHex(_ group: Group) throws -> String {
+        DsClient.pseudonymHex(try group.groupId())
+    }
+
     private func fetchResult(_ rows: [(Int64, Data)]) -> FetchResult {
         FetchResult(
             messages: rows.map {
@@ -112,6 +118,7 @@ final class ReceiveDurabilityTests: XCTestCase {
         let result = client.applyFetchedMessages(
             identity: identity,
             group: group,
+            groupIdHex: try journalHex(group),
             raw: fetchResult([(10, Data([0xFF, 0xFF, 0xFF]))]),
             after: 0
         )
@@ -127,7 +134,8 @@ final class ReceiveDurabilityTests: XCTestCase {
         let (identity, group) = try realGroup()
         let client = ChatClient()
         let result = client.applyFetchedMessages(
-            identity: identity, group: group, raw: fetchResult([]), after: 7
+            identity: identity, group: group, groupIdHex: try journalHex(group),
+            raw: fetchResult([]), after: 7
         )
         XCTAssertFalse(result.touchedMlsState)
         XCTAssertEqual(result.cursor, 7, "an empty batch must not rewind the cursor")
@@ -136,10 +144,12 @@ final class ReceiveDurabilityTests: XCTestCase {
     func testAnAllEchoBatchTouchesNothing() throws {
         let (identity, group) = try realGroup()
         let client = ChatClient()
-        client.markOwnPublishedCommit(messageId: 10)
+        let journal = try journalHex(group)
+        client.markOwnPublishedCommit(groupIdHex: journal, messageId: 10)
         let result = client.applyFetchedMessages(
             identity: identity,
             group: group,
+            groupIdHex: journal,
             raw: fetchResult([(10, Data([0xFF]))]),
             after: 0
         )

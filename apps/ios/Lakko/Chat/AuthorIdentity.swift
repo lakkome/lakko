@@ -33,7 +33,7 @@ import LakkoCore
 /// ## Why resolution happens at receipt
 ///
 /// A leaf only names a member **in the epoch the message was sealed at**.
-/// ``ChatClient/applyFetchedMessages(identity:group:raw:after:)`` calling
+/// ``ChatClient/applyFetchedMessages(identity:group:groupIdHex:raw:after:)`` calling
 /// `processIncomingVerifyingRoles` and getting an Application frame back is the
 /// one moment the group's roster IS that epoch's roster (a Commit that
 /// renumbers leaves is a separate journal row, and OpenMLS decrypts an

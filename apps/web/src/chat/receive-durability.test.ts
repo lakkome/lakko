@@ -78,6 +78,7 @@ vi.mock("./commit-outbox", () => ({
   loadUnacked: async () => [],
 }));
 
+import { base64Encode } from "../auth/account-id";
 import { ChatClient } from "./client";
 import type { DsClient } from "../ds/client";
 import type { PushClient } from "../push/client";
@@ -88,7 +89,22 @@ import type {
 
 const IDENTITY_TOKEN = {} as unknown as WasmIdentity;
 
-const GROUP_ID = new Uint8Array([0xa1, 0xb2]);
+/**
+ * A fresh group id per `device()`.
+ *
+ * The own-published echo registry (`chat/own-published.ts`) is module-global and
+ * keyed by group, deliberately: one page-wide registry is what lets a row
+ * published outside the chat route be recognised as an echo inside it. Handing
+ * every device in this file the SAME group id would therefore let an
+ * unconsumed mark from one `it` suppress a row in the next — so each device
+ * gets its own journal, which is also what the file's own subject matter says
+ * they are.
+ */
+let nextGroupId = 0xa1;
+function freshGroupId(): Uint8Array {
+  nextGroupId += 1;
+  return new Uint8Array([nextGroupId, 0xb2]);
+}
 
 // ---------------------------------------------------------------------------
 // Journal rows — a tiny JSON wire so a row's meaning is readable in a failure.
@@ -122,6 +138,8 @@ interface DurableState {
 
 interface Device {
   readonly group: WasmGroup;
+  /** How the echo registry names this device's journal. */
+  readonly groupIdB64: string;
   /** The MLS snapshot on disk. */
   readonly durable: () => DurableState;
   /** The journal position on disk — a SEPARATE store, written separately. */
@@ -143,6 +161,7 @@ interface Device {
 }
 
 function device(): Device {
+  const groupId = freshGroupId();
   let durable: DurableState = { proposals: [], epoch: 0n };
   let memProposals = new Set<string>();
   let memEpoch = 0n;
@@ -154,7 +173,7 @@ function device(): Device {
 
   const group = {
     get groupId(): Uint8Array {
-      return GROUP_ID;
+      return groupId;
     },
     get epoch(): bigint {
       return memEpoch;
@@ -206,6 +225,7 @@ function device(): Device {
 
   return {
     group,
+    groupIdB64: base64Encode(groupId),
     ds,
     durable: () => ({ proposals: [...durable.proposals], epoch: durable.epoch }),
     durableCursor: () => cursor,
@@ -376,7 +396,7 @@ describe("receive-path durability ordering", () => {
     const chat = clientFor(d);
 
     const id = d.push({ t: "proposal", ref: "P" });
-    chat.markOwnPublishedCommit(id);
+    chat.markOwnPublishedCommit(d.groupIdB64, id);
 
     await chat.pollMessages(null, d.group, 0, 0, d.cursorRef);
     expect(d.persistCalls()).toBe(0);
@@ -392,7 +412,7 @@ describe("receive-path durability ordering", () => {
 
     d.push({ t: "proposal", ref: "P" });
     const ownId = d.push({ t: "commit", needs: "P" });
-    chat.markOwnPublishedCommit(ownId);
+    chat.markOwnPublishedCommit(d.groupIdB64, ownId);
 
     d.failPersist(true);
     await chat.pollMessages(null, d.group, 0, 0, d.cursorRef);

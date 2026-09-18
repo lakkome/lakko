@@ -516,12 +516,6 @@ export interface BroadcastControlOptions {
 }
 
 export class ChatClient {
-  /** Track DS message ids we ourselves just published, so the
-   *  next poll can drop the echo. Cleared per `ChatClient`
-   *  instance; if the UI loses this list (e.g. swap clients)
-   *  the echo surfaces as a `processIncoming` failure that
-   *  we log-and-skip. */
-  private readonly ownPublishedIds = new Set<number>();
   /** The receive path's cursor-may-lag-never-lead gate. One per client, which
    *  is the right granularity because `snapshotStorage()` serialises the whole
    *  provider — see `chat/durable-cursor.ts`. */
@@ -755,9 +749,8 @@ export class ChatClient {
     } catch (err) {
       throw new ChatError("DS publish failed", err);
     }
-    this.ownPublishedIds.add(publish.id);
-    // ADR-0048 — shared with every other ChatClient on this page, so a
-    // service envelope published outside the chat route (a profile right
+    // Keyed by GROUP, and shared with every other `ChatClient` on this page, so
+    // a service envelope published outside the chat route (a profile right
     // after a Welcome) is still recognised as an echo there.
     markOwnPublished(base64Encode(groupId), publish.id);
 
@@ -834,27 +827,33 @@ export class ChatClient {
   }
 
   /**
-   * Register a DS message id as one **we** published (Phase
-   * 1.18g) — typically a commit returned by
+   * Register a DS message id as one **we** published into `groupIdB64` (Phase
+   * 1.18g) — typically a commit or proposal returned by
    * `ContactsClient.addMemberToGroup`'s broadcast step.
    *
-   * The next `pollMessages` will see this id and drop it via
-   * the `ownPublishedIds` filter — same suppression path
-   * `sendMessage` uses for application messages. Without
-   * registration the sender's own pollMessages would hit
-   * `processIncoming` on its own outgoing commit at the
-   * already-advanced epoch, fail, log a noisy console warning,
-   * and render a phantom system row in the timeline.
+   * The next `pollMessages` of THAT group will see this id and drop it — the
+   * same suppression path `sendMessage` uses for application messages. Without
+   * registration the sender's own pollMessages would hit `processIncoming` on
+   * its own outgoing commit at the already-advanced epoch, fail, log a noisy
+   * console warning, and render a phantom system row in the timeline.
    *
-   * Crosses the client boundary because `ContactsClient` owns
-   * the addMember flow (discovery resolution + Welcome shipping)
-   * but `ChatClient` owns the ownPublishedIds registry.
-   * Plumbing the registry through ContactsClient would couple
-   * the two; a thin `markOwnPublishedCommit` accessor keeps the
-   * surfaces independent.
+   * ## The group is not optional
+   *
+   * A DS message id is per-group monotonic, so it identifies a row only
+   * together with its journal. One `ChatClient` serves every group here — the
+   * background receive loop polls them all through a single instance — so a
+   * registry that only held ids would make "row N is my own echo" true for
+   * every group at once: marking a sweep commit at row N in chat A would
+   * SUPPRESS an unrelated row N in chat B, whose cursor has already moved past
+   * it, losing that message permanently. Hence the group-keyed registry in
+   * `chat/own-published.ts`, and hence this parameter.
+   *
+   * Crosses the client boundary because `ContactsClient` owns the addMember
+   * flow (discovery resolution + Welcome shipping) but the echo registry is the
+   * receive path's; a thin accessor keeps the surfaces independent.
    */
-  markOwnPublishedCommit(messageId: number): void {
-    this.ownPublishedIds.add(messageId);
+  markOwnPublishedCommit(groupIdB64: string, messageId: number): void {
+    markOwnPublished(groupIdB64, messageId);
   }
 
   /**
@@ -885,8 +884,8 @@ export class ChatClient {
    * failure swallowed, exactly as a message wake is — so opting in cannot
    * make a publish slower or a call fail.
    *
-   * Records the DS id in `ownPublishedIds` so the broadcaster's own next
-   * poll drops the echo (the owner already holds the secret it minted).
+   * Records the DS id in this group's echo registry so the broadcaster's own
+   * next poll drops the echo (the owner already holds the secret it minted).
    *
    * Serialized under the same per-group `withGroupMlsLock` as `sendMessage`,
    * for the epoch-straddle reason documented there — it shares that method's
@@ -1038,11 +1037,10 @@ export class ChatClient {
       cursor = message.id;
       // Drop our own echoes — the DS doesn't dedupe and
       // OpenMLS can't decrypt them on the sender side at the
-      // same epoch.
-      if (
-        this.ownPublishedIds.has(message.id) ||
-        isOwnPublished(groupIdB64, message.id)
-      ) {
+      // same epoch. Matched against THIS group's registry only: a DS id is
+      // unique within one journal, so a group-blind match would suppress
+      // another chat's row of the same id (see `markOwnPublishedCommit`).
+      if (isOwnPublished(groupIdB64, message.id)) {
         matchedEchoes.push(message.id);
         continue;
       }
@@ -1099,10 +1097,7 @@ export class ChatClient {
         cursorRef?.advance(cursor);
         // Consume the echo registry entries only now: on the held path they
         // stay armed so the re-fetched batch still suppresses our own rows.
-        for (const id of matchedEchoes) {
-          this.ownPublishedIds.delete(id);
-          consumeOwnPublished(groupIdB64, id);
-        }
+        for (const id of matchedEchoes) consumeOwnPublished(groupIdB64, id);
       },
     );
     if (verdict === "held") {

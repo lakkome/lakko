@@ -1530,7 +1530,7 @@ function ChatView(props: {
         props.requireIdentity(),
         props.entry.group,
         { read: () => cursor(), advance: (to) => setCursor(to) },
-        (id) => chat.markOwnPublishedCommit(id),
+        (id) => chat.markOwnPublishedCommit(props.entry.groupIdB64, id),
         actingCommitterNow,
         (event) => swept.push(event),
       );
@@ -1682,6 +1682,7 @@ function ChatView(props: {
               ),
             );
       chat.markOwnPublishedCommit(
+        props.entry.groupIdB64,
         out.kind === "committed" ? out.commitMessageId : out.proposalMessageId,
       );
       if (out.kind === "proposed") noteOwnRequest(`remove:${leaf}`);
@@ -1943,6 +1944,7 @@ function ChatView(props: {
           base64Decode(request.subjectKeyB64),
         );
         chat.markOwnPublishedCommit(
+          props.entry.groupIdB64,
           out.kind === "committed" ? out.commitMessageId : out.proposalMessageId,
         );
         if (out.kind === "proposed") noteOwnRequest(`add:${request.subjectKeyB64}`);
@@ -1960,6 +1962,7 @@ function ChatView(props: {
         if (leaf === undefined) return;
         const out = await contacts.removeMemberFromGroup(identity, group, leaf);
         chat.markOwnPublishedCommit(
+          props.entry.groupIdB64,
           out.kind === "committed" ? out.commitMessageId : out.proposalMessageId,
         );
         if (out.kind === "proposed") {
@@ -1977,7 +1980,7 @@ function ChatView(props: {
           group,
           base64Decode(request.subjectKeyB64),
         );
-        chat.markOwnPublishedCommit(out.proposalMessageId);
+        chat.markOwnPublishedCommit(props.entry.groupIdB64, out.proposalMessageId);
         // Identical bookkeeping to the manual `onApproveJoin`, third argument
         // included: only this device can know the add came from a JOIN
         // request, and that flag is what later says `Ask them to request to
@@ -1999,6 +2002,7 @@ function ChatView(props: {
           request.makeAdmin,
         );
         chat.markOwnPublishedCommit(
+          props.entry.groupIdB64,
           out.kind === "committed" ? out.commitMessageId : out.proposalMessageId,
         );
         if (out.kind === "proposed") noteOwnRequest("role-change");
@@ -2012,6 +2016,7 @@ function ChatView(props: {
           request.outgoing,
         );
         chat.markOwnPublishedCommit(
+          props.entry.groupIdB64,
           out.kind === "committed" ? out.commitMessageId : out.proposalMessageId,
         );
         if (out.kind === "proposed") {
@@ -2576,6 +2581,7 @@ function ChatView(props: {
           ),
       );
       chat.markOwnPublishedCommit(
+        props.entry.groupIdB64,
         result.kind === "committed"
           ? result.commitMessageId
           : result.proposalMessageId,
@@ -2762,8 +2768,8 @@ function ChatView(props: {
     // refreshes after a reset; outgoing rows we sent in
     // this session also surface here on a second refresh
     // through a different path (we already filter the echo
-    // in ChatClient via ownPublishedIds, so duplicates here
-    // are rare).
+    // in ChatClient via the per-group echo registry, so
+    // duplicates here are rare).
     const incomingIds = new Set(
       rows().flatMap((r) =>
         r.kind === "incoming" ? [r.event.messageId] : [],
@@ -3438,9 +3444,10 @@ function ChatView(props: {
   //
   // Typing + read receipts ride the same application send path as
   // chat / edit / etc. (`chat.sendMessage`), so the DS echo is
-  // dropped via `ownPublishedIds` exactly like the ADR-0023 ops.
-  // They are best-effort fire-and-forget — a transient failure must
-  // never wedge the composer or surface a user-facing error (the
+  // dropped via the per-group echo registry exactly like the
+  // ADR-0023 ops. They are best-effort fire-and-forget — a
+  // transient failure must never wedge the composer or surface a
+  // user-facing error (the
   // signals are non-essential status). They render no optimistic
   // bubble.
 
@@ -4210,6 +4217,7 @@ function ChatView(props: {
     // an epoch we've already advanced past. ADR-0045: the artifact is a
     // PROPOSAL in a role-table group and a commit only in a legacy one.
     chat.markOwnPublishedCommit(
+      props.entry.groupIdB64,
       outcome.kind === "committed" ? outcome.commitMessageId : outcome.proposalMessageId,
     );
     // ADR-0045 — record when the request landed, so the quiet window is
@@ -4448,6 +4456,7 @@ function ChatView(props: {
                 removeRun,
               );
         chat.markOwnPublishedCommit(
+          props.entry.groupIdB64,
           proposed.kind === "committed"
             ? proposed.commitMessageId
             : proposed.proposalMessageId,
@@ -4473,7 +4482,7 @@ function ChatView(props: {
             leafIndex,
           );
           if (removed.kind === "committed") {
-            chat.markOwnPublishedCommit(removed.commitMessageId);
+            chat.markOwnPublishedCommit(props.entry.groupIdB64, removed.commitMessageId);
           }
           return removed;
         },
@@ -4534,6 +4543,7 @@ function ChatView(props: {
           ),
       );
       chat.markOwnPublishedCommit(
+        props.entry.groupIdB64,
         result.kind === "committed"
           ? result.commitMessageId
           : result.proposalMessageId,
@@ -4582,7 +4592,7 @@ function ChatView(props: {
           proposalRef,
         ),
       );
-      chat.markOwnPublishedCommit(result.proposalMessageId);
+      chat.markOwnPublishedCommit(props.entry.groupIdB64, result.proposalMessageId);
       // ADR-0045 — the same bookkeeping every other membership request gets:
       // the quiet window is measured against the DS row, and this device knows
       // the request is its own.
@@ -4811,7 +4821,7 @@ function ChatView(props: {
         try {
           await contacts.sweepPendingCommits(
             props.entry.group,
-            (id) => chat.markOwnPublishedCommit(id),
+            (id) => chat.markOwnPublishedCommit(props.entry.groupIdB64, id),
             props.requireIdentity(),
             { read: () => cursor(), advance: (to) => setCursor(to) },
             (event) => sweptOnRestart.push(event),

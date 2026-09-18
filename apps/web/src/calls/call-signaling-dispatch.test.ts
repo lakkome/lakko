@@ -31,9 +31,12 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 describe("SerialOnceQueue", () => {
   it("delivers a row once however many times the poll re-feeds it", async () => {
     const seen: string[] = [];
-    const q = new SerialOnceQueue<Row>(async (r) => {
-      seen.push(r.label);
-    });
+    const q = new SerialOnceQueue<Row>(
+      async (r) => {
+        seen.push(r.label);
+      },
+      (r) => r.messageId,
+    );
     // The old effect walked every row on every rows() change.
     const batch = [
       { messageId: 10, label: "offer" },
@@ -53,16 +56,19 @@ describe("SerialOnceQueue", () => {
     let running = 0;
     let maxRunning = 0;
     const gate = deferred();
-    const q = new SerialOnceQueue<Row>(async (r) => {
-      running += 1;
-      maxRunning = Math.max(maxRunning, running);
-      log.push(`start ${r.label}`);
-      // The first handler parks (a capture prompt, an SDP apply) while the
-      // later rows are already queued behind it.
-      if (r.label === "offer") await gate.promise;
-      log.push(`end ${r.label}`);
-      running -= 1;
-    });
+    const q = new SerialOnceQueue<Row>(
+      async (r) => {
+        running += 1;
+        maxRunning = Math.max(maxRunning, running);
+        log.push(`start ${r.label}`);
+        // The first handler parks (a capture prompt, an SDP apply) while the
+        // later rows are already queued behind it.
+        if (r.label === "offer") await gate.promise;
+        log.push(`end ${r.label}`);
+        running -= 1;
+      },
+      (r) => r.messageId,
+    );
     q.enqueue({ messageId: 1, label: "offer" });
     q.enqueue({ messageId: 2, label: "ice-a" });
     q.enqueue({ messageId: 3, label: "ice-b" });
@@ -90,6 +96,7 @@ describe("SerialOnceQueue", () => {
         if (r.messageId === 1) throw new Error("malformed");
         seen.push(r.messageId);
       },
+      (r) => r.messageId,
       (_err, r) => errors.push(r.messageId),
     );
     q.enqueue({ messageId: 1, label: "bad" });
@@ -102,10 +109,13 @@ describe("SerialOnceQueue", () => {
   it("close drops what is queued and refuses what comes after", async () => {
     const seen: number[] = [];
     const gate = deferred();
-    const q = new SerialOnceQueue<Row>(async (r) => {
-      if (r.messageId === 1) await gate.promise;
-      seen.push(r.messageId);
-    });
+    const q = new SerialOnceQueue<Row>(
+      async (r) => {
+        if (r.messageId === 1) await gate.promise;
+        seen.push(r.messageId);
+      },
+      (r) => r.messageId,
+    );
     q.enqueue({ messageId: 1, label: "running" });
     q.enqueue({ messageId: 2, label: "queued" });
     // Let the first handler start before closing.
@@ -178,7 +188,6 @@ describe("SerialOnceQueue fed by several groups (the app-level call host)", () =
       async (r) => {
         seen.push(`${r.groupIdB64}:${r.messageId}`);
       },
-      undefined,
       (r) => `${r.groupIdB64}:${r.messageId}`,
     );
     expect(q.enqueue({ groupIdB64: "A", messageId: 42 })).toBe(true);

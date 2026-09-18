@@ -38,8 +38,8 @@ import LakkoCore
 /// failure: we'd see a "can't decrypt own message" exception,
 /// swallow it, and the UI would never see the row.
 ///
-/// Instead we **track the DS ids of our own publishes** during the
-/// session and drop matches on receive. The set lives on the
+/// Instead we **track the rows of our own publishes** during the
+/// session and drop matches on receive. The registry lives on the
 /// ``ChatClient`` instance — swapping clients (e.g. logout) loses
 /// the list; pending echoes after a swap surface as the
 /// processIncoming-failed path above, which is harmless but
@@ -48,14 +48,16 @@ public final class ChatClient {
 
     private let ds: DsClient
 
-    /// Track DS message ids we ourselves just published, so the
-    /// next poll can drop the echo. Synchronised via an internal
-    /// serial DispatchQueue because ``sendMessage`` and
-    /// ``pollMessages`` may run on different `Task` actors;
-    /// `Set<Int64>` is value-typed but needs an external lock for
-    /// concurrent mutation.
-    private var ownPublishedIds: Set<Int64> = []
-    private let lockQueue = DispatchQueue(label: "me.lakko.chat.client.ownPublished")
+    /// Rows this device published itself, so the next poll drops the echo.
+    ///
+    /// Keyed on `(journal, id)` — see ``OwnEchoRegistry``. It used to be a bare
+    /// `Set<Int64>` of ids, and because a DS id is assigned per journal, an id
+    /// published in one chat swallowed the next row numbered the same in a
+    /// DIFFERENT chat — cursor already past it, so the row was gone for good.
+    /// That dropped ordinary messages, reactions, read receipts, membership
+    /// commits and incoming call offers alike; it showed up as an incoming call
+    /// that rang only while its own chat was the visible screen.
+    private let ownPublished = OwnEchoRegistry()
 
     /// Fail-closed MLS-ratchet persister wired by ``ChatRepository``.
     ///
@@ -165,7 +167,10 @@ public final class ChatClient {
         } catch {
             throw ChatError.wrapped("DS publish failed", underlying: error)
         }
-        registerOwnPublishedId(publish.id)
+        ownPublished.remember(
+            groupIdHex: DsClient.pseudonymHex(groupId),
+            messageId: publish.id
+        )
 
         return SendMessageResult(
             messageId: publish.id,
@@ -175,13 +180,31 @@ public final class ChatClient {
 
     /// Register a DS message id as one we published — typically a
     /// commit returned by `ContactsClient.addMemberToGroup`'s
-    /// broadcast step. The next ``pollMessages(identity:group:after:waitSecs:)``
-    /// will see the id and drop it via the `ownPublishedIds`
-    /// filter, same path ``sendMessage(identity:group:plaintext:)``
-    /// uses for application messages.
-    public func markOwnPublishedCommit(messageId: Int64) {
-        registerOwnPublishedId(messageId)
+    /// broadcast step. The next
+    /// ``pollMessages(identity:group:after:waitSecs:)`` will see the row and
+    /// drop it via the ``OwnEchoRegistry``, same path
+    /// ``sendMessage(identity:group:plaintext:)`` uses for application
+    /// messages.
+    ///
+    /// `groupIdHex` is REQUIRED, not convenience: a DS id is assigned per
+    /// journal, so an id alone names a row in every group at once and would
+    /// silence an unrelated chat's next row of that number.
+    public func markOwnPublishedCommit(groupIdHex: String, messageId: Int64) {
+        ownPublished.remember(groupIdHex: groupIdHex, messageId: messageId)
     }
+
+    /// Drop every outstanding registration for one journal.
+    ///
+    /// Called when this device leaves a group or its membership ends: that
+    /// journal is never polled again (``ChatRepository/pollGroup(groupIdHex:waitSecs:)``
+    /// gates on it), so nothing can ever consume those entries and they would
+    /// sit in the registry for the life of the process.
+    public func forgetOwnPublished(groupIdHex: String) {
+        ownPublished.forget(groupIdHex: groupIdHex)
+    }
+
+    /// How many registrations are outstanding. Diagnostics and tests only.
+    var ownPublishedCount: Int { ownPublished.count }
 
     /// ADR-0042 — broadcast a CONTROL application message to the group
     /// journal (currently: the push-routing-secret distribution envelope).
@@ -247,7 +270,10 @@ public final class ChatClient {
         } catch {
             throw ChatError.wrapped("DS publishGroup (control) failed", underlying: error)
         }
-        registerOwnPublishedId(publish.id)
+        ownPublished.remember(
+            groupIdHex: DsClient.pseudonymHex(groupId),
+            messageId: publish.id
+        )
         return publish.id
     }
 
@@ -292,6 +318,7 @@ public final class ChatClient {
         return applyFetchedMessages(
             identity: identity,
             group: group,
+            groupIdHex: DsClient.pseudonymHex(groupId),
             raw: raw,
             after: after
         )
@@ -310,7 +337,8 @@ public final class ChatClient {
     /// commit's publish would recreate G-37 at a per-group blast radius: every
     /// send and commit on the group would queue behind an idle connection.
     ///
-    /// The MLS half is ``applyFetchedMessages(identity:group:raw:after:)``,
+    /// The MLS half is
+    /// ``applyFetchedMessages(identity:group:groupIdHex:raw:after:)``,
     /// which the caller runs under the lock. See
     /// ``ChatRepository/pollGroup(groupIdHex:waitSecs:)`` for the composition
     /// and the guards that keep the two halves consistent.
@@ -345,9 +373,14 @@ public final class ChatClient {
     ///
     /// `after` is the cursor the batch was fetched with, and seeds the returned
     /// cursor so an empty batch does not rewind it.
+    ///
+    /// `groupIdHex` names the journal the batch came off. It is REQUIRED
+    /// because the own-echo filter below is per journal: a DS id identifies a
+    /// row only together with the group whose journal assigned it.
     public func applyFetchedMessages(
         identity: Identity,
         group: Group,
+        groupIdHex: String,
         raw: FetchResult,
         after: Int64 = 0
     ) -> PollMessagesResult {
@@ -360,7 +393,13 @@ public final class ChatClient {
             // Drop our own echoes — the DS doesn't dedupe and
             // OpenMLS can't decrypt them on the sender side at
             // the same epoch.
-            if takeOwnPublishedId(message.id) {
+            //
+            // Matched on THIS journal's id, never on the id alone. Ids are per
+            // journal and every chat starts at 1, so an id-only match dropped
+            // another chat's row of the same number — a fetched row, silently
+            // discarded with the cursor advanced past it, which is what kept
+            // incoming calls from ringing outside the open chat.
+            if ownPublished.consume(groupIdHex: groupIdHex, messageId: message.id) {
                 continue
             }
 
@@ -410,18 +449,6 @@ public final class ChatClient {
             hasMore: raw.hasMore,
             touchedMlsState: touchedMlsState
         )
-    }
-
-    // MARK: - Own-published id registry
-
-    private func registerOwnPublishedId(_ id: Int64) {
-        lockQueue.sync { _ = ownPublishedIds.insert(id) }
-    }
-
-    /// Atomically test-and-remove. Returns `true` if the id was
-    /// in the set (caller drops the message); `false` otherwise.
-    private func takeOwnPublishedId(_ id: Int64) -> Bool {
-        lockQueue.sync { ownPublishedIds.remove(id) != nil }
     }
 
     // MARK: - ProcessedMessage → IncomingChatEvent

@@ -611,12 +611,12 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   function newQueue(): SerialOnceQueue<QueuedRow> {
     return new SerialOnceQueue<QueuedRow>(
       handleRow,
+      // A DS message id is unique only within one group's journal.
+      (item) => `${item.groupIdB64}:${item.row.messageId}`,
       (err) => {
         // eslint-disable-next-line no-console
         console.warn("call signaling dispatch failed", err);
       },
-      // A DS message id is unique only within one group's journal.
-      (item) => `${item.groupIdB64}:${item.row.messageId}`,
     );
   }
   let queue = newQueue();

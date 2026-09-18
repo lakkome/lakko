@@ -55,10 +55,18 @@ export interface InboundSignalingRow {
  * - **Isolated failures:** a handler that throws is reported and the queue
  *   moves on; one malformed row must not wedge every call after it.
  *
- * The key defaults to the DS `messageId`, which is only unique within ONE
- * group's journal. A queue fed by several groups — the app-level call host,
- * which receives signaling from every joined group — must key on the pair, or
- * row 42 of one group would be refused as a repeat of row 42 of another.
+ * ## `keyOf` is REQUIRED, and it is the second argument
+ *
+ * It used to be the third, and to DEFAULT to a bare `item.messageId` — which is
+ * only unique within ONE group's journal. The app-level call host receives
+ * signaling from every joined group, so under that default row 42 of one chat
+ * would be refused as a repeat of row 42 of another and a real call frame
+ * would be silently dropped. The one production caller already passed the
+ * qualified pair, so the default was never load-bearing — only a trap set for
+ * the next one. There is no safe default a generic queue can pick either, since
+ * only the caller knows what makes its item unique, so the parameter is
+ * mandatory and sits ahead of the optional `onError`, where it cannot be left
+ * off by accident.
  */
 export class SerialOnceQueue<T> {
   private readonly seen = new Set<string | number>();
@@ -67,12 +75,13 @@ export class SerialOnceQueue<T> {
 
   constructor(
     private readonly handler: (item: T) => Promise<void>,
+    /** What makes an item unique. For anything carrying a DS `messageId`, that
+     *  is the `(group, messageId)` PAIR — never the id alone. */
+    private readonly keyOf: (item: T) => string | number,
     private readonly onError: (err: unknown, item: T) => void = (err) => {
       // eslint-disable-next-line no-console
       console.warn("call signaling dispatch failed", err);
     },
-    private readonly keyOf: (item: T) => string | number = (item) =>
-      (item as unknown as { readonly messageId: number }).messageId,
   ) {}
 
   /** Queue an item. Returns `false` when it was refused (a repeat, or the

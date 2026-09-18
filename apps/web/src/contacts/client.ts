@@ -2435,7 +2435,7 @@ export class ContactsClient {
    *
    * Returns the DS message id of the **commit** publish — the
    * caller (typically `Chat.tsx`'s "Add member" handler) must
-   * register this id with the `ChatClient.markOwnPublishedCommit(id)`
+   * register this id with `ChatClient.markOwnPublishedCommit(groupIdB64, id)`
    * to suppress the echo on the sender's own next poll. Without
    * that suppression `processIncoming` raises "cannot process own
    * outgoing commit at the same epoch" and the timeline shows a

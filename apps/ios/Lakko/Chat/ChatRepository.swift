@@ -1314,6 +1314,11 @@ public final class ChatRepository: ObservableObject {
         // two leaves the chat present rather than half-gone.
         groups.removeValue(forKey: groupIdHex)
         unreadCounts.removeValue(forKey: groupIdHex)
+        // Nothing can poll this journal once the registry row is gone, so any
+        // own-echo registration left for it is unconsumable. The poll gate
+        // above has usually dropped them already; this covers a delete that
+        // never polled after the eviction.
+        chatClient.forgetOwnPublished(groupIdHex: groupIdHex)
         knownGroupsStore.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         state = state.with(threads: buildThreadList())
         return true
@@ -1785,7 +1790,7 @@ public final class ChatRepository: ObservableObject {
         } catch {
             throw ChatError.wrapped("DS publishGroup (add-member commit) failed", underlying: error)
         }
-        chatClient.markOwnPublishedCommit(messageId: commitPublish.id)
+        chatClient.markOwnPublishedCommit(groupIdHex: groupIdHex, messageId: commitPublish.id)
 
         // Publish artifact 2 — the Welcome to the new member's mailbox (the SAME
         // bytes stored in the outbox entry).
@@ -1991,7 +1996,7 @@ public final class ChatRepository: ObservableObject {
         } catch {
             throw ChatError.wrapped("DS publishGroup (remove-member commit) failed", underlying: error)
         }
-        chatClient.markOwnPublishedCommit(messageId: commitPublish.id)
+        chatClient.markOwnPublishedCommit(groupIdHex: groupIdHex, messageId: commitPublish.id)
         ackCommitBestEffort(entryId: entryId, commitMessageId: commitPublish.id)
         state = state.with(threads: buildThreadList())
         return commitPublish.id
@@ -2144,7 +2149,7 @@ public final class ChatRepository: ObservableObject {
         } catch {
             throw ChatError.wrapped("DS publishGroup (approve proposal) failed", underlying: error)
         }
-        chatClient.markOwnPublishedCommit(messageId: publish.id)
+        chatClient.markOwnPublishedCommit(groupIdHex: groupIdHex, messageId: publish.id)
         // ADR-0045 S7 residual 1 — record the approval as OUR OWN request, and
         // flag where it came from. Only this device can know that: on the wire
         // an approved add is indistinguishable from an admin adding a contact.
@@ -3072,7 +3077,17 @@ public final class ChatRepository: ObservableObject {
         // The cursor is deliberately left where the last applied row put it
         // (§6.2.13): it costs nothing, and whether a rejoin wants it reset is
         // the rejoin path's question, not this one's.
-        if membershipEnded(membershipStateNow(groupIdHex: groupIdHex)) { return }
+        if membershipEnded(membershipStateNow(groupIdHex: groupIdHex)) {
+            // This journal will never be applied again, so any own-echo
+            // registration still outstanding for it can never be consumed.
+            // Drop them here rather than carrying them for the life of the
+            // process: a device that committed its own leave registers that
+            // commit's row and then stops polling one line later, which is
+            // exactly how such an entry is made. Idempotent, so running it on
+            // every gated poll costs a set filter.
+            chatClient.forgetOwnPublished(groupIdHex: groupIdHex)
+            return
+        }
         // ADR-0040 (G-35) — sweep the durable pending-commit outbox ONCE per
         // group per session, BEFORE the first poll. Re-publishing a crashed
         // mid-window commit re-arms the own-echo filter for the re-published
@@ -3172,6 +3187,9 @@ public final class ChatRepository: ObservableObject {
         let result = chatClient.applyFetchedMessages(
             identity: identity,
             group: record.group,
+            // The own-echo filter is per journal, so the apply must name the
+            // journal this batch came off: a DS id is assigned per group.
+            groupIdHex: groupIdHex,
             raw: raw,
             after: after
         )
@@ -3991,7 +4009,7 @@ public final class ChatRepository: ObservableObject {
         // proposal IS re-fetched by the poll, and OpenMLS refuses to process a
         // frame this device sent. Suppress it so the poll drops it quietly
         // instead of logging a decrypt failure every batch.
-        chatClient.markOwnPublishedCommit(messageId: publish.id)
+        chatClient.markOwnPublishedCommit(groupIdHex: groupIdHex, messageId: publish.id)
         // Record our own request at the DS row's timestamp, so the quiet window
         // starts from the same instant on every device — and mark it `own`, the
         // UX §10 exception that lets a plain member see the status of a request
@@ -4350,7 +4368,7 @@ public final class ChatRepository: ObservableObject {
                 try wrapWelcomeRendezvous(joinerSignatureKey: key, welcome: welcome)
             },
             markOwnPublished: { [weak self] id in
-                self?.chatClient.markOwnPublishedCommit(messageId: id)
+                self?.chatClient.markOwnPublishedCommit(groupIdHex: groupIdHex, messageId: id)
             },
             persist: { [weak self] in self?.persistSnapshotBestEffort() },
             // The verdict apply advances the SAME cursor the poll drives, so it
@@ -4998,6 +5016,7 @@ public final class ChatRepository: ObservableObject {
             case .republish(let entry):
                 await republishPendingCommit(
                     record: record,
+                    groupIdHex: groupIdHex,
                     accountIdB64: accountIdB64,
                     entry: entry
                 )
@@ -5031,6 +5050,7 @@ public final class ChatRepository: ObservableObject {
     /// for the next sweep — safe. A corrupt (undecodable) commit is dropped.
     private func republishPendingCommit(
         record: GroupRecord,
+        groupIdHex: String,
         accountIdB64: String,
         entry: PendingCommitEntry
     ) async {
@@ -5047,7 +5067,7 @@ public final class ChatRepository: ObservableObject {
             // Echo re-arm: the device is durably at N+1, so feeding its own
             // re-fetched commit into `processIncoming` would raise
             // `CannotDecryptOwnMessage`. Suppress it on the very next poll.
-            chatClient.markOwnPublishedCommit(messageId: commitPub.id)
+            chatClient.markOwnPublishedCommit(groupIdHex: groupIdHex, messageId: commitPub.id)
 
             // ADR-0045 S7 — a direct-path second artifact is now ALWAYS a
             // mailbox Welcome. The rendezvous arm this loop used to carry

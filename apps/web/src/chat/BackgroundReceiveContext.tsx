@@ -538,7 +538,10 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
             coordinator.noteCursor(entry.groupIdB64, to);
           },
         },
-        (id) => chat.markOwnPublishedCommit(id),
+        // Named group, not a bare id: this one `ChatClient` polls every chat,
+        // so a group-blind mark would suppress another chat's row of the same
+        // DS id (`chat/own-published.ts`).
+        (id) => chat.markOwnPublishedCommit(entry.groupIdB64, id),
         (rank) => actingCommitterFor(entry, rank),
         (event) => swept.push(event),
       );
