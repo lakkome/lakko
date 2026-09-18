@@ -223,6 +223,18 @@ public final class CallUiState: ObservableObject {
     /// section 3.2's "no camera on this device" downgrade; it sits under the
     /// status line while the call rings out and goes when it connects.
     @Published public private(set) var mediaNotice: String?
+    /// Participants (by roster id) at least one of whose incoming streams could
+    /// not be SFrame-decrypted, because arming that receiver's decryptor
+    /// failed. Their media is already discarded fail-closed by libwebrtc
+    /// (`sframeRequireFrameEncryption`), so this changes nothing about
+    /// security — it exists so the screen can say "can't decrypt" instead of
+    /// showing a blank tile that reads as a bad network (invariant #4 is about
+    /// never *looking* like a degraded call when the media is refused).
+    ///
+    /// Membership is sticky for the life of the call: a receiver that failed to
+    /// arm is never re-armed, so the condition does not clear on its own and
+    /// silently dropping the badge would be the same lie in slow motion.
+    @Published public private(set) var undecryptable: Set<String> = []
     @Published public private(set) var connectionDetail: ConnectionDetail = .unknown
     @Published public private(set) var qualityPopoverOpen: Bool = false
     @Published public private(set) var hasMultipleCameras: Bool = false
@@ -353,6 +365,27 @@ public final class CallUiState: ObservableObject {
     public func participantLeft(_ id: String) {
         participants.removeAll(where: { $0.id == id })
         if pinnedId == id { pinnedId = nil }
+        // A peer that left takes its undecryptable streams with it. Keeping the
+        // id would make a later rejoin under the same id start out accused.
+        undecryptable.remove(id)
+    }
+
+    /// Record that a participant's incoming media cannot be decrypted (an
+    /// SFrame decryptor that failed to arm). Idempotent — one participant can
+    /// have several receivers fail.
+    public func markUndecryptable(_ id: String) {
+        undecryptable.insert(id)
+    }
+
+    /// The one plain line for a screen with no tiles to badge, built from the
+    /// display names of the participants currently marked. `nil` when nothing
+    /// is marked.
+    public var undecryptableNotice: String? {
+        let names =
+            participants
+            .filter { undecryptable.contains($0.id) }
+            .map(\.displayName)
+        return UndecryptableMedia.notice(names: names)
     }
 
     public func setQuality(_ id: String, _ tier: QualityTier) {
@@ -697,6 +730,7 @@ public final class CallUiState: ObservableObject {
         self.encryptionSheetOpen = false
         self.speakerOn = false
         self.mediaNotice = nil
+        self.undecryptable = []
         self.connectionDetail = .unknown
         self.qualityPopoverOpen = false
         self.settingsOpen = false
@@ -869,6 +903,11 @@ extension CallUiState {
                 )
             }
             self.setParticipants(roster)
+            // A receiver whose decryptor never armed decodes nothing. Mark the
+            // remote tile so the screen can say that, instead of leaving a
+            // blank portrait that reads as "they have no signal". Marking is
+            // one-way: the flag on the session is sticky, and so is this.
+            if session.remoteMediaUndecryptable { self.markUndecryptable("remote") }
             self.setLocalVideoTrack(session.localVideoTrack)
             self.setRemoteVideoTrack(remoteTrack)
             self.setRemoteVideoFlowing(remotePicture)
@@ -938,12 +977,17 @@ extension CallUiState {
         let remoteFlowing = session.$remoteVideoFlowing
             .receive(on: DispatchQueue.main)
             .sink { _ in onMain(rebuild) }
+        // A failed decryptor arm changes what the screen must say, so it is an
+        // input to the rebuild like any other.
+        let undecryptable = session.$remoteMediaUndecryptable
+            .receive(on: DispatchQueue.main)
+            .sink { _ in onMain(rebuild) }
         // Seed once synchronously so the first frame is correct
         // before any publisher fires.
         rebuild()
         return [
             state, localTrack, remoteTrack, mic, camera, e2ee,
-            rtt, relay, down, up, videoPublish, remoteFlowing,
+            rtt, relay, down, up, videoPublish, remoteFlowing, undecryptable,
         ]
     }
 

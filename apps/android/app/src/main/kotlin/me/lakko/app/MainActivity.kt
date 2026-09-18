@@ -598,7 +598,14 @@ private fun AppRoot(
             )
         }
         // The group call's and the call-link call's in-call screens.
-        me.lakko.app.ui.call.GroupCallOverlay(host = me.lakko.app.calls.AppCallHost.group)
+        me.lakko.app.ui.call.GroupCallOverlay(
+            host = me.lakko.app.calls.AppCallHost.group,
+            // ADR-0051 — the group name every member holds, so a group call is
+            // titled by its group instead of by a participant's label.
+            groupNameFor = { groupIdHex ->
+                nameVersion.let { chatRepository.groupName(groupIdHex)?.name }
+            },
+        )
         me.lakko.app.ui.call.LinkCallOverlay(host = me.lakko.app.calls.AppCallHost.link)
     }
 

@@ -21,6 +21,7 @@
 #![warn(missing_docs)]
 
 pub mod config;
+pub mod frame_descriptor;
 pub mod jwks;
 pub mod media;
 pub mod peer;

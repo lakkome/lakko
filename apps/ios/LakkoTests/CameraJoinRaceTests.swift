@@ -149,3 +149,48 @@ final class CameraJoinRaceTests: XCTestCase {
         }
     }
 }
+
+/// The rule that decides whether a group call with exactly one other person
+/// shows that person's video or the portrait.
+///
+/// It exists because the SFU path had no such rule at all: `remoteVideoFlowing`
+/// had one writer in the whole app, on the 1x1 path, so a two-person group call
+/// was pinned to the portrait layout — which draws no tiles — no matter what the
+/// media did. A live test read that screen as "group video does not work".
+@MainActor
+final class SolePictureTests: XCTestCase {
+
+    func testNoSoleRemoteIsNoPicture() {
+        XCTAssertFalse(
+            SfuCallUi.solePictureFlowing(soleRemoteId: nil, flowing: ["peer-a"]))
+    }
+
+    func testTheSoleRemoteWithAFrameIsAPicture() {
+        XCTAssertTrue(
+            SfuCallUi.solePictureFlowing(soleRemoteId: "peer-a", flowing: ["peer-a"]))
+    }
+
+    /// A track handle is not a frame: until the probe fires, the honest screen
+    /// is the portrait.
+    func testTheSoleRemoteWithoutAFrameIsNotAPicture() {
+        XCTAssertFalse(
+            SfuCallUi.solePictureFlowing(soleRemoteId: "peer-a", flowing: []))
+    }
+
+    /// Somebody else's picture is not this one's. In a gallery the caller
+    /// passes no sole id at all, but the rule must not be the one that gets it
+    /// wrong if it ever does.
+    func testAnotherParticipantsPictureDoesNotCount() {
+        XCTAssertFalse(
+            SfuCallUi.solePictureFlowing(soleRemoteId: "peer-a", flowing: ["peer-b"]))
+    }
+
+    /// Derived on every roster or picture change rather than latched: a peer
+    /// leaving a three-way call turns the survivor into a sole remote whose
+    /// picture was already flowing, and the screen must follow.
+    func testASurvivorOfAGalleryIsAPictureOnceItIsAlone() {
+        let flowing: Set<String> = ["peer-a", "peer-b"]
+        XCTAssertFalse(SfuCallUi.solePictureFlowing(soleRemoteId: nil, flowing: flowing))
+        XCTAssertTrue(SfuCallUi.solePictureFlowing(soleRemoteId: "peer-b", flowing: flowing))
+    }
+}

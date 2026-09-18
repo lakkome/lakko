@@ -98,3 +98,7 @@ base64 = "0.22"
 # depends on lakko-calls — the opacity invariant (C-39); this is a test-only
 # dep, same posture as `lakko-channels` in `services/channels`.
 lakko-calls.workspace = true
+# DEV-ONLY: `tests/fork_delta_guard.rs` pins the vendored str0m fork's
+# touched files by hash, so an accidental edit to third-party code we do not
+# review fails CI. Already in the workspace graph (`services/auth`).
+sha2 = "0.10"

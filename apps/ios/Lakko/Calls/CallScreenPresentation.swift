@@ -197,6 +197,58 @@ public enum CallScreenPresentation {
     }
 }
 
+// MARK: - Media that cannot be decrypted
+
+/// What the screen says about a stream whose SFrame decryptor failed to arm.
+///
+/// The security half of this is already settled before any of these words are
+/// read: `RTCCryptoOptions.sframeRequireFrameEncryption` is on, so a receiver
+/// without a decryptor **discards** every frame it is handed. No plaintext can
+/// reach the app, whatever goes wrong here — invariant #4 holds structurally
+/// rather than by anything this type does.
+///
+/// What is left is honesty. An undecryptable stream and a stalled one look
+/// identical from the outside: a tile that never paints, a call with no sound.
+/// The whole point of these strings is that the screen says which of the two it
+/// is, instead of letting a fail-closed refusal pass for a weak network.
+///
+/// Attribution is per **receiver**, not per call — a peer's audio can arm while
+/// its video does not — so the state is held per participant and never
+/// described as "the call is broken".
+public enum UndecryptableMedia {
+
+    /// The badge on that participant's tile in a group call.
+    public static let tileLabel = "Can't decrypt"
+
+    /// What VoiceOver reads for the badge, naming who it is about — the badge
+    /// itself sits next to a name the screen reader has already moved past
+    /// (`docs/ux/calls.md` section 8).
+    public static func spokenTileLabel(name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty
+            ? "Can't decrypt this participant's media"
+            : "Can't decrypt \(trimmed)'s media"
+    }
+
+    /// The one plain line for a screen with no tiles to badge — the 1x1
+    /// portrait and the video overlay header. `nil` when everything that
+    /// arrived is opening, which is the ordinary case.
+    ///
+    /// - Parameter names: display names of the participants whose media cannot
+    ///   be decrypted. An empty or blank name is counted but not quoted, since
+    ///   a 1x1 call often has nothing better than the peer's fingerprint.
+    public static func notice(names: [String]) -> String? {
+        if names.isEmpty { return nil }
+        if names.count == 1 {
+            let trimmed = names[0].trimmingCharacters(in: .whitespaces)
+            return trimmed.isEmpty
+                ? "Can't decrypt the incoming media"
+                : "Can't decrypt \(trimmed)'s media"
+        }
+        return "Can't decrypt media from \(names.count) participants"
+    }
+}
+
 // MARK: - The one status line
 
 /// The single line under the name: the state, or the running time, never both

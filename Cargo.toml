@@ -68,6 +68,14 @@ exclude = [
     # to drop the unmaintained `instant` (RUSTSEC-2024-0384); consumed via
     # `[patch.crates-io]` below, not a workspace member.
     "crates/vendor/fluvio-wasm-timer",
+    # Vendored fork of str0m 0.19.0 carrying ONE additive change: the
+    # packetizer tells an `ExtensionSerializer` which packet of the frame it
+    # is writing (`ExtensionValues::frame_position`). Needed so the SFU can
+    # relay the RFC-less generic frame descriptor, whose first/last-packet
+    # bits differ per packet. Upstream MIT/Apache-2.0 third-party code with
+    # its own deps, so it sits outside our workspace lint / forbid-unsafe
+    # posture; consumed via `[patch.crates-io]` below.
+    "crates/vendor/str0m",
 ]
 
 [workspace.package]
@@ -202,3 +210,22 @@ hpke-rs-libcrux = { path = "crates/vendor/hpke-rs-libcrux" }
 # parking_lot 0.11) leaves the graph entirely. No openmls source change; remove
 # when openmls 0.9 moves off fluvio-wasm-timer itself.
 fluvio-wasm-timer = { path = "crates/vendor/fluvio-wasm-timer" }
+
+# Generic-frame-descriptor relay. A libwebrtc receiver reads the key-frame
+# flag and picture size out of the codec bitstream, which SFrame has replaced
+# with ciphertext, so the only way it can recognise a key frame is the
+# `generic-frame-descriptor-00` RTP header extension. Relaying that extension
+# needs a per-packet value: its `B` / `E` bits mark the first and last packet
+# of a frame, so the frame-level value cannot simply be copied onto every
+# packet of a re-packetized frame.
+#
+# Upstream str0m's `ExtensionSerializer::write_to` is not told which packet of
+# the frame it is writing, so this is impossible to express. The vendored fork
+# adds exactly that: an `ExtensionValues::frame_position` field, set by the
+# packetizer in `packet/payload.rs` right where it already strips other
+# per-packet fields. Two source files, additive only; no behaviour changes for
+# any existing serializer, since they all ignore the new field.
+#
+# `services/sfu/tests/fork_delta_guard.rs` pins both files so an accidental
+# edit fails CI. Drop this patch if the capability lands upstream.
+str0m = { path = "crates/vendor/str0m" }

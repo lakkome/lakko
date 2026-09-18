@@ -86,6 +86,11 @@ final class GroupCallHost: ObservableObject {
             _ ui: CallUiState,
             _ callIdHex: String
         ) -> GroupCallHandle
+        /// The group's own name for the call screen's title — the ADR-0051
+        /// shared fact every member has, falling back through the 1x1 peer name
+        /// and the members' names, never a hex id. `nil` when it cannot be
+        /// resolved at all.
+        var conversationTitle: @MainActor (_ groupIdHex: String) -> String?
         var safetyNumber: (_ seed: Data) -> String?
         var mintCallId: () -> Data
         var nowMs: () -> Int64
@@ -309,6 +314,15 @@ final class GroupCallHost: ObservableObject {
             keyedEpoch: keyedEpoch
         )
         let ui = CallUiState()
+        // Title the screen by the GROUP, not by the literal words "Group call"
+        // the screen falls back to. A group call's identity is the group's, and
+        // since ADR-0051 that name is a shared fact every member holds, so all
+        // of them title the same call the same way. This is deliberately NOT
+        // the other participant's name: participants are named on their own
+        // tiles, and in a call that can grow from two people to five, naming
+        // the screen after whoever happens to be the only other person would
+        // rename the call when a third joined.
+        ui.setPeerName(ports.conversationTitle(groupIdHex))
         let config = SfuCallSession.Config(
             sfuBaseUrl: base,
             jwt: jwt,
@@ -692,6 +706,7 @@ extension GroupCallHost {
                     resolveDisplayName: GroupCallHost.displayNameResolver(callIdHex: callIdHex)
                 )
             },
+            conversationTitle: { [weak repository] in repository?.conversationTitle(groupIdHex: $0) },
             safetyNumber: { try? callSafetyNumber(seed: $0) },
             mintCallId: { CallSession.mintCallId() },
             nowMs: { ChatRepository.nowMs() }

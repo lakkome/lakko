@@ -508,6 +508,7 @@ final class GroupCallHostTests: XCTestCase {
                 h.handles.append(handle)
                 return handle
             },
+            conversationTitle: { _ in "Test group" },
             safetyNumber: { _ in nil },
             mintCallId: { Data(repeating: 0x0A, count: 16) },
             nowMs: { h.nowMs }

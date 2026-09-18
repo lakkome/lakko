@@ -146,6 +146,16 @@ public final class CallSession: ObservableObject {
     /// up rather than a dark rectangle with no controls on it.
     @Published public private(set) var remoteVideoFlowing: Bool = false
 
+    /// `true` once arming the SFrame decryptor on one of the peer's receivers
+    /// failed. That receiver decodes nothing — the crypto options declare frame
+    /// encryption required, so libwebrtc discards its frames rather than
+    /// rendering them — and the refusal is correct; what it is not, without
+    /// this, is visible. Blank video and silence are what a bad network looks
+    /// like too, so the screen reads this and says "can't decrypt" instead.
+    ///
+    /// Sticky: a receiver that failed to arm is never re-armed.
+    @Published public private(set) var remoteMediaUndecryptable: Bool = false
+
     /// The frame probe attached to the current remote video track, held so it
     /// can be detached when the track is replaced or the call ends.
     private var remoteVideoProbe: RemoteVideoFrameProbe?
@@ -1250,6 +1260,11 @@ public final class CallSession: ObservableObject {
                 NSLog(
                     "CallSession: SFrame decryptor arm: kind=%@ ok=%@",
                     kind, armed ? "true" : "false")
+                // ...and on the screen. The call is NOT ended on a failure:
+                // arming is per receiver, so audio can be fine while video is
+                // dead, and hanging up would replace a describable state with a
+                // dropped call — the same ambiguity one layer further out.
+                if !armed { self.remoteMediaUndecryptable = true }
             }
         ))
     }

@@ -3034,6 +3034,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "str0m",
  "thiserror 1.0.69",
  "tokio",
@@ -5443,8 +5444,6 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 [[package]]
 name = "str0m"
 version = "0.19.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "431befc786d98bfa860118d96890df038e4db51635494203bbe600b05582f920"
 dependencies = [
  "arrayvec",
  "base64ct",

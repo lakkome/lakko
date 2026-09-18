@@ -94,6 +94,56 @@ public fun callStage(
 public fun showsSelfViewPip(stage: CallStage, localVideoPresent: Boolean): Boolean =
     localVideoPresent && stage == CallStage.REMOTE_VIDEO
 
+/**
+ * What the call screen is titled — `docs/ux/calls.md` section 4's status line.
+ *
+ * ## The defect this closes
+ *
+ * The title was whatever the first remote participant's tile was labelled, with
+ * no notion of a group. On a live three-person call in a group named "Trio",
+ * the screen was titled `01a0a985` — the peer's SFU account pseudonym, which is
+ * what the roster falls back to when it cannot resolve a contact. So a failure
+ * to name ONE participant renamed the whole call, and the group's own name,
+ * which ADR-0051 makes a shared end-to-end-encrypted fact every member holds,
+ * appeared nowhere.
+ *
+ * ## The rule
+ *
+ * A group call is titled by the group, full stop — **never** by a participant,
+ * however that participant happens to be labelled. That is the part worth
+ * pinning: a participant label is a per-person fallback chain that can and does
+ * end in an opaque identifier, and a title derived from it inherits every one
+ * of those failures. A group with no name says so plainly instead.
+ *
+ * A 1x1 call is titled by the other person, because there the person IS the
+ * call, and falls back to a neutral word rather than to anything opaque.
+ */
+public fun callScreenTitle(
+    groupName: String?,
+    peerName: String?,
+    groupCall: Boolean,
+): String {
+    val group = groupName?.trim()?.takeIf { it.isNotEmpty() }
+    val peer = peerName?.trim()?.takeIf { it.isNotEmpty() }
+    return if (groupCall) group ?: "Group call" else peer ?: "Call"
+}
+
+/**
+ * What an unresolved participant is called — `docs/ux/calls.md` section 4 and
+ * the ADR-0021 roster rule ("unique hit -> displayName, else … Participant N").
+ *
+ * Never the SFU pseudonym. A pseudonym looks exactly like something the reader
+ * ought to recognise and cannot: it is stable, it is theirs, and it says
+ * nothing. `Participant 2` is honest about the one thing that is actually true
+ * — this device does not know who that is — and it stays readable next to the
+ * names that did resolve.
+ *
+ * [ordinal] is 1-based in arrival order among the participants that failed to
+ * resolve, so the numbering is stable for the length of a call.
+ */
+public fun unresolvedParticipantLabel(ordinal: Int): String =
+    "Participant ${if (ordinal < 1) 1 else ordinal}"
+
 /** How long the controls stay up before fading on a connected video call. */
 public const val CALL_CONTROLS_AUTO_HIDE_MS: Long = 5_000L
 

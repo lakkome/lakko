@@ -53,13 +53,24 @@ import me.lakko.app.calls.linkCallNotice
  * destination change never hides or ends a call.
  */
 @Composable
-public fun GroupCallOverlay(host: GroupCallHost) {
+public fun GroupCallOverlay(
+    host: GroupCallHost,
+    /**
+     * `docs/ux/calls.md` section 4 — the group's own name (ADR-0051), or `null`
+     * when it has none. Resolved from the slot's group rather than from the
+     * roster, because a call in a group is named by the group and a participant
+     * label is not a name for it.
+     */
+    groupNameFor: (groupIdHex: String) -> String? = { null },
+) {
     val visible by host.overlayVisible.collectAsStateWithLifecycle()
     if (!visible) return
+    val slot by host.slot.collectAsStateWithLifecycle()
     HostedCallDialog(
         state = host.ui,
         onEndCall = { host.leave() },
         onExit = { host.onOverlayExit() },
+        groupName = slot?.groupIdHex?.let(groupNameFor),
     )
 }
 
@@ -76,7 +87,12 @@ public fun LinkCallOverlay(host: LinkCallHost) {
 }
 
 @Composable
-private fun HostedCallDialog(state: CallUiState, onEndCall: () -> Unit, onExit: () -> Unit) {
+private fun HostedCallDialog(
+    state: CallUiState,
+    onEndCall: () -> Unit,
+    onExit: () -> Unit,
+    groupName: String? = null,
+) {
     Dialog(
         onDismissRequest = { /* exit only via the End button */ },
         properties = DialogProperties(
@@ -100,6 +116,7 @@ private fun HostedCallDialog(state: CallUiState, onEndCall: () -> Unit, onExit: 
                 state = state,
                 onEndCall = onEndCall,
                 groupCall = true,
+                groupName = groupName,
             )
         }
     }

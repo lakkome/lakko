@@ -79,6 +79,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use lakko_svc_sfu::frame_descriptor::{
+    generic_frame_descriptor_extension, FrameDescriptor, GENERIC_FRAME_DESCRIPTOR_ID,
+    GENERIC_FRAME_DESCRIPTOR_URI,
+};
 use lakko_svc_sfu::media::{spawn_media_task, spawn_media_task_advertising, MediaTaskHandle};
 use lakko_svc_sfu::peer::{Peer, PeerId, PeerRegistry};
 use lakko_svc_sfu::protocol::ServerFrame;
@@ -109,15 +113,39 @@ struct SyntheticClient {
     /// fires — the canonical "ICE + DTLS handshake
     /// finished" signal in str0m's API.
     connected: bool,
+    /// Frame descriptor observed on the most recent
+    /// `Event::MediaData`, if the extension was negotiated
+    /// and carried a value. Recorded by [`Self::drain`].
+    last_frame_descriptor: Option<Vec<u8>>,
 }
 
 impl SyntheticClient {
     async fn new() -> Self {
+        Self::build(false).await
+    }
+
+    /// A client whose session extension map carries the generic frame
+    /// descriptor, so it can send the extension as a publisher and parse it
+    /// as a subscriber. Registering it is what a real libwebrtc client does
+    /// under the `WebRTC-GenericDescriptorAdvertised` field trial.
+    async fn new_with_frame_descriptor() -> Self {
+        Self::build(true).await
+    }
+
+    async fn build(with_frame_descriptor: bool) -> Self {
         let socket = UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("UDP bind for synthetic client");
         let local_addr = socket.local_addr().expect("synthetic client local_addr");
-        let mut rtc = Rtc::new(Instant::now());
+        let builder = if with_frame_descriptor {
+            Rtc::builder().set_extension(
+                GENERIC_FRAME_DESCRIPTOR_ID,
+                generic_frame_descriptor_extension(),
+            )
+        } else {
+            Rtc::builder()
+        };
+        let mut rtc = builder.build(Instant::now());
         let candidate =
             Candidate::host(local_addr, Protocol::Udp).expect("host candidate constructs");
         rtc.add_local_candidate(candidate);
@@ -126,7 +154,65 @@ impl SyntheticClient {
             socket: Arc::new(socket),
             local_addr,
             connected: false,
+            last_frame_descriptor: None,
         }
+    }
+
+    /// Build a plain (non-simulcast) SendOnly video publisher offer. Video
+    /// because the frame descriptor is a video extension — an audio media
+    /// line never carries it.
+    fn create_video_publisher_offer(&mut self) -> (String, SdpPendingOffer, Mid) {
+        let mut change = self.rtc.sdp_api();
+        let mid = change.add_media(
+            MediaKind::Video,
+            Direction::SendOnly,
+            Some("frame-descriptor-publisher".to_owned()),
+            None,
+            None,
+        );
+        let (offer, pending) = change.apply().expect("at least one change → Some(offer)");
+        (offer.to_sdp_string(), pending, mid)
+    }
+
+    /// Build a RecvOnly **video** subscriber offer, so the SFU has a video
+    /// media line to renegotiate a downstream track onto.
+    fn create_video_subscriber_offer(&mut self) -> (String, SdpPendingOffer) {
+        let mut change = self.rtc.sdp_api();
+        let _mid = change.add_media(
+            MediaKind::Video,
+            Direction::RecvOnly,
+            Some("frame-descriptor-subscriber".to_owned()),
+            None,
+            None,
+        );
+        let (offer, pending) = change.apply().expect("at least one change → Some(offer)");
+        (offer.to_sdp_string(), pending)
+    }
+
+    /// Write one video frame carrying a frame descriptor, the way a
+    /// libwebrtc publisher would.
+    fn write_video_frame_with_descriptor(
+        &mut self,
+        mid: Mid,
+        payload: &[u8],
+        descriptor: &[u8],
+        frame_idx: u64,
+    ) -> bool {
+        let Some(pt) = self.rtc.writer(mid).and_then(|w| {
+            w.payload_params()
+                .next()
+                .map(str0m::format::PayloadParams::pt)
+        }) else {
+            return false;
+        };
+        let Some(writer) = self.rtc.writer(mid) else {
+            return false;
+        };
+        let rtp_time = MediaTime::new(frame_idx * 3000, Frequency::NINETY_KHZ);
+        writer
+            .user_extension_value(FrameDescriptor(descriptor.to_vec()))
+            .write(pt, Instant::now(), rtp_time, payload.to_vec())
+            .is_ok()
     }
 
     /// Build the offer the SFU's `accept_offer` consumes.
@@ -293,7 +379,12 @@ impl SyntheticClient {
                 },
                 Ok(Output::Event(event)) => match event {
                     Event::Connected => self.connected = true,
-                    Event::MediaData(data) => payloads.push(data.data.clone()),
+                    Event::MediaData(data) => {
+                        if let Some(d) = data.ext_vals.user_values.get::<FrameDescriptor>() {
+                            self.last_frame_descriptor = Some(d.0.clone());
+                        }
+                        payloads.push(data.data.clone());
+                    },
                     _ => {},
                 },
                 // A pending timeout means there is nothing more
@@ -1659,4 +1750,406 @@ async fn multi_frame_sframe_stream_round_trips_through_the_live_sfu() {
             "B must recover frame {i}'s exact plaintext after the SFU relayed it"
         );
     }
+}
+
+/// **Frame-descriptor relay, live leg** — a publisher's
+/// `generic-frame-descriptor-00` header-extension value survives the SFU and
+/// arrives at a subscriber.
+///
+/// ## Why this matters more than it looks
+///
+/// Lakko seals the whole encoded frame with SFrame, which overwrites the
+/// bytes a libwebrtc receiver reads the key-frame flag and picture size from
+/// (`video_rtp_depacketizer_vp8.cc:180` at `branch-heads/6422`). The frame
+/// descriptor is the only remaining channel for those facts, so if the SFU
+/// drops it — which it did, silently, in three separate places before this
+/// change — group video cannot decode however correct the clients are.
+///
+/// The test drives the whole path that has to hold for the extension to
+/// arrive: the SFU must echo the URI in its answer to the publisher's offer
+/// (else the publisher never sends it), parse the value off the wire (else
+/// it is discarded on arrival), offer the URI in its own renegotiation
+/// toward the subscriber (else the subscriber refuses it), and write the
+/// value back onto the relayed frame.
+///
+/// The payload is deliberately larger than one RTP packet, so the SFU
+/// re-packetizes the frame and the per-packet descriptor logic actually
+/// runs. What arrives is asserted to be a **first-packet** value — carrying
+/// the frame-level fields, with the begin-of-frame bit set — which is what
+/// catches a regression where a bare continuation byte reaches the
+/// subscriber in place of the real descriptor. The bit-level recomputation
+/// itself is pinned by the unit tests in
+/// `lakko_svc_sfu::frame_descriptor`, which can enumerate positions a live
+/// path cannot.
+///
+/// Opacity is unaffected: the SFU stores and re-emits these bytes without
+/// reading a field, and never touches the SFrame-sealed payload (C-39).
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn frame_descriptor_survives_the_relay_to_a_subscriber() {
+    let peers = PeerRegistry::new();
+    let b_id = PeerId::fresh();
+    let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
+    assert!(
+        peers
+            .register(Peer {
+                id: b_id.clone(),
+                call_id: "frame-descriptor-test".to_owned(),
+                account_id: "subscriber-b".to_owned(),
+                outbound: Some(b_tx),
+            })
+            .await,
+        "fresh PeerId must register cleanly"
+    );
+
+    let (media, sfu_addr) = spawn_media_task("127.0.0.1:0".parse().unwrap(), peers)
+        .await
+        .expect("UDP bind on loopback:0 succeeds");
+
+    // Both synthetic clients advertise the extension, as a libwebrtc client
+    // does under `WebRTC-GenericDescriptorAdvertised`.
+    let mut a = SyntheticClient::new_with_frame_descriptor().await;
+    let mut b = SyntheticClient::new_with_frame_descriptor().await;
+    let a_id = PeerId::fresh();
+
+    let (b_offer, b_pending) = b.create_video_subscriber_offer();
+    let b_answer = media
+        .accept_offer(b_id.clone(), "frame-descriptor-call".to_owned(), b_offer)
+        .await
+        .expect("SFU accepts B's RecvOnly video subscriber offer");
+    assert!(
+        b_answer.contains(GENERIC_FRAME_DESCRIPTOR_URI),
+        "the SFU must echo the frame-descriptor extension in its answer, \
+         or the peer never activates it; answer was:\n{b_answer}"
+    );
+    b.accept_answer(b_pending, &b_answer)
+        .expect("B applies the SFU's answer");
+
+    let (a_offer, a_pending, publisher_mid) = a.create_video_publisher_offer();
+    let a_answer = media
+        .accept_offer(a_id.clone(), "frame-descriptor-call".to_owned(), a_offer)
+        .await
+        .expect("SFU accepts A's SendOnly video publisher offer");
+    assert!(
+        a_answer.contains(GENERIC_FRAME_DESCRIPTOR_URI),
+        "the SFU must echo the frame-descriptor extension to the publisher too"
+    );
+    a.accept_answer(a_pending, &a_answer)
+        .expect("A applies the SFU's answer");
+
+    // A key-frame-shaped first-packet descriptor: B|E|F|L flags, spatial
+    // bitmask, frame id, then a 1280x720 resolution. Opaque to the SFU; this
+    // test only needs it to be a value libwebrtc's own writer could produce.
+    let descriptor: Vec<u8> = vec![0xf0, 0x01, 0x2a, 0x00, 0x05, 0x00, 0x02, 0xd0];
+    // Larger than one RTP packet, so the SFU re-packetizes and the
+    // per-packet descriptor path runs for real.
+    let payload: Vec<u8> = (0..3000_u32)
+        .map(|i| {
+            u8::try_from(i % 251)
+                .unwrap_or(0)
+                .wrapping_mul(7)
+                .wrapping_add(3)
+        })
+        .collect();
+
+    let deadline = Instant::now() + CROSS_FANOUT_DEADLINE;
+    let mut reneg_answered = false;
+    let mut pending_reneg: Option<String> = None;
+    let mut frame_idx: u64 = 0;
+    let mut received = false;
+
+    while Instant::now() < deadline {
+        let _ = a.drain().await;
+        let b_payloads = b.drain().await;
+        if b_payloads
+            .iter()
+            .any(|p| p.as_slice() == payload.as_slice())
+        {
+            received = true;
+            break;
+        }
+
+        while let Ok(frame) = b_rx.try_recv() {
+            if let ServerFrame::SdpOffer { sdp } = frame {
+                pending_reneg = Some(sdp);
+            }
+        }
+        if !reneg_answered && b.is_connected() {
+            if let Some(sdp) = pending_reneg.take() {
+                assert!(
+                    sdp.contains(GENERIC_FRAME_DESCRIPTOR_URI),
+                    "the SFU's own offer toward the subscriber must carry the \
+                     frame-descriptor extension, or the downstream track can \
+                     never receive one; offer was:\n{sdp}"
+                );
+                if let Ok(answer) = b.answer_renegotiation(&sdp) {
+                    if media
+                        .accept_renegotiation_answer(b_id.clone(), answer)
+                        .await
+                        .is_ok()
+                    {
+                        reneg_answered = true;
+                    }
+                }
+            }
+        }
+
+        if a.is_connected() && b.is_connected() && reneg_answered {
+            a.write_video_frame_with_descriptor(publisher_mid, &payload, &descriptor, frame_idx);
+            frame_idx += 1;
+        }
+
+        let a_sock = a.socket.clone();
+        let b_sock = b.socket.clone();
+        let mut abuf = [0u8; 2048];
+        let mut bbuf = [0u8; 2048];
+        tokio::select! {
+            r = a_sock.recv_from(&mut abuf) => {
+                if let Ok((n, src)) = r {
+                    a.feed_receive(&abuf[..n], src, sfu_addr);
+                }
+            }
+            r = b_sock.recv_from(&mut bbuf) => {
+                if let Ok((n, src)) = r {
+                    b.feed_receive(&bbuf[..n], src, sfu_addr);
+                }
+            }
+            () = tokio::time::sleep(Duration::from_millis(5)) => {
+                a.feed_timeout();
+                b.feed_timeout();
+            }
+        }
+    }
+
+    assert!(
+        received,
+        "subscriber B never received A's video frame within \
+         {CROSS_FANOUT_DEADLINE:?}; a_connected={} b_connected={} \
+         reneg_answered={}",
+        a.is_connected(),
+        b.is_connected(),
+        reneg_answered,
+    );
+
+    let arrived = b
+        .last_frame_descriptor
+        .clone()
+        .expect("the relayed frame must carry a frame descriptor");
+
+    // Every frame-level field survives byte for byte. This is the payload of
+    // the change: the frame type (encoded as "has no dependency diffs") and
+    // the 1280x720 resolution are what the receiver has left to recognise a
+    // key frame by, once SFrame has overwritten the bitstream header.
+    assert_eq!(
+        arrived[1..],
+        descriptor[1..],
+        "the frame-level fields must cross the relay unaltered"
+    );
+    assert!(
+        arrived.len() >= 4,
+        "a first-packet value shorter than four bytes is rejected outright by \
+         libwebrtc's parser"
+    );
+    assert_ne!(
+        arrived[0] & 0x80,
+        0,
+        "what reaches the subscriber must be a first-packet value (B set), \
+         not a bare continuation byte"
+    );
+    assert_eq!(
+        arrived[0] & 0x0f,
+        descriptor[0] & 0x0f,
+        "byte 0's low nibble (the dependency flag and temporal layer) is \
+         frame-level and must not be touched"
+    );
+    // The payload is larger than one RTP packet, so this frame is split on
+    // both legs and its FIRST packet does not end the frame. `E` clear here
+    // is the recomputation doing its job: the fixture had it set, and copying
+    // byte 0 verbatim would have told the receiver this packet was a whole
+    // frame. That is the exact failure the change exists to prevent.
+    assert_eq!(
+        arrived[0] & 0x40,
+        0,
+        "the first packet of a multi-packet frame must not claim to end it"
+    );
+}
+
+/// **The case the live failure was, and the harness did not cover** — a
+/// subscriber that joined a call **audio-only**, and later has a video track
+/// renegotiated onto it by the SFU.
+///
+/// ## Why this shape specifically
+///
+/// The extension map is **per peer**, and `ExtensionMap::remap` only pins an
+/// id for an extension that peer itself offered. A peer that joined
+/// audio-only never offered a video m-line, so nothing pins the frame
+/// descriptor's id — and the SFU's later offer of a video track to that peer
+/// carries whatever the SFU registered. Every other test here has the
+/// subscriber offering video up front, which pins the id and hides the
+/// question entirely.
+///
+/// This asserts the id the SFU offers is **12**, libwebrtc's own
+/// (`webrtc_video_engine.cc:812-852` at `branch-heads/6422`), so that the
+/// pinned and the unpinned case agree. The previous value, 5, is free inside
+/// str0m's `ExtensionMap::standard()` but is playout-delay in libwebrtc's
+/// table — a real divergence, and invisible to a harness whose subscriber is
+/// also str0m.
+///
+/// The test then drives media through anyway, because an id assertion alone
+/// would not catch a renegotiation that is well-formed and still never
+/// delivers.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn audio_only_subscriber_is_offered_video_on_libwebrtcs_own_extmap_id() {
+    let peers = PeerRegistry::new();
+    let b_id = PeerId::fresh();
+    let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
+    assert!(
+        peers
+            .register(Peer {
+                id: b_id.clone(),
+                call_id: "audio-only-join".to_owned(),
+                account_id: "subscriber-b".to_owned(),
+                outbound: Some(b_tx),
+            })
+            .await,
+        "fresh PeerId must register cleanly"
+    );
+
+    let (media, sfu_addr) = spawn_media_task("127.0.0.1:0".parse().unwrap(), peers)
+        .await
+        .expect("UDP bind on loopback:0 succeeds");
+
+    let mut a = SyntheticClient::new_with_frame_descriptor().await;
+    let mut b = SyntheticClient::new_with_frame_descriptor().await;
+    let a_id = PeerId::fresh();
+
+    // B joins AUDIO-ONLY — no video m-line, so nothing pins the frame
+    // descriptor's id for this peer.
+    let (b_offer, b_pending) = b.create_subscriber_offer();
+    assert!(
+        !b_offer.contains(GENERIC_FRAME_DESCRIPTOR_URI),
+        "the point of this test is that B never offers the extension itself"
+    );
+    let b_answer = media
+        .accept_offer(b_id.clone(), "audio-only-call".to_owned(), b_offer)
+        .await
+        .expect("SFU accepts B's audio-only subscriber offer");
+    b.accept_answer(b_pending, &b_answer)
+        .expect("B applies the SFU's answer");
+
+    let (a_offer, a_pending, publisher_mid) = a.create_video_publisher_offer();
+    let a_answer = media
+        .accept_offer(a_id.clone(), "audio-only-call".to_owned(), a_offer)
+        .await
+        .expect("SFU accepts A's SendOnly video publisher offer");
+    a.accept_answer(a_pending, &a_answer)
+        .expect("A applies the SFU's answer");
+
+    let descriptor: Vec<u8> = vec![0xf0, 0x01, 0x2a, 0x00, 0x05, 0x00, 0x02, 0xd0];
+    let payload: Vec<u8> = (0..3000_u32)
+        .map(|i| {
+            u8::try_from(i % 251)
+                .unwrap_or(0)
+                .wrapping_mul(7)
+                .wrapping_add(3)
+        })
+        .collect();
+
+    let deadline = Instant::now() + CROSS_FANOUT_DEADLINE;
+    let mut reneg_answered = false;
+    let mut pending_reneg: Option<String> = None;
+    let mut offered_id: Option<String> = None;
+    let mut frame_idx: u64 = 0;
+    let mut received = false;
+
+    while Instant::now() < deadline {
+        let _ = a.drain().await;
+        let b_payloads = b.drain().await;
+        if b_payloads
+            .iter()
+            .any(|p| p.as_slice() == payload.as_slice())
+        {
+            received = true;
+            break;
+        }
+
+        while let Ok(frame) = b_rx.try_recv() {
+            if let ServerFrame::SdpOffer { sdp } = frame {
+                pending_reneg = Some(sdp);
+            }
+        }
+        if !reneg_answered && b.is_connected() {
+            if let Some(sdp) = pending_reneg.take() {
+                offered_id = sdp
+                    .lines()
+                    .find(|l| {
+                        l.starts_with("a=extmap:") && l.ends_with(GENERIC_FRAME_DESCRIPTOR_URI)
+                    })
+                    .and_then(|l| l.strip_prefix("a=extmap:"))
+                    .and_then(|rest| rest.split_whitespace().next())
+                    .map(std::borrow::ToOwned::to_owned);
+                if let Ok(answer) = b.answer_renegotiation(&sdp) {
+                    if media
+                        .accept_renegotiation_answer(b_id.clone(), answer)
+                        .await
+                        .is_ok()
+                    {
+                        reneg_answered = true;
+                    }
+                }
+            }
+        }
+
+        if a.is_connected() && b.is_connected() && reneg_answered {
+            a.write_video_frame_with_descriptor(publisher_mid, &payload, &descriptor, frame_idx);
+            frame_idx += 1;
+        }
+
+        let a_sock = a.socket.clone();
+        let b_sock = b.socket.clone();
+        let mut abuf = [0u8; 2048];
+        let mut bbuf = [0u8; 2048];
+        tokio::select! {
+            r = a_sock.recv_from(&mut abuf) => {
+                if let Ok((n, src)) = r {
+                    a.feed_receive(&abuf[..n], src, sfu_addr);
+                }
+            }
+            r = b_sock.recv_from(&mut bbuf) => {
+                if let Ok((n, src)) = r {
+                    b.feed_receive(&bbuf[..n], src, sfu_addr);
+                }
+            }
+            () = tokio::time::sleep(Duration::from_millis(5)) => {
+                a.feed_timeout();
+                b.feed_timeout();
+            }
+        }
+    }
+
+    assert_eq!(
+        offered_id.as_deref(),
+        Some("12"),
+        "the SFU must offer the frame descriptor on libwebrtc's own id when \
+         nothing has pinned it for this peer; 5 is playout-delay there"
+    );
+    assert!(
+        received,
+        "the audio-only subscriber never received the renegotiated video \
+         within {CROSS_FANOUT_DEADLINE:?}; a_connected={} b_connected={} \
+         reneg_answered={}",
+        a.is_connected(),
+        b.is_connected(),
+        reneg_answered,
+    );
+    let arrived = b
+        .last_frame_descriptor
+        .clone()
+        .expect("the renegotiated video must carry a frame descriptor too");
+    assert_eq!(
+        arrived[1..],
+        descriptor[1..],
+        "the frame-level fields must survive on this path as well"
+    );
 }

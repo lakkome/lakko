@@ -342,9 +342,36 @@ private struct ParticipantTile: View {
 
     var isPinned: Bool { state.pinnedId == participant.id }
 
+    /// This participant's media cannot be decrypted (a decryptor that failed to
+    /// arm). The tile is blank for that reason and not for the ordinary one.
+    var isUndecryptable: Bool { state.undecryptable.contains(participant.id) }
+
     var body: some View {
         ZStack {
             videoSurface
+            if isUndecryptable {
+                // Said at the top of the tile, not in the label row: the tile
+                // is empty, and an empty tile with a name under it is exactly
+                // what a peer with no bandwidth looks like.
+                VStack {
+                    HStack(spacing: 6) {
+                        Image(systemName: "lock.slash.fill")
+                            .font(.caption)
+                        Text(UndecryptableMedia.tileLabel)
+                            .font(.caption)
+                    }
+                    .foregroundColor(Color.lakkoDanger)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.lakkoBackground.opacity(0.65))
+                    .clipShape(Capsule())
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(
+                        UndecryptableMedia.spokenTileLabel(name: participant.displayName))
+                    Spacer(minLength: 0)
+                }
+                .padding(.top, 8)
+            }
             if participant.isLocal && state.videoPublishState == .starting {
                 HStack(spacing: 8) {
                     ProgressView()
@@ -655,6 +682,19 @@ public struct CallScreen: View {
             remotePicture: hasRemotePicture)
     }
 
+    /// The three numbers that decide the whole shape of the screen, printed on
+    /// every change. A group call that could not show video for a structural
+    /// reason looked, from the outside, exactly like a group call whose media
+    /// never arrived; one line saying `remotes=1 track=true flowing=false` would
+    /// have ended that in a second.
+    private func logLayout() {
+        NSLog(
+            "CallScreen: layout=%@ remotes=%d track=%@ flowing=%@",
+            "\(layout)", remoteParticipants.count,
+            soleRemoteVideoTrack != nil ? "true" : "false",
+            state.remoteVideoFlowing ? "true" : "false")
+    }
+
     private var local: CallUiState.Participant? {
         state.participants.first(where: { $0.isLocal })
     }
@@ -728,6 +768,7 @@ public struct CallScreen: View {
         // when its phase changes — so the fade-out has to be armed from the
         // layout too, or the row of a connected video call would never hide.
         .onChange(of: layout) { _, _ in
+            logLayout()
             restartAutoHide()
         }
         // Peer arrival / departure cues + chat system events. The id-based diff
@@ -753,6 +794,7 @@ public struct CallScreen: View {
                 sessionBindings = state.driveFrom(session: session, peerName: peerName)
             }
             if let notice { state.setMediaNotice(notice) }
+            logLayout()
             // The route the platform actually settled on, not one we assumed.
             state.setSpeakerOn(CallAudioRoute.isSpeakerOn())
             restartAutoHide()
@@ -895,7 +937,10 @@ public struct CallScreen: View {
                 phase: displayPhase,
                 connectedAt: connectedAt,
                 e2eeActive: state.e2ee.active,
-                notice: state.mediaNotice,
+                // A stream that cannot be decrypted outranks the camera
+                // downgrade: one is why this call has no picture at all, the
+                // other is a note about how it started.
+                notice: state.undecryptableNotice ?? state.mediaNotice,
                 prominent: true,
                 onEncryptionTap: { state.setEncryptionSheetOpen(true) })
             Spacer(minLength: 0)
@@ -942,7 +987,10 @@ public struct CallScreen: View {
                 phase: displayPhase,
                 connectedAt: connectedAt,
                 e2eeActive: state.e2ee.active,
-                notice: nil,
+                // The header carries nothing ordinarily; an undecryptable
+                // stream is the exception, since the video behind it is blank
+                // and nothing else on this layout would say why.
+                notice: state.undecryptableNotice,
                 prominent: false,
                 onEncryptionTap: { state.setEncryptionSheetOpen(true) })
             Spacer(minLength: 12)

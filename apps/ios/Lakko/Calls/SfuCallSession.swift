@@ -145,6 +145,19 @@ final class SfuCallSession {
         /// Defaulted so existing memberwise callers keep their shorter
         /// initialiser.
         var onRemoteMediaState: ((_ from: String, _ cameraOn: Bool) -> Void)? = nil
+        /// A remote receiver's SFrame decryptor could not be armed, so nothing
+        /// that receiver carries will ever decode. `streamId` is the MSID
+        /// stream group (== the source peer id on an SFU-routed call, so the
+        /// roster tile key is `"peer-<streamId>"`); `kind` is `"audio"` or
+        /// `"video"`.
+        ///
+        /// This is reported, never acted on by the session: the media is
+        /// already refused fail-closed by libwebrtc, and a call is not ended
+        /// because one of several peers has one dead stream. The adapter marks
+        /// that participant so the screen stops passing a refusal off as a
+        /// network stall. Defaulted so existing memberwise callers keep their
+        /// shorter initialiser.
+        var onUndecryptableReceiver: ((_ streamId: String?, _ kind: String) -> Void)? = nil
     }
 
     private let config: Config
@@ -553,10 +566,31 @@ final class SfuCallSession {
 
     private func makeSignalingCallbacks() -> SfuSignalingCallbacks {
         var cb = SfuSignalingCallbacks()
-        cb.onWelcome = { [weak self] selfPeerId, _, roster in
+        // Every inbound frame this path depends on prints one line. The live
+        // group-call investigation that added them spent a run on inference
+        // because the SFU path was silent end to end: no welcome line, no
+        // receiver line, and — worst — no line at all for a frame the parser
+        // rejected, since `onParseError` had no subscriber anywhere in the app.
+        // Absence of a log meant nothing, which is the one thing a log must
+        // never mean.
+        cb.onParseError = { raw, error in
+            NSLog(
+                "SfuCallSession: signaling frame PARSE FAILED err=%@ text=%@",
+                "\(error)", String(raw.prefix(300)))
+        }
+        cb.onWelcome = { [weak self] selfPeerId, callId, roster in
+            // The joiner learns about everyone already in the call HERE, not
+            // from peer-joined — a second joiner gets no peer-joined for the
+            // peers that preceded it. `rosterCount` is therefore the whole
+            // answer to "did this device learn who else is on the call".
+            NSLog(
+                "SfuCallSession: welcome self=%@ call=%@ rosterCount=%d peers=%@",
+                selfPeerId, callId, roster.count,
+                roster.map(\.peerId).joined(separator: ","))
             Task { @MainActor in self?.callbacks.onWelcome?(selfPeerId, roster) }
         }
         cb.onPeerJoined = { [weak self] peerId, pseudonym, peerTag in
+            NSLog("SfuCallSession: peer joined peer=%@", peerId)
             Task { @MainActor in
                 guard let self else { return }
                 self.callbacks.onPeerJoined?(peerId, pseudonym, peerTag)
@@ -567,15 +601,22 @@ final class SfuCallSession {
             }
         }
         cb.onPeerLeft = { [weak self] peerId in
+            NSLog("SfuCallSession: peer left peer=%@", peerId)
             Task { @MainActor in self?.callbacks.onPeerLeft?(peerId) }
         }
         cb.onSdpAnswer = { [weak self] sdp in
             Task { @MainActor in await self?.applyRemoteAnswer(sdp) }
         }
         cb.onSdpOffer = { [weak self] sdp in
+            // The SFU offers when it has a track to give us, so this line is
+            // the difference between "nobody sent us anything to subscribe to"
+            // and "we were offered a stream and did not take it".
+            NSLog("SfuCallSession: server offer received bytes=%d", sdp.count)
             Task { @MainActor in self?.enqueueServerOffer(sdp) }
         }
         cb.onServerError = { [weak self] code, detail in
+            // Logged here rather than left to the adapter, which discards it.
+            NSLog("SfuCallSession: server error code=%@ detail=%@", "\(code)", detail)
             Task { @MainActor in self?.callbacks.onServerError?(code, detail) }
         }
         cb.onSignalRelay = { [weak self] from, payloadB64 in
@@ -645,9 +686,13 @@ final class SfuCallSession {
             do {
                 let answer = try await pc.createAnswer(remoteOfferSdp: sdp)
                 signaling.sendSdpAnswer(answer)
+                NSLog("SfuCallSession: answered server offer bytes=%d", answer.count)
             } catch {
-                // A single bad renegotiation drops that subscription;
-                // the call stays up. Continue draining.
+                // A single bad renegotiation drops that subscription; the call
+                // stays up. Continue draining — but say so: dropping one
+                // subscription silently is indistinguishable, from the outside,
+                // from a peer that never published.
+                NSLog("SfuCallSession: server offer answer FAILED err=%@", "\(error)")
             }
         }
         drainingOffers = false
@@ -659,6 +704,7 @@ final class SfuCallSession {
     }
 
     private func onSignalingClosed() {
+        NSLog("SfuCallSession: signaling socket closed state=%@", "\(state)")
         if state == .closed || state == .failed { return }
         fail()
     }
@@ -676,15 +722,48 @@ final class SfuCallSession {
             onRemoteVideoTrack: { [weak self] track, streamId in
                 self?.callbacks.onRemoteVideoTrack?(track, streamId)
             },
-            onRemoteReceiver: { [weak self] receiver, _ in
+            onRemoteReceiver: { [weak self] receiver, streamId in
                 // Arm the SFrame decryptor on every incoming track
                 // (audio + video) — invariant #4. Use the CURRENT epoch
                 // seed (`activeSeed`), so a receiver that arrives after a
                 // mid-call rekey is armed at the new epoch (G-18). A remote
                 // track only arrives after this client published (it has a
                 // peer connection), so the seed is always set here.
-                guard let self = self, let seed = self.activeSeed else { return }
-                _ = self.pc?.armSFrameDecryptor(for: receiver, seed: seed)
+                // A torn-down peer connection is a hang-up racing a receiver,
+                // not a decryption fault — there is no longer a call to report
+                // it on, and accusing a peer on the way out would be a lie of
+                // its own.
+                guard let self = self, let seed = self.activeSeed, let pc = self.pc else {
+                    return
+                }
+                let kind = receiver.track?.kind ?? "unknown"
+                guard !pc.armSFrameDecryptor(for: receiver, seed: seed) else {
+                    // Logged on SUCCESS as well as failure. While only failures
+                    // printed, a silent path could mean "armed fine" or "never
+                    // fired at all", and a live investigation read the silence
+                    // as the second when it may well have been the first.
+                    NSLog(
+                        "SfuCallSession: SFrame decryptor armed: kind=%@ peer=%@",
+                        kind, streamId ?? "unknown")
+                    return
+                }
+                // A receiver with no decryptor decodes nothing: the crypto
+                // options declare frame encryption required, so libwebrtc
+                // discards every frame instead of rendering it. That is the
+                // right refusal and it is not in question here — what is in
+                // question is that it looks EXACTLY like a peer with a bad
+                // uplink. The result used to be discarded, which made a fault
+                // that kills one peer's media indistinguishable from weather.
+                //
+                // It is not escalated to ending the call: the arm is per
+                // receiver, so one failure is one stream of one peer, and
+                // tearing down an N-party call (or hiding the peer) would
+                // destroy the very evidence the user needs. It is reported
+                // instead, and the screen says so.
+                NSLog(
+                    "SfuCallSession: SFrame decryptor arm FAILED: kind=%@ peer=%@",
+                    kind, streamId ?? "unknown")
+                self.callbacks.onUndecryptableReceiver?(streamId, kind)
             }
         )
     }

@@ -128,6 +128,7 @@ import me.lakko.app.calls.CallSession
 import me.lakko.app.calls.CallStage
 import me.lakko.app.calls.CameraVideoCapture
 import me.lakko.app.calls.callControlRow
+import me.lakko.app.calls.callScreenTitle
 import me.lakko.app.calls.callStage
 import me.lakko.app.calls.controlsMayAutoHide
 import me.lakko.app.calls.showsSelfViewPip
@@ -192,7 +193,19 @@ private fun CallUiState.QualityTier.colour(): Color = when (this) {
 @Composable
 public fun CallScreen(
     onExit: () -> Unit,
-    state: CallUiState = remember { CallUiState() },
+    /**
+     * The call state to render, or `null` to own a fresh one.
+     *
+     * The distinction is load-bearing and used to be invisible: this screen
+     * resets the state in its `onDispose`, which is right for a state it
+     * created and destructive for one a host owns and keeps feeding. A live
+     * group call hit exactly that — the screen was disposed mid-call, reset the
+     * host's state, and the call fell back to `Calling...` with its controls
+     * greyed and its self-view gone while the peer's timer ran on, because only
+     * this device's VIEW of the call had been wiped. Passing the state now
+     * implies the caller owns it.
+     */
+    state: CallUiState? = null,
     // G3-2-session-bind — the live call session driving this
     // screen. When `null` (Compose previews / design work, and
     // the group + call-link hosts, which drive the screen
@@ -228,7 +241,18 @@ public fun CallScreen(
      * screen while the second participant is still arriving; see [callStage].
      */
     groupCall: Boolean = false,
+    /**
+     * `docs/ux/calls.md` section 4 — what the call is called. For a group call
+     * this is the group's name (ADR-0051); `null` means the group has none. It
+     * is never derived from a participant: see [callScreenTitle].
+     */
+    groupName: String? = null,
 ) {
+    // Captured once: whether this composition created the state, and may
+    // therefore reset it. Reading the parameter later would be wrong — the
+    // question is who made it, which cannot change.
+    val ownsState = remember { state == null }
+    val callState = state ?: remember { CallUiState() }
     // One sound controller per CallScreen lifetime; released
     // in the same DisposableEffect that resets the UI state so
     // the SoundPool + cached MediaPlayer handles do not leak
@@ -251,14 +275,17 @@ public fun CallScreen(
         onDispose {
             audio.stop()
             sounds.release()
-            state.reset()
+            // Only what this composition made. A host's state outlives the
+            // screen by design, and resetting it here is what turned a
+            // disposal into a call that looked dead.
+            if (ownsState) callState.reset()
         }
     }
 
     // The self-view's flip button is drawn only where there is somewhere to
     // flip to; a single-camera device gets no button rather than a dead one.
     LaunchedEffect(context) {
-        state.setHasMultipleCameras(CameraVideoCapture.cameraCount(context) > 1)
+        callState.setHasMultipleCameras(CameraVideoCapture.cameraCount(context) > 1)
     }
 
     // G3-2-session-bind — drive the UI from the real session
@@ -266,12 +293,12 @@ public fun CallScreen(
     // whichever host owns it.
     LaunchedEffect(session) {
         if (session != null) {
-            state.driveFrom(session, remoteName = remoteName.orEmpty())
+            callState.driveFrom(session, remoteName = remoteName.orEmpty())
         }
     }
 
-    val phase by state.phase.collectAsState()
-    val participants by state.participants.collectAsState()
+    val phase by callState.phase.collectAsState()
+    val participants by callState.participants.collectAsState()
 
     // Phase → sound mapping. Mirrors the same trigger map on
     // web (`Call.tsx`) and iOS (`CallScreen.swift`) so the
@@ -310,14 +337,14 @@ public fun CallScreen(
             for (p in remoteParts) {
                 if (p.id !in lastRemoteIds) {
                     sounds.playOnce(CallSoundController.SoundName.JOIN)
-                    state.addSystemEvent("${p.displayName} joined the call")
+                    callState.addSystemEvent("${p.displayName} joined the call")
                 }
             }
             val currentIds = remoteIds.toSet()
             for (prevId in lastRemoteIds) {
                 if (prevId !in currentIds) {
                     sounds.playOnce(CallSoundController.SoundName.LEAVE)
-                    state.addSystemEvent("A participant left the call")
+                    callState.addSystemEvent("A participant left the call")
                     // Display name has been dropped from state
                     // by the time we observe the deletion;
                     // future refinement preserves it. Out of
@@ -336,11 +363,12 @@ public fun CallScreen(
     // only thing this composable draws is the call.
     LakkoTheme(dark = true) {
         InCallView(
-            state = state,
+            state = callState,
             onExit = onExit,
             remoteName = remoteName,
             avatarSeed = avatarSeed,
             groupCall = groupCall,
+            groupName = groupName,
             speakerOn = speakerOn,
             onToggleSpeaker = { audio.toggleSpeaker() },
             onSwitchCamera = onSwitchCamera,
@@ -352,10 +380,10 @@ public fun CallScreen(
                 when {
                     session != null -> session.hangUp()
                     onEndCall != null -> onEndCall()
-                    else -> state.endCall()
+                    else -> callState.endCall()
                 }
             },
-            onSetMic = { on -> if (session != null) session.setMicrophoneEnabled(on) else state.setMic(on) },
+            onSetMic = { on -> if (session != null) session.setMicrophoneEnabled(on) else callState.setMic(on) },
             // G3-2-call-controls + ADR-0032 piece B2b — camera routing. With a
             // real session, turning the camera ON runs `addLocalVideo()`
             // (acquire + add a video track + renegotiate the first time on a
@@ -390,7 +418,7 @@ public fun CallScreen(
                         }
                     }
                 } else {
-                    state.setCamera(on)
+                    callState.setCamera(on)
                 }
             },
         )
@@ -409,6 +437,7 @@ private fun InCallView(
     remoteName: String? = null,
     avatarSeed: String? = null,
     groupCall: Boolean = false,
+    groupName: String? = null,
     speakerOn: Boolean = false,
     onToggleSpeaker: () -> Unit = {},
     onSwitchCamera: (() -> Unit)? = null,
@@ -450,9 +479,15 @@ private fun InCallView(
         groupCall = groupCall,
     )
     val group = stage == CallStage.GRID
-    val displayName = remoteName?.trim()?.takeIf { it.isNotEmpty() }
-        ?: soleRemote?.displayName?.takeIf { it.isNotBlank() }
-        ?: "Call"
+    // docs/ux/calls.md section 4 — a group call is titled by the group, never
+    // by whatever the first participant's tile happens to say. See
+    // [callScreenTitle]; a live call was titled `01a0a985` because the title
+    // inherited a participant label's fallback chain.
+    val displayName = callScreenTitle(
+        groupName = groupName,
+        peerName = remoteName ?: soleRemote?.displayName,
+        groupCall = groupCall,
+    )
     val seed = avatarSeed?.takeIf { it.isNotBlank() } ?: displayName
 
     // Section 4: "The controls fade out after 5 seconds of a connected video
@@ -1325,10 +1360,9 @@ private fun CallStatusLine(
         }
     }
 
-    val participants by state.participants.collectAsState()
-    val title = remoteName?.trim()?.takeIf { it.isNotEmpty() }
-        ?: participants.firstOrNull { !it.isLocal }?.displayName
-        ?: "Call"
+    // Already decided by [callScreenTitle] at the stage; passed through whole so
+    // the line cannot re-derive a different answer from the roster.
+    val title = remoteName?.trim()?.takeIf { it.isNotEmpty() } ?: "Call"
     val status = callStatusText(
         calling = phase is CallUiState.CallPhase.Calling,
         connecting = phase is CallUiState.CallPhase.Connecting,

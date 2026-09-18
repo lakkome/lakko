@@ -114,6 +114,7 @@ use str0m::net::{Protocol, Receive, Transmit};
 use str0m::{Candidate, Event, Input, Output, Rtc};
 use thiserror::Error;
 
+use crate::frame_descriptor;
 use crate::peer::{PeerId, PeerRegistry};
 use crate::protocol::ServerFrame;
 
@@ -501,8 +502,20 @@ impl MediaPeer {
         // ([`drive_layer_selection`]) uses. The initial estimate is a
         // conservative 600 kbps; str0m refines it from TWCC/REMB feedback. BWE
         // is passive for the SFrame-passthrough path (it never rewrites media).
+        //
+        // Register the generic frame descriptor so it is negotiated in both
+        // directions — echoed in the answer to a publisher's offer, and
+        // offered in the SFU's own offer to a subscriber. Without it in this
+        // session map str0m drops the extension three times over: it is not
+        // echoed in the answer, not adopted from the offer, and not parsed
+        // off the wire. The SFU carries the value without interpreting it;
+        // see [`crate::frame_descriptor`] for what that costs in exposure.
         let rtc = Rtc::builder()
             .enable_bwe(Some(Bitrate::kbps(600)))
+            .set_extension(
+                frame_descriptor::GENERIC_FRAME_DESCRIPTOR_ID,
+                frame_descriptor::generic_frame_descriptor_extension(),
+            )
             .build(now);
         Self {
             id,
@@ -944,6 +957,20 @@ impl MediaPeer {
         };
         let Some(pt) = writer.match_params(data.params) else {
             return MediaForward::NoCodecMatch;
+        };
+        // Carry the publisher's frame descriptor onto the relayed frame. The
+        // bytes are opaque to the SFU — it stores and re-emits them, and the
+        // serializer recomputes only the two frame-boundary bits the
+        // re-packetization invalidates. Without this the value is dropped and
+        // the receiver has nothing left to recognise a key frame by, since
+        // SFrame has replaced the bitstream header it would otherwise read.
+        let writer = match data
+            .ext_vals
+            .user_values
+            .get::<frame_descriptor::FrameDescriptor>()
+        {
+            Some(descriptor) => writer.user_extension_value(descriptor.clone()),
+            None => writer,
         };
         if let Err(e) = writer.write(pt, data.network_time, data.time, data.data.clone()) {
             return MediaForward::WriteFailed(e.to_string());
@@ -1681,6 +1708,23 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
                     "SdpAnswer from unknown media peer {peer_id}"
                 ))),
             };
+            // Lifecycle point 4 of 4, and the one that separates the two
+            // failure shapes this logging exists for. Point 3 present and
+            // this absent means the subscriber never answered — it refused
+            // the offer, or never received it. Both present and still no
+            // picture means the track is open and the fault is downstream,
+            // in media rather than in negotiation.
+            match &res {
+                Ok(()) => tracing::info!(
+                    peer = %peer_id,
+                    "media: subscriber answered the downstream-track offer"
+                ),
+                Err(e) => tracing::warn!(
+                    peer = %peer_id,
+                    error = %e,
+                    "media: subscriber's answer to the downstream-track offer was refused"
+                ),
+            }
             let _ = reply.send(res);
         },
     }
@@ -1908,6 +1952,18 @@ async fn drain_outputs(
                         // `register_local_track_in`
                         // is idempotent on `mid`.
                         let track = peer.register_local_track_in(added.mid, added.kind);
+                        // Lifecycle point 1 of 4. A publisher announced a
+                        // track. If a "no video" report has no line here, the
+                        // publisher never got its media line negotiated and
+                        // nothing downstream is worth looking at.
+                        tracing::info!(
+                            peer = %origin,
+                            call = %peer.call_id(),
+                            mid = ?added.mid,
+                            kind = ?added.kind,
+                            direction = ?added.direction,
+                            "media: track announced by peer"
+                        );
                         new_tracks.push(PendingTrackIn {
                             origin: origin.clone(),
                             track,
@@ -2099,6 +2155,38 @@ pub(crate) fn fanout_media_data(
     outcome
 }
 
+/// Condense an SDP's `a=extmap` lines into one field for a log line.
+///
+/// Renders `m=` sections as a separator and each extension as `id:name`,
+/// where the name is the last path segment of the URI — `mid`,
+/// `generic-frame-descriptor-00`, `abs-send-time`. Full URIs would make the
+/// line unreadable and are not what a reader is checking: the question is
+/// always which id a given extension landed on.
+///
+/// Diagnostic only. Nothing branches on this.
+fn extmap_summary(sdp: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for line in sdp.lines() {
+        if let Some(rest) = line.strip_prefix("m=") {
+            let kind = rest.split_whitespace().next().unwrap_or("?");
+            parts.push(format!("[{kind}]"));
+        } else if let Some(rest) = line.strip_prefix("a=extmap:") {
+            let mut fields = rest.split_whitespace();
+            let Some(id) = fields.next() else {
+                continue;
+            };
+            let name = fields.next().map_or("?", |uri| {
+                uri.rsplit(['/', ':'])
+                    .next()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(uri)
+            });
+            parts.push(format!("{id}:{name}"));
+        }
+    }
+    parts.join(" ")
+}
+
 /// Tally of the simulcast layer switches [`drive_layer_selection`] made this
 /// tick. Returned so the media task + tests observe the policy's decisions
 /// without scraping the global metrics registry; the driver also mirrors it into
@@ -2265,12 +2353,17 @@ pub(crate) fn propagate_new_tracks_in(router: &mut MediaRouter, new_tracks: &[Pe
             };
             let inserted = peer.observe_remote_track_in(event.origin.clone(), event.track);
             if inserted {
-                tracing::debug!(
+                // Lifecycle point 2 of 4. The SFU decided this subscriber
+                // should receive that publisher's track. A missing line here
+                // against a present point 1 means cross-call isolation or the
+                // peer walk dropped it, not the negotiation.
+                tracing::info!(
                     origin = %event.origin,
                     target = %peer.id(),
+                    call = %origin_call,
                     mid = ?event.track.mid,
                     kind = ?event.track.kind,
-                    "media: registered remote TrackIn on downstream peer"
+                    "media: opened downstream track on subscriber"
                 );
             }
         }
@@ -2333,11 +2426,20 @@ async fn drive_renegotiations(router: &mut MediaRouter, peers: &PeerRegistry) {
             );
             continue;
         };
+        let extmaps = extmap_summary(&sdp);
         match tx.try_send(ServerFrame::SdpOffer { sdp }) {
             Ok(()) => {
-                tracing::debug!(
+                // Lifecycle point 3 of 4. The SFU offered the subscriber a
+                // downstream track. The extmap summary is here because the id
+                // an extension is offered on is peer-local — a peer that
+                // never offered a video m-line has nothing pinning it — and a
+                // mismatch against the peer's own numbering is invisible
+                // without seeing the offer. It is a single compact field, not
+                // a line per extension.
+                tracing::info!(
                     peer = %peer_id,
-                    "media: dispatched SFU-initiated SdpOffer"
+                    extmaps = %extmaps,
+                    "media: offered downstream track to subscriber"
                 );
             },
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
@@ -2938,6 +3040,32 @@ mod tests {
     /// EVERY non-origin peer exactly once — never to the
     /// origin, never twice, never skipping one. Unit-test
     /// peers have no negotiated writer, so every attempt lands
+    #[test]
+    fn extmap_summary_names_the_id_each_extension_landed_on() {
+        let sdp = "v=0\r\n\
+             m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+             a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level\r\n\
+             a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\r\n\
+             m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+             a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\r\n\
+             a=extmap:12 http://www.webrtc.org/experiments/rtp-hdrext/generic-frame-descriptor-00\r\n";
+        let summary = extmap_summary(sdp);
+        assert_eq!(
+            summary,
+            "[audio] 1:ssrc-audio-level 4:mid [video] 4:mid 12:generic-frame-descriptor-00"
+        );
+    }
+
+    #[test]
+    fn extmap_summary_survives_malformed_input() {
+        // It runs on an SDP str0m produced, but it is a log helper: it must
+        // never be the thing that panics during a call.
+        assert_eq!(extmap_summary(""), "");
+        assert_eq!(extmap_summary("a=extmap:"), "");
+        assert_eq!(extmap_summary("a=extmap:7"), "7:?");
+        assert_eq!(extmap_summary("m="), "[?]");
+    }
+
     /// in `no_writer`; the tally proves the iteration touched
     /// each of the `N - 1` non-origin peers (the fairness
     /// invariant), independent of writer state. Verbatim

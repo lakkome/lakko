@@ -317,6 +317,12 @@ internal class ChatRepositoryGroupCallPort(
         val tagToLabel = HashMap<String, String>()
         val collidedTags = HashSet<String>()
         for (contact in AcceptedContactsStore.load(applicationContext)) {
+            // A contact accepted before the acknowledgement carried an account
+            // id has none, and is skipped here — so no tag is ever computed for
+            // them and every lookup below misses. That is not a code defect the
+            // next build fixes: the id would have arrived on the ack, which sits
+            // behind an inbox cursor that has long since moved past it, so an
+            // affected contact does not heal on its own.
             val accountId = contact.request.fromAccountId ?: continue
             val accountIdHex = accountId.joinToString("") { "%02x".format(it.toInt() and 0xff) }
             val tag = sfuPeerTag(callId = callIdHex, accountId = accountIdHex)
@@ -328,13 +334,22 @@ internal class ChatRepositoryGroupCallPort(
                 tagToLabel[tag] = profileNames.resolve(contact.request.fromPubkey).primary
             }
         }
-        return { _, pseudonym, peerTag ->
+        // Arrival-order numbering for the peers that do not resolve, keyed on
+        // the peer id so a peer named once keeps that number for the call — the
+        // resolver is called again for the same peer (the welcome snapshot and
+        // then peer-joined), and a label that renumbered itself between the two
+        // would be worse than the pseudonym it replaces.
+        val unresolved = java.util.concurrent.ConcurrentHashMap<String, String>()
+        return { peerId, pseudonym, peerTag ->
             if (peerTag.isNotEmpty() && !collidedTags.contains(peerTag) && tagToLabel.containsKey(peerTag)) {
                 tagToLabel.getValue(peerTag)
-            } else if (pseudonym.isEmpty()) {
-                "Peer"
             } else {
-                pseudonym.take(8)
+                // NOT the pseudonym. It reads as an identifier the user should
+                // recognise and cannot; see [unresolvedParticipantLabel].
+                val key = peerId.ifEmpty { pseudonym }
+                unresolved.computeIfAbsent(key) {
+                    unresolvedParticipantLabel(unresolved.size + 1)
+                }
             }
         }
     }
