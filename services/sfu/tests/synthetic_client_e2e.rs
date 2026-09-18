@@ -2153,3 +2153,179 @@ async fn audio_only_subscriber_is_offered_video_on_libwebrtcs_own_extmap_id() {
         "the frame-level fields must survive on this path as well"
     );
 }
+
+/// **The late joiner** — A publishes first, B joins the call afterwards, and
+/// B must be offered the track A was already sending.
+///
+/// ## Why every other test here misses this
+///
+/// `propagate_new_tracks_in` is driven by `Event::MediaAdded` — a track being
+/// *announced* — and opens it onto every peer present at that instant. It is
+/// one-directional by construction. Nothing opened the tracks a call already
+/// had onto a peer that arrived later, so a late joiner received only what
+/// was published after it got there.
+///
+/// Every other test in this file has the subscriber established first and the
+/// publisher arriving last, which is exactly the order in which the missing
+/// direction never matters. A live three-person call with the publisher
+/// joining twelve minutes before the subscriber produced not one downstream
+/// track aimed at the subscriber, for the whole call.
+///
+/// This asserts the repaired direction end to end: A's frame reaches B
+/// verbatim even though A announced it before B existed.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn a_peer_joining_a_call_in_progress_receives_the_tracks_already_in_it() {
+    let peers = PeerRegistry::new();
+    let b_id = PeerId::fresh();
+    let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
+    assert!(
+        peers
+            .register(Peer {
+                id: b_id.clone(),
+                call_id: "late-joiner".to_owned(),
+                account_id: "subscriber-b".to_owned(),
+                outbound: Some(b_tx),
+            })
+            .await,
+        "fresh PeerId must register cleanly"
+    );
+
+    let (media, sfu_addr) = spawn_media_task("127.0.0.1:0".parse().unwrap(), peers)
+        .await
+        .expect("UDP bind on loopback:0 succeeds");
+
+    let mut a = SyntheticClient::new_with_frame_descriptor().await;
+    let a_id = PeerId::fresh();
+
+    // A joins FIRST and publishes.
+    let (a_offer, a_pending, publisher_mid) = a.create_video_publisher_offer();
+    let a_answer = media
+        .accept_offer(a_id.clone(), "late-joiner-call".to_owned(), a_offer)
+        .await
+        .expect("SFU accepts A's publisher offer");
+    a.accept_answer(a_pending, &a_answer)
+        .expect("A applies the SFU's answer");
+
+    // Drive A to Connected and let it announce its track, so the
+    // announcement has definitively happened BEFORE B exists. Without this
+    // the test could pass by accident through the forward direction.
+    let deadline = Instant::now() + HANDSHAKE_DEADLINE;
+    while Instant::now() < deadline && !a.is_connected() {
+        let _ = a.drain().await;
+        let a_sock = a.socket.clone();
+        let mut abuf = [0u8; 2048];
+        tokio::select! {
+            r = a_sock.recv_from(&mut abuf) => {
+                if let Ok((n, src)) = r {
+                    a.feed_receive(&abuf[..n], src, sfu_addr);
+                }
+            }
+            () = tokio::time::sleep(Duration::from_millis(5)) => a.feed_timeout(),
+        }
+    }
+    assert!(a.is_connected(), "publisher A must connect before B joins");
+
+    // NOW B joins, audio-only, the way a peer answering a call in progress
+    // does.
+    let mut b = SyntheticClient::new_with_frame_descriptor().await;
+    let (b_offer, b_pending) = b.create_subscriber_offer();
+    let b_answer = media
+        .accept_offer(b_id.clone(), "late-joiner-call".to_owned(), b_offer)
+        .await
+        .expect("SFU accepts B's offer");
+    b.accept_answer(b_pending, &b_answer)
+        .expect("B applies the SFU's answer");
+
+    let descriptor: Vec<u8> = vec![0xf0, 0x01, 0x2a, 0x00, 0x05, 0x00, 0x02, 0xd0];
+    let payload: Vec<u8> = (0..3000_u32)
+        .map(|i| {
+            u8::try_from(i % 251)
+                .unwrap_or(0)
+                .wrapping_mul(7)
+                .wrapping_add(3)
+        })
+        .collect();
+
+    let deadline = Instant::now() + CROSS_FANOUT_DEADLINE;
+    let mut reneg_answered = false;
+    let mut offered = false;
+    let mut pending_reneg: Option<String> = None;
+    let mut frame_idx: u64 = 0;
+    let mut received = false;
+
+    while Instant::now() < deadline {
+        let _ = a.drain().await;
+        let b_payloads = b.drain().await;
+        if b_payloads
+            .iter()
+            .any(|p| p.as_slice() == payload.as_slice())
+        {
+            received = true;
+            break;
+        }
+
+        while let Ok(frame) = b_rx.try_recv() {
+            if let ServerFrame::SdpOffer { sdp } = frame {
+                offered = true;
+                pending_reneg = Some(sdp);
+            }
+        }
+        if !reneg_answered && b.is_connected() {
+            if let Some(sdp) = pending_reneg.take() {
+                if let Ok(answer) = b.answer_renegotiation(&sdp) {
+                    if media
+                        .accept_renegotiation_answer(b_id.clone(), answer)
+                        .await
+                        .is_ok()
+                    {
+                        reneg_answered = true;
+                    }
+                }
+            }
+        }
+
+        if a.is_connected() && b.is_connected() && reneg_answered {
+            a.write_video_frame_with_descriptor(publisher_mid, &payload, &descriptor, frame_idx);
+            frame_idx += 1;
+        }
+
+        let a_sock = a.socket.clone();
+        let b_sock = b.socket.clone();
+        let mut abuf = [0u8; 2048];
+        let mut bbuf = [0u8; 2048];
+        tokio::select! {
+            r = a_sock.recv_from(&mut abuf) => {
+                if let Ok((n, src)) = r {
+                    a.feed_receive(&abuf[..n], src, sfu_addr);
+                }
+            }
+            r = b_sock.recv_from(&mut bbuf) => {
+                if let Ok((n, src)) = r {
+                    b.feed_receive(&bbuf[..n], src, sfu_addr);
+                }
+            }
+            () = tokio::time::sleep(Duration::from_millis(5)) => {
+                a.feed_timeout();
+                b.feed_timeout();
+            }
+        }
+    }
+
+    // Asserted separately from delivery: "never offered" and "offered but
+    // never delivered" are different bugs, and the live failure was the
+    // former. A bare delivery assertion would not have said which.
+    assert!(
+        offered,
+        "the SFU never offered the late joiner the track the call already had"
+    );
+    assert!(
+        received,
+        "the late joiner never received the already-published video within \
+         {CROSS_FANOUT_DEADLINE:?}; a_connected={} b_connected={} \
+         reneg_answered={}",
+        a.is_connected(),
+        b.is_connected(),
+        reneg_answered,
+    );
+}

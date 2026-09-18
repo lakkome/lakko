@@ -1651,6 +1651,7 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
             offer_sdp,
             reply,
         } => {
+            let peer_id_for_backfill = peer_id.clone();
             let peer = router.peer_or_insert(peer_id, Instant::now());
             // Bind the peer to its call so fanout stays
             // call-scoped (cross-call isolation). Idempotent
@@ -1679,10 +1680,36 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
                 }
             }
             let res = peer.accept_offer(&offer_sdp);
+            // Lifecycle point 0. The four downstream lines describe how the
+            // SFU routes tracks BETWEEN peers; they say nothing about the
+            // answer to a peer's own offer — and that answer alone can hand
+            // the peer a remote track. str0m sets its local direction to
+            // `m.direction().invert()` (`change/sdp.rs:1285`), so a client
+            // that offers a `sendrecv` m-line is answered `sendrecv` and its
+            // libwebrtc raises `ontrack` for a receiver on its OWN send
+            // m-line — one the SFU never points a downstream track at, so it
+            // can never carry media. Logging the answered direction and msid
+            // per m-line is what distinguishes that phantom from a real
+            // subscription: a real downstream track's stream id is the source
+            // peer's id, while this one is a random 30-char msid.
+            if let Ok(answer) = &res {
+                tracing::info!(
+                    peer = %peer_id_for_backfill,
+                    media = %media_line_summary(answer),
+                    "media: answered peer's own offer"
+                );
+            }
+            let ok = res.is_ok();
             // If the receiver dropped, the originating
             // future has bailed — ignore the send
             // failure.
             let _ = reply.send(res);
+            // Give this peer the tracks the call already has. Announcement
+            // only ever propagates FORWARD — see `backfill_existing_tracks`
+            // for why that leaves a late joiner with nothing.
+            if ok {
+                backfill_existing_tracks(router, &peer_id_for_backfill);
+            }
         },
         MediaCommand::AddRemoteCandidate {
             peer_id,
@@ -2153,6 +2180,121 @@ pub(crate) fn fanout_media_data(
     }
     record_fanout_metrics(&outcome);
     outcome
+}
+
+/// Open every track the call already has onto `joiner`.
+///
+/// ## The gap this closes
+///
+/// [`propagate_new_tracks_in`] is the only producer of downstream tracks,
+/// and it runs off `Event::MediaAdded` — a track being **announced**. It
+/// opens that track onto every peer present *at that moment*. Nothing ran
+/// in the other direction, so a peer that joined a call already in progress
+/// was given only what was published **after** it arrived. In a two-person
+/// call where the first participant publishes and the second joins later,
+/// the second received nothing at all, for the whole call.
+///
+/// The asymmetry hid for a long time because it is invisible whenever the
+/// publisher is the one who arrives last, which is the shape every test in
+/// this crate happened to have.
+///
+/// Idempotent: `observe_remote_track_in` de-dupes on
+/// `(source_peer, source_mid)`, so calling this on every offer from a peer —
+/// including its renegotiations — only ever adds what is genuinely missing.
+/// Cross-call isolation is enforced here exactly as in the fanout: only
+/// peers sharing a non-empty `call_id` with the joiner are considered.
+fn backfill_existing_tracks(router: &mut MediaRouter, joiner: &MediaPeerId) {
+    let Some(call) = router
+        .peers()
+        .iter()
+        .find(|p| p.id() == joiner)
+        .map(|p| p.call_id().to_owned())
+        .filter(|c| !c.is_empty())
+    else {
+        return;
+    };
+
+    // Snapshot first: the write below needs a mutable borrow of the joiner,
+    // so the sources cannot be read through `router` at the same time.
+    let sources: Vec<(MediaPeerId, TrackIn)> = router
+        .peers()
+        .iter()
+        .filter(|p| p.id() != joiner && p.call_id() == call)
+        .flat_map(|p| {
+            let id = p.id().clone();
+            p.tracks_in().iter().map(move |t| (id.clone(), *t))
+        })
+        .collect();
+    if sources.is_empty() {
+        return;
+    }
+
+    let Some(peer) = router.peers_mut().iter_mut().find(|p| p.id() == joiner) else {
+        return;
+    };
+    for (origin, track) in sources {
+        if peer.observe_remote_track_in(origin.clone(), track) {
+            // Same lifecycle point 2 as `propagate_new_tracks_in`, reached by
+            // the other route. A joiner's subscriptions appear here rather
+            // than there, which is the difference between "the call had
+            // nothing to give it" and "the call had tracks and withheld them".
+            tracing::info!(
+                origin = %origin,
+                target = %joiner,
+                call = %call,
+                mid = ?track.mid,
+                kind = ?track.kind,
+                "media: opened pre-existing track on joining subscriber"
+            );
+        }
+    }
+}
+
+/// Condense an SDP's media lines into one field for a log line: per m-section
+/// the kind, the direction, and the msid stream id.
+///
+/// The direction is the load-bearing part. A `sendrecv` answer to a client's
+/// `sendrecv` offer gives that client a receiver on its own send m-line,
+/// which looks to the client exactly like a subscription and is not one.
+///
+/// Diagnostic only. Nothing branches on this.
+fn media_line_summary(sdp: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut current: Option<String> = None;
+    let push = |current: &mut Option<String>, parts: &mut Vec<String>| {
+        if let Some(c) = current.take() {
+            parts.push(c);
+        }
+    };
+    for line in sdp.lines() {
+        if let Some(rest) = line.strip_prefix("m=") {
+            push(&mut current, &mut parts);
+            let kind = rest.split_whitespace().next().unwrap_or("?");
+            current = Some(format!("[{kind}"));
+        } else if let Some(c) = current.as_mut() {
+            for dir in ["sendrecv", "sendonly", "recvonly", "inactive"] {
+                if line == format!("a={dir}") {
+                    c.push(' ');
+                    c.push_str(dir);
+                }
+            }
+            if let Some(msid) = line.strip_prefix("a=msid:") {
+                if let Some(stream) = msid.split_whitespace().next() {
+                    c.push_str(" msid=");
+                    c.push_str(stream);
+                }
+            }
+        }
+    }
+    push(&mut current, &mut parts);
+    parts
+        .into_iter()
+        .map(|mut p| {
+            p.push(']');
+            p
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Condense an SDP's `a=extmap` lines into one field for a log line.
@@ -3040,6 +3182,112 @@ mod tests {
     /// EVERY non-origin peer exactly once — never to the
     /// origin, never twice, never skipping one. Unit-test
     /// peers have no negotiated writer, so every attempt lands
+    /// Look up a peer by test name. `MediaRouter` exposes the slice, not a
+    /// by-id getter, and these tests only ever want one peer.
+    fn find_peer<'a>(r: &'a MediaRouter, name: &str) -> &'a MediaPeer {
+        let id = pid(name);
+        r.peers()
+            .iter()
+            .find(|p| p.id() == &id)
+            .unwrap_or_else(|| panic!("peer {name} must be in the router"))
+    }
+
+    /// The unit-level statement of the late-joiner repair: a peer that
+    /// arrives after a track was announced still gets it, and the
+    /// call boundary is respected while doing so.
+    #[test]
+    fn backfill_gives_a_joiner_the_calls_existing_tracks_but_not_another_calls() {
+        let mut r = MediaRouter::new();
+
+        let mut publisher = peer_in_call("publisher", "call-a");
+        let video = publisher.register_local_track_in(Mid::new(), MediaKind::Video);
+        let audio = publisher.register_local_track_in(Mid::new(), MediaKind::Audio);
+        r.add_peer(publisher);
+
+        let mut stranger = peer_in_call("stranger", "call-b");
+        stranger.register_local_track_in(Mid::new(), MediaKind::Video);
+        r.add_peer(stranger);
+
+        // The joiner arrives last, so nothing ever propagated to it.
+        r.add_peer(peer_in_call("joiner", "call-a"));
+        assert!(
+            find_peer(&r, "joiner").tracks_out().is_empty(),
+            "a fresh peer starts with nothing"
+        );
+
+        backfill_existing_tracks(&mut r, &pid("joiner"));
+
+        let joiner = find_peer(&r, "joiner");
+        assert_eq!(
+            joiner.tracks_out().len(),
+            2,
+            "both of the publisher's tracks"
+        );
+        assert!(
+            joiner
+                .tracks_out()
+                .iter()
+                .all(|t| t.source_peer == pid("publisher")),
+            "the stranger is in another call and must never be a source"
+        );
+        let mids: Vec<Mid> = joiner.tracks_out().iter().map(|t| t.source_mid).collect();
+        assert!(mids.contains(&video.mid) && mids.contains(&audio.mid));
+
+        // Runs on every offer from a peer, renegotiations included, so it
+        // must never accumulate duplicates.
+        backfill_existing_tracks(&mut r, &pid("joiner"));
+        assert_eq!(
+            find_peer(&r, "joiner").tracks_out().len(),
+            2,
+            "backfill must be idempotent"
+        );
+    }
+
+    #[test]
+    fn backfill_is_a_no_op_for_a_peer_with_no_call_or_no_peers() {
+        let mut r = MediaRouter::new();
+        // Unknown peer.
+        backfill_existing_tracks(&mut r, &pid("nobody"));
+
+        // A peer whose call is unbound must not inherit anything — an empty
+        // call id matches no real call, the same rule the fanout applies.
+        let mut publisher = peer_in_call("publisher", "call-a");
+        publisher.register_local_track_in(Mid::new(), MediaKind::Video);
+        r.add_peer(publisher);
+        r.add_peer(MediaPeer::new(pid("unbound"), Instant::now()));
+        backfill_existing_tracks(&mut r, &pid("unbound"));
+        assert!(
+            find_peer(&r, "unbound").tracks_out().is_empty(),
+            "an unbound peer must not inherit a call's tracks"
+        );
+    }
+
+    #[test]
+    fn media_line_summary_shows_the_direction_and_msid_per_section() {
+        let sdp = "v=0\r\n\
+             m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+             a=recvonly\r\n\
+             a=msid:aaaaaa bbbbbb\r\n\
+             m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+             a=sendrecv\r\n\
+             a=msid:cccccc dddddd\r\n";
+        assert_eq!(
+            media_line_summary(sdp),
+            "[audio recvonly msid=aaaaaa] [video sendrecv msid=cccccc]"
+        );
+    }
+
+    #[test]
+    fn media_line_summary_survives_malformed_input() {
+        assert_eq!(media_line_summary(""), "");
+        assert_eq!(
+            media_line_summary("a=sendrecv"),
+            "",
+            "no m= section to attach to"
+        );
+        assert_eq!(media_line_summary("m=video 9 x\r\n"), "[video]");
+    }
+
     #[test]
     fn extmap_summary_names_the_id_each_extension_landed_on() {
         let sdp = "v=0\r\n\

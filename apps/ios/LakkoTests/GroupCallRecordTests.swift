@@ -106,8 +106,18 @@ final class GroupCallRecordTests: XCTestCase {
         XCTAssertEqual(Set(r.joined.keys), members(1))
     }
 
-    func testJoinWithNoRecordCreatesNothing() {
-        XCTAssertNil(record([(.join(callId: callA, leafIndex: 1), t0)]))
+    /// CHANGED BEHAVIOUR, deliberately. This used to assert that a join with no
+    /// record created nothing, and a live run showed what that cost: the Start
+    /// is announced exactly once, so a device that was not polling in that
+    /// moment could never learn the call existed, and every heartbeat from the
+    /// people in it folded to a no-op. The record is now adopted from the
+    /// heartbeat instead — see `GroupCallRecordSelectionTests` for what it does
+    /// and does not claim, and for the protective half that survives.
+    func testJoinWithNoRecordAdoptsTheCallItNames() throws {
+        let r = try XCTUnwrap(record([(.join(callId: callA, leafIndex: 1), t0)]))
+        XCTAssertEqual(r.callId, callA)
+        XCTAssertEqual(Set(r.joined.keys), members(1))
+        XCTAssertNil(r.initiatorLeaf, "an adopted record never saw the announce")
     }
 
     func testEndClearsTheMatchingRecord() {
@@ -731,5 +741,231 @@ final class CallLinkFormTests: XCTestCase {
         XCTAssertNotNil(CallLinkForm.labelError(String(repeating: "a", count: CallInviteUrl.labelMaxLen + 1)))
         // 33 two-byte characters = 66 bytes: over the budget at 33 characters.
         XCTAssertNotNil(CallLinkForm.labelError(String(repeating: "\u{00E9}", count: 33)))
+    }
+}
+
+/// The age a log line reports for a record, and the structural drops that
+/// decide whether a record exists at all.
+///
+/// These pin the two facts that make "no banner" ambiguous on a live run: a
+/// Join for an untracked call id is dropped outright (so a device that missed
+/// the Start can never be recovered by heartbeats), and an empty `joined` set
+/// is never live however recent the Start was.
+final class GroupCallObservabilityTests: XCTestCase {
+
+    private let own = "own-device"
+    private let peer = "peer-device"
+
+    private func start(_ callId: Data, atMs: Int64) -> OngoingGroupCall? {
+        GroupCallReducer.apply(
+            .start(callId: callId, initiatorLeaf: 1, createdAtMs: UInt64(atMs), audio: true, video: true),
+            participant: nil, to: nil, rowCreatedAtMs: atMs)
+    }
+
+    /// A heartbeat for a call this device never heard announced now builds the
+    /// record, because the announce is never repeated and the alternative is a
+    /// call that is invisible for its whole life. What it must not do is claim
+    /// the things only the announce carries.
+    func testAJoinForAnUntrackedCallAdoptsItWithoutInventingTheAnnounce() {
+        let joined = GroupCallReducer.apply(
+            .join(callId: Data([1, 2, 3, 4]), leafIndex: 2),
+            participant: GroupCallParticipant(deviceKey: peer, personKey: peer),
+            to: nil, rowCreatedAtMs: 1_000)
+        XCTAssertEqual(joined?.callId, Data([1, 2, 3, 4]))
+        XCTAssertNil(joined?.initiatorLeaf)
+        XCTAssertFalse(joined?.mediaKnown ?? true)
+    }
+
+    /// A Start alone announces a call nobody has joined yet, and it counts as
+    /// live for a grace window — the initiator's own Join lands a moment after
+    /// its Start, and without the grace the announce would flicker. After the
+    /// grace, liveness depends entirely on Join rows having folded.
+    ///
+    /// This is the window that decides what a joining device must have
+    /// received: inside it, the Start is enough; outside it, a device that
+    /// applied the Start but no Join shows nothing.
+    func testAStartWithNoJoinIsLiveOnlyForTheGrace() {
+        let record = start(Data([1, 2, 3, 4]), atMs: 1_000)
+        XCTAssertNotNil(record)
+        XCTAssertTrue(GroupCallReducer.isLive(record!, nowMs: 1_000))
+        XCTAssertTrue(
+            GroupCallReducer.isLive(
+                record!, nowMs: 1_000 + GroupCallReducer.unjoinedGraceMs))
+        XCTAssertFalse(
+            GroupCallReducer.isLive(
+                record!, nowMs: 1_000 + GroupCallReducer.unjoinedGraceMs + 1))
+    }
+
+    func testAJoinWhoseDeviceDidNotResolveIsDropped() {
+        let record = start(Data([1, 2, 3, 4]), atMs: 1_000)
+        let after = GroupCallReducer.apply(
+            .join(callId: Data([1, 2, 3, 4]), leafIndex: 2),
+            participant: nil, to: record, rowCreatedAtMs: 2_000)
+        XCTAssertEqual(after?.joined.count, 0)
+        // Past the unjoined grace there is nothing left to carry it.
+        XCTAssertFalse(
+            GroupCallReducer.isLive(
+                after!, nowMs: 1_000 + GroupCallReducer.unjoinedGraceMs + 1))
+    }
+
+    /// What the log prints as `ageMs`. A record judged stale because of clock
+    /// skew and one judged stale because everybody left produce the same
+    /// verdict, and only this number separates them.
+    func testTheReportedAgeIsNowMinusTheNewestJoin() {
+        let record = start(Data([1, 2, 3, 4]), atMs: 1_000)
+        let after = GroupCallReducer.apply(
+            .join(callId: Data([1, 2, 3, 4]), leafIndex: 2),
+            participant: GroupCallParticipant(deviceKey: peer, personKey: peer),
+            to: record, rowCreatedAtMs: 10_000)
+        XCTAssertEqual(after?.newestLastSeenMs(), 10_000)
+        XCTAssertTrue(GroupCallReducer.isLive(after!, nowMs: 10_000 + 149_000))
+        XCTAssertFalse(GroupCallReducer.isLive(after!, nowMs: 10_000 + 151_000))
+    }
+
+    /// This device's own leftover entry never keeps a call alive for itself.
+    func testOwnDeviceIsIgnoredInTheReportedAge() {
+        let record = start(Data([1, 2, 3, 4]), atMs: 1_000)
+        let after = GroupCallReducer.apply(
+            .join(callId: Data([1, 2, 3, 4]), leafIndex: 2),
+            participant: GroupCallParticipant(deviceKey: own, personKey: own),
+            to: record, rowCreatedAtMs: 10_000)
+        XCTAssertEqual(after?.newestLastSeenMs(ignoringDevice: own), nil)
+        XCTAssertFalse(
+            GroupCallReducer.isLive(
+                after!, nowMs: 1_000 + GroupCallReducer.unjoinedGraceMs + 1,
+                ignoringDevice: own))
+    }
+
+    func testTheShortCallIdMatchesWhatTheServerLogs() {
+        XCTAssertEqual(
+            GroupCallSignalLog.shortId(Data([0xec, 0x9b, 0xbd, 0x0a, 0xff])), "ec9bbd0a")
+    }
+}
+
+/// One chat holds one call record, and the choice between a dead call and a
+/// live one is made here.
+///
+/// This is the defect a live run caught: a chat held the record of a call from
+/// half an hour earlier, every heartbeat from the call actually running was
+/// folded against it, the ids did not match, and the fold returned the old
+/// record unchanged. No change meant no publish, no publish meant no recomputed
+/// verdict, and the only judgement the screen ever made was that the old call
+/// was not live — correct, and about the wrong call.
+final class GroupCallRecordSelectionTests: XCTestCase {
+
+    private let alive = Data([0xec, 0x9b, 0xbd, 0x0a])
+    private let dead = Data([0xe9, 0xa1, 0xe7, 0x0d])
+    private let peer = "peer-device"
+    private let other = "other-device"
+
+    private func started(_ callId: Data, atMs: Int64) -> OngoingGroupCall {
+        GroupCallReducer.apply(
+            .start(callId: callId, initiatorLeaf: 1, createdAtMs: UInt64(atMs), audio: true, video: true),
+            participant: nil, to: nil, rowCreatedAtMs: atMs)!
+    }
+
+    private func join(
+        _ callId: Data, device: String, to current: OngoingGroupCall?, atMs: Int64
+    ) -> OngoingGroupCall? {
+        GroupCallReducer.apply(
+            .join(callId: callId, leafIndex: 2),
+            participant: GroupCallParticipant(deviceKey: device, personKey: device),
+            to: current, rowCreatedAtMs: atMs)
+    }
+
+    /// The headline: a chat holding a stale record, handed a heartbeat from a
+    /// different call, ends up holding the live one.
+    func testAStaleRecordGivesWayToTheCallThatIsActuallyRunning() {
+        let stale = started(dead, atMs: 0)
+        let nowMs = GroupCallReducer.memberFreshMs * 10
+        XCTAssertFalse(GroupCallReducer.isLive(stale, nowMs: nowMs))
+
+        let after = join(alive, device: peer, to: stale, atMs: nowMs)
+
+        XCTAssertEqual(after?.callId, alive, "the live call must win the slot")
+        XCTAssertTrue(GroupCallReducer.isLive(after!, nowMs: nowMs))
+        XCTAssertEqual(after?.joined.count, 1)
+    }
+
+    /// The fold must actually CHANGE the record, because an unchanged record
+    /// publishes nothing and nothing downstream re-reads the verdict. This is
+    /// the second symptom of the same cause.
+    func testTheFoldChangesTheRecordSoTheVerdictIsRecomputed() {
+        let stale = started(dead, atMs: 0)
+        let nowMs = GroupCallReducer.memberFreshMs * 10
+        XCTAssertNotEqual(join(alive, device: peer, to: stale, atMs: nowMs), stale)
+    }
+
+    /// The protective half of the old rule survives: a call in progress is not
+    /// displaced by a foreign call id, so a stale or fabricated id cannot take
+    /// the slot from a call people are in.
+    func testALiveRecordIsNotDisplacedByAForeignCallId() {
+        let live = join(alive, device: peer, to: started(alive, atMs: 0), atMs: 1_000)
+        XCTAssertTrue(GroupCallReducer.isLive(live!, nowMs: 1_000))
+
+        let after = join(dead, device: other, to: live, atMs: 1_000)
+
+        XCTAssertEqual(after?.callId, alive)
+        XCTAssertEqual(after?.joined.count, 1)
+    }
+
+    /// A record adopted from a heartbeat says what it does not know: the
+    /// announce is published once and never repeated, so a device that missed
+    /// it cannot recover who started the call or what media it carries.
+    func testAnAdoptedRecordDoesNotClaimWhatItNeverSaw() {
+        let adopted = join(alive, device: peer, to: nil, atMs: 5_000)
+        XCTAssertNotNil(adopted)
+        XCTAssertNil(adopted?.initiatorLeaf)
+        XCTAssertFalse(adopted!.mediaKnown)
+        // The start is the earliest moment the call is PROVEN to have been
+        // running, never a guess at when it began.
+        XCTAssertEqual(adopted?.startedAtMs, 5_000)
+    }
+
+    /// An announced record keeps saying so.
+    func testAnAnnouncedRecordKeepsItsInitiatorAndMedia() {
+        let announced = started(alive, atMs: 1_000)
+        XCTAssertEqual(announced.initiatorLeaf, 1)
+        XCTAssertTrue(announced.mediaKnown)
+        XCTAssertTrue(announced.video)
+    }
+
+    /// An adopted record cannot borrow the unjoined grace to look live on a
+    /// call that started long ago — it is live because somebody is
+    /// demonstrably in it, which is the stronger reason.
+    func testAnAdoptedRecordIsLiveOnItsHeartbeatNotOnTheGrace() {
+        let atMs = GroupCallReducer.memberFreshMs * 10
+        let adopted = join(alive, device: peer, to: nil, atMs: atMs)!
+        XCTAssertTrue(GroupCallReducer.isLive(adopted, nowMs: atMs))
+        XCTAssertFalse(
+            GroupCallReducer.isLive(adopted, nowMs: atMs + GroupCallReducer.memberFreshMs + 1))
+    }
+
+    /// A leave for some other call prunes a record that is already dead, and
+    /// leaves a live one alone.
+    func testALeaveForAnotherCallPrunesOnlyADeadRecord() {
+        let stale = started(dead, atMs: 0)
+        let nowMs = GroupCallReducer.memberFreshMs * 10
+        let pruned = GroupCallReducer.apply(
+            .leave(callId: alive, leafIndex: 2),
+            participant: GroupCallParticipant(deviceKey: peer, personKey: peer),
+            to: stale, rowCreatedAtMs: nowMs)
+        XCTAssertNil(pruned)
+
+        let live = join(alive, device: peer, to: started(alive, atMs: 0), atMs: 1_000)
+        let kept = GroupCallReducer.apply(
+            .leave(callId: dead, leafIndex: 2),
+            participant: GroupCallParticipant(deviceKey: other, personKey: other),
+            to: live, rowCreatedAtMs: 1_000)
+        XCTAssertEqual(kept?.callId, alive)
+    }
+
+    /// An unresolved sender is still dropped (C-68): a leaf index is not an
+    /// identity, and adoption must not be a way around that.
+    func testAnUnresolvedSenderStillCannotCreateARecord() {
+        let adopted = GroupCallReducer.apply(
+            .join(callId: alive, leafIndex: 2),
+            participant: nil, to: nil, rowCreatedAtMs: 5_000)
+        XCTAssertNil(adopted)
     }
 }

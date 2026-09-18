@@ -250,6 +250,9 @@ public final class ChatViewModel: ObservableObject {
     /// passes `{ try await contactsClient.resolveVerifiedRecipient(...) }`.
     private let resolveRecipient: (String) async throws -> (accountId: Data, signaturePubkey: Data)
     private var cancellables: Set<AnyCancellable> = []
+    /// Drives ``trackGroupCallFreshness``; cancelled when the record goes away
+    /// and on teardown.
+    private var groupCallFreshnessTask: Task<Void, Never>?
     /// Phase 2a3e2b-iOS — cross-device sync. Attached via
     /// [`attachSync`] from the screen so the existing init
     /// signature (1.14f2) stays binary-compatible. `nil` until
@@ -317,7 +320,10 @@ public final class ChatViewModel: ObservableObject {
             .removeDuplicates()
             .receive(on: RunLoop.main)
             .sink { [weak self] record in
-                self?.ongoingGroupCall = record
+                guard let self else { return }
+                self.ongoingGroupCall = record
+                self.logGroupCallVerdict(record)
+                self.trackGroupCallFreshness(record)
             }
             .store(in: &cancellables)
         // ADR-0024 — read watermarks are held durably by the repository (fed
@@ -482,6 +488,7 @@ public final class ChatViewModel: ObservableObject {
         typingExpiryTimer?.invalidate()
         typingSendThrottle?.cancel()
         beaconTicker?.invalidate()
+        groupCallFreshnessTask?.cancel()
     }
 
     /// ADR-0042 — provision this thread's opaque push routing on appear
@@ -606,6 +613,82 @@ public final class ChatViewModel: ObservableObject {
 
     /// The banner / toolbar decision at `nowMs`: is there a live group call on
     /// this chat that this device is not in?
+    /// Re-evaluate the banner while a record exists.
+    ///
+    /// Liveness is a function of the clock as much as of the record: a call is
+    /// live while somebody's newest heartbeat is under 150 s old, and that stops
+    /// being true with no new row arriving to say so. Everything here is driven
+    /// by `@Published` changes, so without a tick the last verdict computed
+    /// stands indefinitely — a call that ended keeps offering a join, and a
+    /// record that was stale when it landed never recovers even after the
+    /// heartbeats that would have refreshed it.
+    ///
+    /// The ticker exists only while there is a record to judge, and is torn
+    /// down the moment there is not, so an idle chat costs nothing.
+    private func trackGroupCallFreshness(_ record: OngoingGroupCall?) {
+        groupCallFreshnessTask?.cancel()
+        guard record != nil else {
+            groupCallFreshnessTask = nil
+            return
+        }
+        groupCallFreshnessTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(Self.groupCallFreshnessTickMs) * 1_000_000)
+                guard !Task.isCancelled, let self, let current = self.ongoingGroupCall else { return }
+                // The record has not changed, so nothing republishes it; tell
+                // the view to re-read a verdict whose inputs include the time.
+                self.objectWillChange.send()
+                self.logGroupCallVerdict(current)
+            }
+        }
+    }
+
+    /// How often the banner re-reads a verdict that no row has changed. A tenth
+    /// of the freshness budget: the banner follows a call ending within a few
+    /// seconds, at a cost of four wakeups a minute while a call is on screen.
+    static let groupCallFreshnessTickMs: Int64 = 15_000
+
+    /// The live-or-stale judgement, printed whenever this chat's record changes
+    /// — which is the only moment it can change, since nothing re-evaluates it
+    /// on a timer.
+    ///
+    /// It prints the numbers rather than the verdict alone, because "no banner"
+    /// has three completely different causes that look identical on screen: the
+    /// record never arrived (no line at all), it arrived and was judged stale
+    /// (a line with an age past the budget), or it was judged live and the
+    /// banner still did not render (a line saying `joinable` with no banner).
+    ///
+    /// `ageMs` is the one to read first. It is `this device's clock` minus `the
+    /// DS server's row stamp`, so it is only a measure of staleness while those
+    /// two clocks agree; a wildly large or negative age is skew, not a call that
+    /// ended.
+    private func logGroupCallVerdict(_ record: OngoingGroupCall?) {
+        guard let record else {
+            NSLog("group-call verdict: no record for this chat")
+            return
+        }
+        let nowMs = ChatRepository.nowMs()
+        let own = repository.ownDeviceKeyB64(groupIdHex: groupIdHex)
+        let newest = record.newestLastSeenMs(ignoringDevice: own)
+        // `startAgeMs` is the second half of the rule and is easy to forget:
+        // liveness is "started within 4 h AND (somebody is fresh OR the start
+        // itself is under the 60 s unjoined grace)". So a call can be live with
+        // nobody joined for its first minute, and after that minute it is live
+        // only if Join rows actually folded — which is exactly the difference
+        // between a device that saw the announce and one that saw the whole
+        // conversation.
+        NSLog(
+            "group-call verdict call=%@ joined=%d ageMs=%@ freshBudgetMs=%d startAgeMs=%d graceMs=%d live=%@ affordance=%@",
+            GroupCallSignalLog.shortId(record.callId),
+            record.joined.count,
+            newest.map { "\(nowMs &- $0)" } ?? "none",
+            GroupCallReducer.memberFreshMs,
+            nowMs &- record.startedAtMs,
+            GroupCallReducer.unjoinedGraceMs,
+            GroupCallReducer.isLive(record, nowMs: nowMs, ignoringDevice: own) ? "true" : "false",
+            "\(groupCallAffordance(nowMs: nowMs))")
+    }
+
     func groupCallAffordance(nowMs: Int64 = ChatRepository.nowMs()) -> GroupCallAffordance {
         GroupCallAffordance.of(
             record: ongoingGroupCall,

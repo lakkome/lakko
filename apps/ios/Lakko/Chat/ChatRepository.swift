@@ -3379,6 +3379,19 @@ public final class ChatRepository: ObservableObject {
             return
         }
         let route = CallSignalingRoute.of(body)
+        if let signal = route.groupSignal {
+            // Printed for EVERY group-control row that reaches this device, before
+            // any of the four gates below can drop it. Its absence therefore means
+            // the row never arrived (a poll that did not run, or a cursor already
+            // past it) rather than a row that arrived and was refused — two
+            // different bugs that were previously indistinguishable, because a
+            // dropped row and an unfetched row both printed nothing.
+            NSLog(
+                "group-call row received kind=%@ leafOk=%@ rowMs=%@",
+                GroupCallSignalLog.kind(signal),
+                signal.speaksFor(senderLeaf: senderLeaf) ? "true" : "false",
+                Self.parseDsTimestampMs(createdAt).map { "\($0)" } ?? "unparseable")
+        }
         if let signal = route.groupSignal, !signal.speaksFor(senderLeaf: senderLeaf) {
             NSLog("group-call signal dropped: claimed leaf does not match the MLS sender")
         } else if let signal = route.groupSignal {
@@ -3412,8 +3425,32 @@ public final class ChatRepository: ObservableObject {
     func applyGroupCallSignal(
         groupIdHex: String, signal: GroupCallSignal, participant: GroupCallParticipant?, atMs: Int64
     ) {
+        let before = groupCalls[groupIdHex]
         let next = GroupCallReducer.apply(
-            signal, participant: participant, to: groupCalls[groupIdHex], rowCreatedAtMs: atMs)
+            signal, participant: participant, to: before, rowCreatedAtMs: atMs)
+        // What the reducer did with it. The two silent drops this makes visible
+        // are the ones that turn a live call into no banner at all:
+        //   * C-12 — a Join for a call id this device does not track is dropped,
+        //     so a device that MISSED THE START can never be brought into the
+        //     record by any number of later heartbeats;
+        //   * C-68 — a Join whose sender leaf did not resolve to a device key is
+        //     dropped, because a leaf index is not an identity.
+        // Either one leaves `joined` empty, and an empty `joined` is never live.
+        // The stored record's OWN call id is printed, not merely whether one
+        // exists. The first version of this line said `hadRecord=true` and
+        // stopped there, and a live run read that as "the announce for the
+        // incoming call had been applied" — when what it actually meant was
+        // "some record is here", and the record was a different, dead call.
+        // A log that answers a narrower question than the reader thinks is
+        // worse than no log.
+        NSLog(
+            "group-call fold kind=%@ participant=%@ record=%@ joined=%d -> %@ joined=%d",
+            GroupCallSignalLog.kind(signal),
+            participant == nil ? "unresolved" : "resolved",
+            before.map { GroupCallSignalLog.shortId($0.callId) } ?? "none",
+            before?.joined.count ?? 0,
+            next.map { GroupCallSignalLog.shortId($0.callId) } ?? "none",
+            next?.joined.count ?? 0)
         guard next != groupCalls[groupIdHex] else { return }
         groupCalls[groupIdHex] = next
         if let accountIdB64 = currentAccountIdB64 {

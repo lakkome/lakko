@@ -133,9 +133,22 @@ struct JoinedDevice: Equatable, Codable {
 /// on relaunch and the chat offered to start a second call beside a running one.
 struct OngoingGroupCall: Equatable, Codable {
     let callId: Data
+    /// The announced media. Meaningful only when ``initiatorLeaf`` is non-nil —
+    /// a record adopted from a Join never saw the announce and carries `false`
+    /// for "unknown", not for "voice". Nothing reads these today; anything that
+    /// starts to must consult ``mediaKnown`` first.
     let audio: Bool
     let video: Bool
-    let initiatorLeaf: UInt32
+    /// The leaf that announced the call, or `nil` when this record was ADOPTED
+    /// from a Join because this device never received the announce.
+    ///
+    /// The Start is published exactly once, by the initiator, before it
+    /// connects (`GroupCallHost`); there is no re-announce. A device that was
+    /// not polling in that moment — asleep, backgrounded, launched later —
+    /// therefore never sees it, and before adoption existed every subsequent
+    /// heartbeat from the people actually in that call was dropped, leaving the
+    /// chat with no idea a call was running.
+    let initiatorLeaf: UInt32?
     /// The announce's `created_at_ms`, bounded above by the DS row's
     /// server-assigned `created_at` — a sender cannot keep its call "fresh" by
     /// claiming a future start.
@@ -151,6 +164,10 @@ struct OngoingGroupCall: Equatable, Codable {
     var joined: [MemberIdentity: JoinedDevice]
     /// Newest DS row time that touched this record.
     var lastActivityMs: Int64
+
+    /// This record came from the call's own announce, so ``audio`` / ``video``
+    /// describe the call rather than standing in for the unknown.
+    var mediaKnown: Bool { initiatorLeaf != nil }
 
     /// Lowercase hex of ``callId`` — the tie-break key and the JWT `call_id`.
     var callIdHex: String {
@@ -170,6 +187,20 @@ struct OngoingGroupCall: Equatable, Codable {
                   nowMs &- entry.lastSeenMs <= GroupCallReducer.memberFreshMs else { return nil }
             return device
         })
+    }
+
+    /// The newest last-seen time among the joined devices, fresh or not.
+    ///
+    /// ``freshDevices`` answers "is anyone here"; this answers "how far off were
+    /// we", which is the number a log needs when the answer is no. A record that
+    /// is judged stale because of clock skew and one that is judged stale
+    /// because everybody really did leave are the same verdict and completely
+    /// different bugs, and only the age tells them apart.
+    func newestLastSeenMs(ignoringDevice: MemberIdentity? = nil) -> Int64? {
+        joined.lazy
+            .filter { $0.key != ignoringDevice }
+            .map(\.value.lastSeenMs)
+            .max()
     }
 
     /// The number of distinct PEOPLE among the fresh devices — what "N people in
@@ -257,10 +288,13 @@ enum GroupCallReducer {
             // wins, so every member converges on one call.
             return precedes(candidate, existing) ? candidate : existing
 
-        case .join(let callId, _):
-            // C-12 — a join for a call id we do not track is dropped.
-            guard var existing = current, existing.callId == callId else { return current }
+        case .join(let callId, let leafIndex):
             guard let participant else { return current }
+            guard var existing = current, existing.callId == callId else {
+                return adopt(
+                    callId: callId, joiningLeaf: leafIndex, participant: participant,
+                    displacing: current, rowCreatedAtMs: rowCreatedAtMs)
+            }
             // A join or heartbeat advances the device's last-seen time; an older
             // row never lowers it.
             let lastSeen = max(existing.joined[participant.deviceKey]?.lastSeenMs ?? rowCreatedAtMs, rowCreatedAtMs)
@@ -270,7 +304,13 @@ enum GroupCallReducer {
             return existing
 
         case .leave(let callId, _):
-            guard var existing = current, existing.callId == callId else { return current }
+            guard var existing = current, existing.callId == callId else {
+                // A leave for some other call says nothing about the one we
+                // hold — unless the one we hold is already dead, in which case
+                // this is as good a moment as any to stop carrying it.
+                if let stale = current, !isLive(stale, nowMs: rowCreatedAtMs) { return nil }
+                return current
+            }
             guard let participant else { return current }
             // Only that device leaves; another device of the same person stays.
             existing.joined[participant.deviceKey] = nil
@@ -281,6 +321,64 @@ enum GroupCallReducer {
             guard let existing = current, existing.callId == callId else { return current }
             return nil
         }
+    }
+
+    /// A Join naming a call this device does not hold.
+    ///
+    /// ## Why this is not simply dropped
+    ///
+    /// It used to be, and that is the defect this rule exists to close. One
+    /// chat holds exactly ONE call record. A record for a call that ended is
+    /// pruned only by the four-hour age cap, so a dead call sat in the slot for
+    /// hours — and because a Join whose id did not match was returned
+    /// unchanged, every heartbeat from the people in the REAL call folded to a
+    /// no-op: no state change, therefore no publish, therefore not even a
+    /// recomputed verdict. A live group call was invisible in the chat for as
+    /// long as the corpse of the previous one outranked it, and the only thing
+    /// the screen could report was that the old call was not live, which was
+    /// true and useless.
+    ///
+    /// ## What is preserved
+    ///
+    /// The protective half of the rule the old comment cited (C-12) is intact:
+    /// a **live** record is never displaced by a foreign call id, so a stranger
+    /// in the chat cannot steal the slot from a call in progress by publishing
+    /// a fabricated one. Only a record that is already not live gives way. The
+    /// invariant as written in `docs/security/calls.md` is about a live
+    /// `GroupCallSession`'s roster, which this advisory record is not, and the
+    /// comment here previously blurred the two.
+    ///
+    /// ## What is honestly unknown
+    ///
+    /// The announce is published once and never repeated, so a device that
+    /// missed it cannot recover the call's start time, its media, or who began
+    /// it. The adopted record says so: ``OngoingGroupCall/initiatorLeaf`` is
+    /// nil, ``OngoingGroupCall/mediaKnown`` is false, and the start is the DS
+    /// row's own time — the earliest moment this device can prove the call was
+    /// running, never a guess at when it began. Since the start time is the
+    /// only thing the unjoined grace reads, an adopted record cannot claim that
+    /// grace on a call that started long ago: it is live because somebody is
+    /// demonstrably in it, which is the stronger of the two reasons anyway.
+    private static func adopt(
+        callId: Data,
+        joiningLeaf: UInt32,
+        participant: GroupCallParticipant,
+        displacing current: OngoingGroupCall?,
+        rowCreatedAtMs: Int64
+    ) -> OngoingGroupCall? {
+        if let current, isLive(current, nowMs: rowCreatedAtMs) { return current }
+        return OngoingGroupCall(
+            callId: callId,
+            audio: true,
+            video: false,
+            initiatorLeaf: nil,
+            startedAtMs: rowCreatedAtMs,
+            joined: [
+                participant.deviceKey: JoinedDevice(
+                    lastSeenMs: rowCreatedAtMs, personKey: participant.personKey)
+            ],
+            lastActivityMs: rowCreatedAtMs
+        )
     }
 
     /// The tie-break order: earlier bounded start first, then lower call id hex.
@@ -325,5 +423,28 @@ enum GroupCallAffordance: Equatable {
             joinedCount: record.freshPeopleCount(nowMs: nowMs, ignoringDevice: ownDeviceKey),
             video: record.video
         )
+    }
+}
+
+/// Names for the group-call signals in log lines.
+///
+/// A kind and an eight-hex-character call-id prefix are enough to line an iOS
+/// log up against the SFU's own — which prints the same prefix — and they carry
+/// nothing else: a leaf index, a device key or a person key would be identity,
+/// and identity does not belong in a log.
+enum GroupCallSignalLog {
+
+    static func kind(_ signal: GroupCallSignal) -> String {
+        switch signal {
+        case .start(let callId, _, _, _, _): return "start:\(shortId(callId))"
+        case .join(let callId, _): return "join:\(shortId(callId))"
+        case .leave(let callId, _): return "leave:\(shortId(callId))"
+        case .end(let callId): return "end:\(shortId(callId))"
+        }
+    }
+
+    /// The first four bytes of a call id, hex — what the SFU logs too.
+    static func shortId(_ callId: Data) -> String {
+        callId.prefix(4).map { String(format: "%02x", $0) }.joined()
     }
 }
