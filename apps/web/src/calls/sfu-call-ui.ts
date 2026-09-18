@@ -230,10 +230,6 @@ export function createSfuCallUi(
     });
   };
 
-  // What the control row carries follows the call's kind, not what is on
-  // screen (docs/ux/calls.md section 4.1's table; see `call-controls.ts`).
-  callActions.setMediaKind(config.media.video ? "video" : "voice");
-
   const session = new SfuCallSession(config, {
     onStateChange: (state): void => {
       switch (state) {

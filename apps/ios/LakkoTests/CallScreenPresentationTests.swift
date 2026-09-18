@@ -20,36 +20,48 @@ final class CallScreenPresentationTests: XCTestCase {
 
     /// Speaker is the control people reach for most on a voice call, and it was
     /// not on the screen at all.
-    func testAVoiceCallShowsSpeakerMuteAndEnd() {
+    func testAVoiceCallShowsSpeakerMuteCameraAndEnd() {
         XCTAssertEqual(
-            CallScreenPresentation.controls(layout: .portrait, videoCall: false),
-            [.speaker, .microphone, .end])
+            CallScreenPresentation.controls(layout: .portrait),
+            [.speaker, .microphone, .camera, .end])
     }
 
-    func testAVideoCallAddsTheCameraButton() {
+    /// The same four, because the camera button is what turns a voice call into
+    /// a video one — the row does not change underneath the user mid-call.
+    func testAVideoCallShowsTheSameFourControls() {
         XCTAssertEqual(
-            CallScreenPresentation.controls(layout: .video, videoCall: true),
-            [.speaker, .microphone, .camera, .end])
+            CallScreenPresentation.controls(layout: .video),
+            CallScreenPresentation.controls(layout: .portrait))
+    }
+
+    /// The capability this pins: a call placed with a voice can still show
+    /// something a minute later. A row briefly built as Speaker / Mute / End
+    /// took that away, and dropping a capability to keep a row short is a
+    /// feature lost to tidiness.
+    func testAVoiceCallCanStillTurnItsCameraOn() {
+        XCTAssertTrue(
+            CallScreenPresentation.controls(layout: .portrait).contains(.camera),
+            "a voice call must keep the button that makes it a video call")
+        XCTAssertTrue(
+            CallScreenPresentation.isEnabled(.camera, phase: .connected),
+            "and it must be pressable once the call is up")
     }
 
     /// The rule the old screen broke worst: switching camera or moving the
     /// sound to the speaker is a one-thumb action mid-sentence, and a menu makes
     /// it two taps and a reading task.
     func testA1x1CallHasNoOverflowMenuAtAll() {
-        for videoCall in [true, false] {
-            for layout in [CallScreenLayout.portrait, .video] {
-                XCTAssertFalse(
-                    CallScreenPresentation.controls(layout: layout, videoCall: videoCall)
-                        .contains(.overflow),
-                    "a 1x1 \(layout.rawValue) call must not hide controls behind a menu")
-            }
+        for layout in [CallScreenLayout.portrait, .video] {
+            XCTAssertFalse(
+                CallScreenPresentation.controls(layout: layout).contains(.overflow),
+                "a 1x1 \(layout.rawValue) call must not hide controls behind a menu")
         }
     }
 
     /// A group call may put participants and chat behind one button — but mute,
     /// camera, speaker and end stay in the row.
     func testAGroupCallKeepsTheFourControlsInTheRowBesideItsOverflow() {
-        let controls = CallScreenPresentation.controls(layout: .gallery, videoCall: true)
+        let controls = CallScreenPresentation.controls(layout: .gallery)
         XCTAssertTrue(controls.contains(.overflow))
         for required in [CallControl.speaker, .microphone, .camera, .end] {
             XCTAssertTrue(controls.contains(required), "\(required.rawValue) stays in the row")
@@ -60,11 +72,17 @@ final class CallScreenPresentationTests: XCTestCase {
     /// must find without looking.
     func testEndIsAlwaysTheLastControl() {
         for layout in [CallScreenLayout.portrait, .video, .gallery] {
-            for videoCall in [true, false] {
-                XCTAssertEqual(
-                    CallScreenPresentation.controls(layout: layout, videoCall: videoCall).last,
-                    .end)
-            }
+            XCTAssertEqual(CallScreenPresentation.controls(layout: layout).last, .end)
+        }
+    }
+
+    /// Every kind of call offers the four, in one order, so the thumb learns one
+    /// row rather than two.
+    func testTheFourControlsKeepOneOrderEverywhere() {
+        for layout in [CallScreenLayout.portrait, .video, .gallery] {
+            let row = CallScreenPresentation.controls(layout: layout)
+                .filter { $0 != .overflow }
+            XCTAssertEqual(row, [.speaker, .microphone, .camera, .end])
         }
     }
 
@@ -72,26 +90,92 @@ final class CallScreenPresentationTests: XCTestCase {
 
     func testAVoiceCallIsAPortrait() {
         XCTAssertEqual(
-            CallScreenPresentation.layout(remoteCount: 1, remoteVideo: false), .portrait)
+            CallScreenPresentation.layout(remoteCount: 1, remotePicture: false), .portrait)
     }
 
     /// And so is a video call that has not received a frame yet — there is
     /// nothing to fill the screen with, and a black rectangle is not an answer.
     func testAVideoCallWithNoFrameYetIsStillAPortrait() {
         XCTAssertEqual(
-            CallScreenPresentation.layout(remoteCount: 0, remoteVideo: false), .portrait)
+            CallScreenPresentation.layout(remoteCount: 0, remotePicture: false), .portrait)
     }
 
     func testAVideoCallWithAFrameFillsTheScreen() {
         XCTAssertEqual(
-            CallScreenPresentation.layout(remoteCount: 1, remoteVideo: true), .video)
+            CallScreenPresentation.layout(remoteCount: 1, remotePicture: true), .video)
     }
 
     func testMoreThanOneOtherPersonIsAGallery() {
         XCTAssertEqual(
-            CallScreenPresentation.layout(remoteCount: 2, remoteVideo: false), .gallery)
+            CallScreenPresentation.layout(remoteCount: 2, remotePicture: false), .gallery)
         XCTAssertEqual(
-            CallScreenPresentation.layout(remoteCount: 4, remoteVideo: true), .gallery)
+            CallScreenPresentation.layout(remoteCount: 4, remotePicture: true), .gallery)
+    }
+
+    // MARK: - A track handle is not a picture
+
+    /// The defect a live Android-to-iOS call found. A peer turning its camera on
+    /// mid-call adds an `m=video` line, libwebrtc hands over a track the instant
+    /// the SDP is applied, and iOS took that as "there is a picture": it went to
+    /// the full-screen video layout and showed a dark surface for over a minute.
+    func testATrackThatHasNotDrawnAFrameIsNotAPicture() {
+        XCTAssertFalse(
+            CallScreenPresentation.hasRemotePicture(trackPresent: true, framesArrived: false),
+            "a track handle arrives with the SDP and proves nothing about frames")
+    }
+
+    func testAFrameWithoutATrackIsNotAPictureEither() {
+        XCTAssertFalse(
+            CallScreenPresentation.hasRemotePicture(trackPresent: false, framesArrived: true))
+        XCTAssertFalse(
+            CallScreenPresentation.hasRemotePicture(trackPresent: false, framesArrived: false))
+    }
+
+    func testATrackThatHasDrawnAFrameIsAPicture() {
+        XCTAssertTrue(
+            CallScreenPresentation.hasRemotePicture(trackPresent: true, framesArrived: true))
+    }
+
+    /// The whole chain, which is what actually failed: an announced-but-silent
+    /// camera must leave the portrait up.
+    func testAnAnnouncedButSilentCameraKeepsThePortrait() {
+        let picture = CallScreenPresentation.hasRemotePicture(
+            trackPresent: true, framesArrived: false)
+        XCTAssertEqual(
+            CallScreenPresentation.layout(remoteCount: 1, remotePicture: picture), .portrait)
+    }
+
+    // MARK: - The controls can never be stranded
+
+    /// The worse of the two live defects: the row faded over a dark screen and
+    /// the tap that should have brought it back did not, so there was no way to
+    /// mute, show a camera, or hang up. The rule that makes that unreachable is
+    /// that a screen with nothing to look at never hides its controls — so an
+    /// announced-but-silent camera, being a portrait, keeps them.
+    func testAnAnnouncedButSilentCameraNeverHidesTheControls() {
+        let picture = CallScreenPresentation.hasRemotePicture(
+            trackPresent: true, framesArrived: false)
+        let layout = CallScreenPresentation.layout(remoteCount: 1, remotePicture: picture)
+        XCTAssertFalse(
+            CallScreenPresentation.autoHides(layout: layout, phase: .connected),
+            "a call with no picture must keep its End button on the screen")
+    }
+
+    /// Stated as the general rule, over every state a 1x1 call can be in: the
+    /// controls only ever hide when there is a picture underneath them.
+    func testControlsOnlyHideWhenThereIsAPictureUnderneath() {
+        for trackPresent in [true, false] {
+            for framesArrived in [true, false] {
+                let picture = CallScreenPresentation.hasRemotePicture(
+                    trackPresent: trackPresent, framesArrived: framesArrived)
+                let layout = CallScreenPresentation.layout(
+                    remoteCount: 1, remotePicture: picture)
+                XCTAssertEqual(
+                    CallScreenPresentation.autoHides(layout: layout, phase: .connected),
+                    picture,
+                    "track=\(trackPresent) frames=\(framesArrived)")
+            }
+        }
     }
 
     // MARK: - Which state is loud (section 4.1.1)

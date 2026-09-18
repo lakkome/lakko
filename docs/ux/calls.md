@@ -150,8 +150,17 @@ round icon button that toggles on press.
 
 | Call kind | The row, left to right |
 |---|---|
-| Voice | Speaker · Mute · End |
+| Voice | Speaker · Mute · Camera · End |
 | Video | Speaker · Mute · Camera · End |
+
+**The camera button is on a voice call too, and it turns the call into a video one.**
+People start a call with their voice and decide to show something a minute later; every
+messenger allows that, and taking it away to keep the row short would be a feature lost
+to tidiness. Pressing it starts the camera, tells the other side, and the screen becomes
+the video layout for both. The other person is not forced into video: their own camera
+stays off until they press their own button, and their screen shows the incoming picture
+with their self-view absent. Turning the camera off again returns the call to the
+portrait.
 
 - **Flip camera does not belong in the row.** It lives on the self-view itself, as a
   small button in that rectangle's corner, where the thing it changes is visible.

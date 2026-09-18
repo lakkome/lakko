@@ -558,7 +558,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     const session: CallSession = new CallSession(callId, {
       onRemoteStream: (s) => {
         setRemoteStream(s);
-        setRemoteHasVideo(s.getVideoTracks().length > 0);
+        watchRemoteVideo(s, setRemoteHasVideo);
       },
       onLocalStream: (s) => setLocalStream(s),
       onVideoPublishState: (s) => setVideoPublishState(s),
@@ -754,9 +754,6 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     if (currentOccupant() !== null) return;
     if (groupEntry(groupIdB64) === undefined) return;
     setVideoCall(withVideo);
-    // What the row carries (docs/ux/calls.md section 4.1's table) follows the
-    // call's kind, not what is on screen — see `calls/call-controls.ts`.
-    callActions.setMediaKind(withVideo ? "video" : "voice");
     const callId = mintCallId();
     const session = buildCallSession(groupIdB64, callId);
     openCallJournal(session, groupIdB64, callIdHex(callId), false, withVideo);
@@ -785,9 +782,6 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     const call = activeCall;
     if (call === null) return;
     if (withVideo) setVideoCall(true);
-    // §3.3: accepting never shows a preparation screen, so this is the one
-    // place the answerer's call kind is decided.
-    callActions.setMediaKind(withVideo ? "video" : "voice");
     await call.accept();
     // Opting into video on accept drives the same mid-call camera-on path the
     // caller uses (see the camera effect below).
@@ -1967,6 +1961,46 @@ export function CallHostView(): JSX.Element {
       <GroupCallBanner />
     </>
   );
+}
+
+/** Remote video tracks already being watched, so a repeated `ontrack` for the
+ *  same stream does not stack listeners. */
+const watchedRemoteTracks = new WeakSet<MediaStreamTrack>();
+
+/**
+ * Keep "the other person is sending a picture" true, in both directions.
+ *
+ * `docs/ux/calls.md` §4.1 requires the receiver's screen to return to the
+ * portrait when the sender stops their camera, and the naive read of the stream
+ * cannot do it: stopping the camera on the 1x1 path flips `track.enabled` on the
+ * sender rather than removing the track, so the receiver's
+ * `getVideoTracks().length` stays 1 forever and the screen would sit on a frozen
+ * or black fill — the empty box §4 exists to remove.
+ *
+ * The signal that does move is the receiving track's own `muted` flag: the
+ * browser sets it when media stops arriving and fires `mute` / `unmute`. Using
+ * it needs no new wire message — the 1x1 signalling protocol carries offer,
+ * answer, ICE and end, and nothing else. **Honest limit:** the flag follows the
+ * media, so it lands a beat after the press rather than with it, and how long a
+ * beat is depends on the engine. A deterministic version is the `media_state`
+ * envelope the SFU path already uses (`lakko_contacts::media_state`), which
+ * would need a variant on the 1x1 `CallSignalingPayload` — a Rust wire change.
+ *
+ * The camera-ON direction needs none of this: adding a track renegotiates, so
+ * `ontrack` fires on the receiver and this runs again with a live track.
+ */
+function watchRemoteVideo(stream: MediaStream, report: (hasVideo: boolean) => void): void {
+  const publish = (): void => {
+    report(stream.getVideoTracks().some((t) => t.readyState === "live" && !t.muted));
+  };
+  for (const track of stream.getVideoTracks()) {
+    if (watchedRemoteTracks.has(track)) continue;
+    watchedRemoteTracks.add(track);
+    track.addEventListener("mute", publish);
+    track.addEventListener("unmute", publish);
+    track.addEventListener("ended", publish);
+  }
+  publish();
 }
 
 /**

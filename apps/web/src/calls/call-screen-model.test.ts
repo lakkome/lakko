@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   CONTROLS_IDLE_HIDE_MS,
   ENDED_DISMISS_MS,
+  callFillSource,
   callStatusDetail,
   callSurfaceKind,
   controlsHidden,
@@ -28,26 +29,78 @@ const PHASES: readonly CallPhaseKind[] = [
 
 describe("callSurfaceKind", () => {
   it("draws the portrait while nobody has answered", () => {
-    expect(callSurfaceKind({ remoteCount: 0, remoteCameraOn: false })).toBe("voice");
-    // Even when this device's own camera is live: the caller is looking at the
-    // person they called, not at themselves.
-    expect(callSurfaceKind({ remoteCount: 0, remoteCameraOn: true })).toBe("voice");
+    expect(
+      callSurfaceKind({ remoteCount: 0, remoteCameraOn: false, localCameraOn: false }),
+    ).toBe("voice");
   });
 
-  it("fills the screen only when the sole remote is sending a picture", () => {
-    expect(callSurfaceKind({ remoteCount: 1, remoteCameraOn: true })).toBe("video");
+  it("keeps the portrait while a video call is still ringing out", () => {
+    // The caller's own camera is live from the camera check, but filling the
+    // screen with it would take away the only thing on the screen that says
+    // who is being called.
+    expect(
+      callSurfaceKind({ remoteCount: 0, remoteCameraOn: true, localCameraOn: true }),
+    ).toBe("voice");
   });
 
-  it("draws the portrait, never an empty box, when the remote camera is off", () => {
-    // The defect the redesign exists to remove: a video call whose callee has
-    // their camera off had nothing to fill the screen with and drew a black
-    // rectangle. docs/ux/calls.md section 4.
-    expect(callSurfaceKind({ remoteCount: 1, remoteCameraOn: false })).toBe("voice");
+  it("fills the screen when the other person is sending a picture", () => {
+    expect(
+      callSurfaceKind({ remoteCount: 1, remoteCameraOn: true, localCameraOn: false }),
+    ).toBe("video");
+  });
+
+  it("fills the screen when THIS device turns its camera on mid-call", () => {
+    // Section 4.1: "Pressing it starts the camera, tells the other side, and
+    // the screen becomes the video layout for both."
+    expect(
+      callSurfaceKind({ remoteCount: 1, remoteCameraOn: false, localCameraOn: true }),
+    ).toBe("video");
+  });
+
+  it("returns to the portrait when the camera goes off again", () => {
+    // Section 4.1's last sentence, and the reason the surface cannot be
+    // decided once at the start of the call.
+    expect(
+      callSurfaceKind({ remoteCount: 1, remoteCameraOn: false, localCameraOn: false }),
+    ).toBe("voice");
+  });
+
+  it("draws the portrait, never an empty box, when no camera is on anywhere", () => {
+    expect(
+      callSurfaceKind({ remoteCount: 1, remoteCameraOn: false, localCameraOn: false }),
+    ).toBe("voice");
   });
 
   it("keeps the roster grid for a group call whatever the cameras do", () => {
-    expect(callSurfaceKind({ remoteCount: 2, remoteCameraOn: false })).toBe("group");
-    expect(callSurfaceKind({ remoteCount: 7, remoteCameraOn: true })).toBe("group");
+    expect(
+      callSurfaceKind({ remoteCount: 2, remoteCameraOn: false, localCameraOn: false }),
+    ).toBe("group");
+    expect(
+      callSurfaceKind({ remoteCount: 7, remoteCameraOn: true, localCameraOn: true }),
+    ).toBe("group");
+  });
+});
+
+describe("callFillSource", () => {
+  it("shows the other person whenever they are sending — that is the call", () => {
+    expect(callFillSource("video", true, false)).toBe("remote");
+    expect(callFillSource("video", true, true)).toBe("remote");
+  });
+
+  it("falls back to this device's own camera when there is no incoming picture", () => {
+    // The person who just turned their camera on gets to see the thing they
+    // started; there is no other picture in existence.
+    expect(callFillSource("video", false, true)).toBe("local");
+  });
+
+  it("has nothing to draw on the portrait or the roster", () => {
+    for (const surface of ["voice", "group"] as const) {
+      expect(callFillSource(surface, true, true)).toBe("none");
+    }
+  });
+
+  it("never claims a picture that does not exist", () => {
+    expect(callFillSource("video", false, false)).toBe("none");
   });
 });
 
@@ -180,14 +233,30 @@ describe("controlsHidden", () => {
 });
 
 describe("selfViewVisible", () => {
-  it("follows the local camera on both 1x1 surfaces", () => {
-    expect(selfViewVisible("video", true)).toBe(true);
-    expect(selfViewVisible("voice", true)).toBe(true);
-    expect(selfViewVisible("video", false)).toBe(false);
-    expect(selfViewVisible("voice", false)).toBe(false);
+  it("is drawn in the corner while the other person fills the screen", () => {
+    expect(selfViewVisible("video", true, "remote")).toBe(true);
+  });
+
+  it("is drawn over the portrait while a video call rings out", () => {
+    expect(selfViewVisible("voice", true, "none")).toBe(true);
+  });
+
+  it("is absent when this device's own camera IS the screen", () => {
+    // A corner copy of the picture behind it is the same view twice.
+    expect(selfViewVisible("video", true, "local")).toBe(false);
+  });
+
+  it("is absent for the person receiving a picture they are not returning", () => {
+    // Section 4.1: "their screen shows the incoming picture with their
+    // self-view absent" — which is what a camera that is off already means.
+    expect(selfViewVisible("video", false, "remote")).toBe(false);
+  });
+
+  it("follows the local camera off", () => {
+    expect(selfViewVisible("voice", false, "none")).toBe(false);
   });
 
   it("is absent on the group grid, where the local tile already exists", () => {
-    expect(selfViewVisible("group", true)).toBe(false);
+    expect(selfViewVisible("group", true, "none")).toBe(false);
   });
 });

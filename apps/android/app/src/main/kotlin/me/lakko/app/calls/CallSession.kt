@@ -135,6 +135,15 @@ public class CallSession(
     private var negotiationReady = false
     private var pendingRenegotiation = false
 
+    /**
+     * The media flag the deferred [pendingRenegotiation] must carry when it is
+     * finally driven. Kept beside the flag rather than derived at send time:
+     * the reason the offer was queued (the camera going on, or off) is known
+     * only at the moment it was queued, and re-deriving it later from whatever
+     * the camera happens to be doing by then is how an offer starts lying.
+     */
+    private var pendingRenegotiationVideo = true
+
     /** In-flight guard for [addLocalVideo] (no double camera acquire). */
     private var addingVideo = false
 
@@ -452,6 +461,42 @@ public class CallSession(
     }
 
     /**
+     * Stop sending the camera AND tell the peer — `docs/ux/calls.md` section
+     * 4.1: "Turning the camera off again returns the call to the portrait",
+     * which has to be true on both screens or the other person is left looking
+     * at a still frame of someone who has put their camera away.
+     *
+     * The frames stop first, so the local preview and the wire go quiet at
+     * once; then the video transceiver moves to `recvOnly` and one
+     * renegotiation carries it. The peer's libwebrtc fires its remove-track
+     * callback off that, their `remoteVideoTrack` clears, and their screen
+     * falls back to the portrait by itself.
+     *
+     * The sender is deliberately kept. Removing the track would tell the peer
+     * just as well and would drop the SFrame encryptor with it, so the next
+     * camera-on would arm a fresh one for the same `(leaf, stream)` pair with
+     * the counter restarted over a key already used — the reuse ADR-0035 exists
+     * to prevent. Keeping it also makes the next camera-on the cheap branch of
+     * [addLocalVideo]: re-enable, no capture, no second arm.
+     *
+     * Falls back to the plain disable when there is no video transceiver yet or
+     * the platform refuses the direction change. That costs the peer a frozen
+     * frame — the behaviour before this existed — and never the call.
+     */
+    public suspend fun stopSendingVideo() {
+        val connection = rtc
+        if (connection == null) {
+            mutableCameraEnabled.value = false
+            return
+        }
+        connection.setCameraEnabled(false)
+        mutableCameraEnabled.value = false
+        if (connection.setLocalVideoSending(false)) {
+            driveRenegotiationOffer(video = false)
+        }
+    }
+
+    /**
      * `docs/ux/calls.md` section 4.1 — flip to the other camera, driven by the
      * small button in the self-view's corner rather than by a dropdown entry
      * (which existed, and did nothing).
@@ -524,6 +569,21 @@ public class CallSession(
             mutableLocalVideoTrack.value = connection.currentLocalVideoTrack()
             mutableCameraEnabled.value = true
             mutableVideoPublishState.value = VideoPublishState.Live
+            // The sender, its track and its SFrame encryptor are all still the
+            // ones negotiated the first time, so nothing is re-armed and the
+            // encryptor's counter carries on where it left off. What DOES need
+            // saying is that video is flowing again, because [stopSendingVideo]
+            // parked the transceiver at `recvOnly` and the peer dropped its
+            // receiver; without this their screen would never come back.
+            if (connection.setLocalVideoSending(true)) {
+                driveRenegotiationOffer(video = true)
+                // The answer drives the watchdog and the probe; a re-enable that
+                // needed no renegotiation is already negotiated as sending, so
+                // it keys and measures here instead.
+            } else {
+                startKeyframeWatchdog()
+                diagnoseMidCallVideo("camera re-enabled")
+            }
             return
         }
         // 2. A capture is already in flight -> do not double-acquire.
@@ -601,8 +661,13 @@ public class CallSession(
             mutableVideoPublishState.value = VideoPublishState.Live
 
             // 6. Renegotiate so the peer learns about the new (sealed) video
-            //    m-line.
-            driveRenegotiationOffer()
+            //    m-line. Stated explicitly rather than left to the default: the
+            //    default carries whatever a PREVIOUS camera-off queued, and an
+            //    offer that adds a video sender while announcing `video = false`
+            //    is the same lie in the other direction.
+            driveRenegotiationOffer(video = true)
+            // No probe and no keyframe here: the sender exists but is not
+            // negotiated until the peer answers, and both belong there.
         } catch (cause: Throwable) {
             // Fail-safe (invariant #4): any thrown error leaves the call up
             // audio-only. Failed drives the caller's toggle revert (the button
@@ -612,6 +677,50 @@ public class CallSession(
             throw cause
         } finally {
             addingVideo = false
+        }
+    }
+
+    /**
+     * Say, on the console, why a mid-call camera-on did or did not reach the
+     * other phone — see [MidCallVideoDiagnosis].
+     *
+     * Live, Android to iOS, the caller's own screen filled with their camera
+     * while iOS attached the track and waited for a first frame that never
+     * arrived. The three causes that produce exactly those two observations —
+     * an unsealed sender, a transceiver not negotiated as sending, and a sender
+     * that never encodes — are indistinguishable from either end, so this reads
+     * all three and names the one that fired.
+     *
+     * Deliberately delayed: `framesEncoded` and `bytesSent` are zero for a
+     * second or two after any camera-on, and a probe that fires immediately
+     * would report NOT_ENCODING for a call that is perfectly healthy. It runs
+     * detached from the caller's coroutine so a slow stats callback never holds
+     * up the camera button, and it logs and nothing else — a diagnosis must not
+     * be able to change the call it is diagnosing.
+     */
+    private fun diagnoseMidCallVideo(label: String = "mid-call camera-on") {
+        scope.launch {
+            delay(MID_CALL_VIDEO_PROBE_DELAY_MS)
+            val connection = rtc ?: return@launch
+            val facts = try {
+                connection.sampleLocalVideoSendFacts()
+            } catch (cause: Throwable) {
+                android.util.Log.w("CallSession", "$label: probe failed", cause)
+                return@launch
+            }
+            android.util.Log.i("CallSession", midCallVideoReport(facts, label))
+        }
+        // A second read, late enough that `keyFramesEncoded` and `pliCount`
+        // describe a sender that has actually been sending. The first read can
+        // only say whether the sender started; these two counters mean nothing
+        // until some traffic has gone by, and the earlier single read took them
+        // before the renegotiation had even completed.
+        scope.launch {
+            delay(MID_CALL_VIDEO_LATE_PROBE_DELAY_MS)
+            val connection = rtc ?: return@launch
+            val facts = runCatching { connection.sampleLocalVideoSendFacts() }.getOrNull()
+                ?: return@launch
+            android.util.Log.i("CallSession", midCallVideoReport(facts, "$label late"))
         }
     }
 
@@ -739,6 +848,12 @@ public class CallSession(
                             // queued before the initial answer landed.
                             negotiationReady = true
                             if (pendingRenegotiation) driveRenegotiationOffer()
+                            // A call DIALLED with video arms its sender at
+                            // connect; print the same facts the mid-call arm
+                            // prints so the two are compared on measurements.
+                            if (mutableCameraEnabled.value) {
+                                diagnoseMidCallVideo("call-start-with-video")
+                            }
                         } catch (cause: Throwable) {
                             android.util.Log.w("CallSession", "applyRemoteAnswer failed", cause)
                             endLocal(WebCallEndReason.Error)
@@ -960,16 +1075,18 @@ public class CallSession(
      * re-drives it once the call settles (native has no `onnegotiationneeded`
      * auto re-fire). [makingOffer] stays set until the reneg answer arrives.
      */
-    private suspend fun driveRenegotiationOffer() {
+    private suspend fun driveRenegotiationOffer(video: Boolean = pendingRenegotiationVideo) {
         val connection = rtc ?: return
         if (!negotiationReady ||
             makingOffer ||
             connection.signalingState() != PeerConnection.SignalingState.STABLE
         ) {
             pendingRenegotiation = true
+            pendingRenegotiationVideo = video
             return
         }
         pendingRenegotiation = false
+        pendingRenegotiationVideo = video
         makingOffer = true
         try {
             val offerSdp = connection.createRenegotiationOffer()
@@ -978,7 +1095,14 @@ public class CallSession(
                     callId = callId,
                     sdp = offerSdp,
                     createdAtMs = System.currentTimeMillis().toULong(),
-                    media = FfiCallMediaFlags(audio = true, video = true),
+                    // `video` used to be hard-coded true, which was correct
+                    // while the only renegotiation was a camera turning ON.
+                    // The camera can now turn OFF the same way, and an offer
+                    // claiming video for a transceiver that has just gone
+                    // `recvOnly` would be a lie about what is being sent.
+                    media = renegotiationMedia(video).let {
+                        FfiCallMediaFlags(audio = it.audio, video = it.video)
+                    },
                 ),
             )
             onOutboundSignaling(bytes)
@@ -1053,7 +1177,116 @@ public class CallSession(
         }
         makingOffer = false
         if (pendingRenegotiation) driveRenegotiationOffer()
+        // The answer is the anchor for everything that follows: it is the first
+        // moment this device's video sender exists at all, and the first moment
+        // the peer has a receiver for it. Both the diagnosis and the keyframe
+        // watchdog hang off it rather than off the camera button, because on a
+        // live call the answer landed LATER than a button-anchored probe fired,
+        // so every number that probe printed described a sender that had not
+        // been negotiated yet.
+        if (mutableCameraEnabled.value) {
+            startKeyframeWatchdog()
+            diagnoseMidCallVideo()
+        }
     }
+
+    /**
+     * Make sure the peer gets a key frame to start from, and say on the console
+     * whether it worked.
+     *
+     * ## What the live run showed
+     *
+     * A receiver joining a stream in progress cannot decode a delta frame; it
+     * discards everything until an IDR arrives, which looks from the outside
+     * like packets arriving and no picture appearing. The first attempt at this
+     * fired the reconfiguration the instant the answer was applied, reported
+     * success, and produced nothing: the receiver asked 78 times over four
+     * seconds and got no key frame. The likeliest reason is that at that
+     * instant there was **no running encoder to reconfigure** — the sender had
+     * been negotiated microseconds earlier and had encoded nothing.
+     *
+     * So this waits for evidence that the encoder is running
+     * (`framesEncoded > 0`) before pulling any lever, then pulls one, then
+     * checks whether it worked and escalates to a different lever if not. Every
+     * decision is [keyframeAction]'s; this only performs it.
+     *
+     * Bounded at [MAX_KEYFRAME_ATTEMPTS]: a watchdog that never gives up would
+     * reconfigure the encoder for the rest of the call, and the console saying
+     * "gave up" is a better report than a loop that hides the failure.
+     */
+    private fun startKeyframeWatchdog() {
+        keyframeWatchdog?.cancel()
+        keyframeWatchdog = scope.launch {
+            var attempts = 0
+            repeat(KEYFRAME_WATCHDOG_TICKS) {
+                delay(KEYFRAME_WATCHDOG_INTERVAL_MS)
+                val connection = rtc ?: return@launch
+                if (!mutableCameraEnabled.value) return@launch
+                val facts = try {
+                    connection.sampleLocalVideoSendFacts()
+                } catch (cause: Throwable) {
+                    android.util.Log.w("CallSession", "keyframe: watchdog probe failed", cause)
+                    return@launch
+                }
+                when (keyframeAction(facts, attempts)) {
+                    KeyframeAction.SATISFIED -> {
+                        android.util.Log.i(
+                            "CallSession",
+                            "keyframe present after $attempts attempt(s): " +
+                                "keyFramesEncoded=${facts.keyFramesEncoded} " +
+                                "framesEncoded=${facts.framesEncoded} " +
+                                "pliCount=${facts.pliCount}",
+                        )
+                        return@launch
+                    }
+                    // The encoder has produced nothing yet. This is the branch
+                    // whose absence wasted the last live run.
+                    KeyframeAction.WAIT -> Unit
+                    KeyframeAction.FORCE -> {
+                        attempts += 1
+                        val ok = runCatching { connection.forceVideoKeyframe() }.getOrDefault(false)
+                        android.util.Log.i(
+                            "CallSession",
+                            "keyframe force (encoder running): requested=$ok " +
+                                "framesEncoded=${facts.framesEncoded} pliCount=${facts.pliCount}",
+                        )
+                    }
+                    KeyframeAction.ESCALATE -> {
+                        attempts += 1
+                        // A different path into the same encoder: change the
+                        // resolution it is fed instead of its send parameters.
+                        val capture = localCameraCapture
+                        if (capture == null) {
+                            android.util.Log.w("CallSession", "keyframe: no capture to nudge")
+                            return@launch
+                        }
+                        runCatching { capture.nudgeOutputFormat() }
+                        android.util.Log.i(
+                            "CallSession",
+                            "keyframe escalation (output-format nudge), attempt $attempts: " +
+                                "keyFramesEncoded=${facts.keyFramesEncoded} pliCount=${facts.pliCount}",
+                        )
+                    }
+                    KeyframeAction.GIVE_UP -> {
+                        // Said plainly, because the peer is showing nothing and
+                        // this device is the reason.
+                        android.util.Log.w(
+                            "CallSession",
+                            "keyframe: no lever produced one after $attempts attempts " +
+                                "(framesEncoded=${facts.framesEncoded} " +
+                                "keyFramesEncoded=${facts.keyFramesEncoded} " +
+                                "pliCount=${facts.pliCount} firCount=${facts.firCount}): " +
+                                keyframeGiveUpDiagnosis(facts),
+                        )
+                        return@launch
+                    }
+                }
+            }
+        }
+    }
+
+    /** The watchdog for the live camera-on, cancelled when a new one starts. */
+    private var keyframeWatchdog: kotlinx.coroutines.Job? = null
 
     private fun endLocal(reason: WebCallEndReason) {
         if (mutableState.value == WebCallState.Done) return

@@ -65,6 +65,24 @@ class OutgoingCallMediaTest {
     }
 
     @Test
+    fun `a mid-call renegotiation says which way the camera went`() {
+        // The flag was hard-coded `video = true`, which was correct while the
+        // only mid-call renegotiation was a camera turning ON. The same button
+        // now turns it OFF by moving the video transceiver to `recvOnly` and
+        // renegotiating, and an offer still claiming video would be the client
+        // lying to its peer about its own media.
+        assertEquals(CallMediaChoice(audio = true, video = true), renegotiationMedia(true))
+        assertEquals(CallMediaChoice(audio = true, video = false), renegotiationMedia(false))
+    }
+
+    @Test
+    fun `a renegotiation never drops the audio section`() {
+        // The microphone's m-line is negotiated once at dial and stays, muted
+        // or not, so Mute never costs a renegotiation.
+        listOf(true, false).forEach { assertTrue(renegotiationMedia(it).audio) }
+    }
+
+    @Test
     fun `the word for each kind is the word the callee is told`() {
         assertEquals("Voice call", requestedCallKindLabel(RequestedCallKind.VOICE))
         assertEquals("Video call", requestedCallKindLabel(RequestedCallKind.VIDEO))

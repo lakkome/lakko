@@ -267,6 +267,12 @@ public final class CallUiState: ObservableObject {
     /// per-participant `remoteVideoTracks` map below instead.
     @Published public private(set) var remoteVideoTrack: RTCVideoTrack?
 
+    /// `true` once the remote video track has actually rendered a frame. The
+    /// call screen keys its layout on this rather than on the track handle,
+    /// which arrives with the SDP and says nothing about whether a picture
+    /// follows (``RemoteVideoFrameProbe``).
+    @Published public private(set) var remoteVideoFlowing: Bool = false
+
     /// N-way SFU remote video — per-peer video tracks keyed on the
     /// roster participant id (`"peer-<streamId>"`, where the SFU pins
     /// the downstream MSID stream-id to the source peer id). Populated
@@ -633,6 +639,14 @@ public final class CallUiState: ObservableObject {
     /// uses the keyed setter below.
     public func setRemoteVideoTrack(_ track: RTCVideoTrack?) {
         self.remoteVideoTrack = track
+        if track == nil { self.remoteVideoFlowing = false }
+    }
+
+    /// Record whether the remote track is producing a picture. Driven by the
+    /// bound session's own frame probe; a dropped track resets it through
+    /// ``setRemoteVideoTrack(_:)``.
+    public func setRemoteVideoFlowing(_ flowing: Bool) {
+        self.remoteVideoFlowing = flowing
     }
 
     /// N-way SFU remote video — set (or, with `nil`, remove) a remote
@@ -699,6 +713,7 @@ public final class CallUiState: ObservableObject {
         // re-binds against a fresh CallSession.
         self.localVideoTrack = nil
         self.remoteVideoTrack = nil
+        self.remoteVideoFlowing = false
         // N-way SFU per-peer video tracks — drop them all.
         self.remoteVideoTracks = [:]
         // B2a — no camera-on in flight for a fresh call.
@@ -828,6 +843,10 @@ extension CallUiState {
             self.setPhase(Self.mapSessionPhase(session.state))
             let connected = session.state == .connected
             let remoteTrack = session.remoteVideoTrack
+            // A track handle is not a picture — `camOn` must mean the tile has
+            // something to draw, or it paints a black rectangle over an avatar.
+            let remotePicture = CallScreenPresentation.hasRemotePicture(
+                trackPresent: remoteTrack != nil, framesArrived: session.remoteVideoFlowing)
             // G3-1-conn-quality — local participant's quality dot
             // is the path quality bucketed from the live RTT.
             let tier = Self.qualityTier(forRttMs: session.rttMs)
@@ -843,7 +862,7 @@ extension CallUiState {
                 roster.append(
                     Participant(
                         id: "remote", displayName: self.peerName ?? "", isLocal: false,
-                        micOn: true, camOn: remoteTrack != nil,
+                        micOn: true, camOn: remotePicture,
                         handRaised: false, quality: .good, speaking: false,
                         screenSharing: false
                     )
@@ -852,6 +871,7 @@ extension CallUiState {
             self.setParticipants(roster)
             self.setLocalVideoTrack(session.localVideoTrack)
             self.setRemoteVideoTrack(remoteTrack)
+            self.setRemoteVideoFlowing(remotePicture)
             // B2a — mirror the 1×1 mid-call camera-on lifecycle so the
             // camera button spins (+ disables) and the self-tile shows
             // the "Starting camera…" hint while it is `.starting`.
@@ -913,12 +933,17 @@ extension CallUiState {
         let videoPublish = session.$videoPublishState
             .receive(on: DispatchQueue.main)
             .sink { _ in onMain(rebuild) }
+        // The first remote frame is what moves the screen to the video layout,
+        // so it has to trigger a rebuild like every other input.
+        let remoteFlowing = session.$remoteVideoFlowing
+            .receive(on: DispatchQueue.main)
+            .sink { _ in onMain(rebuild) }
         // Seed once synchronously so the first frame is correct
         // before any publisher fires.
         rebuild()
         return [
             state, localTrack, remoteTrack, mic, camera, e2ee,
-            rtt, relay, down, up, videoPublish,
+            rtt, relay, down, up, videoPublish, remoteFlowing,
         ]
     }
 

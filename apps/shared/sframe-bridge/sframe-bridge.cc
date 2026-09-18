@@ -3,6 +3,7 @@
 
 #include "sframe-bridge.h"
 
+#include <cstdio>
 #include <cstring>
 
 namespace lakko {
@@ -178,12 +179,53 @@ rtc::RefCountReleaseStatus LakkoFrameEncryptor::Release() const {
 }
 
 // ---------------------------------------------------------------
+// Diagnostic sink
+// ----------------------------------------------------------------------------
+
+namespace {
+
+std::atomic<LogSink> g_log_sink{nullptr};
+
+// Emit one diagnostic line, if a host installed a sink. Never throws, never
+// allocates, and is a no-op when nothing is listening.
+void EmitLog(const char* line) {
+  LogSink sink = g_log_sink.load(std::memory_order_acquire);
+  if (sink != nullptr) {
+    sink(line);
+  }
+}
+
+// The status enum spelled out, so a diagnostic line can be read without the
+// header to hand.
+const char* StatusName(lakko_sframe_status_t status) {
+  switch (status) {
+    case LAKKO_SFRAME_STATUS_T_OK: return "OK";
+    case LAKKO_SFRAME_STATUS_T_NULL_POINTER: return "NULL_POINTER";
+    case LAKKO_SFRAME_STATUS_T_BAD_SEED_LENGTH: return "BAD_SEED_LENGTH";
+    case LAKKO_SFRAME_STATUS_T_KEY_DERIVATION: return "KEY_DERIVATION";
+    case LAKKO_SFRAME_STATUS_T_COUNTER_EXHAUSTED: return "COUNTER_EXHAUSTED";
+    case LAKKO_SFRAME_STATUS_T_AEAD_FAILED: return "AEAD_FAILED";
+    case LAKKO_SFRAME_STATUS_T_WIRE_PARSE: return "WIRE_PARSE";
+    case LAKKO_SFRAME_STATUS_T_KID_OVERFLOW: return "KID_OVERFLOW";
+    case LAKKO_SFRAME_STATUS_T_CTR_OVERFLOW: return "CTR_OVERFLOW";
+    default: return "UNKNOWN";
+  }
+}
+
+}  // namespace
+
+void SetLogSink(LogSink sink) {
+  g_log_sink.store(sink, std::memory_order_release);
+}
+
+// ----------------------------------------------------------------------------
 // LakkoFrameDecryptor
 // ---------------------------------------------------------------
 
 // static
 LakkoFrameDecryptor* LakkoFrameDecryptor::Create(const uint8_t* seed,
-                                                 std::size_t seed_len) {
+                                                 std::size_t seed_len,
+                                                 const char* label) {
   // The decryptor reads the composite KID from each frame's header
   // (ADR-0035), so it carries no per-stream state — a bad seed length
   // is the only Create-time failure, surfaced as nullptr (invariant
@@ -194,11 +236,17 @@ LakkoFrameDecryptor* LakkoFrameDecryptor::Create(const uint8_t* seed,
   if (status != LAKKO_SFRAME_STATUS_T_OK || ring == nullptr) {
     return nullptr;
   }
-  return new LakkoFrameDecryptor(ring);
+  return new LakkoFrameDecryptor(ring, label);
 }
 
-LakkoFrameDecryptor::LakkoFrameDecryptor(lakko_sframe_call_key_ring_t* ring)
-    : ring_(ring) {}
+LakkoFrameDecryptor::LakkoFrameDecryptor(lakko_sframe_call_key_ring_t* ring,
+                                         const char* label)
+    : ring_(ring) {
+  // Bounded copy: the caller's string is not owned and this object outlives
+  // the attach call that supplied it.
+  const char* source = (label != nullptr && label[0] != '\0') ? label : "unknown";
+  std::snprintf(label_, sizeof(label_), "%s", source);
+}
 
 LakkoFrameDecryptor::~LakkoFrameDecryptor() {
   // Callers must have released their refcount before letting us
@@ -222,6 +270,25 @@ webrtc::FrameDecryptorInterface::Result LakkoFrameDecryptor::Decrypt(
   // Encrypt; web <-> native interop). A malformed header or an AEAD
   // failure under both keys both surface as a non-OK status → the frame
   // is dropped (kFailedToDecrypt), never recovered as plaintext.
+  ReportFirstCall(encrypted_frame.size());
+
+  // An empty frame is NOTHING TO DECRYPT, not a failed decryption.
+  //
+  // Audio silence transmission (DTX) sends frames with no payload by design, so
+  // an empty frame is an ordinary thing to receive on a healthy call. Running
+  // it through the opener produced a WIRE_PARSE failure — correctly, there is
+  // no header to parse — and returning `kFailedToDecrypt` then told libwebrtc a
+  // decryption had failed, which is false and counts against the stream. It
+  // also spent this decryptor's one diagnostic report on the least informative
+  // frame of the call, which is how a live investigation lost a day.
+  //
+  // Returning zero plaintext bytes is safe: an empty ciphertext yields an empty
+  // plaintext, so nothing unauthenticated is handed upward and invariant #4 is
+  // untouched — there is no content here to recover or forge.
+  if (encrypted_frame.empty()) {
+    return Result(Status::kOk, 0);
+  }
+
   uint8_t* pt_ptr = nullptr;
   std::size_t pt_len = 0;
   lakko_sframe_status_t open_status =
@@ -229,6 +296,7 @@ webrtc::FrameDecryptorInterface::Result LakkoFrameDecryptor::Decrypt(
           ring_, encrypted_frame.data(), encrypted_frame.size(), &pt_ptr,
           &pt_len);
   if (open_status != LAKKO_SFRAME_STATUS_T_OK) {
+    ReportFirstFailure(open_status, encrypted_frame.data(), encrypted_frame.size());
     return Result(Status::kFailedToDecrypt, 0);
   }
 
@@ -242,6 +310,71 @@ webrtc::FrameDecryptorInterface::Result LakkoFrameDecryptor::Decrypt(
   lakko_sframe_buffer_free(pt_ptr, pt_len);
 
   return Result(Status::kOk, pt_len);
+}
+
+void LakkoFrameDecryptor::ReportFirstCall(std::size_t frame_size) {
+  if (reported_first_call_.exchange(true, std::memory_order_acq_rel)) {
+    return;
+  }
+  char line[160];
+  std::snprintf(
+      line, sizeof(line),
+      "LakkoFrameDecryptor: first frame reached decrypt: label=%s bytes=%zu",
+      label_, frame_size);
+  EmitLog(line);
+}
+
+void LakkoFrameDecryptor::ReportFirstFailure(
+    lakko_sframe_status_t status, const uint8_t* frame_data,
+    std::size_t frame_size) {
+  // An empty frame never reaches here — `Decrypt` returns it as "nothing to
+  // decrypt" before the opener runs — so every report below describes a frame
+  // that genuinely carried bytes and genuinely failed to open.
+  //
+  // Once per decryptor. `exchange` is the whole guard: a racing second frame on
+  // another thread sees `true` and returns.
+  if (reported_failure_.exchange(true, std::memory_order_acq_rel)) {
+    return;
+  }
+  // Re-parse the header for the two values that name WHICH failure this is:
+  // the KID the frame carries — `(sender_leaf << 8) | stream_index` under
+  // ADR-0035 — and the frame counter. A wrong key, a KID the receiver cannot
+  // derive for, and a header it cannot parse at all are three different bugs
+  // with three different fixes, and the status code alone does not separate
+  // them. The parse is independent of the open that just failed, so it still
+  // answers when the open did not.
+  uint32_t kid = 0;
+  uint32_t counter = 0;
+  uint8_t* ciphertext = nullptr;
+  std::size_t ciphertext_len = 0;
+  lakko_sframe_status_t parse_status = lakko_sframe_unwrap_frame(
+      frame_data, frame_size, &kid, &counter, &ciphertext, &ciphertext_len);
+  if (parse_status == LAKKO_SFRAME_STATUS_T_OK) {
+    // The scalars are the diagnosis; the plaintext-shaped buffer is not wanted.
+    lakko_sframe_buffer_free(ciphertext, ciphertext_len);
+  }
+
+  char line[256];
+  if (parse_status == LAKKO_SFRAME_STATUS_T_OK) {
+    // No key material and no frame bytes: a KID is a routing identifier and a
+    // counter is a sequence number, and neither is secret.
+    std::snprintf(
+        line, sizeof(line),
+        "LakkoFrameDecryptor: first decrypt failure: label=%s status=%s(%d) "
+        "kid=%u (leaf=%u stream=%u) counter=%u frameBytes=%zu",
+        label_, StatusName(status), static_cast<int>(status), kid, kid >> 8,
+        kid & 0xFFu, counter, frame_size);
+  } else {
+    // The header itself would not parse, so there is no KID to report — which
+    // is itself the answer: what arrived is not an SFrame frame at all.
+    std::snprintf(
+        line, sizeof(line),
+        "LakkoFrameDecryptor: first decrypt failure: label=%s status=%s(%d) "
+        "headerUnparseable=%s(%d) frameBytes=%zu",
+        label_, StatusName(status), static_cast<int>(status),
+        StatusName(parse_status), static_cast<int>(parse_status), frame_size);
+  }
+  EmitLog(line);
 }
 
 bool LakkoFrameDecryptor::Rekey(const uint8_t* seed, std::size_t seed_len,

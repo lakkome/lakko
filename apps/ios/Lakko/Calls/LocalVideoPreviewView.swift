@@ -55,6 +55,14 @@ public struct LocalVideoPreviewView: UIViewRepresentable {
 
     public func makeUIView(context: Context) -> RTCMTLVideoView {
         let view = RTCMTLVideoView(frame: .zero)
+        // A renderer is not a control. `UIView.isUserInteractionEnabled`
+        // defaults to `true`, and a UIKit view wins hit testing against a
+        // SwiftUI ancestor's gesture — so a full-screen video surface silently
+        // eats every tap meant for the screen behind it. On a call that is not
+        // cosmetic: the controls fade after five seconds of video, and the tap
+        // that should bring them back is the one being eaten, which leaves the
+        // user with no way to mute or hang up. Nothing here needs touches.
+        view.isUserInteractionEnabled = false
         // `videoContentMode` is the libwebrtc-level renderer
         // setting (its enum cases are the same UIKit values).
         view.videoContentMode = contentMode

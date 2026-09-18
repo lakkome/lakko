@@ -177,6 +177,21 @@ class LakkoFrameEncryptor : public webrtc::FrameEncryptorInterface {
 // Decryptor
 // ---------------------------------------------------------------
 
+// A host-supplied sink for the bridge's rare diagnostic lines.
+//
+// The bridge is shared by iOS and Android and no libwebrtc logging header is
+// vendored here, so it cannot pick a platform logger of its own. The host
+// installs one (`NSLog` on iOS, `__android_log_print` on Android) and the
+// bridge stays platform-neutral. `nullptr` — the default — discards.
+//
+// `line` is plain ASCII, owned by the bridge, and valid only for the duration
+// of the call. The sink may run on a libwebrtc worker thread.
+using LogSink = void (*)(const char* line);
+
+// Install (or, with nullptr, remove) the diagnostic sink. Safe to call at any
+// time; the last writer wins.
+void SetLogSink(LogSink sink);
+
 class LakkoFrameDecryptor : public webrtc::FrameDecryptorInterface {
  public:
   // Construct from the same 32-byte per-call seed the encryptor
@@ -192,8 +207,16 @@ class LakkoFrameDecryptor : public webrtc::FrameDecryptorInterface {
   // to one remote receive track opens every frame on it by reading the
   // KID per frame, so audio and either video stream are each keyed
   // correctly with no local media-type or MID signal.
+  //
+  // `label` names which receive track this decryptor serves ("audio",
+  // "video"), for the diagnostic lines only. A live call left it ambiguous
+  // which of two decryptors a failure came from — the line was timestamped
+  // twelve seconds before the video decryptor even existed, so it had to be the
+  // audio one, which nobody could tell from the line itself. Defaulted so the
+  // other platform's call sites compile unchanged.
   static LakkoFrameDecryptor* Create(const uint8_t* seed,
-                                     std::size_t seed_len);
+                                     std::size_t seed_len,
+                                     const char* label = nullptr);
 
   ~LakkoFrameDecryptor() override;
 
@@ -225,13 +248,51 @@ class LakkoFrameDecryptor : public webrtc::FrameDecryptorInterface {
   rtc::RefCountReleaseStatus Release() const override;
 
  private:
-  explicit LakkoFrameDecryptor(lakko_sframe_call_key_ring_t* ring);
+  LakkoFrameDecryptor(lakko_sframe_call_key_ring_t* ring, const char* label);
+
+  // Emit one line the first time ANY frame reaches this decryptor.
+  //
+  // This is the line that separates "the decryptor is rejecting frames" from
+  // "the decryptor is never called". A live call showed 108 packets received
+  // and 27 frames dropped with no failure line from the video decryptor at all,
+  // which is only explicable if `Decrypt` was never reached for video — and no
+  // amount of failure logging can say that, because the absence of a failure
+  // and the absence of a call look identical.
+  void ReportFirstCall(std::size_t frame_size);
+
+  // Emit one line naming why the FIRST frame failed to open: the status, the
+  // KID read off the frame's own header (split into leaf and stream), and the
+  // counter. Subsequent failures are silent.
+  //
+  // Takes a raw `(pointer, size)` rather than an `rtc::ArrayView` on purpose.
+  // Constructing an ArrayView in OUR code instantiates its checked constructor,
+  // which references `rtc::webrtc_checks_impl::FatalLog` — a symbol that lives
+  // inside the precompiled WebRTC framework and is not linked into this bridge,
+  // so the app fails at link. Receiving an ArrayView that libwebrtc built (as
+  // `Decrypt` does) is fine; building one is not.
+  void ReportFirstFailure(lakko_sframe_status_t status,
+                          const uint8_t* frame_data, std::size_t frame_size);
 
   // Owned. The overlap keyer (current + previous call key); ADR-0029.
   // Its internal Rust `Mutex` makes open / rekey / prune thread-safe.
   // The per-frame open reads the composite KID from the frame's header
   // (ADR-0035), so the decryptor holds no per-stream state.
   lakko_sframe_call_key_ring_t* ring_;
+
+  // Which track this decryptor serves, for the diagnostic lines. A bounded
+  // copy: the caller's string is not owned and the decryptor outlives the
+  // attach call.
+  char label_[16];
+
+  // At most three diagnostic lines per decryptor, never per frame. A decryptor
+  // that cannot open the first frame cannot open the thousandth either, and a
+  // per-frame log on the network thread at 30 fps is its own outage.
+  //
+  // A zero-length frame never reaches the failure path at all: `Decrypt`
+  // returns it as "nothing to decrypt" before the opener runs, because an audio
+  // DTX gap is empty by design and is not an error.
+  std::atomic<bool> reported_first_call_{false};
+  std::atomic<bool> reported_failure_{false};
 
   mutable std::atomic<int> refcount_{0};
 };

@@ -19,7 +19,6 @@ class CallControlsTest {
 
     private fun row(
         group: Boolean = false,
-        videoCall: Boolean = false,
         micOn: Boolean = true,
         cameraOn: Boolean = false,
         speakerOn: Boolean = false,
@@ -27,7 +26,6 @@ class CallControlsTest {
         ringing: Boolean = false,
     ) = callControlRow(
         group = group,
-        videoCall = videoCall,
         micOn = micOn,
         cameraOn = cameraOn,
         speakerOn = speakerOn,
@@ -42,24 +40,35 @@ class CallControlsTest {
     // ---- Which controls exist ------------------------------------------------
 
     @Test
-    fun `a voice call shows speaker, mute and end`() {
-        assertEquals(
-            listOf(CallControlKind.SPEAKER, CallControlKind.MICROPHONE, CallControlKind.END),
-            row(videoCall = false).kinds(),
+    fun `the row is the same four buttons whatever the call started as`() {
+        val expected = listOf(
+            CallControlKind.SPEAKER,
+            CallControlKind.MICROPHONE,
+            CallControlKind.CAMERA,
+            CallControlKind.END,
+        )
+        assertEquals(expected, row(cameraOn = false).kinds())
+        assertEquals(expected, row(cameraOn = true).kinds())
+    }
+
+    @Test
+    fun `a voice call has a camera button`() {
+        // Section 4.1: "People start a call with their voice and decide to show
+        // something a minute later; every messenger allows that, and taking it
+        // away to keep the row short would be a feature lost to tidiness."
+        // Pressing it is what turns the call into a video one, so a row without
+        // it would strand a voice call with no way in.
+        assertNotNull(
+            row(cameraOn = false).firstOrNull { it.kind == CallControlKind.CAMERA },
         )
     }
 
     @Test
-    fun `a video call adds the camera`() {
-        assertEquals(
-            listOf(
-                CallControlKind.SPEAKER,
-                CallControlKind.MICROPHONE,
-                CallControlKind.CAMERA,
-                CallControlKind.END,
-            ),
-            row(videoCall = true).kinds(),
-        )
+    fun `the camera button survives being turned off again`() {
+        // "Turning the camera off again returns the call to the portrait" — the
+        // portrait, not a row with one fewer button, or the user could never
+        // turn it back on.
+        assertEquals(row(cameraOn = true).kinds(), row(cameraOn = false).kinds())
     }
 
     @Test
@@ -67,15 +76,15 @@ class CallControlsTest {
         // It was on none of them: the control did not exist anywhere in the app,
         // although it is the one people reach for most on a voice call.
         listOf(
-            row(videoCall = false),
-            row(videoCall = true),
-            row(group = true, videoCall = true),
+            row(cameraOn = false),
+            row(cameraOn = true),
+            row(group = true, cameraOn = true),
         ).forEach { assertNotNull(it.firstOrNull { c -> c.kind == CallControlKind.SPEAKER }) }
     }
 
     @Test
     fun `a one to one call has no more menu`() {
-        listOf(row(videoCall = false), row(videoCall = true)).forEach { controls ->
+        listOf(row(cameraOn = false), row(cameraOn = true)).forEach { controls ->
             assertNull(
                 "a 1x1 call hides nothing behind an ellipsis",
                 controls.firstOrNull { it.kind == CallControlKind.MORE },
@@ -85,7 +94,7 @@ class CallControlsTest {
 
     @Test
     fun `a group call keeps the overflow but not at the expense of the row`() {
-        val controls = row(group = true, videoCall = true)
+        val controls = row(group = true, cameraOn = true)
         assertTrue(controls.kinds().contains(CallControlKind.MORE))
         // "but mute, camera, speaker and end stay in the row"
         listOf(
@@ -99,8 +108,8 @@ class CallControlsTest {
     @Test
     fun `end is always last`() {
         listOf(
-            row(videoCall = false),
-            row(videoCall = true),
+            row(cameraOn = false),
+            row(cameraOn = true),
             row(group = true),
         ).forEach { assertEquals(CallControlKind.END, it.last().kind) }
     }
@@ -132,11 +141,11 @@ class CallControlsTest {
     fun `a sending camera is the quiet state and a stopped one is the loud state`() {
         assertEquals(
             CallControlEmphasis.OUTLINE,
-            row(videoCall = true, cameraOn = true).of(CallControlKind.CAMERA).emphasis,
+            row(cameraOn = true).of(CallControlKind.CAMERA).emphasis,
         )
         assertEquals(
             CallControlEmphasis.SOLID,
-            row(videoCall = true, cameraOn = false).of(CallControlKind.CAMERA).emphasis,
+            row(cameraOn = false).of(CallControlKind.CAMERA).emphasis,
         )
     }
 
@@ -156,7 +165,7 @@ class CallControlsTest {
 
     @Test
     fun `only end is red`() {
-        val controls = row(group = true, videoCall = true, micOn = false, speakerOn = true)
+        val controls = row(group = true, cameraOn = true, micOn = false, speakerOn = true)
         assertEquals(
             listOf(CallControlKind.END),
             controls.filter { it.emphasis == CallControlEmphasis.DANGER }.kinds(),
@@ -175,15 +184,15 @@ class CallControlsTest {
         )
         assertEquals("Mute", row(micOn = false).of(CallControlKind.MICROPHONE).label)
         assertEquals(
-            row(videoCall = true, cameraOn = true).of(CallControlKind.CAMERA).label,
-            row(videoCall = true, cameraOn = false).of(CallControlKind.CAMERA).label,
+            row(cameraOn = true).of(CallControlKind.CAMERA).label,
+            row(cameraOn = false).of(CallControlKind.CAMERA).label,
         )
-        assertEquals("Camera", row(videoCall = true).of(CallControlKind.CAMERA).label)
+        assertEquals("Camera", row().of(CallControlKind.CAMERA).label)
     }
 
     @Test
     fun `every control carries a spoken label naming the resulting state`() {
-        val controls = row(group = true, videoCall = true)
+        val controls = row(group = true, cameraOn = true)
         controls.forEach { assertTrue(it.kind.name, it.spokenLabel.isNotBlank()) }
         assertEquals("Mute microphone", row(micOn = true).of(CallControlKind.MICROPHONE).spokenLabel)
         assertEquals(
@@ -199,7 +208,7 @@ class CallControlsTest {
 
     @Test
     fun `while calling only end is active`() {
-        val controls = row(group = true, videoCall = true, ringing = true)
+        val controls = row(group = true, cameraOn = true, ringing = true)
         controls.forEach {
             if (it.kind == CallControlKind.END) {
                 assertTrue("end must always work", it.enabled)
@@ -212,19 +221,19 @@ class CallControlsTest {
     @Test
     fun `a disabled control is still in the row`() {
         // "Disabled is 40 percent opacity, never a hidden button."
-        assertEquals(row(videoCall = true).kinds(), row(videoCall = true, ringing = true).kinds())
+        assertEquals(row().kinds(), row(ringing = true).kinds())
     }
 
     @Test
     fun `once the call is up every control is active`() {
-        row(group = true, videoCall = true, ringing = false).forEach {
+        row(group = true, cameraOn = true, ringing = false).forEach {
             assertTrue(it.kind.name, it.enabled)
         }
     }
 
     @Test
     fun `an acquiring camera is busy and untappable but end still works`() {
-        val controls = row(videoCall = true, cameraBusy = true)
+        val controls = row(cameraBusy = true)
         val camera = controls.of(CallControlKind.CAMERA)
         assertTrue(camera.busy)
         assertFalse(camera.enabled)
@@ -235,7 +244,7 @@ class CallControlsTest {
 
     @Test
     fun `nothing but the camera is ever busy`() {
-        row(group = true, videoCall = true, cameraBusy = true)
+        row(group = true, cameraBusy = true)
             .filter { it.kind != CallControlKind.CAMERA }
             .forEach { assertFalse(it.kind.name, it.busy) }
     }

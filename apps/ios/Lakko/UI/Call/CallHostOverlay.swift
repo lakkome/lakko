@@ -79,7 +79,6 @@ struct CallHostOverlay: ViewModifier {
                     // name is who the screen says is on it.
                     CallScreen(
                         session: session,
-                        button: host.outgoingButton ?? .voice,
                         surface: host.outgoingSurface,
                         peerName: host.activePeerName,
                         notice: host.outgoingNotice,

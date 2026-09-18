@@ -251,14 +251,6 @@ interface CallStateInternal {
    */
   readonly connectedAt: Accessor<number | null>;
   /**
-   * What the call was placed or answered as.
-   *
-   * Decides whether the control row carries a camera button (§4.1's table), and
-   * deliberately NOT the same question as what is currently on screen — see
-   * `calls/call-controls.ts`.
-   */
-  readonly mediaKind: Accessor<"voice" | "video">;
-  /**
    * Whether the microphone should be live when the call's local participant is
    * first built.
    *
@@ -317,7 +309,6 @@ interface CallStateInternal {
 
 const [phase, setPhase] = createSignal<CallPhase>({ kind: "idle" });
 const [connectedAt, setConnectedAt] = createSignal<number | null>(null);
-const [mediaKind, setMediaKind] = createSignal<"voice" | "video">("voice");
 const [pendingMicOn, setPendingMicOn] = createSignal(true);
 const [participants, setParticipants] = createSignal<Participant[]>([]);
 const [pinnedId, setPinnedId] = createSignal<string | null>(null);
@@ -382,7 +373,6 @@ function localParticipant(): Participant | null {
 export const callState: CallStateInternal = {
   phase,
   connectedAt,
-  mediaKind,
   pendingMicOn,
   participants,
   pinnedId,
@@ -506,11 +496,6 @@ export const callActions = {
     if (next.kind === "connected" && connectedAt() === null) setConnectedAt(Date.now());
     setPhase(next);
   },
-  /** Record what the call was placed or answered as (`voice` / `video`). Drives
-   *  whether the control row carries a camera button. */
-  setMediaKind(kind: "voice" | "video"): void {
-    setMediaKind(kind);
-  },
   /** Ask for the call's local participant to start muted — the camera check's
    *  microphone toggle, applied before any session reports a state. */
   setPendingMicOn(on: boolean): void {
@@ -526,7 +511,6 @@ export const callActions = {
   reset(): void {
     setPhase({ kind: "idle" });
     setConnectedAt(null);
-    setMediaKind("voice");
     setPendingMicOn(true);
     setParticipants([]);
     setPinnedId(null);

@@ -29,12 +29,16 @@ package me.lakko.app.calls
  * emphasis is decided in a composable, so all of it is unit-tested on the host
  * JVM.
  *
- * The table from section 4.1:
+ * The row is the same for both kinds of call — Speaker, Mute, Camera, End —
+ * because **the camera button is on a voice call too, and it turns the call
+ * into a video one**. Section 4.1: "People start a call with their voice and
+ * decide to show something a minute later; every messenger allows that, and
+ * taking it away to keep the row short would be a feature lost to tidiness."
  *
- * | Call kind | The row, left to right |
- * |---|---|
- * | Voice | Speaker, Mute, End |
- * | Video | Speaker, Mute, Camera, End |
+ * That is why the row takes no "is this a video call" input. There is no such
+ * thing on a live call: there is a camera that is sending or not, and the
+ * button that changes which. Deriving the row from a call *kind* is what would
+ * strand a voice call with no way to start showing something.
  *
  * A group call adds one overflow entry for participants and chat, "but mute,
  * camera, speaker and end stay in the row". Flip camera is deliberately absent
@@ -92,31 +96,15 @@ public data class CallControl(
 )
 
 /**
- * The buttons of the row, left to right, for a call of this shape.
- *
- * [videoCall] is "this call has a video dimension" rather than "the caller
- * pressed the video button": a 1x1 call that gained video mid-call must keep a
- * camera button, or the only way to stop sending would be to hang up.
+ * The buttons of the row, left to right. The only difference a group call makes
+ * is the overflow entry; every call has all four of the others.
  */
-public fun callControlKinds(group: Boolean, videoCall: Boolean): List<CallControlKind> = when {
-    group -> listOf(
-        CallControlKind.SPEAKER,
-        CallControlKind.MICROPHONE,
-        CallControlKind.CAMERA,
-        CallControlKind.MORE,
-        CallControlKind.END,
-    )
-    videoCall -> listOf(
-        CallControlKind.SPEAKER,
-        CallControlKind.MICROPHONE,
-        CallControlKind.CAMERA,
-        CallControlKind.END,
-    )
-    else -> listOf(
-        CallControlKind.SPEAKER,
-        CallControlKind.MICROPHONE,
-        CallControlKind.END,
-    )
+public fun callControlKinds(group: Boolean): List<CallControlKind> = buildList {
+    add(CallControlKind.SPEAKER)
+    add(CallControlKind.MICROPHONE)
+    add(CallControlKind.CAMERA)
+    if (group) add(CallControlKind.MORE)
+    add(CallControlKind.END)
 }
 
 /**
@@ -129,13 +117,12 @@ public fun callControlKinds(group: Boolean, videoCall: Boolean): List<CallContro
 @Suppress("LongParameterList")
 public fun callControlRow(
     group: Boolean,
-    videoCall: Boolean,
     micOn: Boolean,
     cameraOn: Boolean,
     speakerOn: Boolean,
     cameraBusy: Boolean = false,
     ringing: Boolean = false,
-): List<CallControl> = callControlKinds(group, videoCall).map { kind ->
+): List<CallControl> = callControlKinds(group).map { kind ->
     when (kind) {
         CallControlKind.SPEAKER -> CallControl(
             kind = kind,

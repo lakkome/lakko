@@ -70,6 +70,23 @@ public fun requestedCallKind(video: Boolean): RequestedCallKind =
 public fun offeredCallMedia(microphoneOn: Boolean, cameraOn: Boolean): CallMediaChoice =
     CallMediaChoice(audio = microphoneOn, video = cameraOn)
 
+/**
+ * The media flags a MID-CALL renegotiation offer carries — `docs/ux/calls.md`
+ * section 4.1's camera button, in both directions.
+ *
+ * It exists because the flag was hard-coded to `video = true`, which was correct
+ * for as long as the only reason to renegotiate mid-call was a camera turning
+ * ON. The same button now turns it OFF the same way — the video transceiver
+ * moves to `recvOnly` and one renegotiation carries it — and an offer still
+ * claiming video for a transceiver that has just stopped sending is a lie about
+ * the call's own media, told by the client to its peer.
+ *
+ * Audio is always carried: the microphone's m-line is negotiated at dial and
+ * stays, muted or not, so that Mute never needs a renegotiation.
+ */
+public fun renegotiationMedia(cameraSending: Boolean): CallMediaChoice =
+    CallMediaChoice(audio = true, video = cameraSending)
+
 /** The word for a call of this kind, as the callee's ring and the pre-join say it. */
 public fun requestedCallKindLabel(kind: RequestedCallKind): String = when (kind) {
     RequestedCallKind.VOICE -> "Voice call"

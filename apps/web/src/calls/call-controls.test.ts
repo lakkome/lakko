@@ -13,7 +13,6 @@ import {
 import type { CallPhaseKind } from "./call-screen-model";
 
 const BASE: CallControlsInput = {
-  mediaKind: "voice",
   surface: "voice",
   phase: "connected",
   micOn: true,
@@ -34,33 +33,50 @@ function control(input: Partial<CallControlsInput>, id: CallControlId) {
 }
 
 describe("callControls — which controls exist (section 4.1)", () => {
-  it("gives a voice call Speaker, Mute and End", () => {
-    expect(ids({ mediaKind: "voice" })).toEqual(["speaker", "mic", "end"]);
+  it("is Speaker, Mute, Camera, End for a voice call", () => {
+    expect(ids({ surface: "voice" })).toEqual(["speaker", "mic", "camera", "end"]);
   });
 
-  it("adds Camera for a video call", () => {
-    expect(ids({ mediaKind: "video", surface: "video" })).toEqual([
-      "speaker",
-      "mic",
-      "camera",
-      "end",
-    ]);
+  it("is the same four for a video call", () => {
+    // Section 4.1's table gives both kinds the same row: "People start a call
+    // with their voice and decide to show something a minute later."
+    expect(ids({ surface: "video" })).toEqual(["speaker", "mic", "camera", "end"]);
+  });
+
+  it("offers the camera on a voice call, which is what turns it into a video one", () => {
+    expect(ids({ surface: "voice" })).toContain("camera");
+    expect(control({ surface: "voice", cameraOn: false }, "camera").disabled).toBe(false);
+    expect(control({ surface: "voice", cameraOn: false }, "camera").accessibleName).toBe(
+      "Start camera",
+    );
+  });
+
+  it("keeps the camera button when BOTH cameras are off, which is when it is the way back", () => {
+    // The surface has fallen back to the portrait here. A row that followed the
+    // surface would drop the button exactly when it is the only way to start a
+    // camera again.
+    expect(ids({ surface: "voice", cameraOn: false })).toContain("camera");
   });
 
   it("never puts a More menu on a 1x1 call", () => {
-    for (const mediaKind of ["voice", "video"] as const) {
-      expect(ids({ mediaKind })).not.toContain("overflow");
+    for (const surface of ["voice", "video"] as const) {
+      expect(ids({ surface })).not.toContain("overflow");
     }
   });
 
   it("keeps mute, camera, speaker and end in the row on a group call, with one overflow", () => {
-    expect(ids({ surface: "group", mediaKind: "voice" })).toEqual([
+    expect(ids({ surface: "group" })).toEqual([
       "speaker",
       "mic",
       "camera",
       "overflow",
       "end",
     ]);
+  });
+
+  it("gives a 1x1 call the same row whatever the surface is doing", () => {
+    // The row is constant for a 1x1 call; only the group overflow varies.
+    expect(ids({ surface: "voice" })).toEqual(ids({ surface: "video" }));
   });
 
   it("omits Speaker entirely where the browser cannot move the sound", () => {
@@ -75,17 +91,12 @@ describe("callControls — which controls exist (section 4.1)", () => {
 
   it("always ends with End, and End is the only red control", () => {
     for (const surface of ["voice", "video", "group"] as const) {
-      const row = callControls({ ...BASE, surface, mediaKind: "video" });
+      const row = callControls({ ...BASE, surface });
       expect(row[row.length - 1]?.id).toBe("end");
       expect(row.filter((c) => c.tone === "end").map((c) => c.id)).toEqual(["end"]);
     }
   });
 
-  it("keeps the camera button on a video call whose own camera is stopped", () => {
-    // If the row followed what is on screen rather than the call's kind,
-    // stopping the camera would delete the button that restarts it.
-    expect(ids({ mediaKind: "video", surface: "voice", cameraOn: false })).toContain("camera");
-  });
 });
 
 describe("callControls — the two states read the right way round (section 4.1.1)", () => {
@@ -97,13 +108,13 @@ describe("callControls — the two states read the right way round (section 4.1.
   it("slashes the icon in the off state", () => {
     expect(control({ micOn: true }, "mic").icon).toBe("mic");
     expect(control({ micOn: false }, "mic").icon).toBe("micOff");
-    expect(control({ mediaKind: "video", cameraOn: true }, "camera").icon).toBe("video");
-    expect(control({ mediaKind: "video", cameraOn: false }, "camera").icon).toBe("videoOff");
+    expect(control({ cameraOn: true }, "camera").icon).toBe("video");
+    expect(control({ cameraOn: false }, "camera").icon).toBe("videoOff");
   });
 
   it("draws a sending camera as the outline and a stopped one as the solid", () => {
-    expect(control({ mediaKind: "video", cameraOn: true }, "camera").tone).toBe("outline");
-    expect(control({ mediaKind: "video", cameraOn: false }, "camera").tone).toBe("solid");
+    expect(control({ cameraOn: true }, "camera").tone).toBe("outline");
+    expect(control({ cameraOn: false }, "camera").tone).toBe("solid");
   });
 
   it("reports the toggles as pressed when they are off, matching the loud state", () => {
@@ -122,26 +133,22 @@ describe("callControls — labels and spoken names (section 4.1.1)", () => {
   it("labels the action and never the state", () => {
     expect(control({ micOn: true }, "mic").label).toBe("Mute");
     expect(control({ micOn: false }, "mic").label).toBe("Mute");
-    expect(control({ mediaKind: "video", cameraOn: true }, "camera").label).toBe("Camera");
-    expect(control({ mediaKind: "video", cameraOn: false }, "camera").label).toBe("Camera");
+    expect(control({ cameraOn: true }, "camera").label).toBe("Camera");
+    expect(control({ cameraOn: false }, "camera").label).toBe("Camera");
   });
 
   it("uses exactly the words section 4.1.1 lists", () => {
-    const labels = callControls({
-      ...BASE,
-      mediaKind: "video",
-      surface: "group",
-    }).map((c) => c.label);
+    const labels = callControls({ ...BASE, surface: "group" }).map((c) => c.label);
     expect(labels).toEqual(["Speaker", "Mute", "Camera", "More", "End"]);
   });
 
   it("names the action and the resulting state for a screen reader", () => {
     expect(control({ micOn: true }, "mic").accessibleName).toBe("Mute microphone");
     expect(control({ micOn: false }, "mic").accessibleName).toBe("Unmute microphone");
-    expect(control({ mediaKind: "video", cameraOn: true }, "camera").accessibleName).toBe(
+    expect(control({ cameraOn: true }, "camera").accessibleName).toBe(
       "Stop camera",
     );
-    expect(control({ mediaKind: "video", cameraOn: false }, "camera").accessibleName).toBe(
+    expect(control({ cameraOn: false }, "camera").accessibleName).toBe(
       "Start camera",
     );
   });
@@ -154,7 +161,7 @@ describe("callControls — labels and spoken names (section 4.1.1)", () => {
 
   it("gives every control a non-empty spoken name", () => {
     for (const surface of ["voice", "video", "group"] as const) {
-      for (const c of callControls({ ...BASE, surface, mediaKind: "video" })) {
+      for (const c of callControls({ ...BASE, surface })) {
         expect(c.accessibleName.trim().length).toBeGreaterThan(0);
         expect(c.label.trim().length).toBeGreaterThan(0);
       }
@@ -164,14 +171,14 @@ describe("callControls — labels and spoken names (section 4.1.1)", () => {
 
 describe("callControls — disabled, never hidden (section 4, section 4.1.1)", () => {
   it("leaves only End active while the call is ringing out", () => {
-    const row = callControls({ ...BASE, mediaKind: "video", phase: "calling" });
+    const row = callControls({ ...BASE, phase: "calling" });
     for (const c of row) {
       expect(c.disabled).toBe(c.id !== "end");
     }
   });
 
   it("still shows every control while it is inert", () => {
-    expect(ids({ mediaKind: "video", phase: "calling" })).toEqual([
+    expect(ids({ phase: "calling" })).toEqual([
       "speaker",
       "mic",
       "camera",
@@ -181,7 +188,7 @@ describe("callControls — disabled, never hidden (section 4, section 4.1.1)", (
 
   it("makes everything inert once the call is over", () => {
     for (const phase of ["ended", "idle"] as const) {
-      for (const c of callControls({ ...BASE, mediaKind: "video", phase })) {
+      for (const c of callControls({ ...BASE, phase })) {
         expect(c.disabled).toBe(true);
       }
     }
@@ -189,16 +196,16 @@ describe("callControls — disabled, never hidden (section 4, section 4.1.1)", (
 
   it("keeps the whole row live while connecting and reconnecting", () => {
     for (const phase of ["connecting", "connected", "reconnecting"] as CallPhaseKind[]) {
-      for (const c of callControls({ ...BASE, mediaKind: "video", phase })) {
+      for (const c of callControls({ ...BASE, phase })) {
         expect(c.disabled).toBe(false);
       }
     }
   });
 
   it("refuses a second press while the camera is being acquired", () => {
-    expect(control({ mediaKind: "video", cameraBusy: true }, "camera").disabled).toBe(true);
+    expect(control({ cameraBusy: true }, "camera").disabled).toBe(true);
     // The rest of the row keeps working.
-    expect(control({ mediaKind: "video", cameraBusy: true }, "mic").disabled).toBe(false);
+    expect(control({ cameraBusy: true }, "mic").disabled).toBe(false);
   });
 });
 

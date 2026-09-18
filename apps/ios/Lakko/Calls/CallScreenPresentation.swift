@@ -95,32 +95,54 @@ public enum CallScreenPresentation {
 
     // MARK: Layout
 
+    /// Is there a remote picture to fill the screen with?
+    ///
+    /// **Both halves are required, and the second is the one that was missing.**
+    /// A remote video track handle arrives with the SDP — the moment a peer's
+    /// renegotiation adds an `m=video` line — so `trackPresent` alone answers
+    /// "the other side says it will send video", not "there is something to
+    /// look at". A live call found the difference: iOS switched to the
+    /// full-screen video layout on the handle and showed a dark surface for over
+    /// a minute, with the controls faded out over it.
+    ///
+    /// `framesArrived` comes from ``RemoteVideoFrameProbe``, which is the
+    /// picture itself and nothing else.
+    public static func hasRemotePicture(trackPresent: Bool, framesArrived: Bool) -> Bool {
+        trackPresent && framesArrived
+    }
+
     /// What the screen draws behind the controls.
     ///
     /// - Parameters:
     ///   - remoteCount: how many other people are on the call.
-    ///   - remoteVideo: a remote video frame source exists.
-    public static func layout(remoteCount: Int, remoteVideo: Bool) -> CallScreenLayout {
+    ///   - remotePicture: a remote video frame has actually been rendered —
+    ///     ``hasRemotePicture(trackPresent:framesArrived:)``, never a bare track
+    ///     handle. With no picture the portrait is the honest thing to show.
+    public static func layout(remoteCount: Int, remotePicture: Bool) -> CallScreenLayout {
         if remoteCount > 1 { return .gallery }
-        return remoteVideo ? .video : .portrait
+        return remotePicture ? .video : .portrait
     }
 
-    /// The row, left to right (`docs/ux/calls.md` section 4.1).
+    /// The row, left to right (`docs/ux/calls.md` section 4.1): Speaker, Mute,
+    /// Camera, End — the same four on **both** call kinds.
+    ///
+    /// **The camera button is on a voice call too**, and pressing it turns the
+    /// call into a video one. People start a call with their voice and decide to
+    /// show something a minute later; every messenger allows that, and dropping
+    /// it to keep a voice call's row short would be a capability lost to
+    /// tidiness. This function briefly did drop it, and the maintainer put it
+    /// back — which is why there is no `videoCall` parameter here any more: the
+    /// row does not depend on what the call is currently carrying, only on
+    /// whether it is a group.
     ///
     /// A 1x1 call has no overflow button at all — the whole set is on the
     /// screen. A group call keeps participants and chat behind one, but mute,
     /// camera, speaker and end stay in the row.
-    ///
-    /// - Parameter videoCall: the call carries video, so the camera button has
-    ///   something to do. A group call is always video-capable.
-    public static func controls(layout: CallScreenLayout, videoCall: Bool) -> [CallControl] {
+    public static func controls(layout: CallScreenLayout) -> [CallControl] {
         if layout == .gallery {
             return [.speaker, .microphone, .camera, .overflow, .end]
         }
-        if videoCall {
-            return [.speaker, .microphone, .camera, .end]
-        }
-        return [.speaker, .microphone, .end]
+        return [.speaker, .microphone, .camera, .end]
     }
 
     /// Whether a control can be pressed in this phase. While the call is only
@@ -162,6 +184,13 @@ public enum CallScreenPresentation {
     /// The controls fade out on a connected call that has something to look at
     /// underneath, and never on a voice call — hiding them over a portrait only
     /// makes the user tap (section 4.2).
+    ///
+    /// "Something to look at" is load-bearing, not a turn of phrase. Because the
+    /// layout is now keyed on a rendered frame rather than a track handle
+    /// (``hasRemotePicture(trackPresent:framesArrived:)``), a call whose peer
+    /// announced video but whose picture never arrives stays a portrait and so
+    /// keeps its controls — including, decisively, the End button. Fading a row
+    /// out over a blank screen is how a user ends up unable to hang up.
     public static func autoHides(layout: CallScreenLayout, phase: CallUiState.CallPhase) -> Bool {
         guard case .connected = phase else { return false }
         return layout == .video || layout == .gallery

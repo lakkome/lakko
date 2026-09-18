@@ -556,9 +556,10 @@ public struct CallScreen: View {
     /// screen can say it (section 4's state table). `nil` for a call that never
     /// connected.
     @State private var endedDurationMs: Int64?
-    /// Which button opened this call, and what that button opened
-    /// (`docs/ux/calls.md` sections 3.1 and 3.2).
-    private let button: CallButtonKind
+    /// What the button that opened this call opened: a call already on the wire,
+    /// or the camera check (`docs/ux/calls.md` sections 3.1 and 3.2). Which
+    /// button it was is not kept, because nothing on this screen depends on it
+    /// any more — the row is the same four controls either way (section 4.1).
     private let surface: CallStartSurface?
     /// The other person's name, resolved by the call's owner.
     private let peerName: String?
@@ -581,7 +582,6 @@ public struct CallScreen: View {
 
     public init(
         session: CallSession? = nil,
-        button: CallButtonKind = .voice,
         surface: CallStartSurface? = nil,
         peerName: String? = nil,
         notice: String? = nil,
@@ -590,7 +590,6 @@ public struct CallScreen: View {
     ) {
         self.session = session
         self.externallyDriven = false
-        self.button = button
         self.surface = surface
         self.peerName = peerName
         self.notice = notice
@@ -605,7 +604,6 @@ public struct CallScreen: View {
         _state = StateObject(wrappedValue: externalState)
         self.session = nil
         self.externallyDriven = true
-        self.button = .voice
         self.surface = nil
         self.peerName = nil
         self.notice = nil
@@ -642,28 +640,31 @@ public struct CallScreen: View {
         return state.remoteVideoTracks[sole] ?? state.remoteVideoTrack
     }
 
+    /// There is a picture only when a frame has actually been rendered. The
+    /// track handle arrives with the SDP and proves nothing — see
+    /// ``CallScreenPresentation/hasRemotePicture(trackPresent:framesArrived:)``.
+    private var hasRemotePicture: Bool {
+        CallScreenPresentation.hasRemotePicture(
+            trackPresent: soleRemoteVideoTrack != nil,
+            framesArrived: state.remoteVideoFlowing)
+    }
+
     private var layout: CallScreenLayout {
         CallScreenPresentation.layout(
             remoteCount: remoteParticipants.count,
-            remoteVideo: soleRemoteVideoTrack != nil)
+            remotePicture: hasRemotePicture)
     }
 
     private var local: CallUiState.Participant? {
         state.participants.first(where: { $0.isLocal })
     }
 
-    /// Does this call carry video, so the camera button has something to do?
-    /// The header button that opened it, the local camera, and a remote video
-    /// frame each answer yes; a plain voice call answers no and its row is
-    /// Speaker, Mute, End (`docs/ux/calls.md` section 4.1).
-    private var videoCall: Bool {
-        if button == .video { return true }
-        if local?.camOn == true { return true }
-        return soleRemoteVideoTrack != nil || !state.remoteVideoTracks.isEmpty
-    }
-
+    /// `docs/ux/calls.md` section 4.1 — the same four controls on both kinds of
+    /// call, because the camera button is what turns a voice call into a video
+    /// one. Nothing about the row depends on what the call is carrying right
+    /// now.
     private var controls: [CallControl] {
-        CallScreenPresentation.controls(layout: layout, videoCall: videoCall)
+        CallScreenPresentation.controls(layout: layout)
     }
 
     private var displayName: String {
@@ -798,6 +799,24 @@ public struct CallScreen: View {
                 gallery
             }
 
+            // The tap target, covering the whole surface at every stage.
+            //
+            // It is a layer of its own rather than a gesture on the ZStack
+            // because the thing underneath is a `UIView`: `RTCMTLVideoView`
+            // fills the screen on a video call and, like any UIView, wins hit
+            // testing against a SwiftUI ancestor's gesture. A live call found
+            // exactly that — the controls faded after five seconds and tapping
+            // the middle of the screen, which is the video, brought nothing
+            // back, leaving no way to mute or hang up. Sitting ABOVE the
+            // content and BELOW the self-view and the controls, this is hit
+            // first and still lets their own buttons through.
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if state.qualityPopoverOpen { state.setQualityPopoverOpen(false) }
+                    showControls()
+                }
+
             if layout != .gallery, local?.camOn == true, let track = state.localVideoTrack {
                 selfView(track: track)
             }
@@ -836,11 +855,6 @@ public struct CallScreen: View {
                 }
                 .zIndex(10)
             }
-        }
-        .contentShape(Rectangle())
-        .onTapGesture {
-            if state.qualityPopoverOpen { state.setQualityPopoverOpen(false) }
-            showControls()
         }
         .animation(.easeInOut(duration: 0.2), value: controlsVisible)
         .animation(.easeInOut(duration: 0.2), value: state.participantListOpen)
@@ -893,7 +907,7 @@ public struct CallScreen: View {
     /// A video call: the other person, full screen.
     @ViewBuilder
     private var remoteVideo: some View {
-        if let track = soleRemoteVideoTrack {
+        if hasRemotePicture, let track = soleRemoteVideoTrack {
             LocalVideoPreviewView(track: track, mirrored: false, contentMode: .scaleAspectFill)
                 .ignoresSafeArea()
                 .accessibilityHidden(true)

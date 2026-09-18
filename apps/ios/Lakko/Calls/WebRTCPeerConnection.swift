@@ -365,6 +365,54 @@ public final class WebRTCPeerConnection: NSObject {
         )
     }
 
+    /// Read the `inbound-rtp` counters for the remote VIDEO stream.
+    ///
+    /// Separates the three reasons a remote picture can be missing — nothing
+    /// arriving, arriving but not decoding, decoding but not drawn — which the
+    /// screen cannot tell apart and which have opposite fixes. See
+    /// ``RemoteVideoDiagnosis``.
+    ///
+    /// Returns ``InboundVideoStats/none`` when the report carries no inbound
+    /// video stream at all, which is itself the answer when a track has
+    /// supposedly attached.
+    public func sampleInboundVideoStats() async -> InboundVideoStats {
+        guard let peer = peer else { return .none }
+        let report: RTCStatisticsReport = await withCheckedContinuation { cont in
+            peer.statistics { cont.resume(returning: $0) }
+        }
+        // `kind` is the current spelling; `mediaType` is the older one and some
+        // builds still emit only that, so both are accepted rather than
+        // silently reporting "no video stream" on a naming difference.
+        let inbound = report.statistics.values.first { stat in
+            guard stat.type == "inbound-rtp" else { return false }
+            let kind = (stat.values["kind"] as? String)
+                ?? (stat.values["mediaType"] as? String)
+            return kind == "video"
+        }
+        guard let inbound else { return .none }
+        let number: (String) -> Int64 = { key in
+            (inbound.values[key] as? NSNumber)?.int64Value ?? 0
+        }
+        // The negotiated codec, resolved through the stream's `codecId`. It is
+        // what separates a frame the decryptor rejected from a frame this device
+        // cannot decode — both count packets and decode nothing.
+        var codec: String?
+        if let codecId = inbound.values["codecId"] as? String,
+            let codecStat = report.statistics[codecId] {
+            codec = codecStat.values["mimeType"] as? String
+        }
+        return InboundVideoStats(
+            packetsReceived: number("packetsReceived"),
+            framesReceived: number("framesReceived"),
+            framesDecoded: number("framesDecoded"),
+            framesDropped: number("framesDropped"),
+            bytesReceived: number("bytesReceived"),
+            pliCount: number("pliCount"),
+            keyFramesDecoded: number("keyFramesDecoded"),
+            codec: codec,
+            decoder: inbound.values["decoderImplementation"] as? String)
+    }
+
     /// Factory entry point for a fresh `RTCVideoSource`
     /// bound to this process's shared `RTCPeerConnectionFactory`.
     /// `LocalCameraCapture` (G3-1-video) drives frames into the
@@ -440,6 +488,44 @@ public final class WebRTCPeerConnection: NSObject {
         }
         localVideoSender = nil
         localVideoTrack = nil
+    }
+
+    /// Stop or resume OFFERING video, without touching the sender.
+    ///
+    /// `docs/ux/calls.md` section 4.1 — "turning the camera off again returns
+    /// the call to the portrait", on BOTH screens. Disabling the track alone
+    /// does not do that: libwebrtc keeps transmitting (black frames), nothing
+    /// fires on the peer, and their screen stays on a full-screen still. What
+    /// the peer does react to is the transceiver's direction, so this flips it
+    /// between `sendRecv` and `recvOnly` and leaves the renegotiation to the
+    /// caller.
+    ///
+    /// **The sender is deliberately kept.** Removing the track would drop its
+    /// SFrame encryptor, and the next camera-on would arm a fresh one for the
+    /// same `(leaf, stream)` — restarting the frame counter at zero and reusing
+    /// `(key, nonce)` pairs already spent, which is exactly the reuse ADR-0035
+    /// exists to prevent. Keeping the sender keeps the encryptor, and with it
+    /// the counter.
+    ///
+    /// - Returns: `true` when the direction actually changed, so the caller
+    ///   knows a renegotiation is owed. `false` (no video sender, no matching
+    ///   transceiver, already in that direction, or the platform refused) leaves
+    ///   the connection exactly as it was.
+    public func setVideoSendingEnabled(_ sending: Bool) -> Bool {
+        guard let peer = peer, let sender = localVideoSender else { return false }
+        guard let transceiver = peer.transceivers.first(where: { $0.sender == sender })
+        else { return false }
+        let wanted: RTCRtpTransceiverDirection = sending ? .sendRecv : .recvOnly
+        guard transceiver.direction != wanted else { return false }
+        var error: NSError?
+        transceiver.setDirection(wanted, error: &error)
+        if let error {
+            NSLog(
+                "WebRTCPeerConnection: video direction change refused: %@",
+                String(describing: error))
+            return false
+        }
+        return true
     }
 
     // MARK: - SFrame (G3-sframe-native N-4)

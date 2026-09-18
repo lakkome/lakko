@@ -52,6 +52,19 @@ class CallScreenLayoutTest {
     }
 
     @Test
+    fun `a group call is a grid even when this device alone has a camera on`() {
+        assertEquals(
+            CallStage.GRID,
+            callStage(
+                remoteParticipants = 2,
+                remoteVideoPresent = false,
+                localVideoPresent = true,
+                groupCall = true,
+            ),
+        )
+    }
+
+    @Test
     fun `a group call with nobody else yet is still a group call`() {
         // Otherwise the roster, the chat and the overflow button all disappear
         // until the second person arrives, and come back when they do.
@@ -76,7 +89,71 @@ class CallScreenLayoutTest {
     }
 
     @Test
+    fun `starting the camera on a voice call turns it into a video one`() {
+        // Section 4.1: pressing the camera button mid-call "starts the camera,
+        // tells the other side, and the screen becomes the video layout for
+        // both". This device's half of that: the portrait becomes a picture.
+        assertEquals(
+            CallStage.LOCAL_VIDEO,
+            callStage(remoteParticipants = 1, remoteVideoPresent = false, localVideoPresent = true),
+        )
+    }
+
+    @Test
+    fun `turning the camera off again returns the call to the portrait`() {
+        assertEquals(
+            CallStage.PORTRAIT,
+            callStage(remoteParticipants = 1, remoteVideoPresent = false, localVideoPresent = false),
+        )
+    }
+
+    @Test
+    fun `the other person's picture outranks this device's own`() {
+        // Once both are sending there is one main surface, and it belongs to
+        // the person being spoken to.
+        assertEquals(
+            CallStage.REMOTE_VIDEO,
+            callStage(remoteParticipants = 1, remoteVideoPresent = true, localVideoPresent = true),
+        )
+    }
+
+    @Test
+    fun `the person who has not started their camera has no self-view`() {
+        // "their screen shows the incoming picture with their self-view absent"
+        val stage = callStage(
+            remoteParticipants = 1,
+            remoteVideoPresent = true,
+            localVideoPresent = false,
+        )
+        assertEquals(CallStage.REMOTE_VIDEO, stage)
+        assertFalse(showsSelfViewPip(stage, localVideoPresent = false))
+    }
+
+    @Test
+    fun `the self-view appears once both cameras are on`() {
+        val stage = callStage(
+            remoteParticipants = 1,
+            remoteVideoPresent = true,
+            localVideoPresent = true,
+        )
+        assertTrue(showsSelfViewPip(stage, localVideoPresent = true))
+    }
+
+    @Test
+    fun `the only picture on screen is never also a self-view`() {
+        // On LOCAL_VIDEO this device's own camera IS the main surface; a
+        // rectangle showing the same camera again would be it twice over.
+        assertFalse(
+            showsSelfViewPip(CallStage.LOCAL_VIDEO, localVideoPresent = true),
+        )
+        assertFalse(showsSelfViewPip(CallStage.PORTRAIT, localVideoPresent = true))
+        assertFalse(showsSelfViewPip(CallStage.GRID, localVideoPresent = true))
+    }
+
+    @Test
     fun `controls fade only on a connected video call`() {
+        assertTrue(controlsMayAutoHide(CallStage.LOCAL_VIDEO, connected = true))
+        assertFalse(controlsMayAutoHide(CallStage.LOCAL_VIDEO, connected = false))
         assertTrue(controlsMayAutoHide(CallStage.REMOTE_VIDEO, connected = true))
         assertFalse(
             "not before the call is up",

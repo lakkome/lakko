@@ -34,7 +34,41 @@ import org.webrtc.FrameEncryptor
 public class LakkoFrameEncryptor private constructor(
     @get:JvmName("getNativeFrameEncryptorPointer")
     private var nativePtr: Long,
+    localLeaf: Int,
+    streamIndex: Int,
 ) : FrameEncryptor {
+
+    /**
+     * The KID this encryptor stamps on every frame it seals:
+     * `(localLeaf << 8) | streamIndex` (ADR-0035).
+     *
+     * Carries no key material — it is the routing identifier that travels in
+     * the clear in every RFC 9605 frame header, which is precisely why it is
+     * safe to log and why the peer can derive the matching key from it without
+     * being told.
+     */
+    public val sealKid: Long = (localLeaf.toLong() shl 8) or (streamIndex.toLong() and 0xFF)
+
+    /** The leaf this encryptor was armed for. */
+    public val leaf: Int = localLeaf
+
+    /** The stream ordinal this encryptor was armed for (0 audio, 1 video). */
+    public val stream: Int = streamIndex
+
+    /**
+     * libwebrtc has fetched the native pointer, i.e. this encryptor reached the
+     * sender's media channel rather than merely having had a setter called on
+     * it.
+     *
+     * The distinction matters: `setFrameEncryptor` succeeding proves nothing
+     * about whether frames are actually being sealed, and a mid-call camera-on
+     * whose encryptor never entered the frame path looks — from both ends —
+     * exactly like one whose key is wrong. This is the strongest signal
+     * available without a native callback on the first seal.
+     */
+    @Volatile
+    public var pointerTaken: Boolean = false
+        private set
 
     /**
      * libwebrtc's standard Java surface — returns the raw
@@ -44,7 +78,10 @@ public class LakkoFrameEncryptor private constructor(
      * Returns 0 (libwebrtc's sentinel for "no encryptor") if
      * [release] has already been called.
      */
-    override fun getNativeFrameEncryptor(): Long = nativePtr
+    override fun getNativeFrameEncryptor(): Long {
+        if (nativePtr != 0L) pointerTaken = true
+        return nativePtr
+    }
 
     /**
      * Drop the native pointer. Idempotent; calling twice is a
@@ -124,7 +161,11 @@ public class LakkoFrameEncryptor private constructor(
             if (!SFrameAvailability.isCallingAvailable) return null
             if (seed.size != 32) return null
             val ptr = nativeCreate(seed, localLeaf, streamIndex)
-            return if (ptr == 0L) null else LakkoFrameEncryptor(ptr)
+            return if (ptr == 0L) {
+                null
+            } else {
+                LakkoFrameEncryptor(ptr, localLeaf, streamIndex)
+            }
         }
 
         @JvmStatic

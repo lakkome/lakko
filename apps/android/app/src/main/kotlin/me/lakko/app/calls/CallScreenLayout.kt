@@ -31,13 +31,32 @@ public enum class CallStage {
     /** One other person, sending video: their video fills the screen. */
     REMOTE_VIDEO,
 
+    /**
+     * This device has started its camera and the other person has not.
+     *
+     * `docs/ux/calls.md` section 4.1: pressing the camera button on a voice
+     * call "starts the camera, tells the other side, and the screen becomes the
+     * video layout for both", and the other person "is not forced into video".
+     * So the caller who pressed it has a video layout with only one picture in
+     * it — their own — and it takes the main surface rather than sitting in a
+     * corner over an empty portrait. When the other person presses their own
+     * button the stage becomes [REMOTE_VIDEO] and this picture moves into the
+     * self-view.
+     */
+    LOCAL_VIDEO,
+
     /** More than one other person: the tiled grid, unchanged (section 9). */
     GRID,
 }
 
 /**
  * The stage for a roster of [remoteParticipants] others, [remoteVideoPresent]
- * saying whether the sole other person is sending video.
+ * saying whether the sole other person is sending video and
+ * [localVideoPresent] whether this device is.
+ *
+ * The other person's picture outranks this device's own: once both cameras are
+ * on there is only one main surface and it belongs to the person being spoken
+ * to, with this device's picture in the self-view.
  *
  * [groupCall] is what KIND of call this is, not how many people are in it right
  * now, and it decides before anything else. A group call whose second
@@ -49,13 +68,31 @@ public enum class CallStage {
 public fun callStage(
     remoteParticipants: Int,
     remoteVideoPresent: Boolean,
+    localVideoPresent: Boolean = false,
     groupCall: Boolean = false,
 ): CallStage = when {
     groupCall -> CallStage.GRID
     remoteParticipants > 1 -> CallStage.GRID
     remoteVideoPresent -> CallStage.REMOTE_VIDEO
+    localVideoPresent -> CallStage.LOCAL_VIDEO
     else -> CallStage.PORTRAIT
 }
+
+/**
+ * Whether the small rounded self-view rectangle is drawn.
+ *
+ * Only when this device is sending AND somebody else's picture already owns the
+ * main surface. Two cases fall out of that, and both are section 4.1's words:
+ *
+ *  - The person who has not turned their camera on sees "the incoming picture
+ *    with their self-view absent" — they are sending nothing, so there is
+ *    nothing to put in the rectangle.
+ *  - The person who has turned it on while the other has not is on
+ *    [CallStage.LOCAL_VIDEO], where their picture IS the main surface; a
+ *    self-view as well would be the same camera twice on one screen.
+ */
+public fun showsSelfViewPip(stage: CallStage, localVideoPresent: Boolean): Boolean =
+    localVideoPresent && stage == CallStage.REMOTE_VIDEO
 
 /** How long the controls stay up before fading on a connected video call. */
 public const val CALL_CONTROLS_AUTO_HIDE_MS: Long = 5_000L
@@ -70,7 +107,9 @@ public const val CALL_CONTROLS_AUTO_HIDE_MS: Long = 5_000L
  *
  * A grid call is treated as a voice call here for the same reason: what is
  * underneath is a roster, not a picture of a person, and a group call is where
- * losing the mute button costs most.
+ * losing the mute button costs most. Both video stages fade, including the one
+ * where the only picture is this device's own — there is still something to
+ * look at, and a tap brings the controls back.
  */
 public fun controlsMayAutoHide(stage: CallStage, connected: Boolean): Boolean =
-    connected && stage == CallStage.REMOTE_VIDEO
+    connected && (stage == CallStage.REMOTE_VIDEO || stage == CallStage.LOCAL_VIDEO)

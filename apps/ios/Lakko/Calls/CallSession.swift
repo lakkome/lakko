@@ -139,6 +139,20 @@ public final class CallSession: ObservableObject {
     /// map keyed on the stream id the SFU stamps.
     @Published public private(set) var remoteVideoTrack: RTCVideoTrack?
 
+    /// `true` once the current ``remoteVideoTrack`` has actually rendered a
+    /// frame. A track handle arrives with the SDP, a picture does not — see
+    /// ``RemoteVideoFrameProbe``. The call screen keys its layout on THIS, so a
+    /// peer that announces video but sends nothing openable leaves the portrait
+    /// up rather than a dark rectangle with no controls on it.
+    @Published public private(set) var remoteVideoFlowing: Bool = false
+
+    /// The frame probe attached to the current remote video track, held so it
+    /// can be detached when the track is replaced or the call ends.
+    private var remoteVideoProbe: RemoteVideoFrameProbe?
+    private var probedRemoteVideoTrack: RTCVideoTrack?
+    /// The one-shot inbound-stats read armed when a remote video track attaches.
+    private var remoteVideoDiagnosisTask: Task<Void, Never>?
+
     /// G3-1-call-controls — observable local mic / camera
     /// enabled state, so the in-call control buttons reflect
     /// (and drive) the real WebRTC track `isEnabled` flags
@@ -463,6 +477,19 @@ public final class CallSession: ObservableObject {
     public func setCameraEnabled(_ on: Bool) {
         rtc?.setCameraEnabled(on)
         cameraEnabled = on
+        guard !on, let rtc else { return }
+        // `docs/ux/calls.md` section 4.1 — the call returns to the portrait on
+        // BOTH screens. Disabling the track is invisible to the peer (libwebrtc
+        // goes on transmitting black frames and fires nothing over there), so
+        // the transceiver stops offering video and one renegotiation carries
+        // that across. The sender itself stays, so its SFrame encryptor and
+        // frame counter survive the toggle — see `setVideoSendingEnabled`.
+        setVideoPublishState(.off)
+        guard rtc.setVideoSendingEnabled(false) else { return }
+        Task { @MainActor [weak self] in
+            guard let self, let rtc = self.rtc else { return }
+            await self.driveRenegotiationOffer(rtc: rtc, video: false)
+        }
     }
 
     /// `docs/ux/calls.md` section 4.1 — is there another camera to flip to?
@@ -514,11 +541,20 @@ public final class CallSession: ObservableObject {
     ///   `LocalCameraCapture.start` error on a camera-start failure.
     public func addLocalVideo() async throws {
         guard let rtc = rtc else { return }
-        // A live video sender already exists — just re-enable it.
+        // A live video sender already exists — just re-enable it. This is the
+        // path a camera toggled off and on again takes, and the reason the
+        // toggle does not remove the sender: re-enabling reuses the SAME
+        // encryptor, so the frame counter carries on from where it stopped
+        // rather than restarting at zero over a key that has already been used
+        // (ADR-0035). If the off-toggle had stopped the transceiver offering
+        // video, one renegotiation puts it back.
         if rtc.currentLocalVideoTrack() != nil {
             rtc.setCameraEnabled(true)
             cameraEnabled = true
             setVideoPublishState(.live)
+            if rtc.setVideoSendingEnabled(true) {
+                await driveRenegotiationOffer(rtc: rtc, video: true)
+            }
             return
         }
         if addingVideo { return } // capture in flight — do not double-acquire
@@ -877,7 +913,14 @@ public final class CallSession: ObservableObject {
     /// perfect-negotiation shape); the pending video m-line then
     /// lives in the `have-local-offer` signaling state until the
     /// answer drains it.
-    private func driveRenegotiationOffer(rtc: WebRTCPeerConnection) async {
+    /// - Parameter video: what the re-offer actually carries. It used to be
+    ///   hardcoded `true`, which was right while the only renegotiation was a
+    ///   camera turning on; a camera turning off now drives one too, and an
+    ///   offer claiming video while withdrawing it is the kind of lie
+    ///   `docs/ux/calls.md` section 1 rules out.
+    private func driveRenegotiationOffer(
+        rtc: WebRTCPeerConnection, video: Bool = true
+    ) async {
         guard negotiationReady, !makingOffer,
             rtc.signalingState == .stable else { return }
         makingOffer = true
@@ -888,7 +931,7 @@ public final class CallSession: ObservableObject {
                     callId: callId,
                     sdp: offerSdp,
                     createdAtMs: UInt64(Date().timeIntervalSince1970 * 1000),
-                    media: FfiCallMediaFlags(audio: dialAudio, video: true)
+                    media: FfiCallMediaFlags(audio: dialAudio, video: video)
                 )
             )
             onOutboundSignaling(bytes)
@@ -960,8 +1003,10 @@ public final class CallSession: ObservableObject {
         self.localVideoTrack = nil
         // G3-1-remote-video — drop the remote handle so the
         // gallery tile reverts to the avatar placeholder on
-        // both end paths.
+        // both end paths. Detaching the frame probe with it keeps
+        // `remoteVideoFlowing` from surviving into the next call.
         self.remoteVideoTrack = nil
+        self.watchRemoteVideoFrames(on: nil)
         // G3-1-conn-quality — clear the stale stats so a fresh
         // call doesn't briefly show the previous RTT / bitrate.
         self.rttMs = nil
@@ -1025,6 +1070,139 @@ public final class CallSession: ObservableObject {
 
     // MARK: - WebRTC delegate plumbing
 
+    /// Attach (or detach) the first-frame probe for the remote video track.
+    ///
+    /// Re-attaching on every track change matters: a peer that stops and
+    /// restarts its camera produces a NEW track, and a stale `true` would send
+    /// the screen to the video layout before the new track has drawn anything.
+    private func watchRemoteVideoFrames(on track: RTCVideoTrack?) {
+        if let previous = probedRemoteVideoTrack, let probe = remoteVideoProbe {
+            previous.remove(probe)
+        }
+        remoteVideoProbe = nil
+        probedRemoteVideoTrack = nil
+        remoteVideoFlowing = false
+        remoteVideoDiagnosisTask?.cancel()
+        remoteVideoDiagnosisTask = nil
+        guard let track else { return }
+        // The two log lines that separate the two ways a remote video can fail.
+        // "track" without "first frame" means the peer announced a camera and
+        // nothing openable arrived — the SDP landed, so the break is in the
+        // media or in SFrame, not in the signaling. Both together mean the
+        // picture is up. Plain text, no payload: a track id is not ours to log.
+        NSLog("CallSession: remote video track attached; waiting for the first frame")
+        scheduleRemoteVideoDiagnosis()
+        let probe = RemoteVideoFrameProbe { [weak self, weak track] in
+            // Only the track this probe was attached to may flip the flag: a
+            // late frame from a track that has since been replaced must not
+            // claim the new one is flowing.
+            guard let self, let track, self.probedRemoteVideoTrack === track else { return }
+            NSLog("CallSession: remote video first frame rendered")
+            self.remoteVideoFlowing = true
+        }
+        track.add(probe)
+        remoteVideoProbe = probe
+        probedRemoteVideoTrack = track
+    }
+
+    /// How long after a remote video track attaches to read the inbound
+    /// counters. Matches the cadence the Android client already logs at, so the
+    /// two sides of one call are directly comparable in a transcript.
+    private static let remoteVideoDiagnosisDelaySeconds = 4
+    /// How long after the FIRST packet to take the late reading — enough for a
+    /// keyframe and its assembly, short enough to stay in the same breath as the
+    /// sender's own log line.
+    private static let remoteVideoSettleSeconds = 4
+    /// The ticker's period.
+    private static let remoteVideoTickSeconds = 1
+    /// How long to keep looking, from the track attaching. Sized off a live run
+    /// where the sender's first packet came **nine seconds** after the track
+    /// attached, so a budget near that would expire before the interesting
+    /// moment; this leaves room for a considerably slower renegotiation.
+    private static let remoteVideoBudgetSeconds = 45
+
+    /// Read the inbound video counters twice and log both, labelled.
+    ///
+    /// ## Why not once
+    ///
+    /// The first version fired once, four seconds after the track attached — and
+    /// a track attaches when the SDP is applied, which on a live call was nine
+    /// seconds before the sender's first packet. It reported `NO_PACKETS` about
+    /// a moment when no packet could exist, and never looked again: true, and
+    /// worse than useless, because it invites a conclusion.
+    ///
+    /// So the early reading is kept (it is the one that says whether anything
+    /// arrived immediately) and a **late** one is added, anchored to an event on
+    /// the wire rather than a local clock: a short ticker watches for the first
+    /// packet, then reads again once the sender is known to be flowing. Frames
+    /// decoding ends it early; a budget guarantees a line either way, because a
+    /// probe that goes quiet reads exactly like one that never ran.
+    ///
+    /// ``RemoteVideoDiagnosis/step(stats:rendered:secondsSinceFirstPacket:secondsRemaining:settleSeconds:)``
+    /// is the whole rule; this method only supplies clocks and I/O.
+    private func scheduleRemoteVideoDiagnosis() {
+        remoteVideoDiagnosisTask?.cancel()
+        remoteVideoDiagnosisTask = Task { @MainActor [weak self] in
+            await self?.runRemoteVideoDiagnosis()
+        }
+    }
+
+    /// The probe body. Split out so the task closure stays a one-liner.
+    private func runRemoteVideoDiagnosis() async {
+        let early = Self.remoteVideoDiagnosisDelaySeconds
+        try? await Task.sleep(nanoseconds: UInt64(early) * 1_000_000_000)
+        guard let first = await sampleRemoteVideoIfLive() else { return }
+        emitRemoteVideoReading(first.stats, rendered: first.rendered,
+                               reading: .early(afterSeconds: early))
+
+        let startedAt = Date()
+        var firstPacketAt: Date?
+        while !Task.isCancelled {
+            try? await Task.sleep(
+                nanoseconds: UInt64(Self.remoteVideoTickSeconds) * 1_000_000_000)
+            guard let sample = await sampleRemoteVideoIfLive() else { return }
+            if firstPacketAt == nil, sample.stats.packetsReceived > 0 {
+                firstPacketAt = Date()
+            }
+            let elapsed = Int(Date().timeIntervalSince(startedAt))
+            let step = RemoteVideoDiagnosis.step(
+                stats: sample.stats,
+                rendered: sample.rendered,
+                secondsSinceFirstPacket: firstPacketAt.map {
+                    Int(Date().timeIntervalSince($0))
+                },
+                secondsRemaining: Self.remoteVideoBudgetSeconds - elapsed,
+                settleSeconds: Self.remoteVideoSettleSeconds)
+            guard case .report(let reading) = step else { continue }
+            // The budget case reports how long it actually waited, which the
+            // pure rule cannot know.
+            let labelled: RemoteVideoReading = {
+                if case .budgetExpired = reading {
+                    return .budgetExpired(afterSeconds: elapsed + early)
+                }
+                return reading
+            }()
+            emitRemoteVideoReading(sample.stats, rendered: sample.rendered,
+                                   reading: labelled)
+            return
+        }
+    }
+
+    /// One sample, or `nil` when the call or the track has gone away.
+    private func sampleRemoteVideoIfLive() async -> (stats: InboundVideoStats, rendered: Bool)? {
+        guard !Task.isCancelled, let rtc = self.rtc,
+            self.probedRemoteVideoTrack != nil
+        else { return nil }
+        return (await rtc.sampleInboundVideoStats(), self.remoteVideoFlowing)
+    }
+
+    private func emitRemoteVideoReading(
+        _ stats: InboundVideoStats, rendered: Bool, reading: RemoteVideoReading
+    ) {
+        let verdict = RemoteVideoDiagnosis.diagnose(stats, rendered: rendered)
+        NSLog("%@", verdict.logLine(stats, rendered: rendered, reading: reading))
+    }
+
     /// Wire the wrapper's typed callbacks back into the
     /// session. `self` is captured weakly to defend against
     /// the wrapper outliving the session in error-path
@@ -1047,6 +1225,7 @@ public final class CallSession: ObservableObject {
                 // path will key on it to map the track to a
                 // specific participant leaf.
                 self?.remoteVideoTrack = track
+                self?.watchRemoteVideoFrames(on: track)
             },
             onRemoteReceiver: { [weak self] receiver, _ in
                 // Arm the SFrame decryptor on EVERY incoming track
@@ -1061,7 +1240,16 @@ public final class CallSession: ObservableObject {
                 // refuses at attach) is a safe skip.
                 guard let self, let rtc = self.rtc,
                     let seed = self.callKeySeed else { return }
-                _ = rtc.armSFrameDecryptor(for: receiver, seed: seed)
+                let kind = receiver.track?.kind ?? "unknown"
+                let armed = rtc.armSFrameDecryptor(for: receiver, seed: seed)
+                // The result used to be discarded, which made a failed attach on
+                // a mid-call receiver completely silent — and a receiver with no
+                // decryptor drops every sealed frame, which looks from the
+                // outside exactly like "the peer is not sending". Whatever else
+                // is true, this is now on the record.
+                NSLog(
+                    "CallSession: SFrame decryptor arm: kind=%@ ok=%@",
+                    kind, armed ? "true" : "false")
             }
         ))
     }

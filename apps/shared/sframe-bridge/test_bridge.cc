@@ -739,6 +739,46 @@ void test_mid_call_rekey_overlap() {
 
 }  // namespace
 
+// An empty frame is nothing to decrypt, not a failed decryption.
+//
+// Audio silence transmission sends payload-free frames by design, so a healthy
+// call delivers them routinely. Running one through the opener yields
+// WIRE_PARSE — correctly, there is no header — and reporting that upward as
+// kFailedToDecrypt tells libwebrtc a decryption failed when none was attempted,
+// which counts against the stream and, on a live call, sent an investigation
+// after a keying bug that did not exist.
+void test_empty_frame_is_not_a_decrypt_failure() {
+  std::printf("test_empty_frame_is_not_a_decrypt_failure ... ");
+
+  auto* dec = lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
+                                                         kTestSeed.size(),
+                                                         "audio");
+  assert(dec != nullptr);
+  dec->AddRef();
+
+  // Zero-length in, zero-length out, and an OK status.
+  std::vector<uint8_t> out(16, 0xAA);
+  auto result = dec->Decrypt(cricket::MEDIA_TYPE_AUDIO, {}, {},
+                             rtc::ArrayView<const uint8_t>(),
+                             rtc::ArrayView<uint8_t>(out.data(), out.size()));
+  assert(result.status == webrtc::FrameDecryptorInterface::Status::kOk &&
+         "an empty frame must not read as a failed decryption");
+  assert(result.bytes_written == 0 && "an empty frame yields no plaintext");
+
+  // And a genuinely bad frame still fails, so the short-circuit has not made
+  // the decryptor permissive about frames that DO carry bytes.
+  const std::array<uint8_t, 4> garbage{0x01, 0x02, 0x03, 0x04};
+  auto bad = dec->Decrypt(cricket::MEDIA_TYPE_AUDIO, {}, {},
+                          rtc::ArrayView<const uint8_t>(garbage.data(),
+                                                        garbage.size()),
+                          rtc::ArrayView<uint8_t>(out.data(), out.size()));
+  assert(bad.status != webrtc::FrameDecryptorInterface::Status::kOk &&
+         "a non-empty unopenable frame must still fail");
+
+  dec->Release();
+  std::printf("ok\n");
+}
+
 int main() {
   test_round_trip_single_sender();
   test_additional_data_ignored_header_is_aad();
@@ -750,6 +790,7 @@ int main() {
   test_payload_size_extremes();
   test_cross_stack_golden_vector();
   test_mid_call_rekey_overlap();
+  test_empty_frame_is_not_a_decrypt_failure();
   std::printf("all sframe-bridge tests passed\n");
   return 0;
 }

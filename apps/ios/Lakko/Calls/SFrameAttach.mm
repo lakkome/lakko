@@ -137,9 +137,31 @@ using SetFrameDecryptorIMP = void (*)(id, SEL, void *);
 
 // MARK: - Public class
 
+namespace {
+
+// The bridge is shared with Android and vendors no libwebrtc logging header, so
+// it cannot pick a logger of its own; it emits through a host-installed sink.
+// This is iOS's (see `lakko::sframe::SetLogSink`). Plain ASCII, already
+// formatted by the bridge, and it may arrive on a libwebrtc worker thread —
+// `NSLog` is safe there.
+void LakkoBridgeLogSink(const char *line) {
+    if (line == nullptr) {
+        return;
+    }
+    NSLog(@"%s", line);
+}
+
+}  // namespace
+
 @implementation LakkoSFrameAttach
 
 + (BOOL)bootProbe {
+    // Installed from the probe because the probe is what every attach path
+    // already runs first, so the sink is in place before any decryptor exists
+    // and there is no second lifecycle to get wrong. Idempotent: the last
+    // writer wins and every writer writes the same pointer.
+    lakko::sframe::SetLogSink(&LakkoBridgeLogSink);
+
     const int cached = g_probe_result.load(std::memory_order_acquire);
     if (cached == 1) {
         return YES;
@@ -269,10 +291,19 @@ using SetFrameDecryptorIMP = void (*)(id, SEL, void *);
         return LakkoSFrameAttachStatusSelectorMissing;
     }
 
+    // Which track this decryptor serves, for the bridge's diagnostic lines.
+    // libwebrtc already knows it; without it a failure line cannot say which of
+    // a call's two decryptors produced it, which is exactly the ambiguity a
+    // live call ran into.
+    const char *label = "unknown";
+    if (receiver.track != nil && receiver.track.kind != nil) {
+        label = receiver.track.kind.UTF8String;
+    }
     lakko::sframe::LakkoFrameDecryptor *dec =
         lakko::sframe::LakkoFrameDecryptor::Create(
             static_cast<const uint8_t *>(seed.bytes),
-            static_cast<size_t>(seed.length));
+            static_cast<size_t>(seed.length),
+            label);
     if (dec == nullptr) {
         return LakkoSFrameAttachStatusBridgeCreateFailed;
     }

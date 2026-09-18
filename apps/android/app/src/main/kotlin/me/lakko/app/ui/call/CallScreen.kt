@@ -130,6 +130,7 @@ import me.lakko.app.calls.CameraVideoCapture
 import me.lakko.app.calls.callControlRow
 import me.lakko.app.calls.callStage
 import me.lakko.app.calls.controlsMayAutoHide
+import me.lakko.app.calls.showsSelfViewPip
 import me.lakko.app.ui.components.LakkoAvatar
 import me.lakko.app.ui.theme.avatarTintFor
 import me.lakko.app.ui.theme.LakkoDark
@@ -374,7 +375,19 @@ public fun CallScreen(
                             }
                         }
                     } else {
-                        session.setCameraEnabled(false)
+                        // docs/ux/calls.md section 4.1 — turning the camera off
+                        // has to reach the other screen too, or they keep the
+                        // last frame. `stopSendingVideo` parks the transceiver
+                        // at `recvOnly` and renegotiates; the sender and its
+                        // SFrame encryptor stay put, so the next camera-on is
+                        // the cheap re-enable branch.
+                        cameraScope.launch {
+                            try {
+                                session.stopSendingVideo()
+                            } catch (cause: Throwable) {
+                                android.util.Log.w("CallScreen", "stopSendingVideo failed", cause)
+                            }
+                        }
                     }
                 } else {
                     state.setCamera(on)
@@ -425,9 +438,15 @@ private fun InCallView(
     val connected = phase is CallUiState.CallPhase.Connected
     // docs/ux/calls.md section 4 — a portrait, a full-screen remote picture, or
     // the group grid. The tiled column used to be all three.
+    // `docs/ux/calls.md` section 4.1 — the layout follows the cameras, not the
+    // kind of call that was placed: starting the camera mid-call "turns the
+    // call into a video one", and turning it off "returns the call to the
+    // portrait".
+    val localVideoPresent = local?.camOn == true && localVideoTrack != null
     val stage = callStage(
         remoteParticipants = remotes.size,
         remoteVideoPresent = soleRemote?.camOn == true && remoteVideoTrack != null,
+        localVideoPresent = localVideoPresent,
         groupCall = groupCall,
     )
     val group = stage == CallStage.GRID
@@ -459,9 +478,6 @@ private fun InCallView(
 
     val controls = callControlRow(
         group = group,
-        // A 1x1 call counts as a video call while either side is sending, so a
-        // call that gained video mid-call keeps a way to stop sending it.
-        videoCall = local?.camOn == true || stage == CallStage.REMOTE_VIDEO,
         micOn = local?.micOn != false,
         cameraOn = local?.camOn == true,
         speakerOn = speakerOn,
@@ -487,17 +503,21 @@ private fun InCallView(
                 e2ee = e2ee,
                 onEncryptionChip = { encryptionSheetOpen = true },
             )
-            CallStage.REMOTE_VIDEO -> {
+            CallStage.REMOTE_VIDEO, CallStage.LOCAL_VIDEO -> {
                 val egl = remember { WebRtcPeerConnection.sharedEglContext() }
-                val track = remoteVideoTrack
+                // On LOCAL_VIDEO the only picture is this device's own, and it
+                // takes the main surface rather than hovering in a corner over
+                // an empty portrait.
+                val onLocal = stage == CallStage.LOCAL_VIDEO
+                val track = if (onLocal) localVideoTrack else remoteVideoTrack
                 if (track != null && egl != null) {
                     LocalVideoPreviewView(
                         track = track,
                         eglContext = egl,
                         modifier = Modifier.fillMaxSize(),
                         // Never mirror the other person: the viewer wants their
-                        // true orientation.
-                        mirrored = false,
+                        // true orientation. Own video is mirrored, like a mirror.
+                        mirrored = onLocal && settings.mirrorLocal && frontFacing,
                         scalingType = RendererCommon.ScalingType.SCALE_ASPECT_FILL,
                     )
                 }
@@ -548,10 +568,12 @@ private fun InCallView(
         }
 
         // Section 4 — "the self-view is a small rounded rectangle in a corner,
-        // draggable, about a quarter of the width". Drawn whenever this device
-        // is sending, including on the portrait stage: a call where only one
-        // side has a camera on still has to show that side their own picture.
-        if (stage != CallStage.GRID && local?.camOn == true) {
+        // draggable, about a quarter of the width", and section 4.1's rule for
+        // who gets one: only when somebody else's picture already owns the main
+        // surface. [showsSelfViewPip] carries both halves.
+        if (showsSelfViewPip(stage, localVideoPresent) ||
+            (local?.camOn == true && videoPublishState == CallUiState.VideoPublishState.Starting)
+        ) {
             SelfViewPip(
                 track = localVideoTrack,
                 mirrored = settings.mirrorLocal && frontFacing,
@@ -559,6 +581,19 @@ private fun InCallView(
                 onSwitchCamera = onSwitchCamera.takeIf { hasMultipleCameras },
                 parentSize = rootSize,
                 modifier = Modifier.align(Alignment.TopEnd),
+            )
+        }
+
+        // Section 4.1 — flip camera "lives on the self-view itself". When this
+        // device's own picture IS the whole screen there is no rectangle to put
+        // it in, so it sits in the same corner of the screen instead.
+        if (stage == CallStage.LOCAL_VIDEO && hasMultipleCameras && onSwitchCamera != null) {
+            SwitchCameraButton(
+                onClick = onSwitchCamera,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .windowInsetsPadding(WindowInsets.safeDrawing)
+                    .padding(top = 96.dp, end = 20.dp),
             )
         }
 
@@ -795,25 +830,38 @@ private fun SelfViewPip(
             }
         }
         if (onSwitchCamera != null) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(6.dp)
-                    .size(32.dp)
-                    .clip(CircleShape)
-                    .background(LakkoDark.background.copy(alpha = 0.6f))
-                    .clickable(onClick = onSwitchCamera)
-                    .semantics { contentDescription = "Switch camera"; role = Role.Button },
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.Filled.FlipCameraAndroid,
-                    contentDescription = null,
-                    tint = LakkoDark.text,
-                    modifier = Modifier.size(18.dp),
-                )
-            }
+            SwitchCameraButton(
+                onClick = onSwitchCamera,
+                modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp),
+            )
         }
+    }
+}
+
+/**
+ * Flip to the other camera — `docs/ux/calls.md` section 4.1, which keeps it out
+ * of the control row and puts it "on the self-view itself ... where the thing
+ * it changes is visible". Before the redesign this was a dropdown entry with an
+ * empty body, so the one control a person reaches for mid-sentence was two taps
+ * away and did nothing.
+ */
+@Composable
+private fun SwitchCameraButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .size(36.dp)
+            .clip(CircleShape)
+            .background(LakkoDark.background.copy(alpha = 0.6f))
+            .clickable(onClick = onClick)
+            .semantics { contentDescription = "Switch camera"; role = Role.Button },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            Icons.Filled.FlipCameraAndroid,
+            contentDescription = null,
+            tint = LakkoDark.text,
+            modifier = Modifier.size(18.dp),
+        )
     }
 }
 

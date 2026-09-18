@@ -18,22 +18,28 @@
  * ## The three surfaces, and why the split is not "audio vs video"
  *
  * §4 describes two layouts for a 1x1 call: a **portrait** (large avatar, name,
- * one quiet line) and a **video fill** (the other person edge to edge, the
- * self-view in a corner). Which one to draw is a question about *what there is
- * to look at*, not about what the call was placed as: a video call whose callee
- * has their camera off has nothing to fill the screen with, and drawing a black
- * rectangle there is the "empty camera box" the redesign exists to remove. So
- * {@link callSurfaceKind} asks whether a remote picture exists, and the portrait
- * is the answer whenever it does not.
+ * one quiet line) and a **video fill** (a picture edge to edge, the self-view in
+ * a corner). Which one to draw is a question about *what there is to look at*,
+ * not about what the call was placed as — §4.1: "Pressing it starts the camera,
+ * tells the other side, and the screen becomes the video layout for both ...
+ * Turning the camera off again returns the call to the portrait." A call is
+ * neither a voice call nor a video call for its whole life; it is whichever one
+ * it is at this moment.
+ *
+ * So the surface follows **any** camera that is on, and {@link callFillSource}
+ * then says whose picture fills it: the other person's if they are sending one,
+ * otherwise this device's own. The pair is what keeps §4's "never an empty box"
+ * true in both directions — a person who turns their camera on while the other
+ * has not is shown the thing they just started, and the person receiving it is
+ * shown the incoming picture with no self-view, because their own camera is off.
+ *
+ * Nobody answered yet is the exception: while a video call is still ringing the
+ * caller keeps the portrait of the person they are calling, with their own
+ * preview in the corner. Filling that screen with the caller's own face would
+ * take away the only thing on it that says who is being called.
  *
  * A group call is the third surface and keeps its roster grid — §9 puts a group
  * redesign out of scope, and the roster is what works today.
- *
- * **This is deliberately NOT the same question as which buttons the row
- * carries.** That one *is* about the kind of call (§4.1's table: a voice call
- * carries no camera button), and it is answered by the call's media kind in
- * `calls/call-controls.ts`. Conflating the two would make the camera button
- * blink out of the row the moment the other person covered their lens.
  */
 
 /** Which layout the call screen draws. */
@@ -57,20 +63,48 @@ export interface CallSurfaceInput {
   /** Whether the sole remote is sending a picture. Ignored when
    *  `remoteCount !== 1`. */
   readonly remoteCameraOn: boolean;
+  /** Whether this device is sending one. */
+  readonly localCameraOn: boolean;
 }
 
 /**
  * The layout for this call, right now.
  *
- * Two or more remotes is a group call and keeps the roster grid. One remote
- * with a picture fills the screen. Everything else — nobody there yet, or a
- * remote with their camera off — is the portrait, because a portrait of the
- * person you are calling is never an empty box.
+ * Two or more remotes is a group call and keeps the roster grid. One remote and
+ * a camera on at either end fills the screen (§4.1: the layout changes "for
+ * both", and it changes back when the camera stops). Everything else — nobody
+ * there yet, or two cameras off — is the portrait, because a portrait of the
+ * person you are talking to is never an empty box.
  */
 export function callSurfaceKind(input: CallSurfaceInput): CallSurfaceKind {
   if (input.remoteCount >= 2) return "group";
-  if (input.remoteCount === 1 && input.remoteCameraOn) return "video";
+  if (input.remoteCount === 1 && (input.remoteCameraOn || input.localCameraOn)) return "video";
   return "voice";
+}
+
+/** Whose picture fills the video surface. */
+export type CallFillSource = "remote" | "local" | "none";
+
+/**
+ * What the video surface is showing.
+ *
+ * The other person's picture whenever there is one — that is the call. Only
+ * when there is not, and this device is the one sending, does the screen fall
+ * back to its own camera: §4.1 says a person who turns their camera on gets the
+ * video layout even though the other side has not, and the only picture in
+ * existence at that moment is theirs.
+ *
+ * `none` on every non-video surface, so a caller cannot read this as "there is
+ * something to draw" when there is not.
+ */
+export function callFillSource(
+  surface: CallSurfaceKind,
+  remoteCameraOn: boolean,
+  localCameraOn: boolean,
+): CallFillSource {
+  if (surface !== "video") return "none";
+  if (remoteCameraOn) return "remote";
+  return localCameraOn ? "local" : "none";
 }
 
 /** What {@link callStatusDetail} needs to know. */
@@ -202,12 +236,23 @@ export function controlsHidden(input: ControlsVisibilityInput): boolean {
 /**
  * Whether the self-view rectangle is drawn.
  *
- * It follows the local camera and nothing else: on the video fill it is the
- * corner rectangle §4 describes, and on the portrait it is what a person who
- * has turned their own camera on expects to see — WhatsApp draws exactly that
- * when the other side has no picture. There is no self-view on the group
- * surface, where the local participant already has a roster tile.
+ * It follows the local camera, with two exclusions. There is none on the group
+ * surface, where the local participant already has a roster tile. And there is
+ * none when this device's own camera is already the thing filling the screen —
+ * a corner copy of the picture behind it is not a second view, it is the same
+ * view twice.
+ *
+ * §4.1's other half falls out of the same rule rather than needing its own: the
+ * person receiving a picture they are not returning has their camera off, so
+ * "their screen shows the incoming picture with their self-view absent" is what
+ * `localCameraOn === false` already means.
  */
-export function selfViewVisible(surface: CallSurfaceKind, localCameraOn: boolean): boolean {
-  return localCameraOn && surface !== "group";
+export function selfViewVisible(
+  surface: CallSurfaceKind,
+  localCameraOn: boolean,
+  fill: CallFillSource,
+): boolean {
+  if (!localCameraOn) return false;
+  if (surface === "group") return false;
+  return fill !== "local";
 }

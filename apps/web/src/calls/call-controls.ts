@@ -19,16 +19,19 @@
  *    **off**, so a muted microphone read as a live one. §4.1.1: off is the loud
  *    state — solid white with a dark slashed icon — and on is the quiet outline.
  *
- * ## Why the row follows the call's KIND and not what is on screen
+ * ## The row is the same for both kinds of call, and that is the point
  *
- * §4.1's table is indexed by call kind — a voice call carries `Speaker · Mute ·
- * End`, a video call adds `Camera` — and that is deliberately not the same
- * question as `callSurfaceKind` in `calls/call-screen-model.ts`, which asks what
- * there is to *look at*. If the row followed the surface, stopping your own
- * camera on a video call whose callee also has theirs off would delete the
- * camera button from under your thumb and leave no way to start it again. So
- * the row reads {@link CallControlsInput.mediaKind}, which a call is placed
- * with and which does not move.
+ * §4.1's table gives a voice call and a video call the same four controls, and
+ * says why: "People start a call with their voice and decide to show something a
+ * minute later; every messenger allows that, and taking it away to keep the row
+ * short would be a feature lost to tidiness."
+ *
+ * So the camera button does not depend on how the call was placed, and it must
+ * not depend on `callSurfaceKind` either — that asks what there is to *look at*,
+ * and it flips to the portrait the moment both cameras are off. A camera button
+ * that vanished exactly when both cameras were off would be missing precisely
+ * when it is the only way back. The row is therefore constant for a 1x1 call,
+ * and the only thing that varies is the group overflow.
  *
  * ## Speaker is omitted, never dead
  *
@@ -84,9 +87,6 @@ export interface CallControlSpec {
 
 /** What {@link callControls} needs to know. */
 export interface CallControlsInput {
-  /** What the call was placed or answered as. Decides whether the row carries
-   *  a camera button; see the module note above. */
-  readonly mediaKind: "voice" | "video";
   /** The layout, which only matters for the group overflow entry. */
   readonly surface: CallSurfaceKind;
   readonly phase: CallPhaseKind;
@@ -139,17 +139,18 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
     disabled: inactive,
   });
 
-  if (input.mediaKind === "video" || input.surface === "group") {
-    out.push({
-      id: "camera",
-      label: "Camera",
-      accessibleName: input.cameraOn ? "Stop camera" : "Start camera",
-      icon: input.cameraOn ? "video" : "videoOff",
-      tone: input.cameraOn ? "outline" : "solid",
-      pressed: !input.cameraOn,
-      disabled: inactive || input.cameraBusy,
-    });
-  }
+  out.push({
+    id: "camera",
+    label: "Camera",
+    // §4.1: pressing this on a voice call starts the camera and turns the call
+    // into a video one. So the name is what the press does, not what the call
+    // was placed as.
+    accessibleName: input.cameraOn ? "Stop camera" : "Start camera",
+    icon: input.cameraOn ? "video" : "videoOff",
+    tone: input.cameraOn ? "outline" : "solid",
+    pressed: !input.cameraOn,
+    disabled: inactive || input.cameraBusy,
+  });
 
   if (input.surface === "group") {
     out.push({

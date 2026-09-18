@@ -86,6 +86,7 @@ import {
 } from "../calls/call-controls";
 import {
   ENDED_DISMISS_MS,
+  callFillSource,
   callStatusDetail,
   callSurfaceKind,
   controlsHidden,
@@ -1018,7 +1019,6 @@ function canSelectAudioOutput(): boolean {
 // ============================================================================
 
 function seedMockCall(): () => void {
-  callActions.setMediaKind("video");
   callActions.setE2ee({ active: true, shortFingerprint: "3F7A B2C1 9E0D 4415" });
   callActions.setConnectionDetail({
     rttMs: 45,
@@ -1174,12 +1174,21 @@ const Call: Component<{
   const remotes = createMemo(() => callState.participants().filter((p) => !p.isLocal));
   const phaseKind = (): CallPhaseKind => callState.phase().kind;
 
+  const remoteCameraOn = (): boolean => remotes()[0]?.camOn === true;
+  const localCameraOn = (): boolean => local()?.camOn === true;
+
   const surface = createMemo<CallSurfaceKind>(() =>
     callSurfaceKind({
       remoteCount: remotes().length,
-      remoteCameraOn: remotes()[0]?.camOn === true,
+      remoteCameraOn: remoteCameraOn(),
+      localCameraOn: localCameraOn(),
     }),
   );
+
+  /** Whose picture the video surface is showing. §4.1: a person who turns their
+   *  camera on gets the video layout even when the other side has not, and the
+   *  only picture that exists then is their own. */
+  const fill = createMemo(() => callFillSource(surface(), remoteCameraOn(), localCameraOn()));
 
   /** The other person's name: what the host resolved, else the sole remote's,
    *  else the honest placeholder. A group call has no single name, so the
@@ -1229,7 +1238,6 @@ const Call: Component<{
 
   const controls = createMemo(() =>
     callControls({
-      mediaKind: callState.mediaKind(),
       surface: surface(),
       phase: phaseKind(),
       micOn: local()?.micOn === true,
@@ -1314,9 +1322,11 @@ const Call: Component<{
         <CallPortrait name={peerLabel()} toneId={toneId()} />
       </Show>
 
-      <Show when={surface() === "video"}>
-        {/* The remote fills the surface. `object-fit: cover` in the stylesheet,
-            so a portrait phone camera does not letterbox into black bars. */}
+      {/* The picture, edge to edge. `object-fit: cover` in the stylesheet, so a
+          portrait phone camera crops rather than letterboxing into the black
+          bars that read as an empty box. Own camera mirrored, the other
+          person's never. */}
+      <Show when={fill() === "remote"}>
         <Show when={props.remoteStreamFor?.(remotes()[0]?.id ?? "")}>
           {(stream) => (
             <video
@@ -1325,6 +1335,22 @@ const Call: Component<{
               playsinline
               muted
               aria-label={`${peerLabel()}'s camera`}
+              ref={(el) => {
+                el.srcObject = stream();
+              }}
+            />
+          )}
+        </Show>
+      </Show>
+      <Show when={fill() === "local"}>
+        <Show when={props.localStream?.()}>
+          {(stream) => (
+            <video
+              class="lk-call-fill mirrored"
+              autoplay
+              playsinline
+              muted
+              aria-label="Your camera"
               ref={(el) => {
                 el.srcObject = stream();
               }}
@@ -1349,7 +1375,7 @@ const Call: Component<{
         </main>
       </Show>
 
-      <Show when={selfViewVisible(surface(), local()?.camOn === true)}>
+      <Show when={selfViewVisible(surface(), localCameraOn(), fill())}>
         <SelfView
           stream={props.localStream?.()}
           starting={callState.videoPublishState() === "starting"}

@@ -353,9 +353,6 @@ export class MultiJoinerCall {
   }
 
   private async start(): Promise<void> {
-    // What the control row carries follows the call's kind, not what is on
-    // screen (docs/ux/calls.md section 4.1's table; see `call-controls.ts`).
-    callActions.setMediaKind(this.opts.media.video ? "video" : "voice");
     try {
       await this.session.connect();
     } catch (err) {

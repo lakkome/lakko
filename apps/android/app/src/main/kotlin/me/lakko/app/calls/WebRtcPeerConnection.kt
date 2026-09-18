@@ -20,6 +20,7 @@ import org.webrtc.MediaStream
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
 import org.webrtc.RtpReceiver
+import org.webrtc.RtpTransceiver
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
 import org.webrtc.VideoSource
@@ -149,6 +150,28 @@ public class WebRtcPeerConnection(
     /** Local video track. Lazily added by [addLocalVideoTrack]. */
     private var localVideoTrack: VideoTrack? = null
 
+    /** `RtpReceiver.id()` of the peer's video receiver, while it has one. */
+    private var remoteVideoReceiverId: String? = null
+
+    /**
+     * An SFrame encryptor is attached to the local video sender.
+     *
+     * Tracked because it cannot be read back: `RtpSender` has a
+     * `setFrameEncryptor` and no getter, so the only way to answer "are these
+     * frames sealed?" — the quietest of the three ways a mid-call camera-on
+     * fails, see [MidCallVideoDiagnosis] — is to remember having armed it.
+     */
+    private var videoSenderSealed: Boolean = false
+
+    /**
+     * The encryptor armed on the video sender, held for diagnosis only — the
+     * strong reference that keeps it alive is [attachedEncryptors].
+     *
+     * It answers the question `videoSenderSealed` cannot: which KID these
+     * frames carry, and whether libwebrtc ever took the pointer.
+     */
+    private var videoSenderEncryptor: me.lakko.sframe.LakkoFrameEncryptor? = null
+
     /** G3-sframe-native N-5 — the `RtpSender` returned by
      *  `peer.addTrack(audioTrack, ...)`. Captured so SFrame
      *  attachment via [armSFrameEncryptors] can call
@@ -213,7 +236,30 @@ public class WebRtcPeerConnection(
             // the incoming audio track plays out via libwebrtc's audio
             // device automatically and needs no UI handle.
             val track = r.track() as? VideoTrack ?: return
+            // Remembered so `onRemoveTrack` can tell the peer's video receiver
+            // from its audio one: by the time that callback runs, the track is
+            // already detached and cannot be inspected.
+            remoteVideoReceiverId = runCatching { r.id() }.getOrNull()
             delegate?.onRemoteVideoTrack(track, streamId)
+        }
+
+        /**
+         * The peer stopped sending on a transceiver.
+         *
+         * `docs/ux/calls.md` section 4.1 — "Turning the camera off again
+         * returns the call to the portrait", on BOTH screens. The peer's camera
+         * button flips its video transceiver to `recvOnly` and renegotiates;
+         * libwebrtc answers that here, and clearing the handle is what lets the
+         * screen fall back from the video layout to the voice portrait. Before
+         * this, a camera turned off stopped the frames and nothing else, so the
+         * viewer was left looking at the last frame that happened to arrive.
+         */
+        override fun onRemoveTrack(receiver: RtpReceiver?) {
+            val r = receiver ?: return
+            val id = runCatching { r.id() }.getOrNull()
+            if (id == null || id != remoteVideoReceiverId) return
+            remoteVideoReceiverId = null
+            delegate?.onRemoteVideoTrack(null, null)
         }
         override fun onConnectionChange(state: PeerConnection.PeerConnectionState?) {
             val s = state ?: return
@@ -333,6 +379,53 @@ public class WebRtcPeerConnection(
         localVideoTrack?.setEnabled(on)
     }
 
+    /**
+     * Start or stop OFFERING this device's video, by moving the video
+     * transceiver between `sendRecv` and `recvOnly` — `docs/ux/calls.md`
+     * section 4.1's "tells the other side".
+     *
+     * ## Why the direction rather than the track
+     *
+     * Disabling the track stops the frames locally and tells the peer nothing:
+     * their receiver keeps the track, so their screen keeps the last frame and
+     * never returns to the portrait. Removing the track would tell them, and is
+     * the wrong tool: it drops the sender, and with it the [FrameEncryptor]
+     * armed on it, so the next camera-on would arm a FRESH encryptor for the
+     * same `(leaf, stream)` pair with its counter back at zero — a second use
+     * of a `(key, nonce)` already used, which is the exact reuse ADR-0035
+     * exists to prevent.
+     *
+     * A direction change keeps the sender, the track and the encryptor exactly
+     * where they are; only the SDP direction moves, and the peer's libwebrtc
+     * fires its remove-track callback off the renegotiated answer.
+     *
+     * @return `true` when the direction was actually changed, so the caller
+     *   knows a renegotiation is worth driving. `false` when there is no video
+     *   transceiver yet or the platform refused — the caller then falls back to
+     *   the plain disable, which costs the peer a frozen frame rather than the
+     *   call.
+     */
+    public fun setLocalVideoSending(sending: Boolean): Boolean {
+        val pc = peer ?: return false
+        val sender = localVideoSender ?: return false
+        return runCatching {
+            val senderId = sender.id()
+            val transceiver = pc.transceivers.firstOrNull { tr ->
+                !tr.isStopped && runCatching { tr.sender.id() }.getOrNull() == senderId
+            } ?: return false
+            val wanted = if (sending) {
+                RtpTransceiver.RtpTransceiverDirection.SEND_RECV
+            } else {
+                RtpTransceiver.RtpTransceiverDirection.RECV_ONLY
+            }
+            if (transceiver.direction == wanted) return false
+            transceiver.setDirection(wanted)
+        }.getOrElse { cause ->
+            Log.w(TAG, "could not change the video transceiver direction", cause)
+            false
+        }
+    }
+
     /** G3-2-conn-quality — one-shot connection-stats sample read
      *  out of WebRTC's `RTCStatsReport`. Surfaces the active
      *  (nominated, succeeded) ICE candidate-pair's round-trip
@@ -445,6 +538,8 @@ public class WebRtcPeerConnection(
      * only runs on the arm-FAILED path, where none was attached.
      */
     public fun removeLocalVideoTrack() {
+        videoSenderSealed = false
+        videoSenderEncryptor = null
         val peer = peer
         val sender = localVideoSender
         if (peer != null && sender != null) {
@@ -490,8 +585,8 @@ public class WebRtcPeerConnection(
         // (key, nonce) across the two streams. A future second video / screen-
         // share would take stream index 2.
         for ((sender, streamIndex) in listOf(
-            localAudioSender to 0,
-            localVideoSender to 1,
+            localAudioSender to AUDIO_STREAM_INDEX,
+            localVideoSender to VIDEO_STREAM_INDEX,
         )) {
             sender ?: continue
             val enc = me.lakko.sframe.LakkoFrameEncryptor.create(seed, localLeaf, streamIndex)
@@ -501,6 +596,15 @@ public class WebRtcPeerConnection(
             }
             sender.setFrameEncryptor(enc)
             attachedEncryptors += enc
+            if (streamIndex == VIDEO_STREAM_INDEX) {
+                videoSenderSealed = true
+                videoSenderEncryptor = enc
+            }
+            Log.i(
+                TAG,
+                "sframe arm (connect): leaf=$localLeaf stream=$streamIndex " +
+                    "kid=0x${enc.sealKid.toString(16)}",
+            )
         }
         return allOk
     }
@@ -532,14 +636,156 @@ public class WebRtcPeerConnection(
         val sender = localVideoSender ?: return false
         // This arm targets the video sender only, so it seals on stream
         // index 1 — the (single, v1) video stream's key space (ADR-0035).
+        // The SAME stream index the connect-time path seals the video sender
+        // with. Two literals for one number is how a mid-call sender ends up
+        // sealed into a key space the peer is not reading.
         val enc = me.lakko.sframe.LakkoFrameEncryptor.create(
             seed,
             localLeaf,
-            1,
+            VIDEO_STREAM_INDEX,
         ) ?: return false
         sender.setFrameEncryptor(enc)
         attachedEncryptors += enc
+        videoSenderSealed = true
+        videoSenderEncryptor = enc
+        // The line to compare, field by field, with the `sframe arm (connect)`
+        // line a call that starts as video prints for the same stream.
+        Log.i(
+            TAG,
+            "sframe arm (mid-call): leaf=$localLeaf stream=$VIDEO_STREAM_INDEX " +
+                "kid=0x${enc.sealKid.toString(16)}",
+        )
         return true
+    }
+
+    /**
+     * Make the video encoder emit a key frame — the frame a receiver that
+     * joined a stream already in progress needs before it can decode anything.
+     *
+     * ## Why a mid-call camera-on needs this and a video call does not
+     *
+     * A VP8 encoder emits an IDR as its very first frame and then, on
+     * libwebrtc's realtime settings, emits no further key frames unless asked.
+     * On a call DIALLED with video both ends finish negotiating before any
+     * media flows, so that first IDR lands in a receiver that exists — which is
+     * exactly why that path has never shown this.
+     *
+     * On a mid-call camera-on the sender sets its local description and starts
+     * encoding as soon as the offer is out, while the peer's video receiver
+     * does not exist until it has seen the offer and answered it. The one IDR
+     * is spent on nobody, every frame after it is a delta frame, and the peer
+     * discards all of them: packets keep arriving while no frame is ever
+     * assembled, which is the `packetsReceived` climbing with `framesReceived`
+     * stuck at zero that this was written against.
+     *
+     * ## The mechanism
+     *
+     * libwebrtc's Java surface has no `requestKeyFrame`, so the lever is
+     * `setParameters`: flipping the encoding's `active` flag off and back on
+     * makes libwebrtc reconfigure the encoder, and a reconfigured encoder keys
+     * its next frame. The gap between the two calls is what stops them being
+     * coalesced into no change at all.
+     *
+     * Costs the stream a few frames, which is free here: the frames it
+     * interrupts are ones the peer is throwing away.
+     */
+    public suspend fun forceVideoKeyframe(): Boolean {
+        val sender = localVideoSender ?: return false
+        val stopped = runCatching {
+            val params = sender.parameters ?: return false
+            val encoding = params.encodings.firstOrNull() ?: return false
+            encoding.active = false
+            sender.setParameters(params)
+        }.getOrElse { cause ->
+            Log.w(TAG, "keyframe: could not deactivate the video encoding", cause)
+            false
+        }
+        if (!stopped) return false
+        kotlinx.coroutines.delay(KEYFRAME_RESTART_GAP_MS)
+        return runCatching {
+            val params = sender.parameters ?: return false
+            val encoding = params.encodings.firstOrNull() ?: return false
+            encoding.active = true
+            sender.setParameters(params)
+        }.getOrElse { cause ->
+            // Left inactive, which would be worse than the frozen picture this
+            // is trying to fix, so say so loudly.
+            Log.w(TAG, "keyframe: could not reactivate the video encoding", cause)
+            false
+        }
+    }
+
+    /**
+     * What the mid-call camera-on diagnosis needs from this device — see
+     * [MidCallVideoDiagnosis]. Reading it is deliberately kept here, where the
+     * libwebrtc types live, and the conclusion is drawn by the pure
+     * [midCallVideoVerdict].
+     */
+    public suspend fun sampleLocalVideoSendFacts(): MidCallVideoFacts {
+        val p = peer
+        val sender = localVideoSender
+        val enc = videoSenderEncryptor
+        if (p == null || sender == null) {
+            return MidCallVideoFacts(
+                framesEncoded = null,
+                bytesSent = null,
+                keyFramesEncoded = null,
+                pliCount = null,
+                firCount = null,
+                direction = null,
+                currentDirection = null,
+                sframeArmed = videoSenderSealed,
+                sealKid = enc?.sealKid,
+                sealLeaf = enc?.leaf,
+                sealStream = enc?.stream,
+                encryptorInFramePath = enc?.pointerTaken == true,
+                codec = null,
+            )
+        }
+        val (direction, currentDirection) = runCatching {
+            val senderId = sender.id()
+            val transceiver = p.transceivers.firstOrNull { tr ->
+                !tr.isStopped && runCatching { tr.sender.id() }.getOrNull() == senderId
+            }
+            transceiver?.direction?.name to transceiver?.currentDirection?.name
+        }.getOrElse { null to null }
+
+        val report = suspendCancellableCoroutine<org.webrtc.RTCStatsReport?> { cont ->
+            try {
+                p.getStats { r -> if (cont.isActive) cont.resume(r) }
+            } catch (cause: Throwable) {
+                if (cont.isActive) cont.resume(null)
+            }
+        }
+        val stats = report?.statsMap
+        val outbound = stats?.values?.firstOrNull {
+            it.type == "outbound-rtp" && (it.members["kind"] as? String) == "video"
+        }
+        // What was actually negotiated for this sender, so the two paths can be
+        // compared on a measurement rather than on an argument about which
+        // MediaConstraints each passes.
+        val codec = (outbound?.members?.get("codecId") as? String)
+            ?.let { stats[it]?.members?.get("mimeType") as? String }
+        return MidCallVideoFacts(
+            framesEncoded = (outbound?.members?.get("framesEncoded") as? Number)?.toLong(),
+            bytesSent = (outbound?.members?.get("bytesSent") as? Number)?.toLong(),
+            keyFramesEncoded =
+                (outbound?.members?.get("keyFramesEncoded") as? Number)?.toLong(),
+            // The peer asking for a key frame. libwebrtc answers these itself;
+            // the count is here so the next call can say whether the peer asked
+            // at all, which separates "we never sent one" from "we sent one and
+            // it did not help".
+            pliCount = (outbound?.members?.get("pliCount") as? Number)?.toLong(),
+            firCount = (outbound?.members?.get("firCount") as? Number)?.toLong(),
+            direction = direction,
+            currentDirection = currentDirection,
+            sframeArmed = videoSenderSealed,
+            sealKid = enc?.sealKid,
+            sealLeaf = enc?.leaf,
+            sealStream = enc?.stream,
+            encryptorInFramePath = enc?.pointerTaken == true,
+            codec = codec,
+        )
     }
 
     /**
@@ -815,6 +1061,25 @@ public class WebRtcPeerConnection(
         private const val LOCAL_STREAM_ID = "lakko-local-stream"
         private const val AUDIO_TRACK_ID = "lakko-audio0"
         private const val VIDEO_TRACK_ID = "lakko-video0"
+
+        /**
+         * ADR-0035 per-`(leaf, stream)` key spaces. The seal KID is
+         * `(localLeaf << 8) | streamIndex`, so audio and video never reuse one
+         * `(key, nonce)`. Named once because the connect-time arm and the
+         * mid-call arm must agree: a mid-call video sender sealed on a
+         * different index than the one the peer's decryptor derives produces
+         * frames it drops in silence.
+         */
+        private const val AUDIO_STREAM_INDEX = 0
+        private const val VIDEO_STREAM_INDEX = 1
+
+        /**
+         * The pause between deactivating and reactivating the video encoding in
+         * [forceVideoKeyframe]. Long enough that libwebrtc treats the two
+         * `setParameters` calls as two changes rather than coalescing them into
+         * none; short enough to be invisible. Chosen, not measured.
+         */
+        private const val KEYFRAME_RESTART_GAP_MS = 120L
 
         /** Track id for the section-3.2 camera check, which belongs to no call. */
         private const val PREVIEW_VIDEO_TRACK_ID = "lakko-preview0"

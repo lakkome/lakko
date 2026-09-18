@@ -143,6 +143,46 @@ public class CameraVideoCapture private constructor(
     }
 
     /**
+     * Make the encoder re-initialise by changing the resolution it is being fed
+     * and changing it back — the second lever for
+     * `docs/ux/calls.md`-section-4.1's mid-call camera-on, when the first one
+     * does not reach the encoder.
+     *
+     * ## Why a second lever exists at all
+     *
+     * The first is `RtpSender.setParameters`, which makes libwebrtc reconfigure
+     * the encoder and a reconfigured encoder keys its next frame. On a live
+     * Android-to-iOS call it reported success and no key frame followed, while
+     * the receiver asked 78 times and got nothing — so on that stack, at that
+     * moment, the parameter write did not reach the encoder.
+     *
+     * This one takes a different path into the same place: a `VideoSource`
+     * output-format change alters the frame size arriving at the encoder, and
+     * an encoder whose input resolution changes must re-initialise, which
+     * produces an IDR. It touches neither the sender nor its SFrame encryptor,
+     * so the stream index and counter are untouched (ADR-0035).
+     *
+     * Costs a brief dip to three-quarter resolution. That is invisible next to
+     * the alternative, which is a picture that never appears at all.
+     */
+    public suspend fun nudgeOutputFormat() {
+        runCatching {
+            source.adaptOutputFormat(NUDGE_WIDTH, NUDGE_HEIGHT, TARGET_FPS)
+        }.onFailure { cause ->
+            android.util.Log.w("CameraVideoCapture", "keyframe: output-format nudge failed", cause)
+            return
+        }
+        kotlinx.coroutines.delay(NUDGE_HOLD_MS)
+        runCatching {
+            source.adaptOutputFormat(TARGET_WIDTH, TARGET_HEIGHT, TARGET_FPS)
+        }.onFailure { cause ->
+            // Left at the reduced size, which is a worse picture but still a
+            // picture — say so rather than leaving it silent.
+            android.util.Log.w("CameraVideoCapture", "keyframe: could not restore the format", cause)
+        }
+    }
+
+    /**
      * Release the capturer + surface helper + the EGL
      * texture pool they own. Call this after `stop()` and
      * after the `VideoSource` has been detached from any
@@ -182,6 +222,18 @@ public class CameraVideoCapture private constructor(
          * the conventional ceiling for mobile video calls.
          */
         public const val TARGET_FPS: Int = 30
+
+        /**
+         * The reduced size [nudgeOutputFormat] passes through on its way back to
+         * [TARGET_WIDTH] x [TARGET_HEIGHT]. Three-quarter scale is far enough
+         * from the target that libwebrtc cannot treat the change as a no-op,
+         * and near enough that the dip is not worth looking at.
+         */
+        private const val NUDGE_WIDTH: Int = TARGET_WIDTH * 3 / 4
+        private const val NUDGE_HEIGHT: Int = TARGET_HEIGHT * 3 / 4
+
+        /** How long the reduced format is held before restoring it. */
+        private const val NUDGE_HOLD_MS: Long = 200L
 
         private const val SURFACE_HELPER_THREAD_NAME = "lakko-capture"
 
