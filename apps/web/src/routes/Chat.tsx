@@ -164,6 +164,8 @@ import {
   type PushRotationOutcome,
 } from "../push/group-routing";
 import { getGroupRoutingSecretForAccount } from "../push/group-routing-store";
+import { createPushWakeReach } from "../push/wake-reach";
+import { mayParkReceive } from "../chat/receive-activity";
 // ADR-0045 (G-38 residual 1) — proposal-based membership. The committer sweep
 // lives in `chat/sweep.ts` and the panel's state rules in
 // `chat/pending-requests.ts`, both plain modules, because `vitest.config.ts`
@@ -3222,18 +3224,30 @@ function ChatView(props: {
    * that sequence left behind; aborted on unmount; ended for good when this
    * device's membership ends.
    *
-   * Paused while the tab is hidden — push covers a backgrounded tab, as on
-   * the native clients, and the ADR-0045 beacon is foreground-gated for the
-   * same reason — EXCEPT while a call is in progress or ringing: 1x1 call
+   * Paused while the tab is hidden AND a push wake is known to reach it —
+   * push then covers the backgrounded tab, as on the native clients, and the
+   * ADR-0045 beacon is foreground-gated for the same reason. A tab push cannot
+   * reach (notifications denied, no VAPID key in the build, no Push API) never
+   * parks: the in-app ring is the only path an incoming call has there, and
+   * this loop is what fetches the offer for THIS chat — the background receive
+   * deliberately skips a group whose view is open. The rule and the observed
+   * defect are in `chat/receive-activity.ts`.
+   *
+   * A call in progress or ringing overrides the pause in any case: 1x1 call
    * signaling rides this journal, and a live SFU call's mid-call rekey
    * (ADR-0029) is driven by the epoch advances this poll applies.
    */
   const receiveLoopAbort = new AbortController();
   const receiveLoopResume = createWakeLatch();
+  const pushWakeReach = createPushWakeReach();
   const callInProgress = (): boolean =>
     callHost.callLaneGroupIdB64() === props.entry.groupIdB64;
   function receiveLoopPaused(): boolean {
-    return globalThis.document?.visibilityState === "hidden" && !callInProgress();
+    return mayParkReceive({
+      documentHidden: globalThis.document?.visibilityState === "hidden",
+      callInProgress: callInProgress(),
+      pushWake: pushWakeReach.read(),
+    });
   }
   function startReceiveLoop(): void {
     void runLongPollLoop(receiveLoopAbort.signal, {

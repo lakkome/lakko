@@ -133,6 +133,7 @@ import {
   type InboundSignalingRow,
 } from "./call-signaling-dispatch";
 import { decideInboundSignaling } from "./call-host-routing";
+import { CallSoundController } from "./CallSoundController";
 import { classifyCallOutcome, type CallLogEntry } from "./call-log";
 import { useCallLog } from "./CallLogContext";
 import { CallJwtClient } from "./call-jwt-client";
@@ -1791,6 +1792,52 @@ export function CallHostView(): JSX.Element {
   const internals = useContext(CallHostInternalsContext);
   if (internals === undefined) throw new Error("CallHostView outside <CallHostProvider>");
   const [audioEl, setAudioEl] = createSignal<HTMLAudioElement | null>(null);
+
+  /**
+   * `docs/ux/calls.md` §2.1 — a ringing call is audible, not only visible.
+   *
+   * The `ringtone-incoming` cue has shipped in `public/sounds/` since the
+   * sound controller was written and had no caller anywhere: `routes/Call.tsx`
+   * maps only the OUTGOING phases (ringback, join, leave), and the incoming
+   * screen is rendered from here, not from there. So a call arriving while the
+   * user was reading another chat put a screen up in silence — which on a
+   * large window is easy to miss entirely, and is half of what made the
+   * 2026-09-18 iOS-to-web call look like nothing had happened.
+   *
+   * Best effort, and honest about it: a browser's autoplay policy can refuse
+   * `play()` until the page has seen a gesture, and `navigator.vibrate` is
+   * absent on desktop and ignored by browsers with no engagement. Both failure
+   * modes are silent by design (the controller logs a warning); neither
+   * affects the call itself.
+   */
+  const sounds = new CallSoundController();
+  let vibrateTimer: ReturnType<typeof setInterval> | null = null;
+  const stopVibration = (): void => {
+    if (vibrateTimer !== null) {
+      clearInterval(vibrateTimer);
+      vibrateTimer = null;
+    }
+    globalThis.navigator?.vibrate?.(0);
+  };
+  createEffect(() => {
+    if (host.state() !== "ringing") {
+      sounds.stopLoop("ringtone-incoming");
+      stopVibration();
+      return;
+    }
+    sounds.startLoop("ringtone-incoming");
+    if (vibrateTimer === null && typeof globalThis.navigator?.vibrate === "function") {
+      const pulse = (): void => {
+        globalThis.navigator?.vibrate?.([400, 200, 400, 1_000]);
+      };
+      pulse();
+      vibrateTimer = setInterval(pulse, 2_000);
+    }
+  });
+  onCleanup(() => {
+    stopVibration();
+    sounds.dispose();
+  });
 
   createEffect(() => {
     const el = audioEl();

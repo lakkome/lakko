@@ -24,8 +24,11 @@
  * for the same group cannot erase them.
  *
  * Runs while signed in (with identity secrets and the canonical identity) and
- * the tab is visible — or while any call is ringing, starting or live, because
- * the call rides a group journal. That call's group gets a dedicated long poll
+ * the loop is not allowed to park. When it may park is `receive-activity.ts`:
+ * only a hidden tab that a push wake is KNOWN to reach, so a tab with
+ * notifications denied — which has no other way to learn of an incoming call —
+ * keeps receiving. A call ringing, starting or live overrides that in any
+ * case, because the call rides a group journal. That call's group gets a dedicated long poll
  * for as long as the call lasts and its chat is not open: one connection, held
  * only then. For a 1x1 call an answer or ICE candidate that waits for the next
  * sweep stalls the connection; for a group (SFU) call a commit that waits leaves
@@ -60,6 +63,8 @@ import {
   receivePushRoutingSecretGated,
   rotatePushRoutingSecretIfMembershipShrank,
 } from "../push/group-routing";
+import { createPushWakeReach } from "../push/wake-reach";
+import { backgroundReceiveIsActive } from "./receive-activity";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { ContactsClient } from "../contacts/client";
 import { DiscoveryClient } from "../discovery/client";
@@ -272,30 +277,40 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   /**
    * How long a push wake keeps a HIDDEN tab sweeping.
    *
-   * A hidden tab parks its sweep, which is the right default — it is nobody's
-   * foreground and polling it burns battery for nothing. But it makes a wake
-   * inert in the one case a wake exists for, and for a call that is a defect
-   * rather than a delay: the offer never reaches the tab, so nothing rings
-   * in-app, and Decline pressed on the background notification (which
-   * deliberately does NOT raise the window — see
-   * `public/sw-call-notification.js`) has no call to refuse and the caller
-   * goes on ringing for the full 45 s.
+   * A hidden tab that push CAN reach parks its sweep — it is nobody's
+   * foreground and polling it burns battery for nothing — and the wake is
+   * what brings it back. Without this window the wake would be inert in the
+   * one case it exists for, and for a call that is a defect rather than a
+   * delay: the offer never reaches the tab, so nothing rings in-app, and
+   * Decline pressed on the background notification (which deliberately does
+   * NOT raise the window — see `public/sw-call-notification.js`) has no call
+   * to refuse and the caller goes on ringing for the full 45 s.
    *
    * Sized to the stale-offer window: past 60 s an offer no longer rings
    * anyway, so a longer window could only poll for a call nobody would
    * answer. Accept does not depend on this — focusing the window makes the
    * tab visible and the sweep resumes on its own — which is exactly why the
    * window exists for the button that does not focus.
+   *
+   * A tab push CANNOT reach never parks in the first place, so this window
+   * never applies to it; see `chat/receive-activity.ts`.
    */
   const WAKE_ACTIVE_MS = 60_000;
   /** Wall-clock deadline of the current wake window; 0 when none is open. */
   let wakeUntilMs = 0;
 
+  /** Whether a push wake can reach this tab at all. Cached; see
+   *  `push/wake-reach.ts` for why the answer has three values and not two. */
+  const pushWakeReach = createPushWakeReach();
+
   function isActive(): boolean {
-    return (
-      activeAccount !== null &&
-      (!isHidden() || callHost.anyCallInProgress() || Date.now() < wakeUntilMs)
-    );
+    return backgroundReceiveIsActive({
+      signedIn: activeAccount !== null,
+      documentHidden: isHidden(),
+      callInProgress: callHost.anyCallInProgress(),
+      wakeWindowOpen: Date.now() < wakeUntilMs,
+      pushWake: pushWakeReach.read(),
+    });
   }
 
   function isExcluded(groupIdB64: string): boolean {
