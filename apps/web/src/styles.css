@@ -3273,13 +3273,33 @@ button.lk-reaction {
   /* A translucent scrim over video, derived from the ground. */
   --call-scrim: color-mix(in srgb, var(--surface-bg) 55%, transparent);
 
+  /* The call control tokens (docs/ux/calls.md section 4.1.1). The two states
+     are defined here, once, so no button carries a literal:
+       - ON  is the quiet outline: a translucent white fill, a white icon.
+       - OFF is the loud one: solid white, dark icon, slashed glyph.
+     Both are stated against the call surface, which is always the dark half of
+     the token table (below) whatever the app's theme is — so `white` here is
+     "the light end of this surface", not a hardcoded page colour, and there is
+     no light-theme reading in which it lands on a light ground. */
+  --call-ctl-size: 64px;
+  --call-ctl-end-size: 72px;
+  --call-ctl-gap: 18px;
+  --call-ctl-on-bg: rgba(255, 255, 255, 0.12);
+  --call-ctl-on-fg: #ffffff;
+  --call-ctl-on-bg-hover: rgba(255, 255, 255, 0.2);
+  --call-ctl-off-bg: #ffffff;
+  --call-ctl-off-fg: #16192b;
+  --call-ctl-off-bg-hover: #e6e9f4;
+  --call-bar-bg: rgba(18, 21, 36, 0.62);
+  --call-bar-border: rgba(255, 255, 255, 0.1);
+  --call-ctl-disabled-opacity: 0.4;
+
   position: fixed;
   inset: 0;
   z-index: 1000;
   background: var(--surface-bg);
   color: var(--surface-fg);
-  display: flex;
-  flex-direction: column;
+  overflow: hidden;
 }
 
 /* The full-screen incoming call (docs/ux/calls.md section 2.2). It shares the
@@ -3288,6 +3308,8 @@ button.lk-reaction {
    the call itself: a second call can only ever arrive while the first is up. */
 .lk-incoming-call {
   z-index: 1050;
+  display: flex;
+  flex-direction: column;
   justify-content: space-between;
   align-items: center;
   padding: 48px 24px 40px;
@@ -3361,51 +3383,110 @@ button.lk-reaction {
   }
 }
 
-/* Top bar: the encryption chip left, the quality dot right. */
-.lk-call-head {
+/* The status line (docs/ux/calls.md section 4): name, then state or duration,
+   with the lock chip beside it. One block for all three surfaces, placed
+   differently by `data-surface` on the root — on the voice portrait it IS the
+   portrait (avatar, name, line, stacked in the upper half); on the video fill
+   and the group grid it floats at the top over a soft shade so it stays
+   readable. There is no second bar and no floating phase badge: section 4 is
+   explicit that the line is never repeated elsewhere. */
+.lk-call-status {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 20px;
+  text-align: center;
+  pointer-events: none;
+}
+/* Only the things that are actually pressable take pointer events back, so the
+   block never swallows a tap meant for the video underneath (which is what
+   wakes the faded control bar). */
+.lk-call-status button,
+.lk-call-status .lk-call-dot.interactive,
+.lk-call-status .lk-call-popover {
+  pointer-events: auto;
+}
+.lk-call[data-surface="voice"] .lk-call-status {
+  top: 13%;
+}
+.lk-call[data-surface="video"] .lk-call-status,
+.lk-call[data-surface="group"] .lk-call-status {
+  top: 0;
+  padding-top: calc(16px + env(safe-area-inset-top));
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--surface-bg) 78%, transparent),
+    transparent
+  );
+}
+
+/* Section 4: "their name under it in the largest type on the screen". */
+.lk-call-name {
+  margin: 0;
+  font-size: 28px;
+  line-height: 34px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.lk-call[data-surface="video"] .lk-call-name,
+.lk-call[data-surface="group"] .lk-call-name {
+  font-size: 17px;
+  line-height: 24px;
+  font-weight: 500;
+}
+.lk-call-state {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 16px;
-  background: var(--surface-elevated);
-  border-bottom: 1px solid var(--surface-border);
-  z-index: 5;
-  flex: 0 0 auto;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-height: 24px;
 }
-/* docs/ux/calls.md section 4: "a single small lock chip ... a lock icon and
-   the word `Encrypted`, on a sunken surface". It is a BUTTON in the armed
-   state (it opens the encryption sheet) and a plain status line otherwise, so
-   the element carries the same rules either way. */
-.lk-call-pill {
+.lk-call-state-text {
+  color: var(--surface-muted);
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+.lk-call[data-surface="video"] .lk-call-state-text,
+.lk-call[data-surface="group"] .lk-call-state-text {
+  font-size: 13px;
+}
+
+/* Section 4: "One small lock chip beside the status line: a lock and the word
+   `Encrypted`". The digits are one tap behind it, in the sheet, and never on
+   the call screen. The chip is a BUTTON when armed and a plain status line
+   otherwise, so the element carries the same rules either way. */
+.lk-call-chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  min-height: 28px;
-  padding: 0 10px;
+  gap: 5px;
+  min-height: 24px;
+  padding: 0 9px;
   border-radius: var(--radius-pill);
-  border: 1px solid var(--surface-border);
-  background: var(--surface-sunken);
+  border: 1px solid var(--call-bar-border);
+  background: var(--call-bar-bg);
   font-size: 12px;
   font-weight: 600;
   font-family: inherit;
   color: var(--surface-muted);
 }
-button.lk-call-pill {
+button.lk-call-chip {
   cursor: pointer;
-}
-button.lk-call-pill:hover {
-  background: var(--surface-hover);
-  border-color: var(--surface-faint);
-}
-button.lk-call-pill:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--accent) 40%, transparent);
-  outline-offset: 2px;
-}
-.lk-call-pill.secure {
   color: var(--success);
 }
-.lk-call-pill.negotiating {
+button.lk-call-chip:hover {
+  background: color-mix(in srgb, var(--call-bar-bg) 70%, var(--surface-fg));
+}
+button.lk-call-chip:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: 2px;
+}
+.lk-call-chip.negotiating {
   color: var(--warning);
 }
 
@@ -3492,7 +3573,11 @@ button.lk-call-pill:focus-visible {
 .lk-call-popover {
   position: absolute;
   top: calc(100% + 8px);
-  right: 0;
+  /* Centred on the dot rather than pinned right: the dot now sits in the
+     middle of the status line, and a right-pinned card would hang off the
+     screen on a narrow window. */
+  left: 50%;
+  transform: translateX(-50%);
   min-width: 200px;
   padding: 12px 14px;
   background: var(--surface-elevated);
@@ -3531,16 +3616,19 @@ button.lk-call-pill:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
-/* The stage and the gallery. */
+/* The group roster: the stage and the gallery. Unchanged by the section 4
+   redesign (section 9 keeps a group redesign out of scope) beyond being
+   positioned under the status line and above the control bar rather than
+   flexed between them. */
 .lk-call-main {
-  flex: 1;
-  position: relative;
+  position: absolute;
+  inset: 0;
+  z-index: 2;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 16px;
+  padding: 96px 16px 168px;
   overflow-y: auto;
-  min-height: 0;
 }
 .lk-call-stage,
 .lk-call-gallery {
@@ -3552,19 +3640,6 @@ button.lk-call-pill:focus-visible {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: 10px;
-}
-.lk-call-waiting {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  padding: 14px 22px;
-  background: color-mix(in srgb, var(--surface-elevated) 92%, transparent);
-  border: 1px solid var(--surface-border);
-  border-radius: var(--radius-md);
-  font-size: 15px;
-  text-align: center;
-  z-index: 5;
 }
 
 /* A participant tile. */
@@ -3702,119 +3777,476 @@ button.lk-call-pill:focus-visible {
   display: inline-flex;
 }
 
-/* Prejoin: a card with the preview and two toggles. */
-.lk-call-prejoin {
+/* ---------------------------------------------------------------------------
+   The voice portrait (docs/ux/calls.md section 4, section 4.2)
+
+   Section 4.2, on what every other messenger does: "Telegram animates a
+   gradient built from the contact's colour; Signal and WhatsApp blur the
+   contact's photo ... Flat surface reads as an empty page, which is what made
+   ours look unfinished."
+
+   Lakko has no profile photos, so what there is to blur is the contact's own
+   initials on their own tint — the same tone hash the chat list and the avatar
+   use, so one person is one colour everywhere. Darkened hard, because the name
+   and the controls sit on top of it and legibility beats decoration.
+
+   The one thing section 4.2 says we deliberately do NOT copy: an animation
+   that keeps moving for the whole call.
+--------------------------------------------------------------------------- */
+.lk-call-portrait {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  background: var(--av-1-bg);
+}
+.lk-call-portrait[data-tone="2"] { background: var(--av-2-bg); }
+.lk-call-portrait[data-tone="3"] { background: var(--av-3-bg); }
+.lk-call-portrait[data-tone="4"] { background: var(--av-4-bg); }
+.lk-call-portrait-wash {
+  position: absolute;
+  inset: -20%;
+  display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px 16px;
-  overflow: auto;
+  filter: blur(72px) saturate(1.3);
+  opacity: 0.85;
 }
-.lk-call-prejoin-card {
-  width: min(480px, 100%);
-  background: var(--surface-elevated);
-  border: 1px solid var(--surface-border);
+.lk-call-portrait-blur {
+  font-size: 46vmin;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--av-1-fg);
+}
+.lk-call-portrait[data-tone="2"] .lk-call-portrait-blur { color: var(--av-2-fg); }
+.lk-call-portrait[data-tone="3"] .lk-call-portrait-blur { color: var(--av-3-fg); }
+.lk-call-portrait[data-tone="4"] .lk-call-portrait-blur { color: var(--av-4-fg); }
+/* The darkening pass. Without it the blurred tint is bright enough to swallow
+   the muted status line. */
+.lk-call-portrait::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--surface-bg) 55%, transparent),
+    color-mix(in srgb, var(--surface-bg) 80%, transparent)
+  );
+}
+
+/* The avatar itself: large and centred in the upper half (section 4). It lives
+   inside the status block so the avatar, the name and the line move as one
+   figure. */
+.lk-call-portrait-avatar {
+  width: 128px;
+  height: 128px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 44px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  background: var(--av-1-bg);
+  color: var(--av-1-fg);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.35);
+}
+/* Inside the status block the avatar sits on the blurred wash of the SAME
+   colour, so a second opaque fill of that colour would disappear into it. A
+   frosted disc reads as a figure against its own background. */
+.lk-call-status .lk-call-portrait-avatar {
+  background: color-mix(in srgb, var(--surface-bg) 45%, transparent);
+  color: var(--surface-fg);
+  backdrop-filter: blur(6px);
+}
+
+/* The remote picture, edge to edge (section 4). `cover` so a portrait phone
+   camera crops instead of letterboxing into black bars — the bars are the
+   "empty box" look this redesign removes. */
+.lk-call-fill {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: var(--surface-bg);
+}
+.lk-call-fill.mirrored {
+  transform: scaleX(-1);
+}
+
+/* ---------------------------------------------------------------------------
+   The self-view (section 4): "a small rounded rectangle in a corner,
+   draggable, about a quarter of the width".
+--------------------------------------------------------------------------- */
+.lk-call-self {
+  position: absolute;
+  z-index: 5;
+  right: 16px;
+  bottom: calc(150px + env(safe-area-inset-bottom));
+  width: min(25%, 180px);
+  aspect-ratio: 3 / 4;
   border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--surface-elevated);
+  border: 1px solid var(--call-bar-border);
   box-shadow: var(--shadow-2);
-  padding: 24px;
+  cursor: grab;
+  touch-action: none;
+}
+.lk-call-self:active {
+  cursor: grabbing;
+}
+.lk-call-self-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* A front camera is a mirror; that is what people expect to see of
+     themselves and what every other client shows. */
+  transform: scaleX(-1);
+}
+.lk-call-self-blank {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--surface-faint);
+  background: var(--surface-sunken);
+}
+.lk-call-self-overlay {
+  position: absolute;
+  inset: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 16px;
-  text-align: center;
-}
-.lk-call-prejoin-card h1 {
-  margin: 0;
-}
-.lk-call-prejoin-card p {
-  margin: -8px 0 0;
-  color: var(--surface-muted);
-}
-.lk-call-preview {
-  position: relative;
-  width: 100%;
-  aspect-ratio: 16 / 9;
-  border-radius: var(--radius-md);
-  overflow: hidden;
-  border: 1px solid var(--surface-border);
-}
-.lk-call-preview-toggles {
-  display: flex;
-  gap: 16px;
-}
-.lk-call-join {
-  width: 100%;
-  min-height: 44px;
-}
-
-/* The bottom row of round controls. */
-.lk-call-controls {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
   justify-content: center;
-  align-items: center;
-  padding: 14px 16px calc(14px + env(safe-area-inset-bottom));
-  background: var(--surface-elevated);
-  border-top: 1px solid var(--surface-border);
-  flex: 0 0 auto;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--surface-muted);
+  background: color-mix(in srgb, var(--surface-bg) 70%, transparent);
 }
-.lk-call-btn {
-  width: 56px;
-  height: 56px;
+/* Section 4.1: "Flip camera does not belong in the row. It lives on the
+   self-view itself, as a small button in that rectangle's corner, where the
+   thing it changes is visible." */
+.lk-call-self-flip {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  width: 32px;
+  height: 32px;
   min-height: 0;
   padding: 0;
-  border-radius: 50%;
-  border: none;
-  background: var(--surface-sunken);
-  color: var(--surface-fg);
-  box-shadow: var(--shadow-1);
-  transition: background-color 120ms ease;
-}
-.lk-call-btn:hover:not(:disabled) {
-  background: var(--surface-hover);
-}
-.lk-call-btn.active {
-  background: var(--accent);
-  color: var(--accent-fg);
-}
-.lk-call-btn.active:hover:not(:disabled) {
-  background: var(--accent-strong);
-}
-.lk-call-btn.destructive {
-  background: var(--danger);
-  color: var(--danger-fg);
-}
-.lk-call-btn.destructive:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--danger) 85%, var(--surface-fg));
-}
-/* A busy button keeps full opacity (the spinner conveys activity); a plainly
-   disabled one dims to signal it is unavailable. */
-.lk-call-btn.busy:disabled {
-  opacity: 1;
-  cursor: default;
-}
-.lk-call-btn-wrap {
-  position: relative;
-}
-.lk-call-btn-badge {
-  position: absolute;
-  top: -2px;
-  right: -2px;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border-radius: var(--radius-pill);
-  background: var(--danger);
-  color: var(--danger-fg);
-  font-size: 11px;
-  font-weight: 700;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: var(--call-bar-bg);
+  color: var(--call-ctl-on-fg);
+  cursor: pointer;
+}
+.lk-call-self-flip:hover {
+  background: color-mix(in srgb, var(--call-bar-bg) 60%, var(--surface-fg));
+}
+.lk-call-self-flip:focus-visible {
+  outline: 2px solid var(--call-ctl-on-fg);
+  outline-offset: 2px;
+}
+
+/* ---------------------------------------------------------------------------
+   The control bar (section 4.1, section 4.1.1)
+
+   Section 4.2 on where every other client puts these: "WhatsApp, Telegram and
+   FaceTime all float them in one rounded container over the content, not loose
+   on the background. That container is what our screen was missing."
+
+   So: one rounded translucent bar, floating above the bottom safe area with a
+   margin, never welded to the edge — and on a voice call placed in the lower
+   third under the portrait rather than at the very bottom of an empty surface.
+--------------------------------------------------------------------------- */
+.lk-call-bar {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(28px + env(safe-area-inset-bottom));
+  z-index: 6;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: var(--call-ctl-gap);
+  max-width: calc(100% - 24px);
+  padding: 14px 20px 10px;
+  border-radius: 28px;
+  background: var(--call-bar-bg);
+  border: 1px solid var(--call-bar-border);
+  box-shadow: var(--shadow-2);
+  backdrop-filter: blur(18px);
+  transition: opacity 200ms ease;
+}
+/* Section 4.1: on a voice call the bar is vertically placed in the lower third
+   under the portrait. */
+.lk-call-bar[data-surface="voice"] {
+  bottom: max(calc(18% - 40px), calc(28px + env(safe-area-inset-bottom)));
+}
+/* Section 4: the controls fade after five seconds of a connected video call
+   and come back on a tap; on a voice call they never hide (section 4.2: there
+   is nothing to look at underneath, so hiding only costs a tap). The bar keeps
+   its space and its focusability is removed with it. */
+.lk-call-bar.faded {
+  opacity: 0;
   pointer-events: none;
 }
 
-/* The settings sheet. */
+/* Section 4.1.1: equal circles, 64 pt across, evenly spaced in one row, one
+   short muted label under each. */
+.lk-call-ctl {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  flex: 0 0 auto;
+}
+.lk-call-ctl-btn {
+  width: var(--call-ctl-size);
+  height: var(--call-ctl-size);
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    opacity 120ms ease;
+}
+/* ON — the quiet state: a live microphone, a sending camera. */
+.lk-call-ctl-btn[data-tone="outline"] {
+  background: var(--call-ctl-on-bg);
+  color: var(--call-ctl-on-fg);
+}
+.lk-call-ctl-btn[data-tone="outline"]:hover:not(:disabled) {
+  background: var(--call-ctl-on-bg-hover);
+}
+/* OFF — the loud state. Section 4.1.1: "muted or stopped is solid white with a
+   dark slashed icon. The old screen highlighted the off state in the accent
+   colour, which read as 'on'." */
+.lk-call-ctl-btn[data-tone="solid"] {
+  background: var(--call-ctl-off-bg);
+  color: var(--call-ctl-off-fg);
+}
+.lk-call-ctl-btn[data-tone="solid"]:hover:not(:disabled) {
+  background: var(--call-ctl-off-bg-hover);
+}
+/* The one red control on the screen, 72 pt and set apart by twice the gap. */
+.lk-call-ctl-btn[data-tone="end"] {
+  width: var(--call-ctl-end-size);
+  height: var(--call-ctl-end-size);
+  background: var(--danger);
+  color: var(--danger-fg);
+}
+.lk-call-ctl-btn[data-tone="end"]:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 82%, #000);
+}
+/* Section 4.1.1: the end button is "set apart by twice the gap". */
+.lk-call-ctl.end {
+  margin-left: var(--call-ctl-gap);
+}
+.lk-call-ctl-btn:focus-visible {
+  outline: 2px solid var(--call-ctl-on-fg);
+  outline-offset: 3px;
+}
+/* Section 4.1.1: "Disabled is 40 percent opacity, never a hidden button." */
+.lk-call-ctl-btn:disabled {
+  opacity: var(--call-ctl-disabled-opacity);
+  cursor: default;
+}
+/* A busy button keeps full opacity — the spinner already says it is working,
+   and dimming it as well would read as unavailable rather than in progress. */
+.lk-call-ctl-btn[aria-busy="true"]:disabled {
+  opacity: 1;
+}
+.lk-call-ctl-label {
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--surface-muted);
+  white-space: nowrap;
+}
+
+/* Narrow windows: the circles shrink but never below the 44 pt touch target
+   section 4.1.1 sets as the floor. */
+@media (max-width: 420px) {
+  .lk-call {
+    --call-ctl-size: 56px;
+    --call-ctl-end-size: 64px;
+    --call-ctl-gap: 12px;
+  }
+}
+/* Short windows: the portrait figure gives up height before the controls do —
+   the avatar is the decorative half and the row is the usable one. */
+@media (max-height: 560px) {
+  .lk-call[data-surface="voice"] .lk-call-status {
+    top: 6%;
+  }
+  .lk-call-status .lk-call-portrait-avatar {
+    width: 88px;
+    height: 88px;
+    font-size: 30px;
+  }
+  .lk-call[data-surface="voice"] .lk-call-name {
+    font-size: 22px;
+    line-height: 28px;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   The camera check (section 3.2)
+--------------------------------------------------------------------------- */
+.lk-camera-check {
+  z-index: 1040;
+}
+/* Camera off is the callee's portrait, centred — section 3.2: "Turning the
+   camera off there does not leave a hole". The avatar is positioned so it
+   paints above the portrait's darkening pseudo-element rather than under it. */
+.lk-camera-check .lk-call-portrait {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.lk-camera-check .lk-call-portrait-avatar {
+  position: relative;
+  z-index: 1;
+  background: color-mix(in srgb, var(--surface-bg) 45%, transparent);
+  color: var(--surface-fg);
+  backdrop-filter: blur(6px);
+}
+.lk-camera-check-close {
+  position: absolute;
+  top: calc(14px + env(safe-area-inset-top));
+  left: 14px;
+  z-index: 7;
+  width: 40px;
+  height: 40px;
+  min-height: 0;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: var(--call-bar-bg);
+  color: var(--call-ctl-on-fg);
+  cursor: pointer;
+}
+.lk-camera-check-close:hover {
+  background: color-mix(in srgb, var(--call-bar-bg) 60%, var(--surface-fg));
+}
+.lk-camera-check-close:focus-visible {
+  outline: 2px solid var(--call-ctl-on-fg);
+  outline-offset: 2px;
+}
+/* "The callee's name across the top." No card, no subtitle, no question. */
+.lk-camera-check-who {
+  position: absolute;
+  top: calc(20px + env(safe-area-inset-top));
+  left: 68px;
+  right: 20px;
+  z-index: 7;
+  text-align: center;
+}
+.lk-camera-check-who h1 {
+  margin: 0;
+  font-size: 20px;
+  line-height: 28px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  text-shadow: 0 1px 12px rgba(0, 0, 0, 0.5);
+}
+/* The big Call button between the two toggles. Green because it is the
+   affirmative action of this screen; it is not on a call surface, so section
+   4.1.1's "nothing else on the screen is red" is untouched. */
+.lk-camera-check-call {
+  width: 76px;
+  height: 76px;
+  background: var(--success);
+  color: #08140c;
+}
+.lk-camera-check-call:hover {
+  background: color-mix(in srgb, var(--success) 85%, #000);
+}
+
+/* ---------------------------------------------------------------------------
+   The group overflow (section 4.1 permits exactly one, and only on a group
+   call): participants and chat, as buttons rather than a menu.
+--------------------------------------------------------------------------- */
+.lk-call-overflow {
+  position: absolute;
+  inset: 0;
+  z-index: 9;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 0 16px calc(180px + env(safe-area-inset-bottom));
+}
+.lk-call-overflow-sheet {
+  display: flex;
+  gap: 10px;
+  padding: 10px;
+  border-radius: 20px;
+  background: var(--call-bar-bg);
+  border: 1px solid var(--call-bar-border);
+  box-shadow: var(--shadow-2);
+  backdrop-filter: blur(18px);
+}
+.lk-call-overflow-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-width: 92px;
+  padding: 12px 10px;
+  border: none;
+  border-radius: 14px;
+  background: transparent;
+  color: var(--call-ctl-on-fg);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.lk-call-overflow-item:hover {
+  background: var(--call-ctl-on-bg);
+}
+.lk-call-overflow-item:focus-visible {
+  outline: 2px solid var(--call-ctl-on-fg);
+  outline-offset: 2px;
+}
+
+/* The ended line (section 4: "`Call ended` and the duration, the screen closes
+   itself after 2 s"). */
+.lk-call-ended {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--surface-bg) 72%, transparent);
+  backdrop-filter: blur(6px);
+}
+.lk-call-ended p {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The modal layer: the encryption sheet (section 5). The in-call settings
+   sheet that used to share it is gone — section 4.1 forbids a settings list
+   inside a call, and none of its toggles was read by any code. */
 .lk-call-modal-backdrop {
   position: fixed;
   inset: 0;
@@ -3846,23 +4278,6 @@ button.lk-call-pill:focus-visible {
 .lk-call-modal-head h2 {
   margin: 0;
 }
-.lk-call-sep {
-  border: none;
-  border-top: 1px solid var(--surface-border);
-  margin: 0;
-}
-.lk-call-field select {
-  background: var(--surface-sunken);
-}
-.lk-call-toggle {
-  font-weight: 400;
-  font-size: 15px;
-}
-.lk-call-toggle-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
 
 /* The right-hand drawer: participants, or the in-call chat. */
 .lk-call-drawer {
@@ -3871,12 +4286,14 @@ button.lk-call-pill:focus-visible {
   top: 0;
   bottom: 0;
   width: 320px;
+  /* Above the control bar: the drawer is opened FROM the bar's overflow, so it
+     must not slide under the thing that opened it. */
   max-width: 100%;
   background: var(--surface-elevated);
   border-left: 1px solid var(--surface-border);
   display: flex;
   flex-direction: column;
-  z-index: 10;
+  z-index: 11;
 }
 .lk-call-drawer-head {
   display: flex;
@@ -3993,38 +4410,10 @@ button.lk-call-pill:focus-visible {
   background: var(--danger);
   color: var(--danger-fg);
 }
-.lk-call-ended {
-  position: absolute;
-  inset: 0;
-  z-index: 30;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  background: color-mix(in srgb, var(--surface-bg) 88%, transparent);
-}
-.lk-call-ended h1 {
-  margin: 0;
-  font-size: 28px;
-}
-.lk-call-ended p {
-  margin: 0;
-  color: var(--surface-muted);
-}
-
 @media (max-width: 720px) {
   .lk-call-drawer {
     width: 100%;
     border-left: none;
-  }
-  .lk-call-controls {
-    gap: 10px;
-    padding: 10px 8px calc(10px + env(safe-area-inset-bottom));
-  }
-  .lk-call-btn {
-    width: 52px;
-    height: 52px;
   }
 }
 @media (prefers-reduced-motion: reduce) {

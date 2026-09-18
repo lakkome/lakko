@@ -82,7 +82,20 @@ internal fun callPermissionsToRequest(
 @Stable
 public class CallPermissionGate internal constructor() {
 
-    private class Pending(val video: Boolean, val onProceed: (video: Boolean) -> Unit)
+    private class Pending(
+        /** Whether CAMERA is part of THIS system request. */
+        val cameraRequested: Boolean,
+        /**
+         * What the user actually asked for, which survives a device that has no
+         * camera to ask about. Keeping the two apart is what stops a
+         * camera-less device being told "Camera access needed" for a permission
+         * nothing on it can grant — and what lets the video button's own rule
+         * ([me.lakko.app.calls.callEntrySurface]) still see a video request and
+         * explain the voice call it places instead.
+         */
+        val requestedVideo: Boolean,
+        val onProceed: (video: Boolean) -> Unit,
+    )
 
     internal sealed interface Denial {
         data object Microphone : Denial
@@ -103,17 +116,21 @@ public class CallPermissionGate internal constructor() {
      */
     public fun request(video: Boolean, onProceed: (video: Boolean) -> Unit) {
         val ctx = context ?: return
+        // A device with no camera has no camera permission to grant, so asking
+        // for one can only end in a dialog telling the user to go and enable
+        // something that does not exist.
+        val cameraRequested = video && me.lakko.app.calls.CameraVideoCapture.hasUsableCamera(ctx)
         val missing = callPermissionsToRequest(
             microphoneGranted = isGranted(ctx, Manifest.permission.RECORD_AUDIO),
             cameraGranted = isGranted(ctx, Manifest.permission.CAMERA),
-            videoRequested = video,
+            videoRequested = cameraRequested,
         )
         if (missing.isEmpty()) {
             onProceed(video)
             return
         }
         val requester = launcher ?: return
-        pending = Pending(video, onProceed)
+        pending = Pending(cameraRequested = cameraRequested, requestedVideo = video, onProceed = onProceed)
         requester.launch(missing.toTypedArray())
     }
 
@@ -127,11 +144,11 @@ public class CallPermissionGate internal constructor() {
         when (
             callPermissionOutcome(
                 microphoneGranted = isGranted(ctx, Manifest.permission.RECORD_AUDIO),
-                videoRequested = request.video,
+                videoRequested = request.cameraRequested,
                 cameraGranted = isGranted(ctx, Manifest.permission.CAMERA),
             )
         ) {
-            CallPermissionOutcome.PROCEED -> request.onProceed(request.video)
+            CallPermissionOutcome.PROCEED -> request.onProceed(request.requestedVideo)
             CallPermissionOutcome.MICROPHONE_DENIED -> denial = Denial.Microphone
             CallPermissionOutcome.CAMERA_DENIED ->
                 denial = Denial.Camera(onAudioOnly = { request.onProceed(false) })

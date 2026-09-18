@@ -1129,9 +1129,13 @@ private fun SessionRoot(
                         },
                     )
                     // The same just-in-time permission gate every call entry
-                    // point uses; the 1x1 call is prepared in the app-level host
-                    // (prejoin first), exactly as the chat header does it.
+                    // point uses. docs/ux/calls.md section 3: the host dials a
+                    // voice call at once and stops only for a video call's
+                    // camera check, exactly as the chat header does it. The
+                    // chosen kind used to be dropped here, so a video call from
+                    // a contact went out as a voice one.
                     val callPermissions = me.lakko.app.ui.call.rememberCallPermissionGate()
+                    val callContext = LocalContext.current
                     me.lakko.app.ui.contacts.ContactDetailScreen(
                         contactKey = key,
                         contactsRepository = contactsRepository,
@@ -1139,7 +1143,14 @@ private fun SessionRoot(
                         onBack = { navController.popBackStack() },
                         onOpenChat = { hex -> navController.navigate(Routes.chat(hex)) },
                         onStartCall = { hex, video ->
-                            callPermissions.request(video = video) { callHost.startOutgoing(hex) }
+                            callPermissions.request(video = video) { granted ->
+                                callHost.startOutgoing(
+                                    groupIdHex = hex,
+                                    kind = me.lakko.app.calls.requestedCallKind(granted),
+                                    hasCamera = me.lakko.app.calls.CameraVideoCapture
+                                        .hasUsableCamera(callContext),
+                                )
+                            }
                         },
                         onVerifySafetyNumber = { k -> navController.navigate(Routes.safetyNumber(k)) },
                     )

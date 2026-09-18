@@ -62,7 +62,7 @@
 
 import { createSignal, type Accessor } from "solid-js";
 
-import { callActions, type Participant } from "../state/call-state";
+import { callActions, callState, type Participant } from "../state/call-state";
 import { loadWasm } from "../wasm";
 import { groupIdHex } from "../devices/sync/state";
 import { CallJwtClient } from "./call-jwt-client";
@@ -353,6 +353,9 @@ export class MultiJoinerCall {
   }
 
   private async start(): Promise<void> {
+    // What the control row carries follows the call's kind, not what is on
+    // screen (docs/ux/calls.md section 4.1's table; see `call-controls.ts`).
+    callActions.setMediaKind(this.opts.media.video ? "video" : "voice");
     try {
       await this.session.connect();
     } catch (err) {
@@ -798,12 +801,12 @@ export class MultiJoinerCall {
       id: "local",
       displayName: "You",
       isLocal: true,
-      micOn: this.opts.media.audio,
+      // See `sfu-call-ui.ts`: `media.audio` is always true on web, so a muted
+      // start is carried in the store instead (docs/ux/calls.md section 3.2).
+      micOn: callState.pendingMicOn(),
       camOn: this.opts.media.video,
-      handRaised: false,
       quality: "good",
       speaking: false,
-      screenSharing: false,
     };
   }
 
@@ -814,10 +817,8 @@ export class MultiJoinerCall {
       isLocal: false,
       micOn: true,
       camOn: false,
-      handRaised: false,
       quality: "good",
       speaking: false,
-      screenSharing: false,
     };
   }
 }

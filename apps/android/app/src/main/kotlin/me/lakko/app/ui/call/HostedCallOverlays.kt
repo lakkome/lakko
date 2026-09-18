@@ -92,7 +92,15 @@ private fun HostedCallDialog(state: CallUiState, onEndCall: () -> Unit, onExit: 
     ) {
         EdgeToEdgeDialogWindow()
         Box(modifier = Modifier.fillMaxSize()) {
-            CallScreen(onExit = onExit, state = state, onEndCall = onEndCall)
+            // Both of these are multi-party calls, so the screen keeps the
+            // grid, the roster and the in-call chat even while only one other
+            // person is on it (docs/ux/calls.md section 4.1, section 9).
+            CallScreen(
+                onExit = onExit,
+                state = state,
+                onEndCall = onEndCall,
+                groupCall = true,
+            )
         }
     }
 }

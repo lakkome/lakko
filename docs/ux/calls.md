@@ -68,43 +68,134 @@ Nothing else on that screen. No code, no digits, no protocol words.
 
 ## 3. Placing a call
 
-- The chat header has two buttons: call and video call. Each starts that kind of call,
-  and the kind the caller chose is what the callee is told.
-- **A voice call never turns the camera on.** The pre-join screen opens with the camera
-  off for a voice call and on for a video call, and the toggles there change the call
-  that is actually placed.
-- Pre-join stays as it is otherwise: a preview, microphone and camera toggles, **Join**
-  and **Cancel**. It is skipped entirely when accepting an incoming call.
-- While the callee's phone is ringing, the caller sees the same call screen with
-  `Ringing...`, and can cancel. After 45 seconds it becomes `No answer`, with **Call
-  again** and **Message** on the ended screen.
+### 3.1 A voice call just calls
+
+Tapping the phone button places the call immediately. No preparation screen, no
+"check your microphone", no empty camera box: the call screen opens straight into
+`Calling...` with the callee's avatar and name, and the controls are there to change
+anything. This is what every phone app does, and asking a question before a voice call
+is the thing that made the old screen feel like a settings page.
+
+The camera stays off, and the callee is told `Voice call`.
+
+### 3.2 A video call shows the camera first
+
+The video button opens a **camera check**, because a person about to be seen deserves
+to know what they look like. It fills the screen with the live self-view, the callee's
+name across the top, and three round controls above the bottom edge: microphone,
+camera, and a large **Call** button between them. Cancel is a plain close control in
+the top corner. No card, no toggle rows, no labels reading like settings.
+
+Turning the camera off there does not leave a hole: the preview becomes the callee's
+avatar on the call background, and the button still reads **Call**. If the device has
+no camera, the video button starts a voice call and says so in one line.
+
+### 3.3 Answering
+
+Accepting an incoming call never shows any preparation screen, for either kind.
+
+### 3.4 While it rings
+
+The caller sees the call screen with `Calling...` and can hang up. After 45 seconds it
+becomes `No answer`, with **Call again** and **Message**.
 
 ## 4. The call screen
 
-Layout, in order from the top:
+One screen for both kinds, laid out for the eye and not for the debugger.
 
-1. **Status line**: the other person's name, and under it the call state in one word or
-   the running time (`Ringing...`, `Connecting...`, `12:04`).
-2. **A single small lock chip** next to the status line: a lock icon and the word
-   `Encrypted`, on a sunken surface. It appears **only** when the call's own encryption
-   is armed. Tapping it opens the encryption sheet (section 5). That chip replaces the
-   strip of digits shown today.
-3. **The stage**: the participant tile or tiles, exactly as they are now for group calls.
-4. **Controls** along the bottom: microphone, camera, more, end call, in that order, with
-   the end-call button in danger red.
+**A voice call** is a portrait: the other person's avatar large and centred in the upper
+half, their name under it in the largest type on the screen, and under that one quiet
+line with the state or the running time. Nothing else competes with it. The background
+is the call surface, not a tile.
 
-States on that screen: ringing, connecting, connected, reconnecting, ended, and failed.
+**A video call** fills the screen with the other person, and the self-view is a small
+rounded rectangle in a corner, draggable, about a quarter of the width. The name and
+the state float over the video at the top, on a soft shade so they stay readable.
 
-| State | What the user sees |
+Both share:
+
+- **The status line**: name, then state or duration. `Calling...`, `Connecting...`,
+  `Reconnecting...`, or `12:04`. Never two of them at once, and never a floating pill
+  repeating what the line already says.
+- **One small lock chip** beside the status line: a lock and the word `Encrypted`, shown
+  only when the call's own encryption is armed, opening the encryption sheet (section 5).
+- **Controls**, bottom, one row of round buttons of equal size, 64 pt across, spaced
+  evenly, each with a small label under it: microphone, camera, speaker, more, end call.
+  End call is a wider red pill, visually separated from the rest. A control that is off
+  is filled; a control that is on is outlined. Nothing but the end button is red.
+- The controls fade out after 5 seconds of a connected video call and come back on a
+  tap; on a voice call they never hide.
+
+### 4.1 Which controls exist, and where they are
+
+The real problem with the old screens was not their colour. It was that they used the
+wrong **kind** of control in the wrong **place**:
+
+- The pre-call screen used **switches in a settings list** — a label on the left, a
+  toggle on the right. A switch says "this is a preference you are configuring". A call
+  needs a button you press.
+- The call screen hid real actions behind an **ellipsis menu**. Switching to the other
+  camera, or moving the sound to the speaker, is something a person does mid-sentence
+  with one thumb; a menu makes it two taps and a reading task.
+- **Speaker was not on the screen at all**, although it is the control people reach for
+  most on a voice call.
+- The row sat glued to the bottom edge of a mostly empty screen, unanchored to anything.
+
+The rules that follow from that:
+
+**Never a switch, a checkbox or a list row inside a call.** Every call control is a
+round icon button that toggles on press.
+
+**The whole set is on the screen. There is no More menu in a 1x1 call.**
+
+| Call kind | The row, left to right |
 |---|---|
-| Ringing | `Ringing...`, only the cancel (end) button is active |
-| Connecting | `Connecting...`, controls active |
-| Connected | The running time, the lock chip if encryption is armed |
-| Reconnecting | `Reconnecting...` over the stage, audio muted until it returns |
-| Could not connect | `Couldn't connect` with one sentence of plain cause (`Check your connection`), plus **Call again** and **Close** |
-| Ended | `Call ended` and the duration, then the screen closes by itself after 2 s |
+| Voice | Speaker · Mute · End |
+| Video | Speaker · Mute · Camera · End |
 
-Connection quality stays as it is: a real measurement or nothing at all.
+- **Flip camera does not belong in the row.** It lives on the self-view itself, as a
+  small button in that rectangle's corner, where the thing it changes is visible.
+- A group call keeps its participants and chat entries, and those may live behind a
+  single overflow button — but mute, camera, speaker and end stay in the row.
+- The row sits inside one rounded translucent bar, floating above the bottom safe area
+  with a margin, not welded to the edge. On a voice call it is vertically placed in the
+  lower third, under the portrait, not at the very bottom of an empty screen.
+- **The pre-call camera check** (section 3.2) uses the same round buttons, not switches:
+  microphone and camera either side of the Call button.
+
+### 4.1.1 How each button looks
+
+- Equal circles, 64 pt across, evenly spaced in one row; the end button is a 72 pt red
+  circle set apart by twice the gap. Nothing else on the screen is red.
+- **The off state is the loud one**: a live microphone or a sending camera is an outline
+  (translucent white fill about 12 percent, white icon); muted or stopped is solid white
+  with a dark slashed icon. The old screen highlighted the off state in the accent
+  colour, which read as "on".
+- One short muted label under each circle: `Speaker`, `Mute`, `Camera`, `End`. The label
+  names the action, never the state, and does not change size when the state does.
+- Disabled is 40 percent opacity, never a hidden button. Touch targets stay at least
+  44 pt. Spoken labels name the action and the resulting state (`Mute microphone`,
+  `Unmute microphone`).
+
+### 4.2 Measured against the messengers people already use
+
+Checked against Telegram, WhatsApp, Signal and the iPhone's own call screen, because a
+call screen is the one surface where being unusual is a cost, not a feature.
+
+| Question | What they do | What we do |
+|---|---|---|
+| Background of a voice call | Telegram animates a gradient built from the contact's colour; Signal and WhatsApp blur the contact's photo | The contact's avatar, heavily blurred and darkened, behind the portrait. Falls back to the initials colour when there is no photo. Flat surface reads as an empty page, which is what made ours look unfinished |
+| Where the controls live | WhatsApp, Telegram and FaceTime all float them in one rounded container over the content, not loose on the background | One rounded translucent bar holding the row, with the end button inside it at the end. That container is what our screen was missing |
+| Labels under the buttons | Telegram labels them, WhatsApp does not, Signal does not | Keep the labels. They cost one line and remove all guessing, and they are what a screen reader reads anyway |
+| Which state is highlighted | All of them make the **off** state the solid, high-contrast one | Same, and it is the correction our screen needed most: it highlighted the off state in the accent colour, which read as "this is on" |
+| Encryption | Telegram shows four emoji in the corner during a call, expandable; Signal keeps the safety number in the contact screen; WhatsApp shows a lock line | Our lock chip with the number behind a sheet, which is Telegram's idea with our own words |
+| Ending a call | All of them: one red circle, nothing else red on screen | Same |
+| Pre-call screen | None of them shows a settings card before a voice call. Telegram and WhatsApp dial straight; only a **video** call shows the self-view first | Same, which is what sections 3.1 and 3.2 now say |
+| While connecting | A short status word under the name, never a badge floating elsewhere | Same |
+
+Two things they do that we deliberately do not: an animated gradient that keeps moving
+during the whole call (decoration with a battery cost), and hiding the controls on a
+voice call (nothing to look at underneath, so hiding them only makes the user tap).
 
 ## 5. The safety number
 

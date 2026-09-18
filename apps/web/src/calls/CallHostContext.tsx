@@ -503,12 +503,13 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     id: "local",
     displayName: "You",
     isLocal: true,
-    micOn: true,
+    // A call placed from the camera check can start muted (docs/ux/calls.md
+    // section 3.2); every one of these constructors used to hardcode `true`,
+    // so the mute survived exactly until the session reported its first state.
+    micOn: callUi.pendingMicOn(),
     camOn: videoCall(),
-    handRaised: false,
     quality: qualityTierForRtt(connStats()?.rttMs ?? null),
     speaking: false,
-    screenSharing: false,
   });
 
   const remoteParticipant = (): Participant => ({
@@ -517,15 +518,21 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     isLocal: false,
     micOn: true,
     camOn: remoteHasVideo(),
-    handRaised: false,
     quality: "good",
     speaking: false,
-    screenSharing: false,
   });
 
   function syncCallUiFromState(s: WebCallState): void {
     switch (s) {
+      // `docs/ux/calls.md` §4's state table separates these two, and the store
+      // used to collapse them into one: a call ringing on the other person's
+      // phone said `Connecting...`, which described the network instead of the
+      // call. `outgoing` is the caller waiting to be answered — `Calling...`.
       case "outgoing":
+        callActions.setPhase({ kind: "calling" });
+        callActions.setParticipants([localParticipant()]);
+        callActions.setE2ee({ active: false, shortFingerprint: null });
+        break;
       case "connecting":
         callActions.setPhase({ kind: "connecting" });
         callActions.setParticipants([localParticipant()]);
@@ -747,6 +754,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     if (currentOccupant() !== null) return;
     if (groupEntry(groupIdB64) === undefined) return;
     setVideoCall(withVideo);
+    // What the row carries (docs/ux/calls.md section 4.1's table) follows the
+    // call's kind, not what is on screen — see `calls/call-controls.ts`.
+    callActions.setMediaKind(withVideo ? "video" : "voice");
     const callId = mintCallId();
     const session = buildCallSession(groupIdB64, callId);
     openCallJournal(session, groupIdB64, callIdHex(callId), false, withVideo);
@@ -775,6 +785,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     const call = activeCall;
     if (call === null) return;
     if (withVideo) setVideoCall(true);
+    // §3.3: accepting never shows a preparation screen, so this is the one
+    // place the answerer's call kind is decided.
+    callActions.setMediaKind(withVideo ? "video" : "voice");
     await call.accept();
     // Opting into video on accept drives the same mid-call camera-on path the
     // caller uses (see the camera effect below).
@@ -1851,6 +1864,14 @@ export function CallHostView(): JSX.Element {
     }
   });
 
+  // The in-call Speaker control (docs/ux/calls.md section 4.1) moves the sound
+  // to the chosen output. It writes `selectedAudioOutput`; this is what makes
+  // that a real thing rather than a stored preference — nothing applied it
+  // before, so the old settings panel's speaker picker changed nothing.
+  createEffect(() => {
+    applyAudioOutput(audioEl(), callUi.settings().selectedAudioOutput);
+  });
+
   const overlayVisible = (): boolean => {
     const s = host.state();
     return s === "outgoing" || s === "connecting" || s === "connected" || s === "ending";
@@ -1884,6 +1905,9 @@ export function CallHostView(): JSX.Element {
              (docs/ux/calls.md §5), and on a 1x1 call this device knows who
              that is. */
           peerName={internals.nameFor(host.callGroupIdB64())}
+          /* One person, one colour: the portrait's tint is hashed from the
+             same id the chat list and the contact row hash. */
+          peerId={host.callGroupIdB64()}
           remoteStreamFor={(participantId) =>
             participantId === "peer" ? (internals.remoteStream() ?? undefined) : undefined
           }
@@ -1911,15 +1935,7 @@ export function CallHostView(): JSX.Element {
                 audio does not cut on roster churn. Remote video renders per tile
                 through `remoteStreamFor`. */}
             <For each={[...handle().remoteStreams().values()]}>
-              {(stream) => (
-                <audio
-                  autoplay
-                  style={{ display: "none" }}
-                  ref={(el) => {
-                    el.srcObject = stream;
-                  }}
-                />
-              )}
+              {(stream) => <RemoteAudio stream={stream} />}
             </For>
           </>
         )}
@@ -1942,15 +1958,7 @@ export function CallHostView(): JSX.Element {
       <Show when={internals.linkHandle()}>
         {(handle) => (
           <For each={[...handle().remoteStreams().values()]}>
-            {(stream) => (
-              <audio
-                autoplay
-                style={{ display: "none" }}
-                ref={(el) => {
-                  el.srcObject = stream;
-                }}
-              />
-            )}
+            {(stream) => <RemoteAudio stream={stream} />}
           </For>
         )}
       </Show>
@@ -1959,6 +1967,49 @@ export function CallHostView(): JSX.Element {
       <GroupCallBanner />
     </>
   );
+}
+
+/**
+ * Move a sink to the output the Speaker control picked.
+ *
+ * `setSinkId` is absent in Firefox and in Safari on iOS, which is why
+ * `docs/ux/calls.md` §4.1 says to omit the Speaker control there rather than
+ * show a dead button — `routes/Call.tsx` feature-detects the same method. A
+ * rejected promise means the id names a device that is gone (a headset
+ * unplugged between the pick and the apply); the sound keeps playing through
+ * whatever it was on, which is the right outcome and not worth an error.
+ */
+function applyAudioOutput(el: HTMLAudioElement | null, deviceId: string | null): void {
+  if (el === null || deviceId === null) return;
+  if (typeof el.setSinkId !== "function") return;
+  void el.setSinkId(deviceId).catch((err: unknown) => {
+    // eslint-disable-next-line no-console
+    console.warn("call host: could not move audio to the selected output", err);
+  });
+}
+
+/** One hidden sink for one remote stream, following the Speaker control. */
+function RemoteAudio(props: { stream: MediaStream }): JSX.Element {
+  const [el, setEl] = createSignal<HTMLAudioElement | null>(null);
+  createEffect(() => {
+    applyAudioOutput(el(), callUiSettings().selectedAudioOutput);
+  });
+  return (
+    <audio
+      autoplay
+      style={{ display: "none" }}
+      ref={(node) => {
+        node.srcObject = props.stream;
+        setEl(node);
+      }}
+    />
+  );
+}
+
+/** The call store's device settings. A module-level reader so `RemoteAudio`
+ *  does not have to be nested inside the provider to see them. */
+function callUiSettings(): ReturnType<typeof callUi.settings> {
+  return callUi.settings();
 }
 
 /** A call-link call's status on a screen other than its `/c/` route. */

@@ -2,33 +2,54 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The in-call UI (docs/ux/client-redesign.md section 5.7).
+ * The in-call screen (`docs/ux/calls.md` §4, §4.1, §4.1.1, §4.2).
  *
- * Layout: active-speaker tile on top, gallery row below, a bottom row of
- * round controls, a participant list or the in-call chat as a right-hand
- * drawer, the settings sheet over everything. The surface is dark by design
- * (calls happen at any hour and a dark ground reads better behind camera
- * feeds): the `.lk-call` root carries the dark half of the shared tokens
- * (`styles.css`), so this file has no palette of its own and no colour
- * literal.
+ * ## What this replaced, and why
  *
- * Two modes:
- *   * Standalone design route (`/call/:id`, no props) — seeds mock
- *     participants on Join; the reference UI for the design system.
- *   * Embedded over a live call (`CallHostView`) — `embedded` is set and the
- *     host drives `callState` from the real session. The screen skips the
- *     mount-time `reset()` (the host owns lifecycle) and routes end-call +
- *     the ended-overlay dismissal through `onExit`.
+ * The screen it replaces was "laid out for the debugger": an active-speaker
+ * tile and a gallery row even for a two-person call, a phase badge floating
+ * over the top repeating what a line already said, and nine loose circles
+ * along the bottom edge — among them a raise-hand and a share-screen button
+ * that wrote a flag nobody could see, and a gear opening a settings list of
+ * checkboxes that no code read. Meanwhile **Speaker**, the control people reach
+ * for most on a voice call, was not on the screen at all, and the accent
+ * highlight landed on whichever button was **off**, so a muted microphone read
+ * as a live one.
  *
- * Encryption is one chip reading `Encrypted` (docs/ux/calls.md section 4),
- * shown exactly when there IS a safety number to show
- * (`calls/encryption-chip.ts`), never on a layout flag. The digits themselves
- * live behind it in the encryption sheet (section 5) and never sit on the call
- * screen.
+ * §4 asks for three things instead: a **portrait** for a voice call, a **fill**
+ * for a video call, and **one** status line. §4.1 asks for the whole control set
+ * on the screen, in one rounded bar, with no ellipsis menu in a 1x1 call.
+ *
+ * ## Where the decisions live
+ *
+ * Not here. `vitest` runs with no jsdom and no Solid transform, so nothing in
+ * this file is reachable from a test — which is how the encryption chip stayed
+ * hidden on every live call for nine months. So every rule is a pure module:
+ *
+ * - `calls/call-screen-model.ts` — which surface, what the status line says,
+ *   the duration format, whether the controls may fade.
+ * - `calls/call-controls.ts` — which controls exist, their labels, their two
+ *   states, what is disabled.
+ * - `calls/encryption-chip.ts` — whether the lock chip is shown, and the sheet.
+ *
+ * This file is the markup that reads them.
+ *
+ * ## Two modes
+ *
+ * - Embedded over a live call (`CallHostView`) — `embedded` is set, the host
+ *   drives `callState` from the real session, and end-call + the ended overlay
+ *   route through `onExit`.
+ * - The standalone design route (`/call/:id`, no props) — seeds a mock roster
+ *   so the layout can be looked at. It used to open on the pre-join card;
+ *   there is no pre-join screen any more (§3), so it opens on the call.
+ *
+ * The surface carries the dark half of the shared tokens (`styles.css`), so
+ * this file has no palette of its own and no colour literal.
  */
 
 import {
   createEffect,
+  createMemo,
   createSignal,
   For,
   onCleanup,
@@ -58,23 +79,71 @@ import {
   showsEncryptionChip,
 } from "../calls/encryption-chip";
 import {
-  mediaForPrejoin,
-  prejoinDefaults,
-  type CallMediaChoice,
-  type CallStartKind,
-} from "../calls/call-media-choice";
+  audioOutputName,
+  callControls,
+  nextAudioOutput,
+  type CallControlSpec,
+} from "../calls/call-controls";
+import {
+  ENDED_DISMISS_MS,
+  callStatusDetail,
+  callSurfaceKind,
+  controlsHidden,
+  elapsedMs,
+  endedSummary,
+  selfViewVisible,
+  spokenCallDuration,
+  type CallPhaseKind,
+  type CallSurfaceKind,
+} from "../calls/call-screen-model";
 import { paths } from "./paths";
 import { Icon } from "../ui/icons";
 import { initialsOf, toneOf } from "../ui/Avatar";
 
 // ============================================================================
-// QualityDot — small glyph in a tile corner + the participant list
+// Small shared pieces
 // ============================================================================
+
+/** Indeterminate spinner glyph. Self-contained SVG (SMIL rotation, no global
+ *  keyframes); takes the surrounding text colour. */
+const Spinner: Component<{ size?: number }> = (props) => {
+  const size = (): number => props.size ?? 22;
+  return (
+    <svg
+      class="lk-spinner"
+      width={size()}
+      height={size()}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+    >
+      <circle
+        cx="12"
+        cy="12"
+        r="9"
+        stroke="currentColor"
+        stroke-width="3"
+        stroke-linecap="round"
+        stroke-dasharray="40 60"
+      >
+        <animateTransform
+          attributeName="transform"
+          attributeType="XML"
+          type="rotate"
+          from="0 12 12"
+          to="360 12 12"
+          dur="0.8s"
+          repeatCount="indefinite"
+        />
+      </circle>
+    </svg>
+  );
+};
 
 interface QualityDotProps {
   tier: QualityTier;
-  /** When true, clicking the dot toggles the connection-detail popover
-   *  (the top-of-screen indicator). When false it is a passive glyph. */
+  /** When true, clicking the dot toggles the connection-detail popover. When
+   *  false it is a passive glyph. */
   interactive?: boolean;
 }
 
@@ -84,60 +153,117 @@ const QualityDot: Component<QualityDotProps> = (props) => (
     classList={{ interactive: props.interactive === true }}
     data-tier={qualityColour(props.tier)}
     role={props.interactive === true ? "button" : undefined}
+    tabindex={props.interactive === true ? 0 : undefined}
     aria-label={`Connection quality: ${props.tier}`}
     title={`Connection: ${props.tier}`}
     onClick={(e): void => {
-      if (props.interactive === true) {
-        e.stopPropagation();
-        callActions.setQualityPopoverOpen(!callState.qualityPopoverOpen());
-      }
+      if (props.interactive !== true) return;
+      e.stopPropagation();
+      callActions.setQualityPopoverOpen(!callState.qualityPopoverOpen());
+    }}
+    onKeyDown={(e): void => {
+      if (props.interactive !== true) return;
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      e.stopPropagation();
+      callActions.setQualityPopoverOpen(!callState.qualityPopoverOpen());
     }}
   />
 );
 
+function localQualityTier(): QualityTier {
+  const local = callState.participants().find((p) => p.isLocal);
+  return local?.quality ?? "good";
+}
+
+function formatBps(bps: number | null): string {
+  if (bps === null) return "—";
+  if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} Mbps`;
+  if (bps >= 1_000) return `${(bps / 1_000).toFixed(0)} kbps`;
+  return `${bps} bps`;
+}
+
+/**
+ * The connection quality dot, and the measurements behind it.
+ *
+ * §4: "Connection quality stays as it is: a real measurement or nothing at
+ * all." So the dot is only drawn once a round-trip time has actually been
+ * sampled — before that there is no measurement, and a green dot would be an
+ * invented signal bar (§1).
+ */
+const QualityIndicator: Component = () => (
+  <Show when={callState.connectionDetail().rttMs !== null}>
+    <div class="lk-call-quality">
+      <QualityDot tier={localQualityTier()} interactive={true} />
+      <Show when={callState.qualityPopoverOpen()}>
+        <div class="lk-call-popover" role="dialog" aria-label="Connection details">
+          <div class="lk-call-popover-head">
+            <span>{localQualityTier()}</span>
+            <span
+              classList={{
+                ok: callState.connectionDetail().connectionType === "direct",
+                warn: callState.connectionDetail().connectionType !== "direct",
+              }}
+            >
+              {callState.connectionDetail().connectionType === "direct"
+                ? "Direct"
+                : callState.connectionDetail().connectionType === "relay"
+                  ? "Relay"
+                  : "—"}
+            </span>
+          </div>
+          <dl class="lk-call-popover-stats">
+            <dt>Round trip</dt>
+            <dd>
+              {callState.connectionDetail().rttMs !== null
+                ? `${callState.connectionDetail().rttMs} ms`
+                : "—"}
+            </dd>
+            <dt>Down</dt>
+            <dd>{formatBps(callState.connectionDetail().downBps)}</dd>
+            <dt>Up</dt>
+            <dd>{formatBps(callState.connectionDetail().upBps)}</dd>
+          </dl>
+        </div>
+      </Show>
+    </div>
+  </Show>
+);
+
 // ============================================================================
-// EncryptionChip — one lock and the word `Encrypted` (docs/ux/calls.md
-// section 4). It replaces the strip of sixteen digits that used to occupy the
-// most valuable line on the screen; the digits are one tap away, in the sheet
-// below, and never on the call itself.
-//
-// Shown only when the call's own encryption is armed AND a number exists to
-// compare — the chip is a promise that tapping it produces one.
+// EncryptionChip / EncryptionSheet — one lock and the word `Encrypted`
+// (§4), with the digits one tap behind it (§5). Unchanged by this redesign
+// beyond where the chip sits: it is now beside the status line rather than in
+// a bar of its own.
 // ============================================================================
 
 const EncryptionChip: Component<{ onOpen: () => void }> = (props) => (
   <Show
     when={showsEncryptionChip(callState.e2ee())}
     fallback={
-      // Not armed yet. Says so rather than claiming protection, and is not a
+      // Not armed. Says so rather than claiming protection, and is not a
       // button: there is nothing to show behind it.
-      <div class="lk-call-pill negotiating" role="status">
-        <Icon name="lock" size={14} />
+      <span class="lk-call-chip negotiating" role="status">
+        <Icon name="lock" size={13} />
         <span>Setting up...</span>
-      </div>
+      </span>
     }
   >
     <button
       type="button"
-      class="lk-call-pill secure"
+      class="lk-call-chip secure"
       aria-label="This call is encrypted. Show the safety number"
       aria-haspopup="dialog"
-      onClick={() => props.onOpen()}
+      onClick={(e): void => {
+        e.stopPropagation();
+        props.onOpen();
+      }}
     >
-      <Icon name="lock" size={14} />
+      <Icon name="lock" size={13} />
       <span>Encrypted</span>
     </button>
   </Show>
 );
-
-// ============================================================================
-// EncryptionSheet — the safety number, on request only (section 5).
-//
-// One plain sentence naming the other person, the number in four groups of
-// four, one line saying what to do with it, and Copy / Done. No protocol
-// words: section 5 is explicit that the code means nothing to anyone who has
-// not been told what it is, so the sheet is where being told happens.
-// ============================================================================
 
 const EncryptionSheet: Component<{ peerName: string | null; onClose: () => void }> = (props) => {
   const [copied, setCopied] = createSignal(false);
@@ -145,8 +271,6 @@ const EncryptionSheet: Component<{ peerName: string | null; onClose: () => void 
 
   const number = (): string | null => callState.e2ee().shortFingerprint;
 
-  // Focus the safe, obvious way out as the sheet appears; Escape does the
-  // same, which is the conventional dismissal and costs nothing here.
   createEffect(() => {
     doneButton?.focus();
   });
@@ -195,10 +319,9 @@ const EncryptionSheet: Component<{ peerName: string | null; onClose: () => void 
         <h2 id="lk-encryption-sheet-title">This call is encrypted</h2>
         <p class="lk-encryption-sheet-lead">{encryptionSheetSentence(props.peerName)}</p>
 
-        {/* One atomic thing to a screen reader: `role="img"` with a label
-            that pauses between the groups (section 8, "the safety number is
-            read in groups of four"), rather than sixteen digits run together
-            or four unexplained numbers. */}
+        {/* One atomic thing to a screen reader: `role="img"` with a label that
+            pauses between the groups (§8), rather than sixteen digits run
+            together or four unexplained numbers. */}
         <p
           class="lk-encryption-sheet-number"
           role="img"
@@ -235,80 +358,305 @@ const EncryptionSheet: Component<{ peerName: string | null; onClose: () => void 
 };
 
 // ============================================================================
-// QualityIndicator — top-of-screen quality dot + tappable popover with
-// RTT / bitrate / connection type.
+// The control bar (§4.1, §4.1.1)
 // ============================================================================
 
-function localQualityTier(): QualityTier {
-  const local = callState.participants().find((p) => p.isLocal);
-  return local?.quality ?? "good";
-}
+/**
+ * One circle plus its word.
+ *
+ * The two states are `data-tone` and nothing else: `outline` for a live device,
+ * `solid` for one that is off. §4.1.1 puts the loud state on **off**, which is
+ * the correction the old row needed most — it painted the off button in the
+ * accent colour, which reads as "this is on".
+ *
+ * The label sits under the circle in a fixed size, and the spoken name is the
+ * action plus the state it will produce, so a screen-reader user is told what
+ * pressing does rather than what is currently true.
+ */
+const ControlButton: Component<{
+  spec: CallControlSpec;
+  busy?: boolean;
+  onPress: () => void;
+}> = (props) => {
+  const inert = (): boolean => props.spec.disabled || props.busy === true;
+  return (
+    <div class="lk-call-ctl" classList={{ end: props.spec.tone === "end" }}>
+      <button
+        type="button"
+        class="lk-call-ctl-btn"
+        data-tone={props.spec.tone}
+        aria-label={props.spec.accessibleName}
+        aria-pressed={props.spec.pressed ?? undefined}
+        aria-busy={props.busy === true ? "true" : undefined}
+        title={props.spec.accessibleName}
+        disabled={inert()}
+        onClick={(e): void => {
+          e.stopPropagation();
+          if (inert()) return;
+          props.onPress();
+        }}
+      >
+        <Show when={props.busy === true} fallback={<Icon name={props.spec.icon} size={26} />}>
+          <Spinner size={26} />
+        </Show>
+      </button>
+      <span class="lk-call-ctl-label" aria-hidden="true">
+        {props.spec.label}
+      </span>
+    </div>
+  );
+};
 
-function formatBps(bps: number | null): string {
-  if (bps === null) return "—";
-  if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} Mbps`;
-  if (bps >= 1_000) return `${(bps / 1_000).toFixed(0)} kbps`;
-  return `${bps} bps`;
-}
-
-const QualityIndicator: Component = () => (
-  <div class="lk-call-quality">
-    <QualityDot tier={localQualityTier()} interactive={true} />
-    <Show when={callState.qualityPopoverOpen()}>
-      <div class="lk-call-popover" role="dialog" aria-label="Connection details">
-        <div class="lk-call-popover-head">
-          <span>{localQualityTier()}</span>
-          <span
-            classList={{
-              ok: callState.connectionDetail().connectionType === "direct",
-              warn: callState.connectionDetail().connectionType !== "direct",
-            }}
-          >
-            {callState.connectionDetail().connectionType === "direct"
-              ? "Direct"
-              : callState.connectionDetail().connectionType === "relay"
-                ? "Relay"
-                : "—"}
-          </span>
-        </div>
-        <dl class="lk-call-popover-stats">
-          <dt>Round trip</dt>
-          <dd>
-            {callState.connectionDetail().rttMs !== null
-              ? `${callState.connectionDetail().rttMs} ms`
-              : "—"}
-          </dd>
-          <dt>Down</dt>
-          <dd>{formatBps(callState.connectionDetail().downBps)}</dd>
-          <dt>Up</dt>
-          <dd>{formatBps(callState.connectionDetail().upBps)}</dd>
-        </dl>
-      </div>
-    </Show>
+/**
+ * The row, in one rounded translucent bar floating above the bottom edge
+ * (§4.1, §4.2: "WhatsApp, Telegram and FaceTime all float them in one rounded
+ * container over the content, not loose on the background. That container is
+ * what our screen was missing.").
+ *
+ * On a voice call the bar sits in the lower third under the portrait rather
+ * than welded to the bottom of an empty surface — a `data-surface` the
+ * stylesheet reads, so the rule is one place rather than repeated per button.
+ */
+const ControlBar: Component<{
+  surface: CallSurfaceKind;
+  /** Faded out after an idle window on a connected video call (§4). A visual
+   *  state only: the bar keeps its accessible name and its buttons keep their
+   *  place in the tab order, and a focus inside it wakes it (the root's
+   *  `focusin`) — marking it `aria-hidden` would hide focusable controls from
+   *  a screen reader while leaving them reachable by keyboard. */
+  hidden: boolean;
+  controls: CallControlSpec[];
+  cameraBusy: boolean;
+  onPress: (spec: CallControlSpec) => void;
+}> = (props) => (
+  <div
+    class="lk-call-bar"
+    data-surface={props.surface}
+    classList={{ faded: props.hidden }}
+    role="toolbar"
+    aria-label="Call controls"
+  >
+    <For each={props.controls}>
+      {(spec) => (
+        <ControlButton
+          spec={spec}
+          busy={spec.id === "camera" && props.cameraBusy}
+          onPress={(): void => props.onPress(spec)}
+        />
+      )}
+    </For>
   </div>
 );
 
 // ============================================================================
-// ParticipantTile — single video / avatar card
+// The status line (§4)
+// ============================================================================
+
+/**
+ * Name, then state or duration — never two of them at once, and never a
+ * floating badge elsewhere repeating it.
+ *
+ * The duration is announced as a duration rather than read digit by digit
+ * (§8): `12:04` read aloud is a time of day, so the visible text is hidden from
+ * the reader and an `aria-label` carries the words.
+ */
+const CallStatus: Component<{
+  name: string;
+  detail: string;
+  spokenDetail: string;
+  /** On the voice portrait the avatar belongs to this block: §4 stacks it,
+   *  the name and the line as one figure in the upper half. Omitted on the
+   *  video fill and the group grid, where the status floats at the top over
+   *  the picture. */
+  avatar?: boolean;
+  onOpenEncryption: () => void;
+}> = (props) => (
+  <div class="lk-call-status">
+    <Show when={props.avatar === true}>
+      <div class="lk-call-portrait-avatar" aria-hidden="true">
+        {initialsOf(props.name)}
+      </div>
+    </Show>
+    <h1 class="lk-call-name">{props.name}</h1>
+    <div class="lk-call-state">
+      <span class="lk-call-state-text" role="status" aria-label={props.spokenDetail}>
+        <span aria-hidden="true">{props.detail}</span>
+      </span>
+      <EncryptionChip onOpen={props.onOpenEncryption} />
+      <QualityIndicator />
+    </div>
+  </div>
+);
+
+// ============================================================================
+// The voice portrait (§4, §4.2)
+// ============================================================================
+
+/**
+ * The other person, large and centred in the upper half.
+ *
+ * §4.2 on the background: "Telegram animates a gradient built from the
+ * contact's colour; Signal and WhatsApp blur the contact's photo ... Flat
+ * surface reads as an empty page, which is what made ours look unfinished." So
+ * the ground is the contact's own avatar tint, heavily blurred and darkened —
+ * Lakko has no profile photos yet, so the tint and the initials are what there
+ * is to blur, and the same hash picks it as everywhere else in the app, which
+ * keeps one person one colour.
+ *
+ * The one thing §4.2 says we deliberately do not copy is an animation that
+ * keeps moving for the whole call: decoration with a battery cost.
+ */
+const CallPortrait: Component<{ name: string; toneId: string }> = (props) => (
+  <div class="lk-call-portrait" data-tone={toneOf(props.toneId)} aria-hidden="true">
+    <div class="lk-call-portrait-wash">
+      <span class="lk-call-portrait-blur">{initialsOf(props.name)}</span>
+    </div>
+  </div>
+);
+
+// ============================================================================
+// The self-view (§4)
+// ============================================================================
+
+/**
+ * "The self-view is a small rounded rectangle in a corner, draggable, about a
+ * quarter of the width."
+ *
+ * Draggable because the one place a corner rectangle is guaranteed to be in the
+ * way is the corner the other person's face happens to occupy. Position is kept
+ * in pixels relative to the call surface and clamped to it on every move, so a
+ * drag cannot park it off-screen; `null` means "the default corner", which is
+ * where it returns on the next call.
+ *
+ * §4.1: "Flip camera does not belong in the row. It lives on the self-view
+ * itself, as a small button in that rectangle's corner, where the thing it
+ * changes is visible."
+ */
+const SelfView: Component<{
+  stream: MediaStream | undefined;
+  starting: boolean;
+  canFlip: boolean;
+  onFlip: () => void;
+}> = (props) => {
+  const [pos, setPos] = createSignal<{ x: number; y: number } | null>(null);
+  let box: HTMLDivElement | undefined;
+  let dragging: { pointerId: number; dx: number; dy: number } | null = null;
+
+  const onPointerDown = (e: PointerEvent): void => {
+    if (box === undefined) return;
+    // The flip button is inside the rectangle and must stay pressable.
+    if ((e.target as HTMLElement).closest("button") !== null) return;
+    const rect = box.getBoundingClientRect();
+    const parent = box.offsetParent as HTMLElement | null;
+    const origin = parent?.getBoundingClientRect() ?? { left: 0, top: 0 };
+    dragging = {
+      pointerId: e.pointerId,
+      dx: e.clientX - rect.left,
+      dy: e.clientY - rect.top,
+    };
+    setPos({ x: rect.left - origin.left, y: rect.top - origin.top });
+    box.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  };
+
+  const onPointerMove = (e: PointerEvent): void => {
+    if (dragging === null || box === undefined || e.pointerId !== dragging.pointerId) return;
+    const parent = box.offsetParent as HTMLElement | null;
+    const origin = parent?.getBoundingClientRect();
+    if (origin === undefined) return;
+    const maxX = Math.max(0, origin.width - box.offsetWidth);
+    const maxY = Math.max(0, origin.height - box.offsetHeight);
+    setPos({
+      x: clamp(e.clientX - origin.left - dragging.dx, 0, maxX),
+      y: clamp(e.clientY - origin.top - dragging.dy, 0, maxY),
+    });
+  };
+
+  const endDrag = (e: PointerEvent): void => {
+    if (dragging === null || e.pointerId !== dragging.pointerId) return;
+    box?.releasePointerCapture(e.pointerId);
+    dragging = null;
+  };
+
+  return (
+    <div
+      class="lk-call-self"
+      ref={box}
+      style={
+        pos() === null
+          ? undefined
+          : { left: `${pos()?.x ?? 0}px`, top: `${pos()?.y ?? 0}px`, right: "auto", bottom: "auto" }
+      }
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={endDrag}
+      onPointerCancel={endDrag}
+    >
+      <Show
+        when={props.stream}
+        fallback={
+          <div class="lk-call-self-blank" aria-hidden="true">
+            <Icon name="video" size={20} strokeWidth={1.4} />
+          </div>
+        }
+      >
+        {(stream) => (
+          <video
+            class="lk-call-self-video"
+            autoplay
+            playsinline
+            muted
+            aria-label="Your camera"
+            ref={(el) => {
+              el.srcObject = stream();
+            }}
+          />
+        )}
+      </Show>
+
+      <Show when={props.starting}>
+        <div class="lk-call-self-overlay" role="status" aria-live="polite">
+          <Spinner size={20} />
+          <span>Starting camera...</span>
+        </div>
+      </Show>
+
+      <Show when={props.canFlip}>
+        <button
+          type="button"
+          class="lk-call-self-flip"
+          aria-label="Switch to the other camera"
+          title="Switch to the other camera"
+          onClick={(e): void => {
+            e.stopPropagation();
+            props.onFlip();
+          }}
+        >
+          <Icon name="cameraFlip" size={16} />
+        </button>
+      </Show>
+    </div>
+  );
+};
+
+function clamp(value: number, low: number, high: number): number {
+  return Math.min(high, Math.max(low, value));
+}
+
+// ============================================================================
+// The group roster (§9 keeps this as it is)
 // ============================================================================
 
 interface TileProps {
   participant: Participant;
   large: boolean;
   onPin?: (id: string) => void;
-  /** SFU group-call only: resolve this participant to its remote
-   *  `MediaStream` (see the `Call` prop of the same name). */
   remoteStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
-  /** 1x1 P2P only: the local capture `MediaStream`, for the self-preview
-   *  `<video>` on the LOCAL tile (see the `Call` prop). */
   localStream?: (() => MediaStream | undefined) | undefined;
 }
 
 const ParticipantTile: Component<TileProps> = (props) => {
   const isPinned = (): boolean => callState.pinnedId() === props.participant.id;
-  /** The live `MediaStream` for this tile, if any. The local tile reads the
-   *  self-preview capture; a remote tile reads the SFU / P2P remote stream.
-   *  Reading it inside JSX tracks the underlying signals. */
   const tileStream = (): MediaStream | undefined =>
     props.participant.isLocal
       ? props.localStream?.()
@@ -338,10 +686,9 @@ const ParticipantTile: Component<TileProps> = (props) => {
           </div>
         }
       >
-        {/* A real <video> bound to the stream. Muted — audio plays through
-            the dedicated hidden <audio> sinks, so this element never doubles
-            the audio. The mock path passes no stream and falls through to
-            the blank surface. */}
+        {/* A real <video> bound to the stream. Muted — audio plays through the
+            dedicated hidden <audio> sinks, so this element never doubles the
+            audio. The mock path passes no stream and falls through. */}
         <Show
           when={tileStream()}
           fallback={
@@ -365,9 +712,6 @@ const ParticipantTile: Component<TileProps> = (props) => {
         </Show>
       </Show>
 
-      {/* Mid-call camera-on hint on the LOCAL tile: while the camera is
-          being acquired the tile is present but the track is not live, so
-          the black tile reads as loading, not broken. */}
       <Show when={props.participant.isLocal && callState.videoPublishState() === "starting"}>
         <div class="lk-call-tile-overlay" role="status" aria-live="polite">
           <Spinner size={props.large ? 30 : 24} />
@@ -375,28 +719,12 @@ const ParticipantTile: Component<TileProps> = (props) => {
         </div>
       </Show>
 
-      {/* Central mute glyph when the remote is muted, so the listener knows
-          their audio input is off. Hidden on the local tile. */}
       <Show when={!props.participant.micOn && !props.participant.isLocal}>
         <div class="lk-call-tile-mute" aria-hidden="true">
           <Icon name="micOff" size={props.large ? 22 : 16} />
         </div>
       </Show>
 
-      <Show when={props.participant.screenSharing}>
-        <div class="lk-call-badge top-left">
-          <Icon name="monitor" size={14} />
-          Sharing
-        </div>
-      </Show>
-
-      <Show when={props.participant.handRaised}>
-        <div class="lk-call-badge top-right" title="Hand raised" aria-label="Hand raised">
-          <Icon name="hand" size={14} />
-        </div>
-      </Show>
-
-      {/* Bottom strip: name + mute + quality + pin */}
       <div class="lk-call-tile-strip">
         <Show when={!props.participant.micOn}>
           <span class="lk-call-tile-muted" aria-label="Microphone muted" title="Muted">
@@ -415,496 +743,40 @@ const ParticipantTile: Component<TileProps> = (props) => {
   );
 };
 
-// ============================================================================
-// PrejoinScreen — a card with the preview and two toggles.
-//
-// docs/ux/calls.md section 3: "A voice call never turns the camera on. The
-// pre-join screen opens with the camera off for a voice call and on for a
-// video call, and the toggles there change the call that is actually placed."
-//
-// Both halves are `calls/call-media-choice.ts`: the screen opens at
-// `prejoinDefaults(kind)` and hands `mediaForPrejoin(toggles)` to Join, so the
-// camera switch changes the offer rather than only the preview. The screen
-// used to open the camera on whatever the caller had pressed, which is the
-// defect that section names.
-// ============================================================================
-
-const PrejoinScreen: Component<{
-  kind: CallStartKind;
-  onJoin: (media: CallMediaChoice) => void;
-}> = (props) => {
-  // Local toggles for camera / mic preview. Once the user joins, these copy
-  // into the participant entry's flags so the post-join state matches — and
-  // into the media the call is placed with.
-  const [previewCamOn, setPreviewCamOn] = createSignal(prejoinDefaults(props.kind).camOn);
-  const [previewMicOn, setPreviewMicOn] = createSignal(prejoinDefaults(props.kind).micOn);
-
-  return (
-    <div class="lk-call lk-call-prejoin" role="region" aria-label="Before you join">
-      <div class="lk-call-prejoin-card">
-        <h1>Ready to join?</h1>
-        <p>Check your camera and microphone first.</p>
-
-        <div class="lk-call-preview">
-          <Show
-            when={previewCamOn()}
-            fallback={
-              <div class="lk-call-tile-blank" aria-hidden="true">
-                <Icon name="videoOff" size={48} strokeWidth={1.4} />
-              </div>
-            }
-          >
-            <div class="lk-call-tile-blank" aria-hidden="true">
-              <Icon name="video" size={48} strokeWidth={1.4} />
-            </div>
-          </Show>
-        </div>
-
-        <div class="lk-call-preview-toggles" role="group" aria-label="Devices">
-          <CircleButton
-            label={previewCamOn() ? "Turn off camera" : "Turn on camera"}
-            glyph={<Icon name={previewCamOn() ? "video" : "videoOff"} size={22} />}
-            active={!previewCamOn()}
-            onClick={(): void => {
-              setPreviewCamOn(!previewCamOn());
-            }}
-          />
-          <CircleButton
-            label={previewMicOn() ? "Mute microphone" : "Unmute microphone"}
-            glyph={<Icon name={previewMicOn() ? "mic" : "micOff"} size={22} />}
-            active={!previewMicOn()}
-            onClick={(): void => {
-              setPreviewMicOn(!previewMicOn());
-            }}
-          />
-        </div>
-
-        <button
-          type="button"
-          class="primary lk-call-join"
-          onClick={(): void => {
-            // Carry the preview toggles into the post-join participant
-            // state AND into the media the call is placed with, then
-            // transition.
-            const media = mediaForPrejoin({ micOn: previewMicOn(), camOn: previewCamOn() });
-            callActions.setMic(previewMicOn());
-            callActions.setCamera(media.video);
-            callActions.join();
-            props.onJoin(media);
-          }}
-        >
-          Join
-        </button>
-      </div>
-    </div>
-  );
-};
-
-// ============================================================================
-// WaitingMessage — shown while the local participant is alone in the call
-// ============================================================================
-
-const WaitingMessage: Component = () => (
-  <div class="lk-call-waiting" role="status" aria-live="polite">
-    Waiting for others to join...
-  </div>
-);
-
-// ============================================================================
-// ControlsBar — the bottom row of round buttons
-// ============================================================================
-
-/** Indeterminate spinner glyph. Self-contained SVG (SMIL rotation, no global
- *  keyframes); takes the surrounding text colour. */
-const Spinner: Component<{ size?: number }> = (props) => {
-  const size = (): number => props.size ?? 22;
-  return (
-    <svg
-      class="lk-spinner"
-      width={size()}
-      height={size()}
-      viewBox="0 0 24 24"
-      fill="none"
-      aria-hidden="true"
-    >
-      <circle
-        cx="12"
-        cy="12"
-        r="9"
-        stroke="currentColor"
-        stroke-width="3"
-        stroke-linecap="round"
-        stroke-dasharray="40 60"
-      >
-        <animateTransform
-          attributeName="transform"
-          attributeType="XML"
-          type="rotate"
-          from="0 12 12"
-          to="360 12 12"
-          dur="0.8s"
-          repeatCount="indefinite"
-        />
-      </circle>
-    </svg>
-  );
-};
-
-interface ButtonProps {
-  label: string;
-  glyph: JSX.Element;
-  active: boolean;
-  destructive?: boolean;
-  /** Show a spinner in place of the glyph + make the button non-interactive
-   *  — an async action is in flight (e.g. mid-call camera acquisition). */
-  busy?: boolean;
-  /** Dim + disable the button without a spinner. */
-  disabled?: boolean;
-  onClick: () => void;
-}
-
-const CircleButton: Component<ButtonProps> = (props) => {
-  const inert = (): boolean => props.busy === true || props.disabled === true;
-  return (
-    <button
-      type="button"
-      class="lk-call-btn"
-      classList={{
-        active: props.active && props.destructive !== true,
-        destructive: props.destructive === true,
-        busy: props.busy === true,
-      }}
-      aria-label={props.label}
-      aria-pressed={props.destructive === true ? undefined : props.active}
-      aria-busy={props.busy === true ? "true" : undefined}
-      title={props.label}
-      disabled={inert()}
-      onClick={(): void => {
-        if (inert()) return;
-        props.onClick();
-      }}
-    >
-      <Show when={props.busy === true} fallback={props.glyph}>
-        <Spinner />
-      </Show>
-    </button>
-  );
-};
-
-const ControlsBar: Component = () => {
-  const local = (): Participant | null =>
-    callState.participants().find((p) => p.isLocal) ?? null;
-
-  return (
-    <div class="lk-call-controls" role="toolbar" aria-label="Call controls">
-      <CircleButton
-        label={local()?.micOn === true ? "Mute microphone" : "Unmute microphone"}
-        glyph={<Icon name={local()?.micOn === true ? "mic" : "micOff"} size={22} />}
-        active={local()?.micOn === false}
-        onClick={(): void => callActions.setMic(local()?.micOn !== true)}
-      />
-      <CircleButton
-        label={
-          callState.videoPublishState() === "starting"
-            ? "Starting camera..."
-            : local()?.camOn === true
-              ? "Stop camera"
-              : "Start camera"
-        }
-        glyph={<Icon name={local()?.camOn === true ? "video" : "videoOff"} size={22} />}
-        active={local()?.camOn === false}
-        // The acquire + renegotiate is async; a spinner + disabled prevents a
-        // spam-tap while the session in-flight-guards.
-        busy={callState.videoPublishState() === "starting"}
-        onClick={(): void => callActions.setCamera(local()?.camOn !== true)}
-      />
-      {/* Switch front / back camera — surfaces only when the platform
-          reported two or more cameras (a phone). Hidden on a laptop with one
-          built-in camera. */}
-      <Show when={callState.hasMultipleCameras() && local()?.camOn === true}>
-        <CircleButton
-          label="Switch camera"
-          glyph={<Icon name="cameraFlip" size={22} />}
-          active={false}
-          onClick={(): void => {
-            // Cycle to the next video input. The store's `selectedVideoInput`
-            // drives the in-call device-switch effect, which calls
-            // `session.switchVideoInput` + `replaceTrack` (same-kind, no
-            // renegotiation) — so this reuses the shipped device-switch path
-            // rather than re-capturing here.
-            void (async (): Promise<void> => {
-              try {
-                const devices = await navigator.mediaDevices.enumerateDevices();
-                const cams = devices.filter((d) => d.kind === "videoinput" && d.deviceId.length > 0);
-                if (cams.length < 2) return;
-                const current = callState.settings().selectedVideoInput;
-                const idx =
-                  current === null
-                    ? 0
-                    : Math.max(
-                        0,
-                        cams.findIndex((c) => c.deviceId === current),
-                      );
-                const next = cams[(idx + 1) % cams.length];
-                if (next !== undefined) {
-                  callActions.setSelectedVideoInput(next.deviceId);
-                }
-              } catch (err) {
-                // eslint-disable-next-line no-console
-                console.warn("call ui: switch camera enumerate failed", err);
-              }
-            })();
-          }}
-        />
-      </Show>
-      <CircleButton
-        label="Participants"
-        glyph={<Icon name="contacts" size={22} />}
-        active={callState.participantListOpen()}
-        onClick={(): void => callActions.setParticipantListOpen(!callState.participantListOpen())}
-      />
-      <CircleButton
-        label={local()?.handRaised === true ? "Lower hand" : "Raise hand"}
-        glyph={<Icon name="hand" size={22} />}
-        active={local()?.handRaised === true}
-        onClick={(): void => callActions.setHandRaised(local()?.handRaised !== true)}
-      />
-      <CircleButton
-        label={local()?.screenSharing === true ? "Stop sharing screen" : "Share screen"}
-        glyph={<Icon name="monitor" size={22} />}
-        active={local()?.screenSharing === true}
-        onClick={(): void => callActions.setScreenSharing(local()?.screenSharing !== true)}
-      />
-      <ChatToggleButton />
-      <CircleButton
-        label="Settings"
-        glyph={<Icon name="settings" size={22} />}
-        active={callState.settingsOpen()}
-        onClick={(): void => callActions.setSettingsOpen(!callState.settingsOpen())}
-      />
-      <CircleButton
-        label="End call"
-        glyph={<Icon name="phoneEnd" size={22} />}
-        active={false}
-        destructive={true}
-        onClick={(): void => callActions.endCall()}
-      />
-    </div>
-  );
-};
-
-/** Chat toggle — a CircleButton with an unread-count badge. The badge
- *  surfaces only when there is something to read AND the panel is closed. */
-const ChatToggleButton: Component = () => (
-  <div class="lk-call-btn-wrap">
-    <CircleButton
-      label={
-        callState.chatOpen()
-          ? "Close chat"
-          : callState.chatUnreadCount() > 0
-            ? `Chat (${callState.chatUnreadCount()} unread)`
-            : "Chat"
-      }
-      glyph={<Icon name="chat" size={22} />}
-      active={callState.chatOpen()}
-      onClick={(): void => callActions.setChatOpen(!callState.chatOpen())}
-    />
-    <Show when={callState.chatUnreadCount() > 0 && !callState.chatOpen()}>
-      <span class="lk-call-btn-badge" aria-hidden="true">
-        {callState.chatUnreadCount() > 99 ? "99+" : callState.chatUnreadCount()}
-      </span>
-    </Show>
-  </div>
-);
-
-// ============================================================================
-// SettingsPanel — the settings sheet
-// ============================================================================
-//
-// Three device pickers + five processing toggles. The device pickers list
-// the OS's real capture / playback devices via `refreshCallDevices`, pulled
-// when the panel opens and on hot-plug (`devicechange`).
-
-/** Enumerate the OS's real capture / playback devices and publish them into
- *  the shared call store so the pickers list the user's actual microphones,
- *  cameras and speakers. Device labels populate only once `getUserMedia` has
- *  been granted (during a live call); before that the browser returns stable
- *  ids with blank labels, which the picker renders with a generic fallback. */
-async function refreshCallDevices(): Promise<void> {
-  const md = typeof navigator !== "undefined" ? navigator.mediaDevices : undefined;
-  if (!md?.enumerateDevices) {
-    return;
-  }
-  try {
-    const infos = await md.enumerateDevices();
-    const devices: CallDevice[] = infos
-      .filter((d) => d.kind === "audioinput" || d.kind === "videoinput" || d.kind === "audiooutput")
-      .map((d) => ({
-        id: d.deviceId,
-        label: d.label,
-        kind: d.kind as CallDevice["kind"],
-      }));
-    callActions.setAvailableDevices(devices);
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn("enumerateDevices failed", err);
-  }
-}
-
-const SettingsPanel: Component = () => {
-  // Refresh the device list whenever the panel opens, and keep it current on
-  // hot-plug (a mic / headset / camera connected or removed mid-call).
-  createEffect(() => {
-    if (!callState.settingsOpen()) {
-      return;
-    }
-    void refreshCallDevices();
-  });
-  onMount(() => {
-    const md = typeof navigator !== "undefined" ? navigator.mediaDevices : undefined;
-    if (!md?.addEventListener) {
-      return;
-    }
-    const handler = (): void => {
-      void refreshCallDevices();
-    };
-    md.addEventListener("devicechange", handler);
-    onCleanup(() => md.removeEventListener("devicechange", handler));
-  });
-  return (
-    <Show when={callState.settingsOpen()}>
-      <div
-        class="lk-call-modal-backdrop"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Call settings"
-        onClick={(e): void => {
-          // Click-out to dismiss — only when the backdrop itself is the
-          // target, not the inner card.
-          if (e.target === e.currentTarget) {
-            callActions.setSettingsOpen(false);
-          }
-        }}
-      >
-        <div class="lk-call-modal">
-          <div class="lk-call-modal-head">
-            <h2>Settings</h2>
-            <button
-              type="button"
-              class="lk-icon-button"
-              aria-label="Close settings"
-              onClick={(): void => callActions.setSettingsOpen(false)}
-            >
-              <Icon name="close" size={18} />
-            </button>
-          </div>
-
-          <DevicePicker
-            label="Microphone"
-            kind="audioinput"
-            selectedId={callState.settings().selectedAudioInput}
-            onPick={(id): void => callActions.setSelectedAudioInput(id)}
-          />
-          <DevicePicker
-            label="Camera"
-            kind="videoinput"
-            selectedId={callState.settings().selectedVideoInput}
-            onPick={(id): void => callActions.setSelectedVideoInput(id)}
-          />
-          <DevicePicker
-            label="Speaker"
-            kind="audiooutput"
-            selectedId={callState.settings().selectedAudioOutput}
-            onPick={(id): void => callActions.setSelectedAudioOutput(id)}
-          />
-
-          <hr class="lk-call-sep" />
-
-          <SettingsToggle
-            label="Noise suppression"
-            checked={callState.settings().noiseSuppression}
-            onChange={(v): void => callActions.setNoiseSuppression(v)}
-          />
-          <SettingsToggle
-            label="Echo cancellation"
-            checked={callState.settings().echoCancellation}
-            onChange={(v): void => callActions.setEchoCancellation(v)}
-          />
-          <SettingsToggle
-            label="Automatic gain control"
-            checked={callState.settings().autoGain}
-            onChange={(v): void => callActions.setAutoGain(v)}
-          />
-          <SettingsToggle
-            label="Mirror my preview"
-            checked={callState.settings().mirrorLocal}
-            onChange={(v): void => callActions.setMirrorLocal(v)}
-          />
-          <SettingsToggle
-            label="Low-data mode"
-            description="Caps video at 360p. Useful on a metered connection."
-            checked={callState.settings().lowDataMode}
-            onChange={(v): void => callActions.setLowDataMode(v)}
-          />
-        </div>
-      </div>
-    </Show>
-  );
-};
-
-const DevicePicker: Component<{
-  label: string;
-  kind: CallDevice["kind"];
-  selectedId: string | null;
-  onPick: (id: string | null) => void;
-}> = (props) => {
-  const available = (): CallDevice[] =>
-    callState.settings().availableDevices.filter((d) => d.kind === props.kind);
-  return (
-    <label class="lk-call-field">
-      {props.label}
-      <select
-        value={props.selectedId ?? ""}
-        onChange={(e): void => {
-          const value = e.currentTarget.value;
-          props.onPick(value === "" ? null : value);
-        }}
-      >
-        <option value="">System default</option>
-        <For each={available()}>
-          {(d): JSX.Element => <option value={d.id}>{d.label || `(${d.kind})`}</option>}
-        </For>
-      </select>
-      <Show when={available().length === 0}>
-        <span class="lk-meta lk-block lk-mt-4">
-          No devices listed yet. They appear once you allow the microphone or camera.
-        </span>
-      </Show>
-    </label>
-  );
-};
-
-const SettingsToggle: Component<{
-  label: string;
-  description?: string;
-  checked: boolean;
-  onChange: (value: boolean) => void;
+const GroupStage: Component<{
+  remoteStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
+  localStream?: (() => MediaStream | undefined) | undefined;
 }> = (props) => (
-  <label class="lk-check lk-call-toggle">
-    <input
-      type="checkbox"
-      checked={props.checked}
-      onChange={(e): void => props.onChange(e.currentTarget.checked)}
-    />
-    <span class="lk-call-toggle-text">
-      <span>{props.label}</span>
-      <Show when={props.description}>{(d) => <span class="lk-meta">{d()}</span>}</Show>
-    </span>
-  </label>
+  <>
+    <Show when={activeSpeaker() !== null}>
+      <div class="lk-call-stage">
+        <ParticipantTile
+          participant={activeSpeaker() as Participant}
+          large={true}
+          onPin={(id): void => callActions.pin(id === "" ? null : id)}
+          remoteStreamFor={props.remoteStreamFor}
+          localStream={props.localStream}
+        />
+      </div>
+    </Show>
+    <div class="lk-call-gallery">
+      <For each={galleryParticipants()}>
+        {(p) => (
+          <ParticipantTile
+            participant={p}
+            large={false}
+            onPin={(id): void => callActions.pin(id === "" ? null : id)}
+            remoteStreamFor={props.remoteStreamFor}
+            localStream={props.localStream}
+          />
+        )}
+      </For>
+    </div>
+  </>
 );
 
 // ============================================================================
-// ParticipantList drawer
+// The group overflow: participants and chat (§4.1 allows exactly one)
 // ============================================================================
 
 const ParticipantList: Component = () => (
@@ -929,19 +801,9 @@ const ParticipantList: Component = () => (
               <span class="lk-call-person-name">
                 {p.displayName || (p.isLocal ? "You" : "Participant")}
               </span>
-              <Show when={p.handRaised}>
-                <span title="Hand raised" aria-label="Hand raised">
-                  <Icon name="hand" size={14} />
-                </span>
-              </Show>
               <Show when={!p.micOn}>
                 <span class="lk-call-tile-muted" title="Muted" aria-label="Muted">
                   <Icon name="micOff" size={14} />
-                </span>
-              </Show>
-              <Show when={p.screenSharing}>
-                <span title="Sharing screen" aria-label="Sharing screen">
-                  <Icon name="monitor" size={14} />
                 </span>
               </Show>
             </li>
@@ -952,89 +814,43 @@ const ParticipantList: Component = () => (
   </Show>
 );
 
-// ============================================================================
-// PhaseBanner — connecting / reconnecting / ended
-// ============================================================================
-
-const PhaseBanner: Component = () => (
-  <Show when={callState.phase().kind !== "connected"}>
-    <div class="lk-call-phase" data-kind={callState.phase().kind} role="status">
-      {phaseText(callState.phase())}
-    </div>
-  </Show>
-);
-
-function phaseText(p: ReturnType<typeof callState.phase>): string {
-  switch (p.kind) {
-    case "prejoin":
-      return "";
-    case "connecting":
-      return "Connecting...";
-    case "reconnecting":
-      return `Reconnecting. ${p.reason}`;
-    case "ended":
-      return "Call ended";
-    case "connected":
-      return "";
-  }
-}
-
-// ============================================================================
-// CallEndedOverlay — dim + hand back after 3 s
-// ============================================================================
-
-const CallEndedOverlay: Component<{ onDismiss: () => void }> = (props) => {
-  const [timer, setTimer] = createSignal<number | null>(null);
-
-  onMount(() => {
-    setTimer(window.setTimeout(props.onDismiss, 3000));
-  });
-  onCleanup(() => {
-    const t = timer();
-    if (t !== null) window.clearTimeout(t);
-  });
-
+const ChatMessageRow: Component<{ msg: ChatMessage }> = (props) => {
+  const isSystem = (): boolean => props.msg.kind === "system";
+  const time = (): string => {
+    const d = new Date(props.msg.ts);
+    const hh = `${d.getHours()}`.padStart(2, "0");
+    const mm = `${d.getMinutes()}`.padStart(2, "0");
+    return `${hh}:${mm}`;
+  };
   return (
-    <div class="lk-call-ended">
-      <h1>Call ended</h1>
-      <p>Returning to your chats...</p>
-    </div>
+    <Show when={!isSystem()} fallback={<div class="lk-call-msg-sys">{props.msg.text}</div>}>
+      <div class="lk-call-msg">
+        <div class="lk-call-msg-meta">
+          <span class="lk-call-msg-sender">{props.msg.senderName}</span>
+          <span>{time()}</span>
+        </div>
+        <div class="lk-call-msg-text">{props.msg.text}</div>
+      </div>
+    </Show>
   );
 };
-
-// ============================================================================
-// ChatPanel — in-call chat
-// ============================================================================
-//
-// Right-hand drawer, full height. Text only; system events (peer joined /
-// left) render inline as muted centred lines.
 
 const ChatPanel: Component = () => {
   let scrollRef: HTMLDivElement | undefined;
   let inputRef: HTMLInputElement | undefined;
 
-  // Auto-scroll to the bottom whenever the message list grows.
   createEffect((): void => {
-    // Re-read so the effect is reactive to message changes.
     void callState.chatMessages().length;
     queueMicrotask((): void => {
-      if (scrollRef !== undefined) {
-        scrollRef.scrollTop = scrollRef.scrollHeight;
-      }
+      if (scrollRef !== undefined) scrollRef.scrollTop = scrollRef.scrollHeight;
     });
   });
 
-  // Auto-focus the compose box when the panel opens.
   createEffect((): void => {
     if (callState.chatOpen() && inputRef !== undefined) {
-      // Delay one tick — the input is being mounted in the same microtask.
       queueMicrotask((): void => inputRef?.focus());
     }
   });
-
-  const submit = (): void => {
-    callActions.sendChatMessage(callState.composeText());
-  };
 
   return (
     <Show when={callState.chatOpen()}>
@@ -1070,7 +886,7 @@ const ChatPanel: Component = () => {
           class="lk-composer lk-call-chat-form"
           onSubmit={(e): void => {
             e.preventDefault();
-            submit();
+            callActions.sendChatMessage(callState.composeText());
           }}
         >
           <input
@@ -1098,47 +914,118 @@ const ChatPanel: Component = () => {
   );
 };
 
-const ChatMessageRow: Component<{ msg: ChatMessage }> = (props) => {
-  const isSystem = (): boolean => props.msg.kind === "system";
-  const time = (): string => {
-    const d = new Date(props.msg.ts);
-    const hh = `${d.getHours()}`.padStart(2, "0");
-    const mm = `${d.getMinutes()}`.padStart(2, "0");
-    return `${hh}:${mm}`;
-  };
+/** The one overflow §4.1 permits, and only on a group call: participants and
+ *  chat, the two entries it names. Rendered as a small sheet over the bar
+ *  rather than a menu, so it is two round buttons like everything else. */
+const OverflowSheet: Component<{ onClose: () => void }> = (props) => (
+  <div
+    class="lk-call-overflow"
+    role="dialog"
+    aria-label="More"
+    onClick={(e): void => {
+      if (e.target === e.currentTarget) props.onClose();
+    }}
+  >
+    <div class="lk-call-overflow-sheet">
+      <button
+        type="button"
+        class="lk-call-overflow-item"
+        onClick={(): void => {
+          callActions.setParticipantListOpen(true);
+          props.onClose();
+        }}
+      >
+        <Icon name="contacts" size={22} />
+        <span>Participants</span>
+      </button>
+      <button
+        type="button"
+        class="lk-call-overflow-item"
+        onClick={(): void => {
+          callActions.setChatOpen(true);
+          props.onClose();
+        }}
+      >
+        <Icon name="chat" size={22} />
+        <span>
+          Chat
+          <Show when={callState.chatUnreadCount() > 0}>
+            {" "}
+            ({callState.chatUnreadCount() > 99 ? "99+" : callState.chatUnreadCount()})
+          </Show>
+        </span>
+      </button>
+    </div>
+  </div>
+);
+
+// ============================================================================
+// The ended screen (§4: "`Call ended` and the duration, the screen closes
+// itself after 2 s")
+// ============================================================================
+
+const CallEndedOverlay: Component<{ summary: string; onDismiss: () => void }> = (props) => {
+  let timer: number | null = null;
+  onMount(() => {
+    timer = window.setTimeout(props.onDismiss, ENDED_DISMISS_MS);
+  });
+  onCleanup(() => {
+    if (timer !== null) window.clearTimeout(timer);
+  });
   return (
-    <Show when={!isSystem()} fallback={<div class="lk-call-msg-sys">{props.msg.text}</div>}>
-      <div class="lk-call-msg">
-        <div class="lk-call-msg-meta">
-          <span class="lk-call-msg-sender">{props.msg.senderName}</span>
-          <span>{time()}</span>
-        </div>
-        <div class="lk-call-msg-text">{props.msg.text}</div>
-      </div>
-    </Show>
+    <div class="lk-call-ended" role="status" aria-live="polite">
+      <p>{props.summary}</p>
+    </div>
   );
 };
 
 // ============================================================================
-// Mock data — seeds the standalone design route with placeholder participants
+// Devices
 // ============================================================================
 
-function seedMockParticipants(): void {
-  // Mock safety number and connection metrics — the live paths write real
-  // ones through the same actions.
-  callActions.setE2ee({
-    active: true,
-    shortFingerprint: "3F7A B2C1 9E0D",
-  });
+/** Enumerate the OS's capture / playback devices into the shared store. Labels
+ *  populate only once a capture permission has been granted, which during a
+ *  live call it has. Drives the Speaker control and the self-view's flip
+ *  button, which is why it now runs from the call screen rather than from a
+ *  settings panel that no longer exists. */
+async function refreshCallDevices(): Promise<void> {
+  const md = typeof navigator !== "undefined" ? navigator.mediaDevices : undefined;
+  if (!md?.enumerateDevices) return;
+  try {
+    const infos = await md.enumerateDevices();
+    const devices: CallDevice[] = infos
+      .filter((d) => d.kind === "audioinput" || d.kind === "videoinput" || d.kind === "audiooutput")
+      .map((d) => ({ id: d.deviceId, label: d.label, kind: d.kind as CallDevice["kind"] }));
+    callActions.setAvailableDevices(devices);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("call ui: enumerateDevices failed", err);
+  }
+}
+
+/** Whether this browser can move a call's sound to a chosen output. Absent in
+ *  Firefox and in Safari on iOS, where §4.1 says to omit Speaker entirely
+ *  rather than show a button that does nothing. */
+function canSelectAudioOutput(): boolean {
+  return (
+    typeof HTMLMediaElement !== "undefined" &&
+    typeof HTMLMediaElement.prototype.setSinkId === "function"
+  );
+}
+
+// ============================================================================
+// Mock data — the standalone design route
+// ============================================================================
+
+function seedMockCall(): () => void {
+  callActions.setMediaKind("video");
+  callActions.setE2ee({ active: true, shortFingerprint: "3F7A B2C1 9E0D 4415" });
   callActions.setConnectionDetail({
     rttMs: 45,
     downBps: 720_000,
     upBps: 380_000,
     connectionType: "direct",
   });
-  // Hard-coded false so the desktop preview does not show the switch-camera
-  // button.
-  callActions.setHasMultipleCameras(false);
   callActions.setParticipants([
     {
       id: "local",
@@ -1146,49 +1033,24 @@ function seedMockParticipants(): void {
       isLocal: true,
       micOn: true,
       camOn: true,
-      handRaised: false,
       quality: "excellent",
       speaking: false,
-      screenSharing: false,
     },
     {
       id: "leaf-1",
-      displayName: "Alice",
-      isLocal: false,
-      micOn: true,
-      camOn: true,
-      handRaised: false,
-      quality: "good",
-      speaking: true,
-      screenSharing: false,
-    },
-    {
-      id: "leaf-2",
-      displayName: "Bob",
-      isLocal: false,
-      micOn: false,
-      camOn: true,
-      handRaised: false,
-      quality: "fair",
-      speaking: false,
-      screenSharing: false,
-    },
-    {
-      id: "leaf-3",
-      displayName: "Carl",
+      displayName: "Anna Weber",
       isLocal: false,
       micOn: true,
       camOn: false,
-      handRaised: true,
-      quality: "poor",
-      speaking: false,
-      screenSharing: false,
+      quality: "good",
+      speaking: true,
     },
   ]);
-  // Synthesise the "connected" transition after a short delay.
-  window.setTimeout((): void => {
+  callActions.setPhase({ kind: "calling" });
+  const timer = window.setTimeout((): void => {
     callActions.setPhase({ kind: "connected" });
-  }, 600);
+  }, 900);
+  return (): void => window.clearTimeout(timer);
 }
 
 // ============================================================================
@@ -1198,68 +1060,74 @@ function seedMockParticipants(): void {
 const Call: Component<{
   embedded?: boolean;
   onExit?: () => void;
-  /** Which of the chat header's two buttons started this call, so the pre-join
-   *  screen opens at the matching camera state (docs/ux/calls.md section 3).
-   *  Defaults to a voice call: the camera is never turned on by a screen that
-   *  was not asked to. */
-  startKind?: CallStartKind;
-  /** The other person, for the encryption sheet's one sentence (section 5).
-   *  Omitted on a group call and on the design route, where the sheet says the
-   *  same true thing without naming anyone. */
+  /** The other person, for the portrait, the status line and the encryption
+   *  sheet's one sentence (§5). Omitted on a group call, where there is no
+   *  "other person". */
   peerName?: string | null;
+  /** What the portrait's colour is hashed from, so one person is one colour
+   *  everywhere in the app. Falls back to the name. */
+  peerId?: string | null;
   /** SFU group-call only: resolve a roster participant id to its live remote
-   *  `MediaStream` so the tile can render real video. Omitted on the 1x1 and
-   *  mock paths (tiles fall back to the avatar / blank surface). */
+   *  `MediaStream`. */
   remoteStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
-  /** 1x1 P2P only: the local capture `MediaStream`, for the LOCAL tile's
-   *  self-preview `<video>`. Omitted on the SFU / mock paths. */
+  /** The local capture `MediaStream`, for the self-view. */
   localStream?: (() => MediaStream | undefined) | undefined;
 }> = (props) => {
   const navigate = useNavigate();
   const [encryptionSheetOpen, setEncryptionSheetOpen] = createSignal(false);
+  const [overflowOpen, setOverflowOpen] = createSignal(false);
+  const [now, setNow] = createSignal(Date.now());
+  const [lastInteraction, setLastInteraction] = createSignal(Date.now());
+
+  // One second is the resolution the running time needs, and it is also what
+  // drives the controls' idle fade — two timers for one cadence would drift
+  // against each other for no gain.
+  onMount(() => {
+    const tick = window.setInterval(() => setNow(Date.now()), 1_000);
+    onCleanup(() => window.clearInterval(tick));
+  });
+
+  // Devices: once at mount (a live call has already been granted capture, so
+  // the labels are real) and again whenever one is plugged in or removed.
+  onMount(() => {
+    void refreshCallDevices();
+    const md = typeof navigator !== "undefined" ? navigator.mediaDevices : undefined;
+    if (!md?.addEventListener) return;
+    const handler = (): void => void refreshCallDevices();
+    md.addEventListener("devicechange", handler);
+    onCleanup(() => md.removeEventListener("devicechange", handler));
+  });
 
   // A call that loses its encryption (it ended, or the slot was handed to
-  // another call) must not leave the safety number of the previous one on
-  // screen behind a sheet the user has to notice and close.
+  // another call) must not leave the previous safety number on screen behind a
+  // sheet the user has to notice and close.
   createEffect(() => {
     if (!showsEncryptionChip(callState.e2ee())) setEncryptionSheetOpen(false);
   });
 
-  // Sound cues — one controller per Call mount; disposed on unmount so cached
-  // <audio> elements + their decoders are released cleanly.
   const sounds = new CallSoundController();
 
   onMount(() => {
-    // Embedded mode: the host already drove `callState` to a live phase
-    // before mounting us — resetting would wipe it.
+    // Embedded: the host already drove `callState` to a live phase before
+    // mounting us, so resetting would wipe it. Standalone: seed the design
+    // route's mock call.
     if (props.embedded !== true) {
       callActions.reset();
-      // `reset()` leaves us in `prejoin`. The mock participants + safety
-      // number get seeded only after the user clicks Join.
+      onCleanup(seedMockCall());
     }
   });
   onCleanup(() => {
     sounds.dispose();
-    // Embedded mode: the host owns the call lifecycle and resets `callState`
-    // when the session reaches `done`.
-    if (props.embedded !== true) {
-      callActions.reset();
-    }
+    if (props.embedded !== true) callActions.reset();
   });
 
-  // Phase -> sound mapping. Mirrors the same trigger map on iOS / Android so
-  // the user-facing audio is identical across platforms.
-  //   prejoin      -> silence
-  //   connecting   -> ringback-outgoing loop ("we are calling")
-  //   connected    -> stop ringback, play join one-shot
-  //   reconnecting -> stop everything (the banner conveys it)
-  //   ended        -> stop everything, play leave one-shot
+  // Phase -> sound. Mirrors the same trigger map on iOS / Android.
   createEffect(() => {
-    const kind = callState.phase().kind;
-    switch (kind) {
-      case "prejoin":
+    switch (callState.phase().kind) {
+      case "idle":
         sounds.stopAll();
         break;
+      case "calling":
       case "connecting":
         sounds.startLoop("ringback-outgoing");
         break;
@@ -1277,147 +1145,262 @@ const Call: Component<{
     }
   });
 
-  // Peer-arrival / peer-departure cues + chat system events. Track the
-  // remote id set; on each delta fire the right cue AND post a system event
-  // into the chat. The local participant is excluded.
+  // Peer arrival / departure cues + chat system events.
   let lastRemoteIds: ReadonlyArray<string> = [];
   createEffect(() => {
     const remote = callState.participants().filter((p) => !p.isLocal);
     const remoteIds = remote.map((p) => p.id);
-
     if (callState.phase().kind === "connected" && lastRemoteIds.length > 0) {
-      // Joiners — present now but not in the previous snapshot.
       for (const p of remote) {
         if (!lastRemoteIds.includes(p.id)) {
           sounds.playOnce("join");
           callActions.addSystemEvent(`${p.displayName} joined the call`);
         }
       }
-      // Leavers — in the previous snapshot but not now.
-      const remoteById = new Map(remote.map((p) => [p.id, p]));
-      const prevSnapshot = lastRemoteIds;
-      for (const prevId of prevSnapshot) {
-        if (!remoteById.has(prevId)) {
+      const present = new Set(remoteIds);
+      for (const prevId of lastRemoteIds) {
+        if (!present.has(prevId)) {
           sounds.playOnce("leave");
-          callActions.addSystemEvent(`A participant left the call`);
-          // The display name has already been dropped from state by the
-          // time we observe the deletion.
+          callActions.addSystemEvent("A participant left the call");
         }
       }
     }
     lastRemoteIds = remoteIds;
   });
 
-  // Whether we are alone in the call (no remote yet). The waiting line
-  // fires off this.
-  const isAlone = (): boolean => callState.participants().filter((p) => !p.isLocal).length === 0;
+  // ----- derived state ------------------------------------------------------
 
-  /** The other person's name when there is exactly one — what the encryption
-   *  sheet's sentence names. A group call has no "other person", so it gets
-   *  `null` and the sentence that does not name anyone. */
-  const soleRemoteName = (): string | null => {
-    const remote = callState.participants().filter((p) => !p.isLocal);
-    return remote.length === 1 ? ((remote[0] as Participant).displayName ?? null) : null;
+  const local = (): Participant | null => callState.participants().find((p) => p.isLocal) ?? null;
+  const remotes = createMemo(() => callState.participants().filter((p) => !p.isLocal));
+  const phaseKind = (): CallPhaseKind => callState.phase().kind;
+
+  const surface = createMemo<CallSurfaceKind>(() =>
+    callSurfaceKind({
+      remoteCount: remotes().length,
+      remoteCameraOn: remotes()[0]?.camOn === true,
+    }),
+  );
+
+  /** The other person's name: what the host resolved, else the sole remote's,
+   *  else the honest placeholder. A group call has no single name, so the
+   *  status line names the call instead of inventing a person. */
+  const peerLabel = createMemo((): string => {
+    if (surface() === "group") return `Group call · ${callState.participants().length}`;
+    const given = props.peerName?.trim() ?? "";
+    if (given !== "") return given;
+    const sole = remotes()[0]?.displayName?.trim() ?? "";
+    // Practically unreachable — the host resolves a name for every 1x1 call —
+    // but it must not invent a person if it is. `encryption-chip.ts` treats
+    // this exact word as "no name" and produces the sentence that names
+    // nobody, so the two stay consistent.
+    return sole !== "" ? sole : "Participant";
+  });
+
+  const toneId = (): string => props.peerId ?? props.peerName ?? remotes()[0]?.id ?? "peer";
+
+  const statusDetail = createMemo(() =>
+    callStatusDetail({
+      phase: phaseKind(),
+      connectedAtMs: callState.connectedAt(),
+      nowMs: now(),
+    }),
+  );
+
+  /** §8: the running time is announced as a duration, not read digit by
+   *  digit. Every other state already reads as words. */
+  const spokenDetail = createMemo(() =>
+    phaseKind() === "connected"
+      ? spokenCallDuration(elapsedMs(callState.connectedAt(), now()))
+      : statusDetail(),
+  );
+
+  const audioOutputs = createMemo(() =>
+    callState
+      .settings()
+      .availableDevices.filter((d) => d.kind === "audiooutput")
+      .map((d) => ({ id: d.id, label: d.label })),
+  );
+  const nextOutput = createMemo(() =>
+    nextAudioOutput(audioOutputs(), callState.settings().selectedAudioOutput),
+  );
+  const videoInputs = createMemo(() =>
+    callState.settings().availableDevices.filter((d) => d.kind === "videoinput"),
+  );
+
+  const controls = createMemo(() =>
+    callControls({
+      mediaKind: callState.mediaKind(),
+      surface: surface(),
+      phase: phaseKind(),
+      micOn: local()?.micOn === true,
+      cameraOn: local()?.camOn === true,
+      cameraBusy: callState.videoPublishState() === "starting",
+      canSelectAudioOutput: canSelectAudioOutput(),
+      nextAudioOutputLabel: audioOutputName(nextOutput()),
+    }),
+  );
+
+  const barHidden = createMemo(() =>
+    controlsHidden({
+      surface: surface(),
+      phase: phaseKind(),
+      msSinceInteraction: now() - lastInteraction(),
+    }),
+  );
+
+  // ----- actions ------------------------------------------------------------
+
+  function press(spec: CallControlSpec): void {
+    switch (spec.id) {
+      case "speaker": {
+        const next = nextOutput();
+        if (next !== null) callActions.setSelectedAudioOutput(next.id);
+        return;
+      }
+      case "mic":
+        callActions.setMic(local()?.micOn !== true);
+        return;
+      case "camera":
+        callActions.setCamera(local()?.camOn !== true);
+        return;
+      case "overflow":
+        setOverflowOpen(!overflowOpen());
+        return;
+      case "end":
+        callActions.endCall();
+        return;
+    }
+  }
+
+  /** Cycle to the next camera. The store's `selectedVideoInput` drives the
+   *  in-call device-switch effect in the call host, which calls
+   *  `switchVideoInput` + `replaceTrack` (same kind, no renegotiation) — so
+   *  this reuses the shipped path rather than re-capturing here. */
+  function flipCamera(): void {
+    const cams = videoInputs().filter((d) => d.id.length > 0);
+    if (cams.length < 2) return;
+    const current = callState.settings().selectedVideoInput;
+    const at = current === null ? 0 : Math.max(0, cams.findIndex((c) => c.id === current));
+    const next = cams[(at + 1) % cams.length];
+    if (next !== undefined) callActions.setSelectedVideoInput(next.id);
+  }
+
+  /** Any interaction wakes the faded bar (§4: "come back on a tap"). */
+  const wake = (): void => {
+    setLastInteraction(Date.now());
+  };
+
+  const exit = (): void => {
+    if (props.embedded === true) props.onExit?.();
+    else navigate(paths.home);
   };
 
   return (
-    <Show
-      when={callState.phase().kind !== "prejoin"}
-      fallback={
-        <PrejoinScreen
-          kind={props.startKind ?? "audio"}
-          onJoin={(): void => {
-            // Synthesise the "connected" transition on the design route.
-            seedMockParticipants();
-            window.setTimeout((): void => {
-              callActions.setPhase({ kind: "connected" });
-            }, 400);
+    <div
+      class="lk-call"
+      data-surface={surface()}
+      data-phase={phaseKind()}
+      onPointerMove={wake}
+      onPointerDown={(): void => {
+        wake();
+        if (callState.qualityPopoverOpen()) callActions.setQualityPopoverOpen(false);
+      }}
+      onKeyDown={wake}
+      onFocusIn={wake}
+    >
+      {/* The ground. A voice call gets the other person's colour, blurred and
+          darkened (§4.2); a video call gets the other person. */}
+      <Show when={surface() !== "group"}>
+        <CallPortrait name={peerLabel()} toneId={toneId()} />
+      </Show>
+
+      <Show when={surface() === "video"}>
+        {/* The remote fills the surface. `object-fit: cover` in the stylesheet,
+            so a portrait phone camera does not letterbox into black bars. */}
+        <Show when={props.remoteStreamFor?.(remotes()[0]?.id ?? "")}>
+          {(stream) => (
+            <video
+              class="lk-call-fill"
+              autoplay
+              playsinline
+              muted
+              aria-label={`${peerLabel()}'s camera`}
+              ref={(el) => {
+                el.srcObject = stream();
+              }}
+            />
+          )}
+        </Show>
+      </Show>
+
+      <CallStatus
+        name={peerLabel()}
+        detail={statusDetail()}
+        spokenDetail={spokenDetail()}
+        avatar={surface() === "voice"}
+        onOpenEncryption={(): void => {
+          setEncryptionSheetOpen(true);
+        }}
+      />
+
+      <Show when={surface() === "group"}>
+        <main class="lk-call-main">
+          <GroupStage remoteStreamFor={props.remoteStreamFor} localStream={props.localStream} />
+        </main>
+      </Show>
+
+      <Show when={selfViewVisible(surface(), local()?.camOn === true)}>
+        <SelfView
+          stream={props.localStream?.()}
+          starting={callState.videoPublishState() === "starting"}
+          canFlip={videoInputs().length >= 2}
+          onFlip={flipCamera}
+        />
+      </Show>
+
+      <ControlBar
+        surface={surface()}
+        hidden={barHidden()}
+        controls={controls()}
+        cameraBusy={callState.videoPublishState() === "starting"}
+        onPress={press}
+      />
+
+      <Show when={overflowOpen()}>
+        <OverflowSheet
+          onClose={(): void => {
+            setOverflowOpen(false);
           }}
         />
-      }
-    >
-      <div class="lk-call">
-        <PhaseBanner />
+      </Show>
 
-        {/* Top status bar — the safety-number pill (left) + the connection
-            quality dot with its popover (right). The phase banner floats
-            over the centre. */}
-        <header class="lk-call-head">
-          <EncryptionChip onOpen={() => setEncryptionSheetOpen(true)} />
-          <QualityIndicator />
-        </header>
+      <ParticipantList />
+      <ChatPanel />
 
-        <main
-          class="lk-call-main"
-          onClick={(): void => {
-            // Tap anywhere on the main area closes the quality popover.
-            if (callState.qualityPopoverOpen()) {
-              callActions.setQualityPopoverOpen(false);
-            }
+      <Show when={encryptionSheetOpen()}>
+        <EncryptionSheet
+          peerName={props.peerName ?? remotes()[0]?.displayName ?? null}
+          onClose={(): void => {
+            setEncryptionSheetOpen(false);
           }}
-        >
-          <Show when={isAlone() && callState.phase().kind === "connected"}>
-            <WaitingMessage />
-          </Show>
+        />
+      </Show>
 
-          <Show when={activeSpeaker() !== null}>
-            <div class="lk-call-stage">
-              <ParticipantTile
-                participant={activeSpeaker() as Participant}
-                large={true}
-                onPin={(id): void => callActions.pin(id === "" ? null : id)}
-                remoteStreamFor={props.remoteStreamFor}
-                localStream={props.localStream}
-              />
-            </div>
-          </Show>
-
-          <div class="lk-call-gallery">
-            <For each={galleryParticipants()}>
-              {(p) => (
-                <ParticipantTile
-                  participant={p}
-                  large={false}
-                  onPin={(id): void => callActions.pin(id === "" ? null : id)}
-                  remoteStreamFor={props.remoteStreamFor}
-                  localStream={props.localStream}
-                />
-              )}
-            </For>
-          </div>
-        </main>
-
-        <ControlsBar />
-        <ParticipantList />
-        <ChatPanel />
-        <SettingsPanel />
-
-        <Show when={encryptionSheetOpen()}>
-          <EncryptionSheet
-            peerName={props.peerName ?? soleRemoteName()}
-            onClose={(): void => {
-              setEncryptionSheetOpen(false);
-            }}
-          />
-        </Show>
-
-        <Show when={callState.phase().kind === "ended"}>
-          <CallEndedOverlay
-            onDismiss={(): void => {
-              // Embedded: hand control back to the host (which tears the
-              // overlay down + resets state). Standalone design route:
-              // navigate home as before.
-              if (props.embedded === true) {
-                props.onExit?.();
-              } else {
-                navigate(paths.home);
-              }
-            }}
-          />
-        </Show>
-      </div>
-    </Show>
+      <Show when={phaseKind() === "ended"}>
+        <CallEndedOverlay
+          summary={endedSummary(callState.connectedAt(), endedAtMs(callState.phase()))}
+          onDismiss={exit}
+        />
+      </Show>
+    </div>
   );
 };
+
+/** When the call ended, or now if the phase carries no moment (it always
+ *  does; the fallback keeps the duration from going negative rather than
+ *  asserting). */
+function endedAtMs(phase: ReturnType<typeof callState.phase>): number {
+  return phase.kind === "ended" ? phase.endedAt : Date.now();
+}
 
 export default Call;

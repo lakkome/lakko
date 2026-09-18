@@ -16,48 +16,41 @@ import org.junit.Test
  * Both chat-header buttons produced the same call. The pre-join's camera toggle
  * was hard-coded on, so the phone button dialed `video = true`, the offer
  * carried a video flag and the callee's ring read `Video call` for a call the
- * caller had asked to make with the phone button. The first test here is
- * literally that: the voice button must not open the camera.
+ * caller had asked to make with the phone button.
+ *
+ * The pre-join itself is gone (section 3.1), so the "which way does the toggle
+ * open" half of this moved to [CallEntryPointTest]. What is left here is the
+ * other half, which outlived the card: what the caller chose, and what the
+ * offer finally carries.
  */
 class OutgoingCallMediaTest {
 
     @Test
-    fun `the phone button opens the pre-join with the camera off`() {
-        assertFalse(prejoinCameraDefault(requestedCallKind(video = false)))
-    }
-
-    @Test
-    fun `the video button opens the pre-join with the camera on`() {
-        assertTrue(prejoinCameraDefault(requestedCallKind(video = true)))
+    fun `the phone button is a voice call and the video button a video one`() {
+        assertEquals(RequestedCallKind.VOICE, requestedCallKind(video = false))
+        assertEquals(RequestedCallKind.VIDEO, requestedCallKind(video = true))
     }
 
     @Test
     fun `a voice call offers no video`() {
-        // The whole chain as the UI runs it: button -> pre-join default ->
-        // untouched toggles -> the media flags the offer carries.
+        // The whole chain as the UI runs it now: button -> kind -> the media
+        // the host dials with, no screen and no toggle in between.
         val kind = requestedCallKind(video = false)
-        val media = offeredCallMedia(
-            microphoneOn = true,
-            cameraOn = prejoinCameraDefault(kind),
-        )
+        val media = immediateDialMedia(kind, hasCamera = true)
         assertEquals(CallMediaChoice(audio = true, video = false), media)
     }
 
     @Test
-    fun `a video call offers video`() {
-        val kind = requestedCallKind(video = true)
-        val media = offeredCallMedia(
-            microphoneOn = true,
-            cameraOn = prejoinCameraDefault(kind),
-        )
+    fun `a video call offers video once the camera check is passed`() {
+        val media = offeredCallMedia(microphoneOn = true, cameraOn = true)
         assertEquals(CallMediaChoice(audio = true, video = true), media)
     }
 
     @Test
-    fun `the pre-join toggles decide what is offered, not the button`() {
-        // Section 3: "the toggles there change the call that is actually
-        // placed". A voice call whose camera the user switches on IS a video
-        // call and says so; a video call joined with the camera off is not.
+    fun `the camera check's buttons decide what is offered, not the header button`() {
+        // Section 3.2: the check's own microphone and camera buttons are what
+        // the call is placed with. A video call whose camera is switched off
+        // there is not a video call.
         assertTrue(offeredCallMedia(microphoneOn = true, cameraOn = true).video)
         assertFalse(offeredCallMedia(microphoneOn = true, cameraOn = false).video)
     }

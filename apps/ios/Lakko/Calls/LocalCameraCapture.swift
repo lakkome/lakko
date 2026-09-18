@@ -56,15 +56,17 @@ public final class LocalCameraCapture {
     /// `nil` only if the device has no cameras — the caller
     /// should have already gated on
     /// `Self.hasUsableCamera()` before constructing.
-    private let device: AVCaptureDevice?
+    /// A `var` because ``flip()`` swaps it for the one facing the other way.
+    private var device: AVCaptureDevice?
 
     /// Selected format — typically 1280x720 or the closest
-    /// resolution the device supports.
-    private let format: AVCaptureDevice.Format?
+    /// resolution the device supports. Re-picked on a flip: the two cameras
+    /// of one phone rarely offer the same format list.
+    private var format: AVCaptureDevice.Format?
 
     /// Selected FPS — 30 by default, capped at the format's
     /// max supported framerate.
-    private let targetFps: Int
+    private var targetFps: Int
 
     /// Tracks whether `start()` has actually started capture
     /// so `stop()` knows whether to call libwebrtc's stop API
@@ -90,23 +92,26 @@ public final class LocalCameraCapture {
             return nil
         }
         self.device = device
+        let picked = Self.pickFormat(for: device)
+        self.format = picked.format
+        self.targetFps = picked.fps
+    }
 
-        // Pick a 720p-ish format. We score every supported
-        // format by `(width × height)` distance to 1280×720
-        // and take the closest match; this works equally well
-        // on devices that offer exact 720p (most iPhones) and
-        // those that only offer 1080p / 480p (older iPads).
+    /// The 720p-class format and frame rate to use for a device.
+    ///
+    /// Every supported format is scored by its distance from 1280x720 and the
+    /// closest wins, which works equally well on devices that offer exact 720p
+    /// (most iPhones) and those that only offer 1080p / 480p (older iPads). The
+    /// rate is capped at 30 and never above the format's own maximum —
+    /// libwebrtc's `startCapture` asserts on `fps > maxFrameRate`.
+    private static func pickFormat(
+        for device: AVCaptureDevice
+    ) -> (format: AVCaptureDevice.Format?, fps: Int) {
         let target: (w: Int32, h: Int32) = (1280, 720)
         let formats = RTCCameraVideoCapturer.supportedFormats(for: device)
         let chosen = formats.min { a, b in
-            Self.formatScore(a, target: target) <
-                Self.formatScore(b, target: target)
+            formatScore(a, target: target) < formatScore(b, target: target)
         }
-        self.format = chosen
-
-        // Cap at 30 FPS, but never above the format's max
-        // — libwebrtc's startCapture asserts on
-        // `fps > maxFrameRate`.
         var cappedFps = 30
         if let chosen = chosen {
             let maxFps = chosen.videoSupportedFrameRateRanges
@@ -114,7 +119,46 @@ public final class LocalCameraCapture {
                 .max() ?? 30
             cappedFps = min(30, maxFps)
         }
-        self.targetFps = cappedFps
+        return (chosen, cappedFps)
+    }
+
+    /// `true` when this host has a camera on the other side to flip to
+    /// (`docs/ux/calls.md` section 4.1 — the flip button lives on the self-view
+    /// and must not be drawn when there is nothing to flip to).
+    public var canFlip: Bool {
+        Self.otherFacingDevice(than: device) != nil
+    }
+
+    /// Swap front camera for back, or back for front, on the SAME video source —
+    /// so the track, the sender and any SFrame encryptor attached to it keep
+    /// running and only the frames change. A host with one camera is a no-op.
+    ///
+    /// The capture is stopped and restarted, which is the only way libwebrtc's
+    /// camera capturer changes device; the gap is the few frames an
+    /// `AVCaptureSession` reconfiguration takes.
+    public func flip() async {
+        guard let next = Self.otherFacingDevice(than: device) else { return }
+        let picked = Self.pickFormat(for: next)
+        guard let format = picked.format else { return }
+        await stop()
+        self.device = next
+        self.format = format
+        self.targetFps = picked.fps
+        do {
+            try await start()
+        } catch {
+            NSLog("LocalCameraCapture: flip restart failed: %@", String(describing: error))
+        }
+    }
+
+    /// The first capture device facing the other way, or `nil` on a host with
+    /// cameras on only one side.
+    private static func otherFacingDevice(
+        than current: AVCaptureDevice?
+    ) -> AVCaptureDevice? {
+        guard let current else { return nil }
+        let wanted: AVCaptureDevice.Position = current.position == .front ? .back : .front
+        return RTCCameraVideoCapturer.captureDevices().first { $0.position == wanted }
     }
 
     /// Score a format by Manhattan distance from the target

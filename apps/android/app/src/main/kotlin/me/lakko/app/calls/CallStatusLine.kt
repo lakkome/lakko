@@ -24,18 +24,31 @@ package me.lakko.app.calls
  * was given — an [elapsedSecs] of `null` (the screen has not yet seen media
  * start) reads `Connected` rather than `0:00`, which would be a clock the user
  * could watch being wrong.
+ *
+ * [calling] is the outgoing call waiting to be answered, and it is separate from
+ * [connecting] because the state table in section 4.1 separates them: `Calling`
+ * is "we have dialled and nobody has picked up", where only End is active, and
+ * `Connecting` is "they picked up and the media is being negotiated". Both read
+ * `Connecting...` before section 3.1 made dialling immediate, which meant the
+ * caller of a ringing phone was told the call was already being set up.
  */
+@Suppress("LongParameterList")
 public fun callStatusText(
+    calling: Boolean,
     connecting: Boolean,
     connected: Boolean,
     reconnecting: Boolean,
     ended: Boolean,
     elapsedSecs: Long?,
 ): String = when {
-    ended -> "Call ended"
+    // Section 4.1's state table: "`Call ended` and the duration". The duration
+    // is the one the line was last given, so a call that never connected ends
+    // with no number rather than a zero.
+    ended -> elapsedSecs?.let { "Call ended, ${formatCallDuration(it)}" } ?: "Call ended"
     reconnecting -> "Reconnecting..."
     connected -> elapsedSecs?.let(::formatCallDuration) ?: "Connected"
     connecting -> "Connecting..."
+    calling -> "Calling..."
     else -> "Ringing..."
 }
 

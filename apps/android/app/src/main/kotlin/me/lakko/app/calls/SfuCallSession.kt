@@ -471,6 +471,20 @@ class SfuCallSession(
     }
 
     /**
+     * `docs/ux/calls.md` section 4.1 — flip to the other camera from the button
+     * in the self-view's corner. The twin of [CallSession.switchCamera]: the
+     * track and sender are untouched, so neither the SFU subscription nor the
+     * SFrame encryptor armed on that sender is disturbed, and no peer
+     * renegotiates.
+     */
+    fun switchCamera(onFacingChanged: (isFrontFacing: Boolean) -> Unit = {}) {
+        val capture = localCameraCapture ?: return
+        capture.switchCamera { switched, isFrontFacing ->
+            if (switched) onFacingChanged(isFrontFacing)
+        }
+    }
+
+    /**
      * camera-off-cleanup — broadcast this device's current camera on/off
      * state ([localCameraOn]) to every other peer over the opaque SFU
      * `signal-relay`. The receiver flips this peer's roster `camOn`

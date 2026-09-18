@@ -26,21 +26,26 @@ package me.lakko.app.calls
  *
  * A *request* and the *media finally offered* are different facts, and conflating
  * them is what made the bug invisible. The kind is what the caller asked for; it
- * decides one thing only — how the pre-join opens ([prejoinCameraDefault]). What
- * is offered is decided later, by the toggles the user is looking at when they
- * press Join ([offeredCallMedia]), which is what the spec means by "the toggles
- * there change the call that is actually placed". A voice call whose camera the
- * user switches on in the pre-join is a video call, and correctly says so.
+ * decides one thing only — which surface the button opens
+ * ([callEntrySurface]). What is offered is decided later: for a voice call by
+ * the kind itself ([immediateDialMedia]), and for a video call by the two round
+ * buttons the user is looking at when they press Call ([offeredCallMedia]).
+ *
+ * The rewrite of `docs/ux/calls.md` section 3 moved that second decision. It
+ * used to be made on a pre-join card shown before EVERY call, whose camera
+ * toggle is what this file was written to fix; that card is gone, and with it
+ * `prejoinCameraDefault`, whose whole job was to open it correctly. The kind now
+ * reaches [callEntrySurface] instead.
  *
  * Pure and Android-free, so both rules are unit-tested on the host JVM.
  */
 
 /** The call kind the caller chose in the chat header. */
 public enum class RequestedCallKind {
-    /** The phone button: the pre-join opens with the camera off. */
+    /** The phone button: the call is dialled immediately (section 3.1). */
     VOICE,
 
-    /** The video button: the pre-join opens with the camera on. */
+    /** The video button: the camera check opens first (section 3.2). */
     VIDEO,
 }
 
@@ -52,23 +57,14 @@ public fun requestedCallKind(video: Boolean): RequestedCallKind =
     if (video) RequestedCallKind.VIDEO else RequestedCallKind.VOICE
 
 /**
- * How the pre-join's camera toggle opens for [kind].
+ * The media flags to dial with, read off the camera check's two round buttons
+ * at the moment Call is pressed.
  *
- * This is the whole of the fix's first half: a voice call never turns the camera
- * on by itself. It is still only a *default* — the user may switch it on, and
- * then they have chosen a video call.
- */
-public fun prejoinCameraDefault(kind: RequestedCallKind): Boolean = kind == RequestedCallKind.VIDEO
-
-/**
- * The media flags to dial with, read off the pre-join toggles at the moment Join
- * is pressed.
- *
- * Deliberately a plain projection of the two switches rather than anything
- * derived from the requested kind: after the pre-join, the kind has had its say.
+ * Deliberately a plain projection of the two buttons rather than anything
+ * derived from the requested kind: after the check, the kind has had its say.
  * A microphone switched off still dials with an audio section — the track is
  * added muted, so the user can unmute mid-call without a renegotiation — which
- * is why [CallMediaChoice.audio] carries the switch and the offer's audio flag
+ * is why [CallMediaChoice.audio] carries the button and the offer's audio flag
  * follows it rather than being forced true.
  */
 public fun offeredCallMedia(microphoneOn: Boolean, cameraOn: Boolean): CallMediaChoice =

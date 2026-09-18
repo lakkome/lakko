@@ -74,12 +74,18 @@ struct CallHostOverlay: ViewModifier {
                 switch presented {
                 case .oneToOne(let session)?:
                     // `docs/ux/calls.md` sections 3 and 4 — the button the
-                    // caller tapped seeds the pre-join's camera, and the
-                    // resolved name is who the call screen says is on it.
+                    // caller tapped decides whether this opens on the camera
+                    // check or on a call already ringing out, and the resolved
+                    // name is who the screen says is on it.
                     CallScreen(
                         session: session,
                         button: host.outgoingButton ?? .voice,
-                        peerName: host.activePeerName
+                        surface: host.outgoingSurface,
+                        peerName: host.activePeerName,
+                        notice: host.outgoingNotice,
+                        onPlaceCall: { micOn, cameraOn in
+                            host.placeCheckedCall(micOn: micOn, cameraOn: cameraOn)
+                        }
                     ) {
                         host.clearFinishedCall()
                     }
@@ -125,9 +131,10 @@ struct CallHostOverlay: ViewModifier {
         group.dismissCallNotice()
     }
 
-    /// The full call screen owns everything from the prejoin of an outgoing
-    /// call, through an accepted incoming one, to the terminal "Call ended"
-    /// overlay. A ringing call is the banner; no call is nothing.
+    /// The full call screen owns everything from the camera check of an
+    /// outgoing video call, through a voice call already ringing out and an
+    /// accepted incoming one, to the terminal "Call ended" overlay. A ringing
+    /// call is the banner; no call is nothing.
     static func presentsCallScreen(_ state: CallSession.WebCallState?) -> Bool {
         switch state {
         case .idle?, .outgoing?, .connecting?, .connected?, .ending?, .done?:

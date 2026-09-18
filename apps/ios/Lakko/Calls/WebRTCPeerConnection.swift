@@ -378,6 +378,17 @@ public final class WebRTCPeerConnection: NSObject {
         sharedFactory.videoSource()
     }
 
+    /// A video track backed by `source` that belongs to no peer connection.
+    ///
+    /// `docs/ux/calls.md` section 3.2 — the camera check happens BEFORE the call
+    /// is placed, so there is no peer connection to hang a track on yet, and
+    /// building one early would mean an offer for a call the user has not asked
+    /// for. The check renders this track; the dial that follows builds its own
+    /// through ``addLocalVideoTrack(_:)``.
+    public static func newPreviewVideoTrack(source: RTCVideoSource) -> RTCVideoTrack {
+        sharedFactory.videoTrack(with: source, trackId: "lakko-preview0")
+    }
+
     /// Video plumbing extension point. `addLocalVideoTrack`
     /// wires a `RTCVideoTrack` backed by the supplied
     /// `RTCVideoSource` into the peer connection, tagging the

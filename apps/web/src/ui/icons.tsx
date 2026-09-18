@@ -64,6 +64,10 @@ const PATHS = {
   mail: `<rect x="3" y="5.5" width="18" height="13" rx="2"/><path d="m3.5 7.5 8.5 6 8.5-6"/>`,
   lines: `<path d="M5 7h14M5 12h10M5 17h7"/>`,
   phoneEnd: `<path d="M3.5 13.5c4.7-4.7 12.3-4.7 17 0l-1.6 2.2a1.6 1.6 0 0 1-2 .5l-2.4-1.2a1.6 1.6 0 0 1-.9-1.6v-1.4a11 11 0 0 0-3.2 0v1.4a1.6 1.6 0 0 1-.9 1.6l-2.4 1.2a1.6 1.6 0 0 1-2-.5z"/>`,
+  // The in-call Speaker control (docs/ux/calls.md section 4.1). `channels`
+  // draws the same idea for a subscriber list; a call control needs its own
+  // name so a change to one never silently restyles the other.
+  speaker: `<path d="M4 9.5v5a1 1 0 0 0 1 1h2.8l4.7 3.5v-14L7.8 8.5H5a1 1 0 0 0-1 1z"/><path d="M16 9.4a3.6 3.6 0 0 1 0 5.2M18.6 6.8a7.2 7.2 0 0 1 0 10.4"/>`,
 } as const;
 
 /** Every icon name the set knows. */

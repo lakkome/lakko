@@ -874,11 +874,11 @@ private struct SessionRoot: View, Equatable {
                 messageId: messageId,
                 onOpenChat: { groupIdHex in push(.chat(groupIdHex: groupIdHex), on: tab) },
                 onCall: { groupIdHex, video in
-                    // The 1x1 entry point the chat header uses: the host
-                    // builds the session without dialing and the prejoin
-                    // offers the camera toggle. `docs/ux/calls.md` section 3 —
-                    // the button decides what the prejoin opens with, so a
-                    // voice call never arrives with the camera already on.
+                    // The 1x1 entry point the chat header uses
+                    // (`docs/ux/calls.md` sections 3.1 and 3.2): the phone
+                    // button dials there and then, the camera button opens the
+                    // camera check first. No preparation screen either way for
+                    // a voice call.
                     services.callHost.startOutgoingCall(
                         groupIdHex: groupIdHex, button: CallMediaChoice.button(video: video))
                 }

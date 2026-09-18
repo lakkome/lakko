@@ -319,11 +319,26 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
      */
     public fun startOutgoing(
         groupIdHex: String,
-        /** What the caller asked for; opens the pre-join's camera toggle. */
+        /** What the caller asked for; decides which surface opens. */
         kind: RequestedCallKind = RequestedCallKind.VOICE,
+        /** Whether this device has a camera to check. See [callEntrySurface]. */
+        hasCamera: Boolean = true,
     ): Boolean {
         if (hasCall || otherCalls.isNotEmpty()) return false
         send(Event.StartOutgoing(groupIdHex, kind))
+        // `docs/ux/calls.md` section 3.1 — "Tapping the phone button places the
+        // call immediately. No preparation screen." The two events are queued on
+        // one channel and handled in order, so the session is built and keyed by
+        // the time the dial is taken; nothing in between is ever drawn, because
+        // the screen's first state IS the call.
+        //
+        // Only a video call on a device with a camera stops here, and what it
+        // stops for is the camera check (section 3.2), which the overlay shows
+        // while the session sits undialled.
+        if (callEntrySurface(kind, hasCamera) == CallEntrySurface.DIAL_IMMEDIATELY) {
+            val media = immediateDialMedia(kind, hasCamera)
+            send(Event.Dial(audio = media.audio, video = media.video))
+        }
         return true
     }
 

@@ -69,6 +69,17 @@ final class CallHost: ObservableObject {
         /// `docs/ux/calls.md` section 6 — write the finished call's row into
         /// the conversation. Local to this device; no wire format.
         var recordCall: @MainActor (_ groupIdHex: String, _ row: CallTranscriptRow) -> Void = { _, _ in }
+        /// Does this device have a camera at all? Decides whether the video
+        /// button opens the camera check or places a voice call
+        /// (`docs/ux/calls.md` section 3.2).
+        var hasCamera: @MainActor () -> Bool = { LocalCameraCapture.hasUsableCamera() }
+        /// Put the call on the wire. A port rather than a direct
+        /// `session.dial(…)` because dialing builds a real peer connection and
+        /// opens the microphone, which a unit test must be able to observe
+        /// without doing.
+        var placeCall: @MainActor (_ session: CallSession, _ audio: Bool, _ video: Bool) -> Void = {
+            session, audio, video in session.dial(audio: audio, video: video)
+        }
     }
 
     // MARK: - Published state
@@ -84,10 +95,16 @@ final class CallHost: ObservableObject {
     @Published private(set) var activeCallState: CallSession.WebCallState?
     /// `true` when the ringing offer asked for video — the banner says so.
     @Published private(set) var incomingVideo: Bool = false
-    /// `docs/ux/calls.md` section 3 — which button started the outgoing call,
-    /// so the pre-join opens with the camera the caller asked for. `nil` while
-    /// no outgoing call is being prepared.
+    /// `docs/ux/calls.md` section 3 — which button started the outgoing call.
+    /// `nil` while no outgoing call is being prepared.
     @Published private(set) var outgoingButton: CallButtonKind?
+    /// What that button opened: a call already on the wire, or the camera check
+    /// the video button shows first. `nil` for an incoming call, which has no
+    /// button of ours and never shows a preparation screen (section 3.3).
+    @Published private(set) var outgoingSurface: CallStartSurface?
+    /// The one line a video call downgraded to voice carries, or `nil`. Shown
+    /// under the status line while the call rings out.
+    @Published private(set) var outgoingNotice: String?
     /// An entry point could not proceed (permission denied, key derivation).
     @Published private(set) var callError: String?
     /// A start is past its tap but not yet holding a session.
@@ -210,14 +227,20 @@ final class CallHost: ObservableObject {
 
     // MARK: - Outbound + user actions
 
-    /// Tap-to-call. Settles the microphone permission, then builds the session
-    /// (deriving + arming the SFrame key) WITHOUT dialing: it sits in `.idle`,
-    /// which the call screen shows as the prejoin; Join dials.
+    /// Tap-to-call. Settles the microphone permission, builds the session
+    /// (deriving + arming the SFrame key) — and then does one of two things,
+    /// decided by ``CallMediaChoice/startSurface(for:hasCamera:)``:
     ///
-    /// `button` is which of the header's two buttons was tapped. It decides
-    /// only what the pre-join opens with (`docs/ux/calls.md` section 3) — the
-    /// toggles there decide what is actually offered — so a caller who taps
-    /// the phone never finds the camera already running.
+    ///   * the **phone button dials there and then** (`docs/ux/calls.md`
+    ///     section 3.1), so the call screen opens on `Calling...`. There used to
+    ///     be a pre-join between the tap and the call — a card asking the user
+    ///     to "check your microphone", with a camera box that was empty and two
+    ///     switches — which is a settings page in front of a phone call;
+    ///   * the **video button leaves the session in `.idle`** (section 3.2),
+    ///     which the screen shows as the camera check; Call dials from there.
+    ///
+    /// A video call on a device with no camera is a voice call with one line
+    /// saying so, never a check of a camera that does not exist.
     func startOutgoingCall(groupIdHex: String, button: CallButtonKind = .voice) {
         guard !hasLiveCall, !callStarting else { return }
         if let other = otherCallOccupant() {
@@ -233,12 +256,30 @@ final class CallHost: ObservableObject {
                 return
             }
             guard !self.hasLiveCall, !self.otherCallBusy else { return }
-            _ = self.install(
+            let hasCamera = self.ports.hasCamera()
+            let surface = CallMediaChoice.startSurface(for: button, hasCamera: hasCamera)
+            let session = self.install(
                 callId: self.ports.mintCallId(),
                 groupIdHex: groupIdHex,
                 direction: .outgoing,
-                button: button)
+                button: button,
+                surface: surface)
+            self.outgoingNotice = CallMediaChoice.noCameraNotice(
+                for: button, hasCamera: hasCamera)
+            if case .dial(let video) = surface {
+                self.ports.placeCall(session, true, video)
+            }
         }
+    }
+
+    /// The camera check's Call button (`docs/ux/calls.md` section 3.2): place
+    /// the call with whatever the two round buttons were left at. A camera the
+    /// user turned off there makes this a voice call, honestly announced as one.
+    func placeCheckedCall(micOn: Bool, cameraOn: Bool) {
+        guard let session = activeCall, session.state == .idle else { return }
+        let media = CallMediaChoice.offeredMedia(micOn: micOn, cameraOn: cameraOn)
+        outgoingSurface = .dial(video: media.video)
+        ports.placeCall(session, media.audio, media.video)
     }
 
     /// Accept the ringing call — after the microphone permission, and the
@@ -296,8 +337,8 @@ final class CallHost: ObservableObject {
         }
     }
 
-    /// Clear the slot once the "Call ended" overlay is dismissed (or a prejoin
-    /// is cancelled).
+    /// Clear the slot once the "Call ended" overlay is dismissed (or a camera
+    /// check is cancelled).
     func clearFinishedCall() {
         guard let call = activeCall else { return }
         if call.state == .done || call.state == .idle {
@@ -336,12 +377,14 @@ final class CallHost: ObservableObject {
         callId: Data,
         groupIdHex: String,
         direction: CallTranscriptRow.Direction,
-        button: CallButtonKind? = nil
+        button: CallButtonKind? = nil,
+        surface: CallStartSurface? = nil
     ) -> CallSession {
         // A `.done` session still on screen is replaced by the new call.
         clearSlot()
         activeCallDirection = direction
         outgoingButton = button
+        outgoingSurface = surface
         let session = CallSession(callId: callId) { [weak self] bytes in
             self?.enqueuePublish(groupIdHex: groupIdHex, bytes: bytes)
         }
@@ -373,6 +416,8 @@ final class CallHost: ObservableObject {
         activeCallState = nil
         incomingVideo = false
         outgoingButton = nil
+        outgoingSurface = nil
+        outgoingNotice = nil
         sessionWasPresented = false
         connectedAtMs = nil
         callWasPlaced = false
@@ -418,7 +463,7 @@ final class CallHost: ObservableObject {
                 activeCallState = nil
             } else if next != .ending {
                 // `.ending` of a call that never showed the full screen (a
-                // declined ring, a cancelled prejoin) is not a reason to show it.
+                // declined ring, a cancelled camera check) is not a reason to show it.
                 activeCallState = next
             }
         }

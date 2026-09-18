@@ -3,26 +3,25 @@
 
 /**
  * What a call actually asks for, from the button that started it through the
- * pre-join toggles (`docs/ux/calls.md` §3).
+ * camera check's toggles (`docs/ux/calls.md` §3).
  *
  * ## The rule this exists to hold
  *
  * §1: "Say what kind of call it is. The word on the callee's screen matches
- * what the caller chose, always." §3 makes the mechanism explicit: "A voice
- * call never turns the camera on. The pre-join screen opens with the camera off
- * for a voice call and on for a video call, and the toggles there change the
- * call that is actually placed."
+ * what the caller chose, always." So whatever the user leaves the camera
+ * check's toggles at is what the **offer** carries: a toggle that only changed
+ * a preview, with the offer still built from the button that opened the screen,
+ * would make the callee's `Video call` line a lie the moment anyone touched it.
  *
- * Two separate claims, and both have to hold together:
+ * ## What the rewritten §3 removed from this module
  *
- * 1. The **default** on the pre-join screen follows the button the user
- *    pressed. The call surface used to open its camera preview on regardless,
- *    so pressing the phone button and pressing the video button produced the
- *    same screen — the defect §3 names.
- * 2. Whatever the user leaves those toggles at is what the **offer** carries.
- *    A toggle that only changes a preview, with the offer still built from the
- *    original button, would make the callee's `Video call` line a lie the
- *    moment anyone touched it.
+ * There used to be a second rule here — `prejoinDefaults`, which decided
+ * whether the **pre-join screen** opened with the camera on. §3.1 retired that
+ * screen for a voice call ("no preparation screen, no 'check your microphone',
+ * no empty camera box") and §3.2 replaced it for a video call with the camera
+ * check, which by definition opens with the camera on. A default for a screen
+ * that only exists in one state is not a decision, so the function is gone
+ * rather than kept as a constant nobody reads.
  *
  * ## Why this is a module
  *
@@ -59,42 +58,30 @@ export interface CallMediaChoice {
   readonly video: boolean;
 }
 
-/** Where the pre-join screen's toggles start. */
-export interface PrejoinToggles {
+/** Where the camera check's toggles stand when the user presses Call. */
+export interface CameraCheckToggles {
   readonly micOn: boolean;
   readonly camOn: boolean;
 }
 
 /**
- * The media a button press asks for, with no pre-join screen in between.
+ * The media a button press asks for, with no screen in between.
  *
- * This is the 1x1 and group path on web today: the header button dials
- * straight through, so the button IS the whole choice.
+ * §3.1's voice call: the phone button dials straight through, so the button IS
+ * the whole choice.
  */
 export function mediaForStart(kind: CallStartKind): CallMediaChoice {
   return { audio: true, video: kind === "video" };
 }
 
 /**
- * Where the pre-join screen opens for a given button — §3's "camera off for a
- * voice call and on for a video call".
- *
- * The microphone starts on either way: a call nobody can hear is not a state a
- * user means to place a call in, and the toggle is right there.
- */
-export function prejoinDefaults(kind: CallStartKind): PrejoinToggles {
-  return { micOn: true, camOn: kind === "video" };
-}
-
-/**
- * The media the offer carries after the user has had the pre-join screen.
+ * The media the offer carries after the user has had the camera check.
  *
  * Reads the **toggles**, not the button: once a screen has offered the user a
- * camera switch, the switch is the answer. A voice call whose camera was turned
- * on becomes a video call and the callee is told so; a video call whose camera
- * was turned off becomes a voice call and the callee is told that instead.
+ * camera switch, the switch is the answer. A video call whose camera was turned
+ * off in the check becomes a voice call, and the callee is told that instead.
  */
-export function mediaForPrejoin(toggles: PrejoinToggles): CallMediaChoice {
+export function mediaForToggles(toggles: CameraCheckToggles): CallMediaChoice {
   return { audio: true, video: toggles.camOn };
 }
 

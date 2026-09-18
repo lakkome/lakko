@@ -816,6 +816,9 @@ public class WebRtcPeerConnection(
         private const val AUDIO_TRACK_ID = "lakko-audio0"
         private const val VIDEO_TRACK_ID = "lakko-video0"
 
+        /** Track id for the section-3.2 camera check, which belongs to no call. */
+        private const val PREVIEW_VIDEO_TRACK_ID = "lakko-preview0"
+
         /**
          * Process-wide singletons. libwebrtc's docs say:
          * > A factory is heavy-weight and should be reused.
@@ -877,6 +880,26 @@ public class WebRtcPeerConnection(
         public fun newVideoSource(context: Context): VideoSource? {
             ensureFactoryInitialised(context)
             return sharedFactory?.createVideoSource(false)
+        }
+
+        /**
+         * A video track over [source] that belongs to no peer connection —
+         * `docs/ux/calls.md` section 3.2's camera check.
+         *
+         * The check runs BEFORE the call is dialled, so there is no session and
+         * no peer connection to hang a track on, and the old pre-join had
+         * nothing to render: it drew the words "Camera preview" in an empty
+         * 16:9 box for the entire time it was on screen. This gives the check a
+         * real track to show, on the same shared factory and EGL share-group
+         * the call itself will use, so nothing is re-initialised when the call
+         * starts.
+         *
+         * The caller owns it and must `dispose()` both the track and the
+         * capture when the check closes.
+         */
+        public fun newPreviewVideoTrack(context: Context, source: VideoSource): VideoTrack? {
+            ensureFactoryInitialised(context)
+            return sharedFactory?.createVideoTrack(PREVIEW_VIDEO_TRACK_ID, source)
         }
 
         /**

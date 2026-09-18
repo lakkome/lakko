@@ -500,10 +500,11 @@ public final class ChatViewModel: ObservableObject {
 
     /// Tap-to-call from the chat header. Hands off to the app-level
     /// ``CallHost``, which settles the microphone permission, mints a fresh
-    /// `call_id` and builds the session (deriving + arming the SFrame key)
-    /// without dialing — the session sits in `.idle`, which the root call
-    /// screen shows as the prejoin; Join dials (G3-1-prejoin-join). The host
-    /// refuses, with an explanation, while another call holds the slot.
+    /// `call_id`, builds the session (deriving + arming the SFrame key) and
+    /// then either dials immediately (the phone button) or leaves the session
+    /// idle behind the camera check (the video button) —
+    /// `docs/ux/calls.md` sections 3.1 and 3.2. The host refuses, with an
+    /// explanation, while another call holds the slot.
     public func startCall(audio: Bool = true, video: Bool = false) {
         // ADR-0045 UX §6.2.8 item 4 / §6.2.11 — every exporter-backed
         // affordance GOES once the membership has ended, and failing closed is
@@ -516,10 +517,9 @@ public final class ChatViewModel: ObservableObject {
         // half.
         guard !membershipHasEnded else { return }
         // `docs/ux/calls.md` section 3 — the button the caller tapped decides
-        // what the pre-join opens with. It used to be dropped here (`_ =
-        // (audio, video)`), so the phone button opened the pre-join with the
-        // camera on and the callee was told "Video call". The microphone is
-        // always asked for; the pre-join's own toggles settle both.
+        // what happens next: a voice call goes straight onto the wire, a video
+        // call shows the camera check first. The microphone is always asked
+        // for; nothing else is asked at all.
         _ = audio
         callHost.startOutgoingCall(
             groupIdHex: groupIdHex, button: CallMediaChoice.button(video: video))

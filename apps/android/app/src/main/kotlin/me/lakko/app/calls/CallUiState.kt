@@ -64,7 +64,15 @@ public class CallUiState(
     )
 
     public sealed class CallPhase {
-        public data object Prejoin : CallPhase()
+        /**
+         * Dialled, nobody has picked up yet — `docs/ux/calls.md` sections 3.1
+         * and 4.1. This used to be `Prejoin`, the state in which the screen
+         * showed a settings card asking the user to configure the call before
+         * it was placed. Section 3.1 removed that screen ("Tapping the phone
+         * button places the call immediately"), so the first state of a call is
+         * now the call itself, reading `Calling...`.
+         */
+        public data object Calling : CallPhase()
         public data object Connecting : CallPhase()
         public data object Connected : CallPhase()
         public data class Reconnecting(val reason: String) : CallPhase()
@@ -147,7 +155,7 @@ public class CallUiState(
     // State flows
     // ----------------------------------------------------------
 
-    private val _phase = MutableStateFlow<CallPhase>(CallPhase.Prejoin)
+    private val _phase = MutableStateFlow<CallPhase>(CallPhase.Calling)
     public val phase: StateFlow<CallPhase> = _phase.asStateFlow()
 
     private val _participants = MutableStateFlow<List<Participant>>(emptyList())
@@ -171,6 +179,20 @@ public class CallUiState(
 
     private val _hasMultipleCameras = MutableStateFlow(false)
     public val hasMultipleCameras: StateFlow<Boolean> = _hasMultipleCameras.asStateFlow()
+
+    /**
+     * `docs/ux/calls.md` section 4.1 — which camera is being captured, so the
+     * self-view knows whether to mirror. The flip button lives in the
+     * self-view's corner and this is what it moves; a back camera shown
+     * mirrored would put the world the wrong way round.
+     */
+    private val _cameraFrontFacing = MutableStateFlow(true)
+    public val cameraFrontFacing: StateFlow<Boolean> = _cameraFrontFacing.asStateFlow()
+
+    /** See [cameraFrontFacing]. Set by whichever session owns the capture. */
+    public fun setCameraFrontFacing(front: Boolean) {
+        _cameraFrontFacing.value = front
+    }
 
     /** ADR-0032 piece B2a — mid-call camera-on lifecycle (see
      *  [VideoPublishState]). Driven from the bound session; `CallScreen`
@@ -619,6 +641,7 @@ public class CallUiState(
             launch { session.downBps.collect { rebuildFromSession(session) } }
             launch { session.upBps.collect { rebuildFromSession(session) } }
             launch { session.videoPublishState.collect { rebuildFromSession(session) } }
+            launch { session.cameraIsFrontFacing.collect { rebuildFromSession(session) } }
         }
     }
 
@@ -662,6 +685,7 @@ public class CallUiState(
             )
         }
         _participants.value = roster
+        _cameraFrontFacing.value = session.cameraIsFrontFacing.value
         _localVideoTrack.value = session.localVideoTrack.value
         _remoteVideoTrack.value = remoteTrack
         // G3-2-e2ee-active — pill reflects real SFrame keying; the
@@ -716,8 +740,16 @@ public class CallUiState(
 
     private fun mapSessionPhase(s: CallSession.WebCallState): CallPhase =
         when (s) {
-            CallSession.WebCallState.Idle -> CallPhase.Prejoin
+            // `docs/ux/calls.md` section 4.1's state table separates the two
+            // waits. Idle is a call prepared and about to be dialled (section
+            // 3.1 made that a single frame, not a screen) and Outgoing is a
+            // dialled call nobody has answered: both are `Calling...`. Only
+            // once the callee has picked up and the media is being negotiated
+            // is it `Connecting...`. Before this every one of them read
+            // `Connecting...`, so a ringing phone claimed to be connecting.
+            CallSession.WebCallState.Idle,
             CallSession.WebCallState.Outgoing,
+            -> CallPhase.Calling
             CallSession.WebCallState.Ringing,
             CallSession.WebCallState.Connecting,
             -> CallPhase.Connecting
@@ -733,7 +765,7 @@ public class CallUiState(
     }
 
     public fun reset() {
-        _phase.value = CallPhase.Prejoin
+        _phase.value = CallPhase.Calling
         _participants.value = emptyList()
         _pinnedId.value = null
         _participantListOpen.value = false
@@ -760,6 +792,8 @@ public class CallUiState(
         _remoteVideoTracks.value = emptyMap()
         // ADR-0032 piece B2a — no camera-on in flight for a fresh call.
         _videoPublishState.value = VideoPublishState.Off
+        // Every call starts on the front camera, so the self-view starts mirrored.
+        _cameraFrontFacing.value = true
     }
 
     /** Mock seed — same shape as the web `seedMockParticipants` /

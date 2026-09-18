@@ -47,10 +47,18 @@ export function qualityColour(tier: QualityTier): "green" | "yellow" | "red" {
   }
 }
 
-/** A single participant in the call. Local + remote share the
- *  same shape; the local one has `isLocal: true` and is filtered
- *  out of certain views (e.g. you don't appear in the gallery
- *  next to your own controls). */
+/**
+ * A single participant in the call. Local + remote share the same shape; the
+ * local one has `isLocal: true` and is filtered out of certain views (e.g. you
+ * don't appear in the gallery next to your own controls).
+ *
+ * `handRaised` and `screenSharing` used to live here and are gone with the
+ * `docs/ux/calls.md` §4.1 control row: nothing on any platform ever set them to
+ * `true` — the local toggles wrote a flag no peer could see and no remote path
+ * reported one — so the tile badges that read them could never appear. §9 puts
+ * screen sharing out of scope, and a control that only lies to its own device is
+ * the "never pretend" rule of §1 broken in miniature.
+ */
 export interface Participant {
   /** Stable id — for local: random; for remote: MLS leaf index
    *  serialised as `"leaf-<n>"`. UI uses this as the `id` for
@@ -66,9 +74,6 @@ export interface Participant {
   /** Camera enabled. `false` = camera-off (avatar tile shown
    *  instead of video). */
   readonly camOn: boolean;
-  /** Raised-hand state. UI shows a glowing hand icon on the
-   *  tile + a sort hint in the participant list. */
-  readonly handRaised: boolean;
   /** Connection quality as last reported by the bandwidth
    *  controller. */
   readonly quality: QualityTier;
@@ -76,20 +81,25 @@ export interface Participant {
    *  speaker (LiveKit metadata). The UI promotes them to the
    *  large active-speaker tile. */
   readonly speaking: boolean;
-  /** Whether this participant is currently sharing their
-   *  screen. Renders the screen-share preview in the place of
-   *  their camera tile. */
-  readonly screenSharing: boolean;
 }
 
-/** Call lifecycle phase.
+/**
+ * Call lifecycle phase, as `docs/ux/calls.md` §4's state table names them.
  *
- *  `prejoin` is the new pre-call screen — user previews their own
- *  camera + microphone, sets a display name, then taps Join to
- *  enter the call. Mirror of the `preJoinScreen` flow in
- *  `lakko_me/public/web/room-template.ts`. */
+ * `idle` is "no call on this device" — the call screen is not mounted, so it is
+ * the reset value and never a rendered state. It replaces the old `prejoin`,
+ * which was a *screen* masquerading as a phase: the pre-call surface now exists
+ * only for a video call, only as §3.2's camera check, and that check runs
+ * *before* any call object exists, so it has nothing to do with a call's
+ * lifecycle.
+ *
+ * `calling` and `connecting` are separate because they are separate facts and
+ * the store used to collapse them: a call ringing on the other person's phone
+ * reported `Connecting...`, which described the network rather than the call.
+ */
 export type CallPhase =
-  | { readonly kind: "prejoin" }
+  | { readonly kind: "idle" }
+  | { readonly kind: "calling" }
   | { readonly kind: "connecting" }
   | { readonly kind: "connected" }
   | { readonly kind: "reconnecting"; readonly reason: string }
@@ -158,13 +168,16 @@ export interface CallDevice {
  *    (noise suppression, echo cancellation, auto-gain) — which
  *    in WebRTC land are constraint flags on getUserMedia.
  *
- *  In Phase 3 the toggles affect state only — the real WebRTC
- *  pod (`S-3-A-iOS-pod` / `S-3-A-Android-pod`) wires them into
- *  the live PeerConnection. Storing them here keeps the UX
- *  parity work decoupled from the pod work.
- *
  *  `selected*` fields are `null` until the user picks a device
- *  explicitly; the OS-default device is used in the meantime. */
+ *  explicitly; the OS-default device is used in the meantime.
+ *
+ *  The capture-processing toggles (noise suppression, echo cancellation,
+ *  automatic gain, preview mirroring, low-data mode) are gone with the
+ *  `docs/ux/calls.md` §4.1 redesign. Two reasons, and the second is the one
+ *  that matters: they were rendered as a settings list of checkboxes inside a
+ *  live call, which §4.1 forbids outright — and no code on any platform ever
+ *  read them, so every one of those checkboxes was a preference the user could
+ *  set and nothing would honour. */
 export interface CallSettings {
   /** Currently selected microphone (`null` → OS default). */
   readonly selectedAudioInput: string | null;
@@ -183,21 +196,6 @@ export interface CallSettings {
    *  (`switchAudioInput`/`switchVideoInput`); the SFU multi-party
    *  path drives capture through its own session. */
   readonly availableDevices: readonly CallDevice[];
-  /** Noise-suppression filter — `getUserMedia({ audio: {
-   *  noiseSuppression: true } })` on web; equivalent
-   *  AVAudioSession / AudioManager mode on the natives. */
-  readonly noiseSuppression: boolean;
-  /** Acoustic echo cancellation. */
-  readonly echoCancellation: boolean;
-  /** Automatic gain control. */
-  readonly autoGain: boolean;
-  /** Mirror the local preview tile horizontally — natural for
-   *  front-facing cameras, distracting for back cameras. */
-  readonly mirrorLocal: boolean;
-  /** Low-data mode — clamps simulcast to the bottom layer
-   *  (≈ 360p / 150 kbps) regardless of measured bandwidth.
-   *  Useful on metered mobile connections. */
-  readonly lowDataMode: boolean;
 }
 
 /** A single chat message inside the call. Two kinds:
@@ -228,24 +226,48 @@ export interface ChatMessage {
   readonly ts: number;
 }
 
-/** Default `CallSettings` — every toggle on, no explicit
- *  device picks. */
+/** Default `CallSettings` — no explicit device picks, nothing enumerated. */
 const DEFAULT_SETTINGS: CallSettings = {
   selectedAudioInput: null,
   selectedVideoInput: null,
   selectedAudioOutput: null,
   availableDevices: [],
-  noiseSuppression: true,
-  echoCancellation: true,
-  autoGain: true,
-  mirrorLocal: true,
-  lowDataMode: false,
 };
 
 /** Top-level UI state. Internal — components read via the
  *  accessors below. */
 interface CallStateInternal {
   readonly phase: Accessor<CallPhase>;
+  /**
+   * When media first flowed, in unix milliseconds, or `null` before it has.
+   *
+   * The call screen's one status line is the running time once connected
+   * (`docs/ux/calls.md` §4), so the duration has to start from a moment the
+   * store owns rather than from when a component happened to mount. Set once
+   * per call and NOT reset by a `reconnecting` round trip — a call that
+   * stumbles for four seconds is still the same call, and a timer that restarts
+   * would tell the user otherwise. Survives into `ended` so the ended line can
+   * state how long the call was.
+   */
+  readonly connectedAt: Accessor<number | null>;
+  /**
+   * What the call was placed or answered as.
+   *
+   * Decides whether the control row carries a camera button (§4.1's table), and
+   * deliberately NOT the same question as what is currently on screen — see
+   * `calls/call-controls.ts`.
+   */
+  readonly mediaKind: Accessor<"voice" | "video">;
+  /**
+   * Whether the microphone should be live when the call's local participant is
+   * first built.
+   *
+   * §3.2's camera check can be left muted, and the call has to start that way.
+   * Every `localParticipant()` constructor used to hardcode `micOn: true`, so a
+   * muted start was silently unmuted the moment the session reported its first
+   * state.
+   */
+  readonly pendingMicOn: Accessor<boolean>;
   readonly participants: Accessor<Participant[]>;
   /** Id of the pinned participant. `null` = follow active
    *  speaker. */
@@ -265,9 +287,7 @@ interface CallStateInternal {
    *  multiple cameras — drives the "switch camera" button's
    *  visibility. */
   readonly hasMultipleCameras: Accessor<boolean>;
-  /** Settings modal open / closed. */
-  readonly settingsOpen: Accessor<boolean>;
-  /** In-call audio / video settings + selected devices. */
+  /** Selected devices. */
   readonly settings: Accessor<CallSettings>;
   /** Chat panel open / closed. */
   readonly chatOpen: Accessor<boolean>;
@@ -295,7 +315,10 @@ interface CallStateInternal {
 // Internal signals + actions
 // ============================================================================
 
-const [phase, setPhase] = createSignal<CallPhase>({ kind: "prejoin" });
+const [phase, setPhase] = createSignal<CallPhase>({ kind: "idle" });
+const [connectedAt, setConnectedAt] = createSignal<number | null>(null);
+const [mediaKind, setMediaKind] = createSignal<"voice" | "video">("voice");
+const [pendingMicOn, setPendingMicOn] = createSignal(true);
 const [participants, setParticipants] = createSignal<Participant[]>([]);
 const [pinnedId, setPinnedId] = createSignal<string | null>(null);
 const [participantListOpen, setParticipantListOpen] = createSignal(false);
@@ -311,7 +334,6 @@ const [connectionDetail, setConnectionDetail] = createSignal<ConnectionDetail>({
 });
 const [qualityPopoverOpen, setQualityPopoverOpen] = createSignal(false);
 const [hasMultipleCameras, setHasMultipleCameras] = createSignal(false);
-const [settingsOpen, setSettingsOpen] = createSignal(false);
 const [settings, setSettings] = createSignal<CallSettings>(DEFAULT_SETTINGS);
 const [chatOpen, setChatOpen] = createSignal(false);
 const [chatMessages, setChatMessages] = createSignal<readonly ChatMessage[]>([]);
@@ -359,6 +381,9 @@ function localParticipant(): Participant | null {
  *  reactivity tracks the call site of `.()`). */
 export const callState: CallStateInternal = {
   phase,
+  connectedAt,
+  mediaKind,
+  pendingMicOn,
   participants,
   pinnedId,
   participantListOpen,
@@ -366,7 +391,6 @@ export const callState: CallStateInternal = {
   connectionDetail,
   qualityPopoverOpen,
   hasMultipleCameras,
-  settingsOpen,
   settings,
   chatOpen,
   chatMessages,
@@ -462,16 +486,6 @@ export const callActions = {
   setVideoPublishState(state: VideoPublishState): void {
     setVideoPublishState(state);
   },
-  /** Toggle local raise-hand. */
-  setHandRaised(raised: boolean): void {
-    const local = localParticipant();
-    if (local !== null) patchParticipant(local.id, { handRaised: raised });
-  },
-  /** Toggle the local screen-share. */
-  setScreenSharing(on: boolean): void {
-    const local = localParticipant();
-    if (local !== null) patchParticipant(local.id, { screenSharing: on });
-  },
   /** Pin a remote participant to the big tile. Pass `null` to
    *  resume "follow active speaker". */
   pin(id: string | null): void {
@@ -481,9 +495,26 @@ export const callActions = {
   setParticipantListOpen(open: boolean): void {
     setParticipantListOpen(open);
   },
-  /** Transition the call lifecycle phase. */
+  /**
+   * Transition the call lifecycle phase.
+   *
+   * Starts the duration clock the first time the call reaches `connected` and
+   * never restarts it: a `connected -> reconnecting -> connected` round trip is
+   * one call, and a timer that went back to `0:00` would say it was two.
+   */
   setPhase(next: CallPhase): void {
+    if (next.kind === "connected" && connectedAt() === null) setConnectedAt(Date.now());
     setPhase(next);
+  },
+  /** Record what the call was placed or answered as (`voice` / `video`). Drives
+   *  whether the control row carries a camera button. */
+  setMediaKind(kind: "voice" | "video"): void {
+    setMediaKind(kind);
+  },
+  /** Ask for the call's local participant to start muted — the camera check's
+   *  microphone toggle, applied before any session reports a state. */
+  setPendingMicOn(on: boolean): void {
+    setPendingMicOn(on);
   },
   /** Hangup — transitions to `ended`. The route component
    *  watches for this and navigates away after a 3s overlay. */
@@ -493,7 +524,10 @@ export const callActions = {
   /** Reset to initial state. Used on route mount + unmount so
    *  re-entering a call screen starts fresh. */
   reset(): void {
-    setPhase({ kind: "prejoin" });
+    setPhase({ kind: "idle" });
+    setConnectedAt(null);
+    setMediaKind("voice");
+    setPendingMicOn(true);
     setParticipants([]);
     setPinnedId(null);
     setParticipantListOpen(false);
@@ -505,10 +539,8 @@ export const callActions = {
       connectionType: "unknown",
     });
     setQualityPopoverOpen(false);
-    setSettingsOpen(false);
-    // Devices list cleared — preferences (toggles + selected
-    // device ids) survive a reset so the user does not have to
-    // re-enable NS/AEC every time they enter a call screen.
+    // Devices list cleared — the selected device ids survive a reset so a
+    // headset picked on the last call is still picked on the next one.
     setSettings((s) => ({ ...s, availableDevices: [] }));
     // Chat is a per-call surface — wipe on reset. The
     // production MLS-backed transport persists text messages
@@ -521,13 +553,6 @@ export const callActions = {
     // Mid-call camera-on lifecycle — back to `off` so a fresh call
     // screen starts without a stale spinner.
     setVideoPublishState("off");
-  },
-  /** Transition from prejoin → connecting. Called when the user
-   *  clicks Join on the prejoin screen. The WebRTC pod takes
-   *  over from here, drives the SDP exchange, and flips the
-   *  phase to `connected` when ICE pairs. */
-  join(): void {
-    setPhase({ kind: "connecting" });
   },
   /** Update the E2EE indicator. Called by the WebRTC pod once
    *  the MLS exporter has produced a CallKey and `call_key_
@@ -549,15 +574,10 @@ export const callActions = {
   setHasMultipleCameras(many: boolean): void {
     setHasMultipleCameras(many);
   },
-  /** Open / close the in-call settings modal. */
-  setSettingsOpen(open: boolean): void {
-    setSettingsOpen(open);
-  },
-  /** Replace the enumerated-devices snapshot. Called by the
-   *  call settings panel after it runs
-   *  `navigator.mediaDevices.enumerateDevices()` (labels are
-   *  populated once getUserMedia has been granted, i.e. during
-   *  a live call). */
+  /** Replace the enumerated-devices snapshot. Called by the call screen after
+   *  it runs `navigator.mediaDevices.enumerateDevices()` (labels are populated
+   *  once getUserMedia has been granted, i.e. during a live call), and on
+   *  `devicechange` when a headset is plugged in mid-call. */
   setAvailableDevices(devices: readonly CallDevice[]): void {
     setSettings((s) => ({ ...s, availableDevices: devices }));
   },
@@ -569,29 +589,10 @@ export const callActions = {
   setSelectedVideoInput(id: string | null): void {
     setSettings((s) => ({ ...s, selectedVideoInput: id }));
   },
-  /** Pick a speaker / headset. `null` = revert to OS default. */
+  /** Pick a speaker / headset. `null` = revert to OS default. Applied to every
+   *  remote `<audio>` sink through `setSinkId` by the call host. */
   setSelectedAudioOutput(id: string | null): void {
     setSettings((s) => ({ ...s, selectedAudioOutput: id }));
-  },
-  /** Toggle the noise-suppression filter. */
-  setNoiseSuppression(on: boolean): void {
-    setSettings((s) => ({ ...s, noiseSuppression: on }));
-  },
-  /** Toggle acoustic echo cancellation. */
-  setEchoCancellation(on: boolean): void {
-    setSettings((s) => ({ ...s, echoCancellation: on }));
-  },
-  /** Toggle automatic gain control. */
-  setAutoGain(on: boolean): void {
-    setSettings((s) => ({ ...s, autoGain: on }));
-  },
-  /** Toggle local-preview horizontal mirroring. */
-  setMirrorLocal(on: boolean): void {
-    setSettings((s) => ({ ...s, mirrorLocal: on }));
-  },
-  /** Toggle low-data mode (clamps simulcast to bottom layer). */
-  setLowDataMode(on: boolean): void {
-    setSettings((s) => ({ ...s, lowDataMode: on }));
   },
   /** Open / close the chat panel. Opening clears the unread
    *  badge — the user has seen the new messages. */

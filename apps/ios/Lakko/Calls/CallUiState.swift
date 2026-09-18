@@ -55,9 +55,15 @@ public final class CallUiState: ObservableObject {
         public let screenSharing: Bool
     }
 
-    /// Lifecycle phase.
+    /// Lifecycle phase (`docs/ux/calls.md` section 4).
     public enum CallPhase: Equatable {
-        case prejoin
+        /// The camera check a video call opens with (section 3.2). A voice call
+        /// never passes through it — it dials immediately — and an accepted
+        /// incoming call never does either (section 3.3).
+        case cameraCheck
+        /// Ringing out: the offer is on the wire, nobody has answered.
+        case calling
+        /// Answered; the transport is coming up.
         case connecting
         case connected
         case reconnecting(reason: String)
@@ -197,7 +203,7 @@ public final class CallUiState: ObservableObject {
 
     // MARK: - Published state
 
-    @Published public private(set) var phase: CallPhase = .prejoin
+    @Published public private(set) var phase: CallPhase = .cameraCheck
     @Published public private(set) var participants: [Participant] = []
     /// `nil` = follow active speaker.
     @Published public private(set) var pinnedId: String?
@@ -209,6 +215,14 @@ public final class CallUiState: ObservableObject {
     @Published public private(set) var peerName: String?
     /// `docs/ux/calls.md` sections 4 and 5 — the encryption sheet is open.
     @Published public private(set) var encryptionSheetOpen: Bool = false
+    /// `docs/ux/calls.md` section 4.1 — the sound is on the loudspeaker. Held
+    /// here so the button's face is decided by one value the tests can read;
+    /// ``CallAudioRoute`` is what actually moves the audio.
+    @Published public private(set) var speakerOn: Bool = false
+    /// One plain line about this call's media, or `nil`. Today's only use is
+    /// section 3.2's "no camera on this device" downgrade; it sits under the
+    /// status line while the call rings out and goes when it connects.
+    @Published public private(set) var mediaNotice: String?
     @Published public private(set) var connectionDetail: ConnectionDetail = .unknown
     @Published public private(set) var qualityPopoverOpen: Bool = false
     @Published public private(set) var hasMultipleCameras: Bool = false
@@ -233,10 +247,9 @@ public final class CallUiState: ObservableObject {
 
     /// G3-1-video-ui-screen — live local-camera track from the
     /// underlying `CallSession` (when one is attached via
-    /// `bind(to:)`). `nil` while audio-only, while the prejoin
-    /// flow is still up, or while the camera-pipeline init is
-    /// in-flight. SwiftUI consumers (the self-tile in
-    /// `ParticipantTile`, the prejoin preview in `PrejoinView`)
+    /// `bind(to:)`). `nil` while audio-only, or while the
+    /// camera-pipeline init is in-flight. SwiftUI consumers (the
+    /// self-view corner of a video call, the tile of a group one)
     /// render `LocalVideoPreviewView(track:)` when this is
     /// non-nil **and** the local participant's `camOn == true`.
     /// Untouched by `seedMockState()` — the mock-driven design
@@ -459,6 +472,18 @@ public final class CallUiState: ObservableObject {
         self.encryptionSheetOpen = open && e2ee.active
     }
 
+    /// `docs/ux/calls.md` section 4.1 — record where the sound is going. The
+    /// caller is ``CallAudioRoute``, which only records what the platform
+    /// accepted, so the button never claims a route the device refused.
+    public func setSpeakerOn(_ on: Bool) {
+        self.speakerOn = on
+    }
+
+    /// Set (or clear) the one line under the status line.
+    public func setMediaNotice(_ notice: String?) {
+        self.mediaNotice = notice
+    }
+
     public func setConnectionDetail(_ d: ConnectionDetail) {
         self.connectionDetail = d
     }
@@ -649,13 +674,15 @@ public final class CallUiState: ObservableObject {
     }
 
     public func reset() {
-        self.phase = .prejoin
+        self.phase = .cameraCheck
         self.participants = []
         self.pinnedId = nil
         self.participantListOpen = false
         self.e2ee = .inactive
         self.peerName = nil
         self.encryptionSheetOpen = false
+        self.speakerOn = false
+        self.mediaNotice = nil
         self.connectionDetail = .unknown
         self.qualityPopoverOpen = false
         self.settingsOpen = false
@@ -782,11 +809,9 @@ extension CallUiState {
     /// `CallSession` signal, deferred): the e2ee fingerprint
     /// pill, connection-quality detail, and the mic / hand /
     /// screen-share controls writing *back* into the session.
-    /// The prejoin Join → `dial` / `acceptCall` action and the
-    /// navigation that presents this screen with a session are
-    /// separate follow-ups — `CallScreen` calls this from
-    /// `onAppear` when a session is injected and falls back to
-    /// `seedMockState()` otherwise.
+    /// Placing the call is ``CallHost``'s job, not this one's —
+    /// `CallScreen` calls this from `onAppear` when a session is
+    /// injected and falls back to `seedMockState()` otherwise.
     ///
     /// Returns the owning `[AnyCancellable]`; store it on the
     /// SwiftUI host for the call's lifetime.
@@ -929,14 +954,21 @@ extension CallUiState {
         }
     }
 
-    /// Map the `CallSession` lifecycle onto the UI phase. The
-    /// pre-connect states collapse to `.connecting` (the UI has
-    /// no separate "ringing"); `ending` holds at `.connected`
+    /// Map the `CallSession` lifecycle onto the UI phase
+    /// (`docs/ux/calls.md` section 4's state table).
+    ///
+    /// `.outgoing` is its own line on that table — the call is on the wire and
+    /// nobody has answered, which the screen says as `Calling...` — and it used
+    /// to collapse into `.connecting`, so a ringing call claimed to be
+    /// connecting to someone who had not picked up. `.idle` is the camera check
+    /// a video call opens with; a voice call dials before the screen is even
+    /// presented, so it is never seen there. `ending` holds at `.connected`
     /// until the terminal `done` flips to `.ended`.
     private static func mapSessionPhase(_ s: CallSession.WebCallState) -> CallPhase {
         switch s {
-        case .idle: return .prejoin
-        case .outgoing, .ringing, .connecting: return .connecting
+        case .idle: return .cameraCheck
+        case .outgoing, .ringing: return .calling
+        case .connecting: return .connecting
         case .connected, .ending: return .connected
         case .done: return .ended(endedAt: Date())
         }

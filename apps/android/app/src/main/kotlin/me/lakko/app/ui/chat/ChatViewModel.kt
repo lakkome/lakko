@@ -333,29 +333,35 @@ public class ChatViewModel(
 
 
     /**
-     * Tap-to-call from the chat header. G3-2-prejoin-join: this only PREPARES
-     * the session — it builds it and arms the SFrame key, but does NOT dial.
-     * The session sits `Idle` (mapped to the prejoin phase), the call screen
-     * presents the prejoin (mic / camera preview), and Join dials it.
+     * Tap-to-call from the chat header.
      *
      * `docs/ux/calls.md` section 3 — [video] says which header button was
-     * pressed, and is carried through to the host so the pre-join opens with
-     * the camera off for a voice call and on for a video one. It used to be
-     * discarded here, so both buttons opened the pre-join with the camera on
-     * and every call went out as a video call; see [me.lakko.app.calls.RequestedCallKind].
+     * pressed, and the host turns that into the surface that opens: a voice
+     * call is DIALLED here and now, and only a video call on a device with a
+     * camera stops at the camera check. Before this both buttons prepared a
+     * session and left it sitting undialled behind a settings card titled "Join
+     * call", which section 3.1 removed outright.
+     *
+     * A video button pressed on a device with no camera places a voice call and
+     * says so in one line, rather than opening a check with nothing in it.
      */
     public fun startCall(audio: Boolean = true, video: Boolean = false) {
-        // `audio` has no say before the pre-join: the microphone toggle there is
-        // what the offer carries, and it opens on for every kind of call.
+        // `audio` has no say: a call is always dialled with an audio section,
+        // because the call screen's Mute button must work without a
+        // renegotiation. See `immediateDialMedia` / `offeredCallMedia`.
         @Suppress("UNUSED_PARAMETER") val ignoredAudio = audio
         val host = callHost ?: return
-        // The host builds the session and arms the SFrame seed from the MLS
-        // exporter (G3-2-call-key) so it is ready when the user taps Join in
-        // the prejoin; the app-level overlay presents it. Refused while any
-        // other call is up — one call at a time.
-        if (!host.startOutgoing(groupIdHex, me.lakko.app.calls.requestedCallKind(video))) {
+        val kind = me.lakko.app.calls.requestedCallKind(video)
+        val hasCamera = me.lakko.app.calls.CameraVideoCapture.hasUsableCamera(repo.context)
+        // The host builds the session, arms the SFrame seed from the MLS
+        // exporter (G3-2-call-key) and dials unless a camera check is due; the
+        // app-level overlay presents whichever of the two follows. Refused
+        // while any other call is up — one call at a time.
+        if (!host.startOutgoing(groupIdHex, kind, hasCamera = hasCamera)) {
             showBusyNotice(me.lakko.app.calls.CallVerb.START)
+            return
         }
+        me.lakko.app.calls.callEntryNotice(kind, hasCamera)?.let(::showCallNotice)
     }
 
     // -------------------------------------------------------------

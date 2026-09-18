@@ -35,7 +35,7 @@
 
 import { createSignal, type Accessor } from "solid-js";
 
-import { callActions, type Participant } from "../state/call-state";
+import { callActions, callState, type Participant } from "../state/call-state";
 import {
   SfuCallSession,
   type SfuCallConfig,
@@ -128,10 +128,8 @@ function remoteParticipant(displayName: string, peerId: string): Participant {
     isLocal: false,
     micOn: true,
     camOn: false,
-    handRaised: false,
     quality: "good",
     speaking: false,
-    screenSharing: false,
   };
 }
 
@@ -176,12 +174,14 @@ export function createSfuCallUi(
     id: "local",
     displayName: localName,
     isLocal: true,
-    micOn: config.media.audio,
+    // The camera check can be left muted (docs/ux/calls.md section 3.2), and
+    // `media.audio` is always true on web (a call with no audio transceiver
+    // could never be unmuted). So the mute state comes from the store, not
+    // from the capture flags.
+    micOn: callState.pendingMicOn(),
     camOn: config.media.video,
-    handRaised: false,
     quality: "good",
     speaking: false,
-    screenSharing: false,
   });
 
   // The roster participant id for a peer is `peer-<peerId>`, and the SFU
@@ -229,6 +229,10 @@ export function createSfuCallUi(
       });
     });
   };
+
+  // What the control row carries follows the call's kind, not what is on
+  // screen (docs/ux/calls.md section 4.1's table; see `call-controls.ts`).
+  callActions.setMediaKind(config.media.video ? "video" : "voice");
 
   const session = new SfuCallSession(config, {
     onStateChange: (state): void => {

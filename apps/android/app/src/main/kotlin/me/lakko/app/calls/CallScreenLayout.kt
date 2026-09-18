@@ -1,0 +1,76 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+package me.lakko.app.calls
+
+/**
+ * What the call screen puts on the stage — `docs/ux/calls.md` section 4.
+ *
+ * ## The defect this closes
+ *
+ * There was one layout for every call: a scrolling column of 16:9 tiles with a
+ * bordered card per participant. A 1x1 voice call was therefore a single empty
+ * tile with one letter in it, floating on a page of dark background, with a
+ * phase pill hovering over it repeating what the status line already said.
+ *
+ * Section 4 gives the two 1x1 shapes their own names. "A voice call is a
+ * portrait: the other person's avatar large and centred in the upper half,
+ * their name under it in the largest type on the screen." "A video call fills
+ * the screen with the other person, and the self-view is a small rounded
+ * rectangle in a corner." The tiled grid survives only for a group call, which
+ * section 9 puts out of scope for this redesign.
+ *
+ * Pure and Android-free, so the choice is unit-tested on the host JVM.
+ */
+
+/** What the call screen draws behind the status line and the controls. */
+public enum class CallStage {
+    /** One other person, no video from them: the portrait of section 4. */
+    PORTRAIT,
+
+    /** One other person, sending video: their video fills the screen. */
+    REMOTE_VIDEO,
+
+    /** More than one other person: the tiled grid, unchanged (section 9). */
+    GRID,
+}
+
+/**
+ * The stage for a roster of [remoteParticipants] others, [remoteVideoPresent]
+ * saying whether the sole other person is sending video.
+ *
+ * [groupCall] is what KIND of call this is, not how many people are in it right
+ * now, and it decides before anything else. A group call whose second
+ * participant has not joined yet still has a roster, a chat and an invite to
+ * offer, and painting it as a 1x1 portrait would take all three away until
+ * somebody else arrived — so a group call keeps its grid throughout, camera or
+ * no camera.
+ */
+public fun callStage(
+    remoteParticipants: Int,
+    remoteVideoPresent: Boolean,
+    groupCall: Boolean = false,
+): CallStage = when {
+    groupCall -> CallStage.GRID
+    remoteParticipants > 1 -> CallStage.GRID
+    remoteVideoPresent -> CallStage.REMOTE_VIDEO
+    else -> CallStage.PORTRAIT
+}
+
+/** How long the controls stay up before fading on a connected video call. */
+public const val CALL_CONTROLS_AUTO_HIDE_MS: Long = 5_000L
+
+/**
+ * Whether the controls may fade away after [CALL_CONTROLS_AUTO_HIDE_MS].
+ *
+ * Section 4: "The controls fade out after 5 seconds of a connected video call
+ * and come back on a tap; on a voice call they never hide." Section 4.2 gives
+ * the reason the rule is not general — on a voice call there is "nothing to look
+ * at underneath, so hiding them only makes the user tap".
+ *
+ * A grid call is treated as a voice call here for the same reason: what is
+ * underneath is a roster, not a picture of a person, and a group call is where
+ * losing the mute button costs most.
+ */
+public fun controlsMayAutoHide(stage: CallStage, connected: Boolean): Boolean =
+    connected && stage == CallStage.REMOTE_VIDEO

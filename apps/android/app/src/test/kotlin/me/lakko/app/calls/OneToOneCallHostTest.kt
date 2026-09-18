@@ -14,6 +14,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
@@ -435,7 +436,10 @@ class OneToOneCallHostTest {
     @Test
     fun `an outgoing call is prepared, dialed, and times out unanswered`() = runTest {
         val h = harness()
-        assertTrue(h.host.startOutgoing(groupA))
+        // A VIDEO call is the only kind that still waits to be dialled: it
+        // stops at the camera check of `docs/ux/calls.md` section 3.2. A voice
+        // call is dialled by `startOutgoing` itself — see the test below.
+        assertTrue(h.host.startOutgoing(groupA, RequestedCallKind.VIDEO))
         runCurrent()
         val call = h.host.active.value!!
         assertFalse(call.incoming)
@@ -465,7 +469,9 @@ class OneToOneCallHostTest {
     @Test
     fun `cancelling a prepared call clears the slot`() = runTest {
         val h = harness()
-        h.host.startOutgoing(groupA)
+        // Only a video call is ever cancellable-before-dialling now: it is the
+        // camera check's close control that cancels it.
+        h.host.startOutgoing(groupA, RequestedCallKind.VIDEO)
         runCurrent()
         h.host.cancelPrepared()
         runCurrent()
@@ -872,19 +878,41 @@ class OneToOneCallHostTest {
     }
 
     @Test
-    fun `the kind the caller chose reaches the prepared call`() = runTest {
+    fun `the phone button dials without any screen in between`() = runTest {
+        // `docs/ux/calls.md` section 3.1 — "Tapping the phone button places the
+        // call immediately. No preparation screen." The host is where that is
+        // true or not: a voice call leaves `startOutgoing` already dialled, so
+        // there is no undialled state for a screen to be drawn over.
         val h = harness()
-        h.host.startOutgoing(groupA, RequestedCallKind.VOICE)
+        assertTrue(h.host.startOutgoing(groupA, RequestedCallKind.VOICE))
         runCurrent()
-        assertEquals(RequestedCallKind.VOICE, h.host.active.value?.requestedKind)
-        assertEquals(false, h.host.active.value?.let { prejoinCameraDefault(it.requestedKind) })
+        val call = h.host.active.value!!
+        assertEquals(RequestedCallKind.VOICE, call.requestedKind)
+        assertEquals(true to false, call.session.dialed)
+        assertNotEquals(CallSession.WebCallState.Idle, call.session.state.value)
+    }
 
-        h.host.cancelPrepared()
+    @Test
+    fun `the video button stops at the camera check`() = runTest {
+        val h = harness()
+        assertTrue(h.host.startOutgoing(groupA, RequestedCallKind.VIDEO, hasCamera = true))
         runCurrent()
-        h.host.startOutgoing(groupA, RequestedCallKind.VIDEO)
+        val call = h.host.active.value!!
+        assertEquals(RequestedCallKind.VIDEO, call.requestedKind)
+        assertNull("nothing is dialled until the check is passed", call.session.dialed)
+        assertEquals(CallSession.WebCallState.Idle, call.session.state.value)
+    }
+
+    @Test
+    fun `the video button on a camera-less device places a voice call`() = runTest {
+        // Section 3.2: "If the device has no camera, the video button starts a
+        // voice call and says so in one line." A check with nothing in it is
+        // the empty preview box all over again.
+        val h = harness()
+        assertTrue(h.host.startOutgoing(groupA, RequestedCallKind.VIDEO, hasCamera = false))
         runCurrent()
-        assertEquals(RequestedCallKind.VIDEO, h.host.active.value?.requestedKind)
-        assertEquals(true, h.host.active.value?.let { prejoinCameraDefault(it.requestedKind) })
+        val call = h.host.active.value!!
+        assertEquals(true to false, call.session.dialed)
     }
 
     // ---- The ring does not depend on which screen is open (section 2.1) ------

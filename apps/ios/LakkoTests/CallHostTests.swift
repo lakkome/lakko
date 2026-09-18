@@ -43,6 +43,11 @@ final class CallHostTests: XCTestCase {
         var camGranted = true
         /// `docs/ux/calls.md` section 6 — the rows the host filed.
         var recorded: [(group: String, row: CallTranscriptRow)] = []
+        /// `docs/ux/calls.md` sections 3.1 and 3.2 — the calls the host put on
+        /// the wire, and with which media. A port rather than a real
+        /// `session.dial`, so no peer connection is ever built here.
+        var placed: [(audio: Bool, video: Bool)] = []
+        var hasCamera = true
         init(nowMs: Int64) { self.nowMs = nowMs }
 
         @MainActor
@@ -72,7 +77,9 @@ final class CallHostTests: XCTestCase {
             cameraGranted: { video in !video || h.camGranted },
             peerName: { _ in "Alice" },
             mintCallId: { Data(repeating: 0x0C, count: 16) },
-            recordCall: { group, row in h.recorded.append((group, row)) }
+            recordCall: { group, row in h.recorded.append((group, row)) },
+            hasCamera: { h.hasCamera },
+            placeCall: { _, audio, video in h.placed.append((audio, video)) }
         ))
     }
 
@@ -361,35 +368,73 @@ final class CallHostTests: XCTestCase {
 
     // MARK: - What the caller chose (docs/ux/calls.md section 3)
 
-    /// The defect: the phone button opened the pre-join with the camera on, so
-    /// the offer said video and the callee was told "Video call". The host
-    /// carries the button the caller tapped; the screen reads it.
-    func testThePhoneButtonPreparesAVoiceCall() async throws {
+    /// Section 3.1 — the phone button places the call. There is no preparation
+    /// screen between the tap and the call at all: the old one asked the caller
+    /// to check a microphone, over an empty camera box, before a voice call.
+    func testThePhoneButtonDialsImmediately() async throws {
         let h = Harness(nowMs: t0)
         let host = makeHost(h)
         host.startOutgoingCall(groupIdHex: groupA, button: .voice)
-        try await waitUntil { host.activeCall != nil }
+        try await waitUntil { !h.placed.isEmpty }
         XCTAssertEqual(host.outgoingButton, .voice)
-        XCTAssertFalse(CallMediaChoice.prejoinCameraOn(for: host.outgoingButton ?? .video))
+        XCTAssertEqual(host.outgoingSurface, .dial(video: false))
+        XCTAssertEqual(h.placed.count, 1)
+        XCTAssertTrue(h.placed[0].audio)
+        XCTAssertFalse(h.placed[0].video, "the phone button never turns the camera on")
+        XCTAssertNil(host.outgoingNotice)
     }
 
-    func testTheVideoButtonPreparesAVideoCall() async throws {
+    /// Section 3.2 — the video button shows the camera first, so nothing is on
+    /// the wire until the check's Call button is pressed.
+    func testTheVideoButtonOpensTheCameraCheckAndDialsNothingYet() async throws {
         let h = Harness(nowMs: t0)
         let host = makeHost(h)
         host.startOutgoingCall(groupIdHex: groupA, button: .video)
         try await waitUntil { host.activeCall != nil }
         XCTAssertEqual(host.outgoingButton, .video)
-        XCTAssertTrue(CallMediaChoice.prejoinCameraOn(for: host.outgoingButton ?? .voice))
+        XCTAssertEqual(host.outgoingSurface, .cameraCheck)
+        XCTAssertTrue(h.placed.isEmpty, "the camera check must not place the call by itself")
     }
 
-    /// An incoming call has no button of ours; the pre-join is skipped
-    /// entirely and the accept decides.
-    func testAnIncomingCallCarriesNoOutgoingButton() {
+    /// The check's Call button places the call with what its two round buttons
+    /// were left at — a camera turned off there makes this a voice call.
+    func testTheCameraChecksCallButtonPlacesWhatTheButtonsSay() async throws {
+        let h = Harness(nowMs: t0)
+        let host = makeHost(h)
+        host.startOutgoingCall(groupIdHex: groupA, button: .video)
+        try await waitUntil { host.activeCall != nil }
+        host.placeCheckedCall(micOn: true, cameraOn: false)
+        XCTAssertEqual(h.placed.count, 1)
+        XCTAssertTrue(h.placed[0].audio)
+        XCTAssertFalse(h.placed[0].video)
+        XCTAssertEqual(host.outgoingSurface, .dial(video: false))
+    }
+
+    /// Section 3.2 — a device with no camera answers the video button with a
+    /// voice call and one line saying so, rather than a check of a camera that
+    /// does not exist.
+    func testTheVideoButtonOnACameralessDeviceCallsWithVoiceAndSaysSo() async throws {
+        let h = Harness(nowMs: t0)
+        h.hasCamera = false
+        let host = makeHost(h)
+        host.startOutgoingCall(groupIdHex: groupA, button: .video)
+        try await waitUntil { !h.placed.isEmpty }
+        XCTAssertEqual(host.outgoingSurface, .dial(video: false))
+        XCTAssertFalse(h.placed[0].video)
+        XCTAssertEqual(
+            host.outgoingNotice, "This device has no camera. Calling with voice only.")
+    }
+
+    /// An incoming call has no button of ours, and section 3.3 says accepting
+    /// one never shows a preparation screen.
+    func testAnIncomingCallCarriesNoOutgoingButtonOrSurface() {
         let h = Harness(nowMs: t0)
         let host = makeHost(h)
         host.receive(row(offer(callA, video: true), group: groupA, id: 1, atMs: t0))
         XCTAssertNil(host.outgoingButton)
+        XCTAssertNil(host.outgoingSurface)
         XCTAssertTrue(host.incomingVideo)
+        XCTAssertTrue(h.placed.isEmpty)
     }
 
     // MARK: - What the call leaves behind (docs/ux/calls.md section 6)

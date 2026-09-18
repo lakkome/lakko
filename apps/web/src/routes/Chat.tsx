@@ -139,6 +139,9 @@ import { useGroupNames } from "../chat/GroupNameContext";
 import { useReadWatermarks } from "../chat/ReadWatermarkContext";
 import { useCallLog } from "../calls/CallLogContext";
 import { callBackKind, type CallLogEntry } from "../calls/call-log";
+import { planCallStart } from "../calls/call-start-flow";
+import { CameraCheck } from "../calls/CameraCheck";
+import { callActions } from "../state/call-state";
 import { mergeConversationEntries } from "../chat/call-timeline";
 import {
   GROUP_NAME_LABEL,
@@ -792,8 +795,16 @@ function ChatView(props: {
     }
   }
 
-  /** The header's Call / Video buttons. */
-  function onCallButton(withVideo: boolean): void {
+  /**
+   * The camera opened for docs/ux/calls.md section 3.2's camera check, or
+   * `null` when no check is up. Holding the stream here rather than a boolean
+   * is what lets the check open on a live picture instead of on a placeholder.
+   */
+  const [cameraCheckStream, setCameraCheckStream] = createSignal<MediaStream | null>(null);
+
+  /** Place a call of the given media, routed to whichever kind of call this
+   *  chat is. */
+  function placeCall(withVideo: boolean): void {
     switch (callAffordance()) {
       case "join-group": {
         const live = liveGroupCall();
@@ -808,6 +819,53 @@ function ChatView(props: {
         return;
       case "hidden":
         return;
+    }
+  }
+
+  /**
+   * The header's two call buttons (docs/ux/calls.md section 3).
+   *
+   * The phone button dials immediately — no preparation screen, which is what
+   * section 3.1 asks for and what every phone app does. The video button opens
+   * the camera check, because "a person about to be seen deserves to know what
+   * they look like".
+   */
+  function onCallButton(withVideo: boolean): void {
+    if (callAffordance() === "hidden") return;
+    if (!withVideo) {
+      placeCall(false);
+      return;
+    }
+    void openCameraCheck();
+  }
+
+  /**
+   * Open section 3.2's camera check, or fall back to a voice call.
+   *
+   * The camera is acquired BEFORE the screen opens, so a device that has none
+   * never sees a check with nothing in it — section 3.2: "If the device has no
+   * camera, the video button starts a voice call and says so in one line."
+   * That one line is `planCallStart`'s, so the words live where a test can
+   * read them.
+   */
+  async function openCameraCheck(): Promise<void> {
+    let stream: MediaStream | null = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    } catch {
+      // No camera, or the permission was refused. Either way the call is still
+      // placeable, just not as a video call.
+      stream = null;
+    }
+    const plan = planCallStart("video", stream !== null);
+    if (plan.kind === "camera-check" && stream !== null) {
+      setCameraCheckStream(stream);
+      return;
+    }
+    if (stream !== null) for (const track of stream.getTracks()) track.stop();
+    if (plan.kind === "dial") {
+      if (plan.notice !== null) setNotice(plan.notice);
+      placeCall(plan.media.video);
     }
   }
 
@@ -6910,6 +6968,27 @@ function ChatView(props: {
         </button>
         </Show>
       </form>
+      </Show>
+
+      {/* docs/ux/calls.md section 3.2 — the one pre-call screen that survives,
+          and only for a video call. It owns the camera it was handed. */}
+      <Show when={cameraCheckStream()}>
+        {(stream) => (
+          <CameraCheck
+            peerName={resolvePeerName()}
+            peerId={props.entry.groupIdB64}
+            initialStream={stream()}
+            onCancel={() => setCameraCheckStream(null)}
+            onCall={(media, micOn) => {
+              setCameraCheckStream(null);
+              // A call left muted on the check has to START muted; every
+              // `localParticipant()` constructor used to hardcode a live
+              // microphone (see `state/call-state.ts`).
+              callActions.setPendingMicOn(micOn);
+              placeCall(media.video);
+            }}
+          />
+        )}
       </Show>
     </div>
   );

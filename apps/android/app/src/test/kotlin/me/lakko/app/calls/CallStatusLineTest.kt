@@ -13,20 +13,44 @@ import org.junit.Test
  */
 class CallStatusLineTest {
 
+    @Suppress("LongParameterList")
     private fun status(
+        calling: Boolean = false,
         connecting: Boolean = false,
         connected: Boolean = false,
         reconnecting: Boolean = false,
         ended: Boolean = false,
         elapsedSecs: Long? = null,
-    ) = callStatusText(connecting, connected, reconnecting, ended, elapsedSecs)
+    ) = callStatusText(calling, connecting, connected, reconnecting, ended, elapsedSecs)
 
     @Test
     fun `each state has its word`() {
         assertEquals("Ringing...", status())
+        assertEquals("Calling...", status(calling = true))
         assertEquals("Connecting...", status(connecting = true))
         assertEquals("Reconnecting...", status(reconnecting = true))
         assertEquals("Call ended", status(ended = true))
+    }
+
+    @Test
+    fun `a dialled call that nobody has answered says Calling`() {
+        // Section 4.1's state table separates the two waits. Every outgoing
+        // state used to read `Connecting...`, so a phone that was merely
+        // ringing claimed the media was already being set up.
+        assertEquals("Calling...", status(calling = true))
+    }
+
+    @Test
+    fun `connecting outranks calling`() {
+        // Once the callee has picked up the call really is being set up, and
+        // that is the more specific fact.
+        assertEquals("Connecting...", status(calling = true, connecting = true))
+    }
+
+    @Test
+    fun `a connected call never falls back to Calling`() {
+        assertEquals("12:04", status(calling = true, connected = true, elapsedSecs = 724))
+        assertEquals("Call ended", status(calling = true, ended = true, elapsedSecs = null))
     }
 
     @Test
@@ -43,8 +67,18 @@ class CallStatusLineTest {
     }
 
     @Test
-    fun `an ended call stops reporting a time`() {
-        assertEquals("Call ended", status(connected = true, ended = true, elapsedSecs = 724))
+    fun `an ended call reports how long it lasted`() {
+        // Section 4.1's state table: "`Call ended` and the duration". The clock
+        // stops — the screen does not keep counting while it dismisses itself —
+        // but the number it stopped at is the last thing the line says.
+        assertEquals("Call ended, 12:04", status(connected = true, ended = true, elapsedSecs = 724))
+    }
+
+    @Test
+    fun `a call that never connected ends with no number`() {
+        // Never pretend (section 1): an unanswered call has no duration, and
+        // "Call ended, 0:00" would be an invented one.
+        assertEquals("Call ended", status(calling = true, ended = true, elapsedSecs = null))
     }
 
     @Test

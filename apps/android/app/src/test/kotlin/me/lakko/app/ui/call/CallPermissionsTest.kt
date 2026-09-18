@@ -39,6 +39,23 @@ class CallPermissionsTest {
     }
 
     @Test
+    fun `a device with no camera is never asked for one`() {
+        // `CallPermissionGate.request` passes `videoRequested = false` when the
+        // device has no camera, so the rule below produces no CAMERA entry and
+        // the outcome cannot be CAMERA_DENIED. Otherwise the video button on a
+        // camera-less device ended in a dialog asking the user to grant a
+        // permission nothing on the device can use.
+        assertEquals(
+            listOf(Manifest.permission.RECORD_AUDIO),
+            callPermissionsToRequest(microphoneGranted = false, cameraGranted = false, videoRequested = false),
+        )
+        assertEquals(
+            CallPermissionOutcome.PROCEED,
+            callPermissionOutcome(microphoneGranted = true, videoRequested = false, cameraGranted = false),
+        )
+    }
+
+    @Test
     fun `only missing permissions are requested and never the camera for audio`() {
         assertEquals(
             listOf(Manifest.permission.RECORD_AUDIO),

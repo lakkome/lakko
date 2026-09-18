@@ -43,7 +43,6 @@ import me.lakko.app.calls.OneToOneCallHost
 import me.lakko.app.calls.OneToOneCallPresentation
 import me.lakko.app.calls.offeredCallMedia
 import me.lakko.app.calls.oneToOneCallPresentation
-import me.lakko.app.calls.prejoinCameraDefault
 
 /**
  * The app-wide presentation of the 1x1 call, mounted once above every session
@@ -53,9 +52,12 @@ import me.lakko.app.calls.prejoinCameraDefault
  *    whatever screen is showing: Accept, Accept with video (only when the offer
  *    carries video, since an answer cannot add a media section the offer does
  *    not have), Decline.
- *  - Everything else — the outgoing prejoin, a call being set up or live, the
- *    ended state — is the full-screen in-call screen, as a dialog so it covers
- *    the screen's own dialogs too. Its only exit is the in-screen End button.
+ *  - An outgoing VIDEO call that has not been dialled yet is the camera check
+ *    of `docs/ux/calls.md` section 3.2. A voice call never reaches that state:
+ *    the host dials it as it prepares it (section 3.1).
+ *  - Everything else — a call being set up or live, the ended state — is the
+ *    full-screen in-call screen, as a dialog so it covers the screen's own
+ *    dialogs too. Its only exit is the in-screen End button.
  *
  * The call lives in [OneToOneCallHost]; this composable only renders it, so
  * navigating between screens never ends a call.
@@ -96,29 +98,43 @@ public fun BoxScope.OneToOneCallOverlay(
         ) {
             EdgeToEdgeDialogWindow()
             Box(modifier = Modifier.fillMaxSize()) {
-                CallScreen(
-                    onExit = { host.clearFinished() },
-                    session = call.session,
-                    // ADR-0048 UX §5 — the other person's resolved name on their tile.
-                    remoteName = name,
-                    // docs/ux/calls.md section 3 — the pre-join opens the way the
-                    // caller asked: camera off for the phone button, on for the
-                    // video one. The toggles still decide what is offered.
-                    prejoinCameraOn = prejoinCameraDefault(call.requestedKind),
-                    // G3-2-prejoin-join — Join dials the prepared session with the
-                    // chosen mic / camera; Cancel abandons it. The call button
-                    // already asked for permissions, but the camera can be switched
-                    // on in the prejoin and a grant can be revoked in between.
-                    onPrejoinJoin = { mic, cam ->
-                        permissions.request(video = cam) { granted ->
-                            // A camera the user asked for but the system refused
-                            // is not offered: `granted` is the truth, not `cam`.
-                            val media = offeredCallMedia(microphoneOn = mic, cameraOn = granted)
-                            host.dial(audio = media.audio, video = media.video)
-                        }
-                    },
-                    onPrejoinCancel = { host.cancelPrepared() },
-                )
+                // docs/ux/calls.md sections 3.1 and 3.2. A prepared but
+                // undialled OUTGOING call is the one moment anything is shown
+                // before the call, and only a video call ever reaches it: the
+                // host dials a voice call (and a video call on a camera-less
+                // device) in the same breath as preparing it, so the state
+                // below is `Outgoing` by the time this composes. An incoming
+                // call never reaches it either — "accepting an incoming call
+                // never shows any preparation screen" (section 3.3).
+                if (state == CallSession.WebCallState.Idle && !call.incoming) {
+                    CameraCheckScreen(
+                        calleeName = name ?: "Call",
+                        avatarSeed = call.groupIdHex,
+                        onCall = { mic, cam ->
+                            permissions.request(video = cam) { granted ->
+                                // A camera the user asked for but the system
+                                // refused is not offered: `granted` is the
+                                // truth, not `cam`.
+                                val media = offeredCallMedia(microphoneOn = mic, cameraOn = granted)
+                                host.dial(audio = media.audio, video = media.video)
+                            }
+                        },
+                        onCancel = { host.cancelPrepared() },
+                    )
+                } else {
+                    CallScreen(
+                        onExit = { host.clearFinished() },
+                        session = call.session,
+                        // ADR-0048 UX §5 — the other person's resolved name.
+                        remoteName = name,
+                        // The chat's own avatar colour, so the portrait of
+                        // section 4 matches the row the call was started from.
+                        avatarSeed = call.groupIdHex,
+                        // docs/ux/calls.md section 4.1 — the flip button on the
+                        // self-view rectangle, which is the only place it lives.
+                        onSwitchCamera = { call.session.switchCamera() },
+                    )
+                }
             }
         }
     }

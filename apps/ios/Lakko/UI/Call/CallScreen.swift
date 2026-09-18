@@ -5,28 +5,41 @@ import Combine
 import SwiftUI
 import WebRTC
 
-/// In-call UI (Phase 3c6-ios).
+/// The call screen (`docs/ux/calls.md` section 4).
 ///
-/// SwiftUI mirror of `apps/web/src/routes/Call.tsx`. Same layout
-/// (active speaker on top, gallery row, controls bar, drawer),
-/// same controls (mic / camera / participants / raise hand /
-/// screen share / end call), same security UX (E2EE pill,
-/// quality dot with popover, mute overlay, waiting message,
-/// prejoin screen with cam/mic preview).
+/// ## What the redesign changed
 ///
-/// State lives in `CallUiState` (`apps/ios/Lakko/Calls/CallUiState.swift`),
-/// which is the Swift port of `apps/web/src/state/call-state.ts`.
+/// The old screen was a debugger's view of a call: a header bar with a hairline,
+/// a scrolling tile grid (for a call with one other person in it), a floating
+/// phase badge repeating the word the status line already carried, and a row of
+/// nine loose buttons welded to the bottom edge — among them a `More` menu
+/// holding the two controls people reach for mid-sentence, and no speaker button
+/// at all. It also opened, for a *voice* call, on a settings card asking the
+/// user to check a camera that was not on.
 ///
-/// When a live `CallSession` is bound via `CallUiState`,
-/// tiles render the real local / remote video tracks through
-/// `LocalVideoPreviewView` (`RTCMTLVideoView`-backed). The
-/// "(video)" gradient is the fallback shown only for an
-/// audio-only call, before a track arrives, or on the
-/// mock-design path (no session bound).
+/// What it is now:
 ///
-/// Three-platform parity: the same component tree exists on
-/// web (Solid.js) and Android (Compose). A change to the
-/// design here should land in the other two ports in lock-step.
+///   * **a voice call is a portrait** — the other person's initials large and
+///     centred over a blurred, darkened ground built from their own colour,
+///     their name in the largest type on the screen, and one quiet line under it
+///     with the state or the running time;
+///   * **a video call fills the screen** with the other person, with the
+///     self-view a small draggable rectangle in a corner and the flip-camera
+///     button on that rectangle, where the thing it changes is visible;
+///   * **one row of equal round buttons** in a single rounded translucent bar
+///     floating above the bottom safe area — Speaker, Mute, End for a voice
+///     call, plus Camera for a video one, with no `More` menu in a 1x1 call at
+///     all;
+///   * **the off state is the loud one**, so a muted microphone is solid white
+///     and unmissable rather than tinted in the accent colour, which read as
+///     "this is on".
+///
+/// A group call keeps the tile grid and puts participants, chat and settings
+/// behind one overflow button, which is the only place a menu is allowed.
+///
+/// What decides the shape — which controls exist, which can be pressed, what
+/// the status line says, when the row hides itself — is
+/// ``CallScreenPresentation``, not this file, so the rules are testable.
 
 // MARK: - QualityDot
 
@@ -39,7 +52,6 @@ private struct QualityDot: View {
         Circle()
             .fill(tier.colour)
             .frame(width: 8, height: 8)
-            .shadow(color: tier.colour.opacity(0.7), radius: 3)
             .contentShape(Rectangle().inset(by: -8))
             .onTapGesture {
                 if interactive { onTap() }
@@ -51,11 +63,11 @@ private struct QualityDot: View {
 // MARK: - EncryptionChip
 
 /// `docs/ux/calls.md` sections 4 and 5 — a lock and one word, next to the
-/// status line, on a sunken surface. It replaces the strip of sixteen digits
-/// that used to run across the top of every call: unreadable, meaningless to
-/// anyone who has not been told what it is, and occupying the most valuable
-/// line on the screen. The digits now live one tap away, in the encryption
-/// sheet, where there is room to say what they are for.
+/// status line. It replaces the strip of sixteen digits that used to run across
+/// the top of every call: unreadable, meaningless to anyone who has not been
+/// told what it is, and occupying the most valuable line on the screen. The
+/// digits now live one tap away, in the encryption sheet, where there is room to
+/// say what they are for.
 ///
 /// It appears only when the call's own encryption is armed. There is no
 /// "Securing..." state: an unarmed call has nothing true to claim, and a 1x1
@@ -73,12 +85,10 @@ private struct EncryptionChip: View {
                     .font(.caption2)
                     .fontWeight(.semibold)
             }
-            .foregroundColor(Color.lakkoSuccess)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Color.lakkoSurfaceSunken)
-            .overlay(Capsule().stroke(Color.lakkoBorder, lineWidth: 1))
-            .clipShape(Capsule())
+            .foregroundStyle(.white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Capsule().fill(Color.white.opacity(0.16)))
         }
         .buttonStyle(.plain)
         .accessibilityLabel("End-to-end encrypted")
@@ -177,42 +187,77 @@ private struct EncryptionSheet: View {
 
 // MARK: - CallStatusLine
 
-/// `docs/ux/calls.md` section 4 item 1 — who is on the call, and under it the
-/// running time once it is connected. The transient phase words
-/// (`Connecting...`, `Reconnecting...`) stay with ``PhaseBanner`` so they are
-/// never printed twice.
+/// The one line the whole screen agrees on (`docs/ux/calls.md` section 4): the
+/// name, then the state or the running time — never both, and never repeated in
+/// a badge floating somewhere else. The old screen printed `Connecting...` in a
+/// coloured pill at the top AND had a status line underneath it; this is the one
+/// line, and ``CallStatusText`` decides its words.
 private struct CallStatusLine: View {
-    let title: String?
+    let name: String
     let phase: CallUiState.CallPhase
     let connectedAt: Date?
+    let e2eeActive: Bool
+    let notice: String?
+    /// Large, centred type for the portrait; compact for the overlay on video.
+    let prominent: Bool
+    let onEncryptionTap: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            if let title {
-                Text(title)
-                    .font(.subheadline)
-                    .fontWeight(.semibold)
-                    .foregroundColor(Color.lakkoText)
-                    .lineLimit(1)
-            }
-            if case .connected = phase, let connectedAt {
-                // One tick a second while the call runs; the view is the only
-                // thing that needs a clock, so it owns it.
-                TimelineView(.periodic(from: connectedAt, by: 1)) { context in
-                    let elapsed = Int64(
-                        max(0, context.date.timeIntervalSince(connectedAt)) * 1000)
-                    Text(CallTranscriptRow.durationLabel(ms: elapsed))
-                        .font(.caption)
-                        .foregroundColor(Color.lakkoTextMuted)
-                        .monospacedDigit()
-                        .accessibilityLabel(CallTranscriptRow.spokenDuration(ms: elapsed))
+        VStack(spacing: prominent ? 8 : 2) {
+            Text(name)
+                .font(prominent ? .system(size: 34, weight: .semibold) : .headline)
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+
+            HStack(spacing: 8) {
+                statusText
+                if e2eeActive {
+                    EncryptionChip(onTap: onEncryptionTap)
                 }
             }
+
+            if let notice {
+                Text(notice)
+                    .font(.footnote)
+                    .foregroundStyle(Color.white.opacity(0.6))
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .multilineTextAlignment(.center)
+    }
+
+    @ViewBuilder
+    private var statusText: some View {
+        if case .connected = phase, let connectedAt {
+            // One tick a second while the call runs; the view is the only thing
+            // that needs a clock, so it owns it.
+            TimelineView(.periodic(from: connectedAt, by: 1)) { context in
+                let elapsed = Int64(max(0, context.date.timeIntervalSince(connectedAt)) * 1000)
+                line(
+                    CallStatusText.line(phase: phase, durationMs: elapsed),
+                    spoken: CallStatusText.spokenLine(phase: phase, durationMs: elapsed))
+            }
+        } else {
+            line(
+                CallStatusText.line(phase: phase, durationMs: nil),
+                spoken: CallStatusText.spokenLine(phase: phase, durationMs: nil))
+        }
+    }
+
+    @ViewBuilder
+    private func line(_ text: String?, spoken: String?) -> some View {
+        if let text {
+            Text(text)
+                .font(prominent ? .callout : .subheadline)
+                .foregroundStyle(Color.white.opacity(0.7))
+                .monospacedDigit()
+                .accessibilityLabel(spoken ?? text)
         }
     }
 }
 
-// MARK: - QualityIndicator (header dot + popover)
+// MARK: - QualityIndicator (dot + popover)
 
 private struct QualityIndicator: View {
     @ObservedObject var state: CallUiState
@@ -259,7 +304,6 @@ private struct QualityIndicator: View {
             RoundedRectangle(cornerRadius: 8).stroke(Color.lakkoBorder, lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 8))
-        .shadow(color: Color.lakkoBackground.opacity(0.5), radius: 8, y: 2)
         .frame(minWidth: 180, alignment: .leading)
     }
 
@@ -287,8 +331,10 @@ private struct QualityIndicator: View {
     }
 }
 
-// MARK: - ParticipantTile
+// MARK: - ParticipantTile (group calls)
 
+/// A tile in a group call's grid. A 1x1 call has no tiles at all any more — it
+/// is a portrait or a full-screen video.
 private struct ParticipantTile: View {
     let participant: CallUiState.Participant
     let large: Bool
@@ -299,10 +345,6 @@ private struct ParticipantTile: View {
     var body: some View {
         ZStack {
             videoSurface
-            // B2a — local self-tile hint while the mid-call camera
-            // acquire + renegotiation is in flight (`.starting`). Local
-            // tile only; the button spinner is the paired affordance in
-            // the controls bar.
             if participant.isLocal && state.videoPublishState == .starting {
                 HStack(spacing: 8) {
                     ProgressView()
@@ -317,7 +359,6 @@ private struct ParticipantTile: View {
                 .background(Color.lakkoBackground.opacity(0.55))
                 .clipShape(Capsule())
             }
-            // Large mute overlay (centre) for muted remotes.
             if !participant.micOn && !participant.isLocal {
                 Image(systemName: "mic.slash.fill")
                     .font(large ? .title : .body)
@@ -326,39 +367,6 @@ private struct ParticipantTile: View {
                     .background(Color.lakkoBackground.opacity(0.55))
                     .clipShape(Circle())
             }
-            // Top-left screen-share badge.
-            if participant.screenSharing {
-                VStack {
-                    HStack {
-                        Text("Sharing")
-                            .font(.caption2)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.lakkoBackground.opacity(0.6))
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                            .foregroundColor(Color.lakkoText)
-                        Spacer()
-                    }
-                    Spacer()
-                }
-                .padding(8)
-            }
-            // Top-right raise-hand badge.
-            if participant.handRaised {
-                VStack {
-                    HStack {
-                        Spacer()
-                        Image(systemName: "hand.raised.fill")
-                            .font(.body)
-                            .padding(4)
-                            .background(Color.lakkoBackground.opacity(0.6))
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                    }
-                    Spacer()
-                }
-                .padding(8)
-            }
-            // Bottom strip: name + mute + quality + pin.
             VStack {
                 Spacer()
                 HStack(spacing: 8) {
@@ -371,11 +379,7 @@ private struct ParticipantTile: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    QualityDot(
-                        tier: participant.quality,
-                        interactive: false,
-                        onTap: {}
-                    )
+                    QualityDot(tier: participant.quality, interactive: false, onTap: {})
                     if isPinned {
                         Image(systemName: "pin.fill")
                             .font(.caption2)
@@ -399,11 +403,6 @@ private struct ParticipantTile: View {
         )
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .background(Color.lakkoSurface)
-        .shadow(
-            color: participant.speaking
-                ? Color.lakkoAccent.opacity(0.6) : .clear,
-            radius: 6
-        )
         .onTapGesture {
             guard !participant.isLocal else { return }
             state.pin(isPinned ? nil : participant.id)
@@ -413,65 +412,33 @@ private struct ParticipantTile: View {
     @ViewBuilder
     private var videoSurface: some View {
         if participant.camOn {
-            // G3-1-video-ui-screen — render the live LOCAL
-            // track for the local participant.
-            // Remote video — render the live REMOTE track. In an
-            // N-way SFU call each remote tile has its own track in
-            // `remoteVideoTracks`, keyed on the tile's id
-            // (`"peer-<streamId>"`, the SFU pinning the MSID
-            // stream-id to the source peer id). The 1×1 P2P
-            // `CallSession` path has no MSID, so it falls back to
-            // the single `remoteVideoTrack` handle — but only for
-            // the sole remote participant, so that one handle is
-            // never painted onto the wrong tile in a group call.
-            // Both paths fall through to the gradient placeholder
-            // when no live track is bound (audio-only, mock design
-            // path, or pre-arming).
             if participant.isLocal, let track = state.localVideoTrack {
                 LocalVideoPreviewView(
                     track: track,
                     mirrored: state.settings.mirrorLocal,
-                    contentMode: .scaleAspectFill
-                )
+                    contentMode: .scaleAspectFill)
             } else if !participant.isLocal,
                 let track = state.remoteVideoTracks[participant.id]
                     ?? (participant.id == state.soleRemoteParticipantId
                         ? state.remoteVideoTrack
                         : nil) {
-                // Remote video is never mirrored — the viewer
-                // wants the other party's true orientation.
-                // `.id(participant.id)` ties the renderer's
-                // identity to the participant so a gallery reorder
-                // never reuses one peer's `RTCMTLVideoView` for
-                // another peer's stream (a track swap for the SAME
-                // peer is handled by `updateUIView`).
-                LocalVideoPreviewView(
-                    track: track,
-                    mirrored: false,
-                    contentMode: .scaleAspectFill
-                )
-                .id(participant.id)
+                // Remote video is never mirrored — the viewer wants the other
+                // party's true orientation. `.id(participant.id)` ties the
+                // renderer's identity to the participant so a gallery reorder
+                // never reuses one peer's view for another peer's stream.
+                LocalVideoPreviewView(track: track, mirrored: false, contentMode: .scaleAspectFill)
+                    .id(participant.id)
             } else {
                 Color.lakkoSurfaceSunken
-                .overlay(
-                    Image(systemName: "video.fill")
-                        .font(.title3)
-                        .foregroundColor(Color.lakkoTextMuted.opacity(0.6))
-                )
             }
         } else {
             ZStack {
                 Color.lakkoSurfaceSunken
-                Text(initial)
-                    .font(.system(size: large ? 80 : 40, weight: .semibold))
-                    .foregroundColor(Color.lakkoText)
+                InitialsAvatar(
+                    name: displayLabel, identity: participant.id,
+                    size: large ? 96 : 56, placeholderSymbol: "person.fill")
             }
         }
-    }
-
-    private var initial: String {
-        let s = displayLabel.first.map { String($0).uppercased() } ?? "?"
-        return s
     }
 
     /// `docs/ux/calls.md` section 4 — who this tile is. "Unknown" is never an
@@ -482,317 +449,7 @@ private struct ParticipantTile: View {
     }
 }
 
-// MARK: - ControlsBar
-
-/// The 56 pt round control face (UX spec section 5.7): elevated surface at
-/// rest, accent when the control is active, danger for End call. The glyph
-/// takes the accent foreground on a filled face so it reads on both.
-private struct CircleFace: View {
-    let systemImage: String
-    let active: Bool
-    var destructive: Bool = false
-    var busy: Bool = false
-
-    static let size: CGFloat = 56
-
-    var body: some View {
-        Group {
-            if busy {
-                ProgressView()
-                    .progressViewStyle(.circular)
-                    .tint(glyph)
-            } else {
-                Image(systemName: systemImage)
-                    .font(.title3)
-                    .foregroundColor(glyph)
-            }
-        }
-        .frame(width: Self.size, height: Self.size)
-        .background(background)
-        .clipShape(Circle())
-    }
-
-    private var background: Color {
-        if destructive { return Color.lakkoDanger }
-        if active { return Color.lakkoAccent }
-        return Color.lakkoSurface
-    }
-
-    private var glyph: Color {
-        (destructive || active) ? Color.lakkoAccentForeground : Color.lakkoText
-    }
-}
-
-private struct CircleButton: View {
-    let label: String
-    let systemImage: String
-    let active: Bool
-    let destructive: Bool
-    /// B2a — busy state: swaps the glyph for a spinner and disables
-    /// the button while an async action (e.g. the mid-call camera
-    /// acquire) is in flight.
-    let busy: Bool
-    let onTap: () -> Void
-
-    init(
-        label: String,
-        systemImage: String,
-        active: Bool,
-        destructive: Bool = false,
-        busy: Bool = false,
-        onTap: @escaping () -> Void
-    ) {
-        self.label = label
-        self.systemImage = systemImage
-        self.active = active
-        self.destructive = destructive
-        self.busy = busy
-        self.onTap = onTap
-    }
-
-    var body: some View {
-        Button(action: onTap) {
-            CircleFace(
-                systemImage: systemImage,
-                active: active,
-                destructive: destructive,
-                busy: busy
-            )
-        }
-        .buttonStyle(.plain)
-        .disabled(busy)
-        .accessibilityLabel(busy ? "\(label), starting" : label)
-    }
-}
-
-/// Chat-toggle button — CircleButton with an overlaid unread
-/// badge in the top-right corner. The badge surfaces only when
-/// there is something unread AND the panel is closed.
-private struct ChatToggleButton: View {
-    @ObservedObject var state: CallUiState
-
-    var body: some View {
-        ZStack(alignment: .topTrailing) {
-            CircleButton(
-                label: state.chatOpen
-                    ? "Close chat"
-                    : (state.chatUnreadCount > 0
-                        ? "Chat (\(state.chatUnreadCount) unread)"
-                        : "Chat"),
-                systemImage: "bubble.left.and.bubble.right.fill",
-                active: state.chatOpen,
-                onTap: { state.setChatOpen(!state.chatOpen) }
-            )
-            if state.chatUnreadCount > 0 && !state.chatOpen {
-                Text(state.chatUnreadCount > 99 ? "99+" : "\(state.chatUnreadCount)")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundColor(Color.lakkoAccentForeground)
-                    .padding(.horizontal, 5)
-                    .frame(minWidth: 18, minHeight: 18)
-                    .background(Capsule().fill(Color.lakkoDanger))
-                    .offset(x: 2, y: -2)
-                    .allowsHitTesting(false)
-            }
-        }
-    }
-}
-
-private struct ControlsBar: View {
-    @ObservedObject var state: CallUiState
-    /// G3-1-session-bind — end-call action. Routes to
-    /// `session.hangUp()` when a real session drives the
-    /// screen; falls back to `state.endCall()` (mock path).
-    let onEndCall: () -> Void
-    /// G3-1-call-controls — mic / camera toggles. Route to the
-    /// real `CallSession` (driving `RTCAudio/VideoTrack.isEnabled`)
-    /// when a session drives the screen; mock-state fallback
-    /// otherwise. The argument is the *desired* enabled state.
-    let onSetMic: (Bool) -> Void
-    let onSetCamera: (Bool) -> Void
-
-    private var local: CallUiState.Participant? {
-        state.participants.first(where: { $0.isLocal })
-    }
-
-    var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 12) {
-                micButton
-                cameraButton
-                switchCameraButton
-                participantsButton
-                raiseHandButton
-                screenShareButton
-                ChatToggleButton(state: state)
-                settingsButton
-                endCallButton
-            }
-            HStack(spacing: 12) {
-                micButton
-                cameraButton
-                participantsButton
-                ChatToggleButton(state: state)
-                moreMenu
-                endCallButton
-            }
-            HStack(spacing: 10) {
-                micButton
-                cameraButton
-                moreMenu
-                endCallButton
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
-        .frame(maxWidth: .infinity)
-        .background(Color.lakkoSurfaceSunken)
-        .overlay(
-            Rectangle()
-                .frame(height: 1)
-                .foregroundColor(Color.lakkoBorder),
-            alignment: .top
-        )
-    }
-
-    private var micButton: some View {
-        CircleButton(
-            label: local?.micOn == true ? "Mute microphone" : "Unmute microphone",
-            systemImage: local?.micOn == true ? "mic.fill" : "mic.slash.fill",
-            active: local?.micOn == false,
-            onTap: { onSetMic(!(local?.micOn ?? true)) }
-        )
-    }
-
-    private var cameraButton: some View {
-        CircleButton(
-            label: local?.camOn == true ? "Stop camera" : "Start camera",
-            systemImage: local?.camOn == true ? "video.fill" : "video.slash.fill",
-            active: local?.camOn == false,
-            // B2a — while the mid-call camera acquire is in flight the
-            // button shows a spinner + is disabled (the session already
-            // in-flight-guards the acquire; this is the visual half).
-            busy: state.videoPublishState == .starting,
-            onTap: { onSetCamera(!(local?.camOn ?? true)) }
-        )
-    }
-
-    private var canSwitchCamera: Bool {
-        state.hasMultipleCameras && local?.camOn == true
-    }
-
-    @ViewBuilder
-    private var switchCameraButton: some View {
-        if canSwitchCamera {
-            CircleButton(
-                label: "Switch camera",
-                systemImage: "arrow.triangle.2.circlepath.camera",
-                active: false,
-                onTap: { /* WebRTC pod owns facingMode toggle (3a-pod-followup) */ }
-            )
-        }
-    }
-
-    private var participantsButton: some View {
-        CircleButton(
-            label: "Participants",
-            systemImage: "person.3.fill",
-            active: state.participantListOpen,
-            onTap: { state.setParticipantListOpen(!state.participantListOpen) }
-        )
-    }
-
-    private var raiseHandButton: some View {
-        CircleButton(
-            label: local?.handRaised == true ? "Lower hand" : "Raise hand",
-            systemImage: "hand.raised.fill",
-            active: local?.handRaised == true,
-            onTap: { state.setHandRaised(!(local?.handRaised ?? false)) }
-        )
-    }
-
-    private var screenShareButton: some View {
-        CircleButton(
-            label: local?.screenSharing == true
-                ? "Stop sharing screen" : "Share screen",
-            systemImage: "rectangle.on.rectangle",
-            active: local?.screenSharing == true,
-            onTap: { state.setScreenSharing(!(local?.screenSharing ?? false)) }
-        )
-    }
-
-    private var settingsButton: some View {
-        CircleButton(
-            label: "Settings",
-            systemImage: "gearshape.fill",
-            active: state.settingsOpen,
-            onTap: { state.setSettingsOpen(!state.settingsOpen) }
-        )
-    }
-
-    private var endCallButton: some View {
-        CircleButton(
-            label: "End call",
-            systemImage: "phone.down.fill",
-            active: false,
-            destructive: true,
-            onTap: onEndCall
-        )
-    }
-
-    /// The controls that do not fit a phone-width row. Same actions, same
-    /// state; only the placement differs from the wide layout.
-    private var moreMenu: some View {
-        Menu {
-            Button {
-                state.setParticipantListOpen(!state.participantListOpen)
-            } label: {
-                Label("Participants", systemImage: "person.3")
-            }
-            Button {
-                state.setChatOpen(!state.chatOpen)
-            } label: {
-                Label(
-                    state.chatUnreadCount > 0
-                        ? "Chat (\(state.chatUnreadCount) unread)" : "Chat",
-                    systemImage: "bubble.left.and.bubble.right")
-            }
-            Button {
-                state.setHandRaised(!(local?.handRaised ?? false))
-            } label: {
-                Label(
-                    local?.handRaised == true ? "Lower hand" : "Raise hand",
-                    systemImage: "hand.raised")
-            }
-            Button {
-                state.setScreenSharing(!(local?.screenSharing ?? false))
-            } label: {
-                Label(
-                    local?.screenSharing == true ? "Stop sharing screen" : "Share screen",
-                    systemImage: "rectangle.on.rectangle")
-            }
-            if canSwitchCamera {
-                Button {
-                    /* WebRTC pod owns facingMode toggle (3a-pod-followup) */
-                } label: {
-                    Label("Switch camera", systemImage: "arrow.triangle.2.circlepath.camera")
-                }
-            }
-            Button {
-                state.setSettingsOpen(!state.settingsOpen)
-            } label: {
-                Label("Settings", systemImage: "gearshape")
-            }
-        } label: {
-            CircleFace(
-                systemImage: "ellipsis",
-                active: local?.handRaised == true || local?.screenSharing == true
-            )
-        }
-        .accessibilityLabel("More controls")
-    }
-}
-
-// MARK: - ParticipantList drawer
+// MARK: - ParticipantList drawer (group calls)
 
 private struct ParticipantListDrawer: View {
     @ObservedObject var state: CallUiState
@@ -819,22 +476,14 @@ private struct ParticipantListDrawer: View {
                     ForEach(state.participants) { p in
                         HStack(spacing: 10) {
                             QualityDot(tier: p.quality, interactive: false, onTap: {})
-                            Text(p.displayName.isEmpty
-                                 ? (p.isLocal ? "You" : "Unknown")
-                                 : p.displayName)
+                            Text(CallPeerName.tileLabel(
+                                displayName: p.displayName, isLocal: p.isLocal))
                                 .foregroundColor(Color.lakkoText)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                            if p.handRaised {
-                                Image(systemName: "hand.raised.fill").accessibilityLabel("Hand raised")
-                            }
                             if !p.micOn {
                                 Image(systemName: "mic.slash.fill")
                                     .foregroundColor(Color.lakkoDanger)
                                     .accessibilityLabel("Muted")
-                            }
-                            if p.screenSharing {
-                                Image(systemName: "rectangle.on.rectangle")
-                                    .accessibilityLabel("Sharing screen")
                             }
                         }
                         .padding(.vertical, 10)
@@ -847,222 +496,38 @@ private struct ParticipantListDrawer: View {
         .frame(width: 320)
         .frame(maxHeight: .infinity)
         .background(Color.lakkoSurface)
-        .overlay(
-            Rectangle()
-                .frame(width: 1)
-                .foregroundColor(Color.lakkoBorder),
-            alignment: .leading
-        )
-    }
-}
-
-// MARK: - PrejoinView
-
-private struct PrejoinView: View {
-    @ObservedObject var state: CallUiState
-    /// `docs/ux/calls.md` section 3 — what the camera toggle starts at: off
-    /// for a voice call, on for a video one. It used to be hard-coded on, so
-    /// the phone button opened a video call.
-    let cameraOn: Bool
-    let onJoin: (_ displayName: String, _ micOn: Bool, _ camOn: Bool) -> Void
-    /// G3-1-prejoin-join — when the screen is driven by a real
-    /// session (presented over the chat before dialing), a Cancel
-    /// button tears the prepped-but-undialed session down. `nil`
-    /// on the standalone design route (no session to abandon).
-    var onCancel: (() -> Void)?
-
-    @State private var camOn: Bool
-    @State private var micOn: Bool = true
-
-    init(
-        state: CallUiState,
-        cameraOn: Bool,
-        onJoin: @escaping (_ displayName: String, _ micOn: Bool, _ camOn: Bool) -> Void,
-        onCancel: (() -> Void)? = nil
-    ) {
-        self.state = state
-        self.cameraOn = cameraOn
-        self.onJoin = onJoin
-        self.onCancel = onCancel
-        _camOn = State(initialValue: cameraOn)
-    }
-
-    var body: some View {
-        ZStack {
-            Color.lakkoBackground.ignoresSafeArea()
-            ScrollView {
-                // One card (design system section 3): the preview, two
-                // toggles, Join. The name field is gone — the roster name
-                // comes from the contact, not from a prompt here.
-                VStack(spacing: 20) {
-                    VStack(spacing: 4) {
-                        Text("Join call")
-                            .font(.title2)
-                            .fontWeight(.semibold)
-                            .foregroundColor(Color.lakkoText)
-                        // Says what there is to check: a voice call has no
-                        // camera to look at until the toggle turns one on.
-                        Text(camOn ? "Check your camera and microphone" : "Check your microphone")
-                            .font(.subheadline)
-                            .foregroundColor(Color.lakkoTextMuted)
-                    }
-
-                    preview
-                        .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                        .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card, style: .continuous))
-
-                    VStack(spacing: 0) {
-                        Toggle(isOn: $camOn) {
-                            Label("Camera", systemImage: camOn ? "video.fill" : "video.slash.fill")
-                                .foregroundColor(Color.lakkoText)
-                        }
-                        .padding(.vertical, 10)
-                        Divider().overlay(Color.lakkoBorder)
-                        Toggle(isOn: $micOn) {
-                            Label("Microphone", systemImage: micOn ? "mic.fill" : "mic.slash.fill")
-                                .foregroundColor(Color.lakkoText)
-                        }
-                        .padding(.vertical, 10)
-                    }
-                    .tint(Color.lakkoAccent)
-
-                    Button(action: { onJoin("", micOn, camOn) }) {
-                        Text("Join")
-                            .font(.headline)
-                            .foregroundColor(Color.lakkoAccentForeground)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 12)
-                            .background(Color.lakkoAccent)
-                            .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.control, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Join the call")
-
-                    if let onCancel = onCancel {
-                        Button(action: onCancel) {
-                            Text("Cancel")
-                                .font(.subheadline)
-                                .foregroundColor(Color.lakkoTextMuted)
-                                .padding(.vertical, 6)
-                        }
-                        .accessibilityLabel("Cancel the call")
-                    }
-                }
-                .padding(20)
-                .background(Color.lakkoSurface)
-                .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.card, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: LakkoRadius.card, style: .continuous)
-                        .stroke(Color.lakkoBorder, lineWidth: 1)
-                )
-                .frame(maxWidth: 480)
-                .padding(24)
-            }
-        }
-    }
-
-    /// G3-1-video-ui-screen — same posture as the in-call self-tile: when
-    /// the host has already armed the camera via
-    /// `CallSession.startLocalCameraCapture` (rare on the prejoin path —
-    /// production typically waits until the user taps Join — but the
-    /// testbed + the accept-with-video flow both arm it here), render the
-    /// live preview. Otherwise a placeholder on the sunken surface.
-    @ViewBuilder
-    private var preview: some View {
-        if camOn, let track = state.localVideoTrack {
-            LocalVideoPreviewView(
-                track: track,
-                mirrored: state.settings.mirrorLocal,
-                contentMode: .scaleAspectFill
-            )
-        } else {
-            ZStack {
-                Color.lakkoSurfaceSunken
-                VStack(spacing: 8) {
-                    Image(systemName: camOn ? "video.fill" : "video.slash.fill")
-                        .font(.largeTitle)
-                        .foregroundColor(Color.lakkoTextMuted)
-                    Text(camOn ? "Your camera starts when you join" : "Camera off")
-                        .font(.footnote)
-                        .foregroundColor(Color.lakkoTextMuted)
-                }
-            }
-        }
-    }
-}
-
-// MARK: - PhaseBanner
-
-private struct PhaseBanner: View {
-    let phase: CallUiState.CallPhase
-
-    var body: some View {
-        Group {
-            if let info = bannerInfo {
-                Text(info.text)
-                    .font(.caption)
-                    .fontWeight(.semibold)
-                    .foregroundColor(Color.lakkoAccentForeground)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 6)
-                    .background(info.colour)
-                    .clipShape(Capsule())
-            }
-        }
-    }
-
-    private var bannerInfo: (text: String, colour: Color)? {
-        switch phase {
-        case .prejoin, .connected:
-            return nil
-        case .connecting:
-            return ("Connecting...", Color.lakkoAccent)
-        case .reconnecting(let reason):
-            return ("Reconnecting... \(reason)", Color.lakkoWarning)
-        case .ended:
-            return ("Call ended", Color.lakkoDanger)
-        }
-    }
-}
-
-// MARK: - WaitingMessage
-
-private struct WaitingMessageOverlay: View {
-    var body: some View {
-        Text("Waiting for others to join...")
-            .font(.subheadline)
-            .foregroundColor(Color.lakkoText)
-            .padding(.horizontal, 24)
-            .padding(.vertical, 16)
-            .background(Color.lakkoSurface.opacity(0.9))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.lakkoBorder, lineWidth: 1)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .accessibilityLabel("Waiting for another participant to join the call")
     }
 }
 
 // MARK: - CallEndedOverlay
 
 private struct CallEndedOverlay: View {
+    /// How long media flowed, or `nil` for a call that never connected — which
+    /// is the difference between a call and an attempt, and is why the duration
+    /// is not simply printed as `0:00`.
+    let durationMs: Int64?
     let onDismiss: () -> Void
 
     var body: some View {
         ZStack {
-            Color.lakkoBackground.opacity(0.85).ignoresSafeArea()
-            VStack(spacing: 12) {
+            Color.black.opacity(0.75).ignoresSafeArea()
+            VStack(spacing: 6) {
                 Text("Call ended")
-                    .font(.largeTitle)
+                    .font(.title2)
                     .fontWeight(.semibold)
-                    .foregroundColor(Color.lakkoText)
-                Text("Returning to your chats...")
-                    .foregroundColor(Color.lakkoTextMuted)
+                    .foregroundStyle(.white)
+                if let durationMs {
+                    Text(CallTranscriptRow.durationLabel(ms: durationMs))
+                        .font(.callout)
+                        .foregroundStyle(Color.white.opacity(0.7))
+                        .monospacedDigit()
+                        .accessibilityLabel(CallTranscriptRow.spokenDuration(ms: durationMs))
+                }
             }
         }
         .task {
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            // Section 4's state table: the screen closes itself after 2 s.
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
             onDismiss()
         }
     }
@@ -1072,151 +537,180 @@ private struct CallEndedOverlay: View {
 
 public struct CallScreen: View {
     @StateObject private var state = CallUiState()
-    /// One sound controller per CallScreen lifetime; deallocated
-    /// with the view (which deactivates the underlying
-    /// AVAudioPlayer instances via its `deinit`).
+    /// One sound controller per CallScreen lifetime; deallocated with the view.
     @StateObject private var sounds = CallSoundsObservable()
-    /// Last observed remote-participant ids, used to fire
-    /// `join` / `leave` cues + chat system events on deltas
-    /// while the call is `connected`. Tracked in the view
-    /// rather than the state object because it is bookkeeping
-    /// for side effects, not model-of-the-call state.
+    /// Last observed remote-participant ids, used to fire join / leave cues +
+    /// chat system events on deltas while the call is connected.
     @State private var lastRemoteIds: [String] = []
-    /// G3-1-session-bind — the live call session driving this
-    /// screen. When `nil` (SwiftUI previews / design work) the
-    /// screen runs on `seedMockState()` exactly as before. When
-    /// injected, `onAppear` wires `state.driveFrom(session:)` so
-    /// phase + roster + video reflect the real call, and the
-    /// end-call button routes to `session.hangUp()`.
     private let session: CallSession?
-    /// Combine subscriptions from `driveFrom(session:)`, held
-    /// for the screen's lifetime.
     @State private var sessionBindings: [AnyCancellable] = []
-    /// `true` when the screen renders an externally-owned `CallUiState`
-    /// (the SFU group-call path, where `SfuCallUi` drives the state).
-    /// In that mode there is no `session` to `driveFrom` and no prejoin
-    /// screen — the call is already connecting when presented.
+    /// `true` when the screen renders an externally-owned `CallUiState` (the
+    /// SFU group-call path, where `SfuCallUi` drives the state).
     private let externallyDriven: Bool
     let onExit: () -> Void
-    /// A camera start this screen refused because camera access is denied
-    /// (``CameraPermission``). Shown as an alert; `nil` when none.
+    /// A camera start this screen refused because camera access is denied.
     @State private var permissionMessage: String?
-    /// When media started flowing, for the status line's running time. `nil`
-    /// until the call is connected.
+    /// When media started flowing, for the status line's running time.
     @State private var connectedAt: Date?
-    /// `docs/ux/calls.md` section 3 — which button opened this call, which is
-    /// what the pre-join's camera toggle starts at. The toggles then decide
-    /// what is actually offered.
+    /// How long media flowed, captured as the call ends so the "Call ended"
+    /// screen can say it (section 4's state table). `nil` for a call that never
+    /// connected.
+    @State private var endedDurationMs: Int64?
+    /// Which button opened this call, and what that button opened
+    /// (`docs/ux/calls.md` sections 3.1 and 3.2).
     private let button: CallButtonKind
-    /// The other person's name, resolved by the call's owner. Drives the
-    /// status line, the remote tile and the encryption sheet's sentence.
+    private let surface: CallStartSurface?
+    /// The other person's name, resolved by the call's owner.
     private let peerName: String?
+    /// One plain line about this call's media (today: the no-camera downgrade).
+    private let notice: String?
+    /// Place the call from the camera check.
+    private let onPlaceCall: ((_ micOn: Bool, _ cameraOn: Bool) -> Void)?
 
-    /// `true` when the camera controls drive a real call (a 1x1 session, or
-    /// an externally driven SFU call), so turning the camera on must settle
-    /// the camera permission first. The mock design route has no camera.
+    /// Section 4 — the controls fade out on a connected video call and come
+    /// back on a tap; on a voice call they never hide.
+    @State private var controlsVisible = true
+    @State private var hideTask: Task<Void, Never>?
+    /// Where the user dragged the self-view to.
+    @State private var selfViewOffset: CGSize = .zero
+    @GestureState private var selfViewDrag: CGSize = .zero
+
+    /// `true` when the camera controls drive a real call, so turning the camera
+    /// on must settle the camera permission first.
     private var gatesCamera: Bool { session != nil || externallyDriven }
 
     public init(
         session: CallSession? = nil,
         button: CallButtonKind = .voice,
+        surface: CallStartSurface? = nil,
         peerName: String? = nil,
+        notice: String? = nil,
+        onPlaceCall: ((_ micOn: Bool, _ cameraOn: Bool) -> Void)? = nil,
         onExit: @escaping () -> Void
     ) {
         self.session = session
         self.externallyDriven = false
         self.button = button
+        self.surface = surface
         self.peerName = peerName
+        self.notice = notice
+        self.onPlaceCall = onPlaceCall
         self.onExit = onExit
     }
 
-    /// SFU group-call init: render a `CallUiState` that an external
-    /// owner (`SfuCallUi`) already drives. No `session`, no prejoin.
+    /// SFU group-call init: render a `CallUiState` that an external owner
+    /// (`SfuCallUi`) already drives. No session, and never a camera check —
+    /// the call is already connecting when presented.
     public init(externalState: CallUiState, onExit: @escaping () -> Void) {
         _state = StateObject(wrappedValue: externalState)
         self.session = nil
         self.externallyDriven = true
         self.button = .voice
+        self.surface = nil
         self.peerName = nil
+        self.notice = nil
+        self.onPlaceCall = nil
         self.onExit = onExit
+    }
+
+    // MARK: - What the screen is showing
+
+    /// The camera check is shown only for the one case that asked for it: an
+    /// outgoing video call, before it is placed. Everything else — a voice call
+    /// (which is already on the wire), an accepted incoming call, a group call —
+    /// goes straight to the call.
+    private var showsCameraCheck: Bool {
+        guard !externallyDriven, session != nil, surface == .cameraCheck else { return false }
+        if case .cameraCheck = state.phase { return true }
+        return false
+    }
+
+    /// A voice call is dialed before this screen is ever presented, so the
+    /// session's brief `.idle` must not read as "camera check" — it reads as
+    /// `Calling...`, which is what is happening.
+    private var displayPhase: CallUiState.CallPhase {
+        if case .cameraCheck = state.phase, !showsCameraCheck { return .calling }
+        return state.phase
+    }
+
+    private var remoteParticipants: [CallUiState.Participant] {
+        state.participants.filter { !$0.isLocal }
+    }
+
+    private var soleRemoteVideoTrack: RTCVideoTrack? {
+        guard let sole = state.soleRemoteParticipantId else { return nil }
+        return state.remoteVideoTracks[sole] ?? state.remoteVideoTrack
+    }
+
+    private var layout: CallScreenLayout {
+        CallScreenPresentation.layout(
+            remoteCount: remoteParticipants.count,
+            remoteVideo: soleRemoteVideoTrack != nil)
+    }
+
+    private var local: CallUiState.Participant? {
+        state.participants.first(where: { $0.isLocal })
+    }
+
+    /// Does this call carry video, so the camera button has something to do?
+    /// The header button that opened it, the local camera, and a remote video
+    /// frame each answer yes; a plain voice call answers no and its row is
+    /// Speaker, Mute, End (`docs/ux/calls.md` section 4.1).
+    private var videoCall: Bool {
+        if button == .video { return true }
+        if local?.camOn == true { return true }
+        return soleRemoteVideoTrack != nil || !state.remoteVideoTracks.isEmpty
+    }
+
+    private var controls: [CallControl] {
+        CallScreenPresentation.controls(layout: layout, videoCall: videoCall)
+    }
+
+    private var displayName: String {
+        CallPeerName.resolve(profileName: state.peerName, chatTitle: nil)
+            ?? (externallyDriven ? "Group call" : CallPeerName.placeholder)
+    }
+
+    /// The identity the ground and the avatar are tinted from. The peer's name
+    /// when there is one, so a call and that person's chat row agree.
+    private var tintIdentity: String {
+        state.peerName ?? "lakko.call"
     }
 
     public var body: some View {
         ZStack {
-            switch state.phase {
-            case .prejoin where !externallyDriven:
-                PrejoinView(
-                    state: state,
-                    cameraOn: CallMediaChoice.prejoinCameraOn(for: button),
-                    onJoin: { displayName, micOn, camOn in
-                        // G3-1-prejoin-join — with a real session the
-                        // user picks mic / camera here and Join dials.
-                        // `startCall` builds the session in `.idle`
-                        // (mapped to `.prejoin`) without dialing, so
-                        // this is the first SDP-producing call. Web is
-                        // audio-only; iOS carries the camera choice.
-                        if let session = session {
-                            _ = displayName
-                            // Settle the camera permission before the dial
-                            // starts a capture: a denied camera refuses with
-                            // an explanation, and the user can turn the
-                            // camera off and join with audio only.
-                            Task { @MainActor in
-                                guard await CameraPermission.ensureGranted(forVideo: camOn) else {
-                                    permissionMessage = CameraPermission.deniedMessage
-                                    return
-                                }
-                                // `docs/ux/calls.md` section 3 — the toggles
-                                // decide what is offered, so what the callee
-                                // is told is what this call actually carries.
-                                let media = CallMediaChoice.offeredMedia(
-                                    micOn: micOn, cameraOn: camOn)
-                                session.dial(audio: media.audio, video: media.video)
-                            }
-                            return
-                        }
-                        // Mock design route — no session injected.
-                        state.seedMockState()
-                        state.setMic(micOn)
-                        state.setCamera(camOn)
-                        // displayName intentionally not wired into state —
-                        // production code maps it onto the local
-                        // participant's displayName via the contact-id
-                        // → name resolution path the chat layer owns.
-                        _ = displayName
-                        state.join()
+            if showsCameraCheck {
+                CameraCheckScreen(
+                    peerName: state.peerName ?? peerName,
+                    identity: tintIdentity,
+                    onCall: { micOn, cameraOn in
+                        onPlaceCall?(micOn, cameraOn)
                     },
-                    onCancel: session == nil
-                        ? nil
-                        : {
-                            // Abandon a prepped-but-undialed call:
-                            // hanging up an `.idle` session drives it
-                            // to `.done`, and `onExit` clears it.
-                            session?.hangUp(reason: .hungUp)
-                            onExit()
-                        }
-                )
-            default:
+                    onCancel: {
+                        // Abandon a prepared-but-unplaced call: hanging up an
+                        // idle session drives it to done, and `onExit` clears it.
+                        session?.hangUp(reason: .hungUp)
+                        onExit()
+                    })
+            } else {
                 callView
             }
         }
-        // Phase → sound mapping. Mirrors the same trigger map
-        // on web (`Call.tsx`) and Android (`CallScreen.kt`) so
-        // the audible UX is identical across platforms. iOS-17
-        // two-parameter `onChange` form (the single-parameter
-        // form is deprecated in iOS 17).
         .onChange(of: state.phase) { _, newPhase in
-            // `docs/ux/calls.md` section 4 — the running time starts when
-            // media does, and only then ("Connected only when media flows").
+            // Section 4 — the running time starts when media does, and only
+            // then ("Connected only when media flows").
             if case .connected = newPhase {
                 if connectedAt == nil { connectedAt = Date() }
             } else {
+                if let connectedAt {
+                    endedDurationMs = Int64(max(0, Date().timeIntervalSince(connectedAt)) * 1000)
+                }
                 connectedAt = nil
             }
             switch newPhase {
-            case .prejoin:
+            case .cameraCheck:
                 sounds.controller.stopAll()
-            case .connecting:
+            case .calling, .connecting:
                 sounds.controller.startLoop(.ringbackOutgoing)
             case .connected:
                 sounds.controller.stopLoop(.ringbackOutgoing)
@@ -1227,13 +721,18 @@ public struct CallScreen: View {
                 sounds.controller.stopAll()
                 sounds.controller.playOnce(.leave)
             }
+            restartAutoHide()
         }
-        // Peer arrival / departure cues + chat system events.
-        // The id-based diff catches "Alice left, Bob joined"
-        // in the same StateFlow tick (which a pure count would
-        // miss).
+        // A call becomes a video call when the first remote frame lands, not
+        // when its phase changes — so the fade-out has to be armed from the
+        // layout too, or the row of a connected video call would never hide.
+        .onChange(of: layout) { _, _ in
+            restartAutoHide()
+        }
+        // Peer arrival / departure cues + chat system events. The id-based diff
+        // catches "Alice left, Bob joined" in the same tick.
         .onChange(of: state.participants.map(\.id)) { _, _ in
-            let remote = state.participants.filter { !$0.isLocal }
+            let remote = remoteParticipants
             let remoteIds = remote.map(\.id)
             if case .connected = state.phase, !lastRemoteIds.isEmpty {
                 for p in remote where !lastRemoteIds.contains(p.id) {
@@ -1244,30 +743,26 @@ public struct CallScreen: View {
                 for prevId in lastRemoteIds where !currentIds.contains(prevId) {
                     sounds.controller.playOnce(.leave)
                     state.addSystemEvent("A participant left the call")
-                    // Display name has been dropped from state
-                    // by the time we observe the deletion — the
-                    // WebRTC pod sprint will preserve the last-
-                    // known name (out of scope for S-3-A-chat).
                 }
             }
             lastRemoteIds = remoteIds
         }
         .onAppear {
-            // G3-1-session-bind — drive the UI from the real
-            // session when one is injected; otherwise the
-            // prejoin → seedMockState() path runs as before.
             if let session, sessionBindings.isEmpty {
                 sessionBindings = state.driveFrom(session: session, peerName: peerName)
             }
+            if let notice { state.setMediaNotice(notice) }
+            // The route the platform actually settled on, not one we assumed.
+            state.setSpeakerOn(CallAudioRoute.isSpeakerOn())
+            restartAutoHide()
         }
-        // A name that resolves mid-call (their profile arrives while the call
-        // runs) reaches the status line straight away, and the tile at the
-        // next roster rebuild.
+        // A name that resolves mid-call reaches the status line straight away.
         .onChange(of: peerName) { _, newValue in
             guard !externallyDriven else { return }
             state.setPeerName(newValue)
         }
         .onDisappear {
+            hideTask?.cancel()
             sounds.controller.stopAll()
             sessionBindings.removeAll()
             state.reset()
@@ -1284,156 +779,55 @@ public struct CallScreen: View {
         } message: { message in
             Text(message)
         }
-        // Calls are dark by design on every platform (UX spec section 4): the
-        // shared tokens resolve to their dark variants inside this screen and
-        // every sheet it presents; no second palette.
+        // Calls are dark by design on every platform (UX spec section 4).
         .preferredColorScheme(.dark)
     }
 
-    /// Drive the camera choice onto whatever owns the call. Turning the
-    /// camera ON reaches here only after ``CameraPermission`` granted it
-    /// (see the `onSetCamera` control).
-    private func applyCamera(_ on: Bool) {
-        guard let session else {
-            // Mock route, or an externally driven SFU call whose owner
-            // observes `camOn` on the state and drives its session.
-            state.setCamera(on)
-            return
-        }
-        guard on else {
-            session.setCameraEnabled(false)
-            return
-        }
-        // 1×1 mid-call camera-on (piece B2b): addLocalVideo acquires + adds a
-        // video track + renegotiates the first time (a call started
-        // audio-only), and re-enables an existing sender after. Idempotent +
-        // in-flight-guarded. On a capture failure revert the toggle + log the
-        // reason — fail-safe, the call stays up audio-only (invariant #4).
-        // Mirror of the web Chat.tsx camera effect.
-        Task {
-            do {
-                try await session.addLocalVideo()
-            } catch {
-                state.setCamera(false)
-                NSLog(
-                    "CallScreen: addLocalVideo failed: %@",
-                    String(describing: error)
-                )
-            }
-        }
-    }
+    // MARK: - The call
 
     private var callView: some View {
-        ZStack(alignment: .top) {
-            Color.lakkoBackground.ignoresSafeArea()
+        ZStack {
+            CallBackdrop(identity: tintIdentity)
+
+            switch layout {
+            case .portrait:
+                portrait
+            case .video:
+                remoteVideo
+            case .gallery:
+                gallery
+            }
+
+            if layout != .gallery, local?.camOn == true, let track = state.localVideoTrack {
+                selfView(track: track)
+            }
 
             VStack(spacing: 0) {
-                // Header bar (`docs/ux/calls.md` section 4): the status line
-                // with the encryption chip beside it, quality dot on the
-                // right.
-                HStack(spacing: 10) {
-                    CallStatusLine(
-                        title: state.peerName,
-                        phase: state.phase,
-                        connectedAt: connectedAt)
-                    if state.e2ee.active {
-                        EncryptionChip { state.setEncryptionSheetOpen(true) }
+                if layout == .portrait {
+                    // A portrait keeps the quality dot and nothing else up
+                    // there: the name and the state belong in the middle of the
+                    // screen, with the avatar, not in a header bar.
+                    HStack {
+                        Spacer()
+                        QualityIndicator(state: state)
                     }
-                    Spacer(minLength: 0)
-                    QualityIndicator(state: state)
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(Color.lakkoSurface)
-                .overlay(
-                    Rectangle()
-                        .frame(height: 1)
-                        .foregroundColor(Color.lakkoBorder),
-                    alignment: .bottom
-                )
-
-                // Main area: active speaker + gallery.
-                ScrollView {
-                    VStack(spacing: 12) {
-                        if let active = state.activeSpeaker {
-                            ParticipantTile(
-                                participant: active, large: true, state: state
-                            )
-                            .frame(maxWidth: 1080)
-                        }
-                        LazyVGrid(
-                            columns: [GridItem(.adaptive(minimum: 180), spacing: 10)],
-                            spacing: 10
-                        ) {
-                            ForEach(state.galleryParticipants) { p in
-                                ParticipantTile(
-                                    participant: p, large: false, state: state
-                                )
-                            }
-                        }
-                        .frame(maxWidth: 1080)
-                    }
-                    .padding(16)
-                }
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    // Tap-outside-to-close for the quality popover.
-                    if state.qualityPopoverOpen {
-                        state.setQualityPopoverOpen(false)
-                    }
-                }
-
-                ControlsBar(
-                    state: state,
-                    onEndCall: {
-                        if let session {
-                            session.hangUp()
-                        } else {
-                            state.endCall()
-                        }
-                    },
-                    onSetMic: { on in
-                        if let session {
-                            session.setMicrophoneEnabled(on)
-                        } else {
-                            state.setMic(on)
-                        }
-                    },
-                    onSetCamera: { on in
-                        if on && gatesCamera {
-                            // Camera on: settle the permission first. A denial
-                            // leaves the camera off and explains why.
-                            Task { @MainActor in
-                                guard await CameraPermission.ensureGranted() else {
-                                    permissionMessage = CameraPermission.deniedMessage
-                                    return
-                                }
-                                applyCamera(true)
-                            }
-                        } else {
-                            applyCamera(on)
-                        }
-                    }
-                )
-            }
-
-            // Centre overlay when alone. The ZStack aligns its children to the
-            // top, so the overlay needs its own full-size frame to sit in the
-            // centre; without it the message covered the safety number.
-            if state.isAlone && state.phase == .connected {
-                WaitingMessageOverlay()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                    .allowsHitTesting(false)
-            }
-
-            // Top-centre phase banner.
-            VStack {
-                PhaseBanner(phase: state.phase)
+                    .padding(.horizontal, 20)
                     .padding(.top, 12)
-                Spacer()
+                } else {
+                    videoOverlayHeader
+                }
+                Spacer(minLength: 0)
+                if controlsVisible {
+                    controlsBar
+                        .padding(.bottom, layout == .portrait ? 56 : 24)
+                        .transition(.opacity)
+                }
             }
 
-            // Drawer slides in from the right.
+            if case .ended = displayPhase {
+                CallEndedOverlay(durationMs: endedDurationMs, onDismiss: onExit).zIndex(30)
+            }
+
             if state.participantListOpen {
                 HStack {
                     Spacer()
@@ -1442,42 +836,30 @@ public struct CallScreen: View {
                 }
                 .zIndex(10)
             }
-
-            // Call-ended overlay (auto-navigates after 3s).
-            if case .ended = state.phase {
-                CallEndedOverlay(onDismiss: onExit)
-                    .zIndex(30)
-            }
         }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if state.qualityPopoverOpen { state.setQualityPopoverOpen(false) }
+            showControls()
+        }
+        .animation(.easeInOut(duration: 0.2), value: controlsVisible)
         .animation(.easeInOut(duration: 0.2), value: state.participantListOpen)
-        // Gear-menu sheet (S-3-A-settings). `.sheet` gives us
-        // the native iOS bottom-detent presentation; iPad gets
-        // the centred form-sheet style automatically.
         .sheet(
             isPresented: Binding(
-                get: { state.settingsOpen },
-                set: { state.setSettingsOpen($0) }
-            )
+                get: { state.settingsOpen }, set: { state.setSettingsOpen($0) })
         ) {
             SettingsSheet(state: state)
         }
-        // Chat sheet (S-3-A-chat). Same `.sheet` mechanism;
-        // the gear and chat are mutually exclusive on iOS by
-        // construction (presenting one dismisses the other).
         .sheet(
-            isPresented: Binding(
-                get: { state.chatOpen },
-                set: { state.setChatOpen($0) }
-            )
+            isPresented: Binding(get: { state.chatOpen }, set: { state.setChatOpen($0) })
         ) {
             ChatSheet(state: state)
         }
-        // `docs/ux/calls.md` section 5 — the safety number, only when asked for.
+        // Section 5 — the safety number, only when asked for.
         .sheet(
             isPresented: Binding(
                 get: { state.encryptionSheetOpen },
-                set: { state.setEncryptionSheetOpen($0) }
-            )
+                set: { state.setEncryptionSheetOpen($0) })
         ) {
             EncryptionSheet(
                 peerName: state.peerName,
@@ -1485,13 +867,312 @@ public struct CallScreen: View {
                 onDone: { state.setEncryptionSheetOpen(false) })
         }
     }
+
+    /// A voice call: the avatar large and centred in the upper half, the name
+    /// under it in the largest type on the screen, and one quiet line under that.
+    private var portrait: some View {
+        VStack(spacing: 24) {
+            Spacer(minLength: 0)
+            InitialsAvatar(
+                name: state.peerName ?? "", identity: tintIdentity, size: 132,
+                placeholderSymbol: "person.fill")
+            CallStatusLine(
+                name: displayName,
+                phase: displayPhase,
+                connectedAt: connectedAt,
+                e2eeActive: state.e2ee.active,
+                notice: state.mediaNotice,
+                prominent: true,
+                onEncryptionTap: { state.setEncryptionSheetOpen(true) })
+            Spacer(minLength: 0)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 32)
+    }
+
+    /// A video call: the other person, full screen.
+    @ViewBuilder
+    private var remoteVideo: some View {
+        if let track = soleRemoteVideoTrack {
+            LocalVideoPreviewView(track: track, mirrored: false, contentMode: .scaleAspectFill)
+                .ignoresSafeArea()
+                .accessibilityHidden(true)
+        }
+    }
+
+    private var gallery: some View {
+        ScrollView {
+            VStack(spacing: 12) {
+                if let active = state.activeSpeaker {
+                    ParticipantTile(participant: active, large: true, state: state)
+                }
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 160), spacing: 10)], spacing: 10
+                ) {
+                    ForEach(state.galleryParticipants) { p in
+                        ParticipantTile(participant: p, large: false, state: state)
+                    }
+                }
+            }
+            .padding(16)
+            .padding(.bottom, 140)
+        }
+    }
+
+    /// Over video, the name and the state float at the top on a soft shade so
+    /// they stay readable — the same one line, smaller.
+    private var videoOverlayHeader: some View {
+        HStack(alignment: .top) {
+            CallStatusLine(
+                name: displayName,
+                phase: displayPhase,
+                connectedAt: connectedAt,
+                e2eeActive: state.e2ee.active,
+                notice: nil,
+                prominent: false,
+                onEncryptionTap: { state.setEncryptionSheetOpen(true) })
+            Spacer(minLength: 12)
+            QualityIndicator(state: state)
+                .padding(.top, 6)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(
+            LinearGradient(
+                colors: [Color.black.opacity(0.55), .clear],
+                startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea(edges: .top))
+    }
+
+    /// The self-view: a small rounded rectangle about a quarter of the width,
+    /// draggable, with the flip-camera button in its own corner — where the
+    /// thing it changes is visible (`docs/ux/calls.md` section 4.1).
+    private func selfView(track: RTCVideoTrack) -> some View {
+        GeometryReader { geo in
+            let width = geo.size.width * 0.26
+            ZStack(alignment: .bottomTrailing) {
+                LocalVideoPreviewView(
+                    track: track,
+                    mirrored: state.settings.mirrorLocal,
+                    contentMode: .scaleAspectFill)
+                if session?.canFlipCamera == true {
+                    Button {
+                        Task { await session?.flipCamera() }
+                    } label: {
+                        Image(systemName: "arrow.triangle.2.circlepath.camera")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 30, height: 30)
+                            .background(Circle().fill(Color.black.opacity(0.45)))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(6)
+                    .accessibilityLabel("Flip camera")
+                }
+            }
+            .frame(width: width, height: width * 4 / 3)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.16), lineWidth: 1))
+            .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
+            .offset(
+                x: geo.size.width - width - 16 + selfViewOffset.width + selfViewDrag.width,
+                y: 90 + selfViewOffset.height + selfViewDrag.height)
+            .gesture(
+                DragGesture()
+                    .updating($selfViewDrag) { value, drag, _ in drag = value.translation }
+                    .onEnded { value in
+                        selfViewOffset.width += value.translation.width
+                        selfViewOffset.height += value.translation.height
+                    })
+        }
+        .accessibilityLabel("Your camera")
+    }
+
+    // MARK: - Controls
+
+    private var controlsBar: some View {
+        CallControlsBar {
+            ForEach(controls) { control in
+                if control == .end { CallControlsEndSpacer() }
+                controlButton(control)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func controlButton(_ control: CallControl) -> some View {
+        let enabled = CallScreenPresentation.isEnabled(control, phase: displayPhase)
+        switch control {
+        case .speaker:
+            CallControlButton(
+                control: .speaker,
+                systemImage: "speaker.wave.2.fill",
+                on: state.speakerOn,
+                enabled: enabled,
+                action: {
+                    state.setSpeakerOn(CallAudioRoute.setSpeakerOn(!state.speakerOn))
+                    showControls()
+                })
+        case .microphone:
+            let on = local?.micOn ?? true
+            CallControlButton(
+                control: .microphone,
+                systemImage: on ? "mic.fill" : "mic.slash.fill",
+                on: on,
+                enabled: enabled,
+                action: {
+                    setMic(!on)
+                    showControls()
+                })
+        case .camera:
+            let on = local?.camOn ?? false
+            CallControlButton(
+                control: .camera,
+                systemImage: on ? "video.fill" : "video.slash.fill",
+                on: on,
+                enabled: enabled,
+                busy: state.videoPublishState == .starting,
+                action: {
+                    setCamera(!on)
+                    showControls()
+                })
+        case .overflow:
+            overflowButton(enabled: enabled)
+        case .end:
+            CallControlButton(
+                control: .end,
+                systemImage: "phone.down.fill",
+                on: false,
+                enabled: true,
+                action: endCall)
+        }
+    }
+
+    /// The one menu a call is allowed: a group call's participants, chat and
+    /// settings. A 1x1 call never reaches this — its whole set is in the row.
+    private func overflowButton(enabled: Bool) -> some View {
+        Menu {
+            Button {
+                state.setParticipantListOpen(!state.participantListOpen)
+            } label: {
+                Label("Participants", systemImage: "person.3")
+            }
+            Button {
+                state.setChatOpen(!state.chatOpen)
+            } label: {
+                Label(
+                    state.chatUnreadCount > 0 ? "Chat (\(state.chatUnreadCount) unread)" : "Chat",
+                    systemImage: "bubble.left.and.bubble.right")
+            }
+            Button {
+                state.setSettingsOpen(!state.settingsOpen)
+            } label: {
+                Label("Settings", systemImage: "gearshape")
+            }
+        } label: {
+            VStack(spacing: 6) {
+                CallControlFaceView(
+                    systemImage: "ellipsis",
+                    face: CallScreenPresentation.face(.overflow, on: false))
+                Text(CallControl.overflow.label)
+                    .font(.caption2)
+                    .foregroundStyle(Color.white.opacity(0.75))
+            }
+            .opacity(enabled ? 1 : CallScreenPresentation.disabledOpacity)
+        }
+        .disabled(!enabled)
+        .accessibilityLabel(CallStatusText.spokenControlLabel(.overflow, on: false))
+    }
+
+    private func endCall() {
+        if let session {
+            session.hangUp()
+        } else {
+            state.endCall()
+        }
+    }
+
+    private func setMic(_ on: Bool) {
+        if let session {
+            session.setMicrophoneEnabled(on)
+        } else {
+            state.setMic(on)
+        }
+    }
+
+    private func setCamera(_ on: Bool) {
+        guard on, gatesCamera else {
+            applyCamera(on)
+            return
+        }
+        // Camera on: settle the permission first. A denial leaves the camera
+        // off and explains why.
+        Task { @MainActor in
+            guard await CameraPermission.ensureGranted() else {
+                permissionMessage = CameraPermission.deniedMessage
+                return
+            }
+            applyCamera(true)
+        }
+    }
+
+    /// Drive the camera choice onto whatever owns the call.
+    private func applyCamera(_ on: Bool) {
+        guard let session else {
+            // Mock route, or an externally driven SFU call whose owner observes
+            // `camOn` on the state and drives its session.
+            state.setCamera(on)
+            return
+        }
+        guard on else {
+            session.setCameraEnabled(false)
+            return
+        }
+        // Mid-call camera-on: `addLocalVideo` acquires + adds a video track +
+        // renegotiates the first time, and re-enables an existing sender after.
+        // On a capture failure revert the toggle and log the reason — the call
+        // stays up audio-only (invariant #4).
+        Task {
+            do {
+                try await session.addLocalVideo()
+            } catch {
+                state.setCamera(false)
+                NSLog("CallScreen: addLocalVideo failed: %@", String(describing: error))
+            }
+        }
+    }
+
+    // MARK: - Auto-hide
+
+    private func showControls() {
+        controlsVisible = true
+        restartAutoHide()
+    }
+
+    /// Section 4 — after five seconds of a connected video call the row fades
+    /// out; a voice call's row never hides, because there is nothing underneath
+    /// it to look at and hiding it only makes the user tap.
+    private func restartAutoHide() {
+        hideTask?.cancel()
+        guard CallScreenPresentation.autoHides(layout: layout, phase: displayPhase) else {
+            controlsVisible = true
+            return
+        }
+        hideTask = Task { @MainActor in
+            try? await Task.sleep(
+                nanoseconds: UInt64(CallScreenPresentation.autoHideAfter * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            controlsVisible = false
+        }
+    }
 }
 
-// MARK: - SettingsSheet (S-3-A-settings)
+// MARK: - SettingsSheet (group calls)
 
-/// In-call settings sheet — device pickers + processing
-/// toggles. Mirrors the same control surface as the web
-/// `SettingsPanel` and the Android `SettingsSheet`.
+/// In-call settings — device pickers + processing toggles. Reachable from a
+/// group call's overflow button; a 1x1 call has no menu at all.
 private struct SettingsSheet: View {
     @ObservedObject var state: CallUiState
 
@@ -1514,57 +1195,43 @@ private struct SettingsSheet: View {
                         devices: audioInputs,
                         selection: Binding(
                             get: { state.settings.selectedAudioInput },
-                            set: { state.setSelectedAudioInput($0) }
-                        )
-                    )
+                            set: { state.setSelectedAudioInput($0) }))
                     devicePicker(
                         title: "Camera",
                         devices: videoInputs,
                         selection: Binding(
                             get: { state.settings.selectedVideoInput },
-                            set: { state.setSelectedVideoInput($0) }
-                        )
-                    )
+                            set: { state.setSelectedVideoInput($0) }))
                     devicePicker(
                         title: "Speaker",
                         devices: audioOutputs,
                         selection: Binding(
                             get: { state.settings.selectedAudioOutput },
-                            set: { state.setSelectedAudioOutput($0) }
-                        )
-                    )
+                            set: { state.setSelectedAudioOutput($0) }))
                 }
                 Section(header: Text("Audio processing")) {
                     Toggle(
                         "Noise suppression",
                         isOn: Binding(
                             get: { state.settings.noiseSuppression },
-                            set: { state.setNoiseSuppression($0) }
-                        )
-                    )
+                            set: { state.setNoiseSuppression($0) }))
                     Toggle(
                         "Echo cancellation",
                         isOn: Binding(
                             get: { state.settings.echoCancellation },
-                            set: { state.setEchoCancellation($0) }
-                        )
-                    )
+                            set: { state.setEchoCancellation($0) }))
                     Toggle(
                         "Automatic gain control",
                         isOn: Binding(
                             get: { state.settings.autoGain },
-                            set: { state.setAutoGain($0) }
-                        )
-                    )
+                            set: { state.setAutoGain($0) }))
                 }
                 Section(header: Text("Video")) {
                     Toggle(
                         "Mirror local preview",
                         isOn: Binding(
                             get: { state.settings.mirrorLocal },
-                            set: { state.setMirrorLocal($0) }
-                        )
-                    )
+                            set: { state.setMirrorLocal($0) }))
                 }
                 Section(
                     header: Text("Network"),
@@ -1574,9 +1241,7 @@ private struct SettingsSheet: View {
                         "Low-data mode",
                         isOn: Binding(
                             get: { state.settings.lowDataMode },
-                            set: { state.setLowDataMode($0) }
-                        )
-                    )
+                            set: { state.setLowDataMode($0) }))
                 }
             }
             .navigationTitle("Settings")
@@ -1605,13 +1270,10 @@ private struct SettingsSheet: View {
     }
 }
 
-// MARK: - ChatSheet (S-3-A-chat)
+// MARK: - ChatSheet (group calls)
 
-/// In-call chat sheet. Text-only; system events ("Alice
-/// joined") rendered inline as grey italic centred lines.
-/// Mock transport — messages live in CallUiState only until
-/// the WebRTC pod wires real MLS application-message
-/// round-trips.
+/// In-call chat. Text-only; system events ("Alice joined") render inline as
+/// centred muted lines. Reachable from a group call's overflow button.
 private struct ChatSheet: View {
     @ObservedObject var state: CallUiState
     @FocusState private var composerFocused: Bool
@@ -1624,12 +1286,12 @@ private struct ChatSheet: View {
                         LazyVStack(alignment: .leading, spacing: 10) {
                             if state.chatMessages.isEmpty {
                                 Text("No messages yet. Only people in this call can read what you send.")
-                                .font(.system(size: 13))
-                                .foregroundColor(Color.lakkoTextMuted)
-                                .multilineTextAlignment(.center)
-                                .frame(maxWidth: .infinity)
-                                .padding(.top, 40)
-                                .padding(.horizontal, 16)
+                                    .font(.system(size: 13))
+                                    .foregroundColor(Color.lakkoTextMuted)
+                                    .multilineTextAlignment(.center)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.top, 40)
+                                    .padding(.horizontal, 16)
                             } else {
                                 ForEach(state.chatMessages) { msg in
                                     ChatMessageRow(msg: msg).id(msg.id)
@@ -1640,7 +1302,6 @@ private struct ChatSheet: View {
                         .padding(.vertical, 12)
                     }
                     .onChange(of: state.chatMessages.count) { _, _ in
-                        // Auto-scroll to the newest message.
                         if let last = state.chatMessages.last {
                             withAnimation(.easeOut(duration: 0.15)) {
                                 proxy.scrollTo(last.id, anchor: .bottom)
@@ -1655,9 +1316,7 @@ private struct ChatSheet: View {
                     TextField(
                         "Send a message",
                         text: Binding(
-                            get: { state.composeText },
-                            set: { state.setComposeText($0) }
-                        )
+                            get: { state.composeText }, set: { state.setComposeText($0) })
                     )
                     .focused($composerFocused)
                     .textFieldStyle(.roundedBorder)
@@ -1667,13 +1326,13 @@ private struct ChatSheet: View {
                     Button(action: send) {
                         Text("Send")
                             .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(canSend ? Color.lakkoAccentForeground : Color.lakkoTextMuted)
+                            .foregroundColor(
+                                canSend ? Color.lakkoAccentForeground : Color.lakkoTextMuted)
                             .padding(.horizontal, 14)
                             .padding(.vertical, 8)
                             .background(
                                 RoundedRectangle(cornerRadius: LakkoRadius.control)
-                                    .fill(canSend ? Color.lakkoAccent : Color.lakkoSurfaceSunken)
-                            )
+                                    .fill(canSend ? Color.lakkoAccent : Color.lakkoSurfaceSunken))
                     }
                     .disabled(!canSend)
                 }

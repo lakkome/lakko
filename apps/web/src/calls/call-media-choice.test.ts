@@ -3,12 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import {
-  callKindWord,
-  mediaForPrejoin,
-  mediaForStart,
-  prejoinDefaults,
-} from "./call-media-choice";
+import { callKindWord, mediaForStart, mediaForToggles } from "./call-media-choice";
 
 describe("mediaForStart", () => {
   it("starts an audio call with the camera off", () => {
@@ -28,42 +23,24 @@ describe("mediaForStart", () => {
   });
 });
 
-describe("prejoinDefaults", () => {
-  it("opens with the camera off for a voice call", () => {
-    // The defect docs/ux/calls.md section 3 names: "an audio call opens the
-    // pre-join screen with the camera on".
-    expect(prejoinDefaults("audio")).toEqual({ micOn: true, camOn: false });
-  });
-
-  it("opens with the camera on for a video call", () => {
-    expect(prejoinDefaults("video")).toEqual({ micOn: true, camOn: true });
-  });
-
-  it("opens with the microphone on either way", () => {
-    expect(prejoinDefaults("audio").micOn).toBe(true);
-    expect(prejoinDefaults("video").micOn).toBe(true);
-  });
-});
-
-describe("mediaForPrejoin", () => {
+describe("mediaForToggles", () => {
   it("carries the toggles, not the button that opened the screen", () => {
-    // A voice call whose camera was turned on IS a video call, and the callee
-    // is told so.
-    expect(mediaForPrejoin({ micOn: true, camOn: true })).toEqual({ audio: true, video: true });
-    // ...and the other way round.
-    expect(mediaForPrejoin({ micOn: true, camOn: false })).toEqual({ audio: true, video: false });
+    // A video call whose camera was turned off in the check IS a voice call,
+    // and the callee is told so (docs/ux/calls.md section 1).
+    expect(mediaForToggles({ micOn: true, camOn: false })).toEqual({ audio: true, video: false });
+    expect(mediaForToggles({ micOn: true, camOn: true })).toEqual({ audio: true, video: true });
   });
 
-  it("keeps audio on for a call joined muted", () => {
-    expect(mediaForPrejoin({ micOn: false, camOn: false })).toEqual({ audio: true, video: false });
+  it("keeps audio on for a call placed muted", () => {
+    expect(mediaForToggles({ micOn: false, camOn: false })).toEqual({ audio: true, video: false });
   });
 
-  it("agrees with the button when the user changes nothing", () => {
-    // The round trip that makes the two rules one rule: open at the default,
-    // touch nothing, and the offer is the one the button asked for.
-    for (const kind of ["audio", "video"] as const) {
-      expect(mediaForPrejoin(prejoinDefaults(kind))).toEqual(mediaForStart(kind));
-    }
+  it("agrees with the video button when the user changes nothing", () => {
+    // The camera check always opens with the camera on (section 3.2 — it is a
+    // camera check), so leaving it alone must place exactly the call the video
+    // button asked for. This is the round trip `prejoinDefaults` used to carry
+    // before section 3 retired the pre-join screen.
+    expect(mediaForToggles({ micOn: true, camOn: true })).toEqual(mediaForStart("video"));
   });
 });
 

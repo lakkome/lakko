@@ -451,7 +451,7 @@ public final class CallSession: ObservableObject {
     /// the real `RTCAudioTrack.isEnabled` via the pod and
     /// publishes the new state so the in-call control reflects
     /// it. No-op-safe before the pod exists (the published flag
-    /// still updates so the prejoin/connecting UI is correct).
+    /// still updates so the calling / connecting UI is correct).
     public func setMicrophoneEnabled(_ on: Bool) {
         rtc?.setMicrophoneEnabled(on)
         micEnabled = on
@@ -463,6 +463,21 @@ public final class CallSession: ObservableObject {
     public func setCameraEnabled(_ on: Bool) {
         rtc?.setCameraEnabled(on)
         cameraEnabled = on
+    }
+
+    /// `docs/ux/calls.md` section 4.1 — is there another camera to flip to?
+    /// The flip button lives on the self-view and is not drawn when this is
+    /// `false`, rather than drawn and inert.
+    public var canFlipCamera: Bool {
+        localCameraCapture?.canFlip ?? false
+    }
+
+    /// Swap the front camera for the back one and back again, on the same
+    /// track and the same sender — so the SFrame encryptor attached to it
+    /// keeps its counter and only the frames change.
+    public func flipCamera() async {
+        guard let capture = localCameraCapture else { return }
+        await capture.flip()
     }
 
     /// Turn the camera ON mid-call (piece B2b) when the 1×1 call

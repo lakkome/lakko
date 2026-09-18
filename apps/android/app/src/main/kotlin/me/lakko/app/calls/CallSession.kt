@@ -452,6 +452,34 @@ public class CallSession(
     }
 
     /**
+     * `docs/ux/calls.md` section 4.1 — flip to the other camera, driven by the
+     * small button in the self-view's corner rather than by a dropdown entry
+     * (which existed, and did nothing).
+     *
+     * A no-op when no camera is being captured. The swap keeps the same video
+     * track and sender, so nothing is renegotiated and the SFrame encryptor
+     * armed on that sender stays armed — a flip can never drop the call out of
+     * its sealed state.
+     */
+    public fun switchCamera() {
+        val capture = localCameraCapture ?: return
+        capture.switchCamera { switched, isFrontFacing ->
+            if (switched) {
+                mutableCameraIsFrontFacing.value = isFrontFacing
+            }
+        }
+    }
+
+    private val mutableCameraIsFrontFacing: MutableStateFlow<Boolean> = MutableStateFlow(true)
+
+    /**
+     * `true` while the captured camera faces the user. The self-view is
+     * mirrored only then: a person expects to see themselves as in a mirror,
+     * and expects the back camera to show the world the right way round.
+     */
+    public val cameraIsFrontFacing: StateFlow<Boolean> = mutableCameraIsFrontFacing.asStateFlow()
+
+    /**
      * ADR-0032 piece B2b — turn the camera ON mid-call when the 1×1 call
      * started audio-only. Mirror of the web `CallSession.addLocalVideo`.
      *

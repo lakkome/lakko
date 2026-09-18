@@ -101,6 +101,48 @@ public class CameraVideoCapture private constructor(
     }
 
     /**
+     * Switch to the next camera on the device — `docs/ux/calls.md` section 4.1:
+     * "Flip camera does not belong in the row. It lives on the self-view
+     * itself, as a small button in that rectangle's corner, where the thing it
+     * changes is visible."
+     *
+     * Before this the flip existed only as a dropdown entry with an empty body,
+     * so the menu item did nothing at all. libwebrtc owns the swap: the capture
+     * keeps running, the same [VideoSource] keeps receiving frames, and no
+     * renegotiation happens, so the remote side sees only the picture change.
+     *
+     * [onDone] reports whether the swap landed and, when it did, whether the new
+     * camera faces the user — which is what decides whether the self-view is
+     * mirrored. It is called on libwebrtc's camera thread.
+     */
+    public fun switchCamera(onDone: (switched: Boolean, isFrontFacing: Boolean) -> Unit) {
+        if (!didStart) {
+            onDone(false, true)
+            return
+        }
+        try {
+            capturer.switchCamera(
+                object : CameraVideoCapturer.CameraSwitchHandler {
+                    override fun onCameraSwitchDone(isFrontCamera: Boolean) {
+                        onDone(true, isFrontCamera)
+                    }
+
+                    override fun onCameraSwitchError(errorDescription: String?) {
+                        android.util.Log.w(
+                            "CameraVideoCapture",
+                            "camera switch failed: ${errorDescription.orEmpty()}",
+                        )
+                        onDone(false, true)
+                    }
+                },
+            )
+        } catch (cause: Throwable) {
+            android.util.Log.w("CameraVideoCapture", "camera switch threw", cause)
+            onDone(false, true)
+        }
+    }
+
+    /**
      * Release the capturer + surface helper + the EGL
      * texture pool they own. Call this after `stop()` and
      * after the `VideoSource` has been detached from any
@@ -148,12 +190,17 @@ public class CameraVideoCapture private constructor(
          * host. Compose call UI should hide the "video" toggle
          * when this is false.
          */
-        public fun hasUsableCamera(context: Context): Boolean {
-            return try {
-                Camera2Enumerator(context).deviceNames.isNotEmpty()
-            } catch (_: Throwable) {
-                false
-            }
+        public fun hasUsableCamera(context: Context): Boolean = cameraCount(context) > 0
+
+        /**
+         * How many cameras this device exposes. `docs/ux/calls.md` section 4.1
+         * puts the flip button on the self-view; with fewer than two cameras
+         * there is nothing to flip to and the button is not drawn.
+         */
+        public fun cameraCount(context: Context): Int = try {
+            Camera2Enumerator(context).deviceNames.size
+        } catch (_: Throwable) {
+            0
         }
 
         /**
