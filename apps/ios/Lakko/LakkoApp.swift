@@ -93,6 +93,16 @@ struct LakkoApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
+        // Before every other side effect here, because `RTCFieldTrials.h` says
+        // "Must be called before any other call into WebRTC" and the SFrame
+        // probe below is the first thing that touches the framework. Without
+        // the generic frame descriptor this installs, a frame-encrypted video
+        // stream never assembles a frame at the receiver — see
+        // ``WebRTCFieldTrials`` for the sources that establish that.
+        WebRTCFieldTrials.installOnce()
+        // TEMPORARY, see ``WebRTCDiagnosticLogging``: libwebrtc announces both
+        // frame-decryptor attachment gates at info level, which iOS suppresses.
+        WebRTCDiagnosticLogging.installOnce()
         // G3-sframe-native N-4 — runtime probe for the non-public
         // `setFrameEncryptor:` / `setFrameDecryptor:` selectors
         // libwebrtc M125's RTCRtpSender / RTCRtpReceiver carry.

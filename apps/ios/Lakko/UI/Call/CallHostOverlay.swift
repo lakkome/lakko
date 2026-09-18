@@ -21,12 +21,22 @@ struct CallHostOverlay: ViewModifier {
     /// live (``CallSlot``); a 1x1 call first only makes a stale screen of
     /// another kind give way deterministically.
     private enum Presented {
+        /// `docs/ux/calls.md` section 2.2 — the in-app incoming call. It shares
+        /// the one full-screen presentation with the live call rather than
+        /// having its own, because SwiftUI allows a view only one
+        /// `fullScreenCover` and the two states are mutually exclusive anyway:
+        /// `presentsCallScreen` excludes `.ringing` by construction.
+        case incoming
         case oneToOne(CallSession)
         case group(CallUiState, id: String)
         case link(CallUiState, id: String)
     }
 
     private var presented: Presented? {
+        if IncomingCallPresentation.showsInAppScreen(
+            state: host.activeCallState, ringingOnSystemUi: host.ringingOnSystemUi) {
+            return .incoming
+        }
         if Self.presentsCallScreen(host.activeCallState), let session = host.activeCall {
             return .oneToOne(session)
         }
@@ -46,15 +56,7 @@ struct CallHostOverlay: ViewModifier {
     func body(content: Content) -> some View {
         content
             .safeAreaInset(edge: .top, spacing: 0) {
-                if host.activeCallState == .ringing {
-                    IncomingCallBanner(
-                        callerName: host.activePeerName,
-                        video: host.incomingVideo,
-                        onAccept: { host.acceptIncomingCall(withVideo: false) },
-                        onAcceptWithVideo: { host.acceptIncomingCall(withVideo: true) },
-                        onDecline: { host.declineIncomingCall() }
-                    )
-                } else if let notice = link.notice {
+                if let notice = link.notice {
                     LinkCallNoticeBanner(
                         notice: notice,
                         onOpen: {
@@ -72,6 +74,18 @@ struct CallHostOverlay: ViewModifier {
                 )
             ) {
                 switch presented {
+                case .incoming?:
+                    // The same entry points the banner drove: the call plumbing
+                    // is untouched, only the surface changed. On a video call
+                    // Accept answers WITH video and the ghost button is the
+                    // audio-only choice (section 2.2), which is the one place
+                    // the banner had the emphasis backwards.
+                    IncomingCallScreen(
+                        callerName: host.activePeerName,
+                        video: host.incomingVideo,
+                        onAccept: { host.acceptIncomingCall(withVideo: host.incomingVideo) },
+                        onAcceptWithoutVideo: { host.acceptIncomingCall(withVideo: false) },
+                        onDecline: { host.declineIncomingCall() })
                 case .oneToOne(let session)?:
                     // `docs/ux/calls.md` sections 3 and 4 — the button the
                     // caller tapped decides whether this opens on the camera
@@ -152,75 +166,6 @@ extension View {
         inviteIntake: InviteIntake
     ) -> some View {
         modifier(CallHostOverlay(host: oneToOne, group: group, link: link, inviteIntake: inviteIntake))
-    }
-}
-
-/// The ringing banner: who is calling, and Accept / Video / Decline.
-private struct IncomingCallBanner: View {
-    let callerName: String?
-    let video: Bool
-    let onAccept: () -> Void
-    let onAcceptWithVideo: () -> Void
-    let onDecline: () -> Void
-
-    private var headline: String {
-        if let callerName { return "\(callerName) is calling" }
-        return "Incoming call"
-    }
-
-    /// The kind of call, then the one security word that is true here: the
-    /// native 1x1 path refuses to connect unless its media keying is armed.
-    /// The kind comes from the offer's own media flags, so it says what the
-    /// caller chose (`docs/ux/calls.md` section 3).
-    private var detail: String {
-        "\(CallMediaChoice.kindLabel(video: video)). End-to-end encrypted."
-    }
-
-    var body: some View {
-        // The banner component (design system section 3): the elevated
-        // surface, a hairline below, an icon, one sentence, the actions.
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: video ? "video.fill" : "phone.fill")
-                    .foregroundStyle(Color.lakkoAccent)
-                    .padding(.top, 2)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(headline)
-                        .font(.headline)
-                        .foregroundStyle(Color.lakkoText)
-                        .lineLimit(2)
-                    Text(detail)
-                        .font(.caption)
-                        .foregroundStyle(Color.lakkoTextMuted)
-                }
-            }
-            .accessibilityElement(children: .combine)
-            HStack(spacing: 8) {
-                Button(action: onAccept) {
-                    Label("Accept", systemImage: "phone.fill")
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Color.lakkoSuccess)
-                .accessibilityLabel("Accept with audio")
-                Button(action: onAcceptWithVideo) {
-                    Label("Video", systemImage: "video.fill")
-                }
-                .buttonStyle(.bordered)
-                .tint(Color.lakkoAccent)
-                .accessibilityLabel("Accept with video")
-                Spacer()
-                Button("Decline", role: .destructive, action: onDecline)
-                    .buttonStyle(.bordered)
-                    .tint(Color.lakkoDanger)
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.lakkoSurface)
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(Color.lakkoBorder).frame(height: 1)
-        }
     }
 }
 

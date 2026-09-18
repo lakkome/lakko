@@ -155,6 +155,9 @@ final class CallKitBridge {
             appIsActive: appIsActive(),
             alreadyReported: provider.isReported(uuid)
         )
+        // Record the choice so `CallHostOverlay` can honour it for as long as
+        // the call rings, not just at the instant it started.
+        host.setRingingOnSystemUi(surface != .inApp)
         switch surface {
         case .systemCallUi:
             reportedUuid = uuid

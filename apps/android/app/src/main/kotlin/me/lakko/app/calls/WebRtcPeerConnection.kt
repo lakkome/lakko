@@ -10,6 +10,7 @@ import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
+import org.webrtc.CryptoOptions
 import org.webrtc.DataChannel
 import org.webrtc.DefaultVideoDecoderFactory
 import org.webrtc.DefaultVideoEncoderFactory
@@ -283,6 +284,46 @@ public class WebRtcPeerConnection(
             // posture mirrors this.
             continualGatheringPolicy =
                 PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
+            // THE reason a receiver can decrypt SFrame media at all.
+            //
+            // `RtpVideoStreamReceiver2`'s constructor builds the decryption
+            // stage ONLY under this flag — "Only construct the encrypted
+            // receiver if frame encryption is enabled" — and the
+            // `frame_decryptor != nullptr` arm is nested inside that branch, so
+            // a stream built without it DISCARDS a decryptor it was handed
+            // (branch-heads/6422, rtp_video_stream_receiver2.cc:330). Nothing
+            // on this client ever set it, so every incoming video frame went to
+            // the decoder as SFrame ciphertext and failed. Audio was immune
+            // because its receive path consults the decryptor inline and has no
+            // such construction-time switch — which is exactly why audio worked
+            // while video never had.
+            //
+            // Set on every PeerConnection this app builds, because Android is a
+            // receiver on every path: a 1x1 call from an iPhone, and every
+            // remote stream on an SFU group call.
+            //
+            // ## What it does and does not enforce — checked, not assumed
+            //
+            // On the RECEIVE side it is genuinely fail-closed and that is the
+            // posture we want (security invariant #4): the stage exists, so a
+            // stream whose decryptor was never attached yields no media rather
+            // than plaintext media. Worth knowing because the failure mode when
+            // someone forgets to attach one is now TOTAL and looks like a dead
+            // stream, not like a degraded one — a silent black picture is the
+            // symptom of a missing decryptor, not of a bad network.
+            //
+            // On the SEND side it enforces nothing at this revision. With no
+            // encryptor attached, `RTPSenderVideo::SendVideo` only logs — "No
+            // FrameEncryptor is attached to this video sending stream but one
+            // is required" — and then packetizes the PLAINTEXT anyway
+            // (rtp_sender_video.cc:635). So this flag must never be mistaken
+            // for the thing that stops unsealed media leaving this device.
+            // What stops that is our own refusal: `CallSession.attachSFrame`
+            // returning false ends the call before any offer, and
+            // `SfuCallSession.connect` refuses before any capture.
+            cryptoOptions = CryptoOptions.builder()
+                .setRequireFrameEncryption(true)
+                .createCryptoOptions()
         }
         peer = sharedFactory!!.createPeerConnection(config, internalObserver)
     }
@@ -740,6 +781,7 @@ public class WebRtcPeerConnection(
                 sealStream = enc?.stream,
                 encryptorInFramePath = enc?.pointerTaken == true,
                 codec = null,
+                headerExtensions = emptyList(),
             )
         }
         val (direction, currentDirection) = runCatching {
@@ -749,6 +791,14 @@ public class WebRtcPeerConnection(
             }
             transceiver?.direction?.name to transceiver?.currentDirection?.name
         }.getOrElse { null to null }
+
+        // What the two ends actually negotiated, rather than what the defaults
+        // are assumed to be. A frame encryptor replaces the whole encoded
+        // frame, so whether the key-frame flag survives at all depends on
+        // there being an extension carrying it outside the payload.
+        val headerExtensions = runCatching {
+            sender.parameters?.headerExtensions?.mapNotNull { it.uri }.orEmpty()
+        }.getOrElse { emptyList() }
 
         val report = suspendCancellableCoroutine<org.webrtc.RTCStatsReport?> { cont ->
             try {
@@ -785,6 +835,7 @@ public class WebRtcPeerConnection(
             sealStream = enc?.stream,
             encryptorInFramePath = enc?.pointerTaken == true,
             codec = codec,
+            headerExtensions = headerExtensions,
         )
     }
 
@@ -1112,9 +1163,28 @@ public class WebRtcPeerConnection(
             synchronized(factoryLock) {
                 if (sharedFactory != null) return
                 val app = context.applicationContext
+                // Ask libwebrtc to offer a frame descriptor.
+                //
+                // Without this the RTP header carries no frame boundaries and
+                // no key-frame flag, and the receiver's only source for both is
+                // the first bytes of the VP8 bitstream — which this app's
+                // SFrame encryptor replaces with ciphertext for every frame. A
+                // live Android-to-iOS call showed exactly that: 48 frames
+                // encoded, 17 of them real key frames, 47 picture requests from
+                // a receiver that assembled zero frames and decoded none,
+                // because it could not recognise a key frame when one arrived.
+                //
+                // Field trials are process-wide and read when the factory is
+                // built, so this must be set once, here, before anything else
+                // touches PeerConnectionFactory. Exactly ONE descriptor trial
+                // is set, and which one is load-bearing rather than arbitrary:
+                // see [FRAME_DESCRIPTOR_FIELD_TRIALS] for why enabling the
+                // dependency descriptor as well silently takes the generic one
+                // off the wire.
                 PeerConnectionFactory.initialize(
                     PeerConnectionFactory.InitializationOptions.builder(app)
                         .setEnableInternalTracer(false)
+                        .setFieldTrials(FRAME_DESCRIPTOR_FIELD_TRIALS)
                         .createInitializationOptions()
                 )
                 val egl = EglBase.create()

@@ -5,6 +5,7 @@ package me.lakko.app.calls
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -35,6 +36,7 @@ class MidCallVideoDiagnosisTest {
         sealStream: Int? = 1,
         encryptorInFramePath: Boolean = true,
         codec: String? = "video/VP8",
+        headerExtensions: List<String> = emptyList(),
     ) = MidCallVideoFacts(
         framesEncoded = framesEncoded,
         bytesSent = bytesSent,
@@ -49,6 +51,7 @@ class MidCallVideoDiagnosisTest {
         sealStream = sealStream,
         encryptorInFramePath = encryptorInFramePath,
         codec = codec,
+        headerExtensions = headerExtensions,
     )
 
     @Test
@@ -310,6 +313,103 @@ class MidCallVideoDiagnosisTest {
         // probe taken while the watchdog was still working on it.
         val window = KEYFRAME_WATCHDOG_INTERVAL_MS * KEYFRAME_WATCHDOG_TICKS
         assertTrue("window=$window", window > MID_CALL_VIDEO_LATE_PROBE_DELAY_MS)
+    }
+
+    // ---- The frame descriptor -------------------------------------------------
+
+    @Test
+    fun `a sender with no frame-descriptor extension is reported as such`() {
+        // A frame encryptor replaces the whole encoded frame, including the
+        // byte libwebrtc's VP8 receive path reads the key-frame flag from. With
+        // no extension carrying that flag outside the payload, a receiver has
+        // nothing left to recognise a key frame by.
+        assertFalse(carriesFrameDescriptorExtension(emptyList()))
+        assertFalse(
+            carriesFrameDescriptorExtension(
+                listOf(
+                    "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time",
+                    "urn:ietf:params:rtp-hdrext:sdes:mid",
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `either descriptor extension counts`() {
+        assertTrue(carriesFrameDescriptorExtension(listOf(DEPENDENCY_DESCRIPTOR_URI)))
+        assertTrue(carriesFrameDescriptorExtension(listOf(GENERIC_FRAME_DESCRIPTOR_URI)))
+    }
+
+    @Test
+    fun `the report prints the negotiated extensions and the verdict on them`() {
+        val without = midCallVideoReport(facts(headerExtensions = listOf("urn:ietf:params:rtp-hdrext:sdes:mid")))
+        assertTrue(without, without.contains("frameDescriptorExt=false"))
+        assertTrue(without, without.contains("extmaps=[urn:ietf:params:rtp-hdrext:sdes:mid]"))
+
+        val with = midCallVideoReport(facts(headerExtensions = listOf(DEPENDENCY_DESCRIPTOR_URI)))
+        assertTrue(with, with.contains("frameDescriptorExt=true"))
+    }
+
+    // ---- The field trials that put a descriptor on the wire -------------------
+
+    @Test
+    fun `the field-trial string is the shape libwebrtc parses`() {
+        // Malformed trials are not ignored; libwebrtc validates the string at
+        // init, so a stray token would break every call rather than just this
+        // feature. The format is `key/value/` pairs, concatenated, with a
+        // trailing slash.
+        val trials = FRAME_DESCRIPTOR_FIELD_TRIALS
+        assertTrue(trials, trials.endsWith("/"))
+        val tokens = trials.trimEnd('/').split("/")
+        assertEquals("even number of key/value tokens: $tokens", 0, tokens.size % 2)
+        tokens.forEach { assertTrue("empty token in $trials", it.isNotBlank()) }
+    }
+
+    @Test
+    fun `the generic descriptor is the one enabled`() {
+        val tokens = FRAME_DESCRIPTOR_FIELD_TRIALS.trimEnd('/').split("/")
+        val byName = tokens.chunked(2).associate { it[0] to it[1] }
+        assertEquals("Enabled", byName["WebRTC-GenericDescriptorAdvertised"])
+    }
+
+    @Test
+    fun `the dependency descriptor is deliberately not enabled`() {
+        // Not an omission, and not an obvious improvement to add back. It is
+        // NOT inert for VP8 — GenericStructure returns a MinimalisticStructure
+        // for kVideoCodecVP8 unconditionally — and because it fires, and
+        // because the send side prefers it whenever both are registered,
+        // offering both puts the DEPENDENCY descriptor on the wire, written
+        // over a structure this side only simulates. The peer enables the
+        // generic one alone, so the generic one is the only descriptor both
+        // ends chose on purpose.
+        val tokens = FRAME_DESCRIPTOR_FIELD_TRIALS.trimEnd('/').split("/")
+        val byName = tokens.chunked(2).associate { it[0] to it[1] }
+        assertNull(
+            "re-adding this silently outranks the generic descriptor on the wire",
+            byName["WebRTC-DependencyDescriptorAdvertised"],
+        )
+    }
+
+    @Test
+    fun `descriptor authentication is deliberately not enabled`() {
+        // It would fold the descriptor into the frame encryptor's
+        // additional_data, which ADR-0013 deliberately does not bind so that
+        // web and native open each other's frames.
+        assertFalse(
+            FRAME_DESCRIPTOR_FIELD_TRIALS,
+            FRAME_DESCRIPTOR_FIELD_TRIALS.contains("GenericDescriptorAuth"),
+        )
+    }
+
+    @Test
+    fun `the probe recognises the extension the trial is meant to produce`() {
+        // The acceptance test for the change: this line flipping to true on a
+        // live call is what says the descriptor reached the wire.
+        assertTrue(carriesFrameDescriptorExtension(listOf(GENERIC_FRAME_DESCRIPTOR_URI)))
+        assertFalse(carriesFrameDescriptorExtension(emptyList()))
+        // Still recognised if it ever appears, so the probe keeps reporting the
+        // truth about a session rather than only what this build asked for.
+        assertTrue(carriesFrameDescriptorExtension(listOf(DEPENDENCY_DESCRIPTOR_URI)))
     }
 
     @Test

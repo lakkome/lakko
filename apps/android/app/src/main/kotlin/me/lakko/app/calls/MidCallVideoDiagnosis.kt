@@ -152,7 +152,86 @@ public data class MidCallVideoFacts(
     val encryptorInFramePath: Boolean,
     /** The negotiated outbound video codec, e.g. `video/VP8`. */
     val codec: String?,
+    /**
+     * The RTP header extensions negotiated on the video sender, by URI.
+     *
+     * The question this exists to answer: does either end carry the frame's
+     * key-frame flag and boundaries OUTSIDE the encrypted payload? A frame
+     * encryptor replaces the whole encoded frame — including the first byte of
+     * the VP8 bitstream, which is where libwebrtc's VP8 receive path reads the
+     * key-frame flag — so unless a dependency-descriptor or generic-frame
+     * -descriptor extension is negotiated, a receiver has nothing left to
+     * recognise a key frame by.
+     */
+    val headerExtensions: List<String>,
 )
+
+/** The dependency-descriptor extension: frame boundaries and type, out of band. */
+public const val DEPENDENCY_DESCRIPTOR_URI: String =
+    "https://aomediacodec.github.io/av1-rtp-spec/#dependency-descriptor-rtp-header-extension"
+
+/** Its predecessor, carrying the same facts. */
+public const val GENERIC_FRAME_DESCRIPTOR_URI: String =
+    "http://www.webrtc.org/experiments/rtp-hdrext/generic-frame-descriptor-00"
+
+/**
+ * The libwebrtc field trial that puts a frame descriptor on the wire.
+ *
+ * Neither descriptor extension is offered by default: `WebRtcVideoEngine::
+ * GetRtpHeaderExtensions` (branch-heads/6422, the revision this app links)
+ * appends both with direction `kStopped` unless the matching trial reads
+ * `Enabled`, and `kStopped` means "not offered". That is why a live call
+ * negotiated ten extensions with neither descriptor among them, and why the
+ * receiver had nowhere to read a key-frame flag from except the first byte of
+ * the VP8 bitstream — which this app's SFrame encryptor replaces with
+ * ciphertext on every frame.
+ *
+ * Enabling this fixed that much, measurably: across the same call the peer's
+ * picture requests fell from 71 to 4 and its dropped frames from 69 to 4, and
+ * this sender stopped emitting key frames on demand (17 down to 2) because
+ * nothing was begging for them any more.
+ *
+ * ## Why the dependency descriptor is NOT enabled — do not add it back
+ *
+ * `WebRTC-DependencyDescriptorAdvertised` was enabled here first, and the
+ * argument for it was sound as far as it went: offering a superset stops the
+ * two ends each picking a different single extension and negotiating neither,
+ * and `RTPSenderVideo::AddRtpHeaderExtensions` resolves the overlap itself —
+ * "Do not use generic frame descriptor when dependency descriptor is stored"
+ * (`rtp_sender_video.cc:408`). Reading the same revision also shows the
+ * dependency descriptor is **not** inert for VP8 the way it is often assumed
+ * to be: `RtpPayloadParams::GenericStructure` returns a
+ * `MinimalisticStructure` for `kVideoCodecVP8` unconditionally, so
+ * `video_structure_` is non-null and the dependency-descriptor branch fires.
+ *
+ * That is exactly why it must not be enabled. Because it fires, and because
+ * the library prefers it whenever both are registered, offering both means the
+ * **dependency descriptor** is what actually goes on the wire — written over a
+ * frame-dependency structure this side *simulates* for VP8, whose templates
+ * the receiver must resolve before it can reference a frame. The peer
+ * deliberately enables only the generic descriptor, so the generic one is the
+ * only descriptor both ends chose on purpose, and the only way to put it on
+ * the wire is to stop offering the one that outranks it.
+ *
+ * `WebRTC-GenericDescriptorAuth` is deliberately absent for a different
+ * reason: it would fold the descriptor into the frame encryptor's
+ * `additional_data`, which ADR-0013 deliberately does not bind so that web and
+ * native open each other's frames.
+ *
+ * Format: the trial string is `key/value/` pairs concatenated, and the gate is
+ * `absl::StartsWith(trials.Lookup(name), "Enabled")`.
+ */
+public const val FRAME_DESCRIPTOR_FIELD_TRIALS: String =
+    "WebRTC-GenericDescriptorAdvertised/Enabled/"
+
+/**
+ * Whether the negotiated extensions carry the frame descriptor.
+ *
+ * `false` with a frame encryptor armed means the receiver's only source for
+ * "is this a key frame" is inside the ciphertext, so it can never see one.
+ */
+public fun carriesFrameDescriptorExtension(uris: List<String>): Boolean =
+    uris.any { it == DEPENDENCY_DESCRIPTOR_URI || it == GENERIC_FRAME_DESCRIPTOR_URI }
 
 /** A direction that actually sends. */
 private fun sends(direction: String?): Boolean =
@@ -314,5 +393,7 @@ public fun midCallVideoReport(
     append(", pliCount=").append(facts.pliCount ?: -1L)
     append(", firCount=").append(facts.firCount ?: -1L)
     append(", codec=").append(facts.codec ?: "none")
+    append(", frameDescriptorExt=").append(carriesFrameDescriptorExtension(facts.headerExtensions))
+    append(", extmaps=[").append(facts.headerExtensions.joinToString(" ")).append(']')
     append(')')
 }

@@ -115,6 +115,13 @@ public final class WebRTCPeerConnection: NSObject {
     /// of any `WebRTCPeerConnection` and keep it for the
     /// life of the process.
     private static let sharedFactory: RTCPeerConnectionFactory = {
+        // Before ANY other call into WebRTC, per `RTCFieldTrials.h`. This is the
+        // one initialiser every peer connection must pass through, so a trial
+        // installed here cannot be missed by a code path that skipped app
+        // launch — and without it a frame-encrypted VP8 stream never assembles
+        // a single frame at the receiver (see `WebRTCFieldTrials`).
+        WebRTCFieldTrials.installOnce()
+        WebRTCDiagnosticLogging.installOnce()
         RTCInitializeSSL()
         // Default encoder / decoder factories: software VP8
         // + H.264 (Apple's hardware codec when available).
@@ -197,6 +204,37 @@ public final class WebRTCPeerConnection: NSObject {
         // negotiates with `Rtc::sdp_api`.
         config.bundlePolicy = .maxBundle
         config.rtcpMuxPolicy = .require
+        // Every sender must carry a frame encryptor and every receiver a frame
+        // decryptor, or no media flows. This is our stated posture already
+        // (invariant #4, no fallback to non-E2EE) and it was not being declared
+        // — which is what silently broke video.
+        //
+        // `rtp_video_stream_receiver2.cc:330` builds the video decryption stage
+        // ONLY under this flag:
+        //
+        //     // Only construct the encrypted receiver if frame encryption is enabled.
+        //     if (config_.crypto_options.sframe.require_frame_encryption) {
+        //       buffered_frame_decryptor_ = std::make_unique<BufferedFrameDecryptor>(...);
+        //       if (frame_decryptor != nullptr) { ...SetFrameDecryptor... }
+        //     }
+        //
+        // With the flag off, a receive stream built from a config that ALREADY
+        // carries our decryptor discards it — the `frame_decryptor != nullptr`
+        // arm is nested inside the disabled branch. Frames then run to the
+        // decoder as SFrame ciphertext and every one fails to decode, while our
+        // `Decrypt` is never called: attached, never consulted.
+        //
+        // Audio never had this. `ChannelReceive` holds its decryptor as a plain
+        // member and consults it inline on the receive path
+        // (`audio/channel_receive.cc:689`), so there is no construction-time
+        // flag that can take its decryption stage away. That asymmetry is the
+        // whole reason audio worked and video did not.
+        let crypto = RTCCryptoOptions(
+            srtpEnableGcmCryptoSuites: false,
+            srtpEnableAes128Sha1_32CryptoCipher: false,
+            srtpEnableEncryptedRtpHeaderExtensions: false,
+            sframeRequireFrameEncryption: true)
+        config.cryptoOptions = crypto
 
         // Constraints. Mandatory ones go in `mandatory`;
         // optional are advisory. Empty for the first pass —

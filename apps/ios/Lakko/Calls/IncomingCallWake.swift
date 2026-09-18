@@ -207,6 +207,28 @@ public enum IncomingCallUi: Equatable {
 ///   * **An active app shows its own screen.** Section 2.1's first row: with the
 ///     app open, the call takes over Lakko's own screen, not the phone's.
 public enum IncomingCallPresentation {
+
+    /// Whether Lakko's own full-screen incoming call should be on screen
+    /// (`docs/ux/calls.md` section 2.2).
+    ///
+    /// The second argument is what keeps this off the CallKit path. ``decide``
+    /// already chooses ONE surface per call, but it runs once, when the ring
+    /// starts; the view re-evaluates continuously and would happily draw the
+    /// in-app screen underneath the system call screen — two surfaces for one
+    /// call, which is exactly what section 2.1 forbids. So the choice
+    /// ``decide`` made is recorded, and this reads it back.
+    ///
+    /// - Parameters:
+    ///   - state: the 1x1 call's state; only a ringing call has an incoming
+    ///     screen at all.
+    ///   - ringingOnSystemUi: this call was reported to CallKit, so the phone's
+    ///     own screen owns it.
+    public static func showsInAppScreen(
+        state: CallSession.WebCallState?, ringingOnSystemUi: Bool
+    ) -> Bool {
+        state == .ringing && !ringingOnSystemUi
+    }
+
     public static func decide(
         source: IncomingCallSource,
         appIsActive: Bool,

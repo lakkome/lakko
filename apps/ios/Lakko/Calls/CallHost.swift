@@ -93,8 +93,17 @@ final class CallHost: ObservableObject {
     /// object. `nil` when there is nothing to show — including a call that
     /// ended while it was still ringing, which never had a screen to dismiss.
     @Published private(set) var activeCallState: CallSession.WebCallState?
-    /// `true` when the ringing offer asked for video — the banner says so.
+    /// `true` when the ringing offer asked for video — the incoming screen
+    /// says so, and it decides which accept is the primary one.
     @Published private(set) var incomingVideo: Bool = false
+    /// `true` when this ringing call was reported to CallKit, so the phone's own
+    /// call screen owns it and Lakko must not draw its own over the top.
+    ///
+    /// Written by ``CallKitBridge``, which is the only thing that knows which
+    /// surface was chosen. It lives here rather than on the bridge because the
+    /// view already observes this object, and one observed object is one fewer
+    /// way for the two surfaces to disagree.
+    @Published private(set) var ringingOnSystemUi: Bool = false
     /// `docs/ux/calls.md` section 3 — which button started the outgoing call.
     /// `nil` while no outgoing call is being prepared.
     @Published private(set) var outgoingButton: CallButtonKind?
@@ -313,6 +322,12 @@ final class CallHost: ObservableObject {
         }
     }
 
+    /// Record which surface is ringing this call. Called by ``CallKitBridge``.
+    func setRingingOnSystemUi(_ onSystem: Bool) {
+        guard ringingOnSystemUi != onSystem else { return }
+        ringingOnSystemUi = onSystem
+    }
+
     func declineIncomingCall() {
         activeCall?.declineCall()
     }
@@ -415,6 +430,7 @@ final class CallHost: ObservableObject {
         activeGroupIdHex = nil
         activeCallState = nil
         incomingVideo = false
+        ringingOnSystemUi = false
         outgoingButton = nil
         outgoingSurface = nil
         outgoingNotice = nil
