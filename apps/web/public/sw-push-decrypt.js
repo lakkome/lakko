@@ -141,6 +141,18 @@ const STALE_OFFER_MS = 60_000;
  *   profile; `wrongDomain` is the only "not a profile" answer. Used ONLY to
  *   classify the row out of the preview path — the SW never stores a
  *   received profile (C-59). Optional so an older deps object still loads.
+ * @property {(bytes: Uint8Array) => void} [decodeProfileRequest]
+ *   ADR-0048 §2 trigger 4 — the fail-closed profile-request codec. THROWS
+ *   when the bytes are not that envelope; returning is the whole result
+ *   (the request is field-less). Used ONLY to classify the row out of the
+ *   preview path — the SW never answers a request (an answer is an MLS
+ *   application message, C-59). Optional so an older deps object still
+ *   loads.
+ * @property {() => number} [profileRequestEnvelopeLen]
+ *   ADR-0048 — the exact on-wire length of a profile request, read from the
+ *   FFI like `committerBeaconEnvelopeLen`. Optional; absent means the arm
+ *   is off (see `isProfileRequestEnvelope` for why it cannot fall back to
+ *   the codec alone).
  * @property {(bytes: Uint8Array) => any} [decodeGroupNameEnvelope]
  *   ADR-0051 — the fail-closed group-name-envelope codec. THROWS an `Error`
  *   carrying a `groupNameError` code when the bytes are not a well-formed
@@ -653,10 +665,10 @@ function callNoticeFrom(wasm, processed, message, groupHex, nowMs) {
  * kinds before its chat parse; this is the background mirror of that
  * same two-step peek, in the same order.
  *
- * Five kinds, each its own arm below: call signaling, the ADR-0042 /
+ * Six kinds, each its own arm below: call signaling, the ADR-0042 /
  * ADR-0044 push-routing secret, the ADR-0045 committer beacon, the
- * ADR-0048 profile and the ADR-0051 group name. Each arm is a cheap byte
- * peek gating an authoritative codec.
+ * ADR-0048 profile, the ADR-0048 profile request and the ADR-0051 group
+ * name. Each arm is a cheap byte peek gating an authoritative codec.
  *
  * Classification ONLY — no writes, no cursor advance (C-59 / ADR-0041).
  *
@@ -680,7 +692,59 @@ function isServiceEnvelope(wasm, bytes) {
   if (isProfileEnvelope(wasm, bytes)) return true;
   // 5. Group name (ADR-0051).
   if (isGroupNameEnvelope(wasm, bytes)) return true;
+  // 6. Profile request (ADR-0048 §2 trigger 4).
+  if (isProfileRequestEnvelope(wasm, bytes)) return true;
   return false;
+}
+
+/**
+ * First byte of the ADR-0048 profile-request domain separator (`'l'` of
+ * `"lakko/profile-request/v1\0"`). Its own constant, like the ones above.
+ */
+const PROFILE_REQUEST_FIRST_BYTE = 0x6c;
+
+/**
+ * Arm 6 of {@link isServiceEnvelope} — the ADR-0048 profile request, the
+ * newcomer's "introduce yourselves".
+ *
+ * Field-less like the beacon, so the same shape: every request on the wire
+ * is the same 26 bytes, the length + first-byte peek is a complete test, and
+ * the codec behind it is confirmation that also makes the arm fail-closed on
+ * an unknown version (a v2 this build does not know falls through and
+ * renders — one ugly notification beats a swallowed message).
+ *
+ * The length is READ from `profileRequestEnvelopeLen()`, never written down
+ * here (the ADR-0044 drift class). Without it there is no safe suppress —
+ * the peek alone is a single byte a real "let's meet at six" would clear —
+ * so the arm is off rather than guessing.
+ *
+ * Classification ONLY — no writes, no cursor advance, and no ANSWER: the
+ * answer is the device's profile envelope, an MLS application message this
+ * path structurally cannot send (C-59). The foreground answers when it next
+ * reads the row.
+ *
+ * @param {DecryptWasm} wasm
+ * @param {Uint8Array} bytes
+ * @returns {boolean}
+ */
+function isProfileRequestEnvelope(wasm, bytes) {
+  if (bytes.length === 0 || bytes[0] !== PROFILE_REQUEST_FIRST_BYTE) return false;
+  if (typeof wasm.profileRequestEnvelopeLen !== "function") return false;
+  let expected;
+  try {
+    expected = wasm.profileRequestEnvelopeLen();
+  } catch {
+    return false;
+  }
+  if (typeof expected !== "number" || bytes.length !== expected) return false;
+  if (typeof wasm.decodeProfileRequest !== "function") return false;
+  try {
+    // Returns nothing on success — field-less, so no handle to free.
+    wasm.decodeProfileRequest(bytes);
+  } catch {
+    return false;
+  }
+  return true;
 }
 
 /**

@@ -497,6 +497,11 @@ class MultiJoinerCall private constructor(
             // where the chat receive loop checks the sender's role. A relay
             // payload binds the name to nobody, so it is dropped, never stored.
             FfiIncomingEnvelopeKind.GROUP_NAME -> Unit
+            // ADR-0048 trigger 4 — a profile REQUEST likewise rides the GROUP
+            // JOURNAL, where the chat receive loop answers it with a profile
+            // sealed into the group. A relay payload names no member to answer
+            // and a call peer is not a group; dropped, never answered.
+            FfiIncomingEnvelopeKind.PROFILE_REQUEST -> Unit
         }
     }
 

@@ -66,6 +66,13 @@ const profile: IncomingChatEvent = {
   senderKey: "k" as never,
   createdAt: T,
 };
+const profileRequest: IncomingChatEvent = {
+  kind: "profileRequest",
+  messageId: 12,
+  senderLeaf: 1,
+  senderKey: "k" as never,
+  createdAt: T,
+};
 const groupName: IncomingChatEvent = {
   kind: "group-name",
   messageId: 10,
@@ -89,6 +96,7 @@ describe("planBackgroundEvents", () => {
     profile,
     groupName,
     receipt,
+    profileRequest,
   ]);
 
   it("files chat and system rows into the timeline, in journal order", () => {
@@ -117,6 +125,12 @@ describe("planBackgroundEvents", () => {
     for (const kind of ["committerBeacon", "pushRoutingSecret", "profile"]) {
       expect(plan.toView.some((e) => e.kind === kind)).toBe(false);
     }
+  });
+
+  it("settles a profile request where it is received, never in the view or the timeline (ADR-0048)", () => {
+    expect(plan.profileRequests.map((e) => e.messageId)).toEqual([12]);
+    expect(plan.toView.some((e) => e.kind === "profileRequest")).toBe(false);
+    expect(plan.timeline.some((e) => (e.messageId as number) === 12)).toBe(false);
   });
 
   it("settles a group name where it is received, never in the view (ADR-0051)", () => {

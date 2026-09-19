@@ -331,6 +331,48 @@ public final class ChatRepository: ObservableObject {
         )
     )
 
+    /// ADR-0048 §2 trigger 4 — the per-account, per-group "last asked" stamp
+    /// behind ``profileRequester``. Non-secret, app-private.
+    private let profileRequestStore = ProfileRequestStore()
+
+    /// ADR-0048 §2 trigger 4 — asks a group to introduce itself, right after a
+    /// join and on opening a chat that still shows a placeholder for someone,
+    /// through the same locked application send path the profile itself takes.
+    /// The decision is the core's `shouldRequestProfiles`; this only supplies
+    /// its inputs (the unnamed count off the live roster + the persisted stamp).
+    private lazy var profileRequester = ProfileRequester(
+        ports: ProfileRequester.Ports(
+            send: { [weak self] groupIdHex in
+                guard let self else { return }
+                try await self.publishApplicationMessage(
+                    groupIdHex: groupIdHex, plaintextBytes: composeProfileRequest())
+            },
+            unnamedMembers: { [weak self] groupIdHex in
+                self?.unnamedMemberCount(groupIdHex: groupIdHex)
+            },
+            canSend: { [weak self] groupIdHex in
+                guard let self, self.groups[groupIdHex] != nil else { return false }
+                return !membershipEnded(self.membershipStateNow(groupIdHex: groupIdHex))
+            },
+            lastRequestedAtMs: { [weak self] groupIdHex in
+                guard let self, let accountIdB64 = self.currentAccountIdB64 else { return nil }
+                return self.profileRequestStore.lastRequestedAtMs(
+                    accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+            },
+            recordRequestedAt: { [weak self] groupIdHex, atMs in
+                guard let self, let accountIdB64 = self.currentAccountIdB64 else { return }
+                self.profileRequestStore.record(
+                    accountIdB64: accountIdB64, groupIdHex: groupIdHex, atMs: atMs)
+            },
+            nowMs: { UInt64(max(0, Self.nowMs())) },
+            rule: { joinedJustNow, unnamed, last, now in
+                shouldRequestProfiles(
+                    joinedJustNow: joinedJustNow, unnamedMembers: unnamed,
+                    lastRequestedAtMs: last, nowMs: now)
+            }
+        )
+    )
+
     public init(
         chatClient: ChatClient = ChatClient(),
         dsClient: DsClient = DsClient(),
@@ -535,6 +577,8 @@ public final class ChatRepository: ObservableObject {
             snapshotLeafKeyStore.clear(accountIdB64: accountIdB64)
             knownGroupsStore.clear(accountIdB64: accountIdB64)
             conversationKindStore.clear(accountIdB64: accountIdB64)
+            // ADR-0048 — when this device last asked each group for names.
+            profileRequestStore.clear(accountIdB64: accountIdB64)
             // ADR-0024 — who read what, in which group.
             readWatermarkStore.clear(accountIdB64: accountIdB64)
             // Which calls were running in which chat.
@@ -758,6 +802,8 @@ public final class ChatRepository: ObservableObject {
         // ADR-0048 §2 — a chat this device just founded has never heard its
         // name; the recipient joins at the epoch this is sealed under.
         publishOwnProfileSoon(groupIdHex: groupIdHex)
+        // ADR-0048 §2 trigger 4 — and this device has never heard theirs.
+        requestProfilesAfterJoin(groupIdHex: groupIdHex)
         return groupIdHex
     }
 
@@ -805,6 +851,10 @@ public final class ChatRepository: ObservableObject {
         subscribeGroupUnderPushGid(groupIdHex: groupIdHex)
         // ADR-0048 §2 — joining: tell the group who this is.
         publishOwnProfileSoon(groupIdHex: groupIdHex)
+        // ADR-0048 §2 trigger 4 — and ask who everyone else is: every profile
+        // already in the journal was sealed in an epoch this device cannot
+        // open, and only a member whose device notices the growth re-sends.
+        requestProfilesAfterJoin(groupIdHex: groupIdHex)
         return groupIdHex
     }
 
@@ -815,6 +865,51 @@ public final class ChatRepository: ObservableObject {
         Task { @MainActor [weak self] in
             await self?.profilePublisher.publishNow(groupIdHex: groupIdHex)
         }
+    }
+
+    /// ADR-0048 §2 trigger 4 — ask `groupIdHex` to introduce itself right
+    /// after joining it. Fire-and-forget like the profile publish beside it,
+    /// and sequenced after it on the same per-group send chain, so the group
+    /// reads "here is who I am" before "who are you".
+    private func requestProfilesAfterJoin(groupIdHex: String) {
+        Task { @MainActor [weak self] in
+            await self?.profileRequester.noteJoined(groupIdHex: groupIdHex)
+        }
+    }
+
+    /// ADR-0048 §2 trigger 4 — the chat for `groupIdHex` was opened: ask the
+    /// group to introduce itself if someone in it still has no name here and
+    /// this device has not asked within the core's interval. The view model
+    /// calls this from the screen's appear path; the rule decides, so calling
+    /// it on every appear costs nothing when nothing is due.
+    public func requestProfilesOnOpen(groupIdHex: String) async {
+        await profileRequester.noteOpened(groupIdHex: groupIdHex)
+    }
+
+    /// ADR-0048 §2 trigger 4 — answer another member's request by
+    /// republishing this device's own profile through the growth path: same
+    /// throttle, same jitter, so N members answering one request do not land
+    /// N envelopes in the same second. A device with no own profile publishes
+    /// nothing, exactly as it does on growth.
+    private func answerProfileRequest(groupIdHex: String) {
+        profilePublisher.noteGrowth(groupIdHex: groupIdHex)
+    }
+
+    /// ADR-0048 §2 trigger 4 — how many PEOPLE in `groupIdHex`, this account
+    /// excluded, still resolve to the neutral placeholder on this device; `nil`
+    /// when there is no handle or the roster cannot be read. Counted per
+    /// person (ADR-0050 collapses a person's device leaves), against the one
+    /// resolver every surface names people through, so "unnamed" here is
+    /// exactly what the user sees as `Member`.
+    func unnamedMemberCount(groupIdHex: String) -> Int? {
+        guard let record = groups[groupIdHex],
+              let people = members(groupIdHex: groupIdHex)
+        else { return nil }
+        let own = AuthorIdentity.own(group: record.group)
+        return people.filter { person in
+            base64Encode(person.signaturePublicKey) != own
+                && ProfileDirectory.shared.resolve(signatureKey: person.signaturePublicKey).isPlaceholder
+        }.count
     }
 
     // MARK: - Calls
@@ -3305,6 +3400,11 @@ public final class ChatRepository: ObservableObject {
                 self?.receiveGroupName(
                     groupIdHex: groupIdHex, name: name, updatedAtMs: updatedAtMs,
                     senderLeaf: senderLeaf)
+            },
+            // ADR-0048 §2 trigger 4 — only SCHEDULES a throttled republish, so
+            // the lock held here is never awaited against itself.
+            profileRequestSink: { [weak self] in
+                self?.answerProfileRequest(groupIdHex: groupIdHex)
             }
         )
         // THE ORDERING RULE — persist first, advance the cursor second, and hold
@@ -4321,6 +4421,9 @@ public final class ChatRepository: ObservableObject {
                             self?.receiveGroupName(
                                 groupIdHex: groupIdHex, name: name, updatedAtMs: updatedAtMs,
                                 senderLeaf: senderLeaf)
+                        },
+                        profileRequestSink: { [weak self] in
+                            self?.answerProfileRequest(groupIdHex: groupIdHex)
                         }
                     )
                     // Per row, and deliberately not deferred to the end of the
@@ -5622,7 +5725,8 @@ private final class GroupRecord {
         committerBeaconSink: ((UInt32?, String) -> Void)? = nil,
         membershipProposalSink: ((ProposalRecord, String) -> Void)? = nil,
         profileSink: ((ProfileClaim, MemberIdentity?) -> Void)? = nil,
-        groupNameSink: ((String, UInt64, UInt32?) -> Void)? = nil
+        groupNameSink: ((String, UInt64, UInt32?) -> Void)? = nil,
+        profileRequestSink: (() -> Void)? = nil
     ) {
         for event in events {
             switch event {
@@ -5756,6 +5860,16 @@ private final class GroupRecord {
                 // owner / admins can set it; the stamp so the strictly-newer
                 // order can refuse a stale re-send.
                 groupNameSink?(name, updatedAtMs, senderLeaf)
+            case .profileRequest(_, let senderKey, _):
+                // ADR-0048 §2 trigger 4 — someone asked the group to introduce
+                // itself. Not a timeline row: routed out so the repository can
+                // republish this device's own profile through the growth path.
+                // This account's own echo (another of our devices asking) is
+                // not a question for us, the same exclusion the read watermark
+                // applies; and a request with no resolvable sender is dropped,
+                // never answered — the fail-closed side, as for the beacon.
+                guard let senderKey, senderKey != ownAuthorKey else { continue }
+                profileRequestSink?()
             }
         }
     }

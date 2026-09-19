@@ -606,6 +606,22 @@ public final class ChatClient {
                     createdAt: createdAt
                 )
             }
+            // ADR-0048 §2 trigger 4 — sniff for a profile REQUEST ("introduce
+            // yourselves") before the chat parser, for the same reason as the
+            // beacon arm: the lossy-UTF-8 fallback would otherwise render it as
+            // a bubble reading `lakko/profile-request/v1` plus a control byte.
+            // Field-less like the beacon, so the exact-length peek is a
+            // complete test and the FFI decode behind it is the version gate.
+            // Placed after the identity resolution so the receive side can
+            // tell another person's request from this account's own echo
+            // (another of our devices asking) without a second roster read.
+            if Self.looksLikeProfileRequest(data) {
+                return .profileRequest(
+                    messageId: messageId,
+                    senderKey: senderKey,
+                    createdAt: createdAt
+                )
+            }
             // ADR-0023: feed the application bytes through the
             // structured ``parseBodyEnvelope(bytes:)`` surface,
             // which branches a plain chat message from an
@@ -867,6 +883,34 @@ public final class ChatClient {
         guard (try? decodeCommitterBeacon(plaintext: bytes)) != nil else { return false }
         return true
     }
+
+    /// First byte of the ADR-0048 profile-request domain separator (`'l'` of
+    /// `"lakko/profile-request/v1"` + a trailing NUL). Decides nothing on its
+    /// own — the same `'l'` every `lakko/…` domain starts with.
+    private static let profileRequestFirstByte: UInt8 = 0x6C
+
+    /// The request's exact wire length, read from the FFI
+    /// (`profileRequestEnvelopeLen()`) rather than written as a local `26`,
+    /// for the reason the beacon length is: a stale literal fails in the
+    /// dangerous direction, silently letting the request through to the chat
+    /// parser as a bubble.
+    private static let profileRequestLen = Int(profileRequestEnvelopeLen())
+
+    /// ADR-0048 §2 trigger 4 — is this application plaintext a profile request?
+    ///
+    /// The same shape as ``looksLikeCommitterBeacon(_:)``: the request carries
+    /// no fields, so the exact length plus the domain prefix pin all but the
+    /// version byte, and the FFI decode behind the peek is what keeps the arm
+    /// fail-closed on an unknown schema version — a v2 request this build
+    /// cannot read falls through to the chat parser like any other
+    /// unrecognised plaintext rather than being swallowed here.
+    static func looksLikeProfileRequest(_ bytes: Data) -> Bool {
+        guard bytes.count == profileRequestLen,
+              bytes.first == profileRequestFirstByte
+        else { return false }
+        guard (try? decodeProfileRequest(plaintext: bytes)) != nil else { return false }
+        return true
+    }
 }
 
 // MARK: - Result types
@@ -997,6 +1041,22 @@ public enum IncomingChatEvent: Equatable {
         name: String,
         updatedAtMs: UInt64,
         senderLeaf: UInt32?,
+        createdAt: String
+    )
+    /// ADR-0048 §2 trigger 4 — a member asked the group to introduce itself
+    /// (a newcomer's pull for the names it could not read from earlier
+    /// epochs). Never a timeline bubble: the receive loop answers by
+    /// republishing this device's own profile through the throttled, jittered
+    /// growth path, or stays silent when it holds no profile.
+    ///
+    /// The envelope carries NO fields (26 bytes, identical for every sender),
+    /// for the reasons the beacon gives. `senderKey` is the asker's account
+    /// key resolved from the MLS-authenticated leaf at receipt (C-68): the
+    /// receive side uses it only to tell another person's request from this
+    /// account's own echo, and answers no request it cannot attribute.
+    case profileRequest(
+        messageId: Int64,
+        senderKey: MemberIdentity?,
         createdAt: String
     )
     /// ADR-0042 — an in-group push-routing-secret distribution envelope

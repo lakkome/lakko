@@ -943,6 +943,7 @@ mod tests {
             crate::push_routing::PUSH_GID_DERIVE_DOMAIN_V1,
             crate::committer_beacon::COMMITTER_BEACON_ENVELOPE_DOMAIN_V1,
             crate::group_name::GROUP_NAME_ENVELOPE_DOMAIN_V1,
+            crate::profile_request::PROFILE_REQUEST_ENVELOPE_DOMAIN_V1,
             crate::invite::REVOKE_DOMAIN_V1,
             crate::invite::OWNER_LIST_DOMAIN_V1,
             crate::invite::JOINER_TAG_SALT_DOMAIN_V1,

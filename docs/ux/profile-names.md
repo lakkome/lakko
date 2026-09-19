@@ -77,7 +77,7 @@ Persian/Indic joiners are allowed. Empty after trimming = no name.
 
 | State | UI |
 |---|---|
-| Profile not yet received | Fallback per §3 (username if verified, else fingerprint). Updates in place when it arrives |
+| Profile not yet received | Fallback per §3 (username if verified, else fingerprint). Updates in place when it arrives. The device does not only wait: it asks the group to introduce itself right after joining, and again when it opens a group where someone is still unnamed (at most once a day per group), so a name arrives as soon as its owner's device next reads the group |
 | Username being verified | Show the name without the username; add `· @alice` when verification completes |
 | Username verification failed or mismatched | Username never shown for this person; a quiet "Username not verified" line in the contact detail only |
 | Name changed by the other person | Updates everywhere on next receipt; no notification, no history |

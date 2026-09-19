@@ -942,6 +942,11 @@ public class ChatRepository(
         // ADR-0048 §2 — publish this device's profile into the group it just
         // joined: nobody there knows its name yet.
         profileRepublish.publishNow(groupIdHex)
+        // ADR-0048 trigger 4 — and ask the group for everyone else's: the
+        // growth re-sends fire on the OTHER devices, and one that is away when
+        // this join lands never re-sends. Launched, never awaited: the publish
+        // takes the per-group lock itself.
+        profileRequestScope.launch { requestProfilesBestEffort(groupIdHex, joinedJustNow = true) }
         return groupIdHex
     }
 
@@ -3401,6 +3406,125 @@ public class ChatRepository(
         profileRepublish.publishNowToAll(targets)
     }
 
+    // -----------------------------------------------------------------
+    // ADR-0048 trigger 4 — the "introduce yourselves" request
+    // -----------------------------------------------------------------
+
+    /** When this device last asked each group; persisted, so a reinstall of
+     *  the app asks again and a restart does not. */
+    private val profileRequestStore: me.lakko.app.profile.ProfileRequestStore by lazy {
+        me.lakko.app.profile.ProfileRequestPrefsStore(applicationContext)
+    }
+
+    /** The decision, with the core's rule behind it (`shouldRequestProfiles`
+     *  over UniFFI, so the three clients agree on when to ask). */
+    private val profileRequestPolicy: me.lakko.app.profile.ProfileRequestPolicy by lazy {
+        me.lakko.app.profile.ProfileRequestPolicy(
+            store = profileRequestStore,
+            rule = { joinedJustNow, unnamed, last, now ->
+                uniffi.lakko_ffi_uniffi.shouldRequestProfiles(joinedJustNow, unnamed, last, now)
+            },
+        )
+    }
+
+    /** Process-lifetime scope for the request publish: it takes the per-group
+     *  lock through [broadcastControlToGroup], so it is always LAUNCHED, never
+     *  awaited under a lock, and it must not die with the screen that opened. */
+    private val profileRequestScope: CoroutineScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * ADR-0048 trigger 4 — a member asked this group to introduce itself:
+     * answer with this device's own profile through the growth path (throttled
+     * to one per group per 30 s, jittered), so N members answering one request
+     * do not land N envelopes in the same second. A device holding no profile
+     * publishes nothing, as it does on growth.
+     *
+     * Not answered: an unattributable request (no sender this device can name
+     * as a member) and one from this same PERSON on another device — that
+     * device already knows this account's name. Called from the poll's
+     * provider critical section (the own-identity read touches the `Group`);
+     * the answer itself is scheduled onto the republish scope.
+     */
+    private fun answerProfileRequestBestEffort(
+        group: Group,
+        groupIdHex: String,
+        senderKey: MemberIdentity?,
+    ) {
+        if (senderKey == null) return
+        val own = try {
+            ownIdentity(group)
+        } catch (_: Throwable) {
+            null
+        }
+        if (own != null && own == senderKey) return
+        profileRepublish.onGrowth(groupIdHex)
+    }
+
+    /**
+     * ADR-0048 trigger 4 — on opening [groupIdHex]: if some member still has no
+     * name on this device, ask the group once (at most once a day per group,
+     * the core's `shouldRequestProfiles`). Fire-and-forget; the request is an
+     * MLS application message over the audited locked send path. Heals a group
+     * joined before the request existed, and one whose growth re-sends never
+     * arrived.
+     */
+    public fun requestProfilesIfNeeded(groupIdHex: String) {
+        profileRequestScope.launch { requestProfilesBestEffort(groupIdHex, joinedJustNow = false) }
+    }
+
+    /**
+     * The one request routine. On a join it asks unconditionally (a new
+     * membership is a new audience); on an open it counts the members whose
+     * resolved name is the placeholder and lets the core's rule decide.
+     *
+     * The store is stamped only AFTER the publish went out (the way the
+     * republish scheduler records a publish only when it was sent), so a
+     * request that fails on a join is asked again on the next open rather than
+     * silenced for a day.
+     */
+    private suspend fun requestProfilesBestEffort(groupIdHex: String, joinedJustNow: Boolean) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val identity = canonicalIdentity.get() ?: return
+        val record = groups[groupIdHex] ?: return
+        // An evicted device cannot seal into the group and must not try.
+        if (readIsActive { record.group.isActive() } == false) return
+        val unnamed = if (joinedJustNow) {
+            0
+        } else {
+            // A torn roster read decides nothing: this device cannot tell who
+            // is unnamed, and a request on a guess is a journal row for nothing.
+            val rows = members(groupIdHex) ?: return
+            val ownLeaf = ownLeafIndex(groupIdHex)
+            val ownKey = rows.firstOrNull { it.leafIndex == ownLeaf }?.signaturePublicKey
+            me.lakko.app.profile.countUnnamedMembers(
+                memberKeys = rows.map { it.signaturePublicKey },
+                ownKey = ownKey,
+                isPlaceholder = { key -> profileDirectory.resolve(key).isPlaceholder },
+            )
+        }
+        val stamp = profileRequestPolicy.decide(
+            accountIdB64 = accountIdB64,
+            groupIdHex = groupIdHex,
+            joinedJustNow = joinedJustNow,
+            unnamedMembers = unnamed,
+        ) ?: return
+        try {
+            broadcastControlToGroup(
+                identity = identity,
+                groupIdHex = groupIdHex,
+                group = record.group,
+                envelope = uniffi.lakko_ffi_uniffi.composeProfileRequest(),
+            )
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            throw cancel
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0048 profile request not published", cause)
+            return
+        }
+        profileRequestPolicy.recordSent(accountIdB64, groupIdHex, stamp)
+    }
+
     /**
      * ADR-0048 §3 — a received profile, bound to the sender's signature key the
      * classifier resolved at receipt (C-68). Stored only when strictly newer;
@@ -4144,6 +4268,12 @@ public class ChatRepository(
                     // per group (C-62 sub-invariant 5).
                     receiveGroupName(record.group, groupIdHex, senderKey, name)
                 },
+                profileRequestSink = { senderKey ->
+                    // ADR-0048 trigger 4 — inside the poll's provider critical
+                    // section, where the own-identity read is safe; the answer
+                    // itself is scheduled, never sent from here.
+                    answerProfileRequestBestEffort(record.group, groupIdHex, senderKey)
+                },
                 membershipProposalSink = { proposal, createdAt ->
                     // ADR-0045 UX §4 / §10 — stamp a PEER's request with the DS
                     // row's own timestamp. Without this the observation store
@@ -4766,6 +4896,9 @@ public class ChatRepository(
             // ADR-0051 — the shared group names held for this account go too.
             if (accountIdB64 != null) {
                 GroupNameStore.deleteAccount(applicationContext, accountIdB64)
+                // ADR-0048 trigger 4 — and when this device last asked each
+                // group for names: a fresh install asks again.
+                profileRequestStore.deleteAccount(accountIdB64)
                 // ADR-0024 — and the persisted read watermarks.
                 readWatermarkStore.deleteAccount(accountIdB64)
                 // And the persisted group-call records.
@@ -6069,6 +6202,9 @@ public class ChatRepository(
                                     createdAt = createdAt,
                                 )
                             },
+                            profileRequestSink = { senderKey ->
+                                answerProfileRequestBestEffort(record.group, groupIdHex, senderKey)
+                            },
                         )
                         persistReadWatermarksIfReceipts(groupIdHex, record, listOf(sweptEvent))
                         // A swept chat message counts toward the chat list's
@@ -6873,6 +7009,7 @@ private class GroupRecord(
         membershipProposalSink: ((ProposalRecord, String) -> Unit)? = null,
         profileSink: ((MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiProfile) -> Unit)? = null,
         groupNameSink: ((MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiGroupName) -> Unit)? = null,
+        profileRequestSink: ((MemberIdentity?) -> Unit)? = null,
     ) {
         // ADR-0050 — a message this PERSON sent from another device arrives as an
         // incoming row (another leaf sealed it) but is ours: it renders on our
@@ -6954,6 +7091,15 @@ private class GroupRecord(
                     // writes the store only on accept.
                     val name = event.groupName
                     if (name != null) groupNameSink?.invoke(event.senderKey, name)
+                }
+                is IncomingChatEvent.ProfileRequest -> {
+                    // ADR-0048 trigger 4 — a member asking for everyone's
+                    // profile. Not a timeline row. A malformed request
+                    // (`wellFormed == false`) is consumed as a no-op — dropped,
+                    // never answered; the sink answers a well-formed one with
+                    // this device's own profile through the throttled growth
+                    // path, unless the asker is this same person.
+                    if (event.wellFormed) profileRequestSink?.invoke(event.senderKey)
                 }
                 is IncomingChatEvent.ExternalJoinRequest -> {
                     // ADR-0027 (G-3) — a non-member's external Add proposal,

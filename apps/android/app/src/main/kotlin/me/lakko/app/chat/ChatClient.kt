@@ -10,6 +10,7 @@ import me.lakko.app.ds.DsClientArgError
 import me.lakko.app.ds.DsHttpError
 import me.lakko.app.ds.DsNetworkError
 import me.lakko.app.ds.FetchResult
+import me.lakko.app.profile.looksLikeProfileRequestEnvelope
 import me.lakko.app.push.GroupPushRouting
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 import uniffi.lakko_ffi_uniffi.FfiException
@@ -596,6 +597,19 @@ private fun decodeGroupNameOrNull(bytes: ByteArray): FfiGroupName? =
         null
     }
 
+/** ADR-0048 trigger 4 — the authoritative, fail-closed profile-request decode,
+ *  reported as a boolean because the request carries nothing to hand back: a
+ *  clean return IS the verdict. A bad length or an unknown schema version
+ *  throws and yields `false`, and the request is then dropped — never
+ *  answered, never rendered (the peek already classified it). */
+private fun decodesAsProfileRequest(bytes: ByteArray): Boolean =
+    try {
+        uniffi.lakko_ffi_uniffi.decodeProfileRequest(bytes)
+        true
+    } catch (_: Throwable) {
+        false
+    }
+
 /**
  * Classify one decrypted DS row into an [IncomingChatEvent].
  *
@@ -642,6 +656,7 @@ internal fun toEvent(
     parseBody: (ByteArray) -> ParsedBody = ::parseBodyEnvelope,
     decodeProfile: (ByteArray) -> FfiProfile? = ::decodeProfileOrNull,
     decodeGroupName: (ByteArray) -> FfiGroupName? = ::decodeGroupNameOrNull,
+    isProfileRequest: (ByteArray) -> Boolean = ::decodesAsProfileRequest,
 ): IncomingChatEvent =
     when (processed) {
         is ProcessedMessage.Application -> {
@@ -769,6 +784,23 @@ internal fun toEvent(
                 IncomingChatEvent.GroupName(
                     messageId = messageId,
                     groupName = decodeGroupName(processed.data),
+                    senderKey = processed.senderLeaf?.let(resolveSender),
+                    createdAt = createdAt,
+                )
+            } else if (looksLikeProfileRequestEnvelope(processed.data)) {
+                // ADR-0048 trigger 4 — a member asking the group to introduce
+                // itself. Never a timeline bubble. The request carries no
+                // fields, so the only thing about it worth knowing is WHO
+                // asked, resolved to the account key here, at the epoch the
+                // row decrypted at (C-68): the repository answers with this
+                // device's own profile through the growth path unless the
+                // asker is this same person on another device. A malformed
+                // request arrives as `wellFormed = false` and is consumed as a
+                // no-op — dropped, never answered, never handed to the chat
+                // parser whose lossy-UTF-8 fallback would render it.
+                IncomingChatEvent.ProfileRequest(
+                    messageId = messageId,
+                    wellFormed = isProfileRequest(processed.data),
                     senderKey = processed.senderLeaf?.let(resolveSender),
                     createdAt = createdAt,
                 )
@@ -1276,6 +1308,27 @@ public sealed interface IncomingChatEvent {
     public data class GroupName(
         val messageId: Long,
         val groupName: FfiGroupName?,
+        val senderKey: MemberIdentity?,
+        val createdAt: String,
+    ) : IncomingChatEvent
+
+    /** ADR-0048 trigger 4 — a member's "introduce yourselves" request. Never a
+     *  timeline bubble. Consumes a DS [messageId] like any other application
+     *  row so the poll cursor advances past it.
+     *
+     *  [wellFormed] is `false` when the plaintext opened with the request
+     *  domain but the core refused the payload (a bad length, an unknown
+     *  version); such a request is consumed as a no-op — dropped, never
+     *  answered.
+     *
+     *  [senderKey] is the asker's account key resolved from the MLS sender leaf
+     *  at receipt (C-68), `null` when unresolvable — an unattributable request
+     *  is not answered, since the answer would go to nobody this device can
+     *  name as a member. It is also what stops this person answering their own
+     *  request from another device. */
+    public data class ProfileRequest(
+        val messageId: Long,
+        val wellFormed: Boolean,
         val senderKey: MemberIdentity?,
         val createdAt: String,
     ) : IncomingChatEvent

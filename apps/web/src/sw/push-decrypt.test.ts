@@ -111,6 +111,29 @@ function committerBeacon(version = 0x01): Uint8Array {
   return out;
 }
 
+/** `lakko_contacts::profile_request::PROFILE_REQUEST_ENVELOPE_DOMAIN_V1`
+ *  — `b"lakko/profile-request/v1\x00"`, 25 bytes; NUL appended
+ *  programmatically, as above. */
+const PROFILE_REQUEST_DOMAIN = (() => {
+  const ascii = new TextEncoder().encode("lakko/profile-request/v1");
+  const out = new Uint8Array(ascii.length + 1);
+  out.set(ascii, 0);
+  out[ascii.length] = 0x00;
+  return out;
+})();
+
+/** The FFI-reported envelope length: domain(25) || version(1) = 26. */
+const PROFILE_REQUEST_LEN = PROFILE_REQUEST_DOMAIN.length + 1;
+
+/** ADR-0048 profile request: domain(25) || version(1)=0x01 = 26 bytes.
+ *  Field-less like the beacon; first byte is `l`. */
+function profileRequest(version = 0x01): Uint8Array {
+  const out = new Uint8Array(PROFILE_REQUEST_LEN);
+  out.set(PROFILE_REQUEST_DOMAIN, 0);
+  out[PROFILE_REQUEST_DOMAIN.length] = version;
+  return out;
+}
+
 /**
  * Mock wasm core. `processIncomingVerifyingRoles` throws when the
  * payload marker is "THROW", else surfaces it as an Application frame
@@ -185,6 +208,14 @@ function mockWasm() {
       }
       if (bytes[COMMITTER_BEACON_DOMAIN.length] !== 0x01) throw new Error("UnknownVersion");
       // Field-less: a clean return IS the whole result.
+    },
+    profileRequestEnvelopeLen: () => PROFILE_REQUEST_LEN,
+    decodeProfileRequest: (bytes: Uint8Array) => {
+      if (bytes.length !== PROFILE_REQUEST_LEN) throw new Error("BadLength");
+      for (let i = 0; i < PROFILE_REQUEST_DOMAIN.length; i++) {
+        if (bytes[i] !== PROFILE_REQUEST_DOMAIN[i]) throw new Error("WrongDomain");
+      }
+      if (bytes[PROFILE_REQUEST_DOMAIN.length] !== 0x01) throw new Error("UnknownVersion");
     },
   };
 }
@@ -490,6 +521,85 @@ describe("decryptPushPreview — service envelopes are never previewed", () => {
       dsFetchGroup: vi.fn(async () => ({
         messages: [rawMsg(42, routingSecretEnvelope())],
       })),
+    });
+    await decryptPushPreview(wake(), deps);
+    expect(saveSnapshot).not.toHaveBeenCalled();
+    expect(saveMessageLog).not.toHaveBeenCalled();
+    expect(advanceCursor).not.toHaveBeenCalled();
+  });
+});
+
+describe("decryptPushPreview — the ADR-0048 profile request is never previewed", () => {
+  // A newcomer asks the group to introduce itself right after joining and
+  // on opening a chat with unnamed members, so the newest row of a group
+  // somebody just joined is often a request. Unfiltered, the lossy-UTF-8
+  // fallback renders it as "lakko/profile-request/v1" plus a control byte.
+
+  it("the unfiltered request really would render as garbage text", () => {
+    const wasm = mockWasm();
+    const parsed = wasm.parseBodyEnvelope(profileRequest()) as { kind: string; text: string };
+    expect(parsed.kind).toBe("chat");
+    expect(parsed.text).toContain("lakko/profile-request/v1");
+  });
+
+  it("returns null for a lone profile request", async () => {
+    const { deps } = baseDeps({
+      dsFetchGroup: vi.fn(async () => ({ messages: [rawMsg(42, profileRequest())] })),
+    });
+    expect(await decryptPushPreview(wake(), deps)).toBeNull();
+  });
+
+  it("falls back to the older chat message when a request is NEWEST", async () => {
+    const { deps } = baseDeps({
+      dsFetchGroup: vi.fn(async () => ({
+        messages: [
+          msg(41, { kind: "chat", text: "real message", attachmentCount: 0 }),
+          rawMsg(42, profileRequest()),
+        ],
+      })),
+    });
+    const out = await decryptPushPreview(wake({ pointer: 42 }), deps);
+    expect(out?.body).toBe("real message");
+  });
+
+  it("still previews a 26-byte `l`-prefixed body the codec REFUSES", async () => {
+    // The peek matches but the codec rejects (unknown version): a genuine
+    // message, or a future request version this build does not know.
+    const notARequest = profileRequest(0xff);
+    const { deps } = baseDeps({
+      dsFetchGroup: vi.fn(async () => ({ messages: [rawMsg(42, notARequest)] })),
+    });
+    const out = await decryptPushPreview(wake(), deps);
+    expect(out?.body).toContain("lakko/profile-request");
+  });
+
+  it("takes the envelope length from the FFI, not a hardcoded 26", async () => {
+    const wasm = mockWasm();
+    wasm.profileRequestEnvelopeLen = () => 99;
+    const { deps } = baseDeps({
+      wasm,
+      dsFetchGroup: vi.fn(async () => ({ messages: [rawMsg(42, profileRequest())] })),
+    });
+    const out = await decryptPushPreview(wake(), deps);
+    expect(out?.body).toContain("lakko/profile-request");
+  });
+
+  it("without the FFI length the arm is off rather than guessing", async () => {
+    // A single-byte peek would swallow any 26-byte message starting with
+    // `l`; the arm refuses to run on that alone.
+    const { profileRequestEnvelopeLen: omitted, ...wasm } = mockWasm();
+    void omitted;
+    const { deps } = baseDeps({
+      wasm,
+      dsFetchGroup: vi.fn(async () => ({ messages: [rawMsg(42, profileRequest())] })),
+    });
+    const out = await decryptPushPreview(wake(), deps);
+    expect(out?.body).toContain("lakko/profile-request");
+  });
+
+  it("classifies a request without ever persisting (C-59)", async () => {
+    const { deps, saveSnapshot, saveMessageLog, advanceCursor } = baseDeps({
+      dsFetchGroup: vi.fn(async () => ({ messages: [rawMsg(42, profileRequest())] })),
     });
     await decryptPushPreview(wake(), deps);
     expect(saveSnapshot).not.toHaveBeenCalled();

@@ -226,7 +226,8 @@ private class RealThrowawayGroup(
         // the THROWAWAY provider only) but has no body to show.
         val app = processed as? ProcessedMessage.Application ?: return null
         // A SERVICE envelope (ADR-0042/0044 push-routing-secret, an
-        // ADR-0045 committer beacon, a profile, a group name) is
+        // ADR-0045 committer beacon, a profile, a group name, a profile
+        // request) is
         // machine-to-machine traffic with no user-visible body. It MUST
         // be rejected before `parseBodyEnvelope`, whose deliberate
         // legacy fallback would otherwise degrade the raw bytes to

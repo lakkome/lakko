@@ -224,6 +224,11 @@ public class ChatViewModel(
         // `push_gid`; member with a secret -> subscribe; else defer.
         // Idempotent + race-safe; fire-and-forget inside the repository.
         repo.ensurePushRouting(groupIdHex)
+        // ADR-0048 trigger 4 — chat-open profile request: if some member still
+        // reads `Member` on this device, ask the group to introduce itself (at
+        // most once a day per group; the core's rule decides). Fire-and-forget
+        // inside the repository, like the provisioning above.
+        repo.requestProfilesIfNeeded(groupIdHex)
         // Manually combine two StateFlows — kotlinx-coroutines
         // has no synchronous `combine` for two StateFlows;
         // two parallel collectors keep the derived flow hot

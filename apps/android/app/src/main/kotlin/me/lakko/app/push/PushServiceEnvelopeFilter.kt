@@ -6,6 +6,7 @@ package me.lakko.app.push
 import me.lakko.app.chat.looksLikeCallSignaling
 import me.lakko.app.chat.looksLikeGroupNameEnvelope
 import me.lakko.app.chat.looksLikeProfileEnvelope
+import me.lakko.app.profile.looksLikeProfileRequestEnvelope
 
 /**
  * SERVICE-ENVELOPE classifier for the background push-preview path.
@@ -216,6 +217,14 @@ private fun isServiceEnvelopeOtherThanCall(
     // `lakko/group-name/v1`. Suppressed only — storing a name is a WRITE and
     // this path is read-only (C-59).
     if (looksLikeGroupNameEnvelope(payload)) return true
+
+    // Kind 6 — ADR-0048 trigger 4, the "introduce yourselves" request. The
+    // same NUL-terminated-prefix shape again, and the same foreground peek.
+    // Suppressed only: ANSWERING is a publish (an MLS application message,
+    // a ratchet advance), which this read-only path must never do (C-59) —
+    // the foreground answers when it next reads the journal, which is when
+    // the asker's request is actually read.
+    if (looksLikeProfileRequestEnvelope(payload)) return true
 
     return false
 }

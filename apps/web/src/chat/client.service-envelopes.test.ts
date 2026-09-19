@@ -227,6 +227,94 @@ describe("ADR-0045 — the committer beacon is filtered in the foreground loop",
   });
 });
 
+describe("ADR-0048 — the profile request is filtered in the foreground loop", () => {
+  // The newcomer's "introduce yourselves": field-less like the beacon, 26
+  // bytes, byte-identical on every call. Same failure mode without its arm —
+  // a bubble reading the domain string.
+
+  it("a profile request is classified as a request, never a chat event", async () => {
+    const [ev] = await classify(wasm.composeProfileRequest());
+
+    expect(ev?.kind).toBe("profileRequest");
+    expect(ev?.kind).not.toBe("application");
+  });
+
+  it("a request never reaches the timeline as text", async () => {
+    const [ev] = await classify(wasm.composeProfileRequest());
+
+    const asText = (ev as { text?: string } | undefined)?.text ?? "";
+    expect(asText).not.toContain("profile-request");
+  });
+
+  it("carries the sender leaf, the resolved sender key and the DS timestamp", async () => {
+    // The self-check ("is this our own echo?") and the answer both key on the
+    // sender resolved AT RECEIPT (C-68), never on the leaf.
+    const chat = new ChatClient(
+      dsWith(wasm.composeProfileRequest()),
+      { identityProvider: () => IDENTITY_TOKEN },
+      mockPush(),
+    );
+    const res = await chat.pollMessages(null, passthroughGroup(freshGid(), 7), 0);
+    const ev = res.events[0];
+
+    expect(ev?.kind).toBe("profileRequest");
+    if (ev?.kind !== "profileRequest") throw new Error("unreachable");
+    expect(ev.senderLeaf).toBe(7);
+    expect(ev.createdAt).toBe("2026-08-24T00:00:00Z");
+  });
+
+  it("request bytes would render as a chat bubble without the arm", () => {
+    const parsed = wasm.parseBodyEnvelope(wasm.composeProfileRequest());
+
+    expect(parsed.kind).toBe("chat");
+    expect(parsed.text).toContain("lakko/profile-request/v1");
+  });
+
+  it("an unknown request version is NOT swallowed by the arm", async () => {
+    const notARequest = wasm.composeProfileRequest();
+    notARequest[notARequest.length - 1] = 0xff;
+
+    const [ev] = await classify(notARequest);
+
+    expect(ev?.kind).not.toBe("profileRequest");
+    expect(ev?.kind).toBe("application");
+  });
+
+  it("the length the arm reads from the FFI matches the wire", () => {
+    expect(wasm.profileRequestEnvelopeLen()).toBe(wasm.composeProfileRequest().length);
+  });
+
+  it("a request and a beacon are told apart, both from a chat row", async () => {
+    // Two field-less `l`-prefixed envelopes of nearly the same length: the
+    // domain, not the shape, decides.
+    const events = await classify(
+      wasm.composeCommitterBeacon(),
+      wasm.composeProfileRequest(),
+      chatEnvelope("after"),
+    );
+
+    expect(events.map((e) => e.kind)).toEqual([
+      "committerBeacon",
+      "profileRequest",
+      "application",
+    ]);
+  });
+
+  it("the real `shouldRequestProfiles` agrees with the rule the pure tests transcribe", () => {
+    // `profile/profile-request.test.ts` drives `decideProfileRequest` with a
+    // transcription of the core rule; this pins the transcription against the
+    // real export on the same four cases.
+    const day = wasm.profileRequestMinIntervalMs();
+    const now = 1_700_000_000_000n;
+    expect(wasm.shouldRequestProfiles(true, 0, now, now)).toBe(true);
+    expect(wasm.shouldRequestProfiles(false, 0, undefined, now)).toBe(false);
+    expect(wasm.shouldRequestProfiles(false, 1, undefined, now)).toBe(true);
+    expect(wasm.shouldRequestProfiles(false, 1, now - 60_000n, now)).toBe(false);
+    expect(wasm.shouldRequestProfiles(false, 1, now - day, now)).toBe(true);
+    expect(day).toBe(24n * 60n * 60n * 1000n);
+  });
+});
+
 describe("the pre-existing service-envelope arms still work", () => {
   it("a real chat message is still a chat event", async () => {
     const [ev] = await classify(chatEnvelope("hello"));

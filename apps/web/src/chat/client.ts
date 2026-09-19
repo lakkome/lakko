@@ -97,6 +97,7 @@ import {
   markOwnPublished,
 } from "./own-published";
 import { sniffProfile, type ReceivedProfile } from "../profile/profile-envelope";
+import { sniffProfileRequest } from "../profile/profile-request";
 import { sniffGroupName } from "./group-name-envelope";
 import type { StoredGroupName } from "./group-name-store";
 import {
@@ -365,6 +366,25 @@ export type IncomingChatEvent =
       senderLeaf: number | undefined;
       /** The DS row's timestamp — the beacon's age, which is the half of
        *  the freshness question the bytes deliberately do not carry. */
+      createdAt: string;
+    }
+  | {
+      /** ADR-0048 §2 trigger 4 — a member asking the group to introduce
+       *  itself (`crates/lakko-contacts/src/profile_request.rs`). Never a
+       *  timeline bubble: every OTHER member answers by scheduling its own
+       *  profile publish for this group through the throttled growth path.
+       *
+       *  Field-less like the beacon, and for the same reasons: the asker is
+       *  already MLS-authenticated through the sender leaf, and the answer
+       *  (the ordinary profile envelope) needs nothing from the request. */
+      kind: "profileRequest";
+      messageId: number;
+      /** Diagnostic only. */
+      senderLeaf: number | undefined;
+      /** The sender's person key resolved at receipt (C-68) — what the
+       *  self-check reads, so a device never answers its own echo.
+       *  `undefined` ⇒ unattributable, dropped. */
+      senderKey: MemberIdentity | undefined;
       createdAt: string;
     }
   | {
@@ -1134,7 +1154,8 @@ export function rosterOf(group: WasmGroup): RosterMember[] {
  * the same cursor over them — so it must produce timeline events for them, and
  * it must produce them through THIS function rather than a second dispatch of
  * its own. The ladder below routes call signaling, the ADR-0042/0044
- * push-routing secret, the ADR-0045 committer beacon, external-join proposals,
+ * push-routing secret, the ADR-0045 committer beacon, the ADR-0048 profile
+ * request and profile, the ADR-0051 group name, external-join proposals,
  * membership proposals and the ADR-0023/0024 chat / edit / delete / reaction /
  * typing / read-receipt bodies; two copies of that would be two things to keep
  * in step, and the one that fell behind would silently render a service
@@ -1232,6 +1253,20 @@ export async function toEvent(
         kind: "committerBeacon",
         messageId,
         senderLeaf,
+        createdAt,
+      };
+    }
+    // ADR-0048 §2 trigger 4 — a profile request, before the chat parser for
+    // the same reason as the beacon: it is field-less and the lossy-UTF-8
+    // fallback would render it as a bubble reading
+    // `lakko/profile-request/v1` plus a control byte. The sniff is backed
+    // by the fail-closed wasm codec (domain + exact length + version).
+    if (sniffProfileRequest(await loadWasm(), bytes)) {
+      return {
+        kind: "profileRequest",
+        messageId,
+        senderLeaf,
+        senderKey,
         createdAt,
       };
     }

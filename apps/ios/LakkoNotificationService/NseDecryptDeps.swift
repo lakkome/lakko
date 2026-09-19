@@ -202,8 +202,9 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         // SERVICE-ENVELOPE FILTER — the background half of the gate the
         // foreground `ChatClient.toEvent` has always run, in the same order.
         // Call-signaling proto bytes, ADR-0042/0044 push-routing-secret
-        // envelopes, ADR-0045 committer-liveness beacons and ADR-0048 profile
-        // envelopes all ride the SAME
+        // envelopes, ADR-0045 committer-liveness beacons, ADR-0048 profile
+        // envelopes and profile requests, and ADR-0051 group names all ride
+        // the SAME
         // group journal as chat; without this, `parseBodyEnvelope`'s deliberate
         // legacy UTF-8 fallback degrades them to a `.chat` body and the NSE
         // renders a notification full of a domain string plus raw binary.
@@ -217,7 +218,9 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
             decodesAsProfile: Self.decodesAsProfile,
             profileEnvelopeLens: Self.profileEnvelopeLengths,
             decodesAsGroupName: Self.decodesAsGroupName,
-            groupNameEnvelopeLens: Self.groupNameEnvelopeLengths
+            groupNameEnvelopeLens: Self.groupNameEnvelopeLengths,
+            decodesAsProfileRequest: Self.decodesAsProfileRequest,
+            profileRequestEnvelopeLen: Self.profileRequestEnvelopeLength
         ) {
             return nil
         }
@@ -339,6 +342,27 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         let minLen = Int(groupNameEnvelopeMinLen())
         let maxLen = Int(groupNameEnvelopeMaxLen())
         return minLen...max(minLen, maxLen)
+    }
+
+    /// The AUTHORITATIVE — and, as for the beacon, COMPLETE — half of the
+    /// ADR-0048 profile-request filter: the slim FFI's `decodeProfileRequest`,
+    /// which returns nothing on success because the request is field-less.
+    ///
+    /// READ-ONLY: a pure decode. The NSE never ANSWERS a request — the answer
+    /// is an MLS application message, a ratchet advance this process may not
+    /// make (C-59); the slim FFI does not even export `composeProfileRequest`.
+    /// The foreground app answers on its own receive path.
+    private static func decodesAsProfileRequest(_ bytes: Data) -> Bool {
+        (try? decodeProfileRequest(plaintext: bytes)) != nil
+    }
+
+    /// The exact composed length of an ADR-0048 profile request, read from the
+    /// slim FFI's `profileRequestEnvelopeLen()` so the cheap pre-filter carries
+    /// no hand-copied wire number; a Rust golden pins the exported value
+    /// against the composed wire, so a revision fails Rust CI rather than
+    /// silently narrowing this filter.
+    private static var profileRequestEnvelopeLength: Int {
+        Int(profileRequestEnvelopeLen())
     }
 
     /// LOAD-BEARING: this does NOT persist — no `snapshotStorage()` /

@@ -72,6 +72,21 @@ username_len(1) ‖ username`, bounded and fail-closed like its siblings:
   group, on changing its profile, and when the group gains a member** (a newcomer cannot read
   earlier epochs, so it would otherwise never learn existing names). The republish on growth
   is throttled and jittered per group so one add does not produce a synchronised burst.
+- **In-group, on request (added 2026-09-19):** the three triggers above are push-only, and the
+  one a newcomer depends on for everyone else's name fires on the *other* devices. A device
+  that is away when the join lands never re-sends, a closed web tab cannot, and a re-send that
+  did not arrive has no second chance; live, a web account that joined a five-person group last
+  showed `Member` for three of them. So a newcomer also **asks**: a field-less
+  `lakko/profile-request/v1` envelope (`lakko-contacts::profile_request`, 26 bytes, the
+  committer-beacon shape and for the same reasons — the asker is MLS-authenticated by its
+  sender leaf, a timestamp would be the sender's clock, and the answer is the existing profile
+  envelope). Every member that reads it publishes its profile through the same throttled,
+  jittered growth path, so N answers to one request do not land in one second, and a device
+  with no profile at all stays silent as it does on growth. A device asks right after joining,
+  and again on opening a group in which some member still has no profile on this device, at
+  most once per group per 24 hours (`should_request_profiles`, one rule shared over the FFI so
+  the clients cannot drift). A malformed request is dropped, never answered; the NSE and the
+  background decrypt paths recognise it only to suppress it (C-59).
 - **Not carried:** `ContactAck` (plaintext) and anything the server stores.
 
 ### 3. Binding and verification
@@ -129,7 +144,9 @@ One resolver per client, used by every surface in the UX spec.
 - **Positive:** people have names; the server sees none of them; a username cannot be
   impersonated in the UI; no MLS, storage or DS change.
 - **Negative:** each profile change and each group growth costs one application message per
-  member per group; username verification costs one discovery lookup (with proof-of-work) per
+  member per group, and a request costs one message from the asker plus one answer per member
+  that holds a profile (the daily floor bounds a device that keeps opening a group whose
+  members never answer); username verification costs one discovery lookup (with proof-of-work) per
   new `(key, username)` pair and tells discovery that someone resolved that username; display
   names can collide and can be misleading, as in every messenger.
 - **Neutral:** invariant #3 untouched (no `lakko-mls` change); the contact-request sealed

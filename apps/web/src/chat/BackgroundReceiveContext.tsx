@@ -57,6 +57,8 @@ import {
   sleepCancellable,
 } from "../ds/long-poll-loop";
 import { useProfiles } from "../profile/ProfileContext";
+import { observeMembers } from "../profile/membership-baseline";
+import { isOwnKeyB64 } from "../profile/own-key";
 import {
   memberSignatureKeys,
   readPushRotationRole,
@@ -108,7 +110,7 @@ import {
   type RosterLeafKeys,
 } from "./device-readmission";
 import { markOwnPublished } from "./own-published";
-import { ownPersonKeyB64, personKeyOf, type RosterLeaf } from "./person-key";
+import { ownPersonKeyB64, personKeyOf, personKeysOf, type RosterLeaf } from "./person-key";
 import { loadAccepted } from "../contacts/local-store";
 import { proposalKey, recordObservation } from "./pending-requests";
 import { ReceiveCoordinator } from "./receive-coordinator";
@@ -685,6 +687,21 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     for (const p of plan.profiles) {
       if (p.profile !== undefined && p.senderKey !== undefined) profiles.ingest(p.senderKey, p.profile);
     }
+    // ADR-0048 §2 trigger 4 — another member asked this group to introduce
+    // itself; answer with the own profile through the throttled growth path.
+    // A request this device published itself (re-fetched after a reload, when
+    // the own-echo registry is empty) is not a question for it; an
+    // unattributable sender is dropped. One answer covers the whole batch —
+    // the scheduler coalesces anyway.
+    {
+      const own = chats.identity();
+      for (const r of plan.profileRequests) {
+        if (r.senderKey === undefined) continue;
+        if (own !== null && isOwnKeyB64(own, r.senderKey)) continue;
+        profiles.requested(groupIdB64);
+        break;
+      }
+    }
     // ADR-0024 — read receipts land in the durable store whether or not the
     // chat is open; the view reads its "Read" ticks from there.
     for (const r of plan.readReceipts) readWatermarks.ingest(groupIdB64, r.senderKey, r.target);
@@ -740,6 +757,17 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       // never puts back a device an admin removed.
       recordRemovedDevices(account, groupIdB64, membersBefore, memberSignatureKeys(entry.group));
       void rotateIfShrank(account, entry, membersBefore);
+    }
+
+    // ADR-0048 §2 trigger 3 — did the group GAIN a member? Against the
+    // baseline persisted per (account, group), not a per-session variable, so
+    // a join that landed while this tab was closed is still growth to it, and
+    // a chat nobody has open still re-sends its name (with the ADR-0051 group
+    // name, same throttle). Every batch, not only one carrying a commit row:
+    // an Add this device swept itself lands with no commit event of its own.
+    if (observeMembers(account, groupIdB64, new Set(personKeysOf(entry.group)))) {
+      profiles.groupGrew(groupIdB64);
+      groupNames.groupGrew(groupIdB64);
     }
 
     // The chat view gets the rest, now or when it next mounts.

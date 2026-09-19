@@ -853,6 +853,13 @@ public func nseLooksLikeGroupName(_ bytes: Data, envelopeLens: ClosedRange<Int>)
 /// recognised and suppressed, never stored (the NSE has no role table to
 /// gate it with, and no durable store to write). A recognised envelope makes
 /// the caller fall back to the newest real message or the generic body.
+///
+/// ADR-0048 §2 trigger 4 adds a sixth, the profile REQUEST — a newcomer's
+/// field-less "introduce yourselves". Recognised and suppressed, and NOT
+/// answered: the answer is an MLS application message (a ratchet advance
+/// C-59 forbids this process), so the foreground app answers it on its own
+/// receive path. Like the beacon it is fixed-length, and the length arrives
+/// from the slim FFI (`profileRequestEnvelopeLen()`) for the same reason.
 public func nseIsServiceEnvelope(
     _ bytes: Data,
     decodesAsPushRoutingSecret: (Data) -> Bool,
@@ -861,7 +868,9 @@ public func nseIsServiceEnvelope(
     decodesAsProfile: (Data) -> Bool,
     profileEnvelopeLens: ClosedRange<Int>,
     decodesAsGroupName: (Data) -> Bool,
-    groupNameEnvelopeLens: ClosedRange<Int>
+    groupNameEnvelopeLens: ClosedRange<Int>,
+    decodesAsProfileRequest: (Data) -> Bool,
+    profileRequestEnvelopeLen: Int
 ) -> Bool {
     if nseLooksLikeCallSignaling(bytes) { return true }
     if nseLooksLikePushRoutingSecret(bytes), decodesAsPushRoutingSecret(bytes) { return true }
@@ -875,7 +884,29 @@ public func nseIsServiceEnvelope(
     if nseLooksLikeGroupName(bytes, envelopeLens: groupNameEnvelopeLens), decodesAsGroupName(bytes) {
         return true
     }
+    if nseLooksLikeProfileRequest(bytes, envelopeLen: profileRequestEnvelopeLen),
+       decodesAsProfileRequest(bytes) {
+        return true
+    }
     return false
+}
+
+/// First byte of the frozen 25-byte ADR-0048 profile-request domain separator
+/// `lakko/profile-request/v1\0` — the same ASCII `l` as every other in-group
+/// envelope domain, kept as its own constant for the same reason as the
+/// others: retiring one wire format must not re-point another's peek.
+private let profileRequestEnvelopeFirstByte: UInt8 = 0x6C
+
+/// Cheap PRE-FILTER for an ADR-0048 profile request: the exact length plus the
+/// first domain byte, the beacon's shape exactly. The request carries no
+/// fields, so every request on the wire is byte-identical and the length is a
+/// total test of the size; the length is injected (the slim FFI's
+/// `profileRequestEnvelopeLen()`) rather than written as `26` because a stale
+/// literal fails in the dangerous direction — a too-narrow peek silently stops
+/// suppressing requests and a notification reads `lakko/profile-request/v1`.
+/// The peek decides nothing; `decodeProfileRequest` is the verdict.
+public func nseLooksLikeProfileRequest(_ bytes: Data, envelopeLen: Int) -> Bool {
+    bytes.count == envelopeLen && bytes.first == profileRequestEnvelopeFirstByte
 }
 
 /// Decode a lowercase-hex string into bytes. `nil` on any malformed input

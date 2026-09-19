@@ -77,6 +77,7 @@ pub mod incoming_envelope;
 pub mod invite;
 pub mod media_state;
 pub mod profile;
+pub mod profile_request;
 pub mod pseudonym;
 pub mod push_routing;
 pub mod request;
@@ -137,6 +138,12 @@ pub use profile::{
     profile_is_newer, try_unwrap_profile, DisplayNameError, Profile, ProfileError,
     DISPLAY_NAME_MAX_BYTES, DISPLAY_NAME_MAX_CHARS, FORMAT_CHAR_RANGES, PROFILE_ENVELOPE_DOMAIN_V1,
     PROFILE_ENVELOPE_MAX_LEN, PROFILE_ENVELOPE_MIN_LEN, PROFILE_VERSION_V1,
+};
+pub use profile_request::{
+    compose_profile_request, decode_profile_request, should_request_profiles,
+    try_unwrap_profile_request, ProfileRequest, ProfileRequestError,
+    PROFILE_REQUEST_ENVELOPE_DOMAIN_V1, PROFILE_REQUEST_ENVELOPE_LEN,
+    PROFILE_REQUEST_MIN_INTERVAL_MS, PROFILE_REQUEST_PAYLOAD_LEN, PROFILE_REQUEST_VERSION_V1,
 };
 pub use pseudonym::{Direction, IdentityPseudonym, PerRelationship, StrangerInbox, PSEUDONYM_LEN};
 pub use push_routing::{

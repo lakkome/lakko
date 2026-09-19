@@ -144,6 +144,11 @@ export function TimelineBubble(
       // pushed into `rows()`. Defensive.
       return null;
     }
+    if (ev.kind === "profileRequest") {
+      // ADR-0048 §2 trigger 4 — answered by the profile provider, never
+      // pushed into `rows()`. Defensive.
+      return null;
+    }
     if (ev.kind === "group-name") {
       // ADR-0051 — consumed by the group-name gate, never pushed into
       // `rows()`. Defensive.

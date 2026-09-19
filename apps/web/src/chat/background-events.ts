@@ -22,6 +22,7 @@
  *   | membershipProposal    | observation recorded if stored| yes (panel refresh)     |
  *   | callSignaling         | the app-level call host       | no                      |
  *   | profile               | the profile store             | no                      |
+ *   | profileRequest        | the profile publish scheduler | no                      |
  *   | pushRoutingSecret     | the gated receive             | no                      |
  *   | committerBeacon       | the beacon observation store  | no                      |
  *   | group-name            | the gated group-name store    | no                      |
@@ -46,6 +47,9 @@ export interface BackgroundEventPlan {
   /** Call signaling for the call host, in journal order. */
   readonly signaling: readonly InboundSignalingRow[];
   readonly profiles: readonly Of<"profile">[];
+  /** ADR-0048 §2 trigger 4 — requests to introduce ourselves; the provider
+   *  answers each (from another member) with a throttled profile publish. */
+  readonly profileRequests: readonly Of<"profileRequest">[];
   readonly pushSecrets: readonly Of<"pushRoutingSecret">[];
   readonly beacons: readonly Of<"committerBeacon">[];
   /** ADR-0024 — read receipts, for the durable watermark store. Also in
@@ -67,6 +71,7 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
   const toView: IncomingChatEvent[] = [];
   const signaling: InboundSignalingRow[] = [];
   const profiles: Of<"profile">[] = [];
+  const profileRequests: Of<"profileRequest">[] = [];
   const pushSecrets: Of<"pushRoutingSecret">[] = [];
   const beacons: Of<"committerBeacon">[] = [];
   const groupNames: Of<"group-name">[] = [];
@@ -108,6 +113,9 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
       case "profile":
         profiles.push(e);
         break;
+      case "profileRequest":
+        profileRequests.push(e);
+        break;
       case "pushRoutingSecret":
         pushSecrets.push(e);
         break;
@@ -130,6 +138,7 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
     toView,
     signaling,
     profiles,
+    profileRequests,
     pushSecrets,
     beacons,
     readReceipts,

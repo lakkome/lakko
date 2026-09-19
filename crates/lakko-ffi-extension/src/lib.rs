@@ -79,6 +79,7 @@ pub mod call_signaling;
 pub mod committer_beacon;
 pub mod group_name;
 pub mod profile;
+pub mod profile_request;
 pub mod push_routing;
 
 uniffi::setup_scaffolding!();

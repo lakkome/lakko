@@ -88,6 +88,7 @@ use crate::committer_beacon::{try_unwrap_committer_beacon, CommitterBeaconError}
 use crate::group_name::{try_unwrap_group_name, GroupName, GroupNameError};
 use crate::media_state::{try_unwrap_media_state, MediaStateError};
 use crate::profile::{try_unwrap_profile, Profile, ProfileError};
+use crate::profile_request::{try_unwrap_profile_request, ProfileRequestError};
 use crate::push_routing::{try_unwrap_push_routing_secret, PushRoutingSecretError};
 
 /// Discriminated dispatch result. Borrow-flavoured slice so
@@ -186,6 +187,10 @@ pub enum IncomingEnvelope<'a> {
     /// for that group — the whole read-decide-write under the per-group
     /// lock (C-62 sub-invariant 5).
     GroupName(GroupName),
+    /// A member asks the group to introduce itself (ADR-0048 §2,
+    /// trigger 4). Carries nothing; the receiver answers with its own
+    /// profile through the throttled growth path. Never a chat bubble.
+    ProfileRequest,
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -229,6 +234,9 @@ pub enum DispatchError {
     /// refused — a name has no remainder worth keeping.
     #[error(transparent)]
     GroupName(#[from] GroupNameError),
+    /// The profile-request domain with a malformed payload.
+    #[error(transparent)]
+    ProfileRequest(#[from] ProfileRequestError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -282,6 +290,10 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     // 7. Group name — ADR-0051.
     if let Some(group_name) = try_unwrap_group_name(plaintext)? {
         return Ok(IncomingEnvelope::GroupName(group_name));
+    }
+    // 7b. Profile request — ADR-0048 §2 trigger 4.
+    if try_unwrap_profile_request(plaintext)?.is_some() {
+        return Ok(IncomingEnvelope::ProfileRequest);
     }
     // 8. Plain intro message — ADR-0005 scenario A.
     Ok(IncomingEnvelope::IntroMessage(plaintext))

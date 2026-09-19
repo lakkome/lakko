@@ -59,6 +59,12 @@ use lakko_contacts::profile::{
     profile_is_newer as rust_profile_is_newer, DisplayNameError, Profile as RustProfile,
     ProfileError,
 };
+use lakko_contacts::profile_request::{
+    compose_profile_request as rust_compose_profile_request,
+    decode_profile_request as rust_decode_profile_request,
+    should_request_profiles as rust_should_request_profiles, PROFILE_REQUEST_ENVELOPE_LEN,
+    PROFILE_REQUEST_MIN_INTERVAL_MS,
+};
 use lakko_contacts::push_routing::{
     compose_push_routing_secret as rust_compose_push_routing_secret,
     decode_push_routing_secret as rust_decode_push_routing_secret,
@@ -1514,6 +1520,10 @@ pub enum WasmIncomingEnvelopeKind {
     /// receiver's role-table check (ADR-0051 §2), then `groupNameIsNewer`.
     /// An empty name clears the name.
     GroupName = 7,
+    /// A member asks the group to introduce itself (ADR-0048 §2 trigger 4).
+    /// `payload` is empty; answer with the own profile through the throttled
+    /// growth path; never render it.
+    ProfileRequest = 8,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -1661,6 +1671,14 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             mint_epoch: None,
             profile: None,
             group_name: Some(g.into()),
+        },
+        IncomingEnvelope::ProfileRequest => WasmIncomingEnvelope {
+            kind: WasmIncomingEnvelopeKind::ProfileRequest,
+            payload: Vec::new(),
+            camera_on: None,
+            mint_epoch: None,
+            profile: None,
+            group_name: None,
         },
         IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::IntroMessage,
@@ -2092,6 +2110,59 @@ fn decode_committer_beacon_core(plaintext: &[u8]) -> Result<(), String> {
     rust_decode_committer_beacon(plaintext)
         .map(|_| ())
         .map_err(|err| err.to_string())
+}
+
+/// ADR-0048 §2 trigger 4 — the newcomer's "introduce yourselves" envelope.
+/// Publish it as an MLS application message right after joining a group,
+/// and on opening a group with an unnamed member when
+/// `shouldRequestProfiles` says so. Field-less; byte-identical every call.
+#[wasm_bindgen(js_name = composeProfileRequest)]
+#[must_use]
+pub fn compose_profile_request() -> Vec<u8> {
+    rust_compose_profile_request()
+}
+
+/// Recognise a profile request: resolves for a well-formed one, throws for
+/// a foreign domain or a malformed payload.
+#[wasm_bindgen(js_name = decodeProfileRequest)]
+pub fn decode_profile_request(plaintext: &[u8]) -> Result<(), JsError> {
+    rust_decode_profile_request(plaintext)
+        .map(|_| ())
+        .map_err(|err| JsError::new(&err.to_string()))
+}
+
+/// Length of the profile-request wire, for a cheap pre-filter.
+#[wasm_bindgen(js_name = profileRequestEnvelopeLen)]
+#[must_use]
+pub fn profile_request_envelope_len() -> u32 {
+    u32::try_from(PROFILE_REQUEST_ENVELOPE_LEN).unwrap_or(u32::MAX)
+}
+
+/// The daily floor between two requests to one group outside a join.
+#[wasm_bindgen(js_name = profileRequestMinIntervalMs)]
+#[must_use]
+pub fn profile_request_min_interval_ms() -> u64 {
+    PROFILE_REQUEST_MIN_INTERVAL_MS
+}
+
+/// Should this device ask the group to introduce itself now? Always on a
+/// join; otherwise only with an unnamed member and no sooner than
+/// `profileRequestMinIntervalMs` after the last request (`undefined` =
+/// never asked).
+#[wasm_bindgen(js_name = shouldRequestProfiles)]
+#[must_use]
+pub fn should_request_profiles(
+    joined_just_now: bool,
+    unnamed_members: u32,
+    last_requested_at_ms: Option<u64>,
+    now_ms: u64,
+) -> bool {
+    rust_should_request_profiles(
+        joined_just_now,
+        unnamed_members as usize,
+        last_requested_at_ms,
+        now_ms,
+    )
 }
 
 /// The fold: decide whether this device is the acting committer (ADR-0045

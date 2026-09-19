@@ -30,3 +30,11 @@ path = "fuzz_targets/client_frame_decode.rs"
 test = false
 doc = false
 bench = false
+
+# The root workspace patches `str0m` with the vendored fork (one additive
+# packetizer change, see crates/vendor/str0m). A `[patch]` section is not
+# inherited by a crate that opted out of the workspace, so without this
+# mirror the fuzz build resolves the unpatched crates.io release and the
+# SFU no longer compiles against it.
+[patch.crates-io]
+str0m = { path = "../../../crates/vendor/str0m" }

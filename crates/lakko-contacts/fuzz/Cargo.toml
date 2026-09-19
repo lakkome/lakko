@@ -54,6 +54,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "profile_request_decode"
+path = "fuzz_targets/profile_request_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "push_routing_secret_decode"
 path = "fuzz_targets/push_routing_secret_decode.rs"
 test = false

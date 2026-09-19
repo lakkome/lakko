@@ -83,6 +83,12 @@ use lakko_contacts::profile::{
     normalize_display_name as rust_normalize_display_name,
     profile_is_newer as rust_profile_is_newer, Profile as RustProfile,
 };
+use lakko_contacts::profile_request::{
+    compose_profile_request as rust_compose_profile_request,
+    decode_profile_request as rust_decode_profile_request,
+    should_request_profiles as rust_should_request_profiles, PROFILE_REQUEST_ENVELOPE_LEN,
+    PROFILE_REQUEST_MIN_INTERVAL_MS,
+};
 use lakko_contacts::push_routing::{
     compose_push_routing_secret as rust_compose_push_routing_secret,
     decode_push_routing_secret as rust_decode_push_routing_secret,
@@ -1616,6 +1622,11 @@ pub enum FfiIncomingEnvelopeKind {
     /// keep it only when [`group_name_is_newer`]. An empty name clears the
     /// name.
     GroupName,
+    /// A member asks the group to introduce itself (ADR-0048 §2 trigger 4).
+    /// `payload` is empty. Answer by publishing the own profile through the
+    /// throttled growth path; never render it. Appended last so every
+    /// earlier variant keeps its ordinal.
+    ProfileRequest,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -1711,6 +1722,12 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
             group_name = Some(g.into());
             (FfiIncomingEnvelopeKind::GroupName, Vec::new(), None, None)
         },
+        IncomingEnvelope::ProfileRequest => (
+            FfiIncomingEnvelopeKind::ProfileRequest,
+            Vec::new(),
+            None,
+            None,
+        ),
         IncomingEnvelope::IntroMessage(p) => (
             FfiIncomingEnvelopeKind::IntroMessage,
             p.to_vec(),
@@ -2064,6 +2081,64 @@ pub fn decode_committer_beacon(plaintext: Vec<u8>) -> Result<(), FfiError> {
     rust_decode_committer_beacon(&plaintext)
         .map(|_| ())
         .map_err(|err| FfiError::Contacts(err.to_string()))
+}
+
+/// ADR-0048 §2 trigger 4 — the newcomer's "introduce yourselves" envelope.
+/// Publish it as an MLS application message into the group right after
+/// joining, and on opening a group with an unnamed member when
+/// [`should_request_profiles`] says so. Field-less; byte-identical every
+/// call.
+#[uniffi::export]
+#[must_use]
+pub fn compose_profile_request() -> Vec<u8> {
+    rust_compose_profile_request()
+}
+
+/// Recognise a profile request. `Ok(())` for a well-formed one, an error
+/// for anything else (a foreign domain or a malformed payload). The
+/// dispatcher already classifies it as
+/// [`FfiIncomingEnvelopeKind::ProfileRequest`]; this is the standalone
+/// check for a receive path that peeks before dispatching.
+#[uniffi::export]
+pub fn decode_profile_request(plaintext: Vec<u8>) -> Result<(), FfiError> {
+    rust_decode_profile_request(&plaintext)
+        .map(|_| ())
+        .map_err(|err| FfiError::Contacts(err.to_string()))
+}
+
+/// Length of the profile-request wire, for a cheap pre-filter.
+#[uniffi::export]
+#[must_use]
+pub fn profile_request_envelope_len() -> u32 {
+    u32::try_from(PROFILE_REQUEST_ENVELOPE_LEN).unwrap_or(u32::MAX)
+}
+
+/// The daily floor between two requests to one group outside a join.
+#[uniffi::export]
+#[must_use]
+pub const fn profile_request_min_interval_ms() -> u64 {
+    PROFILE_REQUEST_MIN_INTERVAL_MS
+}
+
+/// Should this device ask the group to introduce itself now? See
+/// `lakko_contacts::profile_request::should_request_profiles`: always on a
+/// join; otherwise only with an unnamed member and no sooner than
+/// [`profile_request_min_interval_ms`] after the last request. `None` for
+/// `last_requested_at_ms` means never asked.
+#[uniffi::export]
+#[must_use]
+pub fn should_request_profiles(
+    joined_just_now: bool,
+    unnamed_members: u32,
+    last_requested_at_ms: Option<u64>,
+    now_ms: u64,
+) -> bool {
+    rust_should_request_profiles(
+        joined_just_now,
+        unnamed_members as usize,
+        last_requested_at_ms,
+        now_ms,
+    )
 }
 
 /// The fold: decide whether this device is the acting committer (ADR-0045

@@ -516,6 +516,11 @@ final class MultiJoinerCall {
             // JOURNAL (role-gated in `ChatRepository.receiveGroupName`), never
             // the SFU signal-relay. Out of place here — drop.
             break
+        case .profileRequest:
+            // ADR-0048 — a profile request rides the GROUP JOURNAL (answered
+            // in `ChatRepository.answerProfileRequest`), never the SFU
+            // signal-relay. Out of place here — drop.
+            break
         }
     }
 

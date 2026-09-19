@@ -50,6 +50,11 @@ import { ProfilePublishScheduler, type PublishReason } from "./publish-scheduler
 import { resolveDisplay, type ResolvedName } from "./resolver";
 import { UsernameVerifier } from "./username-verification";
 import { isOwnKeyB64 } from "./own-key";
+import {
+  decideProfileRequest,
+  lastProfileRequestAt,
+  recordProfileRequest,
+} from "./profile-request";
 
 export interface ProfileApi {
   /** Bumped on any change a resolved name may depend on. `resolve` reads it,
@@ -66,10 +71,20 @@ export interface ProfileApi {
   resolve(key: Uint8Array | string): ResolvedName;
   /** File a received profile under its AUTHENTICATED sender key. */
   ingest(senderKeyB64: string, profile: IncomingProfile): void;
-  /** This device joined `groupIdB64` (Welcome, founding, accept). */
+  /** This device joined `groupIdB64` (Welcome, founding, accept). Publishes
+   *  the own profile and, right after it, a profile request (ADR-0048 §2
+   *  trigger 4) so the members already there introduce themselves. */
   groupJoined(groupIdB64: string): void;
   /** `groupIdB64` gained at least one member. */
   groupGrew(groupIdB64: string): void;
+  /** Another member asked `groupIdB64` to introduce itself: answer with the
+   *  own profile through the throttled growth path. A device with no own
+   *  profile publishes nothing, as on growth. */
+  requested(groupIdB64: string): void;
+  /** On opening `groupIdB64`: ask the group to introduce itself if some
+   *  person in `memberKeysB64` (the roster's people, base64 account keys)
+   *  still has no name on this device, at most once a day per group. */
+  requestProfilesOnOpen(groupIdB64: string, memberKeysB64: readonly string[]): Promise<void>;
   /** Record a username binding a lookup already proved. */
   learnUsername(signatureKeyB64: string, username: string): void;
   /** The own profile envelope, or `null` when there is nothing to publish. */
@@ -196,6 +211,31 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     await publisher.broadcastControl(secrets, entry.group, envelope);
   }
 
+  /**
+   * ADR-0048 §2 trigger 4 — publish the field-less "introduce yourselves"
+   * envelope into `groupIdB64`, through the same locked application-send
+   * path the profile envelope uses. Stamps the persisted last-asked time
+   * BEFORE the publish, so a slow or failing send cannot let the on-open
+   * check fire a second request moments later. Never throws.
+   */
+  async function publishProfileRequest(groupIdB64: string): Promise<void> {
+    const account = accountId();
+    if (account === null) return;
+    const secrets = auth.identitySecrets();
+    if (secrets === null || chats.identity() === null) return;
+    const entry = chats.get(groupIdB64);
+    if (entry === undefined) return;
+    if (readIsActive(entry.group) === false) return;
+    recordProfileRequest(account, groupIdB64, Date.now());
+    try {
+      const w = await loadWasm();
+      await publisher.broadcastControl(secrets, entry.group, w.composeProfileRequest());
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("[profile] request not published", err);
+    }
+  }
+
   const scheduler = new ProfilePublishScheduler<ReturnType<typeof setTimeout>>({
     now: () => Date.now(),
     setTimer: (fn, ms) => setTimeout(fn, ms),
@@ -305,10 +345,41 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       });
     },
     groupJoined(groupIdB64) {
-      void scheduler.joined(groupIdB64);
+      // The own profile first — the members already there cannot learn the
+      // newcomer's name any other way — then the request for theirs. `joined`
+      // never rejects (the scheduler retries a failed publish itself), so the
+      // request is not gated on the profile having landed.
+      void scheduler.joined(groupIdB64).then(() => publishProfileRequest(groupIdB64));
     },
     groupGrew(groupIdB64) {
       scheduler.groupGrew(groupIdB64);
+    },
+    requested(groupIdB64) {
+      // The growth path: throttled to one publish per group per 30 s and
+      // jittered, so N members answering one request do not land N envelopes
+      // in the same second. `publishInto` stays silent without an own profile.
+      scheduler.groupGrew(groupIdB64);
+    },
+    async requestProfilesOnOpen(groupIdB64, memberKeysB64) {
+      const account = accountId();
+      const own = chats.identity();
+      if (account === null || own === null) return;
+      const w = await loadWasm();
+      // The count reads the SAME resolver every screen renders from, so
+      // "unnamed" here is exactly a row that shows as `Member`.
+      const decision = decideProfileRequest(
+        {
+          joinedJustNow: false,
+          memberKeysB64,
+          isOwnKey: (k) => isOwnKeyB64(own, k),
+          sourceOf: (k) => api.resolve(k).source,
+          lastRequestedAtMs: lastProfileRequestAt(account, groupIdB64),
+          nowMs: Date.now(),
+        },
+        (joined, unnamed, last, now) => w.shouldRequestProfiles(joined, unnamed, last, now),
+      );
+      if (!decision.ask) return;
+      await publishProfileRequest(groupIdB64);
     },
     learnUsername(signatureKeyB64, username) {
       if (accountId() === null) return;

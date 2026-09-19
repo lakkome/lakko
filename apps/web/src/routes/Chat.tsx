@@ -40,6 +40,7 @@ import {
   onMount,
   onCleanup,
   Show,
+  untrack,
   type JSX,
 } from "solid-js";
 import { A, useNavigate, useParams, useSearchParams } from "@solidjs/router";
@@ -150,7 +151,8 @@ import {
   groupNameErrorCode,
   groupNameErrorText,
 } from "../chat/group-name-store";
-import { membersGrew } from "../profile/membership-growth";
+import { observeMembers } from "../profile/membership-baseline";
+import { isOwnKeyB64 } from "../profile/own-key";
 import { createUsernameCheck } from "../profile/username-field";
 import { mayLookUp, usernameReason } from "../profile/rules";
 import {
@@ -1153,19 +1155,26 @@ function ChatView(props: {
   // ADR-0048 §2 trigger 3 — when this group gains a member, republish this
   // device's profile (throttled + jittered per group by the scheduler), so the
   // newcomer — who cannot read any earlier epoch — learns the existing names.
-  // The first roster read is the baseline, not growth. Every path that can add
-  // a member (a polled commit, a sweep, an own direct add) bumps
+  // The first-ever roster read is the baseline, not growth. Every path that
+  // can add a member (a polled commit, a sweep, an own direct add) bumps
   // `membersVersion`, which is what re-runs `members()`.
-  let lastMemberKeys: ReadonlySet<string> | null = null;
+  //
+  // The baseline is PERSISTED per (account, group) (`membership-baseline.ts`)
+  // and shared with the background receive, not kept in a variable of this
+  // view: a variable lived as long as the tab, so a join that landed while
+  // the tab was closed read as a baseline to the next session and the
+  // newcomer never got this device's name.
   createEffect(() => {
     const current = new Set(members().map((m) => base64Encode(m.sigPubkey)));
-    if (membersGrew(lastMemberKeys, current)) {
+    const s = auth.state();
+    if (s.kind !== "session") return;
+    const grew = untrack(() => observeMembers(s.account.accountId, props.entry.groupIdB64, current));
+    if (grew) {
       profiles.groupGrew(props.entry.groupIdB64);
       // ADR-0051 §3 — an owner / admin holding a name re-sends it (original
       // stamp) so the newcomer learns it; same throttle + jitter.
       groupNames.groupGrew(props.entry.groupIdB64);
     }
-    if (current.size > 0) lastMemberKeys = current;
   });
 
   // G-18 / ADR-0029 — the mid-call call-key rotation is the call host's: it
@@ -3016,6 +3025,18 @@ function ChatView(props: {
           // eslint-disable-next-line no-console
           console.warn("group name receive failed", err);
         });
+        continue;
+      }
+      // ADR-0048 §2 trigger 4 — another member asked this group to introduce
+      // itself. Answered by the profile provider through the throttled growth
+      // path; never a timeline row. This device's own request (re-fetched
+      // after a reload, when the own-echo registry is empty) is not a question
+      // for it, and an unattributable sender is dropped.
+      if (e.kind === "profileRequest") {
+        const own = chats.identity();
+        if (e.senderKey !== undefined && !(own !== null && isOwnKeyB64(own, e.senderKey))) {
+          profiles.requested(props.entry.groupIdB64);
+        }
         continue;
       }
       // ADR-0048 — a member's profile. Filed in the profile store under the
@@ -4915,6 +4936,21 @@ function ChatView(props: {
       // immediate, precisely because a candidate that has just opened the app
       // is when a stale view is likeliest to hand the duty elsewhere.
       void emitBeaconIfDue();
+      // ADR-0048 §2 trigger 4 — opening a group some of whose people this
+      // device still cannot name asks them to introduce themselves, at most
+      // once a day per group (the core's `shouldRequestProfiles`). After the
+      // first poll, so the names that were already on the journal have been
+      // filed and are not asked for again. The roster's PEOPLE (account
+      // keys), which is what the resolver names.
+      void profiles
+        .requestProfilesOnOpen(
+          props.entry.groupIdB64,
+          untrack(() => members()).map((m) => base64Encode(m.sigPubkey)),
+        )
+        .catch((err: unknown) => {
+          // eslint-disable-next-line no-console
+          console.warn("ADR-0048 profile request not sent", err);
+        });
       // ADR-0042 — ensure this group's opaque push routing is provisioned.
       // Owner + no secret yet → mint + persist + broadcast the distribution
       // envelope (E2EE journal); then subscribe under `push_gid` (or defer
@@ -7270,6 +7306,11 @@ function timelineRowToPersisted(
     // ADR-0048 — consumed by the receive loop (filed in the profile store),
     // never a timeline row. Never persist it: a name belongs in the encrypted
     // profile store, not in the transcript.
+    return null;
+  }
+  if (row.event.kind === "profileRequest") {
+    // ADR-0048 §2 trigger 4 — answered by the profile provider, never a
+    // timeline row. Never persist it.
     return null;
   }
   if (row.event.kind === "group-name") {

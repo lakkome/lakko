@@ -849,12 +849,13 @@ export class SfuCallSession {
         this.lastPingMs = this.nowMs();
         break;
       case "dead":
-        console.warn(
-          "SfuCallSession: keepalive dead (no pong for " +
+        // One line, from `fail`: it names every failure, so the detail
+        // rides in the reason rather than in a second warning.
+        this.fail(
+          "keepalive dead (no pong for " +
             Math.round((this.nowMs() - this.lastInboundMs) / 1000) +
-            " s); failing the call",
+            " s)",
         );
-        this.fail("keepalive dead");
         break;
       case "wait":
         break;

@@ -400,6 +400,10 @@ public final class ChatViewModel: ObservableObject {
                 maybePublishReadReceipt()
                 // ADR-0045 S4b — start announcing that this device can sweep.
                 startBeaconTicker()
+                // ADR-0048 §2 trigger 4 — if someone here is still `Member`,
+                // ask the group to introduce itself (the core's rule decides,
+                // at most once a day per group; nothing is sent otherwise).
+                requestProfilesIfDue()
             } else {
                 // Left the thread — stop advertising that we're typing.
                 stopTyping()
@@ -458,6 +462,20 @@ public final class ChatViewModel: ObservableObject {
     private func stopBeaconTicker() {
         beaconTicker?.invalidate()
         beaconTicker = nil
+    }
+
+    // MARK: - ADR-0048 §2 trigger 4 — ask the group for the names it still lacks
+
+    /// Fire-and-forget: the repository counts the placeholders off the live
+    /// roster, consults the persisted "last asked" stamp, and lets the core's
+    /// `shouldRequestProfiles` decide. Nothing here awaits it — the screen
+    /// renders whatever names it has, and an answer re-renders through the
+    /// profile directory's revision like any other profile.
+    private func requestProfilesIfDue() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.repository.requestProfilesOnOpen(groupIdHex: self.groupIdHex)
+        }
     }
 
     private func emitBeaconTick() async {
