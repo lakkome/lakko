@@ -1038,6 +1038,7 @@ mod tests {
             display_name: Some("Alice Petrova".to_string()),
             username: Some("alice".to_string()),
             updated_at_ms: 1_700_000_000_000,
+            account_id: None,
         }
     }
 

@@ -86,8 +86,13 @@ async function classify(senderLeaf: number, ...payloads: Uint8Array[]): Promise<
   return (await chat.pollMessages(null, group(freshGid(), senderLeaf), 0)).events;
 }
 
-function profileEnvelope(name = "Alice Petrova", username = "alice", at = 1_700n): Uint8Array {
-  return wasm.composeProfileEnvelope(name, username, at);
+function profileEnvelope(
+  name = "Alice Petrova",
+  username = "alice",
+  at = 1_700n,
+  accountId?: Uint8Array,
+): Uint8Array {
+  return wasm.composeProfileEnvelope(name, username, at, accountId);
 }
 
 describe("ADR-0048 — a profile is filtered in the foreground loop", () => {
@@ -95,7 +100,19 @@ describe("ADR-0048 — a profile is filtered in the foreground loop", () => {
     const [ev] = await classify(3, profileEnvelope());
     expect(ev?.kind).toBe("profile");
     if (ev?.kind !== "profile") throw new Error("unreachable");
-    expect(ev.profile).toEqual({ displayName: "Alice Petrova", username: "alice", updatedAtMs: 1_700n });
+    expect(ev.profile).toEqual({
+      displayName: "Alice Petrova",
+      username: "alice",
+      updatedAtMs: 1_700n,
+      accountId: null,
+    });
+  });
+
+  it("a profile's claimed account id rides along (ADR-0048 v2)", async () => {
+    const id = new Uint8Array(16).fill(0x5a);
+    const [ev] = await classify(3, profileEnvelope("Alice Petrova", "alice", 1_700n, id));
+    if (ev?.kind !== "profile") throw new Error("unreachable");
+    expect(ev.profile?.accountId).toEqual(id);
   });
 
   it("is bound to the sender's signature key resolved at receipt, never the leaf", async () => {

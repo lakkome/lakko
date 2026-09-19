@@ -40,6 +40,24 @@ class PeerProfileStoreTest {
     }
 
     @Test
+    fun `a same-stamp resend fills in a missing account id and nothing else`() {
+        val store = PeerProfileStore(InMemoryProfilePersistence(), isNewer)
+        store.offer("KEY_A", p("Alice", 10uL))
+        val id = "0".repeat(31) + "5"
+        assertEquals(
+            ProfileOffer.STORED,
+            store.offer("KEY_A", p("Mallory", 10uL).copy(accountIdHex = id)),
+        )
+        assertEquals("Alice", store.get("KEY_A")?.displayName)
+        assertEquals(id, store.get("KEY_A")?.accountIdHex)
+        // An older stamp learns nothing; a known id is never replaced.
+        val other = "0".repeat(31) + "6"
+        assertEquals(ProfileOffer.NOT_NEWER, store.offer("KEY_A", p("Alice", 9uL).copy(accountIdHex = other)))
+        assertEquals(ProfileOffer.NOT_NEWER, store.offer("KEY_A", p("Alice", 10uL).copy(accountIdHex = other)))
+        assertEquals(id, store.get("KEY_A")?.accountIdHex)
+    }
+
+    @Test
     fun `profiles are keyed per signature key and never cross`() {
         val store = PeerProfileStore(InMemoryProfilePersistence(), isNewer)
         store.offer("KEY_A", p("Alice", 100uL))
@@ -81,5 +99,49 @@ class PeerProfileStoreTest {
         assertEquals(before + 1, directory.version.value)
         assertEquals(ProfileOffer.UNATTRIBUTED, directory.onProfileReceived(null, p("X", 9uL)))
         assertNull(directory.profiles.get("KEY_B"))
+    }
+
+    // ADR-0048 v2 — the account id a profile carries, kept per key for the
+    // ADR-0021 call roster.
+
+    private val idA = "0a".repeat(16)
+
+    @Test
+    fun `a newer profile without an account id keeps the id already held`() {
+        val store = PeerProfileStore(InMemoryProfilePersistence(), isNewer)
+        store.offer("KEY_A", PeerProfile("Alice", null, 1uL, accountIdHex = idA))
+        assertEquals(ProfileOffer.STORED, store.offer("KEY_A", PeerProfile("Alice P", null, 2uL)))
+        assertEquals("Alice P", store.get("KEY_A")?.displayName)
+        assertEquals(idA, store.get("KEY_A")?.accountIdHex)
+    }
+
+    @Test
+    fun `a newer profile with an account id replaces the held one`() {
+        val store = PeerProfileStore(InMemoryProfilePersistence(), isNewer)
+        val idB = "0b".repeat(16)
+        store.offer("KEY_A", PeerProfile("Alice", null, 1uL, accountIdHex = idA))
+        store.offer("KEY_A", PeerProfile("Alice", null, 2uL, accountIdHex = idB))
+        assertEquals(idB, store.get("KEY_A")?.accountIdHex)
+    }
+
+    @Test
+    fun `the directory enumerates only the profiles that carry an account id`() {
+        val directory = ProfileDirectory(
+            persistence = InMemoryProfilePersistence(),
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            isNewer = isNewer,
+            passesRule = { true },
+        )
+        directory.onProfileReceived("KEY_A", PeerProfile("Alice", null, 1uL, accountIdHex = idA))
+        directory.onProfileReceived("KEY_B", PeerProfile("Bob", null, 1uL))
+        assertEquals(mapOf("KEY_A" to idA), directory.accountIdsByKey())
+    }
+
+    @Test
+    fun `the raw id becomes lowercase hex only when it is exactly sixteen bytes`() {
+        assertEquals("ff".repeat(16), accountIdHexOrNull(ByteArray(16) { 0xff.toByte() }))
+        assertNull(accountIdHexOrNull(ByteArray(15)))
+        assertNull(accountIdHexOrNull(ByteArray(17)))
+        assertNull(accountIdHexOrNull(null))
     }
 }

@@ -98,6 +98,7 @@ mod tests {
             display_name: name.map(str::to_string),
             username: username.map(str::to_string),
             updated_at_ms: 1_700_000_000_000,
+            account_id: None,
         }
     }
 
@@ -156,14 +157,16 @@ mod tests {
     /// silently narrowing the NSE peek.
     #[test]
     fn golden_pins_the_swift_prefilter_shape() {
-        assert_eq!(profile_envelope_min_len(), 28);
-        assert_eq!(profile_envelope_max_len(), 315);
+        assert_eq!(profile_envelope_min_len(), 29);
+        assert_eq!(profile_envelope_max_len(), 332);
         let smallest = compose_profile(&profile(None, None)).unwrap();
-        assert_eq!(smallest.len(), 28);
+        assert_eq!(smallest.len(), 29);
         assert_eq!(smallest[0], 0x6c);
         let name = format!("{}\u{20AC}", "\u{1F600}".repeat(63));
-        let largest = compose_profile(&profile(Some(&name), Some(&"a".repeat(32)))).unwrap();
-        assert_eq!(largest.len(), 315);
+        let mut maximal = profile(Some(&name), Some(&"a".repeat(32)));
+        maximal.account_id = Some([7; 16]);
+        let largest = compose_profile(&maximal).unwrap();
+        assert_eq!(largest.len(), 332);
         decode_profile_envelope(largest).expect("the maximal envelope decodes");
     }
 

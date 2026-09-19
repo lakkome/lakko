@@ -73,12 +73,21 @@ public fun ownProfilePreview(nameCheck: DisplayNameCheck, username: String?): St
 /** Copy shown after saving a profile name (UX §4). */
 public const val PROFILE_SAVED_COPY: String = "Your name will update for your contacts."
 
-/** The wire form of [profile] for the core's composer. */
-public fun OwnProfile.toFfi(): uniffi.lakko_ffi_uniffi.FfiProfile =
+/**
+ * The wire form of this profile for the core's composer.
+ *
+ * @param accountId this account's raw 16-byte auth account id (ADR-0048 v2):
+ *   what a receiver derives the ADR-0021 call peer tag from, so a group member
+ *   who is not a contact still gets a name on their call tile. Sent only when
+ *   it is exactly 16 bytes — the composer refuses any other length, and a
+ *   profile with no id is better than no profile at all.
+ */
+public fun OwnProfile.toFfi(accountId: ByteArray?): uniffi.lakko_ffi_uniffi.FfiProfile =
     uniffi.lakko_ffi_uniffi.FfiProfile(
         displayName = displayName,
         username = username?.takeIf { it.isNotEmpty() },
         updatedAtMs = updatedAtMs.coerceAtLeast(0L).toULong(),
+        accountId = accountId?.takeIf { it.size == ACCOUNT_ID_BYTES },
     )
 
 /** Per-account persistence for [OwnProfile], keyed by the raw account id. */

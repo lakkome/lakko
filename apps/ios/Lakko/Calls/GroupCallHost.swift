@@ -767,7 +767,7 @@ extension GroupCallHost {
                 SfuCallUi(
                     config: config,
                     ui: ui,
-                    resolveDisplayName: GroupCallHost.displayNameResolver(callIdHex: callIdHex)
+                    resolveDisplayName: GroupCallHost.displayNameResolver(callIdHex: callIdHex, ui: ui)
                 )
             },
             conversationTitle: { [weak repository] in repository?.conversationTitle(groupIdHex: $0) },
@@ -780,31 +780,23 @@ extension GroupCallHost {
         ))
     }
 
-    /// ADR-0021 — the per-call peer_tag -> contact label resolver, so the SFU
-    /// roster shows the name the rest of the app shows for that contact. The
-    /// tag is re-derived locally (the SFU never sends a name); a tag collision
-    /// falls back to the pseudonym.
-    static func displayNameResolver(callIdHex: String) -> (String, String, String) -> String {
-        var tagToLabel: [String: String] = [:]
-        var collidedTags = Set<String>()
-        let profiles = ProfileDirectory.shared
-        for c in AcceptedContactsStore.load() {
-            guard let accountId = c.request.fromAccountId else { continue }
-            let accountIdHex = accountId.map { String(format: "%02x", $0) }.joined()
-            let tag = sfuPeerTag(callId: callIdHex, accountId: accountIdHex)
-            if tagToLabel[tag] != nil {
-                collidedTags.insert(tag)
-            } else {
-                // ADR-0048 — the one resolver: rename, profile name, verified
-                // username, fingerprint. Call tiles show the name only.
-                tagToLabel[tag] = profiles.resolve(signatureKey: c.request.fromPubkey).name
-            }
-        }
-        return { _, pseudonym, peerTag in
-            if !peerTag.isEmpty, !collidedTags.contains(peerTag), let label = tagToLabel[peerTag] {
-                return label
-            }
-            return pseudonym.isEmpty ? "Peer" : String(pseudonym.prefix(8))
+    /// ADR-0021 — the per-call peer_tag -> label resolver, so the SFU roster
+    /// shows the name the rest of the app shows for that person. The tag is
+    /// re-derived locally (the SFU never sends a name) over every account id
+    /// the device knows — accepted contacts AND received profiles (ADR-0048
+    /// envelope v2), so a member who is not a contact is named too; a tag
+    /// collision falls back to the pseudonym.
+    ///
+    /// Not frozen at call start: the map is rebuilt on every roster event, and
+    /// a profile arriving mid-call (the newcomer's own is answered within about
+    /// thirty seconds of joining) re-labels the live roster on `ui` through the
+    /// directory's `revision`. The resolver lives as long as the closure — the
+    /// handle holds it, so a finished call drops the subscription with it.
+    static func displayNameResolver(callIdHex: String, ui: CallUiState) -> (String, String, String) -> String {
+        let resolver = GroupCallNameResolver.live(callIdHex: callIdHex)
+        resolver.follow(ProfileDirectory.shared.$revision, ui: ui)
+        return { peerId, pseudonym, peerTag in
+            resolver.resolve(peerId: peerId, pseudonym: pseudonym, peerTag: peerTag)
         }
     }
 }

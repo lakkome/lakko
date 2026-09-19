@@ -109,12 +109,7 @@ public final class ProfileDirectory: ObservableObject {
     /// The own profile as an envelope ready to publish, or `nil` without an
     /// active account. A guest publishes a name with no username.
     func ownProfileEnvelope() -> Data? {
-        guard accountIdB64 != nil else { return nil }
-        let profile = FfiProfile(
-            displayName: ownProfile?.displayName,
-            username: ownUsername,
-            updatedAtMs: ownProfile?.updatedAtMs ?? 0
-        )
+        guard let profile = ownProfileForRequest() else { return nil }
         do {
             return try composeProfileEnvelope(profile: profile)
         } catch {
@@ -127,12 +122,21 @@ public final class ProfileDirectory: ObservableObject {
     }
 
     /// The own profile for a contact request, or `nil` without an account.
+    ///
+    /// Carries the account's 16 raw bytes (profile envelope v2) so a receiver
+    /// can match this device's owner to a group-call tile: the SFU's per-call
+    /// `peer_tag` (ADR-0021) is derived over the account id, which a signature
+    /// key alone cannot produce. The id is already public to every peer that
+    /// holds the identity bundle; here it only travels inside the E2EE
+    /// envelope. An account id that is not exactly 16 bytes is sent as none —
+    /// `composeProfileEnvelope` refuses any other length.
     func ownProfileForRequest() -> FfiProfile? {
-        guard accountIdB64 != nil else { return nil }
+        guard let accountIdB64 else { return nil }
         return FfiProfile(
             displayName: ownProfile?.displayName,
             username: ownUsername,
-            updatedAtMs: ownProfile?.updatedAtMs ?? 0
+            updatedAtMs: ownProfile?.updatedAtMs ?? 0,
+            accountId: Data(base64Encoded: accountIdB64).flatMap { $0.count == 16 ? $0 : nil }
         )
     }
 
@@ -154,6 +158,14 @@ public final class ProfileDirectory: ObservableObject {
 
     func storedProfile(signatureKeyB64: String) -> ProfileClaim? {
         received.profile(signatureKeyB64: signatureKeyB64)
+    }
+
+    /// Every received profile that names an account id, as
+    /// `(signature key, account id)`. What a group-call roster folds into its
+    /// per-call `peer_tag` map alongside the accepted contacts, so a member
+    /// who is not a contact is still named on their tile.
+    func profilesWithAccountId() -> [(signatureKeyB64: String, accountId: Data)] {
+        received.profilesWithAccountId()
     }
 
     // MARK: - Local renames

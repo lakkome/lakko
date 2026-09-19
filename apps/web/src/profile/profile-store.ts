@@ -52,6 +52,11 @@ export interface StoredProfile {
   readonly username: string | null;
   /** Sender-clock milliseconds. */
   readonly updatedAtMs: bigint;
+  /** The CLAIMED 16-byte auth account id as 32 lower-case hex characters
+   *  (the `AcceptedContact.accountIdHex` shape), or `null` when the envelope
+   *  carried none (ADR-0048 v2). What the call roster derives the ADR-0021
+   *  peer tag from; never an identity on its own — the signature key is. */
+  readonly accountIdHex: string | null;
 }
 
 /** A decoded profile as the core hands it over (the wasm `Profile` getters). */
@@ -59,6 +64,38 @@ export interface IncomingProfile {
   readonly displayName: string | undefined | null;
   readonly username: string | undefined | null;
   readonly updatedAtMs: bigint;
+  /** Exactly 16 bytes, or absent. Anything else is stored as "none". */
+  readonly accountId?: Uint8Array | undefined | null;
+}
+
+/** Length of an auth account id, in bytes. */
+export const ACCOUNT_ID_BYTES = 16;
+
+/** A not-newer re-send that carries an account id the held row lacks: the
+ *  held row with that id filled in, when the two are the same profile (same
+ *  stamp); `null` when nothing is to be learned. */
+export function mergeAccountId(
+  held: StoredProfile | undefined,
+  incoming: StoredProfile,
+): StoredProfile | null {
+  if (held === undefined) return null;
+  if (held.accountIdHex !== null || incoming.accountIdHex === null) return null;
+  if (held.updatedAtMs !== incoming.updatedAtMs) return null;
+  return { ...held, accountIdHex: incoming.accountIdHex };
+}
+
+/** 32 lower-case hex characters — the only shape `accountIdHex` ever holds. */
+export const ACCOUNT_ID_HEX_RE = /^[0-9a-f]{32}$/;
+
+/** Hex of a 16-byte account id; `null` for any other length, so a malformed
+ *  claim degrades to "no account id" rather than to a tag nobody derives. */
+export function accountIdHexOfBytes(bytes: Uint8Array | null | undefined): string | null {
+  if (bytes === null || bytes === undefined || bytes.length !== ACCOUNT_ID_BYTES) return null;
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 1) {
+    out += (bytes[i] ?? 0).toString(16).padStart(2, "0");
+  }
+  return out;
 }
 
 /** A persisted verification result. `pending` is never persisted. */
@@ -108,7 +145,12 @@ function toStored(p: IncomingProfile): StoredProfile {
   const displayName =
     typeof p.displayName === "string" && p.displayName.length > 0 ? p.displayName : null;
   const username = typeof p.username === "string" && p.username.length > 0 ? p.username : null;
-  return { displayName, username, updatedAtMs: p.updatedAtMs };
+  return {
+    displayName,
+    username,
+    updatedAtMs: p.updatedAtMs,
+    accountIdHex: accountIdHexOfBytes(p.accountId),
+  };
 }
 
 export class ProfileStore {
@@ -180,8 +222,19 @@ export class ProfileStore {
     await this.open(accountId);
     if (this.loadedAccount !== accountId) return false;
     const incoming = toStored(profile);
-    if (decideIngest(this.profiles.get(senderKeyB64), incoming.updatedAtMs, this.isNewer) === "keep") {
-      return false;
+    const held = this.profiles.get(senderKeyB64);
+    if (decideIngest(held, incoming.updatedAtMs, this.isNewer) === "keep") {
+      // The same profile sent again (a growth or request answer carries the
+      // stamp it was set at) is not newer, but it can carry an account id the
+      // held row never had: rows filed before the envelope carried one, or by
+      // an older sender. Take the id and nothing else, or the call roster can
+      // never name a person whose profile predates the field.
+      const learned = mergeAccountId(held, incoming);
+      if (learned === null) return false;
+      this.profiles.set(senderKeyB64, learned);
+      this.notify();
+      this.persist(accountId);
+      return true;
     }
     this.profiles.set(senderKeyB64, incoming);
     this.notify();

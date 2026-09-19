@@ -671,6 +671,7 @@ mod tests {
             display_name: Some("Alice".to_string()),
             username: Some("alice".to_string()),
             updated_at_ms: 1,
+            account_id: None,
         };
         for sibling in [
             wrap_call_welcome(&[0xAB; 256]),

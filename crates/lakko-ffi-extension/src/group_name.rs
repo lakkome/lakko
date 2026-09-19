@@ -218,6 +218,7 @@ mod tests {
             display_name: Some("Alice".to_string()),
             username: None,
             updated_at_ms: 1,
+            account_id: None,
         })
         .unwrap();
         assert!(decode_group_name_envelope(profile).is_err());

@@ -100,6 +100,7 @@ import { ownPersonKeyB64 } from "../chat/person-key";
 import { base64Decode, base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { loadAccepted } from "../contacts/local-store";
 import { onGroupMlsIdle } from "../mls/group-lock";
+import { buildPeerTagMap, personForPeerTag, type PeerTagBinding, type PeerTagMap } from "./peer-tag-map";
 import { useProfiles } from "../profile/ProfileContext";
 import { memberNameOf } from "../profile/member-label";
 import { useGroupNames } from "../chat/GroupNameContext";
@@ -1076,27 +1077,39 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       const jwt = new CallJwtClient(wasm);
       jwt.setSessionToken(secrets.sessionToken);
       const minted = await jwt.mint(hex, "participant");
-      // ADR-0021 — the per-call peer_tag -> contact name map, derived locally
-      // (the SFU never sends a name). On a tag collision between two contacts
-      // neither name is shown.
-      const tagToName = new Map<string, string>();
-      const collidedTags = new Set<string>();
-      for (const c of loadAccepted()) {
-        if (c.accountIdHex !== undefined) {
-          const tag = wasm.sfuPeerTag(hex, c.accountIdHex);
-          if (tagToName.has(tag)) collidedTags.add(tag);
-          else tagToName.set(tag, profiles.resolve(c.signaturePubkeyB64).name);
+      // ADR-0021 — the per-call peer_tag -> person map, derived locally (the
+      // SFU never sends a name) over every account id this device holds: the
+      // accepted contacts' AND the ones members claimed in their profiles
+      // (ADR-0048 v2). Not frozen at call start — a newcomer's profile is
+      // answered within the first poll or so, and the roster event that
+      // named its tile may have run before it landed. The map is rebuilt
+      // whenever the profile store changes (`profiles.version` also bumps on
+      // an accepted-contacts change), and `refreshNames` below re-runs the
+      // roster through it.
+      let tagMap: { version: number; map: PeerTagMap } | null = null;
+      const currentTagMap = (): PeerTagMap => {
+        const v = profiles.version();
+        if (tagMap !== null && tagMap.version === v) return tagMap.map;
+        const bindings: PeerTagBinding[] = [];
+        for (const c of loadAccepted()) {
+          if (c.accountIdHex !== undefined) {
+            bindings.push({ personKeyB64: c.signaturePubkeyB64, accountIdHex: c.accountIdHex });
+          }
         }
-      }
+        for (const b of profiles.accountIdBindings()) bindings.push(b);
+        const map = buildPeerTagMap(bindings, (accountIdHex) => wasm.sfuPeerTag(hex, accountIdHex));
+        tagMap = { version: v, map };
+        return map;
+      };
       const resolveDisplayName = (
         _peerId: string,
         pseudonym: string,
         peerTag: string | undefined,
       ): string => {
-        if (peerTag !== undefined && !collidedTags.has(peerTag)) {
-          const name = tagToName.get(peerTag);
-          if (name !== undefined) return name;
-        }
+        // The one resolver every screen names people through; a call tile
+        // shows the name only.
+        const person = personForPeerTag(currentTagMap(), peerTag);
+        if (person !== null) return profiles.resolve(person).name;
         return pseudonym.length > 0 ? pseudonym.slice(0, 8) : "Peer";
       };
       if (initiator) {
@@ -1179,6 +1192,16 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       if (groupHandle() === null && activeGroupCall === null) setGroupSlot(null);
     }
   }
+
+  // A profile, a rename or an accepted contact landing while a group call is
+  // up re-names the tiles already on screen: the adapter replays each peer's
+  // (pseudonym, peer_tag) through `resolveDisplayName`, whose map above is
+  // keyed on the same version this effect tracks.
+  createEffect(() => {
+    profiles.version();
+    const h = groupHandle();
+    if (h !== null) untrack(() => h.refreshNames());
+  });
 
   /** SFU session lifecycle -> the group journal. */
   function onGroupSessionState(hex: string, state: SfuCallState): void {

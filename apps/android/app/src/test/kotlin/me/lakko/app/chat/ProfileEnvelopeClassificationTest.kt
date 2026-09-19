@@ -53,7 +53,8 @@ class ProfileEnvelopeClassificationTest {
         isTyping = null,
     )
 
-    private val decoded = FfiProfile(displayName = "Alice", username = "alice", updatedAtMs = 42uL)
+    private val decoded =
+        FfiProfile(displayName = "Alice", username = "alice", updatedAtMs = 42uL, accountId = null)
 
     private fun classify(
         payload: ByteArray,

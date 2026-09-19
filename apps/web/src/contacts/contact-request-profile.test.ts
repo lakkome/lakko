@@ -79,9 +79,23 @@ describe("contact request carries a profile", () => {
     const { request, aliceKey } = await roundTrip(async () =>
       wasm.composeProfileEnvelope("Alice Petrova", "alice", 1_234n),
     );
-    expect(request.profile).toEqual({ displayName: "Alice Petrova", username: "alice", updatedAtMs: 1_234n });
+    expect(request.profile).toEqual({
+      displayName: "Alice Petrova",
+      username: "alice",
+      updatedAtMs: 1_234n,
+      accountId: null,
+    });
     expect(Array.from(request.fromPubkey)).toEqual(Array.from(aliceKey));
     expect(request.intro).toBe("hi bob");
+  });
+
+  it("carries the sender's claimed account id when the envelope has one (ADR-0048 v2)", async () => {
+    const id = new Uint8Array(16).fill(0x5a);
+    const { request } = await roundTrip(async () =>
+      wasm.composeProfileEnvelope("Alice Petrova", "alice", 1_234n, id),
+    );
+    expect(request.profile?.accountId).toEqual(id);
+    expect(request.profile?.displayName).toBe("Alice Petrova");
   });
 
   it("without a profile the request still arrives, with none", async () => {

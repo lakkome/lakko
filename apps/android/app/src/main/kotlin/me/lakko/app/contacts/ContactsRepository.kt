@@ -306,7 +306,8 @@ public class ContactsRepository(
     /** This account's own profile in wire form, or `null` when none is stored. */
     private fun ownProfileForWire(accountId: ByteArray): uniffi.lakko_ffi_uniffi.FfiProfile? {
         val ctx = appCtx ?: return null
-        return me.lakko.app.profile.OwnProfileStore.load(ctx, accountId)?.toFfi()
+        // ADR-0048 v2 — states this account's id alongside the name.
+        return me.lakko.app.profile.OwnProfileStore.load(ctx, accountId)?.toFfi(accountId)
     }
 
     /**

@@ -51,7 +51,25 @@ public data class PeerProfile(
     val username: String?,
     /** Sender-clock stamp; the recency order key (ADR-0048 §1). */
     val updatedAtMs: ULong,
+    /**
+     * The sender's self-stated 16-byte auth account id as lowercase hex, or
+     * `null` (a profile that carried none, or a row stored before the field
+     * existed). What the group-call roster derives the ADR-0021 peer tag from
+     * (`me.lakko.app.calls.buildPeerTagLabels`); a claim, like the id on a
+     * contact acknowledgement, and defended the same way — two keys claiming
+     * one id hide the tag for both.
+     */
+    val accountIdHex: String? = null,
 )
+
+/** The auth account id length, bytes. */
+public const val ACCOUNT_ID_BYTES: Int = 16
+
+/** [PeerProfile.accountIdHex] for the raw id a decoded profile carried:
+ *  lowercase hex when it is exactly [ACCOUNT_ID_BYTES] long, else `null`. */
+public fun accountIdHexOrNull(accountId: ByteArray?): String? =
+    accountId?.takeIf { it.size == ACCOUNT_ID_BYTES }
+        ?.joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
 /** The roster / sender label for a person nothing is known about. */
 public const val PLACEHOLDER_MEMBER: String = "Member"

@@ -388,6 +388,23 @@ public final class CallUiState: ObservableObject {
         return UndecryptableMedia.notice(names: names)
     }
 
+    /// ADR-0021 / ADR-0048 — a participant's name resolved AFTER the roster
+    /// event that placed them: a profile that arrived mid-call (a newcomer's
+    /// own is answered within about thirty seconds of joining). An unknown id
+    /// or an unchanged name is a no-op, so re-applying every name on a
+    /// profile change publishes nothing for a roster that already agrees.
+    public func setParticipantName(_ id: String, _ name: String) {
+        guard participants.contains(where: { $0.id == id && $0.displayName != name }) else { return }
+        patch(id: id) { p in
+            Participant(
+                id: p.id, displayName: name, isLocal: p.isLocal,
+                micOn: p.micOn, camOn: p.camOn, handRaised: p.handRaised,
+                quality: p.quality, speaking: p.speaking,
+                screenSharing: p.screenSharing
+            )
+        }
+    }
+
     public func setQuality(_ id: String, _ tier: QualityTier) {
         patch(id: id) { p in
             Participant(

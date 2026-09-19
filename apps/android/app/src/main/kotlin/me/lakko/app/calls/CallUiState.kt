@@ -322,6 +322,13 @@ public class CallUiState(
         _participants.value = _participants.value + p
     }
 
+    /** Rename one tile (ADR-0021 / ADR-0048 — a peer resolved to a name after
+     *  it joined). No-op on an unknown id or an unchanged name. */
+    public fun setParticipantName(id: String, name: String) {
+        if (_participants.value.none { it.id == id && it.displayName != name }) return
+        patch(id) { it.copy(displayName = name) }
+    }
+
     public fun participantLeft(id: String) {
         _participants.value = _participants.value.filterNot { it.id == id }
         if (_pinnedId.value == id) _pinnedId.value = null

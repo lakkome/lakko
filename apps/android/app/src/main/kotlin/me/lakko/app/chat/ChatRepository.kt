@@ -3358,7 +3358,9 @@ public class ChatRepository(
      *  yet (nothing to publish). */
     private fun ownProfileForWire(): uniffi.lakko_ffi_uniffi.FfiProfile? {
         val accountId = keyPackageAccount.get()?.accountId ?: return null
-        return me.lakko.app.profile.OwnProfileStore.load(applicationContext, accountId)?.toFfi()
+        // ADR-0048 v2 — the profile states this account's id, so a member who
+        // is not a contact can still name this device's call tile (ADR-0021).
+        return me.lakko.app.profile.OwnProfileStore.load(applicationContext, accountId)?.toFfi(accountId)
     }
 
     /**
@@ -3543,6 +3545,9 @@ public class ChatRepository(
                     displayName = profile.displayName,
                     username = profile.username,
                     updatedAtMs = profile.updatedAtMs,
+                    // ADR-0048 v2 — the id the call roster derives the
+                    // ADR-0021 peer tag from; kept per person key.
+                    accountIdHex = me.lakko.app.profile.accountIdHexOrNull(profile.accountId),
                 ),
             )
         } catch (cause: Throwable) {

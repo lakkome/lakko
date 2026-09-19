@@ -17,11 +17,25 @@ public struct ProfileClaim: Codable, Equatable, Hashable, Sendable {
     public let username: String?
     /// Sender-clock UNIX milliseconds at which the profile was set.
     public let updatedAtMs: UInt64
+    /// The sender's 16-byte account id (profile envelope v2), or `nil` when
+    /// the envelope carried none. What lets a group-call tile be matched to
+    /// this person: the SFU's per-call `peer_tag` (ADR-0021) is derived over
+    /// the account id, never over the signature key. Like every other field it
+    /// is a claim; the sender can only mis-state its own tag, which then
+    /// matches nobody on the call.
+    public let accountId: Data?
 
-    public init(displayName: String?, username: String?, updatedAtMs: UInt64) {
+    public init(
+        displayName: String?,
+        username: String?,
+        updatedAtMs: UInt64,
+        accountId: Data? = nil
+    ) {
         self.displayName = displayName
         self.username = username
         self.updatedAtMs = updatedAtMs
+        // Only a whole 16-byte id is kept; anything else is no id at all.
+        self.accountId = accountId.flatMap { $0.count == 16 ? $0 : nil }
     }
 }
 
@@ -122,10 +136,41 @@ final class ReceivedProfileStore {
     func accept(_ claim: ProfileClaim, signatureKeyB64: String?) -> ProfileAcceptance {
         guard let accountIdB64 else { return .inactive }
         guard let key = signatureKeyB64, Self.isSignatureKey(key) else { return .noSender }
-        if let stored = profiles[key], !isNewer(claim.updatedAtMs, stored.updatedAtMs) {
-            return .notNewer
+        let stored = profiles[key]
+        if let stored, !isNewer(claim.updatedAtMs, stored.updatedAtMs) {
+            // The same profile sent again (a growth or request answer carries
+            // the stamp it was set at) is not newer, but it can carry an
+            // account id the held row never had: a row filed before the
+            // envelope carried one. Take the id and nothing else, or the call
+            // roster can never name a person whose profile predates the field.
+            guard stored.accountId == nil, let learned = claim.accountId,
+                claim.updatedAtMs == stored.updatedAtMs
+            else { return .notNewer }
+            profiles[key] = ProfileClaim(
+                displayName: stored.displayName,
+                username: stored.username,
+                updatedAtMs: stored.updatedAtMs,
+                accountId: learned
+            )
+            if let data = try? JSONEncoder().encode(profiles) {
+                persistence.save(data, accountIdB64: accountIdB64)
+            }
+            return .stored
         }
-        profiles[key] = claim
+        // A key belongs to one account for its whole life, so an account id
+        // once learned is not un-learned by a newer profile that omits it
+        // (a row written before the envelope carried one, or a carrier that
+        // did not fill it). The newer name and username still replace the old.
+        var next = claim
+        if next.accountId == nil, let known = stored?.accountId {
+            next = ProfileClaim(
+                displayName: claim.displayName,
+                username: claim.username,
+                updatedAtMs: claim.updatedAtMs,
+                accountId: known
+            )
+        }
+        profiles[key] = next
         if let data = try? JSONEncoder().encode(profiles) {
             persistence.save(data, accountIdB64: accountIdB64)
         }
@@ -135,6 +180,17 @@ final class ReceivedProfileStore {
     /// The stored profile for `signatureKeyB64`, if any.
     func profile(signatureKeyB64: String) -> ProfileClaim? {
         profiles[signatureKeyB64]
+    }
+
+    /// Every stored profile that names an account id, as
+    /// `(signature key, account id)` — the input a group-call roster needs to
+    /// re-derive each person's per-call `peer_tag`. Rows stored before the
+    /// envelope carried an id (or from a sender that sent none) are simply
+    /// absent here; they still resolve a name everywhere else.
+    func profilesWithAccountId() -> [(signatureKeyB64: String, accountId: Data)] {
+        profiles.compactMap { key, claim in
+            claim.accountId.map { (signatureKeyB64: key, accountId: $0) }
+        }
     }
 
     /// Drop the account's map from disk (forget-device) and from memory when

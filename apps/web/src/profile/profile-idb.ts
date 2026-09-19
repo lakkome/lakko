@@ -27,11 +27,12 @@
  * would lose to the profile name in exactly one place.
  */
 
-import type {
-  ProfileBackend,
-  ProfileRow,
-  StoredProfile,
-  StoredVerification,
+import {
+  ACCOUNT_ID_HEX_RE,
+  type ProfileBackend,
+  type ProfileRow,
+  type StoredProfile,
+  type StoredVerification,
 } from "./profile-store";
 
 const DB_NAME = "lakko-profiles";
@@ -47,8 +48,14 @@ export const PROFILE_ROW_VERSION = 1;
 export interface ProfileRowPayload {
   readonly v: 1;
   /** keyB64 -> profile. `t` is the decimal `updated_at_ms` (a `u64` does not
-   *  survive `JSON.parse` as a number). */
-  readonly p: Record<string, { readonly d: string | null; readonly u: string | null; readonly t: string }>;
+   *  survive `JSON.parse` as a number). `a` is the claimed account id as 32
+   *  lower-case hex characters, ABSENT when the profile carried none — rows
+   *  written before the field existed read the same way, so they need no
+   *  rewrite (the schema version stays 1: the field is additive). */
+  readonly p: Record<
+    string,
+    { readonly d: string | null; readonly u: string | null; readonly t: string; readonly a?: string }
+  >;
   /** `keyB64|username` -> verification. `s` is `verified` / `mismatch` /
    *  `error`, `c` the check time. */
   readonly vf: Record<string, { readonly s: string; readonly c: number }>;
@@ -61,9 +68,14 @@ const VERIFICATION_STATES: ReadonlySet<string> = new Set(["verified", "mismatch"
 
 /** Encode a row (plus the rename mirror) to the payload JSON. */
 export function encodeProfileRow(row: ProfileRow, renames: ReadonlyMap<string, string>): string {
-  const p: Record<string, { d: string | null; u: string | null; t: string }> = {};
+  const p: Record<string, { d: string | null; u: string | null; t: string; a?: string }> = {};
   for (const [key, prof] of row.profiles) {
-    p[key] = { d: prof.displayName, u: prof.username, t: prof.updatedAtMs.toString() };
+    p[key] = {
+      d: prof.displayName,
+      u: prof.username,
+      t: prof.updatedAtMs.toString(),
+      ...(prof.accountIdHex === null ? {} : { a: prof.accountIdHex }),
+    };
   }
   const vf: Record<string, { s: string; c: number }> = {};
   for (const [key, v] of row.verifications) {
@@ -99,7 +111,11 @@ export function decodeProfileRow(json: string): ProfileRow | null {
       if (d !== null && typeof d !== "string") continue;
       if (u !== null && typeof u !== "string") continue;
       if (typeof t !== "string" || !/^\d+$/.test(t)) continue;
-      profiles.set(key, { displayName: d, username: u, updatedAtMs: BigInt(t) });
+      // A malformed `a` drops the FIELD, not the profile: the name is still
+      // good, only the tag derivation has nothing to work from.
+      const a = (raw as { a?: unknown }).a;
+      const accountIdHex = typeof a === "string" && ACCOUNT_ID_HEX_RE.test(a) ? a : null;
+      profiles.set(key, { displayName: d, username: u, updatedAtMs: BigInt(t), accountIdHex });
     }
   }
   const verifications = new Map<string, StoredVerification>();

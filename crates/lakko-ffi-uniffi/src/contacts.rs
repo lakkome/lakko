@@ -495,6 +495,10 @@ pub struct FfiProfile {
     pub username: Option<String>,
     /// Sender-clock UNIX milliseconds at which the profile was set.
     pub updated_at_ms: u64,
+    /// The sender's 16-byte auth account id, or `None`. On compose, exactly
+    /// 16 bytes or absent; anything else is refused. On receipt, the value
+    /// the call roster derives the ADR-0021 peer tag from (ADR-0048 v2).
+    pub account_id: Option<Vec<u8>>,
 }
 
 impl From<RustProfile> for FfiProfile {
@@ -503,6 +507,7 @@ impl From<RustProfile> for FfiProfile {
             display_name: p.display_name,
             username: p.username,
             updated_at_ms: p.updated_at_ms,
+            account_id: p.account_id.map(|id| id.to_vec()),
         }
     }
 }
@@ -520,10 +525,20 @@ fn prepare_profile(p: FfiProfile) -> Result<RustProfile, FfiError> {
         Some(u) if !u.is_empty() => Some(lakko_discovery_client::validate_username(&u)?),
         _ => None,
     };
+    let account_id = match p.account_id {
+        None => None,
+        Some(bytes) => Some(<[u8; 16]>::try_from(bytes.as_slice()).map_err(|_| {
+            FfiError::Contacts(format!(
+                "profile account id must be 16 bytes, got {}",
+                bytes.len()
+            ))
+        })?),
+    };
     Ok(RustProfile {
         display_name,
         username,
         updated_at_ms: p.updated_at_ms,
+        account_id,
     })
 }
 
@@ -3557,6 +3572,7 @@ mod tests {
             display_name: Some("  Alice Petrova ".to_string()),
             username: Some("@Alice".to_string()),
             updated_at_ms: 1_700_000_000_000,
+            account_id: None,
         }
     }
 
@@ -3565,6 +3581,7 @@ mod tests {
             display_name: Some("Alice Petrova".to_string()),
             username: Some("alice".to_string()),
             updated_at_ms: 1_700_000_000_000,
+            account_id: None,
         }
     }
 
@@ -3584,6 +3601,7 @@ mod tests {
             display_name: Some("   ".to_string()),
             username: Some(String::new()),
             updated_at_ms: 1,
+            account_id: None,
         })
         .expect("compose blank");
         let decoded = decode_profile_envelope(blank).expect("decode blank");

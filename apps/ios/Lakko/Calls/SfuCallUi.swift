@@ -369,7 +369,10 @@ final class SfuCallUi {
     }
 
     /// Stable roster id for a remote peer.
-    private static func participantId(forPeer peerId: String) -> String {
+    /// The roster participant id for an SFU peer. Internal (not private) so
+    /// ``GroupCallNameResolver`` can re-label the same tile later without a
+    /// second copy of the convention.
+    static func participantId(forPeer peerId: String) -> String {
         "peer-\(peerId)"
     }
 

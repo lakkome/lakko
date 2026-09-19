@@ -29,6 +29,11 @@ export interface ReceivedProfile {
   readonly displayName: string | null;
   readonly username: string | null;
   readonly updatedAtMs: bigint;
+  /** The sender's 16-byte auth account id (ADR-0048 v2), or `null` when the
+   *  envelope carried none. The sender's CLAIM, like the name: it is what the
+   *  call roster derives the ADR-0021 peer tag from, and nothing else. Copied
+   *  out of the wasm handle, so it outlives `free()`. */
+  readonly accountId: Uint8Array | null;
 }
 
 export type ProfileSniff =
@@ -42,6 +47,7 @@ export interface ProfileDecoder {
     readonly displayName: string | undefined;
     readonly username: string | undefined;
     readonly updatedAtMs: bigint;
+    readonly accountId?: Uint8Array | undefined;
     free?(): void;
   };
 }
@@ -71,6 +77,7 @@ export function sniffProfile(decoder: ProfileDecoder, bytes: Uint8Array): Profil
     displayName: decoded.displayName ?? null,
     username: decoded.username ?? null,
     updatedAtMs: decoded.updatedAtMs,
+    accountId: decoded.accountId === undefined ? null : decoded.accountId.slice(),
   };
   try {
     decoded.free?.();

@@ -46,7 +46,9 @@ authenticated signature key and show a username only after verifying it through 
 ### 1. The envelope (`lakko-contacts::profile`)
 
 `domain "lakko/profile/v1\0" ‖ version(1) ‖ updated_at_ms(8 BE) ‖ name_len(1) ‖ name ‖
-username_len(1) ‖ username`, bounded and fail-closed like its siblings:
+username_len(1) ‖ username ‖ account_id_len(1) ‖ account_id`, bounded and fail-closed like its
+siblings (version `0x02` since 2026-09-19; `0x01`, which had no account id, is refused —
+nothing was deployed):
 
 - `display_name`: UTF-8, at most 64 characters and 255 bytes (the one-byte length field),
   trimmed, no line breaks, no control characters, and no format characters **except** ZERO
@@ -57,6 +59,17 @@ username_len(1) ‖ username`, bounded and fail-closed like its siblings:
   Empty = no name.
 - `username`: empty or the normalised form (`lakko_discovery_client::normalize_username`),
   at most 64 bytes.
+- `account_id` (added 2026-09-19): the sender's 16-byte auth account id, or absent (length
+  byte 0; any other length is refused). It exists for one consumer: the group-call roster.
+  The SFU names a participant by the ADR-0021 per-call peer tag, derived from the account
+  id, and a client can compute that tag only for people whose account id it holds; until
+  this field existed that was its accepted contacts, so every other member's tile showed a
+  pseudonym while the members panel showed a name. Like every field it is the sender's
+  claim: a receiver keys nothing security-relevant on it, stores it under the sender's
+  account key resolved at receipt (C-68), and uses it only to label a tile. Members of an
+  E2EE group already see each other's account public keys, which are equally linkable, so
+  this widens nothing toward the server (which never sees the envelope) and little toward
+  members.
 - An envelope violating a bound is **rejected as a whole** (unlike attachment metadata, a
   profile has no "rest" worth keeping).
 - `IncomingEnvelope::Profile` so it is never rendered as a chat bubble; a fuzz target.

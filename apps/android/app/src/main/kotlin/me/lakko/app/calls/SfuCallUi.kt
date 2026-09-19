@@ -259,8 +259,11 @@ class SfuCallUi(
         session.publishVideo()
     }
 
-    private companion object {
-        fun participantId(peerId: String): String = "peer-$peerId"
+    internal companion object {
+        /** The roster id of a remote peer (`peer-<peerId>`); the MSID stream
+         *  id == the source peer id per the SFU contract. Internal so the
+         *  host's name resolver can address the same tile. */
+        internal fun participantId(peerId: String): String = "peer-$peerId"
 
         fun localParticipant(
             name: String,

@@ -1080,6 +1080,7 @@ public class ContactsClient(
                                     displayName = p.displayName,
                                     username = p.username,
                                     updatedAtMs = p.updatedAtMs,
+                                    accountIdHex = me.lakko.app.profile.accountIdHexOrNull(p.accountId),
                                 )
                             }
                             // UTF-8 decode with replacement-on-

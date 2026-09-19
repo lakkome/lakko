@@ -367,14 +367,21 @@ final class ProfileNamesTests: XCTestCase {
     }
 
     func testAProfileEnvelopeIsClassifiedWithTheResolvedSenderNeverAsChat() throws {
+        // Envelope v2 — the sender's account id rides along and is kept on
+        // the claim (what a group-call tile is matched on, ADR-0021).
+        let accountId = Data(repeating: 0xAC, count: 16)
         let bytes = try composeProfileEnvelope(
-            profile: FfiProfile(displayName: "Alice Petrova", username: "alice", updatedAtMs: 42))
+            profile: FfiProfile(
+                displayName: "Alice Petrova", username: "alice", updatedAtMs: 42, accountId: accountId))
         let event = classify(bytes)
         guard case .profile(let messageId, let profile, let senderKey, _) = event else {
             return XCTFail("a profile envelope must classify as .profile, got \(event)")
         }
         XCTAssertEqual(messageId, 9)
-        XCTAssertEqual(profile, ProfileClaim(displayName: "Alice Petrova", username: "alice", updatedAtMs: 42))
+        XCTAssertEqual(
+            profile,
+            ProfileClaim(
+                displayName: "Alice Petrova", username: "alice", updatedAtMs: 42, accountId: accountId))
         XCTAssertEqual(senderKey, "member-3", "bound to the identity the sender leaf names at receipt")
         guard case .profile(_, _, .none, _) = classify(bytes, senderLeaf: nil) else {
             return XCTFail("an unattributable profile still never becomes a bubble")
@@ -383,7 +390,7 @@ final class ProfileNamesTests: XCTestCase {
 
     func testWithoutTheArmTheProfileWouldRenderAsText() throws {
         let bytes = try composeProfileEnvelope(
-            profile: FfiProfile(displayName: "Alice", username: nil, updatedAtMs: 1))
+            profile: FfiProfile(displayName: "Alice", username: nil, updatedAtMs: 1, accountId: nil))
         let parsed = parseBodyEnvelope(bytes: bytes)
         XCTAssertEqual(parsed.kind, .chat, "the legacy fallback degrades it to a chat body")
         XCTAssertTrue(parsed.text.contains("lakko/profile/v1"))

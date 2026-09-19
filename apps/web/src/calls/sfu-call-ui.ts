@@ -109,6 +109,12 @@ export interface SfuCallUiHandle {
    *  every attached SFrame transform retains its previous key for the overlap
    *  window so in-flight frames still open, then drops it. No-op if unchanged. */
   rekey(newSeed: Uint8Array): void;
+  /** Re-run `resolveDisplayName` for every remote peer in the roster and
+   *  patch the tiles whose name changed. The caller runs it when what the
+   *  resolver reads has changed — a profile carrying an account id landing
+   *  after the call started (ADR-0048 v2), a rename — so a tile that joined
+   *  as a pseudonym is not stuck with it for the call's lifetime. */
+  refreshNames(): void;
 }
 
 const PEER_PREFIX = "peer-";
@@ -160,6 +166,11 @@ export function createSfuCallUi(
   // `callActions.setParticipantCamera` calls already run on — no new
   // concurrency; the whole handle (and this map) is discarded on `hangUp`.
   const lastKnownCameraOn = new Map<string, boolean>();
+
+  // The naming inputs of every remote peer in the roster, keyed by the
+  // roster tile id. `refreshNames` replays them through the resolver; the
+  // store's `Participant` deliberately carries neither.
+  const namingInputs = new Map<string, { pseudonym: string; peerTag: string | undefined }>();
 
   const localName = options.localDisplayName ?? "You";
   const nameOf = (
@@ -257,17 +268,23 @@ export function createSfuCallUi(
       options.onSessionStateChange?.(state);
     },
     onWelcome: (selfPeerId, roster): void => {
+      namingInputs.clear();
       const remotes = roster
         .filter((p: SfuPeerSnapshot) => p.peer_id !== selfPeerId)
-        .map((p: SfuPeerSnapshot) =>
-          remoteParticipant(
+        .map((p: SfuPeerSnapshot) => {
+          namingInputs.set(peerParticipantId(p.peer_id), {
+            pseudonym: p.account_pseudonym,
+            peerTag: p.peer_tag,
+          });
+          return remoteParticipant(
             nameOf(p.peer_id, p.account_pseudonym, p.peer_tag),
             p.peer_id,
-          ),
-        );
+          );
+        });
       callActions.setParticipants([localParticipant(), ...remotes]);
     },
     onPeerJoined: (peerId, accountPseudonym, peerTag): void => {
+      namingInputs.set(peerParticipantId(peerId), { pseudonym: accountPseudonym, peerTag });
       callActions.participantJoined(
         remoteParticipant(nameOf(peerId, accountPseudonym, peerTag), peerId),
       );
@@ -277,6 +294,7 @@ export function createSfuCallUi(
       // Forget the departed peer's sticky camera state so a later rejoin under
       // the same id starts from a clean slate (join-race guard).
       lastKnownCameraOn.delete(id);
+      namingInputs.delete(id);
       callActions.participantLeft(id);
     },
     onRemoteTrack: (rt): void => {
@@ -311,6 +329,7 @@ export function createSfuCallUi(
     connect: (): Promise<void> => session.connect(),
     hangUp: (): void => {
       session.hangUp();
+      namingInputs.clear();
       setRemoteStreams(new Map());
       setLocalStream(null);
       setVideoPublishState("off");
@@ -328,5 +347,13 @@ export function createSfuCallUi(
     switchVideoInput: (deviceId): Promise<void> =>
       session.switchVideoInput(deviceId),
     rekey: (newSeed): void => session.rekey(newSeed),
+    refreshNames: (): void => {
+      for (const [id, inputs] of namingInputs) {
+        callActions.setParticipantName(
+          id,
+          nameOf(id.slice(PEER_PREFIX.length), inputs.pseudonym, inputs.peerTag),
+        );
+      }
+    },
   };
 }

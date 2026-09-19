@@ -80,18 +80,47 @@ public class PeerProfileStore(
     /** Every held profile (a snapshot). */
     public fun all(): Map<String, PeerProfile> = synchronized(lock) { profiles }
 
+    /** Signature key -> account id hex, for every held profile that has one
+     *  (the ADR-0021 call-roster sources). */
+    public fun accountIdsByKey(): Map<String, String> = synchronized(lock) {
+        profiles.mapNotNull { (key, p) -> p.accountIdHex?.let { key to it } }.toMap()
+    }
+
     /**
      * Offer a received [profile] from [signatureKeyB64]. Stores it only when
      * nothing is held or it is strictly newer than what is.
+     *
+     * A newer profile that carries no account id keeps the id already held for
+     * the key: the id names the account, which a rename does not change, and
+     * dropping it would take the person's name off their call tile.
      */
     public fun offer(signatureKeyB64: String?, profile: PeerProfile): ProfileOffer {
         if (signatureKeyB64.isNullOrEmpty()) return ProfileOffer.UNATTRIBUTED
         synchronized(lock) {
             val held = profiles[signatureKeyB64]
             if (held != null && !isNewer(profile.updatedAtMs, held.updatedAtMs)) {
-                return ProfileOffer.NOT_NEWER
+                // The same profile sent again (a growth or request answer
+                // carries the stamp it was set at) is not newer, but it can
+                // carry an account id the held row never had: a row filed
+                // before the envelope carried one. Take the id and nothing
+                // else, or the call roster can never name a person whose
+                // profile predates the field.
+                val learned = profile.accountIdHex
+                if (held.accountIdHex != null || learned == null ||
+                    held.updatedAtMs != profile.updatedAtMs
+                ) {
+                    return ProfileOffer.NOT_NEWER
+                }
+                profiles = profiles + (signatureKeyB64 to held.copy(accountIdHex = learned))
+                persistence.saveProfiles(profiles)
+                return ProfileOffer.STORED
             }
-            profiles = profiles + (signatureKeyB64 to profile)
+            val merged = if (profile.accountIdHex == null && held?.accountIdHex != null) {
+                profile.copy(accountIdHex = held.accountIdHex)
+            } else {
+                profile
+            }
+            profiles = profiles + (signatureKeyB64 to merged)
             persistence.saveProfiles(profiles)
             return ProfileOffer.STORED
         }

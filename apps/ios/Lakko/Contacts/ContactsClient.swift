@@ -884,7 +884,10 @@ public final class ContactsClient {
                         ProfileClaim(
                             displayName: $0.displayName,
                             username: $0.username,
-                            updatedAtMs: $0.updatedAtMs
+                            updatedAtMs: $0.updatedAtMs,
+                            // Envelope v2 — the requester's account id, or
+                            // `nil` when it sent none (ADR-0021 tile match).
+                            accountId: $0.accountId
                         )
                     }
                 } catch {

@@ -144,6 +144,17 @@ pub const PROFILE_ENVELOPE_DOMAIN_V1: &[u8] = b"lakko/profile/v1\x00";
 /// accepted value.
 pub const PROFILE_VERSION_V1: u8 = 0x01;
 
+/// Schema version carried in the first payload byte. v2 (2026-09-19)
+/// appended the optional account id after the username; v1 is refused
+/// (`UnknownVersion`), since nothing was deployed and a v1 envelope
+/// cannot name an account for the call roster.
+pub const PROFILE_VERSION_V2: u8 = 0x02;
+
+/// Length of the account id the envelope may carry: the 16-byte auth
+/// account id, the value the SFU's per-call peer tag is derived from
+/// (ADR-0021), so a call tile can be matched to this profile.
+pub const ACCOUNT_ID_LEN: usize = 16;
+
 /// Longest admissible display name, in Unicode scalar values (not grapheme
 /// clusters — a flag or a skin-toned emoji counts as more than one).
 pub const DISPLAY_NAME_MAX_CHARS: usize = 64;
@@ -155,14 +166,14 @@ pub const DISPLAY_NAME_MAX_BYTES: usize = u8::MAX as usize;
 
 /// Bytes after the separator that every envelope carries: version,
 /// `updated_at_ms`, `name_len`, `username_len`.
-const FIXED_PAYLOAD_LEN: usize = 1 + 8 + 1 + 1;
+const FIXED_PAYLOAD_LEN: usize = 1 + 8 + 1 + 1 + 1;
 
 /// Shortest well-formed envelope: no name, no username.
 pub const PROFILE_ENVELOPE_MIN_LEN: usize = PROFILE_ENVELOPE_DOMAIN_V1.len() + FIXED_PAYLOAD_LEN;
 
 /// Longest well-formed envelope: a maximal name and a maximal username.
 pub const PROFILE_ENVELOPE_MAX_LEN: usize =
-    PROFILE_ENVELOPE_MIN_LEN + DISPLAY_NAME_MAX_BYTES + USERNAME_MAX_LEN;
+    PROFILE_ENVELOPE_MIN_LEN + DISPLAY_NAME_MAX_BYTES + USERNAME_MAX_LEN + ACCOUNT_ID_LEN;
 
 /// Unicode general category `Cf` (format), as inclusive code-point ranges.
 ///
@@ -232,6 +243,14 @@ pub struct Profile {
     /// Sender-clock UNIX milliseconds at which this profile was set. Orders
     /// profiles from the same sender via [`profile_is_newer`].
     pub updated_at_ms: u64,
+    /// The sender's auth account id (16 bytes), the value a per-call peer
+    /// tag is derived from (ADR-0021): what lets a call tile be matched to
+    /// a group member who is not a contact. Like every other field it is
+    /// the sender's claim; a receiver keys nothing security-relevant on it
+    /// and stores it under the sender's account key resolved at receipt
+    /// (C-68). `None` when the sender did not say (a guest, or a device
+    /// that has no account id at hand).
+    pub account_id: Option<[u8; ACCOUNT_ID_LEN]>,
 }
 
 impl Profile {
@@ -435,12 +454,19 @@ pub fn compose_profile(profile: &Profile) -> CoreResult<Vec<u8>, ProfileError> {
 
     let mut out = Vec::with_capacity(PROFILE_ENVELOPE_MIN_LEN + name.len() + username.len());
     out.extend_from_slice(PROFILE_ENVELOPE_DOMAIN_V1);
-    out.push(PROFILE_VERSION_V1);
+    out.push(PROFILE_VERSION_V2);
     out.extend_from_slice(&profile.updated_at_ms.to_be_bytes());
     out.push(name_len);
     out.extend_from_slice(name);
     out.push(username_len);
     out.extend_from_slice(username);
+    match &profile.account_id {
+        Some(id) => {
+            out.push(u8::try_from(ACCOUNT_ID_LEN).unwrap_or(u8::MAX));
+            out.extend_from_slice(id);
+        },
+        None => out.push(0),
+    }
     Ok(out)
 }
 
@@ -467,7 +493,7 @@ pub fn try_unwrap_profile(plaintext: &[u8]) -> CoreResult<Option<Profile>, Profi
     let mut cur = payload;
 
     let version = take_u8(&mut cur)?;
-    if version != PROFILE_VERSION_V1 {
+    if version != PROFILE_VERSION_V2 {
         return Err(ProfileError::UnknownVersion(version));
     }
     let updated_at_bytes: [u8; 8] = take(&mut cur, 8)?
@@ -479,6 +505,17 @@ pub fn try_unwrap_profile(plaintext: &[u8]) -> CoreResult<Option<Profile>, Profi
     let name_bytes = take(&mut cur, name_len)?;
     let username_len = usize::from(take_u8(&mut cur)?);
     let username_bytes = take(&mut cur, username_len)?;
+    let account_id_len = usize::from(take_u8(&mut cur)?);
+    let account_id = match account_id_len {
+        0 => None,
+        ACCOUNT_ID_LEN => {
+            let bytes: [u8; ACCOUNT_ID_LEN] = take(&mut cur, ACCOUNT_ID_LEN)?
+                .try_into()
+                .map_err(|_| ProfileError::Truncated)?;
+            Some(bytes)
+        },
+        got => return Err(ProfileError::AccountIdLength { got }),
+    };
     if !cur.is_empty() {
         return Err(ProfileError::TrailingBytes { count: cur.len() });
     }
@@ -503,6 +540,7 @@ pub fn try_unwrap_profile(plaintext: &[u8]) -> CoreResult<Option<Profile>, Profi
         display_name,
         username,
         updated_at_ms,
+        account_id,
     };
     profile.validate()?;
     Ok(Some(profile))
@@ -544,6 +582,12 @@ pub enum ProfileError {
     /// The username is not canonical.
     #[error("invalid username: {0}")]
     Username(UsernameError),
+    /// The account id length byte is neither 0 nor 16.
+    #[error("profile account id is {got} bytes, expected 0 or 16")]
+    AccountIdLength {
+        /// The length byte as read.
+        got: usize,
+    },
 }
 
 impl ProfileError {
@@ -560,6 +604,7 @@ impl ProfileError {
             Self::UnknownVersion(_) => "unknownVersion".to_string(),
             Self::DisplayName(e) => format!("displayName.{}", e.code()),
             Self::Username(e) => format!("username.{}", e.code()),
+            Self::AccountIdLength { .. } => "accountId.length".to_string(),
         }
     }
 }
@@ -592,6 +637,7 @@ mod tests {
             display_name: name.map(str::to_string),
             username: username.map(str::to_string),
             updated_at_ms: at,
+            account_id: None,
         }
     }
 
@@ -605,6 +651,8 @@ mod tests {
         out.extend_from_slice(name);
         out.push(u8::try_from(username.len()).unwrap());
         out.extend_from_slice(username);
+        // v2: no account id.
+        out.push(0);
         out
     }
 
@@ -631,18 +679,23 @@ mod tests {
         let sep = PROFILE_ENVELOPE_DOMAIN_V1.len();
         assert_eq!(sep, 17);
         assert_eq!(&wire[..sep], b"lakko/profile/v1\x00");
-        assert_eq!(wire[sep], PROFILE_VERSION_V1);
+        assert_eq!(wire[sep], PROFILE_VERSION_V2);
         assert_eq!(&wire[sep + 1..sep + 9], &[1, 2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(wire[sep + 9], 2);
         assert_eq!(&wire[sep + 10..sep + 12], b"Al");
         assert_eq!(wire[sep + 12], 3);
-        assert_eq!(&wire[sep + 13..], b"abc");
+        assert_eq!(&wire[sep + 13..sep + 16], b"abc");
+        assert_eq!(
+            &wire[sep + 16..],
+            &[0],
+            "no account id: one zero length byte"
+        );
     }
 
     #[test]
     fn envelope_length_bounds_are_the_documented_construction() {
-        assert_eq!(PROFILE_ENVELOPE_MIN_LEN, 28);
-        assert_eq!(PROFILE_ENVELOPE_MAX_LEN, 28 + 255 + 32);
+        assert_eq!(PROFILE_ENVELOPE_MIN_LEN, 29);
+        assert_eq!(PROFILE_ENVELOPE_MAX_LEN, 29 + 255 + 32 + 16);
         let empty = compose_profile(&profile(None, None, 0)).unwrap();
         assert_eq!(empty.len(), PROFILE_ENVELOPE_MIN_LEN);
         // A maximal envelope: 255 bytes of name in exactly 64 chars (63
@@ -650,7 +703,9 @@ mod tests {
         let name = format!("{}\u{20AC}", "\u{1F600}".repeat(63));
         assert_eq!(name.len(), 255);
         assert_eq!(name.chars().count(), DISPLAY_NAME_MAX_CHARS);
-        let max = compose_profile(&profile(Some(&name), Some(&"a".repeat(32)), 0)).unwrap();
+        let mut maximal = profile(Some(&name), Some(&"a".repeat(32)), 0);
+        maximal.account_id = Some([7; ACCOUNT_ID_LEN]);
+        let max = compose_profile(&maximal).unwrap();
         assert_eq!(max.len(), PROFILE_ENVELOPE_MAX_LEN);
     }
 
@@ -695,7 +750,7 @@ mod tests {
 
     #[test]
     fn unknown_versions_are_refused() {
-        for v in [0x00, 0x02, 0xFF] {
+        for v in [0x00, 0x01, 0xFF] {
             assert_eq!(
                 decode_profile(&raw(v, 0, b"", b"")),
                 Err(ProfileError::UnknownVersion(v))
@@ -706,11 +761,11 @@ mod tests {
     #[test]
     fn non_utf8_fields_are_refused() {
         assert_eq!(
-            decode_profile(&raw(1, 0, &[0xFF, 0xFE], b"")),
+            decode_profile(&raw(2, 0, &[0xFF, 0xFE], b"")),
             Err(ProfileError::DisplayName(DisplayNameError::NotUtf8))
         );
         assert_eq!(
-            decode_profile(&raw(1, 0, b"", &[0xC3, 0x28, 0x61])),
+            decode_profile(&raw(2, 0, b"", &[0xC3, 0x28, 0x61])),
             Err(ProfileError::Username(UsernameError::InvalidCharacters))
         );
     }
@@ -719,13 +774,13 @@ mod tests {
     fn an_out_of_bounds_field_rejects_the_whole_envelope() {
         // A perfectly good username does not rescue a bad name, and vice versa.
         assert_eq!(
-            decode_profile(&raw(1, 0, "Alice\u{202E}".as_bytes(), b"alice")),
+            decode_profile(&raw(2, 0, "Alice\u{202E}".as_bytes(), b"alice")),
             Err(ProfileError::DisplayName(
                 DisplayNameError::ControlOrFormatCharacter
             ))
         );
         assert_eq!(
-            decode_profile(&raw(1, 0, b"Pavel", "p\u{430}vel".as_bytes())),
+            decode_profile(&raw(2, 0, b"Pavel", "p\u{430}vel".as_bytes())),
             Err(ProfileError::Username(UsernameError::InvalidCharacters))
         );
     }
@@ -754,7 +809,7 @@ mod tests {
             );
             let compose_err = compose_profile(&p).unwrap_err();
             let decode_err =
-                decode_profile(&raw(1, 0, name.as_bytes(), username.as_bytes())).unwrap_err();
+                decode_profile(&raw(2, 0, name.as_bytes(), username.as_bytes())).unwrap_err();
             assert_eq!(compose_err, decode_err, "{name:?} / {username:?}");
         }
         // 65 chars cannot even be hand-built past the u8 length on some
@@ -762,7 +817,7 @@ mod tests {
         let long = "a".repeat(DISPLAY_NAME_MAX_CHARS + 1);
         assert_eq!(
             compose_profile(&profile(Some(&long), None, 0)),
-            decode_profile(&raw(1, 0, long.as_bytes(), b"")).map(|_| Vec::new()),
+            decode_profile(&raw(2, 0, long.as_bytes(), b"")).map(|_| Vec::new()),
         );
     }
 
@@ -901,13 +956,53 @@ mod tests {
     fn error_messages_never_echo_the_name() {
         let err = check_display_name("Secret\u{202E}Name").unwrap_err();
         assert!(!err.to_string().contains("Secret"));
-        let err = decode_profile(&raw(1, 0, "Secret\u{202E}".as_bytes(), b"")).unwrap_err();
+        let err = decode_profile(&raw(2, 0, "Secret\u{202E}".as_bytes(), b"")).unwrap_err();
         assert!(!err.to_string().contains("Secret"));
         assert!(!format!("{err:?}").contains("Secret"));
     }
 
     #[test]
+    fn account_id_round_trips_and_a_bad_length_is_refused() {
+        let mut p = profile(Some("Alice"), Some("alice"), 7);
+        p.account_id = Some([0xAB; ACCOUNT_ID_LEN]);
+        let wire = compose_profile(&p).unwrap();
+        assert_eq!(wire.len(), 29 + 5 + 5 + 16);
+        assert_eq!(decode_profile(&wire).unwrap(), p);
+        // No account id: a single zero length byte, nothing after it.
+        let bare = compose_profile(&profile(None, None, 1)).unwrap();
+        assert_eq!(bare.len(), PROFILE_ENVELOPE_MIN_LEN);
+        assert_eq!(decode_profile(&bare).unwrap().account_id, None);
+        // A length byte that is neither 0 nor 16 is refused as a whole.
+        let mut odd = bare.clone();
+        *odd.last_mut().unwrap() = 4;
+        odd.extend_from_slice(&[1, 2, 3, 4]);
+        assert_eq!(
+            decode_profile(&odd),
+            Err(ProfileError::AccountIdLength { got: 4 })
+        );
+        // Claims 16 bytes, carries fewer: truncated.
+        let mut short = bare.clone();
+        *short.last_mut().unwrap() = 16;
+        short.extend_from_slice(&[0; 8]);
+        assert_eq!(decode_profile(&short), Err(ProfileError::Truncated));
+    }
+
+    #[test]
+    fn a_v1_envelope_is_refused_as_unknown_version() {
+        let mut wire = compose_profile(&profile(Some("Alice"), None, 1)).unwrap();
+        wire[PROFILE_ENVELOPE_DOMAIN_V1.len()] = PROFILE_VERSION_V1;
+        assert_eq!(
+            decode_profile(&wire),
+            Err(ProfileError::UnknownVersion(0x01))
+        );
+    }
+
+    #[test]
     fn error_codes_are_frozen() {
+        assert_eq!(
+            ProfileError::AccountIdLength { got: 3 }.code(),
+            "accountId.length"
+        );
         assert_eq!(ProfileError::WrongDomain.code(), "wrongDomain");
         assert_eq!(ProfileError::Truncated.code(), "truncated");
         assert_eq!(

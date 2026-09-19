@@ -9,13 +9,16 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.contacts.AcceptedContactsStore
 import uniffi.lakko_ffi_uniffi.FfiCallEndReason
@@ -281,6 +284,8 @@ internal class ChatRepositoryGroupCallPort(
         repository.publishGroupCallSignal(groupIdHex, body)
 
     override fun createSession(request: GroupCallSessionRequest, ui: CallUiState): GroupCallSessionHandle {
+        val profileNames = me.lakko.app.profile.ProfileDirectory.get(applicationContext)
+        val names = peerDisplayNameResolver(request.callIdHex, profileNames)
         val sfu = SfuCallUi(
             applicationContext = applicationContext,
             config = SfuCallSession.Config(
@@ -293,15 +298,31 @@ internal class ChatRepositoryGroupCallPort(
             ),
             scope = scope,
             ui = ui,
-            resolveDisplayName = peerDisplayNameResolver(request.callIdHex),
+            resolveDisplayName = names::resolve,
         )
+        // A profile that arrives during the call (the newcomer's introduce-
+        // yourself request is answered within about half a minute) bumps the
+        // directory's version; rename the tiles already on screen rather than
+        // leave them `Participant N` until the next roster event. Cancelled on
+        // hang-up, which every end path reaches through the host's release.
+        val renames = scope.launch {
+            profileNames.version.drop(1).collect {
+                when (sfu.session.state) {
+                    SfuCallSession.State.FAILED, SfuCallSession.State.CLOSED -> cancel()
+                    else -> names.reapply(ui, SfuCallUi::participantId)
+                }
+            }
+        }
         return object : GroupCallSessionHandle {
             override val failed: Boolean
                 get() = sfu.session.state == SfuCallSession.State.FAILED
 
             override suspend fun connect() = sfu.connect()
 
-            override fun hangUp() = sfu.hangUp()
+            override fun hangUp() {
+                renames.cancel()
+                sfu.hangUp()
+            }
 
             override fun rekey(seed: ByteArray) = sfu.rekey(seed)
 
@@ -315,52 +336,44 @@ internal class ChatRepositoryGroupCallPort(
     }
 
     /**
-     * ADR-0021 — the per-call peer_tag -> contact label map, computed once over
-     * the persisted accepted contacts, so the SFU roster resolves to the
-     * identifier the rest of the app shows. The tag is re-derived locally (the
-     * SFU never sends a name); a collision falls back to the pseudonym.
+     * ADR-0021 — the per-call peer_tag -> label resolver over BOTH sources of
+     * an account id: the persisted accepted contacts and every stored profile
+     * that carried one (ADR-0048 v2), so a group member who is not a contact
+     * still gets a name on their tile. The tag is re-derived locally (the SFU
+     * never sends a name); the label is the one resolver's primary (rename,
+     * profile name, verified `@username`); two keys behind one tag hide it and
+     * the tile reads `Participant N` — see [buildPeerTagLabels].
+     *
+     * Not frozen at call start: the map is rebuilt whenever the directory's
+     * version moves (a profile received mid-call), read on every roster event
+     * and by the host's reapply collector.
      */
-    private fun peerDisplayNameResolver(callIdHex: String): (String, String, String) -> String {
-        val profileNames = me.lakko.app.profile.ProfileDirectory.get(applicationContext)
-        val tagToLabel = HashMap<String, String>()
-        val collidedTags = HashSet<String>()
-        for (contact in AcceptedContactsStore.load(applicationContext)) {
-            // A contact accepted before the acknowledgement carried an account
-            // id has none, and is skipped here — so no tag is ever computed for
-            // them and every lookup below misses. That is not a code defect the
-            // next build fixes: the id would have arrived on the ack, which sits
-            // behind an inbox cursor that has long since moved past it, so an
-            // affected contact does not heal on its own.
-            val accountId = contact.request.fromAccountId ?: continue
-            val accountIdHex = accountId.joinToString("") { "%02x".format(it.toInt() and 0xff) }
-            val tag = sfuPeerTag(callId = callIdHex, accountId = accountIdHex)
-            if (tagToLabel.containsKey(tag)) {
-                collidedTags.add(tag)
-            } else {
-                // ADR-0048 — the one resolver (rename, profile name, verified
-                // @username, fingerprint).
-                tagToLabel[tag] = profileNames.resolve(contact.request.fromPubkey).primary
+    private fun peerDisplayNameResolver(
+        callIdHex: String,
+        profileNames: me.lakko.app.profile.ProfileDirectory,
+    ): GroupCallNameResolver = GroupCallNameResolver(
+        sourcesVersion = { profileNames.version.value },
+        sources = {
+            val fromContacts = AcceptedContactsStore.load(applicationContext).mapNotNull { contact ->
+                // A contact accepted before the acknowledgement carried an
+                // account id has none here; their profile, if one was received,
+                // is the other way their tile gets a name.
+                val accountId = contact.request.fromAccountId ?: return@mapNotNull null
+                PeerTagSource(
+                    accountIdHex = accountId.joinToString("") { "%02x".format(it.toInt() and 0xff) },
+                    signatureKeyB64 = java.util.Base64.getEncoder().encodeToString(contact.request.fromPubkey),
+                )
             }
-        }
-        // Arrival-order numbering for the peers that do not resolve, keyed on
-        // the peer id so a peer named once keeps that number for the call — the
-        // resolver is called again for the same peer (the welcome snapshot and
-        // then peer-joined), and a label that renumbered itself between the two
-        // would be worse than the pseudonym it replaces.
-        val unresolved = java.util.concurrent.ConcurrentHashMap<String, String>()
-        return { peerId, pseudonym, peerTag ->
-            if (peerTag.isNotEmpty() && !collidedTags.contains(peerTag) && tagToLabel.containsKey(peerTag)) {
-                tagToLabel.getValue(peerTag)
-            } else {
-                // NOT the pseudonym. It reads as an identifier the user should
-                // recognise and cannot; see [unresolvedParticipantLabel].
-                val key = peerId.ifEmpty { pseudonym }
-                unresolved.computeIfAbsent(key) {
-                    unresolvedParticipantLabel(unresolved.size + 1)
-                }
+            val fromProfiles = profileNames.accountIdsByKey().map { (keyB64, accountIdHex) ->
+                PeerTagSource(accountIdHex = accountIdHex, signatureKeyB64 = keyB64)
             }
-        }
-    }
+            fromContacts + fromProfiles
+        },
+        tagOf = { accountIdHex -> sfuPeerTag(callId = callIdHex, accountId = accountIdHex) },
+        // ADR-0048 — the one resolver; a call tile shows the primary alone.
+        labelOf = { keyB64 -> profileNames.resolve(keyB64).primary },
+        warn = { message, error -> android.util.Log.w("AppCallHost", message, error) },
+    )
 }
 
 /** The production [LinkCallPort]: [MultiJoinerCall] over the account identity. */

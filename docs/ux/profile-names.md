@@ -69,7 +69,11 @@ Persian/Indic joiners are allowed. Empty after trimming = no name.
 - Chat list and chat header (1x1: the other person; group: the group label, unchanged).
 - Message author labels in groups, typing indicators, reactions ("Liked by …"), read
   receipts, join requests, member list, admin actions ("Alice removed Bob").
-- Call rosters and incoming-call banners.
+- Call rosters and incoming-call banners. A group-call tile is matched to a person through
+  the per-call tag the SFU emits, which a device can compute only for an account id it
+  holds; the profile carries the account id (since 2026-09-19) so a member who is not a
+  contact is named on the tile as in the members panel, and a name that arrives during the
+  call replaces the placeholder in place.
 - Notifications (the background-decrypt path shows the resolved name when it is already
   known on the device; it does not fetch or verify anything).
 

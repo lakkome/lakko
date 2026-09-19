@@ -142,6 +142,15 @@ public class ProfileDirectory internal constructor(
     public fun resolve(signatureKey: ByteArray): ResolvedName =
         resolve(Base64.getEncoder().encodeToString(signatureKey))
 
+    /**
+     * Signature key (standard base64) -> account id hex for every stored
+     * profile that carried one (ADR-0048 v2): the second source, beside the
+     * accepted contacts, the group-call roster derives ADR-0021 peer tags from.
+     * A profile arriving mid-call bumps [version], so a caller that rebuilds
+     * on it names a tile already on screen.
+     */
+    public fun accountIdsByKey(): Map<String, String> = profiles.accountIdsByKey()
+
     /** Forget every learned profile and verification (forget device). */
     public fun clear() {
         profiles.clear()
@@ -239,6 +248,8 @@ internal class SharedPrefsProfilePersistence(private val context: Context) : Pro
         val username: String? = null,
         /** Stored as the unsigned value's bit pattern. */
         val updatedAtMs: Long = 0L,
+        /** Absent on a row written before ADR-0048 v2; reads as `null`. */
+        val accountIdHex: String? = null,
     )
 
     private fun prefs() = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -247,7 +258,7 @@ internal class SharedPrefsProfilePersistence(private val context: Context) : Pro
         val raw = prefs().getString(KEY_PROFILES, null) ?: return emptyMap()
         return try {
             json.decodeFromString<Map<String, StoredProfile>>(raw).mapValues { (_, s) ->
-                PeerProfile(s.displayName, s.username, s.updatedAtMs.toULong())
+                PeerProfile(s.displayName, s.username, s.updatedAtMs.toULong(), s.accountIdHex)
             }
         } catch (_: Exception) {
             emptyMap()
@@ -256,7 +267,7 @@ internal class SharedPrefsProfilePersistence(private val context: Context) : Pro
 
     override fun saveProfiles(profiles: Map<String, PeerProfile>) {
         val stored = profiles.mapValues { (_, p) ->
-            StoredProfile(p.displayName, p.username, p.updatedAtMs.toLong())
+            StoredProfile(p.displayName, p.username, p.updatedAtMs.toLong(), p.accountIdHex)
         }
         prefs().edit().putString(KEY_PROFILES, json.encodeToString(stored)).apply()
     }

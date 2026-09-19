@@ -22,7 +22,13 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import initWasm, * as wasm from "../../wasm/lakko_ffi_wasm";
-import { MemoryProfileBackend, ProfileStore, decideIngest, type ProfileRow } from "./profile-store";
+import {
+  MemoryProfileBackend,
+  ProfileStore,
+  decideIngest,
+  type ProfileRow,
+  type StoredProfile,
+} from "./profile-store";
 import { decodeProfileRow, encodeProfileRow } from "./profile-idb";
 
 beforeAll(async () => {
@@ -35,8 +41,8 @@ const ACCOUNT = "acct";
 const KEY_A = "a".repeat(43) + "=";
 const KEY_B = "b".repeat(43) + "=";
 
-function profile(name: string | null, username: string | null, at: bigint) {
-  return { displayName: name, username, updatedAtMs: at };
+function profile(name: string | null, username: string | null, at: bigint): StoredProfile {
+  return { displayName: name, username, updatedAtMs: at, accountIdHex: null };
 }
 
 describe("decideIngest", () => {
@@ -66,6 +72,31 @@ describe("ProfileStore", () => {
     await store.ingest(ACCOUNT, KEY_A, profile("Alice", "alice", 100n));
     expect(await store.ingest(ACCOUNT, KEY_A, profile("Mallory", "mallory", 100n))).toBe(false);
     expect(store.get(KEY_A)?.displayName).toBe("Alice");
+  });
+
+  it("a same-stamp re-send fills in a missing account id and nothing else", async () => {
+    const store = new ProfileStore(new MemoryProfileBackend(), isNewer);
+    await store.ingest(ACCOUNT, KEY_A, profile("Alice", "alice", 100n));
+    const id = new Uint8Array(16).fill(5);
+    expect(
+      await store.ingest(ACCOUNT, KEY_A, {
+        displayName: "Mallory",
+        username: "mallory",
+        updatedAtMs: 100n,
+        accountId: id,
+      }),
+    ).toBe(true);
+    expect(store.get(KEY_A)?.displayName).toBe("Alice");
+    expect(store.get(KEY_A)?.accountIdHex).toBe("05".repeat(16));
+    // An older stamp learns nothing; a known id is never replaced.
+    const other = new Uint8Array(16).fill(6);
+    expect(
+      await store.ingest(ACCOUNT, KEY_A, { displayName: "Alice", username: "alice", updatedAtMs: 99n, accountId: other }),
+    ).toBe(false);
+    expect(
+      await store.ingest(ACCOUNT, KEY_A, { displayName: "Alice", username: "alice", updatedAtMs: 100n, accountId: other }),
+    ).toBe(false);
+    expect(store.get(KEY_A)?.accountIdHex).toBe("05".repeat(16));
   });
 
   it("a claim from another key never touches the first key's entry", async () => {
@@ -164,6 +195,38 @@ describe("profile row codec", () => {
     expect(back?.profiles.get(KEY_A)?.updatedAtMs).toBe(18446744073709551615n);
     expect(back?.profiles.get(KEY_B)).toEqual(profile(null, null, 0n));
     expect(back?.verifications.get(`${KEY_A}|alice`)).toEqual({ state: "mismatch", checkedAtMs: 42 });
+  });
+
+  it("carries the claimed account id, and reads a row written without it", () => {
+    const hex = "0123456789abcdef0123456789abcdef";
+    const row: ProfileRow = {
+      profiles: new Map([
+        [KEY_A, { ...profile("Alice", null, 1n), accountIdHex: hex }],
+        [KEY_B, profile("Bob", null, 2n)],
+      ]),
+      verifications: new Map(),
+    };
+    const json = encodeProfileRow(row, new Map());
+    const parsed = JSON.parse(json) as { p: Record<string, { a?: string }> };
+    expect(parsed.p[KEY_A]?.a).toBe(hex);
+    expect("a" in (parsed.p[KEY_B] ?? {})).toBe(false);
+    const back = decodeProfileRow(json);
+    expect(back?.profiles.get(KEY_A)?.accountIdHex).toBe(hex);
+    expect(back?.profiles.get(KEY_B)?.accountIdHex).toBeNull();
+    // A malformed id drops the field, not the profile.
+    const bad = decodeProfileRow(
+      JSON.stringify({ v: 1, p: { k: { d: "A", u: null, t: "1", a: "ZZ" } }, vf: {}, r: {} }),
+    );
+    expect(bad?.profiles.get("k")).toEqual(profile("A", null, 1n));
+  });
+
+  it("stores a 16-byte account id as hex and anything else as none", async () => {
+    const store = new ProfileStore(new MemoryProfileBackend(), isNewer);
+    const id = new Uint8Array(16).fill(0xab);
+    await store.ingest(ACCOUNT, KEY_A, { ...profile("Alice", null, 1n), accountId: id });
+    expect(store.get(KEY_A)?.accountIdHex).toBe("ab".repeat(16));
+    await store.ingest(ACCOUNT, KEY_B, { ...profile("Bob", null, 1n), accountId: new Uint8Array(15) });
+    expect(store.get(KEY_B)?.accountIdHex).toBeNull();
   });
 
   it("drops malformed entries instead of trusting them", () => {

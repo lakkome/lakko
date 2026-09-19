@@ -848,7 +848,10 @@ public final class ChatClient {
         return ProfileClaim(
             displayName: decoded.displayName,
             username: decoded.username,
-            updatedAtMs: decoded.updatedAtMs
+            updatedAtMs: decoded.updatedAtMs,
+            // Envelope v2 — the sender's account id, or `nil` when it sent
+            // none; what a group-call tile is matched on (ADR-0021).
+            accountId: decoded.accountId
         )
     }
 

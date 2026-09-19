@@ -444,6 +444,18 @@ export const callActions = {
   setQuality(id: string, tier: QualityTier): void {
     patchParticipant(id, { quality: tier });
   },
+  /** Rename a participant in place. The SFU adapter re-runs its name
+   *  resolution when a profile lands mid-call (ADR-0048 v2 carries the
+   *  account id the ADR-0021 peer tag is derived from), so a tile that
+   *  joined as a pseudonym picks up the person's name. No-op on unknown id
+   *  or an unchanged name. */
+  setParticipantName(id: string, displayName: string): void {
+    setParticipants((list) =>
+      list.some((p) => p.id === id && p.displayName !== displayName)
+        ? list.map((p) => (p.id === id ? { ...p, displayName } : p))
+        : list,
+    );
+  },
   /** Set a specific participant's camera flag. Used for REMOTE
    *  participants when a video track arrives / ends (the SFU adapter
    *  flips it so the tile switches between the video surface and the

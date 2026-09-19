@@ -2185,6 +2185,8 @@ export class ContactsClient {
             displayName: p.displayName ?? null,
             username: p.username ?? null,
             updatedAtMs: p.updatedAtMs,
+            // Copied before `free()`: the getter's view dies with the handle.
+            accountId: p.accountId === undefined ? null : p.accountId.slice(),
           };
           p.free();
         }

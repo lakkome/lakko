@@ -127,7 +127,17 @@ fn prepare_profile(
     display_name: Option<String>,
     username: Option<String>,
     updated_at_ms: u64,
+    account_id: Option<Vec<u8>>,
 ) -> Result<RustProfile, JsValue> {
+    let account_id = match account_id {
+        None => None,
+        Some(bytes) => Some(<[u8; 16]>::try_from(bytes.as_slice()).map_err(|_| {
+            JsValue::from_str(&format!(
+                "profile account id must be 16 bytes, got {}",
+                bytes.len()
+            ))
+        })?),
+    };
     let display_name = match display_name {
         Some(name) => rust_normalize_display_name(&name)
             .map_err(|e| profile_error_value(ProfileError::DisplayName(e)))?,
@@ -144,6 +154,7 @@ fn prepare_profile(
         display_name,
         username,
         updated_at_ms,
+        account_id,
     })
 }
 
@@ -487,6 +498,7 @@ pub struct WasmProfile {
     display_name: Option<String>,
     username: Option<String>,
     updated_at_ms: u64,
+    account_id: Option<Vec<u8>>,
 }
 
 impl From<RustProfile> for WasmProfile {
@@ -495,6 +507,7 @@ impl From<RustProfile> for WasmProfile {
             display_name: p.display_name,
             username: p.username,
             updated_at_ms: p.updated_at_ms,
+            account_id: p.account_id.map(|id| id.to_vec()),
         }
     }
 }
@@ -518,6 +531,13 @@ impl WasmProfile {
     pub fn updated_at_ms(&self) -> u64 {
         self.updated_at_ms
     }
+
+    /// The sender's 16-byte auth account id, or `undefined` (ADR-0048 v2):
+    /// what the call roster derives the ADR-0021 peer tag from.
+    #[wasm_bindgen(getter, js_name = accountId)]
+    pub fn account_id(&self) -> Option<Vec<u8>> {
+        self.account_id.clone()
+    }
 }
 
 /// Compose a profile envelope (ADR-0048) — the inner plaintext to publish as
@@ -536,8 +556,9 @@ pub fn compose_profile_envelope(
     display_name: Option<String>,
     username: Option<String>,
     updated_at_ms: u64,
+    account_id: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, JsValue> {
-    let profile = prepare_profile(display_name, username, updated_at_ms)?;
+    let profile = prepare_profile(display_name, username, updated_at_ms, account_id)?;
     rust_compose_profile(&profile).map_err(profile_error_value)
 }
 
@@ -2563,12 +2584,16 @@ mod tests {
             Some("  Alice Petrova ".to_string()),
             Some("@Alice".to_string()),
             42,
+            Some(vec![9; 16]),
         )
         .unwrap();
         let decoded = decode_profile_envelope(&envelope).unwrap();
         assert_eq!(decoded.display_name(), Some("Alice Petrova".to_string()));
         assert_eq!(decoded.username(), Some("alice".to_string()));
         assert_eq!(decoded.updated_at_ms(), 42);
+        assert_eq!(decoded.account_id(), Some(vec![9; 16]));
+        // The wrong-length refusal is a `JsValue` error, which cannot be
+        // constructed off wasm32; the core pins it (`profile.rs`).
         assert!(profile_is_newer(43, 42) && !profile_is_newer(42, 42));
         assert_eq!(
             normalize_display_name("  Bo ").unwrap(),

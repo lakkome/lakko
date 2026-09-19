@@ -359,6 +359,7 @@ mod tests {
             display_name: Some("Alice Petrova".to_string()),
             username: Some("alice".to_string()),
             updated_at_ms: 42,
+            account_id: None,
         };
         let wrapped = compose_profile(&profile).unwrap();
         assert_eq!(
@@ -371,13 +372,14 @@ mod tests {
     fn an_out_of_bounds_profile_is_an_error_not_an_intro_message() {
         // Fail-closed: a profile carrying a right-to-left override in
         // its name must be dropped, never rendered as chat text.
-        use crate::profile::{DisplayNameError, PROFILE_ENVELOPE_DOMAIN_V1, PROFILE_VERSION_V1};
+        use crate::profile::{DisplayNameError, PROFILE_ENVELOPE_DOMAIN_V1, PROFILE_VERSION_V2};
         let name = "Alice\u{202E}".as_bytes();
         let mut wrapped = PROFILE_ENVELOPE_DOMAIN_V1.to_vec();
-        wrapped.push(PROFILE_VERSION_V1);
+        wrapped.push(PROFILE_VERSION_V2);
         wrapped.extend_from_slice(&0u64.to_be_bytes());
         wrapped.push(u8::try_from(name.len()).unwrap());
         wrapped.extend_from_slice(name);
+        wrapped.push(0);
         wrapped.push(0);
         assert_eq!(
             dispatch_incoming_envelope(&wrapped),

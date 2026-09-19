@@ -45,7 +45,12 @@ import { loadRenames, subscribeAcceptedChanged } from "../contacts/local-store";
 import { loadWasm, type Wasm } from "../wasm";
 import { EMPTY_OWN_PROFILE, loadOwnProfile, saveOwnProfile, type OwnProfile } from "./own-profile";
 import { IdbProfileBackend } from "./profile-idb";
-import { ProfileStore, type IncomingProfile } from "./profile-store";
+import {
+  ACCOUNT_ID_BYTES,
+  ProfileStore,
+  accountIdHexOfBytes,
+  type IncomingProfile,
+} from "./profile-store";
 import { ProfilePublishScheduler, type PublishReason } from "./publish-scheduler";
 import { resolveDisplay, type ResolvedName } from "./resolver";
 import { UsernameVerifier } from "./username-verification";
@@ -89,6 +94,22 @@ export interface ProfileApi {
   learnUsername(signatureKeyB64: string, username: string): void;
   /** The own profile envelope, or `null` when there is nothing to publish. */
   ownProfileEnvelope(): Promise<Uint8Array | null>;
+  /** The 16-byte auth account id a person CLAIMED in their profile, as 32
+   *  lower-case hex characters, or `null` when none is held. For the viewer's
+   *  own key it is the signed-in account. Reactive. What the call roster
+   *  derives the ADR-0021 peer tag from. */
+  accountIdHexOf(keyB64: string): string | null;
+  /** Every stored profile that carries an account id, as
+   *  `(personKeyB64, accountIdHex)` pairs. The own account is not among them
+   *  (the device never receives its own envelope). Reactive. */
+  accountIdBindings(): readonly AccountIdBinding[];
+}
+
+/** One person's claimed account id, keyed on the signature key it was
+ *  filed under. */
+export interface AccountIdBinding {
+  readonly personKeyB64: string;
+  readonly accountIdHex: string;
 }
 
 const ProfileContext = createContext<ProfileApi>();
@@ -125,6 +146,19 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     const s = auth.state();
     if (s.kind !== "session") return null;
     return s.account.username.length > 0 ? s.account.username : null;
+  };
+  /** The signed-in account's 16-byte id, or `null` when there is no session
+   *  or the stored id is not 16 bytes (the core refuses any other length, and
+   *  a profile without an id is better than no profile). */
+  const ownAccountIdBytes = (): Uint8Array | null => {
+    const account = accountId();
+    if (account === null) return null;
+    try {
+      const bytes = base64Decode(account);
+      return bytes.length === ACCOUNT_ID_BYTES ? bytes : null;
+    } catch {
+      return null;
+    }
   };
 
   const store = new ProfileStore(
@@ -194,7 +228,15 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
     // clears the name on the receivers.
     if (own.displayName === null && username === null && own.updatedAtMs === 0) return null;
     const w = await loadWasm();
-    return w.composeProfileEnvelope(own.displayName, username, BigInt(own.updatedAtMs));
+    // ADR-0048 v2 — the own account id rides along so a member who never
+    // accepted this account as a contact can still derive its ADR-0021 peer
+    // tag and name its call tile. `undefined` for a session without one.
+    return w.composeProfileEnvelope(
+      own.displayName,
+      username,
+      BigInt(own.updatedAtMs),
+      ownAccountIdBytes() ?? undefined,
+    );
   }
 
   async function publishInto(groupIdB64: string, reason: PublishReason): Promise<void> {
@@ -387,6 +429,20 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
       bump();
     },
     ownProfileEnvelope,
+    accountIdHexOf(keyB64) {
+      version();
+      const own = chats.identity();
+      if (own !== null && isOwnKeyB64(own, keyB64)) return accountIdHexOfBytes(ownAccountIdBytes());
+      return store.get(keyB64)?.accountIdHex ?? null;
+    },
+    accountIdBindings() {
+      version();
+      const out: AccountIdBinding[] = [];
+      for (const [personKeyB64, p] of store.entries()) {
+        if (p.accountIdHex !== null) out.push({ personKeyB64, accountIdHex: p.accountIdHex });
+      }
+      return out;
+    },
   };
 
   return <ProfileContext.Provider value={api}>{props.children}</ProfileContext.Provider>;
