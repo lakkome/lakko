@@ -483,6 +483,65 @@ pub struct MediaPeer {
     /// rid). [`drive_layer_selection`] reads these to learn each layer's cost
     /// so it can fit a subscriber's budget.
     layer_meters: HashMap<(Mid, Rid), LayerBitrateMeter>,
+    /// When the SFU last asked THIS (publishing) peer for a keyframe on each
+    /// of its tracks, keyed `(mid, rid)`. Backs the rate limit in
+    /// [`MediaPeer::request_keyframe_limited`]: a subscriber that has no
+    /// reference frame asks for one about five times a second until it gets
+    /// it, and relaying every one of those to the encoder would turn a
+    /// missing keyframe into a keyframe storm.
+    last_keyframe_request: HashMap<(Mid, Option<Rid>), Instant>,
+}
+
+/// Minimum gap between two keyframe requests the SFU relays to one publisher
+/// track.
+///
+/// Chosen, not measured. The bound it has to satisfy from below: the live
+/// receiver asked roughly every 200 ms, so anything under that relays every
+/// request and limits nothing. From above: this is the extra latency a late
+/// joiner can pay beyond the encoder's own, and a picture arriving half a
+/// second late is still a picture, where five minutes was not. Two keyframe
+/// requests per second per track under a storm is an acceptable worst case
+/// for a video encoder that would otherwise be asked five times a second.
+pub const KEYFRAME_REQUEST_MIN_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Why the SFU is asking a publisher for a keyframe. Carried into the log
+/// line so a run shows which path produced the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyframeReason {
+    /// A downstream track just opened on a subscriber, which therefore holds
+    /// no reference frame for it. Both the late-joiner backfill and the
+    /// ordinary forward propagation reach the subscriber's answer the same
+    /// way, and both need this.
+    DownstreamOpened,
+    /// A subscriber sent a PLI or FIR on a downstream track.
+    SubscriberRequest,
+}
+
+impl KeyframeReason {
+    /// Stable, low-cardinality label for logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DownstreamOpened => "downstream-opened",
+            Self::SubscriberRequest => "subscriber-pli",
+        }
+    }
+}
+
+/// One downstream track that a subscriber's renegotiation answer just
+/// promoted to `Open`. Returned by [`MediaPeer::accept_renegotiation_answer`]
+/// so the caller can ask the publisher for a keyframe at the one moment it
+/// becomes useful — after the subscriber can receive it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenedTrack {
+    /// Publisher of the track.
+    pub source_peer: MediaPeerId,
+    /// Publisher-side mid.
+    pub source_mid: Mid,
+    /// Audio or video. Only video needs a keyframe.
+    pub kind: MediaKind,
+    /// Simulcast layer the subscriber is latched to, if any.
+    pub rid: Option<Rid>,
 }
 
 impl MediaPeer {
@@ -526,6 +585,7 @@ impl MediaPeer {
             pending_offer: None,
             egress_estimate_bps: None,
             layer_meters: HashMap::new(),
+            last_keyframe_request: HashMap::new(),
         }
     }
 
@@ -717,7 +777,7 @@ impl MediaPeer {
     ///   refuses.
     /// - [`MediaError::BadSdp`] when `sdp` fails
     ///   `SdpAnswer::from_sdp_string`.
-    pub fn accept_renegotiation_answer(&mut self, sdp: &str) -> MediaResult<()> {
+    pub fn accept_renegotiation_answer(&mut self, sdp: &str) -> MediaResult<Vec<OpenedTrack>> {
         let Some(pending) = self.pending_offer.take() else {
             return Err(MediaError::Str0m(
                 "received SdpAnswer with no pending offer".to_owned(),
@@ -732,13 +792,22 @@ impl MediaPeer {
         // Promote every Negotiating(..) entry. Multiple
         // tracks may have been added in the same
         // change-set; all of them flip on the same
-        // answer.
+        // answer. Report what opened so the caller can
+        // ask each publisher for a keyframe now that this
+        // subscriber can actually receive one.
+        let mut opened = Vec::new();
         for entry in &mut self.tracks_out {
             if let TrackOutState::Negotiating(mid) = entry.state {
                 entry.state = TrackOutState::Open(mid);
+                opened.push(OpenedTrack {
+                    source_peer: entry.source_peer.clone(),
+                    source_mid: entry.source_mid,
+                    kind: entry.kind,
+                    rid: entry.chosen_rid,
+                });
             }
         }
-        Ok(())
+        Ok(opened)
     }
 
     /// Stable id for this peer.
@@ -1051,6 +1120,78 @@ impl MediaPeer {
         if let Some(stream_rx) = self.rtc.direct_api().stream_rx_by_mid(mid, Some(rid)) {
             stream_rx.request_keyframe(KeyframeRequestKind::Pli);
         }
+    }
+
+    /// Ask THIS (publishing) peer for a keyframe on `(mid, rid)`, at most once
+    /// per [`KEYFRAME_REQUEST_MIN_INTERVAL`] per track. Returns whether a PLI
+    /// actually went out, so the caller logs only real requests.
+    ///
+    /// `rid == None` on a simulcast source means the subscriber has not
+    /// latched a layer yet (it latches on the first frame it sees, which is
+    /// exactly what it is waiting for). There is no single stream to ask in
+    /// that case, so every layer this publisher has been seen sending on is
+    /// asked — the subscriber will latch whichever arrives first, and the
+    /// others cost one keyframe each, once.
+    ///
+    /// The distinction from [`Self::request_layer_keyframe`] is deliberate:
+    /// the simulcast layer switch is a single deliberate event and keeps its
+    /// unlimited path untouched; this one sits behind a subscriber that may
+    /// be asking five times a second.
+    pub fn request_keyframe_limited(&mut self, mid: Mid, rid: Option<Rid>, now: Instant) -> bool {
+        let key = (mid, rid);
+        if !keyframe_request_allowed(self.last_keyframe_request.get(&key).copied(), now) {
+            return false;
+        }
+        let mut api = self.rtc.direct_api();
+        let sent = match rid {
+            Some(r) => api.stream_rx_by_mid(mid, Some(r)).is_some_and(|s| {
+                s.request_keyframe(KeyframeRequestKind::Pli);
+                true
+            }),
+            None => {
+                if let Some(s) = api.stream_rx_by_mid(mid, None) {
+                    s.request_keyframe(KeyframeRequestKind::Pli);
+                    true
+                } else {
+                    // Simulcast: no rid-less stream. Ask every metered layer.
+                    let layers: Vec<Rid> = self
+                        .layer_meters
+                        .keys()
+                        .filter(|(m, _)| *m == mid)
+                        .map(|(_, r)| *r)
+                        .collect();
+                    let mut any = false;
+                    for r in layers {
+                        if let Some(s) = self.rtc.direct_api().stream_rx_by_mid(mid, Some(r)) {
+                            s.request_keyframe(KeyframeRequestKind::Pli);
+                            any = true;
+                        }
+                    }
+                    any
+                }
+            },
+        };
+        if sent {
+            self.last_keyframe_request.insert(key, now);
+        }
+        sent
+    }
+
+    /// Resolve one of THIS (subscribing) peer's downstream mids back to the
+    /// publisher it mirrors. `None` unless the track is `Open` — a keyframe
+    /// request on a track that is still negotiating has no stream behind it
+    /// yet and would only reach the encoder before the subscriber can use it.
+    #[must_use]
+    pub fn origin_for_downstream_mid(&self, local_mid: Mid) -> Option<OpenedTrack> {
+        self.tracks_out
+            .iter()
+            .find(|e| e.state == TrackOutState::Open(local_mid))
+            .map(|e| OpenedTrack {
+                source_peer: e.source_peer.clone(),
+                source_mid: e.source_mid,
+                kind: e.kind,
+                rid: e.chosen_rid,
+            })
     }
 }
 
@@ -1742,17 +1883,39 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
             // picture means the track is open and the fault is downstream,
             // in media rather than in negotiation.
             match &res {
-                Ok(()) => tracing::info!(
-                    peer = %peer_id,
-                    "media: subscriber answered the downstream-track offer"
-                ),
+                Ok(opened) => {
+                    tracing::info!(
+                        peer = %peer_id,
+                        opened = opened.len(),
+                        "media: subscriber answered the downstream-track offer"
+                    );
+                    // The subscriber can receive now, and holds no reference
+                    // frame for anything that just opened. Ask each video
+                    // publisher for a keyframe at this moment rather than at
+                    // open time — asked earlier it lands before the
+                    // subscriber exists to decode it, and the subscriber is
+                    // left waiting for the publisher's next natural keyframe,
+                    // which in a live call took five minutes.
+                    let now = Instant::now();
+                    for track in opened {
+                        if track.kind != MediaKind::Video {
+                            continue;
+                        }
+                        request_keyframe_from_publisher(
+                            router,
+                            track,
+                            now,
+                            KeyframeReason::DownstreamOpened,
+                        );
+                    }
+                },
                 Err(e) => tracing::warn!(
                     peer = %peer_id,
                     error = %e,
                     "media: subscriber's answer to the downstream-track offer was refused"
                 ),
             }
-            let _ = reply.send(res);
+            let _ = reply.send(res.map(|_| ()));
         },
     }
 }
@@ -1799,6 +1962,11 @@ async fn run_media_loop(
         // PeerRegistry the signaling layer owns.
         drive_renegotiations(&mut router, &peers).await;
         fanout_media_data(&mut router, &summary.pending);
+        // Subscribers' PLIs, resolved during the drain to the publisher
+        // track each mirrors, go to the publishers now — rate-limited per
+        // track, since a subscriber with no reference frame asks about five
+        // times a second until it has one.
+        relay_keyframe_requests(&mut router, &summary.keyframe_requests, now);
         // Per-receiver simulcast layer selection: match each subscriber's
         // egress bandwidth estimate against the measured per-layer bitrates,
         // (re)select the best-fitting layer, and request a keyframe on any
@@ -1916,6 +2084,11 @@ pub(crate) struct DrainSummary {
     /// The router propagates them to every other peer's
     /// `tracks_out` before the next fanout pass.
     pub(crate) new_tracks: Vec<PendingTrackIn>,
+    /// Keyframe requests (PLI / FIR) subscribers sent on
+    /// their downstream tracks, already resolved to the
+    /// publisher track they mirror. Relayed to the
+    /// publishers, rate-limited, after the drain.
+    pub(crate) keyframe_requests: Vec<OpenedTrack>,
 }
 
 /// Drain `poll_output` on every peer; write any
@@ -1939,6 +2112,7 @@ async fn drain_outputs(
     let mut earliest_deadline = now + MAX_TICK_INTERVAL;
     let mut pending: Vec<PendingFanout> = Vec::new();
     let mut new_tracks: Vec<PendingTrackIn> = Vec::new();
+    let mut keyframe_requests: Vec<OpenedTrack> = Vec::new();
     for peer in router.peers_mut() {
         let origin = peer.id().clone();
         loop {
@@ -1996,13 +2170,23 @@ async fn drain_outputs(
                             track,
                         });
                     },
-                    // Other events (ICE state,
-                    // keyframe requests, stats,
+                    Event::KeyframeRequest(req) => {
+                        // A subscriber has no decodable frame on one of ITS
+                        // downstream tracks and is asking for one. The SFU
+                        // holds no frames, so the only thing that can answer
+                        // is the publisher — map the subscriber's local mid
+                        // back to the publisher track it mirrors and relay.
+                        // Resolved here, against this peer's `tracks_out`,
+                        // because the relay itself needs a mutable borrow of
+                        // a different peer.
+                        if let Some(target) = peer.origin_for_downstream_mid(req.mid) {
+                            keyframe_requests.push(target);
+                        }
+                    },
+                    // Other events (ICE state, stats,
                     // MediaChanged, ChannelOpen, ...)
                     // are not actionable for the
                     // SFrame-passthrough router yet.
-                    // The per-event surface lands as
-                    // follow-up sub-sprints.
                     _ => {},
                 },
                 Err(e) => {
@@ -2020,6 +2204,7 @@ async fn drain_outputs(
         earliest_deadline,
         pending,
         new_tracks,
+        keyframe_requests,
     }
 }
 
@@ -2248,6 +2433,73 @@ fn backfill_existing_tracks(router: &mut MediaRouter, joiner: &MediaPeerId) {
             );
         }
     }
+}
+
+/// The rate limit's decision, kept pure so it can be pinned without a live
+/// stream: a request is allowed when none has gone out for this track, or the
+/// last one is at least [`KEYFRAME_REQUEST_MIN_INTERVAL`] old. A clock that
+/// reads earlier than the last request (a monotonic clock cannot, but the
+/// arithmetic should not care) saturates to zero elapsed and denies.
+fn keyframe_request_allowed(last: Option<Instant>, now: Instant) -> bool {
+    last.map_or(true, |l| {
+        now.saturating_duration_since(l) >= KEYFRAME_REQUEST_MIN_INTERVAL
+    })
+}
+
+/// Ask the publisher of `track` for a keyframe, rate-limited per publisher
+/// track, and log it when one actually goes out. Returns whether it did.
+///
+/// The SFU holds no frames of its own, so a subscriber that lacks a reference
+/// frame can only be helped by the publisher producing a new one. This is
+/// the single path both reasons go through, so the rate limit is shared: a
+/// track that was just asked because it opened is not asked again a moment
+/// later because the subscriber's own PLI arrived before the keyframe did.
+pub(crate) fn request_keyframe_from_publisher(
+    router: &mut MediaRouter,
+    track: &OpenedTrack,
+    now: Instant,
+    reason: KeyframeReason,
+) -> bool {
+    let Some(publisher) = router.peer_mut(&track.source_peer) else {
+        return false;
+    };
+    let sent = publisher.request_keyframe_limited(track.source_mid, track.rid, now);
+    if sent {
+        // Lifecycle point 5. With the four negotiation lines showing a track
+        // open and this showing the request go out, a "first frame" line on
+        // the subscriber is expected within the encoder's keyframe latency —
+        // not at the publisher's next natural keyframe, whenever that is.
+        tracing::info!(
+            origin = %track.source_peer,
+            mid = ?track.source_mid,
+            rid = ?track.rid,
+            reason = reason.as_str(),
+            "media: keyframe requested from publisher"
+        );
+    }
+    sent
+}
+
+/// Relay every subscriber keyframe request captured during a drain to its
+/// publisher. Duplicates within one tick — several subscribers asking for the
+/// same track, or one subscriber asking repeatedly — collapse through the
+/// per-track rate limit rather than being de-duplicated here, so the same
+/// rule governs requests that arrive in one tick and across ticks.
+pub(crate) fn relay_keyframe_requests(
+    router: &mut MediaRouter,
+    requests: &[OpenedTrack],
+    now: Instant,
+) -> usize {
+    let mut relayed = 0;
+    for req in requests {
+        if req.kind != MediaKind::Video {
+            continue;
+        }
+        if request_keyframe_from_publisher(router, req, now, KeyframeReason::SubscriberRequest) {
+            relayed += 1;
+        }
+    }
+    relayed
 }
 
 /// Condense an SDP's media lines into one field for a log line: per m-section
@@ -3260,6 +3512,111 @@ mod tests {
             find_peer(&r, "unbound").tracks_out().is_empty(),
             "an unbound peer must not inherit a call's tracks"
         );
+    }
+
+    #[test]
+    fn keyframe_gate_allows_the_first_request_and_one_per_interval_after() {
+        let t0 = Instant::now();
+        assert!(keyframe_request_allowed(None, t0), "nothing sent yet");
+        assert!(
+            !keyframe_request_allowed(Some(t0), t0 + KEYFRAME_REQUEST_MIN_INTERVAL / 2),
+            "inside the window is denied"
+        );
+        assert!(
+            keyframe_request_allowed(Some(t0), t0 + KEYFRAME_REQUEST_MIN_INTERVAL),
+            "exactly the interval later is allowed"
+        );
+        assert!(
+            !keyframe_request_allowed(Some(t0 + Duration::from_secs(1)), t0),
+            "a clock reading before the last request denies rather than underflows"
+        );
+    }
+
+    #[test]
+    fn keyframe_interval_sits_between_the_receivers_cadence_and_a_usable_wait() {
+        // The live receiver asked about every 200 ms; below that the limit
+        // relays everything and limits nothing. Above a second a late joiner
+        // waits noticeably. The value is chosen, not measured — this pins the
+        // reasoning so a later change has to argue with it.
+        assert!(KEYFRAME_REQUEST_MIN_INTERVAL > Duration::from_millis(200));
+        assert!(KEYFRAME_REQUEST_MIN_INTERVAL <= Duration::from_secs(1));
+    }
+
+    #[test]
+    fn origin_for_downstream_mid_resolves_only_an_open_track() {
+        let mut sub = peer_in_call("sub", "call-a");
+        let source_mid = Mid::new();
+        sub.observe_remote_track_in(
+            pid("pub"),
+            TrackIn {
+                mid: source_mid,
+                kind: MediaKind::Video,
+            },
+        );
+        let local = Mid::new();
+
+        // ToOpen: no local mid exists yet to ask on.
+        assert!(sub.origin_for_downstream_mid(local).is_none());
+
+        sub.tracks_out[0].state = TrackOutState::Negotiating(local);
+        assert!(
+            sub.origin_for_downstream_mid(local).is_none(),
+            "a negotiating track has no stream behind it yet"
+        );
+
+        sub.tracks_out[0].state = TrackOutState::Open(local);
+        let resolved = sub
+            .origin_for_downstream_mid(local)
+            .expect("open track resolves");
+        assert_eq!(resolved.source_peer, pid("pub"));
+        assert_eq!(resolved.source_mid, source_mid);
+        assert_eq!(resolved.kind, MediaKind::Video);
+        assert_eq!(resolved.rid, None, "no layer latched yet");
+
+        assert!(
+            sub.origin_for_downstream_mid(Mid::new()).is_none(),
+            "an unrelated mid resolves to nothing"
+        );
+    }
+
+    #[test]
+    fn relay_skips_audio_and_unknown_publishers_without_panicking() {
+        let mut r = MediaRouter::new();
+        r.add_peer(peer_in_call("pub", "call-a"));
+        let now = Instant::now();
+        let reqs = vec![
+            OpenedTrack {
+                source_peer: pid("pub"),
+                source_mid: Mid::new(),
+                kind: MediaKind::Audio,
+                rid: None,
+            },
+            OpenedTrack {
+                source_peer: pid("nobody"),
+                source_mid: Mid::new(),
+                kind: MediaKind::Video,
+                rid: None,
+            },
+            // A video track on a known publisher with no live StreamRx: the
+            // PLI has nowhere to go, so it is reported as not sent — never
+            // as sent-and-logged.
+            OpenedTrack {
+                source_peer: pid("pub"),
+                source_mid: Mid::new(),
+                kind: MediaKind::Video,
+                rid: None,
+            },
+        ];
+        assert_eq!(relay_keyframe_requests(&mut r, &reqs, now), 0);
+    }
+
+    #[test]
+    fn keyframe_reason_labels_are_stable() {
+        assert_eq!(
+            KeyframeReason::DownstreamOpened.as_str(),
+            "downstream-opened"
+        );
+        assert_eq!(KeyframeReason::SubscriberRequest.as_str(), "subscriber-pli");
     }
 
     #[test]

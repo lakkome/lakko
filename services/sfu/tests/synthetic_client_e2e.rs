@@ -88,7 +88,8 @@ use lakko_svc_sfu::peer::{Peer, PeerId, PeerRegistry};
 use lakko_svc_sfu::protocol::ServerFrame;
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::media::{
-    Direction, Frequency, MediaKind, MediaTime, Mid, Rid, Simulcast, SimulcastLayer,
+    Direction, Frequency, KeyframeRequestKind, MediaKind, MediaTime, Mid, Rid, Simulcast,
+    SimulcastLayer,
 };
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, Input, Output, Rtc};
@@ -117,6 +118,10 @@ struct SyntheticClient {
     /// `Event::MediaData`, if the extension was negotiated
     /// and carried a value. Recorded by [`Self::drain`].
     last_frame_descriptor: Option<Vec<u8>>,
+    /// Keyframe requests (PLI / FIR) the SFU has sent THIS
+    /// client as a publisher, as surfaced by str0m's
+    /// `Event::KeyframeRequest`. Counted by [`Self::drain`].
+    keyframe_requests_seen: usize,
 }
 
 impl SyntheticClient {
@@ -155,7 +160,22 @@ impl SyntheticClient {
             local_addr,
             connected: false,
             last_frame_descriptor: None,
+            keyframe_requests_seen: 0,
         }
+    }
+
+    /// Send a PLI on one of this (subscribing) client's receive streams, the
+    /// way a decoder with no reference frame does. `false` if str0m has no
+    /// receive stream for `mid` yet — one exists once the first packet has
+    /// arrived — so a caller sends only after media has started flowing.
+    fn send_pli(&mut self, mid: Mid) -> bool {
+        self.rtc
+            .direct_api()
+            .stream_rx_by_mid(mid, None)
+            .is_some_and(|s| {
+                s.request_keyframe(KeyframeRequestKind::Pli);
+                true
+            })
     }
 
     /// Build a plain (non-simulcast) SendOnly video publisher offer. Video
@@ -385,6 +405,7 @@ impl SyntheticClient {
                         }
                         payloads.push(data.data.clone());
                     },
+                    Event::KeyframeRequest(_) => self.keyframe_requests_seen += 1,
                     _ => {},
                 },
                 // A pending timeout means there is nothing more
@@ -2327,5 +2348,293 @@ async fn a_peer_joining_a_call_in_progress_receives_the_tracks_already_in_it() {
         a.is_connected(),
         b.is_connected(),
         reneg_answered,
+    );
+}
+
+/// The mid of the video m-section in an SFU renegotiation offer — the
+/// subscriber-side handle a PLI is sent on.
+fn video_mid_in(sdp: &str) -> Option<Mid> {
+    let mut in_video = false;
+    for line in sdp.lines() {
+        if let Some(rest) = line.strip_prefix("m=") {
+            in_video = rest.starts_with("video");
+        } else if in_video {
+            if let Some(mid) = line.strip_prefix("a=mid:") {
+                return Some(Mid::from(mid.trim()));
+            }
+        }
+    }
+    None
+}
+
+/// Pump both clients for `for_how_long`, feeding sockets and timeouts,
+/// while `publish` writes a frame from A on each pass if set.
+async fn pump(
+    a: &mut SyntheticClient,
+    b: &mut SyntheticClient,
+    sfu_addr: SocketAddr,
+    for_how_long: Duration,
+    publish: Option<(Mid, &[u8], &[u8], &mut u64)>,
+) {
+    let until = Instant::now() + for_how_long;
+    let mut publish = publish;
+    while Instant::now() < until {
+        let _ = a.drain().await;
+        let _ = b.drain().await;
+        if let Some((mid, payload, descriptor, idx)) = publish.as_mut() {
+            a.write_video_frame_with_descriptor(*mid, payload, descriptor, **idx);
+            **idx += 1;
+        }
+        let a_sock = a.socket.clone();
+        let b_sock = b.socket.clone();
+        let mut abuf = [0u8; 2048];
+        let mut bbuf = [0u8; 2048];
+        tokio::select! {
+            r = a_sock.recv_from(&mut abuf) => {
+                if let Ok((n, src)) = r {
+                    a.feed_receive(&abuf[..n], src, sfu_addr);
+                }
+            }
+            r = b_sock.recv_from(&mut bbuf) => {
+                if let Ok((n, src)) = r {
+                    b.feed_receive(&bbuf[..n], src, sfu_addr);
+                }
+            }
+            () = tokio::time::sleep(Duration::from_millis(5)) => {
+                a.feed_timeout();
+                b.feed_timeout();
+            }
+        }
+    }
+}
+
+/// **A late joiner's first picture is requested, not awaited.**
+///
+/// The previous test proves a late joiner is *offered* the track. This one
+/// proves it can *decode* it in bounded time. A subscriber that joins after
+/// the publisher's initial keyframe holds no reference for the deltas it
+/// starts receiving; unless someone asks the publisher for a new keyframe,
+/// it waits for the next natural one — which in a live call was five
+/// minutes, during which the receiver sent 1475 PLIs that nothing relayed.
+///
+/// Two things are asserted, against the publisher's own view (str0m
+/// surfaces an incoming PLI as `Event::KeyframeRequest`):
+///
+/// 1. After the joiner answers the downstream offer, the publisher receives
+///    a keyframe request **without the joiner having sent any PLI** — the
+///    SFU asked on the joiner's behalf, at the moment the joiner could use
+///    it.
+/// 2. A burst of the joiner's own PLIs reaches the publisher as **one**
+///    request within [`KEYFRAME_REQUEST_MIN_INTERVAL`], not one per PLI.
+///
+/// The publisher streams from before the joiner exists, which is both the
+/// realistic shape and the one in which a publisher-side receive stream
+/// exists for the SFU to send a PLI on at answer time.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn a_late_joiners_first_keyframe_is_requested_and_pli_bursts_collapse() {
+    use lakko_svc_sfu::media::KEYFRAME_REQUEST_MIN_INTERVAL;
+
+    let peers = PeerRegistry::new();
+    let b_id = PeerId::fresh();
+    let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
+    assert!(
+        peers
+            .register(Peer {
+                id: b_id.clone(),
+                call_id: "keyframe-relay".to_owned(),
+                account_id: "subscriber-b".to_owned(),
+                outbound: Some(b_tx),
+            })
+            .await
+    );
+    let (media, sfu_addr) = spawn_media_task("127.0.0.1:0".parse().unwrap(), peers)
+        .await
+        .expect("UDP bind on loopback:0 succeeds");
+
+    let descriptor: Vec<u8> = vec![0xf0, 0x01, 0x2a, 0x00, 0x05, 0x00, 0x02, 0xd0];
+    let payload: Vec<u8> = (0..3000_u32)
+        .map(|i| {
+            u8::try_from(i % 251)
+                .unwrap_or(0)
+                .wrapping_mul(7)
+                .wrapping_add(3)
+        })
+        .collect();
+    let mut frame_idx: u64 = 0;
+
+    // A joins first, connects, and starts streaming into an empty call.
+    let mut a = SyntheticClient::new_with_frame_descriptor().await;
+    let a_id = PeerId::fresh();
+    let (a_offer, a_pending, publisher_mid) = a.create_video_publisher_offer();
+    let a_answer = media
+        .accept_offer(a_id.clone(), "keyframe-call".to_owned(), a_offer)
+        .await
+        .expect("SFU accepts A's publisher offer");
+    a.accept_answer(a_pending, &a_answer)
+        .expect("A applies answer");
+    let mut placeholder = SyntheticClient::new().await; // never connected; pump wants two
+    let deadline = Instant::now() + HANDSHAKE_DEADLINE;
+    while Instant::now() < deadline && !a.is_connected() {
+        pump(
+            &mut a,
+            &mut placeholder,
+            sfu_addr,
+            Duration::from_millis(20),
+            None,
+        )
+        .await;
+    }
+    assert!(a.is_connected(), "publisher A must connect before B joins");
+    // Stream for a while so the SFU has a live receive stream for A's video
+    // — the thing a PLI is sent on.
+    pump(
+        &mut a,
+        &mut placeholder,
+        sfu_addr,
+        Duration::from_millis(300),
+        Some((publisher_mid, &payload, &descriptor, &mut frame_idx)),
+    )
+    .await;
+    let requests_before_join = a.keyframe_requests_seen;
+
+    // B joins the call in progress.
+    let mut b = SyntheticClient::new_with_frame_descriptor().await;
+    let (b_offer, b_pending) = b.create_subscriber_offer();
+    let b_answer = media
+        .accept_offer(b_id.clone(), "keyframe-call".to_owned(), b_offer)
+        .await
+        .expect("SFU accepts B's offer");
+    b.accept_answer(b_pending, &b_answer)
+        .expect("B applies answer");
+
+    // Drive to: B connected, renegotiation answered, B receiving.
+    let deadline = Instant::now() + CROSS_FANOUT_DEADLINE;
+    let mut reneg_answered = false;
+    let mut b_video_mid: Option<Mid> = None;
+    let mut pending_reneg: Option<String> = None;
+    let mut b_received = false;
+    while Instant::now() < deadline && !(reneg_answered && b_received) {
+        let _ = a.drain().await;
+        if !b.drain().await.is_empty() {
+            b_received = true;
+        }
+        while let Ok(frame) = b_rx.try_recv() {
+            if let ServerFrame::SdpOffer { sdp } = frame {
+                pending_reneg = Some(sdp);
+            }
+        }
+        if !reneg_answered && b.is_connected() {
+            if let Some(sdp) = pending_reneg.take() {
+                b_video_mid = video_mid_in(&sdp);
+                if let Ok(answer) = b.answer_renegotiation(&sdp) {
+                    if media
+                        .accept_renegotiation_answer(b_id.clone(), answer)
+                        .await
+                        .is_ok()
+                    {
+                        reneg_answered = true;
+                    }
+                }
+            }
+        }
+        a.write_video_frame_with_descriptor(publisher_mid, &payload, &descriptor, frame_idx);
+        frame_idx += 1;
+        let a_sock = a.socket.clone();
+        let b_sock = b.socket.clone();
+        let mut abuf = [0u8; 2048];
+        let mut bbuf = [0u8; 2048];
+        tokio::select! {
+            r = a_sock.recv_from(&mut abuf) => {
+                if let Ok((n, src)) = r { a.feed_receive(&abuf[..n], src, sfu_addr); }
+            }
+            r = b_sock.recv_from(&mut bbuf) => {
+                if let Ok((n, src)) = r { b.feed_receive(&bbuf[..n], src, sfu_addr); }
+            }
+            () = tokio::time::sleep(Duration::from_millis(5)) => {
+                a.feed_timeout();
+                b.feed_timeout();
+            }
+        }
+    }
+    assert!(reneg_answered, "B must answer the downstream offer");
+    assert!(b_received, "B must be receiving A's video");
+    let b_video_mid = b_video_mid.expect("the renegotiation offer carries a video mid");
+
+    // (1) The SFU asked A for a keyframe on B's behalf. B has sent no PLI
+    //     of its own, so any request A sees came from the downstream-opened
+    //     path. Allow a few more ticks for the PLI to cross the loopback.
+    pump(
+        &mut a,
+        &mut b,
+        sfu_addr,
+        Duration::from_millis(200),
+        Some((publisher_mid, &payload, &descriptor, &mut frame_idx)),
+    )
+    .await;
+    assert!(
+        a.keyframe_requests_seen > requests_before_join,
+        "the publisher must be asked for a keyframe when a late joiner's track \
+         opens, without the joiner having to ask; before={requests_before_join} \
+         after={}",
+        a.keyframe_requests_seen
+    );
+
+    // Let the rate-limit window expire, then establish a quiet baseline so
+    // the burst assertion below measures the burst and nothing else.
+    pump(
+        &mut a,
+        &mut b,
+        sfu_addr,
+        KEYFRAME_REQUEST_MIN_INTERVAL + Duration::from_millis(200),
+        Some((publisher_mid, &payload, &descriptor, &mut frame_idx)),
+    )
+    .await;
+    let quiet_start = a.keyframe_requests_seen;
+    pump(
+        &mut a,
+        &mut b,
+        sfu_addr,
+        Duration::from_millis(200),
+        Some((publisher_mid, &payload, &descriptor, &mut frame_idx)),
+    )
+    .await;
+    assert_eq!(
+        a.keyframe_requests_seen, quiet_start,
+        "no keyframe requests should reach the publisher while nobody asks"
+    );
+
+    // (2) B fires a burst of PLIs, the way a decoder with no reference does.
+    //     They must collapse to exactly one request at A inside the window.
+    let baseline = a.keyframe_requests_seen;
+    let mut sent = 0;
+    for _ in 0..10 {
+        if b.send_pli(b_video_mid) {
+            sent += 1;
+        }
+        pump(
+            &mut a,
+            &mut b,
+            sfu_addr,
+            Duration::from_millis(10),
+            Some((publisher_mid, &payload, &descriptor, &mut frame_idx)),
+        )
+        .await;
+    }
+    assert_eq!(sent, 10, "B must have a receive stream to send PLIs on");
+    // Total elapsed since the burst began stays well under the window.
+    pump(
+        &mut a,
+        &mut b,
+        sfu_addr,
+        Duration::from_millis(150),
+        Some((publisher_mid, &payload, &descriptor, &mut frame_idx)),
+    )
+    .await;
+    assert_eq!(
+        a.keyframe_requests_seen - baseline,
+        1,
+        "ten subscriber PLIs inside one window must reach the publisher as \
+         exactly one keyframe request"
     );
 }
