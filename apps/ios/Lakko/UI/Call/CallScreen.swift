@@ -962,8 +962,8 @@ public struct CallScreen: View {
     private var gallery: some View {
         ScrollView {
             VStack(spacing: 12) {
-                if let active = state.activeSpeaker {
-                    ParticipantTile(participant: active, large: true, state: state)
+                if let featured = state.featuredParticipant {
+                    ParticipantTile(participant: featured, large: true, state: state)
                 }
                 LazyVGrid(
                     columns: [GridItem(.adaptive(minimum: 160), spacing: 10)], spacing: 10
@@ -973,8 +973,14 @@ public struct CallScreen: View {
                     }
                 }
             }
-            .padding(16)
-            .padding(.bottom, 140)
+            // Section 4.4: the tiles never sit under the status line or the
+            // control bar. The header floats over the top of this scroll view
+            // and the bar over its bottom, so the content reserves the height
+            // of each: the first row starts below the header, the last row
+            // clears the bar even when the list scrolls to its end.
+            .padding(.horizontal, 16)
+            .padding(.top, 72)
+            .padding(.bottom, 156)
         }
     }
 

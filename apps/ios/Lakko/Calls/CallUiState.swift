@@ -315,27 +315,17 @@ public final class CallUiState: ObservableObject {
 
     // MARK: - Derived state
 
-    /// Active-speaker pick: pinned > speaking-remote > first
-    /// remote > local. Same dispatch as the web `activeSpeaker`
-    /// memo.
-    public var activeSpeaker: Participant? {
-        if let pin = pinnedId, let found = participants.first(where: { $0.id == pin }) {
-            return found
-        }
-        if let speakingRemote = participants.first(where: { $0.speaking && !$0.isLocal }) {
-            return speakingRemote
-        }
-        if let firstRemote = participants.first(where: { !$0.isLocal }) {
-            return firstRemote
-        }
-        return participants.first
+    /// The tile the group stage draws large, or `nil` for an equal grid. The
+    /// rule is `CallScreenPresentation.featured` (section 4.4), shared with the
+    /// web and Android stores.
+    public var featuredParticipant: Participant? {
+        CallScreenPresentation.featured(participants: participants, pinnedId: pinnedId)
     }
 
-    /// Gallery participants — everyone except the active
-    /// speaker.
+    /// The grid: everyone but the featured tile in roster order, or everyone
+    /// when there is no featured tile.
     public var galleryParticipants: [Participant] {
-        guard let active = activeSpeaker else { return [] }
-        return participants.filter { $0.id != active.id }
+        CallScreenPresentation.gallery(participants: participants, featured: featuredParticipant)
     }
 
     /// Quality tier of the local participant — drives the

@@ -282,24 +282,16 @@ public class CallUiState(
     // on the StateFlow this peeks at).
     // ----------------------------------------------------------
 
-    /** Active-speaker pick: pinned > speaking-remote > first
-     *  remote > local. */
-    public fun activeSpeaker(): Participant? {
-        val list = _participants.value
-        val pin = _pinnedId.value
-        if (pin != null) {
-            list.firstOrNull { it.id == pin }?.let { return it }
-        }
-        list.firstOrNull { it.speaking && !it.isLocal }?.let { return it }
-        list.firstOrNull { !it.isLocal }?.let { return it }
-        return list.firstOrNull()
-    }
+    /** The tile the group stage draws large, or `null` for an equal grid. The
+     *  rule is [me.lakko.app.calls.featuredParticipant] (section 4.4), shared
+     *  with the web and iOS stores. */
+    public fun featuredParticipant(): Participant? =
+        featuredParticipant(_participants.value, _pinnedId.value)
 
-    /** Gallery = everyone except the active speaker. */
-    public fun galleryParticipants(): List<Participant> {
-        val active = activeSpeaker() ?: return emptyList()
-        return _participants.value.filter { it.id != active.id }
-    }
+    /** The grid: everyone but the featured tile in roster order, or everyone
+     *  when there is no featured tile. */
+    public fun galleryParticipants(): List<Participant> =
+        galleryParticipants(_participants.value, featuredParticipant())
 
     /** Local participant quality (drives the header dot). */
     public fun localQualityTier(): QualityTier =

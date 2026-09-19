@@ -3636,10 +3636,24 @@ button.lk-call-chip:focus-visible {
   max-width: 1080px;
   margin: 0 auto;
 }
+/* Section 4.4: the featured tile is sized so that it AND one row of the grid
+   fit between the status line and the control bar. Its width follows the
+   height left over (viewport minus the 96px top and 168px bottom insets, the
+   12px gap and one 156px grid row) at 16:9, capped at the roster width. Before
+   this the tile took the full 1080px on a laptop and pushed the grid row under
+   the bar, where it was legible only after a scroll nobody knew to make. */
+.lk-call-stage {
+  max-width: clamp(280px, calc((100dvh - 432px) * 16 / 9), 1080px);
+}
 .lk-call-gallery {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: 10px;
+}
+/* Section 4.4: with nobody else sending video there is no featured tile and
+   everyone sits in the grid at the same, larger size. */
+.lk-call-gallery.equal {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
 }
 
 /* A participant tile. */

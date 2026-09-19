@@ -61,7 +61,7 @@ import {
 import { useNavigate } from "@solidjs/router";
 
 import {
-  activeSpeaker,
+  featuredParticipant,
   callActions,
   callState,
   galleryParticipants,
@@ -749,18 +749,20 @@ const GroupStage: Component<{
   localStream?: (() => MediaStream | undefined) | undefined;
 }> = (props) => (
   <>
-    <Show when={activeSpeaker() !== null}>
-      <div class="lk-call-stage">
-        <ParticipantTile
-          participant={activeSpeaker() as Participant}
-          large={true}
-          onPin={(id): void => callActions.pin(id === "" ? null : id)}
-          remoteStreamFor={props.remoteStreamFor}
-          localStream={props.localStream}
-        />
-      </div>
+    <Show when={featuredParticipant()}>
+      {(featured) => (
+        <div class="lk-call-stage">
+          <ParticipantTile
+            participant={featured()}
+            large={true}
+            onPin={(id): void => callActions.pin(id === "" ? null : id)}
+            remoteStreamFor={props.remoteStreamFor}
+            localStream={props.localStream}
+          />
+        </div>
+      )}
     </Show>
-    <div class="lk-call-gallery">
+    <div class="lk-call-gallery" classList={{ equal: featuredParticipant() === null }}>
       <For each={galleryParticipants()}>
         {(p) => (
           <ParticipantTile

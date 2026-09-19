@@ -123,6 +123,37 @@ public enum CallScreenPresentation {
         return remotePicture ? .video : .portrait
     }
 
+    /// The tile a group call draws large, or `nil` for an equal grid (section
+    /// 4.4): pinned, else speaking with video, else the first in roster order
+    /// with video, else nobody. The user's own tile is never featured while
+    /// anyone else is present; alone, their preview is the only thing there is
+    /// to show. `speaking` is a hint the transport may never set, and the rule
+    /// reads the same when it is always `false`.
+    ///
+    /// What this replaced picked the first remote whatever they were sending,
+    /// so the first person to join held the big slot for the whole call with an
+    /// avatar in it while other people's cameras ran in the small tiles.
+    public static func featured(
+        participants: [CallUiState.Participant], pinnedId: String?
+    ) -> CallUiState.Participant? {
+        if let pin = pinnedId, let pinned = participants.first(where: { $0.id == pin }) {
+            return pinned
+        }
+        let remotes = participants.filter { !$0.isLocal }
+        if remotes.isEmpty { return participants.first(where: { $0.isLocal }) }
+        return remotes.first(where: { $0.speaking && $0.camOn })
+            ?? remotes.first(where: { $0.camOn })
+    }
+
+    /// The grid under (or instead of) the featured tile: everyone but the
+    /// featured one, in roster order; everyone, when there is none.
+    public static func gallery(
+        participants: [CallUiState.Participant], featured: CallUiState.Participant?
+    ) -> [CallUiState.Participant] {
+        guard let featured else { return participants }
+        return participants.filter { $0.id != featured.id }
+    }
+
     /// The row, left to right (`docs/ux/calls.md` section 4.1): Speaker, Mute,
     /// Camera, End — the same four on **both** call kinds.
     ///

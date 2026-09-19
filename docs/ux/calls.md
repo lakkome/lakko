@@ -228,6 +228,37 @@ Neither rule changes what is announced to the group: the leaving device tells th
 group it left, and ends the call for the chat when its record shows nobody else
 still in it, exactly as a hang-up does.
 
+### 4.4 A group call: the big tile and the grid
+
+A group call is a grid of tiles with, sometimes, one tile drawn large above the
+rest. The same rule decides that tile on every client, because the three screens
+were each picking someone else and one of them was picking wrong:
+
+- **The large tile shows a picture, or there is no large tile.** It goes to the
+  person the user pinned; otherwise to the person who is speaking and sending
+  video; otherwise to the first person in the roster who is sending video. When
+  nobody else is sending video there is no large tile at all: everyone sits in
+  the grid at the same size, camera or no camera. A large tile holding an
+  avatar while other people's cameras run in small tiles was the defect - the
+  first person to join took the big slot for the whole call, whatever they were
+  sending.
+- **The user's own tile is never the large one** unless they are alone in the
+  call, when their own preview is the only thing there is to show. With others
+  present it sits in the grid like everyone else's.
+- **Pinning wins over everything.** A pinned tile stays large whether or not it
+  is sending video, until the user unpins it; that is what a pin is for.
+- **The grid keeps roster order** and never reorders on its own. When the person
+  in the large tile stops sending video, the next one sending video takes the
+  slot and they drop into the grid where their roster position puts them.
+- **The tiles never sit under the status line or the control bar.** The scroll
+  area reserves the height of both, so the last row of tiles is fully visible
+  above the bar and the first row starts below the status line. The bar still
+  fades on a tap, but a tile is never legible only while it is faded.
+
+The one line of the spec every client implements is: pinned, else speaking with
+video, else first with video, else nobody. `speaking` is a hint the transport may
+never set; the rule must read the same when it is always false.
+
 ## 5. The safety number
 
 Today the call safety number is printed across the top of the call as sixteen digits.
@@ -290,6 +321,7 @@ word).
 
 ## 9. Out of scope here
 
-Group call redesign beyond the shared call screen, call recording, call links
+Group call redesign beyond the shared call screen and the tile rule of section
+4.4, call recording, call links
 (they keep the behaviour of [ADR-0032](../adr/0032-multi-joiner-call-links.md)),
 screen sharing, and call history sync between devices.

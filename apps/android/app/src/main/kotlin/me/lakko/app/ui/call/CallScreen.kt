@@ -131,6 +131,8 @@ import me.lakko.app.calls.callControlRow
 import me.lakko.app.calls.callScreenTitle
 import me.lakko.app.calls.callStage
 import me.lakko.app.calls.controlsMayAutoHide
+import me.lakko.app.calls.featuredParticipant
+import me.lakko.app.calls.galleryParticipants
 import me.lakko.app.calls.showsSelfViewPip
 import me.lakko.app.ui.components.LakkoAvatar
 import me.lakko.app.ui.theme.avatarTintFor
@@ -918,9 +920,12 @@ private fun ParticipantGrid(
         // inside a lazy list's content lambda is not observed, so the tiles
         // froze at whatever the roster was on first composition (an empty
         // screen when the overlay opened before the SFU welcome arrived).
-        val active = remember(participants) { state.activeSpeaker() }
-        val gallery = remember(participants, active) {
-            participants.filter { it.id != active?.id }
+        val pinnedId by state.pinnedId.collectAsState()
+        val featured = remember(participants, pinnedId) {
+            featuredParticipant(participants, pinnedId)
+        }
+        val gallery = remember(participants, featured) {
+            galleryParticipants(participants, featured)
         }
         Column(
             modifier = Modifier
@@ -930,8 +935,8 @@ private fun ParticipantGrid(
                 .padding(start = 16.dp, end = 16.dp, top = 76.dp, bottom = 140.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (active != null) {
-                ParticipantTile(participant = active, large = true, state = state)
+            if (featured != null) {
+                ParticipantTile(participant = featured, large = true, state = state)
             }
             gallery.chunked(2).forEach { row ->
                 Row(

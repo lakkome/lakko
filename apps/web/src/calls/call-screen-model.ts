@@ -82,6 +82,55 @@ export function callSurfaceKind(input: CallSurfaceInput): CallSurfaceKind {
   return "voice";
 }
 
+/** What {@link featuredParticipant} needs to know about one tile. The store's
+ *  `Participant` satisfies it structurally; the rule reads nothing else. */
+export interface FeaturedCandidate {
+  readonly id: string;
+  readonly isLocal: boolean;
+  readonly camOn: boolean;
+  readonly speaking: boolean;
+}
+
+/**
+ * The tile a group call draws large, or `null` for an equal grid (§4.4).
+ *
+ * Pinned, else speaking with video, else the first in roster order with video,
+ * else nobody. The user's own tile is never featured while anyone else is
+ * present; alone, their preview is the only thing there is to show. `speaking`
+ * is a hint the transport may never set, and the rule reads the same when it
+ * is always `false`: the first camera in roster order.
+ *
+ * What this replaced picked the first remote whatever they were sending, so
+ * the first person to join held the big slot for the whole call with an avatar
+ * in it while other people's cameras ran in the small tiles.
+ */
+export function featuredParticipant<T extends FeaturedCandidate>(
+  participants: readonly T[],
+  pinnedId: string | null,
+): T | null {
+  if (pinnedId !== null) {
+    const pinned = participants.find((p) => p.id === pinnedId);
+    if (pinned !== undefined) return pinned;
+  }
+  const remotes = participants.filter((p) => !p.isLocal);
+  if (remotes.length === 0) return participants.find((p) => p.isLocal) ?? null;
+  return (
+    remotes.find((p) => p.speaking && p.camOn) ?? remotes.find((p) => p.camOn) ?? null
+  );
+}
+
+/**
+ * The grid under (or instead of) the featured tile: everyone but the featured
+ * one, in roster order; everyone, when there is none.
+ */
+export function galleryParticipants<T extends FeaturedCandidate>(
+  participants: readonly T[],
+  featured: T | null,
+): T[] {
+  if (featured === null) return [...participants];
+  return participants.filter((p) => p.id !== featured.id);
+}
+
 /** Whose picture fills the video surface. */
 export type CallFillSource = "remote" | "local" | "none";
 

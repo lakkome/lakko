@@ -20,6 +20,10 @@
  */
 
 import { createSignal, createMemo, type Accessor } from "solid-js";
+import {
+  featuredParticipant as pickFeatured,
+  galleryParticipants as pickGallery,
+} from "../calls/call-screen-model";
 
 import type { VideoPublishState } from "../calls/call-session";
 
@@ -389,33 +393,20 @@ export const callState: CallStateInternal = {
   videoPublishState,
 };
 
-/** Derived: the participant whose tile should be in the big
- *  "active speaker" slot. Picks (in order): the pinned one,
- *  the currently-speaking remote, otherwise the first remote,
- *  otherwise local. */
-export const activeSpeaker = createMemo<Participant | null>(() => {
-  const pin = pinnedId();
-  const all = participants();
-  if (pin !== null) {
-    const found = all.find((p) => p.id === pin);
-    if (found !== undefined) return found;
-  }
-  const speakingRemote = all.find((p) => p.speaking && !p.isLocal);
-  if (speakingRemote !== undefined) return speakingRemote;
-  const firstRemote = all.find((p) => !p.isLocal);
-  if (firstRemote !== undefined) return firstRemote;
-  return all[0] ?? null;
-});
+/** Derived: the tile the group stage draws large, or `null` for an equal grid.
+ *  The rule is `calls/call-screen-model.ts` `featuredParticipant` (§4.4):
+ *  pinned, else speaking with video, else first with video, else nobody; the
+ *  local tile only when alone. */
+export const featuredParticipant = createMemo<Participant | null>(() =>
+  pickFeatured(participants(), pinnedId()),
+);
 
-/** Derived: gallery slice — everyone except the active
- *  speaker. The local participant always appears in the
- *  gallery (in a small pip-style tile), unless they ARE the
- *  active speaker. */
-export const galleryParticipants = createMemo<Participant[]>(() => {
-  const active = activeSpeaker();
-  if (active === null) return [];
-  return participants().filter((p) => p.id !== active.id);
-});
+/** Derived: the grid — everyone but the featured tile in roster order, or
+ *  everyone when there is no featured tile. The local participant always sits
+ *  in it unless they are the featured one. */
+export const galleryParticipants = createMemo<Participant[]>(() =>
+  pickGallery(participants(), featuredParticipant()),
+);
 
 /** Mutating actions exposed to UI event handlers. Each is a
  *  free function so a button's `onClick={callActions.toggleMic}`

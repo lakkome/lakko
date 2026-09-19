@@ -12,7 +12,9 @@ import {
   controlsHidden,
   elapsedMs,
   endedSummary,
+  featuredParticipant,
   formatCallDuration,
+  galleryParticipants,
   selfViewVisible,
   spokenCallDuration,
   type CallPhaseKind,
@@ -258,5 +260,74 @@ describe("selfViewVisible", () => {
 
   it("is absent on the group grid, where the local tile already exists", () => {
     expect(selfViewVisible("group", true, "none")).toBe(false);
+  });
+});
+
+describe("featuredParticipant (§4.4)", () => {
+  const tile = (
+    id: string,
+    over: Partial<{ isLocal: boolean; camOn: boolean; speaking: boolean }> = {},
+  ) => ({ id, isLocal: false, camOn: false, speaking: false, ...over });
+  const me = tile("me", { isLocal: true, camOn: true });
+
+  it("features nobody when no one else is sending video", () => {
+    // The defect: the first remote held the big slot with an avatar in it
+    // while other cameras ran in small tiles. With no remote camera at all the
+    // honest layout is an equal grid, the local camera notwithstanding.
+    const roster = [me, tile("a"), tile("b"), tile("c")];
+    expect(featuredParticipant(roster, null)).toBeNull();
+    expect(galleryParticipants(roster, null).map((p) => p.id)).toEqual(["me", "a", "b", "c"]);
+  });
+
+  it("features the first remote with a camera, in roster order", () => {
+    const roster = [me, tile("a"), tile("b", { camOn: true }), tile("c", { camOn: true })];
+    expect(featuredParticipant(roster, null)?.id).toBe("b");
+    expect(galleryParticipants(roster, roster[2] ?? null).map((p) => p.id)).toEqual([
+      "me",
+      "a",
+      "c",
+    ]);
+  });
+
+  it("prefers a speaking remote with a camera over an earlier silent one", () => {
+    const roster = [me, tile("a", { camOn: true }), tile("b", { camOn: true, speaking: true })];
+    expect(featuredParticipant(roster, null)?.id).toBe("b");
+  });
+
+  it("never features a speaker who is not sending video", () => {
+    const roster = [me, tile("a", { speaking: true }), tile("b", { camOn: true })];
+    expect(featuredParticipant(roster, null)?.id).toBe("b");
+    expect(featuredParticipant([me, tile("a", { speaking: true })], null)).toBeNull();
+  });
+
+  it("never features the local tile while anyone else is present", () => {
+    expect(featuredParticipant([me, tile("a")], null)).toBeNull();
+  });
+
+  it("features the local tile when alone", () => {
+    expect(featuredParticipant([me], null)?.id).toBe("me");
+    expect(featuredParticipant([tile("me-off", { isLocal: true })], null)?.id).toBe("me-off");
+  });
+
+  it("lets a pin win over the camera rule", () => {
+    const roster = [me, tile("a"), tile("b", { camOn: true })];
+    expect(featuredParticipant(roster, "a")?.id).toBe("a");
+  });
+
+  it("ignores a pin that names nobody in the roster", () => {
+    const roster = [me, tile("a"), tile("b", { camOn: true })];
+    expect(featuredParticipant(roster, "gone")?.id).toBe("b");
+  });
+
+  it("hands the slot to the next camera when the featured one stops", () => {
+    const before = [me, tile("a", { camOn: true }), tile("b", { camOn: true })];
+    const after = [me, tile("a"), tile("b", { camOn: true })];
+    expect(featuredParticipant(before, null)?.id).toBe("a");
+    expect(featuredParticipant(after, null)?.id).toBe("b");
+  });
+
+  it("returns null on an empty roster", () => {
+    expect(featuredParticipant([], null)).toBeNull();
+    expect(galleryParticipants([], null)).toEqual([]);
   });
 });
