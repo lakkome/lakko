@@ -571,12 +571,6 @@ impl MediaPeer {
         now: Instant,
         stats_interval: Option<Duration>,
     ) -> Self {
-        // Enable BWE so str0m emits `Event::EgressBitrateEstimate` for this
-        // peer — the per-receiver bandwidth signal the simulcast layer policy
-        // ([`drive_layer_selection`]) uses. The initial estimate is a
-        // conservative 600 kbps; str0m refines it from TWCC/REMB feedback. BWE
-        // is passive for the SFrame-passthrough path (it never rewrites media).
-        //
         // Register the generic frame descriptor so it is negotiated in both
         // directions — echoed in the answer to a publisher's offer, and
         // offered in the SFU's own offer to a subscriber. Without it in this
@@ -584,8 +578,21 @@ impl MediaPeer {
         // echoed in the answer, not adopted from the offer, and not parsed
         // off the wire. The SFU carries the value without interpreting it;
         // see [`crate::frame_descriptor`] for what that costs in exposure.
+        // Send-side bandwidth estimation is OFF, and with it str0m's pacer.
+        // The SFU relays media it cannot re-encode: when the estimate toward a
+        // subscriber collapses after a loss burst (60 kbps was seen live on
+        // 2026-09-19 after a one-second blackout), the pacer holds a stream it
+        // cannot thin far below its rate, the frames queue, the picture stops
+        // for 15 s and then arrives in a burst. Unpaced, packets leave as
+        // they arrive and a subscriber that is really short of bandwidth asks
+        // its publisher for less through its own receiver feedback. The cost
+        // is that `Event::EgressBitrateEstimate` never fires, so the
+        // simulcast layer policy (`drive_layer_selection`) has no estimate to
+        // act on and stays on the latched layer; nothing publishes simulcast
+        // today. TWCC feedback toward publishers is a receive-side setting
+        // and is unaffected.
         let rtc = Rtc::builder()
-            .enable_bwe(Some(Bitrate::kbps(600)))
+            .enable_bwe(None)
             .set_extension(
                 frame_descriptor::GENERIC_FRAME_DESCRIPTOR_ID,
                 frame_descriptor::generic_frame_descriptor_extension(),
@@ -2333,6 +2340,15 @@ async fn drain_outputs(
                     // diagnostics are on; each is one line per stream
                     // per interval, cumulative counters as str0m keeps
                     // them.
+                    // Transport state, always on: a subscriber that stops
+                    // receiving for seconds at a time is either paced or
+                    // disconnected, and only this line tells the two apart.
+                    Event::IceConnectionStateChange(state) => {
+                        tracing::info!(peer = %origin, state = ?state, "media: ICE connection state");
+                    },
+                    Event::Connected => {
+                        tracing::info!(peer = %origin, "media: peer transport connected");
+                    },
                     Event::MediaIngressStats(st) => log_ingress_stats(&origin, &st),
                     Event::MediaEgressStats(st) => log_egress_stats(&origin, peer, &st),
                     Event::PeerStats(st) => log_peer_stats(&origin, &st),
