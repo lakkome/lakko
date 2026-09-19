@@ -41,6 +41,13 @@ pub mod names {
     /// Cumulative count of distinct calls observed since
     /// boot.
     pub const CALLS_TOTAL: &str = "lakko_sfu_calls_total";
+    /// Cumulative count of peers the signaling socket dropped
+    /// because they sent nothing for the idle window (see
+    /// `SignalingLiveness`). A live peer answers protocol pings,
+    /// so every increment is a peer whose network went away
+    /// without a close frame; a steady rate on a healthy network
+    /// means a client stack has stopped answering pings.
+    pub const PEERS_DROPPED_IDLE_TOTAL: &str = "lakko_sfu_peers_dropped_idle_total";
     /// Cumulative count of signaling frames received from
     /// peers. A single un-labelled bucket: the typed signaling
     /// protocol exists (`lakko-sfu-proto`), but this counter is
@@ -133,6 +140,10 @@ impl MetricsExporter {
             "Cumulative count of distinct calls observed since boot"
         );
         metrics::describe_counter!(
+            names::PEERS_DROPPED_IDLE_TOTAL,
+            "Peers dropped by the signaling socket for sending nothing during the idle window"
+        );
+        metrics::describe_counter!(
             names::SIGNALING_FRAMES_TOTAL,
             "Cumulative count of signaling frames, labelled by `direction` \
              (inbound = received from a peer / outbound = broadcast to peers) \
@@ -162,6 +173,7 @@ impl MetricsExporter {
         metrics::counter!(names::PEERS_ADMITTED_TOTAL).absolute(0);
         metrics::counter!(names::PEERS_REJECTED_TOTAL).absolute(0);
         metrics::counter!(names::CALLS_TOTAL).absolute(0);
+        metrics::counter!(names::PEERS_DROPPED_IDLE_TOTAL).absolute(0);
         // SIGNALING_FRAMES_TOTAL is now labelled by `direction` + `kind`; an
         // unlabelled zero-init would ship a meaningless empty-label series
         // alongside the real ones, so — like the labelled

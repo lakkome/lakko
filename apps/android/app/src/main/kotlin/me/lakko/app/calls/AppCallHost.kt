@@ -244,6 +244,14 @@ internal class ChatRepositoryGroupCallPort(
 
     override fun isGroupActive(groupIdHex: String): Boolean? = repository.isGroupActive(groupIdHex)
 
+    override fun recordCall(groupIdHex: String, entry: CallTranscriptEntry) {
+        try {
+            repository.recordCallRow(groupIdHex, entry)
+        } catch (error: Throwable) {
+            android.util.Log.w("ChatRepositoryGroupCallPort", "recording the call row failed", error)
+        }
+    }
+
     override suspend fun syncGroup(groupIdHex: String) {
         // Best effort: when a long poll of this group is already in flight this
         // returns at once, and that poll is what keeps the epoch current anyway.

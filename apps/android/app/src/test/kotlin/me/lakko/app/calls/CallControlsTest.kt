@@ -248,4 +248,40 @@ class CallControlsTest {
             .filter { it.kind != CallControlKind.CAMERA }
             .forEach { assertFalse(it.kind.name, it.busy) }
     }
+
+    // ---- Fitting the row to the screen ---------------------------------------
+
+    @Test
+    fun `five controls fit a 411 dp phone with the end button on the screen`() {
+        // The emulator that showed the defect: 1080 px at 420 dpi = 411 dp, the
+        // bar inset 12 dp each side.
+        val fit = fitCallControlBar(availableWidthDp = 411f - 24f, count = 5)
+        val row = 5 * fit.columnDp + 5 * CALL_CONTROL_GAP_DP + 2 * CALL_CONTROL_BAR_PADDING_DP
+        assertTrue("row $row must fit 387 dp", row <= 387f + 0.01f)
+        assertTrue(fit.endDiameterDp <= fit.columnDp)
+        assertTrue(fit.diameterDp >= CALL_CONTROL_MIN_DIAMETER_DP)
+        assertTrue(fit.endDiameterDp > fit.diameterDp)
+    }
+
+    @Test
+    fun `with room to spare the controls keep the spec sizes`() {
+        val fit = fitCallControlBar(availableWidthDp = 800f, count = 5)
+        assertEquals(CALL_CONTROL_DIAMETER_DP, fit.diameterDp, 0.001f)
+        assertEquals(CALL_CONTROL_END_DIAMETER_DP, fit.endDiameterDp, 0.001f)
+        assertEquals(CALL_CONTROL_END_DIAMETER_DP, fit.columnDp, 0.001f)
+    }
+
+    @Test
+    fun `a narrow phone never drops a control under the minimum touch target`() {
+        val fit = fitCallControlBar(availableWidthDp = 320f - 24f, count = 5)
+        assertTrue(fit.diameterDp >= CALL_CONTROL_MIN_DIAMETER_DP)
+        assertTrue(fit.endDiameterDp >= CALL_CONTROL_MIN_DIAMETER_DP)
+    }
+
+    @Test
+    fun `the four-control row of a one-to-one call fits at spec sizes on a 411 dp phone`() {
+        val fit = fitCallControlBar(availableWidthDp = 411f - 24f, count = 4)
+        assertEquals(CALL_CONTROL_DIAMETER_DP, fit.diameterDp, 0.001f)
+        assertEquals(CALL_CONTROL_END_DIAMETER_DP, fit.endDiameterDp, 0.001f)
+    }
 }

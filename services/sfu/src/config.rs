@@ -36,6 +36,14 @@ const DEFAULT_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
 /// normal load; 100 fps leaves plenty of slack for ICE
 /// candidate bursts at handshake.
 const DEFAULT_PEER_MSG_RATE_PER_SEC: u32 = 100;
+/// How often the signaling socket pings a silent peer.
+/// Chosen, not measured: three unanswered pings inside the
+/// idle window below declare the peer gone.
+const DEFAULT_SIGNALING_PING_SECS: u64 = 20;
+/// How long a peer may go without any inbound frame (a
+/// Pong answers a ping, so a live peer is never silent this
+/// long) before it is dropped and announced as left.
+const DEFAULT_SIGNALING_IDLE_SECS: u64 = 60;
 
 /// Failure modes for loading the runtime config.
 #[derive(Debug, Error)]
@@ -122,6 +130,20 @@ pub struct Config {
     /// With media off it holds the raw value (or `None`) so
     /// startup can warn that it is being ignored.
     pub media_advertise_ip: Option<IpAddr>,
+    /// How often the signaling socket sends a WebSocket
+    /// protocol ping to each peer (`LAKKO_SFU_SIGNALING_PING_SECS`).
+    /// Every client stack answers a protocol ping on its own
+    /// (URLSession, OkHttp, browsers, tungstenite), so this
+    /// needs nothing from the app layer.
+    pub signaling_ping_interval: Duration,
+    /// How long a peer may send nothing at all before it is
+    /// dropped and announced as left
+    /// (`LAKKO_SFU_SIGNALING_IDLE_SECS`). Must exceed the ping
+    /// interval, or every peer would be dropped between pings.
+    /// Without this a phone that lost its network stayed on
+    /// every other participant's roster until nginx gave up on
+    /// the idle socket an hour later.
+    pub signaling_idle_timeout: Duration,
 }
 
 impl Config {
@@ -151,6 +173,11 @@ impl Config {
             "LAKKO_SFU_PEER_MSG_RATE_PER_SEC",
             DEFAULT_PEER_MSG_RATE_PER_SEC,
         )?;
+        let signaling_ping_interval =
+            parse_secs("LAKKO_SFU_SIGNALING_PING_SECS", DEFAULT_SIGNALING_PING_SECS)?;
+        let signaling_idle_timeout =
+            parse_secs("LAKKO_SFU_SIGNALING_IDLE_SECS", DEFAULT_SIGNALING_IDLE_SECS)?;
+        check_signaling_liveness(signaling_ping_interval, signaling_idle_timeout)?;
         let media_bind = parse_optional_socket("LAKKO_SFU_MEDIA_BIND")?;
         let raw_advertise_ip = parse_optional_ip(MEDIA_ADVERTISE_IP)?;
         let media_advertise_ip = match media_bind {
@@ -167,8 +194,34 @@ impl Config {
             peer_msg_rate_per_sec,
             media_bind,
             media_advertise_ip,
+            signaling_ping_interval,
+            signaling_idle_timeout,
         })
     }
+}
+
+/// A zero ping interval would spin; a zero idle timeout, or one
+/// no longer than the ping interval, would drop every peer
+/// between two pings. Refused at load rather than discovered
+/// as an empty roster in production.
+fn check_signaling_liveness(ping: Duration, idle: Duration) -> Result<(), ConfigError> {
+    if ping.is_zero() {
+        return Err(ConfigError::Invalid {
+            name: "LAKKO_SFU_SIGNALING_PING_SECS",
+            detail: "must be at least 1".to_owned(),
+        });
+    }
+    if idle <= ping {
+        return Err(ConfigError::Invalid {
+            name: "LAKKO_SFU_SIGNALING_IDLE_SECS",
+            detail: format!(
+                "must exceed LAKKO_SFU_SIGNALING_PING_SECS ({} s), got {} s",
+                ping.as_secs(),
+                idle.as_secs()
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn parse_socket(name: &'static str, fallback: &str) -> Result<SocketAddr, ConfigError> {
@@ -299,6 +352,8 @@ mod tests {
             "LAKKO_SFU_PEER_MSG_RATE_PER_SEC",
             "LAKKO_SFU_MEDIA_BIND",
             "LAKKO_SFU_MEDIA_ADVERTISE_IP",
+            "LAKKO_SFU_SIGNALING_PING_SECS",
+            "LAKKO_SFU_SIGNALING_IDLE_SECS",
         ] {
             env::remove_var(key);
         }
@@ -333,6 +388,56 @@ mod tests {
                 assert_eq!(cfg.signaling_bind.to_string(), "127.0.0.1:7880");
                 assert_eq!(cfg.metrics_bind.to_string(), "127.0.0.1:9641");
                 assert_eq!(cfg.jwks_refresh, Duration::from_secs(300));
+            },
+        );
+    }
+
+    /// The liveness defaults: a ping every 20 s, gone after 60 s
+    /// of silence. Pinned so a change is a decision, not a drift.
+    #[test]
+    fn signaling_liveness_defaults() {
+        with_env(&[("LAKKO_SFU_JWKS_URL", "https://a/x")], || {
+            let cfg = Config::from_env().expect("valid minimal env");
+            assert_eq!(cfg.signaling_ping_interval, Duration::from_secs(20));
+            assert_eq!(cfg.signaling_idle_timeout, Duration::from_secs(60));
+        });
+    }
+
+    /// An idle window that does not exceed the ping interval would
+    /// drop every peer between two pings; refused at load.
+    #[test]
+    fn signaling_idle_must_exceed_ping() {
+        with_env(
+            &[
+                ("LAKKO_SFU_JWKS_URL", "https://a/x"),
+                ("LAKKO_SFU_SIGNALING_PING_SECS", "30"),
+                ("LAKKO_SFU_SIGNALING_IDLE_SECS", "30"),
+            ],
+            || {
+                let err = Config::from_env().unwrap_err();
+                assert!(matches!(
+                    err,
+                    ConfigError::Invalid {
+                        name: "LAKKO_SFU_SIGNALING_IDLE_SECS",
+                        ..
+                    }
+                ));
+            },
+        );
+        with_env(
+            &[
+                ("LAKKO_SFU_JWKS_URL", "https://a/x"),
+                ("LAKKO_SFU_SIGNALING_PING_SECS", "0"),
+            ],
+            || {
+                let err = Config::from_env().unwrap_err();
+                assert!(matches!(
+                    err,
+                    ConfigError::Invalid {
+                        name: "LAKKO_SFU_SIGNALING_PING_SECS",
+                        ..
+                    }
+                ));
             },
         );
     }

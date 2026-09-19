@@ -81,6 +81,7 @@ import {
   isSFrameTransformSupported,
 } from "./sframe-transform";
 import { trackConstraint, type VideoPublishState } from "./call-session";
+import { SFU_KEEPALIVE_TICK_MS, sfuKeepaliveAction } from "./sfu-keepalive";
 
 /** Lifecycle phases the SFU session can be in. */
 export type SfuCallState =
@@ -145,6 +146,11 @@ export interface SfuCallConfig {
    * #4). Defaults to `false` (publish immediately, the normal path).
    */
   readonly deferPublish?: boolean;
+  /**
+   * Clock the signaling keepalive reads (`sfu-keepalive.ts`). Defaults to
+   * `Date.now`; injected by tests so fake timers drive it.
+   */
+  readonly nowMs?: () => number;
 }
 
 /** A remote participant's media surfaced to the caller. */
@@ -287,6 +293,18 @@ export class SfuCallSession {
    */
   private localCameraOn: boolean;
 
+  /**
+   * Signaling keepalive (`sfu-keepalive.ts`): a coarse tick pings the SFU on
+   * the interval and fails the call once nothing inbound (Welcome or Pong)
+   * has arrived within the deadline, so a dead link ends the call instead of
+   * leaving the timer counting on a socket nobody answers.
+   */
+  private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+  private lastInboundMs = 0;
+  private lastPingMs = 0;
+  private pingNonce = 0;
+  private readonly nowMs: () => number;
+
   constructor(
     private readonly config: SfuCallConfig,
     private readonly callbacks: SfuCallCallbacks = {},
@@ -294,6 +312,7 @@ export class SfuCallSession {
     this.activeSeed = config.seed ?? null;
     this.publishLeaf = config.localLeaf ?? 0;
     this.localCameraOn = config.media.video;
+    this.nowMs = config.nowMs ?? Date.now;
   }
 
   /**
@@ -355,6 +374,9 @@ export class SfuCallSession {
         onSignalRelay: (f): void => this.onSignalRelayFrame(f),
         onSdpAnswer: (f): void => void this.onSdpAnswer(f),
         onSdpOffer: (f): void => this.onSdpOffer(f),
+        onPong: (): void => {
+          this.lastInboundMs = this.nowMs();
+        },
         onServerError: (f): void => this.callbacks.onServerError?.(f),
         onClose: (): void => this.onSignalingClosed(),
         onSocketError: (): void => this.onSignalingClosed(),
@@ -366,6 +388,10 @@ export class SfuCallSession {
       this.fail();
       throw err;
     }
+
+    // The socket is open and the Welcome has arrived: start the keepalive.
+    this.lastInboundMs = this.lastPingMs = this.nowMs();
+    this.keepaliveTimer = setInterval(() => this.onKeepaliveTick(), SFU_KEEPALIVE_TICK_MS);
 
     // 2. Build the peer connection + capture + publish — UNLESS the caller
     //    asked to defer (ADR-0032 link joiner: stay signaling-only until it
@@ -660,6 +686,10 @@ export class SfuCallSession {
    *  lifecycle state — the state transition is the caller's
    *  (`hangUp` → closed, `fail` → failed). Idempotent. */
   private releaseResources(): void {
+    if (this.keepaliveTimer !== null) {
+      clearInterval(this.keepaliveTimer);
+      this.keepaliveTimer = null;
+    }
     if (this.signaling !== null) {
       this.signaling.close();
       this.signaling = null;
@@ -803,8 +833,32 @@ export class SfuCallSession {
   // -----------------------------------------------------------------
 
   private onWelcome(frame: SfuWelcome): void {
+    this.lastInboundMs = this.nowMs();
     this.selfPeerId = frame.peer_id;
     this.callbacks.onWelcome?.(frame.peer_id, frame.roster);
+  }
+
+  /** One keepalive tick (`SFU_KEEPALIVE_TICK_MS`): ping when due, fail the
+   *  call when the deadline has passed with nothing inbound. */
+  private onKeepaliveTick(): void {
+    if (this.state === "failed" || this.state === "closed") return;
+    switch (sfuKeepaliveAction(this.nowMs(), this.lastInboundMs, this.lastPingMs)) {
+      case "ping":
+        this.pingNonce += 1;
+        this.signaling?.sendPing(this.pingNonce);
+        this.lastPingMs = this.nowMs();
+        break;
+      case "dead":
+        console.warn(
+          "SfuCallSession: keepalive dead (no pong for " +
+            Math.round((this.nowMs() - this.lastInboundMs) / 1000) +
+            " s); failing the call",
+        );
+        this.fail();
+        break;
+      case "wait":
+        break;
+    }
   }
 
   private onPeerJoined(frame: SfuPeerJoined): void {

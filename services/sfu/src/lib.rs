@@ -40,7 +40,7 @@ use crate::config::Config;
 use crate::jwks::JwksCache;
 use crate::media::MediaTaskHandle;
 use crate::peer::PeerRegistry;
-use crate::signaling::AppState;
+use crate::signaling::{AppState, SignalingLiveness};
 
 /// Service version pulled from the crate manifest at compile
 /// time.
@@ -106,7 +106,7 @@ pub async fn ready(cfg: Config, jwks: JwksCache) -> impl IntoResponse {
 /// switches to [`build_app_with_media`].
 pub fn build_app(cfg: Config, jwks: JwksCache) -> (Router, PeerRegistry) {
     let peers = PeerRegistry::new();
-    let state = AppState::new(jwks.clone(), peers.clone());
+    let state = AppState::new(jwks.clone(), peers.clone(), SignalingLiveness::from(&cfg));
     let router = build_router(state, cfg, jwks);
     (router, peers)
 }
@@ -121,7 +121,12 @@ pub fn build_app_with_media(
     media: MediaTaskHandle,
 ) -> (Router, PeerRegistry) {
     let peers = PeerRegistry::new();
-    let state = AppState::new_with_media(jwks.clone(), peers.clone(), media);
+    let state = AppState::new_with_media(
+        jwks.clone(),
+        peers.clone(),
+        media,
+        SignalingLiveness::from(&cfg),
+    );
     let router = build_router(state, cfg, jwks);
     (router, peers)
 }
@@ -134,7 +139,7 @@ pub fn build_app_with_media(
 /// constructs the registry once and threads it through
 /// both halves.
 pub fn build_app_without_media(cfg: Config, jwks: JwksCache, peers: PeerRegistry) -> Router {
-    let state = AppState::new(jwks.clone(), peers);
+    let state = AppState::new(jwks.clone(), peers, SignalingLiveness::from(&cfg));
     build_router(state, cfg, jwks)
 }
 
@@ -147,6 +152,6 @@ pub fn build_app_with_media_and_peers(
     media: MediaTaskHandle,
     peers: PeerRegistry,
 ) -> Router {
-    let state = AppState::new_with_media(jwks.clone(), peers, media);
+    let state = AppState::new_with_media(jwks.clone(), peers, media, SignalingLiveness::from(&cfg));
     build_router(state, cfg, jwks)
 }

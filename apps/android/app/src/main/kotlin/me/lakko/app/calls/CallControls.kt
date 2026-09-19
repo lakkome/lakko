@@ -175,3 +175,48 @@ public fun callControlRow(
         )
     }
 }
+
+// ---- Fitting the row to the screen ------------------------------------------
+
+/** Section 4.1: a round control is 64 dp across, the end button 72. */
+public const val CALL_CONTROL_DIAMETER_DP: Float = 64f
+public const val CALL_CONTROL_END_DIAMETER_DP: Float = 72f
+/** The gap between columns; the end button is set apart by one more. */
+public const val CALL_CONTROL_GAP_DP: Float = 12f
+/** The bar's own horizontal padding, each side. */
+public const val CALL_CONTROL_BAR_PADDING_DP: Float = 16f
+/** Never smaller than the platform's minimum touch target. */
+public const val CALL_CONTROL_MIN_DIAMETER_DP: Float = 48f
+
+/** How wide each column of the bar is and how large its circles are drawn. */
+public data class CallControlBarFit(
+    /** Width of every column; the row is `count` of these plus the gaps and padding. */
+    val columnDp: Float,
+    val diameterDp: Float,
+    val endDiameterDp: Float,
+)
+
+/**
+ * Size the control row so that every control, the end button included, is on
+ * the screen.
+ *
+ * The row used to give every column the end button's width and never asked
+ * how wide the screen was: five columns of 72 dp, five gaps and the padding
+ * came to 452 dp, and on a 411 dp phone the red End button - the one control
+ * that must never be missing - was clipped past the right edge of a group
+ * call. At the spec sizes five controls do not fit a 411 dp screen at all, so
+ * when the room is short the circles shrink together, keeping their ratio and
+ * never going under the minimum touch target; when there is room they stay
+ * at the spec sizes and the row wraps its content as before.
+ */
+public fun fitCallControlBar(availableWidthDp: Float, count: Int): CallControlBarFit {
+    if (count <= 0) {
+        return CallControlBarFit(0f, CALL_CONTROL_DIAMETER_DP, CALL_CONTROL_END_DIAMETER_DP)
+    }
+    val room = availableWidthDp - 2f * CALL_CONTROL_BAR_PADDING_DP - count * CALL_CONTROL_GAP_DP
+    val column = (room / count).coerceAtMost(CALL_CONTROL_END_DIAMETER_DP)
+    val scale = (column / CALL_CONTROL_END_DIAMETER_DP).coerceIn(0f, 1f)
+    val end = (CALL_CONTROL_END_DIAMETER_DP * scale).coerceAtLeast(CALL_CONTROL_MIN_DIAMETER_DP)
+    val normal = (CALL_CONTROL_DIAMETER_DP * scale).coerceAtLeast(CALL_CONTROL_MIN_DIAMETER_DP)
+    return CallControlBarFit(columnDp = column.coerceAtLeast(end), diameterDp = normal, endDiameterDp = end)
+}

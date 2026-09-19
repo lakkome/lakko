@@ -7,6 +7,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -43,9 +44,13 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import me.lakko.app.calls.CALL_CONTROL_BAR_PADDING_DP
+import me.lakko.app.calls.CALL_CONTROL_GAP_DP
 import me.lakko.app.calls.CallControl
+import me.lakko.app.calls.CallControlBarFit
 import me.lakko.app.calls.CallControlEmphasis
 import me.lakko.app.calls.CallControlKind
+import me.lakko.app.calls.fitCallControlBar
 import me.lakko.app.ui.theme.LakkoDark
 
 /**
@@ -66,17 +71,18 @@ import me.lakko.app.ui.theme.LakkoDark
  * side, floating over whatever the stage is showing.
  */
 
-/** Diameter of every control but End (section 4.1.1). */
-private val CONTROL_DIAMETER = 64.dp
-
-/** The End button is larger, and the only red thing on the screen. */
-private val END_DIAMETER = 72.dp
-
-/** Gap between controls; End is set apart by twice this. */
-private val CONTROL_GAP = 12.dp
+/** Sizes come from `fitCallControlBar` (`CallControls.kt`), which is what keeps
+ *  the end button on the screen; these are the row's fixed metrics. */
+private val CONTROL_GAP = CALL_CONTROL_GAP_DP.dp
+private val BAR_PADDING = CALL_CONTROL_BAR_PADDING_DP.dp
 
 /**
  * The floating bar.
+ *
+ * Measured against the width it is given, so that every control is on the
+ * screen whatever the count: five controls at the spec sizes do not fit a
+ * 411 dp phone, and before this the End button of a group call was clipped
+ * past the right edge (see `fitCallControlBar`).
  *
  * @param onControl invoked with the kind that was pressed. A disabled control
  *   never invokes it, and is drawn at 40 percent rather than hidden, so the
@@ -88,30 +94,43 @@ internal fun CallControlBar(
     onControl: (CallControlKind) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Row(
-        modifier = modifier
-            .clip(RoundedCornerShape(44.dp))
-            // Translucent so the video underneath still reads through it, dark
-            // so the white icons on top keep their contrast.
-            .background(LakkoDark.background.copy(alpha = 0.62f))
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.Bottom,
-        horizontalArrangement = Arrangement.spacedBy(CONTROL_GAP),
-    ) {
-        controls.forEachIndexed { index, control ->
-            // "the end button is a 72 pt red circle set apart by twice the gap"
-            if (control.kind == CallControlKind.END && index > 0) {
-                Spacer(Modifier.width(CONTROL_GAP))
+    BoxWithConstraints(modifier = modifier, contentAlignment = Alignment.Center) {
+        val fit = fitCallControlBar(availableWidthDp = maxWidth.value, count = controls.size)
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(44.dp))
+                // Translucent so the video underneath still reads through it, dark
+                // so the white icons on top keep their contrast.
+                .background(LakkoDark.background.copy(alpha = 0.62f))
+                .padding(horizontal = BAR_PADDING, vertical = 12.dp),
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(CONTROL_GAP),
+        ) {
+            controls.forEachIndexed { index, control ->
+                // "the end button is a 72 pt red circle set apart by twice the gap":
+                // the extra gap is padding on the end column, not a child of the
+                // row, so `spacedBy` does not add a third gap around it (which
+                // is what squeezed the end button once the row was sized to fit).
+                CallControlButton(
+                    control = control,
+                    fit = fit,
+                    setApart = control.kind == CallControlKind.END && index > 0,
+                    onClick = { onControl(control.kind) },
+                )
             }
-            CallControlButton(control = control, onClick = { onControl(control.kind) })
         }
     }
 }
 
 /** One circle with its word underneath. */
 @Composable
-private fun CallControlButton(control: CallControl, onClick: () -> Unit) {
-    val diameter = if (control.kind == CallControlKind.END) END_DIAMETER else CONTROL_DIAMETER
+private fun CallControlButton(
+    control: CallControl,
+    fit: CallControlBarFit,
+    setApart: Boolean,
+    onClick: () -> Unit,
+) {
+    val diameter = (if (control.kind == CallControlKind.END) fit.endDiameterDp else fit.diameterDp).dp
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         // One spoken label for the whole control, naming the action and the
@@ -119,7 +138,8 @@ private fun CallControlButton(control: CallControl, onClick: () -> Unit) {
         // below contributes nothing of its own, so TalkBack does not read
         // "Mute, Mute microphone".
         modifier = Modifier
-            .width(END_DIAMETER)
+            .padding(start = if (setApart) CONTROL_GAP else 0.dp)
+            .width(fit.columnDp.dp)
             .alpha(if (control.enabled) 1f else DISABLED_ALPHA)
             .semantics(mergeDescendants = true) {
                 contentDescription = control.spokenLabel

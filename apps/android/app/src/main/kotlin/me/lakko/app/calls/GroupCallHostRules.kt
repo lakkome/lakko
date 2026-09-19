@@ -68,6 +68,31 @@ public fun planGroupCallLeave(
     return GroupCallLeavePlan(leaveReason = leaveReason, publishLeave = joinPublished, publishEnd = publishEnd)
 }
 
+/**
+ * The row a finished group call leaves in the conversation (`docs/ux/calls.md`
+ * section 6), or `null` when there is nothing to write.
+ *
+ * Direction is not who rang whom - nobody rings in a group call - but whose
+ * call it was from this device's side: one it started is outgoing, one it
+ * joined is incoming. Only a device whose media actually flowed writes a row:
+ * a join that never connected rang nowhere and missed nothing, and the
+ * group-call banner is what announces a live call, so there is no missed row
+ * either.
+ */
+public fun groupCallTranscriptEntry(
+    initiator: Boolean,
+    video: Boolean,
+    connectedAtMs: Long?,
+    endedAtMs: Long,
+): CallTranscriptEntry? {
+    val duration = callDurationSecs(connectedAtMs, endedAtMs) ?: return null
+    return CallTranscriptEntry(
+        outcome = if (initiator) CallOutcome.OUTGOING else CallOutcome.INCOMING,
+        video = video,
+        durationSecs = duration,
+    )
+}
+
 /** What the host does when a group's MLS work settles. */
 public enum class GroupCallEpochAction {
     /** Not the call's group, nothing changed, or the state cannot be read now. */
@@ -150,3 +175,29 @@ public fun decideGroupCallStart(
     }
     return GroupCallStartDecision.Busy(callBusyMessage(occupant, verb))
 }
+
+// ---- Group call: ending by itself when everyone else has left ---------------
+
+/** Chosen: long enough for a peer whose app blinked to come back, short enough that nobody sits in an empty room. */
+public const val GROUP_CALL_ALONE_END_MS: Long = 10_000L
+
+public enum class GroupCallAloneAction { NONE, ARM_END, DISARM }
+
+/**
+ * Whether the host arms or disarms the alone-end timer (`docs/ux/calls.md`
+ * section 4.3): when the last other person leaves a group call that had other
+ * people in it, the call ends by itself [GROUP_CALL_ALONE_END_MS] later as a
+ * hang-up, and someone coming back inside that window cancels it. The person
+ * who started a call and is still waiting for the first joiner is not in this
+ * case: nobody left.
+ *
+ * @param remoteCount other participants on the roster now.
+ * @param sawRemote this call has had at least one other participant.
+ * @param armed the alone-end timer is currently running.
+ */
+public fun groupCallAloneAction(remoteCount: Int, sawRemote: Boolean, armed: Boolean): GroupCallAloneAction =
+    when {
+        remoteCount == 0 && sawRemote && !armed -> GroupCallAloneAction.ARM_END
+        remoteCount > 0 && armed -> GroupCallAloneAction.DISARM
+        else -> GroupCallAloneAction.NONE
+    }

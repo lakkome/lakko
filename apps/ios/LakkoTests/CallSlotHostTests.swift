@@ -208,6 +208,31 @@ final class GroupCallHostRulesTests: XCTestCase {
                 membershipEnded: false, callInProgress: false, affordance: .none, memberCount: nil),
             .startOneToOne)
     }
+
+    // MARK: Alone in the call (docs/ux/calls.md section 4.3)
+
+    func testTheAloneEndArmsOnlyOnceARemoteWasSeenAndTheRosterIsEmpty() {
+        XCTAssertEqual(GroupCallHostRules.aloneAction(remoteCount: 0, sawRemote: true, armed: false), .armEnd)
+        // The person who started the call and is still waiting: nobody left.
+        XCTAssertEqual(GroupCallHostRules.aloneAction(remoteCount: 0, sawRemote: false, armed: false), .none)
+        XCTAssertEqual(GroupCallHostRules.aloneAction(remoteCount: 2, sawRemote: true, armed: false), .none)
+    }
+
+    func testTheRowIsWrittenOnlyForACallWhoseMediaFlowed() {
+        XCTAssertNil(GroupCallHostRules.transcriptRow(initiator: true, connectedAtMs: nil, endedAtMs: 5_000))
+        XCTAssertEqual(
+            GroupCallHostRules.transcriptRow(initiator: true, connectedAtMs: 1_000, endedAtMs: 61_500),
+            CallTranscriptRow(direction: .outgoing, outcome: .answered(durationMs: 60_500)))
+        XCTAssertEqual(
+            GroupCallHostRules.transcriptRow(initiator: false, connectedAtMs: 1_000, endedAtMs: 1_000),
+            CallTranscriptRow(direction: .incoming, outcome: .answered(durationMs: 0)))
+    }
+
+    func testSomeoneComingBackDisarmsTheAloneEnd() {
+        XCTAssertEqual(GroupCallHostRules.aloneAction(remoteCount: 1, sawRemote: true, armed: true), .disarm)
+        XCTAssertEqual(GroupCallHostRules.aloneAction(remoteCount: 0, sawRemote: true, armed: true), .none)
+        XCTAssertEqual(GroupCallHostRules.aloneEndMs, 10_000)
+    }
 }
 
 // MARK: - Link call decisions
@@ -461,6 +486,11 @@ final class GroupCallHostTests: XCTestCase {
         var heartbeatTicks = 0
         /// Heartbeat sleeps started so far.
         var heartbeatSleeps = 0
+        /// Alone-end sleeps the test has allowed to finish / started so far.
+        var aloneTicks = 0
+        var aloneSleeps = 0
+        /// Conversation rows the host filed.
+        var rows: [(String, CallTranscriptRow)] = []
         /// The seed a given epoch derives, so a rekey is checkable.
         static func seed(_ epoch: UInt64?) -> Data {
             Data(repeating: UInt8(truncatingIfNeeded: epoch ?? 0), count: 32)
@@ -482,15 +512,27 @@ final class GroupCallHostTests: XCTestCase {
             },
             ownDeviceKey: { _ in "own" },
             sleepMs: { ms in
-                // A heartbeat sleep finishes only when the test grants a tick.
-                guard ms == GroupCallReducer.heartbeatMs else { return true }
-                h.heartbeatSleeps += 1
-                let granted = h.heartbeatSleeps
-                while !Task.isCancelled {
-                    if h.heartbeatTicks >= granted { return true }
-                    try? await Task.sleep(nanoseconds: 2_000_000)
+                // A heartbeat or alone-end sleep finishes only when the test
+                // grants a tick; any other sleep is instant.
+                if ms == GroupCallReducer.heartbeatMs {
+                    h.heartbeatSleeps += 1
+                    let granted = h.heartbeatSleeps
+                    while !Task.isCancelled {
+                        if h.heartbeatTicks >= granted { return true }
+                        try? await Task.sleep(nanoseconds: 2_000_000)
+                    }
+                    return false
                 }
-                return false
+                if ms == GroupCallHostRules.aloneEndMs {
+                    h.aloneSleeps += 1
+                    let granted = h.aloneSleeps
+                    while !Task.isCancelled {
+                        if h.aloneTicks >= granted { return true }
+                        try? await Task.sleep(nanoseconds: 2_000_000)
+                    }
+                    return false
+                }
+                return true
             },
             publish: { _, bytes in
                 if let body = try? parseCallSignaling(plaintext: bytes) { h.published.append(body) }
@@ -511,6 +553,7 @@ final class GroupCallHostTests: XCTestCase {
             conversationTitle: { _ in "Test group" },
             safetyNumber: { _ in nil },
             mintCallId: { Data(repeating: 0x0A, count: 16) },
+            recordCall: { groupIdHex, row in h.rows.append((groupIdHex, row)) },
             nowMs: { h.nowMs }
         ))
     }
@@ -735,6 +778,93 @@ final class GroupCallHostTests: XCTestCase {
         if case .end(_, let reason)? = h.published.last {
             XCTAssertEqual(reason, .error)
         }
+    }
+
+    // MARK: Alone in the call (docs/ux/calls.md section 4.3)
+
+    private func participant(_ id: String, local: Bool) -> CallUiState.Participant {
+        .init(id: id, displayName: local ? "You" : "Anna", isLocal: local, micOn: true, camOn: false,
+              handRaised: false, quality: .good, speaking: false, screenSharing: false)
+    }
+
+    /// Everyone else left: after the grace the device hangs up as if the End
+    /// button were tapped, so the group hears the Leave and, since nobody else
+    /// is in the record, the End.
+    func testTheCallEndsByItselfWhenEveryoneElseHasLeft() async throws {
+        let h = Harness()
+        let host = makeHost(h)
+        let handle = try await startLiveCall(host, h)
+        let ui = try XCTUnwrap(host.presentation)
+        ui.setParticipants([participant("local", local: true), participant("peer-1", local: false)])
+        ui.setParticipants([participant("local", local: true)])
+        try await waitUntil { h.aloneSleeps == 1 }
+        XCTAssertEqual(handle.hangUps, 0, "the grace has not run out")
+        h.aloneTicks = 1
+        try await waitUntil { handle.hangUps == 1 }
+        XCTAssertNil(host.activeCall)
+        // The departure is announced by a task the leave spawns; wait for it
+        // rather than for the publish chain, which may not exist yet.
+        try await waitUntil { Array(self.kinds(h.published).suffix(2)) == ["leave", "end"] }
+    }
+
+    /// `docs/ux/calls.md` section 6: the call this device started leaves an
+    /// outgoing row with the time its media flowed, once.
+    func testAFinishedGroupCallLeavesOneRowInTheConversation() async throws {
+        let h = Harness()
+        let host = makeHost(h)
+        _ = try await startLiveCall(host, h)
+        let ui = try XCTUnwrap(host.presentation)
+        h.nowMs = t0 + 1_000
+        ui.setPhase(.connected)
+        try await waitUntil { host.activeCall?.connectedAtMs == self.t0 + 1_000 }
+        h.nowMs = t0 + 75_000
+        host.leave()
+        host.dismissPresentation()
+        XCTAssertEqual(h.rows.count, 1)
+        XCTAssertEqual(h.rows.first?.0, group)
+        XCTAssertEqual(h.rows.first?.1, CallTranscriptRow(direction: .outgoing, outcome: .answered(durationMs: 74_000)))
+    }
+
+    func testAJoinThatNeverConnectedLeavesNoRow() async throws {
+        let h = Harness()
+        h.connectError = Down()
+        let host = makeHost(h)
+        host.start(groupIdHex: group, video: false, joinCallId: nil)
+        try await waitUntil { host.activeCall == nil && host.callError != nil }
+        XCTAssertTrue(h.rows.isEmpty)
+    }
+
+    func testSomeoneComingBackInsideTheGraceKeepsTheCall() async throws {
+        let h = Harness()
+        let host = makeHost(h)
+        let handle = try await startLiveCall(host, h)
+        let ui = try XCTUnwrap(host.presentation)
+        ui.setParticipants([participant("local", local: true), participant("peer-1", local: false)])
+        ui.setParticipants([participant("local", local: true)])
+        try await waitUntil { h.aloneSleeps == 1 }
+        ui.setParticipants([participant("local", local: true), participant("peer-2", local: false)])
+        h.aloneTicks = 1
+        try await Task.sleep(nanoseconds: 60_000_000)
+        XCTAssertEqual(handle.hangUps, 0)
+        XCTAssertNotNil(host.activeCall)
+        // Leaving again re-arms from scratch.
+        ui.setParticipants([participant("local", local: true)])
+        try await waitUntil { h.aloneSleeps == 2 }
+        XCTAssertEqual(handle.hangUps, 0)
+    }
+
+    /// The person who started the call and is still waiting for the first
+    /// joiner is not alone in the sense of the rule: nobody left.
+    func testACallThatNeverHadAnyoneElseWaitsForTheUser() async throws {
+        let h = Harness()
+        let host = makeHost(h)
+        let handle = try await startLiveCall(host, h)
+        let ui = try XCTUnwrap(host.presentation)
+        ui.setParticipants([participant("local", local: true)])
+        try await Task.sleep(nanoseconds: 60_000_000)
+        XCTAssertEqual(h.aloneSleeps, 0)
+        XCTAssertEqual(handle.hangUps, 0)
+        XCTAssertNotNil(host.activeCall)
     }
 
     private struct Down: Error, LocalizedError {

@@ -149,6 +149,37 @@ class CallSlotRulesTest {
         )
     }
 
+    // ---- Group call: ending by itself when everyone else has left --------------
+
+    @Test
+    fun `the alone-end timer arms only when a remote was seen and the roster is now empty`() {
+        assertEquals(GroupCallAloneAction.ARM_END, groupCallAloneAction(remoteCount = 0, sawRemote = true, armed = false))
+    }
+
+    @Test
+    fun `a call that never had a remote never arms the alone-end timer`() {
+        // The initiator waiting for the first joiner: nobody left.
+        assertEquals(GroupCallAloneAction.NONE, groupCallAloneAction(remoteCount = 0, sawRemote = false, armed = false))
+        assertEquals(GroupCallAloneAction.NONE, groupCallAloneAction(remoteCount = 1, sawRemote = false, armed = false))
+    }
+
+    @Test
+    fun `someone coming back while armed disarms the alone-end timer`() {
+        assertEquals(GroupCallAloneAction.DISARM, groupCallAloneAction(remoteCount = 1, sawRemote = true, armed = true))
+        assertEquals(GroupCallAloneAction.DISARM, groupCallAloneAction(remoteCount = 3, sawRemote = true, armed = true))
+    }
+
+    @Test
+    fun `nothing to do when already armed and still alone, or when others are present and nothing is armed`() {
+        assertEquals(GroupCallAloneAction.NONE, groupCallAloneAction(remoteCount = 0, sawRemote = true, armed = true))
+        assertEquals(GroupCallAloneAction.NONE, groupCallAloneAction(remoteCount = 2, sawRemote = true, armed = false))
+    }
+
+    @Test
+    fun `the alone-end window is the one shared with iOS and web`() {
+        assertEquals(10_000L, GROUP_CALL_ALONE_END_MS)
+    }
+
     // ---- Link call --------------------------------------------------------------
 
     @Test
@@ -225,5 +256,20 @@ class CallSlotRulesTest {
         )
         assertEquals("The call failed: boom", linkCallNotice(LinkCallPhase.ERROR, false, "boom")?.text)
         assertEquals("The call failed.", linkCallNotice(LinkCallPhase.ERROR, false, null)?.text)
+    }
+
+    // ---- The conversation row ------------------------------------------------
+
+    @Test
+    fun `the row is written only for a call whose media flowed`() {
+        assertNull(groupCallTranscriptEntry(initiator = true, video = false, connectedAtMs = null, endedAtMs = 5_000L))
+        assertEquals(
+            CallTranscriptEntry(CallOutcome.OUTGOING, video = true, durationSecs = 60L),
+            groupCallTranscriptEntry(initiator = true, video = true, connectedAtMs = 1_000L, endedAtMs = 61_500L),
+        )
+        assertEquals(
+            CallTranscriptEntry(CallOutcome.INCOMING, video = false, durationSecs = 0L),
+            groupCallTranscriptEntry(initiator = false, video = false, connectedAtMs = 1_000L, endedAtMs = 1_000L),
+        )
     }
 }

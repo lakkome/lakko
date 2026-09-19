@@ -93,6 +93,10 @@ final class GroupCallHost: ObservableObject {
         var conversationTitle: @MainActor (_ groupIdHex: String) -> String?
         var safetyNumber: (_ seed: Data) -> String?
         var mintCallId: () -> Data
+        /// `docs/ux/calls.md` §6 — file the finished call's row in the
+        /// conversation it happened in. Defaulted so hosts that never record
+        /// (tests of other paths) keep their shorter initialiser.
+        var recordCall: @MainActor (_ groupIdHex: String, _ row: CallTranscriptRow) -> Void = { _, _ in }
         var nowMs: () -> Int64
     }
 
@@ -107,6 +111,9 @@ final class GroupCallHost: ObservableObject {
         var joinPublished: Bool
         /// The MLS epoch the session's current seed was derived at.
         var keyedEpoch: UInt64?
+        /// When this device's own media first flowed, or `nil` if it never did
+        /// (``GroupCallHostRules/transcriptRow(initiator:connectedAtMs:endedAtMs:)``).
+        var connectedAtMs: Int64?
 
         var callIdHex: String { callId.map { String(format: "%02x", $0) }.joined() }
     }
@@ -149,6 +156,12 @@ final class GroupCallHost: ObservableObject {
     /// The participant heartbeat of the live call (see ``runHeartbeat(callId:)``).
     /// Cancelled with the session, so it never outlives the call.
     private var heartbeatTask: Task<Void, Never>?
+    /// The live call has had at least one other participant
+    /// (``GroupCallHostRules/aloneAction(remoteCount:sawRemote:armed:)``).
+    private var sawRemote = false
+    /// The alone-end timer: everyone else left, the call ends when it fires
+    /// unless someone comes back first. Cancelled with the session.
+    private var aloneEndTask: Task<Void, Never>?
 
     init(ports: Ports) {
         self.ports = ports
@@ -430,6 +443,10 @@ final class GroupCallHost: ObservableObject {
     /// dismissed.
     func leave(hungUp: Bool = true) {
         guard let call = releaseSession() else { return }
+        if let row = GroupCallHostRules.transcriptRow(
+            initiator: call.initiator, connectedAtMs: call.connectedAtMs, endedAtMs: ports.nowMs()) {
+            ports.recordCall(call.groupIdHex, row)
+        }
         // A device that neither joined nor announced the call has nothing to
         // say about it (see `planLeave`), so it need not read the journal.
         guard call.joinPublished || call.initiator else { return }
@@ -477,6 +494,9 @@ final class GroupCallHost: ObservableObject {
         controls.removeAll()
         heartbeatTask?.cancel()
         heartbeatTask = nil
+        aloneEndTask?.cancel()
+        aloneEndTask = nil
+        sawRemote = false
         let h = handle
         // Cleared BEFORE `hangUp`: the session's `closed` transition moves the
         // screen to `ended`, whose observer must find no handle left.
@@ -592,13 +612,57 @@ final class GroupCallHost: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self, weak handle] phase in
                 MainActor.assumeIsolated {
-                    guard case .ended = phase,
-                          let self, let handle, self.handle === handle else { return }
-                    // The End button, or the session closing on its own.
-                    self.leave(hungUp: handle.sessionState != .failed)
+                    guard let self, let handle, self.handle === handle else { return }
+                    switch phase {
+                    case .connected:
+                        // The row's clock (`docs/ux/calls.md` §6) starts when
+                        // media flows, not when the screen opened.
+                        if self.activeCall?.connectedAtMs == nil { self.activeCall?.connectedAtMs = self.ports.nowMs() }
+                    case .ended:
+                        // The End button, or the session closing on its own.
+                        self.leave(hungUp: handle.sessionState != .failed)
+                    default:
+                        break
+                    }
                 }
             }
             .store(in: &controls)
+        // Everyone else left: end the call after the grace unless someone
+        // comes back (`docs/ux/calls.md` §4.3).
+        ui.$participants
+            .map { $0.filter { !$0.isLocal }.count }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self, weak handle, weak ui] remoteCount in
+                MainActor.assumeIsolated {
+                    guard let self, let handle, let ui, self.handle === handle else { return }
+                    self.applyAloneRule(remoteCount: remoteCount, handle: handle, ui: ui)
+                }
+            }
+            .store(in: &controls)
+    }
+
+    private func applyAloneRule(remoteCount: Int, handle: GroupCallHandle, ui: CallUiState) {
+        if remoteCount > 0 { sawRemote = true }
+        let armed = aloneEndTask.map { !$0.isCancelled } ?? false
+        switch GroupCallHostRules.aloneAction(remoteCount: remoteCount, sawRemote: sawRemote, armed: armed) {
+        case .armEnd:
+            NSLog("group call: everyone else left; ending in %d s", Int(GroupCallHostRules.aloneEndMs / 1000))
+            let sleepMs = ports.sleepMs
+            aloneEndTask = Task { @MainActor [weak self, weak handle, weak ui] in
+                guard await sleepMs(GroupCallHostRules.aloneEndMs), !Task.isCancelled else { return }
+                guard let self, let handle, let ui, self.handle === handle else { return }
+                self.aloneEndTask = nil
+                guard !ui.participants.contains(where: { !$0.isLocal }) else { return }
+                NSLog("group call: ended because everyone else left")
+                self.leave(hungUp: true)
+            }
+        case .disarm:
+            aloneEndTask?.cancel()
+            aloneEndTask = nil
+        case .none:
+            break
+        }
     }
 
     private func applyCamera(_ camOn: Bool, handle: GroupCallHandle, ui: CallUiState) {
@@ -709,6 +773,9 @@ extension GroupCallHost {
             conversationTitle: { [weak repository] in repository?.conversationTitle(groupIdHex: $0) },
             safetyNumber: { try? callSafetyNumber(seed: $0) },
             mintCallId: { CallSession.mintCallId() },
+            recordCall: { [weak repository] groupIdHex, row in
+                repository?.appendCallRow(groupIdHex: groupIdHex, row: row)
+            },
             nowMs: { ChatRepository.nowMs() }
         ))
     }

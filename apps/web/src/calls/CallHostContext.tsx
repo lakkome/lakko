@@ -138,7 +138,9 @@ import { classifyCallOutcome, type CallLogEntry } from "./call-log";
 import { useCallLog } from "./CallLogContext";
 import { CallJwtClient } from "./call-jwt-client";
 import {
+  GROUP_CALL_ALONE_END_MS,
   decideGroupCallEpochChange,
+  groupCallAloneAction,
   planGroupCallLeave,
   selectGroupCallBanner,
   type GroupLeaveReason,
@@ -889,6 +891,14 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     readonly startedAtMs: number;
     /** When this device's own media first flowed, or `null` if it never did. */
     connectedAtMs: number | null;
+    /** This call has had at least one other participant on the roster
+     *  (`groupCallAloneAction`): an initiator still waiting for the first
+     *  joiner never ends by itself. */
+    sawRemote: boolean;
+    /** The alone-end timer (`GROUP_CALL_ALONE_END_MS`), running while everyone
+     *  else has left; cleared when someone comes back or the call leaves the
+     *  slot. */
+    aloneTimer: ReturnType<typeof setTimeout> | null;
   }
   let activeGroupCall: ActiveGroupCall | null = null;
   /** Synchronous latch so a double tap cannot open two SFU sessions. */
@@ -1125,6 +1135,8 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         video: opts.withVideo,
         startedAtMs: Date.now(),
         connectedAtMs: null,
+        sawRemote: false,
+        aloneTimer: null,
       };
       const handle = createSfuCallUi(
         {
@@ -1228,7 +1240,13 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   function releaseGroupSlot(): { readonly call: ActiveGroupCall | null; readonly failed: boolean } {
     const g = activeGroupCall;
     activeGroupCall = null;
-    if (g !== null) stopGroupHeartbeat(g);
+    if (g !== null) {
+      stopGroupHeartbeat(g);
+      if (g.aloneTimer !== null) {
+        clearTimeout(g.aloneTimer);
+        g.aloneTimer = null;
+      }
+    }
     const h = groupHandle();
     const failed = h?.session.getState() === "failed";
     if (h !== null) {
@@ -1375,6 +1393,40 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     const h = groupHandle();
     if (local === undefined || h === null) return;
     h.setMicrophoneEnabled(local.micOn);
+  });
+
+  // Everyone else left -> the call ends by itself as a hang-up after
+  // `GROUP_CALL_ALONE_END_MS`, unless someone comes back first
+  // (`docs/ux/calls.md` §4.3, decided by `groupCallAloneAction`).
+  createEffect(() => {
+    const remotes = callUi.participants().filter((p) => !p.isLocal).length;
+    untrack(() => {
+      const g = activeGroupCall;
+      if (g === null || groupHandle() === null) return;
+      if (remotes > 0) g.sawRemote = true;
+      switch (groupCallAloneAction(remotes, g.sawRemote, g.aloneTimer !== null)) {
+        case "arm-end":
+          console.info(
+            "group call: everyone else left; ending in " +
+              GROUP_CALL_ALONE_END_MS / 1000 +
+              " s",
+          );
+          g.aloneTimer = setTimeout(() => {
+            g.aloneTimer = null;
+            if (activeGroupCall !== g) return;
+            if (callUi.participants().some((p) => !p.isLocal)) return;
+            console.info("group call: ended because everyone else left");
+            void leaveGroupCall("hungUp");
+          }, GROUP_CALL_ALONE_END_MS);
+          break;
+        case "disarm":
+          if (g.aloneTimer !== null) clearTimeout(g.aloneTimer);
+          g.aloneTimer = null;
+          break;
+        default:
+          break;
+      }
+    });
   });
 
   // In-call device picker -> `replaceTrack` on the live SFU sender (it keeps its

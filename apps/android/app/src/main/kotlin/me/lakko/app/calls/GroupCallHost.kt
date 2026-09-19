@@ -136,6 +136,9 @@ public interface GroupCallPort {
     public suspend fun publishSignal(groupIdHex: String, body: FfiCallSignalingBody): Boolean
 
     public fun createSession(request: GroupCallSessionRequest, ui: CallUiState): GroupCallSessionHandle
+
+    /** `docs/ux/calls.md` section 6 - file the finished call's row in the conversation it happened in. */
+    public fun recordCall(groupIdHex: String, entry: CallTranscriptEntry)
 }
 
 /** The group call in the host's slot. */
@@ -199,11 +202,20 @@ public class GroupCallHost(
         val callIdHex: String,
         val ownLeaf: UInt,
         val initiator: Boolean,
+        /** Whether this device asked for video when it started or joined. */
+        val video: Boolean,
         var joinPublished: Boolean = false,
         var keyedEpoch: ULong?,
         var connected: Boolean = false,
+        /** When this device's own media first flowed, or `null` if it never did
+         *  ([groupCallTranscriptEntry]). */
+        var connectedAtMs: Long? = null,
         /** Re-publishes the Join every [GROUP_CALL_HEARTBEAT_MS]; cancelled by [release]. */
         var heartbeat: Job? = null,
+        /** This call has had at least one other participant ([groupCallAloneAction]). */
+        var sawRemote: Boolean = false,
+        /** The alone-end timer (`docs/ux/calls.md` section 4.3); cancelled by [release]. */
+        var aloneEnd: Job? = null,
         /** Set by [release]: no Join may be published for this call any more. */
         @Volatile var stopped: Boolean = false,
     )
@@ -237,6 +249,9 @@ public class GroupCallHost(
                 val h = handle ?: return@collect
                 when (phase) {
                     CallUiState.CallPhase.Connected -> if (!a.joinPublished) {
+                        // The row's clock (`docs/ux/calls.md` section 6) starts
+                        // when media flows, not when the screen opened.
+                        if (a.connectedAtMs == null) a.connectedAtMs = clock()
                         a.joinPublished = true
                         val p = port ?: return@collect
                         a.heartbeat = scope.launch {
@@ -289,6 +304,38 @@ public class GroupCallHost(
                 .map { list -> list.firstOrNull { it.isLocal }?.micOn }
                 .distinctUntilChanged()
                 .collect { micOn -> if (micOn != null) handle?.setMicrophoneEnabled(micOn) }
+        }
+        // Everyone else left: the call ends by itself after GROUP_CALL_ALONE_END_MS
+        // as a hang-up, unless someone comes back inside the window
+        // (`docs/ux/calls.md` section 4.3). The initiator still waiting for the
+        // first joiner is not in this case, which `sawRemote` records.
+        scope.launch {
+            ui.participants
+                .map { list -> list.count { !it.isLocal } }
+                .distinctUntilChanged()
+                .collect { count ->
+                    val a = active ?: return@collect
+                    if (count > 0) a.sawRemote = true
+                    when (groupCallAloneAction(count, a.sawRemote, a.aloneEnd?.isActive == true)) {
+                        GroupCallAloneAction.ARM_END -> {
+                            logGroupCallInfo("group call: everyone else left; ending in ${GROUP_CALL_ALONE_END_MS / 1000} s")
+                            a.aloneEnd = scope.launch {
+                                delay(GROUP_CALL_ALONE_END_MS)
+                                if (active === a && ui.participants.value.none { !it.isLocal }) {
+                                    logGroupCallInfo("group call: ended because everyone else left")
+                                    // Publishes the Leave and, when the record shows
+                                    // nobody else fresh, the End; nothing more to add.
+                                    leaveWith(GroupLeaveReason.HUNG_UP)
+                                }
+                            }
+                        }
+                        GroupCallAloneAction.DISARM -> {
+                            a.aloneEnd?.cancel()
+                            a.aloneEnd = null
+                        }
+                        GroupCallAloneAction.NONE -> Unit
+                    }
+                }
         }
     }
 
@@ -410,6 +457,7 @@ public class GroupCallHost(
                 callIdHex = callIdHex,
                 ownLeaf = leaf.toUInt(),
                 initiator = initiator,
+                video = video,
                 keyedEpoch = read.epoch,
             )
             active = a
@@ -527,6 +575,9 @@ public class GroupCallHost(
         val failed = handle?.failed == true
         val otherFresh = p?.recordOtherFreshMembers(a.groupIdHex, a.callIdHex, clock())
         release()
+        groupCallTranscriptEntry(a.initiator, a.video, a.connectedAtMs, clock())?.let { entry ->
+            p?.recordCall(a.groupIdHex, entry)
+        }
         val plan = planGroupCallLeave(
             reason = reason,
             sessionFailed = failed,
@@ -559,6 +610,8 @@ public class GroupCallHost(
         active?.let {
             it.stopped = true
             it.heartbeat?.cancel()
+            it.aloneEnd?.cancel()
+            it.aloneEnd = null
         }
         active = null
         // Cleared BEFORE `hangUp`: the session's closed transition moves the UI
@@ -581,6 +634,14 @@ public class GroupCallHost(
 private fun logGroupCallWarning(message: String, error: Throwable?) {
     try {
         android.util.Log.w("GroupCallHost", message, error)
+    } catch (_: Throwable) {
+        // No Android logger (host unit tests).
+    }
+}
+
+private fun logGroupCallInfo(message: String) {
+    try {
+        android.util.Log.i("GroupCallHost", message)
     } catch (_: Throwable) {
         // No Android logger (host unit tests).
     }

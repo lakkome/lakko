@@ -162,6 +162,33 @@ export function selectGroupCallBanner(input: GroupCallBannerInput): LiveGroupCal
   return null;
 }
 
+/** Chosen: long enough for a peer whose app blinked to come back, short enough that nobody sits in an empty room. */
+export const GROUP_CALL_ALONE_END_MS = 10_000;
+
+export type GroupCallAloneAction = "none" | "arm-end" | "disarm";
+
+/**
+ * Whether a group call left with nobody else in it should end by itself
+ * (`docs/ux/calls.md` §4.3): when the last other person leaves a call that had
+ * other people in it, the call ends as a hang-up `GROUP_CALL_ALONE_END_MS`
+ * later, and someone rejoining inside that window cancels it. The person who
+ * started a call and is still waiting for the first joiner is NOT in this
+ * case — nobody left.
+ *
+ * @param remoteCount other participants on the roster now.
+ * @param sawRemote this call has had at least one other participant.
+ * @param armed the alone-end timer is currently running.
+ */
+export function groupCallAloneAction(
+  remoteCount: number,
+  sawRemote: boolean,
+  armed: boolean,
+): GroupCallAloneAction {
+  if (remoteCount === 0 && sawRemote && !armed) return "arm-end";
+  if (remoteCount > 0 && armed) return "disarm";
+  return "none";
+}
+
 /** What a chat's call buttons do. */
 export type ChatCallAffordance =
   /** No call buttons: membership ended, or a call is already running. */

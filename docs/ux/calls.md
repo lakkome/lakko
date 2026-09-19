@@ -206,6 +206,28 @@ Two things they do that we deliberately do not: an animated gradient that keeps 
 during the whole call (decoration with a battery cost), and hiding the controls on a
 voice call (nothing to look at underneath, so hiding them only makes the user tap).
 
+### 4.3 When the connection or the other people go away
+
+A call must never sit on screen pretending to be a call. Two cases, both decided
+by rules the clients share:
+
+- **The connection to the call server is lost.** The phone notices within 45
+  seconds (it exchanges a small keepalive with the server every 15 seconds and
+  gives up after three misses) and the call ends as `Call ended`, with the usual
+  row in the conversation. The server drops a phone that has stopped answering
+  within a minute, so the others see that person's tile go rather than a frozen
+  face for the rest of the hour. There is no `Reconnecting...` on a group call
+  today: the transport does not resume a session, so the honest word is the end.
+- **Everyone else has left a group call.** When the last other person leaves a
+  call that had other people in it, the call ends by itself 10 seconds later,
+  as `Call ended`; someone rejoining inside those 10 seconds cancels it. The
+  person who started a call and is still waiting for the first one to join is
+  not in this case: nobody left, so they wait until they hang up.
+
+Neither rule changes what is announced to the group: the leaving device tells the
+group it left, and ends the call for the chat when its record shows nobody else
+still in it, exactly as a hang-up does.
+
 ## 5. The safety number
 
 Today the call safety number is printed across the top of the call as sixteen digits.
@@ -230,6 +252,11 @@ occupies the most valuable line on the screen.
 
 - Every finished call writes a row into the conversation: `Outgoing call, 12:04`,
   `Incoming call, 12:04`, `Missed call`, `Declined`. Tapping the row calls back.
+- A group call writes the same row, once, on the device that was in it. Direction is
+  whose call it was from that device's side: one it started is outgoing, one it joined
+  is incoming. Only a device whose media flowed writes a row: a join that never
+  connected rang nowhere and missed nothing, and the banner is what announces a live
+  group call, so there is no missed row.
 - A missed call also raises a normal notification, and the chat list shows the chat as
   unread with `Missed call`.
 - The **Calls** section of the app lists recent calls with the same wording, newest

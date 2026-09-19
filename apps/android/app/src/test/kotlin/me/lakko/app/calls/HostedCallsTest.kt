@@ -72,7 +72,12 @@ class HostedCallsTest {
         var connectError: Throwable? = null
         val published = mutableListOf<Pair<String, FfiCallSignalingBody>>()
         val sessions = mutableListOf<FakeGroupSession>()
+        val rows = mutableListOf<Pair<String, CallTranscriptEntry>>()
         var synced = 0
+
+        override fun recordCall(groupIdHex: String, entry: CallTranscriptEntry) {
+            rows += groupIdHex to entry
+        }
 
         override fun sfuBaseUrl(): String = "wss://sfu.test"
         override fun sessionToken(): String = "token"
@@ -391,6 +396,82 @@ class HostedCallsTest {
         assertEquals(false, h.port.sessions.single().mic.last())
     }
 
+    // ---- Group call: ends by itself when everyone else has left --------------------
+
+    private fun participant(id: String, isLocal: Boolean) = CallUiState.Participant(
+        id = id,
+        displayName = if (isLocal) "You" else id,
+        isLocal = isLocal,
+        micOn = true,
+        camOn = false,
+        handRaised = false,
+        quality = CallUiState.QualityTier.Good,
+        speaking = false,
+        screenSharing = false,
+    )
+
+    @Test
+    fun `the call ends by itself ten seconds after the last other participant left`() = runTest {
+        val h = groupHarness()
+        h.host.start(groupA, video = false, joinCallIdHex = null)
+        runCurrent()
+        val local = participant("local", isLocal = true)
+        val remote = participant("peer-1", isLocal = false)
+        h.host.ui.setParticipants(listOf(local, remote))
+        runCurrent()
+        h.host.ui.setParticipants(listOf(local))
+        runCurrent()
+
+        advanceTimeBy(GROUP_CALL_ALONE_END_MS - 1)
+        runCurrent()
+        assertEquals("still up just inside the window", 0, h.port.sessions.single().hangUps)
+
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(1, h.port.sessions.single().hangUps)
+        // A hang-up: the Leave, then (nobody else fresh in the record) the End.
+        assertEquals(listOf("GroupLeave", "End"), h.port.kinds().takeLast(2))
+        assertEquals(FfiCallEndReason.HUNG_UP, (h.port.published.last().second as FfiCallSignalingBody.End).reason)
+        assertNull(h.host.slot.value)
+    }
+
+    @Test
+    fun `someone rejoining inside the window cancels the alone-end`() = runTest {
+        val h = groupHarness()
+        h.host.start(groupA, video = false, joinCallIdHex = null)
+        runCurrent()
+        val local = participant("local", isLocal = true)
+        val remote = participant("peer-1", isLocal = false)
+        h.host.ui.setParticipants(listOf(local, remote))
+        runCurrent()
+        h.host.ui.setParticipants(listOf(local))
+        runCurrent()
+        advanceTimeBy(GROUP_CALL_ALONE_END_MS / 2)
+        runCurrent()
+        h.host.ui.setParticipants(listOf(local, remote))
+        runCurrent()
+
+        advanceTimeBy(3 * GROUP_CALL_ALONE_END_MS)
+        runCurrent()
+        assertEquals(0, h.port.sessions.single().hangUps)
+        assertNotNull(h.host.slot.value)
+        assertTrue(h.port.kinds().none { it == "GroupLeave" || it == "End" })
+    }
+
+    @Test
+    fun `a call that only ever had the local participant never ends by itself`() = runTest {
+        val h = groupHarness()
+        h.host.start(groupA, video = false, joinCallIdHex = null)
+        runCurrent()
+        h.host.ui.setParticipants(listOf(participant("local", isLocal = true)))
+        runCurrent()
+
+        advanceTimeBy(5 * GROUP_CALL_ALONE_END_MS)
+        runCurrent()
+        assertEquals(0, h.port.sessions.single().hangUps)
+        assertNotNull(h.host.slot.value)
+    }
+
     // ---- Link-call fakes -------------------------------------------------------------
 
     class FakeLinkHandle : LinkCallHandle {
@@ -591,5 +672,31 @@ class HostedCallsTest {
         h.host.ui.setMic(false)
         runCurrent()
         assertTrue(h.port.handles.single().mic.isEmpty())
+    }
+
+    // ---- The conversation row (docs/ux/calls.md section 6) ------------------------
+
+    @Test
+    fun `a finished group call leaves one outgoing row in the conversation`() = runTest {
+        val h = groupHarness()
+        h.host.start(groupA, video = false, joinCallIdHex = null)
+        runCurrent()
+        h.host.leave()
+        runCurrent()
+        assertEquals(1, h.port.rows.size)
+        assertEquals(groupA, h.port.rows.single().first)
+        assertEquals(
+            CallTranscriptEntry(outcome = CallOutcome.OUTGOING, video = false, durationSecs = 0L),
+            h.port.rows.single().second,
+        )
+    }
+
+    @Test
+    fun `a join that never connected leaves no row`() = runTest {
+        val h = groupHarness()
+        h.port.connectError = IllegalStateException("down")
+        h.host.start(groupA, video = false, joinCallIdHex = null)
+        runCurrent()
+        assertTrue(h.port.rows.isEmpty())
     }
 }

@@ -67,6 +67,8 @@ fn test_config() -> Config {
         // the WS fanout, not the media half.
         media_bind: None,
         media_advertise_ip: None,
+        signaling_ping_interval: std::time::Duration::from_secs(20),
+        signaling_idle_timeout: std::time::Duration::from_secs(60),
     }
 }
 
@@ -113,7 +115,12 @@ fn mint(key: &TestKey, account_id: &str, call_id: &str, role: CallRole) -> Strin
 /// handle the test can let drop to tear the server down at
 /// the end of the case.
 async fn spawn_server(jwks: Jwks) -> std::net::SocketAddr {
-    let cfg = test_config();
+    spawn_server_with(test_config(), jwks).await
+}
+
+/// [`spawn_server`] with a caller-shaped config (the liveness
+/// tests shrink the ping / idle windows to seconds).
+async fn spawn_server_with(cfg: Config, jwks: Jwks) -> std::net::SocketAddr {
     let jwks_cache = JwksCache::from_jwks_for_test(jwks);
     let (router, _peers) = build_app(cfg, jwks_cache);
 
@@ -135,21 +142,26 @@ fn ws_url(addr: &std::net::SocketAddr, jwt: &str) -> String {
 
 /// Read one ServerFrame from a tungstenite WS stream.
 /// Panics on EOF / parse failure — these are tests, panics
-/// are the right thing to do.
+/// are the right thing to do. Protocol Ping / Pong frames are
+/// the liveness layer, not signaling: tungstenite answers a
+/// Ping on its own and surfaces both, so they are skipped here.
 async fn recv_frame<S>(ws: &mut S) -> ServerFrame
 where
     S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
-    let msg = ws
-        .next()
-        .await
-        .expect("frame should be available")
-        .expect("ws read");
-    match msg {
-        Message::Text(text) => {
-            serde_json::from_str::<ServerFrame>(&text).expect("server frame parses")
-        },
-        other => panic!("expected Text frame, got {other:?}"),
+    loop {
+        let msg = ws
+            .next()
+            .await
+            .expect("frame should be available")
+            .expect("ws read");
+        match msg {
+            Message::Text(text) => {
+                return serde_json::from_str::<ServerFrame>(&text).expect("server frame parses");
+            },
+            Message::Ping(_) | Message::Pong(_) => {},
+            other => panic!("expected Text frame, got {other:?}"),
+        }
     }
 }
 
@@ -465,4 +477,146 @@ async fn cross_call_isolation() {
     // Alice should NOT see eve-joined (different call).
     let race = tokio::time::timeout(std::time::Duration::from_millis(150), alice.next()).await;
     assert!(race.is_err(), "cross-call peer-joined leaked");
+}
+
+// ---------------------------------------------------------
+// Signaling liveness
+// ---------------------------------------------------------
+
+/// A config whose liveness windows are seconds, so a test can
+/// wait them out.
+fn liveness_config(ping_secs: u64, idle_secs: u64) -> Config {
+    Config {
+        signaling_ping_interval: std::time::Duration::from_secs(ping_secs),
+        signaling_idle_timeout: std::time::Duration::from_secs(idle_secs),
+        ..test_config()
+    }
+}
+
+/// The defect: a peer whose network went away without a close
+/// frame stayed registered (and on every other participant's
+/// roster) until TCP or nginx gave up, up to an hour. Here B
+/// stops reading its socket, so its stack never answers the
+/// server's pings; the server must drop it inside the idle
+/// window and A must hear `peer-left`.
+#[tokio::test]
+async fn a_peer_that_stops_answering_pings_is_dropped_and_announced_as_left() {
+    let key = test_key(0x21);
+    let addr = spawn_server_with(liveness_config(1, 2), key.jwks.clone()).await;
+    let call = "0123456789abcdef0123456789abcdef";
+    let jwt_a = mint(
+        &key,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        call,
+        CallRole::Publisher,
+    );
+    let jwt_b = mint(
+        &key,
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        call,
+        CallRole::Publisher,
+    );
+
+    let (mut a, _) = tokio_tungstenite::connect_async(ws_url(&addr, &jwt_a))
+        .await
+        .expect("A connects");
+    assert!(matches!(
+        recv_frame(&mut a).await,
+        ServerFrame::Welcome { .. }
+    ));
+
+    let (mut b, _) = tokio_tungstenite::connect_async(ws_url(&addr, &jwt_b))
+        .await
+        .expect("B connects");
+    assert!(matches!(
+        recv_frame(&mut b).await,
+        ServerFrame::Welcome { .. }
+    ));
+    let joined = recv_frame(&mut a).await;
+    let b_id = match joined {
+        ServerFrame::PeerJoined { peer_id, .. } => peer_id,
+        other => panic!("expected peer-joined, got {other:?}"),
+    };
+
+    // B goes quiet: it is never polled again, so tungstenite
+    // never answers a ping on its behalf. The socket stays open
+    // from the server's point of view — exactly a phone whose
+    // network vanished.
+    let _b_held_open = b;
+
+    // A keeps reading (which is what answers A's own pings) and
+    // must see B leave well inside the window plus one interval.
+    let left = tokio::time::timeout(std::time::Duration::from_secs(6), recv_frame(&mut a))
+        .await
+        .expect("A hears about B inside the idle window");
+    match left {
+        ServerFrame::PeerLeft { peer_id } => assert_eq!(peer_id, b_id),
+        other => panic!("expected peer-left, got {other:?}"),
+    }
+}
+
+/// The control: a peer that answers the pings (any stack that is
+/// polled does) is never dropped, however long it says nothing at
+/// the app layer.
+#[tokio::test]
+async fn a_peer_that_answers_pings_is_kept_through_several_idle_windows() {
+    let key = test_key(0x22);
+    let addr = spawn_server_with(liveness_config(1, 2), key.jwks.clone()).await;
+    let call = "0123456789abcdef0123456789abcdef";
+    let jwt_a = mint(
+        &key,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        call,
+        CallRole::Publisher,
+    );
+    let jwt_b = mint(
+        &key,
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        call,
+        CallRole::Publisher,
+    );
+
+    let (mut a, _) = tokio_tungstenite::connect_async(ws_url(&addr, &jwt_a))
+        .await
+        .expect("A connects");
+    assert!(matches!(
+        recv_frame(&mut a).await,
+        ServerFrame::Welcome { .. }
+    ));
+    let (mut b, _) = tokio_tungstenite::connect_async(ws_url(&addr, &jwt_b))
+        .await
+        .expect("B connects");
+    assert!(matches!(
+        recv_frame(&mut b).await,
+        ServerFrame::Welcome { .. }
+    ));
+    assert!(matches!(
+        recv_frame(&mut a).await,
+        ServerFrame::PeerJoined { .. }
+    ));
+
+    // B keeps its socket polled in the background — the pongs
+    // go out — but sends nothing itself for three idle windows.
+    let b_reader = tokio::spawn(async move {
+        let mut b = b;
+        let mut frames = Vec::new();
+        let until = tokio::time::Instant::now() + std::time::Duration::from_secs(7);
+        loop {
+            match tokio::time::timeout_at(until, b.next()).await {
+                Ok(Some(Ok(Message::Text(text)))) => frames.push(text.clone()),
+                Ok(Some(Ok(_))) => {},
+                Ok(Some(Err(_)) | None) | Err(_) => break,
+            }
+        }
+        frames
+    });
+
+    // A must hear nothing about B in that time.
+    let heard = tokio::time::timeout(std::time::Duration::from_secs(6), recv_frame(&mut a)).await;
+    assert!(
+        heard.is_err(),
+        "A heard {heard:?} about a peer that was answering its pings"
+    );
+    let b_frames = b_reader.await.expect("B reader");
+    assert!(b_frames.is_empty(), "B received {b_frames:?} while idle");
 }

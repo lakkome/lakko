@@ -88,6 +88,54 @@ enum GroupCallHostRules {
         return LeavePlan(reason: reason, publishLeave: joinPublished, publishEnd: publishEnd)
     }
 
+    // MARK: - Alone in the call
+
+    /// Chosen: long enough for a peer whose app blinked to come back, short
+    /// enough that nobody sits in an empty room (`docs/ux/calls.md` §4.3).
+    static let aloneEndMs: Int64 = 10_000
+
+    enum AloneAction: Equatable {
+        case none
+        /// Start the alone-end timer.
+        case armEnd
+        /// Someone came back: cancel it.
+        case disarm
+    }
+
+    /// Whether the call should end by itself because everyone else has left.
+    ///
+    /// Only a call that HAD other people qualifies: the person who started a
+    /// call and is still waiting for the first joiner is not in this case, since
+    /// nobody left.
+    ///
+    /// - Parameters:
+    ///   - remoteCount: other participants on the roster now.
+    ///   - sawRemote: this call has had at least one other participant.
+    ///   - armed: the alone-end timer is currently running.
+    static func aloneAction(remoteCount: Int, sawRemote: Bool, armed: Bool) -> AloneAction {
+        if remoteCount == 0, sawRemote, !armed { return .armEnd }
+        if remoteCount > 0, armed { return .disarm }
+        return .none
+    }
+
+    // MARK: - The conversation row
+
+    /// The row a finished group call leaves in the conversation
+    /// (`docs/ux/calls.md` §6), or `nil` when there is nothing to write.
+    ///
+    /// Direction is not who rang whom — nobody rings in a group call — but whose
+    /// call it was from this device's side: one it started is outgoing, one it
+    /// joined is incoming. Only a device whose media actually flowed writes a
+    /// row: a join that never connected rang nowhere and missed nothing, and the
+    /// group-call banner is what announces a live call, so there is no missed
+    /// row either.
+    static func transcriptRow(initiator: Bool, connectedAtMs: Int64?, endedAtMs: Int64) -> CallTranscriptRow? {
+        guard let connectedAtMs else { return nil }
+        return CallTranscriptRow(
+            direction: initiator ? .outgoing : .incoming,
+            outcome: .answered(durationMs: max(0, endedAtMs &- connectedAtMs)))
+    }
+
     // MARK: - Epoch changes
 
     /// What the host does when a group's MLS chain drains.

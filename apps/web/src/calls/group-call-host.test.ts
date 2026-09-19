@@ -4,8 +4,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  GROUP_CALL_ALONE_END_MS,
   chatCallAffordance,
   decideGroupCallEpochChange,
+  groupCallAloneAction,
   planGroupCallLeave,
   selectGroupCallBanner,
   type ChatCallAffordanceInput,
@@ -220,5 +222,34 @@ describe("planGroupCallLeave and the person's other device", () => {
     );
     expect(plan.publishLeave).toBe(true);
     expect(plan.publishEnd).toBe(false);
+  });
+});
+
+describe("groupCallAloneAction", () => {
+  it("pins the shared constant", () => {
+    expect(GROUP_CALL_ALONE_END_MS).toBe(10_000);
+  });
+
+  it("arms only when a remote was seen and the roster is now empty", () => {
+    expect(groupCallAloneAction(0, true, false)).toBe("arm-end");
+  });
+
+  it("never arms for a call that never had a remote (initiator waiting)", () => {
+    expect(groupCallAloneAction(0, false, false)).toBe("none");
+    expect(groupCallAloneAction(0, false, true)).toBe("none");
+  });
+
+  it("disarms when someone comes back while armed", () => {
+    expect(groupCallAloneAction(1, true, true)).toBe("disarm");
+    expect(groupCallAloneAction(3, true, true)).toBe("disarm");
+  });
+
+  it("does nothing when already armed and still alone", () => {
+    expect(groupCallAloneAction(0, true, true)).toBe("none");
+  });
+
+  it("does nothing while others are present and nothing is armed", () => {
+    expect(groupCallAloneAction(2, true, false)).toBe("none");
+    expect(groupCallAloneAction(1, false, false)).toBe("none");
   });
 });

@@ -5,7 +5,9 @@ package me.lakko.app.calls
 
 import android.content.Context
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import me.lakko.sframe.SFrameAvailability
 import org.webrtc.PeerConnection
@@ -69,6 +71,8 @@ class SfuCallSession(
     private val config: Config,
     private val scope: CoroutineScope,
     private val callbacks: Callbacks = Callbacks(),
+    /** Wall clock for the signaling keepalive; injectable for tests. */
+    private val nowMs: () -> Long = { System.currentTimeMillis() },
 ) {
     enum class State { IDLE, CONNECTING, CONNECTED, FAILED, CLOSED }
 
@@ -166,6 +170,16 @@ class SfuCallSession(
     private val offerQueue = ArrayDeque<String>()
     private var drainingOffers = false
 
+    // ---- Signaling keepalive (SfuKeepalive.kt) -------------------------
+    // Runs from the moment signaling is open until hangUp. All four fields are
+    // read and written on [scope] only (the Pong / Welcome callbacks hop).
+    private var keepaliveJob: Job? = null
+    /** Last time the SFU proved it is there (the Welcome frame or a Pong). */
+    private var lastInboundMs = 0L
+    /** Last time we sent a Ping. */
+    private var lastPingMs = 0L
+    private var pingNonce = 0UL
+
     /**
      * Call-key seed of the CURRENT MLS epoch (G-18, ADR-0029). Starts at
      * [Config.seed] and advances on [rekey], so a late-arriving receiver
@@ -252,6 +266,19 @@ class SfuCallSession(
         } catch (e: Throwable) {
             fail()
             throw e
+        }
+
+        // Signaling is open: start the keepalive on BOTH paths (a deferred
+        // publisher sits signaling-only for a while and must notice a dead
+        // link too). The connect itself counts as the first inbound proof.
+        val opened = nowMs()
+        lastInboundMs = opened
+        lastPingMs = opened
+        keepaliveJob = scope.launch {
+            while (isActive) {
+                delay(SFU_KEEPALIVE_TICK_MS)
+                onKeepaliveTick()
+            }
         }
 
         // ADR-0032 deferred publish — a link joiner stays signaling-only
@@ -353,6 +380,8 @@ class SfuCallSession(
         }
         localCameraCapture = null
         callbacks.onLocalVideoTrack(null)
+        keepaliveJob?.cancel()
+        keepaliveJob = null
         signaling?.close()
         signaling = null
         pc?.close()
@@ -659,7 +688,12 @@ class SfuCallSession(
                 callId: String,
                 roster: List<SfuPeerSnapshot>,
             ) {
+                scope.launch { lastInboundMs = nowMs() }
                 callbacks.onWelcome(selfPeerId, roster)
+            }
+
+            override fun onPong(nonce: ULong) {
+                scope.launch { lastInboundMs = nowMs() }
             }
 
             override fun onPeerJoined(peerId: String, accountPseudonym: String, peerTag: String) {
@@ -841,6 +875,27 @@ class SfuCallSession(
         if (state == State.FAILED || state == State.CLOSED) return
         setState(State.FAILED)
         hangUp()
+    }
+
+    /** One keepalive evaluation, every [SFU_KEEPALIVE_TICK_MS] on [scope]. */
+    private fun onKeepaliveTick() {
+        if (state == State.FAILED || state == State.CLOSED) return
+        val now = nowMs()
+        when (sfuKeepaliveAction(now, lastInboundMs, lastPingMs)) {
+            SfuKeepaliveAction.PING -> {
+                pingNonce += 1u
+                signaling?.sendPing(pingNonce)
+                lastPingMs = now
+            }
+            SfuKeepaliveAction.DEAD -> {
+                android.util.Log.w(
+                    "SfuCallSession",
+                    "SfuCallSession: keepalive dead (no pong for ${(now - lastInboundMs) / 1000} s); failing the call",
+                )
+                fail()
+            }
+            SfuKeepaliveAction.WAIT -> Unit
+        }
     }
 
     private companion object {

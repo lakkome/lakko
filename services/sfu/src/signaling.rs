@@ -28,7 +28,7 @@
 //! not leak diagnostic detail.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
     extract::{
@@ -43,6 +43,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use crate::config::Config;
 use crate::jwks::{JwksCache, JwksError};
 use crate::media::MediaTaskHandle;
 use crate::peer::{Peer, PeerId, PeerRegistry};
@@ -73,6 +74,40 @@ pub struct AppState {
     /// / `IceCandidate` frames surface as
     /// `RouterError::MediaNotWired`.
     pub media: Option<MediaTaskHandle>,
+    /// How the signaling socket tells a live peer from one whose
+    /// network went away without a close frame.
+    pub liveness: SignalingLiveness,
+}
+
+/// Signaling-socket liveness: the SFU pings every peer on the
+/// WebSocket protocol layer and drops one that has sent nothing
+/// for the idle window.
+///
+/// Before this the only thing that ended a vanished peer's
+/// registration was TCP giving up, which behind nginx's
+/// hour-long `proxy_read_timeout` meant a phone that lost its
+/// network kept its tile on every other participant's roster for
+/// up to an hour, and the media task had long since pruned its
+/// dead `Rtc`. Protocol pings need nothing from the clients:
+/// URLSession, OkHttp, browsers and tungstenite all answer a
+/// ping on their own, so a silent peer is one that is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignalingLiveness {
+    /// How often a protocol ping is sent to each peer.
+    pub ping_interval: Duration,
+    /// How long a peer may send nothing at all (a Pong counts)
+    /// before it is dropped and announced as left. Exceeds
+    /// `ping_interval`, enforced by [`Config::from_env`].
+    pub idle_timeout: Duration,
+}
+
+impl From<&Config> for SignalingLiveness {
+    fn from(cfg: &Config) -> Self {
+        Self {
+            ping_interval: cfg.signaling_ping_interval,
+            idle_timeout: cfg.signaling_idle_timeout,
+        }
+    }
 }
 
 impl AppState {
@@ -80,11 +115,12 @@ impl AppState {
     /// half. Used by integration tests and the signaling-
     /// only deployment mode.
     #[must_use]
-    pub fn new(jwks: JwksCache, peers: PeerRegistry) -> Arc<Self> {
+    pub fn new(jwks: JwksCache, peers: PeerRegistry, liveness: SignalingLiveness) -> Arc<Self> {
         Arc::new(Self {
             jwks,
             peers,
             media: None,
+            liveness,
         })
     }
 
@@ -96,11 +132,13 @@ impl AppState {
         jwks: JwksCache,
         peers: PeerRegistry,
         media: MediaTaskHandle,
+        liveness: SignalingLiveness,
     ) -> Arc<Self> {
         Arc::new(Self {
             jwks,
             peers,
             media: Some(media),
+            liveness,
         })
     }
 }
@@ -224,19 +262,35 @@ async fn handle_socket(
 
     let (ws_tx, mut ws_rx) = socket.split();
 
-    // Writer task — drain the outbound mpsc into the WS sink.
+    // Writer task — drain the outbound mpsc into the WS sink,
+    // and ping the peer on the protocol layer every
+    // `liveness.ping_interval` so a live peer is never silent
+    // for the reader's idle window (its stack answers with a
+    // Pong without any app-layer help).
     let writer_peer_id = peer.id.clone();
+    let ping_interval = state.liveness.ping_interval;
     let writer = tokio::spawn(async move {
         let mut ws_tx = ws_tx;
-        while let Some(frame) = out_rx.recv().await {
-            let json = match serde_json::to_string(&frame) {
-                Ok(j) => j,
-                Err(e) => {
-                    warn!(peer = %writer_peer_id, error = %e, "ws: outbound serialise failed");
-                    continue;
+        let mut pings = tokio::time::interval(ping_interval);
+        pings.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // The first tick of an interval fires at once; a ping
+        // straight after the welcome is pointless.
+        pings.tick().await;
+        loop {
+            let message = tokio::select! {
+                frame = out_rx.recv() => match frame {
+                    Some(frame) => match serde_json::to_string(&frame) {
+                        Ok(json) => Message::Text(json.into()),
+                        Err(e) => {
+                            warn!(peer = %writer_peer_id, error = %e, "ws: outbound serialise failed");
+                            continue;
+                        },
+                    },
+                    None => break,
                 },
+                _ = pings.tick() => Message::Ping(Vec::new().into()),
             };
-            if let Err(e) = ws_tx.send(Message::Text(json.into())).await {
+            if let Err(e) = ws_tx.send(message).await {
                 debug!(peer = %writer_peer_id, error = %e, "ws: writer send failed");
                 break;
             }
@@ -244,8 +298,26 @@ async fn handle_socket(
     });
 
     // Reader loop — process inbound frames until the peer
-    // disconnects or violates the protocol.
-    while let Some(frame) = ws_rx.next().await {
+    // disconnects, violates the protocol, or falls silent for
+    // the idle window. Any inbound frame restarts the window; a
+    // live peer answers the writer's pings with a Pong, so only
+    // a peer whose network is gone reaches the deadline.
+    let idle_timeout = state.liveness.idle_timeout;
+    loop {
+        let frame = match tokio::time::timeout(idle_timeout, ws_rx.next()).await {
+            Ok(Some(frame)) => frame,
+            Ok(None) => break,
+            Err(_elapsed) => {
+                warn!(
+                    peer = %peer.id,
+                    call = %peer.call_id,
+                    idle_secs = idle_timeout.as_secs(),
+                    "ws: peer silent past the idle window; dropping it and announcing the leave"
+                );
+                metrics::counter!(names::PEERS_DROPPED_IDLE_TOTAL).increment(1);
+                break;
+            },
+        };
         match frame {
             Ok(Message::Text(text)) => {
                 if text.len() > MAX_INBOUND_FRAME_BYTES {

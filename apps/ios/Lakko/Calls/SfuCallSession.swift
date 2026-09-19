@@ -211,12 +211,27 @@ final class SfuCallSession {
     /// Mid-call camera-on lifecycle (piece B).
     private var videoPublishState: VideoPublishState = .off
 
-    init(config: Config, callbacks: Callbacks) {
+    // ---- Signaling keepalive (`SfuKeepalive`) ------------------------------
+    /// Ticks every `SfuKeepalive.tickMs` from signaling connect to hang-up.
+    private var keepaliveTask: Task<Void, Never>?
+    /// When the server last proved it was there (Welcome or Pong).
+    private var lastInboundMs: Int64 = 0
+    /// When this device last pinged.
+    private var lastPingMs: Int64 = 0
+    private var pingNonce: UInt64 = 0
+    private let nowMs: () -> Int64
+
+    init(
+        config: Config,
+        callbacks: Callbacks,
+        nowMs: @escaping () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }
+    ) {
         self.config = config
         self.callbacks = callbacks
         self.activeSeed = config.seed
         self.publishLeaf = config.localLeaf ?? 0
         self.localCameraOn = config.video
+        self.nowMs = nowMs
     }
 
     /// Broadcast our current camera state to every other peer over the
@@ -270,6 +285,7 @@ final class SfuCallSession {
             fail()
             throw error
         }
+        startKeepalive()
 
         // 2. Build the peer connection + publish — UNLESS the caller asked to
         //    defer (ADR-0032 link joiner: stay signaling-only until it holds a
@@ -322,8 +338,49 @@ final class SfuCallSession {
         pc?.setMicrophoneEnabled(on)
     }
 
+    // MARK: - Signaling keepalive
+
+    /// Start the keepalive clock the moment the socket is open; the first ping
+    /// goes out one interval later, and a Welcome or Pong resets the deadline.
+    private func startKeepalive() {
+        let now = nowMs()
+        lastInboundMs = now
+        lastPingMs = now
+        keepaliveTask?.cancel()
+        keepaliveTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(SfuKeepalive.tickMs) * 1_000_000)
+                if Task.isCancelled { return }
+                self?.onKeepaliveTick()
+            }
+        }
+    }
+
+    private func onKeepaliveTick() {
+        if state == .failed || state == .closed { return }
+        switch SfuKeepalive.action(nowMs: nowMs(), lastInboundMs: lastInboundMs, lastPingMs: lastPingMs) {
+        case .ping:
+            pingNonce &+= 1
+            signaling?.sendPing(nonce: pingNonce)
+            lastPingMs = nowMs()
+        case .dead:
+            NSLog(
+                "SfuCallSession: keepalive dead (no pong for %d s); failing the call",
+                Int((nowMs() &- lastInboundMs) / 1000))
+            fail()
+        case .wait:
+            break
+        }
+    }
+
+    private func noteSignalingInbound() {
+        lastInboundMs = nowMs()
+    }
+
     /// Tear down. Idempotent.
     func hangUp() {
+        keepaliveTask?.cancel()
+        keepaliveTask = nil
         // Stop the camera first (fire-and-forget — `LocalCameraCapture`
         // also stops in its deinit, but the explicit stop releases the
         // `AVCaptureSession` promptly).
@@ -578,7 +635,11 @@ final class SfuCallSession {
                 "SfuCallSession: signaling frame PARSE FAILED err=%@ text=%@",
                 "\(error)", String(raw.prefix(300)))
         }
+        cb.onPong = { [weak self] _ in
+            Task { @MainActor in self?.noteSignalingInbound() }
+        }
         cb.onWelcome = { [weak self] selfPeerId, callId, roster in
+            Task { @MainActor in self?.noteSignalingInbound() }
             // The joiner learns about everyone already in the call HERE, not
             // from peer-joined — a second joiner gets no peer-joined for the
             // peers that preceded it. `rosterCount` is therefore the whole
