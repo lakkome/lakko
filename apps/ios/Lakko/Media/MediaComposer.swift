@@ -158,7 +158,7 @@ struct RecordingBar: View {
     }
 
     private var pulsingDot: some View {
-        TimelineView(.periodic(from: .now, by: 0.5)) { context in
+        TimelineView(.periodic(from: TimelineAnchor.date, by: 0.5)) { context in
             Circle()
                 .fill(Color.red)
                 .frame(width: 10, height: 10)

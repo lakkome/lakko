@@ -56,6 +56,24 @@ import WebRTC
 @MainActor
 public final class WebRTCPeerConnection: NSObject {
 
+    /// The queue every blocking libwebrtc entry point is called on.
+    ///
+    /// `RTCPeerConnection`'s `offer` / `answer` / `setLocalDescription` /
+    /// `setRemoteDescription` / `add(candidate)` / `close` look asynchronous
+    /// (they take completion handlers) but each one first proxies to
+    /// libwebrtc's signaling thread and BLOCKS the caller until that thread
+    /// has done the work. Applying the first answer starts audio, which on
+    /// the worker thread initialises the voice-processing audio unit, and on
+    /// the simulator that unit's RPC to the audio server needs the app's main
+    /// run loop to be alive. Called from the main actor, the wait deadlocked:
+    /// the main thread slept in `setRemoteDescription`, the audio server never
+    /// got its answer, and CoreAudio aborted the process ten seconds later
+    /// (`_ReportRPCTimeout` under `AudioUnitInitialize`, three crash reports
+    /// in one hour). Serial, so the calls keep the order they were issued in.
+    private static let libwebrtcQueue = DispatchQueue(
+        label: "me.lakko.webrtc.blocking", qos: .userInitiated)
+
+
     // MARK: - Public callback surface
 
     /// Caller-supplied delegate. The wrapper invokes these
@@ -292,7 +310,9 @@ public final class WebRTCPeerConnection: NSObject {
     /// once. Safe to call multiple times.
     public func close() {
         guard let p = peer else { return }
-        p.close()
+        // Off the main thread for the reason `libwebrtcQueue` gives: `close`
+        // blocks on the signaling thread, which tears the audio unit down.
+        Self.libwebrtcQueue.async { p.close() }
         peer = nil
         localAudioTrack = nil
         localVideoTrack = nil
@@ -757,6 +777,7 @@ public final class WebRTCPeerConnection: NSObject {
             optionalConstraints: nil
         )
         let offer: RTCSessionDescription = try await withCheckedThrowingContinuation { cont in
+            Self.libwebrtcQueue.async {
             peer.offer(for: constraints) { sdp, err in
                 if let err = err { cont.resume(throwing: err); return }
                 guard let sdp = sdp else {
@@ -764,14 +785,17 @@ public final class WebRTCPeerConnection: NSObject {
                 }
                 cont.resume(returning: sdp)
             }
+            }
         }
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            Self.libwebrtcQueue.async {
             peer.setLocalDescription(offer) { err in
                 if let err = err {
                     cont.resume(throwing: err)
                 } else {
                     cont.resume()
                 }
+            }
             }
         }
         return offer.sdp
@@ -796,6 +820,7 @@ public final class WebRTCPeerConnection: NSObject {
             optionalConstraints: nil
         )
         let offer: RTCSessionDescription = try await withCheckedThrowingContinuation { cont in
+            Self.libwebrtcQueue.async {
             peer.offer(for: constraints) { sdp, err in
                 if let err = err { cont.resume(throwing: err); return }
                 guard let sdp = sdp else {
@@ -803,14 +828,17 @@ public final class WebRTCPeerConnection: NSObject {
                 }
                 cont.resume(returning: sdp)
             }
+            }
         }
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            Self.libwebrtcQueue.async {
             peer.setLocalDescription(offer) { err in
                 if let err = err {
                     cont.resume(throwing: err)
                 } else {
                     cont.resume()
                 }
+            }
             }
         }
         return offer.sdp
@@ -826,6 +854,7 @@ public final class WebRTCPeerConnection: NSObject {
         }
         let remoteOffer = RTCSessionDescription(type: .offer, sdp: remoteOfferSdp)
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            Self.libwebrtcQueue.async {
             peer.setRemoteDescription(remoteOffer) { err in
                 if let err = err {
                     cont.resume(throwing: err)
@@ -833,8 +862,10 @@ public final class WebRTCPeerConnection: NSObject {
                     cont.resume()
                 }
             }
+            }
         }
         let answer: RTCSessionDescription = try await withCheckedThrowingContinuation { cont in
+            Self.libwebrtcQueue.async {
             peer.answer(for: RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)) { sdp, err in
                 if let err = err { cont.resume(throwing: err); return }
                 guard let sdp = sdp else {
@@ -842,14 +873,17 @@ public final class WebRTCPeerConnection: NSObject {
                 }
                 cont.resume(returning: sdp)
             }
+            }
         }
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            Self.libwebrtcQueue.async {
             peer.setLocalDescription(answer) { err in
                 if let err = err {
                     cont.resume(throwing: err)
                 } else {
                     cont.resume()
                 }
+            }
             }
         }
         return answer.sdp
@@ -863,12 +897,14 @@ public final class WebRTCPeerConnection: NSObject {
         }
         let remoteAnswer = RTCSessionDescription(type: .answer, sdp: remoteAnswerSdp)
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            Self.libwebrtcQueue.async {
             peer.setRemoteDescription(remoteAnswer) { err in
                 if let err = err {
                     cont.resume(throwing: err)
                 } else {
                     cont.resume()
                 }
+            }
             }
         }
     }
@@ -890,12 +926,14 @@ public final class WebRTCPeerConnection: NSObject {
         }
         let rollback = RTCSessionDescription(type: .rollback, sdp: "")
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            Self.libwebrtcQueue.async {
             peer.setLocalDescription(rollback) { err in
                 if let err = err {
                     cont.resume(throwing: err)
                 } else {
                     cont.resume()
                 }
+            }
             }
         }
     }
@@ -919,6 +957,7 @@ public final class WebRTCPeerConnection: NSObject {
             sdpMid: sdpMid
         )
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            Self.libwebrtcQueue.async {
             peer.add(rtcCandidate) { err in
                 if let err = err {
                     NSLog(
@@ -927,6 +966,7 @@ public final class WebRTCPeerConnection: NSObject {
                     )
                 }
                 cont.resume()
+            }
             }
         }
     }

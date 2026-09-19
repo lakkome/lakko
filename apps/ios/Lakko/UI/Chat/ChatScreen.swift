@@ -124,23 +124,33 @@ public struct ChatScreen: View {
             // banner re-evaluates on a timer rather than only on a new
             // journal row.
             if !viewModel.membershipHasEnded {
-                TimelineView(.periodic(from: .now, by: 10)) { context in
-                    GroupCallBanner(
-                        affordance: viewModel.groupCallAffordance(
-                            nowMs: Int64(context.date.timeIntervalSince1970 * 1000)
-                        ),
-                        busy: viewModel.groupCallStarting,
-                        // One call at a time: a live call anywhere withdraws Join.
-                        joinAvailable: !viewModel.anyCallInProgress,
-                        onJoin: { video in viewModel.joinOngoingGroupCall(video: video) }
-                    )
-                }
+                GroupCallBanner(
+                    affordance: viewModel.groupCallAffordance(
+                        nowMs: Int64(now.timeIntervalSince1970 * 1000)
+                    ),
+                    busy: viewModel.groupCallStarting,
+                    // One call at a time: a live call anywhere withdraws Join.
+                    joinAvailable: !viewModel.anyCallInProgress,
+                    onJoin: { video in viewModel.joinOngoingGroupCall(video: video) }
+                )
             }
             messagesList
             Divider()
             composer
         }
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.width
+        } action: { width in
+            messagesWidth = width
+        }
         .background(Color.lakkoBackground)
+        .onReceive(Self.affordanceClock) { date in
+            // The time input of the call affordances (banner + toolbar
+            // labels): a call nobody joined stops being joinable after a
+            // minute, any call after four hours. A plain timer feeding one
+            // state value, on purpose: see `now`.
+            now = date
+        }
         .onAppear {
             // Phase 2a3e2b — the cross-device draft / read-cursor sync is
             // attached where the view model is made (`SessionRoot`), so this
@@ -189,21 +199,15 @@ public struct ChatScreen: View {
             // E2EE session, and there is not one.
             if !viewModel.membershipHasEnded {
             ToolbarItem(placement: .navigationBarTrailing) {
-                // Re-evaluated on the banner's tick: whether the tap joins a
-                // live call changes with time (a ghost call stops being live
-                // without a new journal row).
-                TimelineView(.periodic(from: .now, by: 10)) { _ in
-                    Button {
-                        // A live group call this device is not in is JOINED; else
-                        // a group chat (>2 members) starts an SFU call (multi-party
-                        // + SFrame) and a 1×1 chat stays P2P.
-                        viewModel.onCallButton(video: false)
-                    } label: {
-                        Image(systemName: "phone")
-                    }
-                    .accessibilityLabel(callButtonLabel(video: false))
-                    .disabled(viewModel.chatCallAction == .unavailable)
-                }
+                // No `TimelineView` in a toolbar item, ever: one inside a bar
+                // item host re-rendered on every layout pass and dirtied the
+                // navigation stack's hosting view, which laid the bar items
+                // out again -- a layout feedback loop that held the main
+                // thread at full CPU on every chat with content (UIKit's
+                // `-UIViewLayoutFeedbackLoopDebuggingThreshold` named the bar
+                // item hosts). The join-or-start decision is taken at tap
+                // time anyway; the label follows `now`.
+                callButton(video: false)
             }
             // Video-call button — starts the call with the local
             // camera published (`config.video`). Group chats publish
@@ -211,15 +215,7 @@ public struct ChatScreen: View {
             // P2P video call. Withdrawn with its sibling above once the
             // membership has ended (§6.2.8 item 4).
             ToolbarItem(placement: .navigationBarTrailing) {
-                TimelineView(.periodic(from: .now, by: 10)) { _ in
-                    Button {
-                        viewModel.onCallButton(video: true)
-                    } label: {
-                        Image(systemName: "video")
-                    }
-                    .accessibilityLabel(callButtonLabel(video: true))
-                    .disabled(viewModel.chatCallAction == .unavailable)
-                }
+                callButton(video: true)
             }
             }
             // A4 — the Members sheet (roster + add / remove) lives in the
@@ -419,123 +415,141 @@ public struct ChatScreen: View {
         viewModel.messages.last(where: { !ChatTimeline.isHiddenSystemRow($0) })?.messageId
     }
 
+    /// See `messagesList`.
+    @State private var messagesWidth: CGFloat = 0
+
+    /// The time the call affordances are evaluated at. Driven by a timer
+    /// into one state value rather than by `TimelineView`s: the banner's
+    /// was harmless, the toolbar's caused the layout loop described at the
+    /// call buttons, and one clock for both keeps them in step.
+    @State private var now = Date()
+    private static let affordanceClock = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
+
     @ViewBuilder
     private var messagesList: some View {
-        GeometryReader { geometry in
-            ScrollViewReader { scrollProxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        if viewModel.messages.isEmpty {
-                            emptyHint
-                        } else {
-                            let entries = timelineEntries
-                            ForEach(entries, id: \.message.messageId) { entry in
-                                if let dateLabel = entry.dateLabel {
-                                    DateSeparator(label: dateLabel)
-                                }
-                                MessageRow(
-                                    message: entry.message,
-                                    ownIdentity: viewModel.ownIdentity,
-                                    // ADR-0048 — who wrote an incoming group
-                                    // message, resolved from the identity stored
-                                    // at receipt (C-68). A 1x1 needs no label;
-                                    // a run shows it once.
-                                    authorName: viewModel.presentsAsGroup
-                                        && entry.message.direction == .incoming
-                                        ? entry.message.authorKeyB64.flatMap {
-                                            viewModel.personName(signatureKeyB64: $0)
-                                        }
-                                        : nil,
-                                    showsSenderColumn: viewModel.presentsAsGroup
-                                        && entry.message.direction == .incoming,
-                                    startsRun: entry.startsRun,
-                                    timeLabel: entry.timeLabel,
-                                    // UX spec section 5.2 — about 78 percent of
-                                    // the timeline width.
-                                    maxBubbleWidth: geometry.size.width * 0.78,
-                                    reactorNames: { emoji in
-                                        entry.message.reactions
-                                            .filter { $0.emoji == emoji }
-                                            .compactMap { viewModel.personName(signatureKeyB64: $0.reactor) }
-                                    },
-                                    // ADR-0045 UX §6.2.5 — the same predicate the
-                                    // composer is gated on.
-                                    actionsAvailable: viewModel.messageActionsAvailable,
-                                    // ADR-0024 — "Sent" / "Read" glyph on our own
-                                    // messages, derived from the other members'
-                                    // read watermarks.
-                                    readState: viewModel.readState(of: entry.message),
-                                    onPreview: openAttachmentPreview,
-                                    onEdit: { viewModel.beginEdit(entry.message) },
-                                    onDelete: { viewModel.deleteMessage(entry.message) },
-                                    onReact: { emoji in
-                                        viewModel.react(to: entry.message, emoji: emoji)
-                                    },
-                                    // ADR-0047 §4 — the reaction bar's `+`.
-                                    onMoreReactions: {
-                                        picker = PickerRequest(mode: .reaction, message: entry.message)
-                                    },
-                                    // `docs/ux/calls.md` section 6 — tapping a
-                                    // call row calls back, the same way the
-                                    // header's phone button does.
-                                    onCallBack: { viewModel.onCallButton(video: false) }
-                                )
-                                // Tighter inside a run, a clear gap between runs.
-                                .padding(.top, entry.startsRun ? 10 : 2)
-                                .id(entry.message.messageId)
+        // The width the bubbles size against, read with `onGeometryChange` on
+        // the screen's outer column (`chatBody`) so it is written only when it
+        // actually changes, and not on the list, whose own width moves with
+        // its rows. Until the first read arrives the rows size against a
+        // conservative width.
+        messagesColumn(width: messagesWidth > 0 ? messagesWidth : 360)
+    }
+
+    @ViewBuilder
+    private func messagesColumn(width: CGFloat) -> some View {
+        ScrollViewReader { scrollProxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    if viewModel.messages.isEmpty {
+                        emptyHint
+                    } else {
+                        let entries = timelineEntries
+                        ForEach(entries, id: \.message.messageId) { entry in
+                            if let dateLabel = entry.dateLabel {
+                                DateSeparator(label: dateLabel)
                             }
-                        }
-                        // ADR-0047 — outgoing media still uploading (or failed):
-                        // shown in the timeline immediately with a determinate
-                        // ring, or `Not sent · Retry`. Nothing has reached the
-                        // other side until the row is replaced by the sent message.
-                        ForEach(media.pendingSends) { pending in
-                            PendingMediaRow(pending: pending) {
-                                media.retry(sendId: pending.id)
-                            }
-                            .padding(.top, 10)
-                            .id("pending-\(pending.id)")
-                        }
-                        // ADR-0045 UX §6.2.5 — the terminal row.
-                        //
-                        // It goes in the TIMELINE, not in a banner: it is an
-                        // outcome that happened at a definite point in the
-                        // transcript. A row marks WHERE the history stops,
-                        // survives scrollback and needs no dismissal state. It
-                        // renders after the list because it is not a
-                        // `ChatMessage` (nothing produced it on the wire) and
-                        // the state is terminal. Carried by TEXT, never by hue
-                        // or an icon, and never announced over what the reader
-                        // is doing.
-                        if let row = viewModel.terminalRowCopy {
-                            VStack(spacing: 4) {
-                                Text(row.headline)
-                                Text(row.consequence)
-                            }
-                            .font(.footnote)
-                            .foregroundStyle(Color.lakkoTextMuted)
-                            .multilineTextAlignment(.center)
-                            .frame(maxWidth: .infinity, alignment: .center)
-                            .padding(.top, 12)
-                            .accessibilityElement(children: .combine)
+                            MessageRow(
+                                message: entry.message,
+                                ownIdentity: viewModel.ownIdentity,
+                                // ADR-0048 — who wrote an incoming group
+                                // message, resolved from the identity stored
+                                // at receipt (C-68). A 1x1 needs no label;
+                                // a run shows it once.
+                                authorName: viewModel.presentsAsGroup
+                                    && entry.message.direction == .incoming
+                                    ? entry.message.authorKeyB64.flatMap {
+                                        viewModel.personName(signatureKeyB64: $0)
+                                    }
+                                    : nil,
+                                showsSenderColumn: viewModel.presentsAsGroup
+                                    && entry.message.direction == .incoming,
+                                startsRun: entry.startsRun,
+                                timeLabel: entry.timeLabel,
+                                // UX spec section 5.2 — about 78 percent of
+                                // the timeline width.
+                                maxBubbleWidth: width * 0.78,
+                                reactorNames: { emoji in
+                                    entry.message.reactions
+                                        .filter { $0.emoji == emoji }
+                                        .compactMap { viewModel.personName(signatureKeyB64: $0.reactor) }
+                                },
+                                // ADR-0045 UX §6.2.5 — the same predicate the
+                                // composer is gated on.
+                                actionsAvailable: viewModel.messageActionsAvailable,
+                                // ADR-0024 — "Sent" / "Read" glyph on our own
+                                // messages, derived from the other members'
+                                // read watermarks.
+                                readState: viewModel.readState(of: entry.message),
+                                onPreview: openAttachmentPreview,
+                                onEdit: { viewModel.beginEdit(entry.message) },
+                                onDelete: { viewModel.deleteMessage(entry.message) },
+                                onReact: { emoji in
+                                    viewModel.react(to: entry.message, emoji: emoji)
+                                },
+                                // ADR-0047 §4 — the reaction bar's `+`.
+                                onMoreReactions: {
+                                    picker = PickerRequest(mode: .reaction, message: entry.message)
+                                },
+                                // `docs/ux/calls.md` section 6 — tapping a
+                                // call row calls back, the same way the
+                                // header's phone button does.
+                                onCallBack: { viewModel.onCallButton(video: false) }
+                            )
+                            // Tighter inside a run, a clear gap between runs.
+                            .padding(.top, entry.startsRun ? 10 : 2)
+                            .id(entry.message.messageId)
                         }
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                }
-                .onChange(of: viewModel.messages.count) { _, _ in
-                    // Scroll to the latest message whenever the list grows.
-                    if let last = lastDrawnMessageId {
-                        withAnimation {
-                            scrollProxy.scrollTo(last, anchor: .bottom)
+                    // ADR-0047 — outgoing media still uploading (or failed):
+                    // shown in the timeline immediately with a determinate
+                    // ring, or `Not sent · Retry`. Nothing has reached the
+                    // other side until the row is replaced by the sent message.
+                    ForEach(media.pendingSends) { pending in
+                        PendingMediaRow(pending: pending) {
+                            media.retry(sendId: pending.id)
                         }
+                        .padding(.top, 10)
+                        .id("pending-\(pending.id)")
+                    }
+                    // ADR-0045 UX §6.2.5 — the terminal row.
+                    //
+                    // It goes in the TIMELINE, not in a banner: it is an
+                    // outcome that happened at a definite point in the
+                    // transcript. A row marks WHERE the history stops,
+                    // survives scrollback and needs no dismissal state. It
+                    // renders after the list because it is not a
+                    // `ChatMessage` (nothing produced it on the wire) and
+                    // the state is terminal. Carried by TEXT, never by hue
+                    // or an icon, and never announced over what the reader
+                    // is doing.
+                    if let row = viewModel.terminalRowCopy {
+                        VStack(spacing: 4) {
+                            Text(row.headline)
+                            Text(row.consequence)
+                        }
+                        .font(.footnote)
+                        .foregroundStyle(Color.lakkoTextMuted)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.top, 12)
+                        .accessibilityElement(children: .combine)
                     }
                 }
-                .onChange(of: media.pendingSends.count) { old, new in
-                    guard new > old, let last = media.pendingSends.last else { return }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+            }
+            .onChange(of: viewModel.messages.count) { _, _ in
+                // Scroll to the latest message whenever the list grows.
+                if let last = lastDrawnMessageId {
                     withAnimation {
-                        scrollProxy.scrollTo("pending-\(last.id)", anchor: .bottom)
+                        scrollProxy.scrollTo(last, anchor: .bottom)
                     }
+                }
+            }
+            .onChange(of: media.pendingSends.count) { old, new in
+                guard new > old, let last = media.pendingSends.last else { return }
+                withAnimation {
+                    scrollProxy.scrollTo("pending-\(last.id)", anchor: .bottom)
                 }
             }
         }
@@ -569,6 +583,20 @@ public struct ChatScreen: View {
 
     /// VoiceOver label for a toolbar call button — says "Join" when the tap
     /// joins the live group call rather than starting a new one.
+    @ViewBuilder
+    private func callButton(video: Bool) -> some View {
+        Button {
+            // A live group call this device is not in is JOINED; else
+            // a group chat (>2 members) starts an SFU call (multi-party
+            // + SFrame) and a 1×1 chat stays P2P.
+            viewModel.onCallButton(video: video)
+        } label: {
+            Image(systemName: video ? "video" : "phone")
+        }
+        .accessibilityLabel(callButtonLabel(video: video))
+        .disabled(viewModel.chatCallAction == .unavailable)
+    }
+
     private func callButtonLabel(video: Bool) -> String {
         if case .joinable = viewModel.groupCallAffordance() {
             return video ? "Join group call with video" : "Join group call"
@@ -2545,6 +2573,20 @@ private struct ChatTitleView: View {
     let identity: String
     let isGroup: Bool
 
+    /// The bar item's height, fixed on purpose. As a `.principal` toolbar
+    /// item this view is measured by the navigation bar at a fitting width,
+    /// and a height that depends on that width (two truncating lines beside
+    /// an avatar) gives the bar something to re-measure on every layout pass.
+    /// That re-measuring was one leg of the layout feedback loop the toolbar
+    /// call buttons describe (the `TimelineView`s inside bar items were the
+    /// driver; removing them ended the loop on every chat). The fixed size is
+    /// kept so the bar has nothing width-dependent to measure here at all.
+    static let barHeight: CGFloat = 36
+    /// The most the two text lines may take. With the width capped here and
+    /// the whole item sized to its own ideal (`fixedSize` below), the bar's
+    /// proposals cannot change the item's size.
+    static let maxTextWidth: CGFloat = 170
+
     var body: some View {
         HStack(spacing: 8) {
             InitialsAvatar(name: title, identity: identity, size: 32, isGroup: isGroup)
@@ -2559,7 +2601,10 @@ private struct ChatTitleView: View {
                         .lineLimit(1)
                 }
             }
+            .frame(maxWidth: Self.maxTextWidth, alignment: .leading)
         }
+        .frame(height: Self.barHeight)
+        .fixedSize()
         .accessibilityElement(children: .combine)
     }
 }
