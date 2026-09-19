@@ -130,6 +130,12 @@ pub struct Config {
     /// With media off it holds the raw value (or `None`) so
     /// startup can warn that it is being ignored.
     pub media_advertise_ip: Option<IpAddr>,
+    /// Media diagnostics cadence (`LAKKO_SFU_MEDIA_DIAG_SECS`):
+    /// when set, str0m reports per-stream statistics and the media
+    /// loop logs them plus a per-subscriber fanout summary this
+    /// often. Unset or `0` means off, the production default; the
+    /// output is one line per stream per peer per interval.
+    pub media_diagnostics: Option<Duration>,
     /// How often the signaling socket sends a WebSocket
     /// protocol ping to each peer (`LAKKO_SFU_SIGNALING_PING_SECS`).
     /// Every client stack answers a protocol ping on its own
@@ -184,6 +190,7 @@ impl Config {
             Some(bind) => Some(resolve_media_advertise_ip(bind, raw_advertise_ip)?),
             None => raw_advertise_ip,
         };
+        let media_diagnostics = parse_optional_secs("LAKKO_SFU_MEDIA_DIAG_SECS")?;
 
         Ok(Self {
             signaling_bind,
@@ -194,6 +201,7 @@ impl Config {
             peer_msg_rate_per_sec,
             media_bind,
             media_advertise_ip,
+            media_diagnostics,
             signaling_ping_interval,
             signaling_idle_timeout,
         })
@@ -312,6 +320,20 @@ fn parse_secs(name: &'static str, fallback: u64) -> Result<Duration, ConfigError
     Ok(Duration::from_secs(n))
 }
 
+/// A duration in whole seconds that is absent when the variable is
+/// unset, empty or `0`.
+fn parse_optional_secs(name: &'static str) -> Result<Option<Duration>, ConfigError> {
+    let raw = match env::var(name) {
+        Ok(v) if !v.is_empty() => v,
+        _ => return Ok(None),
+    };
+    let n: u64 = raw.parse().map_err(|_| ConfigError::Invalid {
+        name,
+        detail: format!("expected unsigned integer, got {raw:?}"),
+    })?;
+    Ok((n > 0).then(|| Duration::from_secs(n)))
+}
+
 fn parse_u32(name: &'static str, fallback: u32) -> Result<u32, ConfigError> {
     let raw = match env::var(name) {
         Ok(v) if !v.is_empty() => v,
@@ -354,6 +376,7 @@ mod tests {
             "LAKKO_SFU_MEDIA_ADVERTISE_IP",
             "LAKKO_SFU_SIGNALING_PING_SECS",
             "LAKKO_SFU_SIGNALING_IDLE_SECS",
+            "LAKKO_SFU_MEDIA_DIAG_SECS",
         ] {
             env::remove_var(key);
         }
@@ -365,6 +388,37 @@ mod tests {
             env::remove_var(k);
         }
         out
+    }
+
+    #[test]
+    fn media_diagnostics_is_off_unless_a_positive_cadence_is_set() {
+        let jwks = ("LAKKO_SFU_JWKS_URL", "https://auth.example/jwks.json");
+        with_env(&[jwks], || {
+            assert_eq!(Config::from_env().unwrap().media_diagnostics, None);
+        });
+        with_env(&[jwks, ("LAKKO_SFU_MEDIA_DIAG_SECS", "0")], || {
+            assert_eq!(
+                Config::from_env().unwrap().media_diagnostics,
+                None,
+                "0 means off"
+            );
+        });
+        with_env(&[jwks, ("LAKKO_SFU_MEDIA_DIAG_SECS", "5")], || {
+            assert_eq!(
+                Config::from_env().unwrap().media_diagnostics,
+                Some(Duration::from_secs(5))
+            );
+        });
+        with_env(&[jwks, ("LAKKO_SFU_MEDIA_DIAG_SECS", "soon")], || {
+            let err = Config::from_env().unwrap_err();
+            assert!(matches!(
+                err,
+                ConfigError::Invalid {
+                    name: "LAKKO_SFU_MEDIA_DIAG_SECS",
+                    ..
+                }
+            ));
+        });
     }
 
     #[test]

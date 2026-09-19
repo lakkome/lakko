@@ -70,12 +70,17 @@ async fn main() -> anyhow::Result<()> {
     // with no advertisable host-candidate address, and the
     // media task re-applies the same rules before binding.
     let media_handle = if let Some(bind) = cfg.media_bind {
-        let (handle, advertised) =
-            media::spawn_media_task_advertising(bind, cfg.media_advertise_ip, peers.clone())
-                .await?;
+        let (handle, advertised) = media::spawn_media_task_advertising(
+            bind,
+            cfg.media_advertise_ip,
+            peers.clone(),
+            cfg.media_diagnostics,
+        )
+        .await?;
         info!(
             media_bind = %bind,
             media_advertised_addr = %advertised,
+            media_diagnostics = ?cfg.media_diagnostics,
             "media: UDP socket bound; routing task spawned; ICE host candidate advertised"
         );
         Some(handle)

@@ -401,6 +401,14 @@ async fn handle_socket(
     // outbound sender so the writer task exits.
     router.announce_leave(&peer).await;
     state.peers.unregister(&peer.id).await;
+    // The media half keeps its own per-peer state and learns of the
+    // departure only from here; left alone, a peer whose ICE never
+    // connected would stay in the router for the life of the process.
+    if let Some(media) = state.media.as_ref() {
+        if let Err(e) = media.remove_peer(peer.id.clone()) {
+            warn!(peer = %peer.id, error = %e, "ws: could not ask the media task to drop the peer");
+        }
+    }
     metrics::gauge!(names::PEERS_ACTIVE).decrement(1.0);
     writer.abort();
     info!(peer = %peer.id, "ws: peer disconnected");

@@ -49,6 +49,7 @@ import { ProfileStore, type IncomingProfile } from "./profile-store";
 import { ProfilePublishScheduler, type PublishReason } from "./publish-scheduler";
 import { resolveDisplay, type ResolvedName } from "./resolver";
 import { UsernameVerifier } from "./username-verification";
+import { isOwnKeyB64 } from "./own-key";
 
 export interface ProfileApi {
   /** Bumped on any change a resolved name may depend on. `resolve` reads it,
@@ -267,8 +268,15 @@ export function ProfileProvider(props: { children: JSX.Element }): JSX.Element {
         keyBytes = key;
         keyB64 = base64Encode(key);
       }
+      // The viewer's own row. Rosters key a person on the ACCOUNT key
+      // (ADR-0050), the device's signature key names one of their
+      // phones; a key that matches either is this account, and it is
+      // named from the own profile rather than from the received store,
+      // which never holds it (the device never receives its own
+      // envelope). Comparing the device key alone left the viewer's own
+      // row reading `Member` on every group screen (2026-09-19).
       const own = chats.identity();
-      if (own !== null && base64Encode(own.signaturePublicKey) === keyB64) {
+      if (own !== null && isOwnKeyB64(own, keyB64)) {
         const mine = ownProfile();
         const username = ownUsername();
         return resolveDisplay({

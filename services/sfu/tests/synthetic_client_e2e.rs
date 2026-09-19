@@ -642,6 +642,7 @@ async fn unspecified_bind_with_advertise_ip_completes_handshake() {
         "0.0.0.0:0".parse().unwrap(),
         Some("127.0.0.1".parse().unwrap()),
         peers,
+        None,
     )
     .await
     .expect("unspecified bind with an advertise IP starts");

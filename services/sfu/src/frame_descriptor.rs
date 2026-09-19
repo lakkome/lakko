@@ -109,6 +109,8 @@ const FLAG_END_OF_SUBFRAME: u8 = 0x40;
 const FLAG_FIRST_SUBFRAME_V00: u8 = 0x20;
 /// Vestigial `L`. Same.
 const FLAG_LAST_SUBFRAME_V00: u8 = 0x10;
+/// `D`: the frame lists dependency diffs, so it is not a key frame.
+const FLAG_DEPENDENCIES: u8 = 0x08;
 
 /// Shortest first-packet value libwebrtc's parser accepts: flags, spatial
 /// bitmask, and the two frame-id bytes (`if (data.size() < 4) return false`).
@@ -125,6 +127,22 @@ const MAX_ONE_BYTE_FORM_LEN: usize = 16;
 /// keyed by type, so this newtype is the key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameDescriptor(pub Vec<u8>);
+
+/// Whether a stored first-packet descriptor value marks an
+/// independent frame, i.e. one with no frame dependencies: a key
+/// frame. libwebrtc writes `D` (`0x08`) when the frame lists
+/// dependency diffs and leaves it clear for a key frame
+/// (`rtp_generic_frame_descriptor_extension.cc`, the `kFlagDependencies`
+/// branch of `Write`). Returns `None` for a value that is not a
+/// first-packet value, where the flag is undefined.
+#[must_use]
+pub fn is_independent_frame(value: &[u8]) -> Option<bool> {
+    let first = *value.first()?;
+    if first & FLAG_BEGIN_OF_SUBFRAME == 0 || value.len() < MIN_FIRST_PACKET_LEN {
+        return None;
+    }
+    Some(first & FLAG_DEPENDENCIES == 0)
+}
 
 /// Build the descriptor value for one outgoing packet.
 ///
@@ -263,6 +281,36 @@ pub fn generic_frame_descriptor_extension() -> Extension {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn independent_frame_flag_reads_d_on_a_first_packet_value_only() {
+        // Key frame: first packet, no dependency diffs.
+        assert_eq!(
+            is_independent_frame(&[FLAG_BEGIN_OF_SUBFRAME, 0x01, 0x00, 0x2a]),
+            Some(true)
+        );
+        // Delta frame: first packet with `D` set and one diff byte.
+        assert_eq!(
+            is_independent_frame(&[
+                FLAG_BEGIN_OF_SUBFRAME | FLAG_DEPENDENCIES,
+                0x01,
+                0x00,
+                0x2a,
+                0x04
+            ]),
+            Some(false)
+        );
+        // Not a first packet: the flag is undefined there.
+        assert_eq!(
+            is_independent_frame(&[FLAG_END_OF_SUBFRAME
+                | FLAG_FIRST_SUBFRAME_V00
+                | FLAG_LAST_SUBFRAME_V00]),
+            None
+        );
+        // Claims to be a first packet but is too short to be one.
+        assert_eq!(is_independent_frame(&[FLAG_BEGIN_OF_SUBFRAME, 0x01]), None);
+        assert_eq!(is_independent_frame(&[]), None);
+    }
 
     /// A publisher's first-packet value for a key frame: flags `B|F|L`,
     /// spatial bitmask, frame id, then a 4-byte resolution.

@@ -556,6 +556,21 @@ impl MediaPeer {
     /// `crate::peer::PeerRegistry`.
     #[must_use]
     pub fn new(id: MediaPeerId, now: Instant) -> Self {
+        Self::with_stats_interval(id, now, None)
+    }
+
+    /// As [`Self::new`], additionally asking str0m for periodic
+    /// per-stream statistics (`Event::MediaIngressStats` /
+    /// `Event::MediaEgressStats` / `Event::PeerStats`) every
+    /// `stats_interval`. `None` keeps str0m silent, which is the
+    /// production default; the media loop logs the events when the
+    /// operator turns diagnostics on (`LAKKO_SFU_MEDIA_DIAG_SECS`).
+    #[must_use]
+    pub fn with_stats_interval(
+        id: MediaPeerId,
+        now: Instant,
+        stats_interval: Option<Duration>,
+    ) -> Self {
         // Enable BWE so str0m emits `Event::EgressBitrateEstimate` for this
         // peer — the per-receiver bandwidth signal the simulcast layer policy
         // ([`drive_layer_selection`]) uses. The initial estimate is a
@@ -575,6 +590,7 @@ impl MediaPeer {
                 frame_descriptor::GENERIC_FRAME_DESCRIPTOR_ID,
                 frame_descriptor::generic_frame_descriptor_extension(),
             )
+            .set_stats_interval(stats_interval)
             .build(now);
         Self {
             id,
@@ -840,6 +856,15 @@ impl MediaPeer {
     #[must_use]
     pub fn is_alive(&self) -> bool {
         self.rtc.is_alive()
+    }
+
+    /// Mark the peer dead so the next prune drops it. Called when
+    /// `poll_output` fails (str0m does not always flip `is_alive`
+    /// itself on an error) and when the peer's signaling socket has
+    /// closed, so a departed peer stops receiving fanout, being
+    /// offered new tracks, and being backfilled onto joiners.
+    pub fn disconnect(&mut self) {
+        self.rtc.disconnect();
     }
 
     /// Consume a client's SDP offer and produce the
@@ -1380,6 +1405,9 @@ impl std::fmt::Debug for MediaPeer {
 #[derive(Debug, Default)]
 pub struct MediaRouter {
     peers: Vec<MediaPeer>,
+    /// str0m statistics cadence handed to every peer this router
+    /// creates lazily; `None` (the default) keeps statistics off.
+    stats_interval: Option<Duration>,
 }
 
 impl MediaRouter {
@@ -1389,6 +1417,12 @@ impl MediaRouter {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Ask str0m for per-stream statistics on every peer created
+    /// from here on (see [`MediaPeer::with_stats_interval`]).
+    pub fn set_stats_interval(&mut self, interval: Option<Duration>) {
+        self.stats_interval = interval;
     }
 
     /// Add a freshly-admitted peer to the router. The
@@ -1465,7 +1499,8 @@ impl MediaRouter {
         if let Some(idx) = existing_idx {
             &mut self.peers[idx]
         } else {
-            self.peers.push(MediaPeer::new(id, now));
+            self.peers
+                .push(MediaPeer::with_stats_interval(id, now, self.stats_interval));
             self.peers
                 .last_mut()
                 .expect("just-pushed peer is always present")
@@ -1528,6 +1563,19 @@ pub enum MediaCommand {
         answer_sdp: String,
         /// One-shot reply channel.
         reply: tokio::sync::oneshot::Sender<MediaResult<()>>,
+    },
+    /// The peer's signaling socket closed: drop its media state
+    /// now rather than when its DTLS or ICE session happens to
+    /// time out. Until this existed a peer whose socket closed
+    /// before ICE ever connected stayed in the router for the
+    /// life of the process: every later track was offered to it,
+    /// every frame was fanned out to it, and every joiner was
+    /// backfilled against it (five such ghosts sat in one live
+    /// four-person call on 2026-09-19). No reply: the caller has
+    /// nothing to do with a failure but log it.
+    RemovePeer {
+        /// The departed peer.
+        peer_id: MediaPeerId,
     },
 }
 
@@ -1641,6 +1689,19 @@ impl MediaTaskHandle {
         result.map_err(MediaCommandError::Media)
     }
 
+    /// Send a [`RemovePeer`](MediaCommand::RemovePeer). Fire and
+    /// forget: the only failures are the command queue being full
+    /// or the task being gone, and the caller can do nothing about
+    /// either beyond logging.
+    pub fn remove_peer(&self, peer_id: MediaPeerId) -> std::result::Result<(), MediaCommandError> {
+        self.tx
+            .try_send(MediaCommand::RemovePeer { peer_id })
+            .map_err(|e| match e {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => MediaCommandError::Backpressure,
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => MediaCommandError::TaskGone,
+            })
+    }
+
     /// Send an
     /// [`AcceptRenegotiationAnswer`](MediaCommand::AcceptRenegotiationAnswer)
     /// command. Called by the router when it routes a
@@ -1685,7 +1746,7 @@ pub async fn spawn_media_task(
     bind_addr: SocketAddr,
     peers: PeerRegistry,
 ) -> MediaResult<(MediaTaskHandle, SocketAddr)> {
-    spawn_media_task_advertising(bind_addr, None, peers).await
+    spawn_media_task_advertising(bind_addr, None, peers, None).await
 }
 
 /// Spawn the media event-loop task. Binds a
@@ -1743,6 +1804,7 @@ pub async fn spawn_media_task_advertising(
     bind_addr: SocketAddr,
     advertise_ip: Option<IpAddr>,
     peers: PeerRegistry,
+    diagnostics: Option<Duration>,
 ) -> MediaResult<(MediaTaskHandle, SocketAddr)> {
     let host_ip = resolve_advertise_ip(bind_addr.ip(), advertise_ip)?;
     let socket = tokio::net::UdpSocket::bind(bind_addr)
@@ -1754,7 +1816,13 @@ pub async fn spawn_media_task_advertising(
     let advertise_addr = SocketAddr::new(host_ip, local_addr.port());
 
     let (tx, rx) = tokio::sync::mpsc::channel::<MediaCommand>(MEDIA_COMMAND_CAPACITY);
-    tokio::spawn(run_media_loop(socket, advertise_addr, rx, peers));
+    tokio::spawn(run_media_loop(
+        socket,
+        advertise_addr,
+        rx,
+        peers,
+        diagnostics,
+    ));
     Ok((MediaTaskHandle { tx }, advertise_addr))
 }
 
@@ -1917,6 +1985,15 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, advertise_addr: O
             }
             let _ = reply.send(res.map(|_| ()));
         },
+        MediaCommand::RemovePeer { peer_id } => {
+            let removed = router.remove_peer(&peer_id);
+            tracing::info!(
+                peer = %peer_id,
+                removed,
+                peers_left = router.len(),
+                "media: peer removed after its signaling socket closed"
+            );
+        },
     }
 }
 
@@ -1933,8 +2010,14 @@ async fn run_media_loop(
     advertise_addr: SocketAddr,
     mut rx: tokio::sync::mpsc::Receiver<MediaCommand>,
     peers: PeerRegistry,
+    diagnostics: Option<Duration>,
 ) {
     let mut router = MediaRouter::new();
+    router.set_stats_interval(diagnostics);
+    // Per-destination fanout tallies, flushed to the log on the
+    // diagnostics cadence. Off (no bookkeeping at all) unless the
+    // operator asked for it.
+    let mut ledger = diagnostics.map(|every| FanoutLedger::new(every, Instant::now()));
     let mut buf = vec![0u8; UDP_RECV_BUF];
 
     loop {
@@ -1961,7 +2044,10 @@ async fn run_media_loop(
         // back to the peer's WS via the same
         // PeerRegistry the signaling layer owns.
         drive_renegotiations(&mut router, &peers).await;
-        fanout_media_data(&mut router, &summary.pending);
+        fanout_media_data_into(&mut router, &summary.pending, ledger.as_mut());
+        if let Some(l) = ledger.as_mut() {
+            l.flush_if_due(now);
+        }
         // Subscribers' PLIs, resolved during the drain to the publisher
         // track each mirrors, go to the publishers now — rate-limited per
         // track, since a subscriber with no reference frame asks about five
@@ -2050,6 +2136,65 @@ async fn run_media_loop(
         // in-place — O(n) on the worst case.
         router.retain_peers(MediaPeer::is_alive);
     }
+}
+
+/// One line per publisher stream per stats interval. The three
+/// statistics events exist only when the peer was built with a stats
+/// interval, i.e. when `LAKKO_SFU_MEDIA_DIAG_SECS` is set; the
+/// counters are cumulative as str0m keeps them.
+fn log_ingress_stats(peer: &MediaPeerId, st: &str0m::stats::MediaIngressStats) {
+    tracing::info!(
+        peer = %peer,
+        mid = ?st.mid,
+        rid = ?st.rid,
+        bytes = st.bytes,
+        packets = st.packets,
+        plis = st.plis,
+        nacks = st.nacks,
+        loss = ?st.loss,
+        rtt_ms = ?st.rtt.map(|d| d.as_millis()),
+        "media: ingress stats"
+    );
+}
+
+/// One line per downstream stream per stats interval, naming the
+/// publisher track it mirrors so a reader can pair it with that
+/// publisher's ingress line.
+fn log_egress_stats(
+    peer: &MediaPeerId,
+    media_peer: &MediaPeer,
+    st: &str0m::stats::MediaEgressStats,
+) {
+    let upstream = media_peer.origin_for_downstream_mid(st.mid);
+    tracing::info!(
+        peer = %peer,
+        mid = ?st.mid,
+        rid = ?st.rid,
+        origin = ?upstream.as_ref().map(|t| t.source_peer.to_string()),
+        origin_mid = ?upstream.as_ref().map(|t| t.source_mid),
+        bytes = st.bytes,
+        packets = st.packets,
+        plis = st.plis,
+        nacks = st.nacks,
+        loss = ?st.loss,
+        rtt_ms = ?st.rtt.map(|d| d.as_millis()),
+        "media: egress stats"
+    );
+}
+
+/// One line per peer per stats interval: the transport-level view,
+/// including the egress bandwidth estimate the layer policy reads.
+fn log_peer_stats(peer: &MediaPeerId, st: &str0m::stats::PeerStats) {
+    tracing::info!(
+        peer = %peer,
+        bwe_tx = ?st.bwe_tx,
+        bytes_rx = st.bytes_rx,
+        bytes_tx = st.bytes_tx,
+        loss_in = ?st.ingress_loss_fraction,
+        loss_out = ?st.egress_loss_fraction,
+        rtt_ms = ?st.rtt.map(|d| d.as_millis()),
+        "media: peer stats"
+    );
 }
 
 /// One [`MediaData`] event captured during a drain pass,
@@ -2183,18 +2328,27 @@ async fn drain_outputs(
                             keyframe_requests.push(target);
                         }
                     },
-                    // Other events (ICE state, stats,
-                    // MediaChanged, ChannelOpen, ...)
-                    // are not actionable for the
+                    // The three statistics events exist only when the
+                    // peer was built with a stats interval, i.e. when
+                    // diagnostics are on; each is one line per stream
+                    // per interval, cumulative counters as str0m keeps
+                    // them.
+                    Event::MediaIngressStats(st) => log_ingress_stats(&origin, &st),
+                    Event::MediaEgressStats(st) => log_egress_stats(&origin, peer, &st),
+                    Event::PeerStats(st) => log_peer_stats(&origin, &st),
+                    // Other events (ICE state, MediaChanged,
+                    // ChannelOpen, ...) are not actionable for the
                     // SFrame-passthrough router yet.
                     _ => {},
                 },
                 Err(e) => {
-                    tracing::warn!(error = %e, "media: poll_output failed; dropping peer");
-                    // The peer's `is_alive` will likely
-                    // flip false at the next tick; we
-                    // rely on the loop-tail retain to
-                    // clean up rather than break here.
+                    // The message has always said "dropping"; the
+                    // prune at the loop tail keys on `is_alive`, which
+                    // str0m does not flip for every error, so flip it
+                    // here or the peer lives on and every later write
+                    // to it fails.
+                    tracing::warn!(peer = %origin, error = %e, "media: poll_output failed; dropping peer");
+                    peer.disconnect();
                     break;
                 },
             }
@@ -2247,6 +2401,137 @@ impl FanoutOutcome {
     /// outcome buckets = `frames × non-origin peers`.
     pub(crate) fn attempted(&self) -> u64 {
         self.sent + self.no_writer + self.no_codec_match + self.write_failed + self.wrong_layer
+    }
+
+    /// File one forward result into its bucket.
+    pub(crate) fn tally(&mut self, forwarded: &MediaForward) {
+        match forwarded {
+            MediaForward::Sent => self.sent += 1,
+            MediaForward::NoWriter => self.no_writer += 1,
+            MediaForward::NoCodecMatch => self.no_codec_match += 1,
+            MediaForward::WrongLayer => self.wrong_layer += 1,
+            MediaForward::WriteFailed(_) => self.write_failed += 1,
+        }
+    }
+}
+
+/// What one publisher stream produced over a ledger interval.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OriginTally {
+    /// Frames the SFU depacketized from this stream.
+    pub(crate) frames: u64,
+    /// Payload bytes across those frames.
+    pub(crate) bytes: u64,
+    /// Frames whose relayed descriptor marks them independent, i.e.
+    /// key frames. Only a video stream carrying the generic frame
+    /// descriptor can count here; audio and descriptor-less video
+    /// stay at zero, which the log reader must not read as
+    /// "no key frames were sent".
+    pub(crate) key_frames: u64,
+}
+
+/// Per-destination fanout bookkeeping, logged and reset on a fixed
+/// cadence. Exists because the Prometheus counters answer "how many
+/// frames were dropped" and not "whose frames, to whom" — the
+/// question a call with picture on one device and none on another
+/// asks. Keys carry the origin's mid, so a publisher's audio and
+/// video are told apart.
+#[derive(Debug)]
+pub(crate) struct FanoutLedger {
+    every: Duration,
+    last_flush: Instant,
+    /// `(destination, origin, origin mid)` -> outcome buckets.
+    per_target: HashMap<(MediaPeerId, MediaPeerId, Mid), FanoutOutcome>,
+    /// `(origin, origin mid)` -> what the publisher produced.
+    per_origin: HashMap<(MediaPeerId, Mid), OriginTally>,
+}
+
+impl FanoutLedger {
+    /// A ledger that flushes every `every`, counting from `now`.
+    pub(crate) fn new(every: Duration, now: Instant) -> Self {
+        Self {
+            every,
+            last_flush: now,
+            per_target: HashMap::new(),
+            per_origin: HashMap::new(),
+        }
+    }
+
+    /// File one depacketized frame against its publisher stream.
+    pub(crate) fn record_origin(&mut self, origin: &MediaPeerId, data: &MediaData) {
+        let tally = self
+            .per_origin
+            .entry((origin.clone(), data.mid))
+            .or_default();
+        tally.frames += 1;
+        tally.bytes += data.data.len() as u64;
+        let independent = data
+            .ext_vals
+            .user_values
+            .get::<frame_descriptor::FrameDescriptor>()
+            .and_then(|d| frame_descriptor::is_independent_frame(&d.0));
+        if independent == Some(true) {
+            tally.key_frames += 1;
+        }
+    }
+
+    /// File one forward attempt.
+    pub(crate) fn record(
+        &mut self,
+        target: &MediaPeerId,
+        origin: &MediaPeerId,
+        origin_mid: Mid,
+        forwarded: &MediaForward,
+    ) {
+        self.per_target
+            .entry((target.clone(), origin.clone(), origin_mid))
+            .or_default()
+            .tally(forwarded);
+    }
+
+    /// `true` once a full interval has passed since the last flush.
+    pub(crate) fn is_due(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.last_flush) >= self.every
+    }
+
+    /// Log everything filed since the last flush and start over.
+    /// Returns the number of lines written, `0` when not yet due.
+    pub(crate) fn flush_if_due(&mut self, now: Instant) -> usize {
+        if !self.is_due(now) {
+            return 0;
+        }
+        self.last_flush = now;
+        let mut lines = 0;
+        let mut origins: Vec<_> = self.per_origin.drain().collect();
+        origins.sort_by(|a, b| a.0.cmp(&b.0));
+        for ((origin, mid), t) in origins {
+            tracing::info!(
+                origin = %origin,
+                mid = ?mid,
+                frames = t.frames,
+                bytes = t.bytes,
+                key_frames = t.key_frames,
+                "media: publisher stream over the last interval"
+            );
+            lines += 1;
+        }
+        let mut targets: Vec<_> = self.per_target.drain().collect();
+        targets.sort_by(|a, b| a.0.cmp(&b.0));
+        for ((target, origin, mid), o) in targets {
+            tracing::info!(
+                target = %target,
+                origin = %origin,
+                origin_mid = ?mid,
+                sent = o.sent,
+                no_writer = o.no_writer,
+                no_codec_match = o.no_codec_match,
+                write_failed = o.write_failed,
+                wrong_layer = o.wrong_layer,
+                "media: fanout to subscriber over the last interval"
+            );
+            lines += 1;
+        }
+        lines
     }
 }
 
@@ -2303,15 +2588,32 @@ fn record_fanout_metrics(outcome: &FanoutOutcome) {
 /// matching writer or codec PT — see [`MediaForward`]
 /// for the per-variant skip semantics and the deferred
 /// TracksIn/TracksOut mapping note.
+#[cfg(test)]
 pub(crate) fn fanout_media_data(
     router: &mut MediaRouter,
     pending: &[PendingFanout],
+) -> FanoutOutcome {
+    fanout_media_data_into(router, pending, None)
+}
+
+/// As [`fanout_media_data`], additionally filing every attempt into
+/// `ledger` (per destination, origin and origin mid) when one is
+/// given. The ledger is the diagnostic view the aggregate counters
+/// cannot give: which subscriber a publisher's frames do and do not
+/// reach, and whether the publisher's video carries key frames.
+pub(crate) fn fanout_media_data_into(
+    router: &mut MediaRouter,
+    pending: &[PendingFanout],
+    mut ledger: Option<&mut FanoutLedger>,
 ) -> FanoutOutcome {
     let mut outcome = FanoutOutcome::default();
     if pending.is_empty() || router.len() < 2 {
         return outcome;
     }
     for event in pending {
+        if let Some(l) = ledger.as_deref_mut() {
+            l.record_origin(&event.origin, &event.data);
+        }
         // Cross-call isolation: media is forwarded ONLY to
         // peers in the SAME call as the origin. Look up the
         // origin's call once; if the origin is gone (pruned)
@@ -2347,7 +2649,11 @@ pub(crate) fn fanout_media_data(
             // tallied so a starved subscriber (a spike in
             // `no_writer`) is observable in the metrics
             // rather than silently dropped.
-            match peer.forward_media_data(&event.origin, &event.data) {
+            let forwarded = peer.forward_media_data(&event.origin, &event.data);
+            if let Some(l) = ledger.as_deref_mut() {
+                l.record(peer.id(), &event.origin, event.data.mid, &forwarded);
+            }
+            match forwarded {
                 MediaForward::Sent => outcome.sent += 1,
                 MediaForward::NoWriter => outcome.no_writer += 1,
                 MediaForward::NoCodecMatch => outcome.no_codec_match += 1,
@@ -3263,6 +3569,7 @@ mod tests {
             "0.0.0.0:0".parse().unwrap(),
             Some("127.0.0.1".parse().unwrap()),
             peers,
+            None,
         )
         .await
         .expect("unspecified bind with an advertise IP starts");
@@ -3737,6 +4044,85 @@ mod tests {
     /// same-call subscriber + two cross-call peers, exactly
     /// ONE forward attempt is made (the same-call subscriber);
     /// the two foreign-call peers are never touched.
+    #[test]
+    fn remove_peer_command_drops_the_media_peer_from_the_router() {
+        let mut r = MediaRouter::new();
+        r.add_peer(peer_in_call("pub", "call-A"));
+        r.add_peer(peer_in_call("sub", "call-A"));
+        handle_command(
+            &mut r,
+            MediaCommand::RemovePeer {
+                peer_id: pid("sub"),
+            },
+            None,
+        );
+        assert_eq!(r.len(), 1, "the departed peer is gone");
+        assert!(r.peer_mut(&pid("sub")).is_none());
+        // A frame from the remaining publisher is offered to nobody:
+        // no ghost is left to fan out to.
+        let pending = vec![PendingFanout {
+            origin: pid("pub"),
+            data: synthetic_media_data(),
+        }];
+        assert_eq!(fanout_media_data(&mut r, &pending).attempted(), 0);
+        // Removing again is a no-op.
+        handle_command(
+            &mut r,
+            MediaCommand::RemovePeer {
+                peer_id: pid("sub"),
+            },
+            None,
+        );
+        assert_eq!(r.len(), 1);
+    }
+
+    #[test]
+    fn disconnect_makes_the_peer_prunable() {
+        let mut p = MediaPeer::new(pid("alice"), Instant::now());
+        assert!(p.is_alive());
+        p.disconnect();
+        assert!(!p.is_alive(), "disconnect flips is_alive");
+        let mut r = MediaRouter::new();
+        r.add_peer(p);
+        r.retain_peers(MediaPeer::is_alive);
+        assert!(r.is_empty(), "the loop-tail prune drops it");
+    }
+
+    #[test]
+    fn fanout_ledger_files_per_target_and_flushes_only_when_due() {
+        let t0 = Instant::now();
+        let mut l = FanoutLedger::new(Duration::from_secs(10), t0);
+        let data = synthetic_media_data();
+        l.record_origin(&pid("pub"), &data);
+        l.record(&pid("sub1"), &pid("pub"), data.mid, &MediaForward::Sent);
+        l.record(&pid("sub1"), &pid("pub"), data.mid, &MediaForward::NoWriter);
+        l.record(&pid("sub2"), &pid("pub"), data.mid, &MediaForward::Sent);
+        let sub1 = &l.per_target[&(pid("sub1"), pid("pub"), data.mid)];
+        assert_eq!((sub1.sent, sub1.no_writer), (1, 1));
+        assert_eq!(l.per_target.len(), 2, "one row per destination");
+        let origin = &l.per_origin[&(pid("pub"), data.mid)];
+        assert_eq!(origin.frames, 1);
+        assert_eq!(origin.bytes, data.data.len() as u64);
+        assert_eq!(origin.key_frames, 0, "no descriptor on a synthetic frame");
+        assert_eq!(
+            l.flush_if_due(t0 + Duration::from_secs(9)),
+            0,
+            "not due yet"
+        );
+        assert_eq!(l.per_target.len(), 2, "kept until the flush");
+        assert_eq!(
+            l.flush_if_due(t0 + Duration::from_secs(10)),
+            3,
+            "one publisher line and two destination lines"
+        );
+        assert!(l.per_target.is_empty() && l.per_origin.is_empty());
+        assert_eq!(
+            l.flush_if_due(t0 + Duration::from_secs(10)),
+            0,
+            "a flush restarts the interval"
+        );
+    }
+
     #[test]
     fn fanout_never_crosses_calls() {
         let mut r = MediaRouter::new();
