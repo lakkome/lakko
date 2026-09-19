@@ -385,7 +385,7 @@ export class SfuCallSession {
     try {
       await this.signaling.connect();
     } catch (err) {
-      this.fail();
+      this.fail("signaling connect failed", err);
       throw err;
     }
 
@@ -400,7 +400,7 @@ export class SfuCallSession {
     try {
       await this.openPeerConnectionAndPublish();
     } catch (err) {
-      this.fail();
+      this.fail("publish failed", err);
       throw err;
     }
   }
@@ -428,7 +428,7 @@ export class SfuCallSession {
     try {
       await this.openPeerConnectionAndPublish();
     } catch (err) {
-      this.fail();
+      this.fail("publish failed", err);
       throw err;
     }
   }
@@ -809,7 +809,7 @@ export class SfuCallSession {
       if (s === "connected" || s === "completed") {
         if (this.state === "connecting") this.setState("connected");
       } else if (s === "failed") {
-        this.fail();
+        this.fail("ICE connection failed");
       }
     };
 
@@ -854,7 +854,7 @@ export class SfuCallSession {
             Math.round((this.nowMs() - this.lastInboundMs) / 1000) +
             " s); failing the call",
         );
-        this.fail();
+        this.fail("keepalive dead");
         break;
       case "wait":
         break;
@@ -939,9 +939,12 @@ export class SfuCallSession {
       // The initial publish (or a mid-call renegotiation) is now answered —
       // arm `onnegotiationneeded` for future local track changes (piece B).
       this.negotiationReady = true;
-    } catch {
+      // A downstream-track offer that arrived while our offer was out is
+      // parked in the queue; it can be answered now.
+      void this.drainOfferQueue();
+    } catch (err) {
       this.isSettingRemoteAnswerPending = false;
-      this.fail();
+      this.fail(`applying the SFU's answer failed (signalingState=${pc.signalingState})`, err);
     }
   }
 
@@ -1002,6 +1005,23 @@ export class SfuCallSession {
           (pc.signalingState === "stable" || this.isSettingRemoteAnswerPending);
         const ignoreOffer = !this.polite && !readyForOffer;
         if (ignoreOffer) continue;
+        // Our own offer is still out (the initial publish, or a mid-call
+        // renegotiation) and the SFU's answer to it has not been applied.
+        // The textbook polite move here, applying the remote offer over a
+        // rollback of ours, is wrong against the SFU: the SFU never rolls
+        // back, it answers, and it answers first. Live on 2026-09-19 the SFU
+        // sent its answer and a downstream-track offer in the same
+        // millisecond; applying the offer first rolled the publish offer
+        // back, the answer then carried fresh ICE credentials (refused by
+        // the SFU as an ICE restart) and the SFU's own answer failed with
+        // "Called in wrong state: have-remote-offer", killing the join.
+        // Park the offer; the answer handler re-drains once it has applied.
+        if (pc.signalingState === "have-local-offer" && !this.isSettingRemoteAnswerPending) {
+          this.offerQueue.unshift(sdp);
+          break;
+        }
+        const stateBefore = pc.signalingState;
+        const ufragBefore = SfuCallSession.iceUfrag(pc.localDescription?.sdp);
         try {
           // No-arg setLocalDescription() so the (polite) rollback + answer is
           // atomic.
@@ -1011,10 +1031,22 @@ export class SfuCallSession {
           if (answerSdp === undefined) {
             throw new Error("setLocalDescription produced no answer SDP");
           }
+          const ufragAfter = SfuCallSession.iceUfrag(answerSdp);
+          if (ufragBefore !== undefined && ufragAfter !== ufragBefore) {
+            // The SFU refuses an answer that changes the ICE credentials
+            // ("Ice restart in answer without one in the offer"), and then
+            // drops the peer. Say so where it can be seen.
+            // eslint-disable-next-line no-console
+            console.warn(
+              `SfuCallSession: the answer to the SFU's offer changed the ICE ufrag (${ufragBefore} -> ${ufragAfter}); signalingState before the offer was ${stateBefore}`,
+            );
+          }
           signaling.sendSdpAnswer(answerSdp);
-        } catch {
+        } catch (err) {
           // A single bad renegotiation drops that subscription; the
           // call stays up. Continue draining the rest.
+          // eslint-disable-next-line no-console
+          console.warn(`SfuCallSession: could not answer the SFU's offer (signalingState before=${stateBefore}, now=${pc.signalingState})`, err);
         }
       }
     } finally {
@@ -1024,7 +1056,7 @@ export class SfuCallSession {
 
   private onSignalingClosed(): void {
     if (this.state === "closed" || this.state === "failed") return;
-    this.fail();
+    this.fail("signaling socket closed");
   }
 
   // -----------------------------------------------------------------
@@ -1036,9 +1068,20 @@ export class SfuCallSession {
     this.callbacks.onStateChange?.(state);
   }
 
-  private fail(): void {
+  private fail(reason: string, err?: unknown): void {
     if (this.state === "failed" || this.state === "closed") return;
+    // Every failure names itself: the live 2026-09-19 web join died in
+    // silence three times before the reason was found in the SFU's log.
+    // eslint-disable-next-line no-console
+    console.warn(`SfuCallSession: failing the call: ${reason}`, err ?? "");
     this.setState("failed");
     this.hangUp();
+  }
+
+  /** The `a=ice-ufrag` of an SDP, for the ICE-credential check below. */
+  private static iceUfrag(sdp: string | undefined): string | undefined {
+    if (sdp === undefined) return undefined;
+    const m = /a=ice-ufrag:([^\r\n]+)/.exec(sdp);
+    return m === null ? undefined : m[1];
   }
 }

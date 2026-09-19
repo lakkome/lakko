@@ -64,6 +64,10 @@ public final class ChatRepository: ObservableObject {
 
     private let chatClient: ChatClient
     private let dsClient: DsClient
+    /// Journal rows holding a Welcome addressed to this device that it could
+    /// not open (sealed to a KeyPackage a re-request replaced). Skipped on
+    /// later polls so the wait goes on for a newer Welcome.
+    private var unopenableWelcomeRows = Set<Int64>()
     private let discovery: DiscoveryClient
     private let snapshotStore: IdentitySnapshotStore
     /// ADR-0050 — which leaf identity the on-disk snapshot belongs to.
@@ -1036,7 +1040,7 @@ public final class ChatRepository: ObservableObject {
     /// link capability (the wire bytes the slug base64url-decodes to). Decodes
     /// + verifies the capability fail-closed (before any post), reads the
     /// group's current epoch from the journal head's public MLS framing
-    /// (`epochOfMessage`, no group secret), crafts an external-join proposal
+    /// (`epochAfterMessage` over the paged journal, no group secret), crafts an external-join proposal
     /// (ADR-0027) for that epoch, and posts it to the group journal. Returns the
     /// group id + the joiner's signature key — the caller drives
     /// `pollForJoinWelcome` until an admin approves and the Welcome arrives.
@@ -1087,12 +1091,18 @@ public final class ChatRepository: ObservableObject {
         let groupId = cap.groupId()
         // Read the current epoch from the journal head (public framing; a
         // non-member can do this). Empty / unreachable journal ⇒ epoch 0.
-        var epoch: UInt64 = 0
-        if let raw = try? await dsClient.fetchGroup(groupId: groupId, after: 0, waitSecs: 0) {
-            for m in raw.messages {
-                if let e = epochOfMessage(bytes: m.payload) { epoch = e }
-            }
-        }
+        // Paged to the head and read with `epochAfterMessage`: see
+        // `JournalHeadEpoch` for the two ways the single-page read went stale.
+        let epoch = (try? await JournalHeadEpoch.read(
+            fetchPage: { after, limit in
+                let raw = try await dsClient.fetchGroup(
+                    groupId: groupId, after: after, limit: limit, waitSecs: 0)
+                return .init(
+                    rows: raw.messages.map { .init(id: $0.id, payload: $0.payload) },
+                    hasMore: raw.hasMore)
+            },
+            epochAfter: { epochAfterMessage(bytes: $0) }
+        )) ?? 0
         let proposal: Data
         do {
             proposal = try identity.createExternalJoinProposal(groupId: groupId, epoch: epoch)
@@ -1105,6 +1115,10 @@ public final class ChatRepository: ObservableObject {
             throw ChatError.wrapped(
                 "DS publishGroup (external-join proposal) failed", underlying: error)
         }
+        // The proposal's KeyPackage private key is the only thing that can open
+        // the Welcome the admin will post later; persist it now rather than
+        // losing it to a relaunch before then.
+        persistSnapshotBestEffort()
         // ADR-0028 OQ2 — post a join-attribution envelope so the approving admin
         // can see which member's link this request arrived on. Best-effort +
         // advisory: a failure must not block the join (the admin approval gate is
@@ -1127,16 +1141,40 @@ public final class ChatRepository: ObservableObject {
         groupId: Data,
         joinerSignatureKey: Data
     ) async throws -> String? {
-        let raw: FetchResult
+        // Paged to the end: the Welcome is the newest row, and a single-page
+        // read never reached it on a journal longer than one page (see
+        // `JournalHeadEpoch.scan`).
+        var candidates: [(id: Int64, welcome: Data)] = []
         do {
-            raw = try await dsClient.fetchGroup(groupId: groupId, after: 0, waitSecs: 0)
+            let _: Never? = try await JournalHeadEpoch.scan(
+                fetchPage: { after, limit in
+                    let raw = try await dsClient.fetchGroup(
+                        groupId: groupId, after: after, limit: limit, waitSecs: 0)
+                    return .init(
+                        rows: raw.messages.map { .init(id: $0.id, payload: $0.payload) },
+                        hasMore: raw.hasMore)
+                },
+                visit: { row in
+                    guard !unopenableWelcomeRows.contains(row.id),
+                          let rendezvous = try? parseWelcomeRendezvous(bytes: row.payload),
+                          rendezvous.joinerSignatureKey == joinerSignatureKey else { return nil }
+                    candidates.append((id: row.id, welcome: rendezvous.welcome))
+                    return nil
+                }
+            )
         } catch {
             throw ChatError.wrapped("DS fetchGroup (join poll) failed", underlying: error)
         }
-        for m in raw.messages {
-            guard let rendezvous = try? parseWelcomeRendezvous(bytes: m.payload) else { continue }
-            if rendezvous.joinerSignatureKey == joinerSignatureKey {
-                return try await joinGroupFromWelcome(welcomeBytes: rendezvous.welcome)
+        // Newest first: after a re-request only the latest Welcome is sealed to
+        // the KeyPackage this device still holds. One that will not open is
+        // remembered and skipped, and the wait goes on for a newer one.
+        for candidate in candidates.reversed() {
+            do {
+                return try await joinGroupFromWelcome(welcomeBytes: candidate.welcome)
+            } catch {
+                unopenableWelcomeRows.insert(candidate.id)
+                NSLog("join: Welcome row %lld could not be opened; waiting for a newer one: %@",
+                      candidate.id, String(describing: error))
             }
         }
         return nil

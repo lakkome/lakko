@@ -5952,3 +5952,14 @@ pub fn welcome_rendezvous_for(bytes: &[u8], my_signature_key: &[u8]) -> Option<V
 pub fn epoch_of_message(bytes: &[u8]) -> Option<u64> {
     lakko_mls::epoch_of_message(bytes)
 }
+
+/// The epoch the group is in AFTER a journal row (ADR-0028 §3): the framed
+/// epoch, plus one when the row is a Commit. Over the journal's last MLS row
+/// this is the number a joiner puts on its external-join proposal; the framed
+/// epoch is stale whenever the head is a Commit and the proposal is then
+/// silently refused. Returns `undefined` exactly where `epochOfMessage` does.
+#[wasm_bindgen(js_name = epochAfterMessage)]
+#[must_use]
+pub fn epoch_after_message(bytes: &[u8]) -> Option<u64> {
+    lakko_mls::epoch_after_message(bytes)
+}

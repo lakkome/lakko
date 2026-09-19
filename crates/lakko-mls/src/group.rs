@@ -3755,6 +3755,33 @@ pub fn epoch_of_message(bytes: &[u8]) -> Option<u64> {
     Some(proto.epoch().as_u64())
 }
 
+/// The epoch the group is **in after** this journal row, read from the public
+/// framing like [`epoch_of_message`] — the number a joiner must put on its
+/// external-join proposal when this row is the journal head.
+///
+/// The two differ on a Commit: a Commit is framed at the epoch it was created
+/// in, and applying it moves the group to the next one, so a journal whose
+/// head is a Commit is one epoch ahead of what [`epoch_of_message`] reports.
+/// A proposal crafted for the framed epoch is then refused by every member as
+/// stale, and the joiner never learns why. The content type rides the same
+/// cleartext framing as the epoch, so a non-member can tell the two apart.
+///
+/// Returns `None` exactly where [`epoch_of_message`] does.
+#[must_use]
+pub fn epoch_after_message(bytes: &[u8]) -> Option<u64> {
+    let mut slice = bytes;
+    let msg = MlsMessageIn::tls_deserialize(&mut slice).ok()?;
+    let proto = msg.try_into_protocol_message().ok()?;
+    let epoch = proto.epoch().as_u64();
+    Some(
+        if proto.content_type() == openmls::framing::ContentType::Commit {
+            epoch.saturating_add(1)
+        } else {
+            epoch
+        },
+    )
+}
+
 // ============================================================================
 // ADR-0045 — the adversary half of the proposal gate's property tests.
 //
@@ -6726,23 +6753,37 @@ mod external_join_tests {
         let bob = Identity::from_seed(&[0xE1u8; 64]).expect("bob");
 
         // An application message at epoch 0 reports epoch 0 from its framing.
-        let m0 = alice_g
-            .create_application_message(&alice, b"hello")
-            .expect("app msg");
-        assert_eq!(crate::epoch_of_message(&wire(m0)), Some(0));
+        let m0 = wire(
+            alice_g
+                .create_application_message(&alice, b"hello")
+                .expect("app msg"),
+        );
+        assert_eq!(crate::epoch_of_message(&m0), Some(0));
+        assert_eq!(crate::epoch_after_message(&m0), Some(0));
 
         // Add bob → alice merges → epoch advances. The Welcome has no epoch.
         let add = alice_g
             .add_member_from_wire(&alice, &kp_wire(&bob))
             .expect("add bob");
-        assert_eq!(crate::epoch_of_message(&wire(add.welcome)), None);
+        let welcome = wire(add.welcome);
+        assert_eq!(crate::epoch_of_message(&welcome), None);
+        assert_eq!(crate::epoch_after_message(&welcome), None);
+        // The Commit itself is framed at the epoch it was created in (0), but
+        // the group it leaves behind is at 1: a joiner reading a journal whose
+        // head is this Commit must target 1, not 0.
+        let commit = wire(add.commit);
+        assert_eq!(crate::epoch_of_message(&commit), Some(0));
+        assert_eq!(crate::epoch_after_message(&commit), Some(1));
 
         // A fresh app message now reports the advanced epoch.
-        let m1 = alice_g
-            .create_application_message(&alice, b"world")
-            .expect("app msg 2");
+        let m1 = wire(
+            alice_g
+                .create_application_message(&alice, b"world")
+                .expect("app msg 2"),
+        );
         assert_eq!(alice_g.epoch(), 1);
-        assert_eq!(crate::epoch_of_message(&wire(m1)), Some(alice_g.epoch()));
+        assert_eq!(crate::epoch_of_message(&m1), Some(alice_g.epoch()));
+        assert_eq!(crate::epoch_after_message(&m1), Some(alice_g.epoch()));
 
         // Non-MLS / empty bytes → None (the caller treats this as epoch 0).
         assert_eq!(crate::epoch_of_message(&[0xFFu8; 12]), None);

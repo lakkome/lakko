@@ -151,7 +151,7 @@ public enum CoPublisher {
     /// from a `/g/` co-publisher link. Decodes + verifies the capability,
     /// recovers the channel id from the PublisherGroup `group_id` (the link
     /// conveys only the `group_id`), reads the group's current epoch from its DS
-    /// journal head's public framing (`epochOfMessage`, no group secret), crafts
+    /// journal head's public framing (`epochAfterMessage` over the paged journal, no group secret), crafts
     /// an external-join proposal (ADR-0027), and posts it + a self-signed
     /// join-attribution (OQ2) to the journal. The caller then polls with
     /// `pollForCoPublishWelcome`.
@@ -181,12 +181,18 @@ public enum CoPublisher {
         let channelIdHex = ChannelsComposer.bytesToHex(channelIdBytes)
         // Read the current epoch from the journal head (public framing; a
         // non-member can do this). Empty / unreachable journal => epoch 0.
-        var epoch: UInt64 = 0
-        if let raw = try? await ds.fetchGroup(groupId: groupId, after: 0, waitSecs: 0) {
-            for m in raw.messages {
-                if let e = epochOfMessage(bytes: m.payload) { epoch = e }
-            }
-        }
+        // Paged to the head and read with `epochAfterMessage`: see
+        // `JournalHeadEpoch` for the two ways the single-page read went stale.
+        let epoch = (try? await JournalHeadEpoch.read(
+            fetchPage: { after, limit in
+                let raw = try await ds.fetchGroup(
+                    groupId: groupId, after: after, limit: limit, waitSecs: 0)
+                return .init(
+                    rows: raw.messages.map { .init(id: $0.id, payload: $0.payload) },
+                    hasMore: raw.hasMore)
+            },
+            epochAfter: { epochAfterMessage(bytes: $0) }
+        )) ?? 0
         let proposal = try identity.createExternalJoinProposal(groupId: groupId, epoch: epoch)
         _ = try await ds.publishGroup(groupId: groupId, payload: proposal)
         // Self-signed join attribution (OQ2) — advisory; best-effort.
@@ -219,23 +225,45 @@ public enum CoPublisher {
         // has co-published to the channel before (nil on a first join).
         existingSigningSeed: Data? = nil
     ) async throws -> ChannelPublisherKeys? {
-        let raw = try await ds.fetchGroup(groupId: groupId, after: 0, waitSecs: 0)
-        for m in raw.messages {
-            guard let rendezvous = try? parseWelcomeRendezvous(bytes: m.payload) else { continue }
-            guard rendezvous.joinerSignatureKey == joinerKey else { continue }
-            // Join the PublisherGroup from the Welcome — this persists the joined
-            // MLS state under the deterministic PublisherGroup `group_id` in the
-            // identity's provider. The handle itself is throwaway (ARC frees it);
-            // `freshPublisherKeys` re-opens the now-joined PublisherGroup by
-            // channel id and derives the shared content-key seed + a fresh
-            // per-device signing key so this device can publish.
-            _ = try Group.joinFromWelcome(welcome: rendezvous.welcome, identity: identity)
-            return try ChannelsComposer.freshPublisherKeys(
-                identity: identity,
-                channelIdHex: channelIdHex,
-                existingSigningSeed: existingSigningSeed)
+        // Paged to the end: the Welcome is the newest row, and a single-page
+        // read never reached it on a journal longer than one page (see
+        // `JournalHeadEpoch.scan`).
+        var candidates: [Data] = []
+        let _: Never? = try await JournalHeadEpoch.scan(
+            fetchPage: { after, limit in
+                let raw = try await ds.fetchGroup(
+                    groupId: groupId, after: after, limit: limit, waitSecs: 0)
+                return .init(
+                    rows: raw.messages.map { .init(id: $0.id, payload: $0.payload) },
+                    hasMore: raw.hasMore)
+            },
+            visit: { row in
+                guard let rendezvous = try? parseWelcomeRendezvous(bytes: row.payload),
+                      rendezvous.joinerSignatureKey == joinerKey else { return nil }
+                candidates.append(rendezvous.welcome)
+                return nil
+            }
+        )
+        // Join the PublisherGroup from the Welcome — this persists the joined
+        // MLS state under the deterministic PublisherGroup `group_id` in the
+        // identity's provider. The handle itself is throwaway (ARC frees it);
+        // `freshPublisherKeys` re-opens the now-joined PublisherGroup by
+        // channel id and derives the shared content-key seed + a fresh
+        // per-device signing key so this device can publish. Newest first,
+        // and a Welcome sealed to a KeyPackage this device no longer holds is
+        // skipped rather than ending the wait.
+        var joined = false
+        for welcome in candidates.reversed() {
+            if (try? Group.joinFromWelcome(welcome: welcome, identity: identity)) != nil {
+                joined = true
+                break
+            }
         }
-        return nil
+        guard joined else { return nil }
+        return try ChannelsComposer.freshPublisherKeys(
+            identity: identity,
+            channelIdHex: channelIdHex,
+            existingSigningSeed: existingSigningSeed)
     }
 
     /// Reseal the CURRENT (post-approve) channel seed to all subscribers — the

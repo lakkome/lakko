@@ -2580,7 +2580,7 @@ public class ChatRepository(
      * capability (the wire bytes the slug base64url-decodes to). Decodes +
      * verifies the capability fail-closed (before any post), reads the group's
      * current epoch from the journal head's public MLS framing
-     * (`epochOfMessage`, no group secret), crafts an external-join proposal
+     * (`epochAfterMessage` over the paged journal, no group secret), crafts an external-join proposal
      * (ADR-0027), and posts it to the group journal. Returns the group id + the
      * joiner's signature key — the caller drives [pollForJoinWelcome] until an
      * admin approves and the Welcome arrives.
@@ -2654,14 +2654,21 @@ public class ChatRepository(
         }
         // Read the current epoch from the journal head (public framing; a
         // non-member can do this). Empty / unreachable journal => epoch 0.
-        var epoch: ULong = 0u
-        try {
-            val raw = dsClient.fetchGroup(groupId, after = 0L, waitSecs = 0)
-            for (m in raw.messages) {
-                uniffi.lakko_ffi_uniffi.epochOfMessage(m.payload)?.let { epoch = it }
-            }
+        // Paged to the head and read with `epochAfterMessage`: see
+        // `JournalHeadEpoch` for the two ways the single-page read went stale.
+        val epoch: ULong = try {
+            JournalHeadEpoch.read(
+                fetchPage = { after, limit ->
+                    val raw = dsClient.fetchGroup(groupId, after = after, limit = limit, waitSecs = 0)
+                    JournalHeadEpoch.Page(
+                        rows = raw.messages.map { JournalHeadEpoch.Row(it.id, it.payload) },
+                        hasMore = raw.hasMore,
+                    )
+                },
+                epochAfter = { uniffi.lakko_ffi_uniffi.epochAfterMessage(it) },
+            )
         } catch (e: Throwable) {
-            // keep epoch 0
+            0u // keep epoch 0
         }
         val proposal = try {
             identity.createExternalJoinProposal(groupId, epoch)
@@ -2673,6 +2680,10 @@ public class ChatRepository(
         } catch (e: Throwable) {
             throw ChatError("DS publishGroup (external-join proposal) failed", e)
         }
+        // The proposal's KeyPackage private key is the only thing that can open
+        // the Welcome the admin will post later; persist it now rather than
+        // losing it to a process death before then.
+        persistSnapshotBestEffort()
         // ADR-0028 OQ2 — post a join-attribution envelope so the approving admin
         // can see which member's link this request arrived on. Best-effort +
         // advisory: a failure must not block the join (the admin approval gate is
@@ -2706,19 +2717,45 @@ public class ChatRepository(
         groupId: ByteArray,
         joinerSignatureKey: ByteArray,
     ): String? {
-        val raw = try {
-            dsClient.fetchGroup(groupId, after = 0L, waitSecs = 0)
+        // Paged to the end: the Welcome is the newest row, and a single-page
+        // read never reached it on a journal longer than one page (see
+        // `JournalHeadEpoch.scan`).
+        val candidates = ArrayList<Pair<Long, ByteArray>>()
+        try {
+            JournalHeadEpoch.scan<Unit>(
+                fetchPage = { after, limit ->
+                    val raw = dsClient.fetchGroup(groupId, after = after, limit = limit, waitSecs = 0)
+                    JournalHeadEpoch.Page(
+                        rows = raw.messages.map { JournalHeadEpoch.Row(it.id, it.payload) },
+                        hasMore = raw.hasMore,
+                    )
+                },
+                visit = { row ->
+                    if (row.id !in unopenableWelcomeRows) {
+                        val rendezvous = try {
+                            uniffi.lakko_ffi_uniffi.parseWelcomeRendezvous(row.payload)
+                        } catch (e: FfiException) {
+                            null
+                        }
+                        if (rendezvous != null && rendezvous.joinerSignatureKey.contentEquals(joinerSignatureKey)) {
+                            candidates += row.id to rendezvous.welcome
+                        }
+                    }
+                    null
+                },
+            )
         } catch (e: Throwable) {
             throw ChatError("DS fetchGroup (join poll) failed", e)
         }
-        for (m in raw.messages) {
-            val rendezvous = try {
-                uniffi.lakko_ffi_uniffi.parseWelcomeRendezvous(m.payload)
-            } catch (e: FfiException) {
-                continue
-            }
-            if (rendezvous.joinerSignatureKey.contentEquals(joinerSignatureKey)) {
-                return joinGroupFromWelcome(rendezvous.welcome)
+        // Newest first: after a re-request only the latest Welcome is sealed to
+        // the KeyPackage this device still holds. One that will not open is
+        // remembered and skipped, and the wait goes on for a newer one.
+        for ((id, welcome) in candidates.asReversed()) {
+            try {
+                return joinGroupFromWelcome(welcome)
+            } catch (e: Throwable) {
+                unopenableWelcomeRows += id
+                android.util.Log.w("ChatRepository", "join: Welcome row $id could not be opened; waiting for a newer one", e)
             }
         }
         return null
@@ -4909,6 +4946,11 @@ public class ChatRepository(
      * MLS mutations and the snapshot write run in, so it needs no lock of its own.
      */
     private val cursorGate = DurableCursorGate()
+
+    /** Journal rows holding a Welcome addressed to this device that it could
+     *  not open (sealed to a KeyPackage a re-request replaced). Skipped on
+     *  later polls so the wait goes on for a newer Welcome. */
+    private val unopenableWelcomeRows = HashSet<Long>()
 
     private fun persistSnapshotBestEffort() {
         MainThreadGuard.assertOffMain("persistSnapshotBestEffort")

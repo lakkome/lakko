@@ -12,7 +12,7 @@ import uniffi.lakko_ffi_uniffi.PublisherGroup
 import uniffi.lakko_ffi_uniffi.channelIdFromPublisherGroupId
 import uniffi.lakko_ffi_uniffi.composeGroupInviteCapability
 import uniffi.lakko_ffi_uniffi.composeGroupJoinAttribution
-import uniffi.lakko_ffi_uniffi.epochOfMessage
+import uniffi.lakko_ffi_uniffi.epochAfterMessage
 import uniffi.lakko_ffi_uniffi.parseWelcomeRendezvous
 import uniffi.lakko_ffi_uniffi.publisherGroupOpenOrCreate
 import uniffi.lakko_ffi_uniffi.sealSubscriberSeedEnvelope
@@ -185,7 +185,7 @@ public object CoPublisher {
      *  from a `/g/` co-publisher link. Decodes + verifies the capability,
      *  recovers the channel id from the PublisherGroup `group_id`, reads the
      *  group's current epoch from its DS journal head's public framing
-     *  (`epochOfMessage`, no group secret), crafts an external-join proposal
+     *  (`epochAfterMessage` over the paged journal, no group secret), crafts an external-join proposal
      *  (ADR-0027), and posts it + a self-signed join-attribution (OQ2) to the
      *  journal. The caller then polls with [pollForCoPublishWelcome]. */
     public suspend fun requestToCoPublish(
@@ -216,14 +216,21 @@ public object CoPublisher {
         val channelIdHex = ChannelsComposer.bytesToHex(channelIdBytes)
         // Read the current epoch from the journal head (public framing; a
         // non-member can do this). Empty / unreachable journal => epoch 0.
-        var epoch: ULong = 0uL
-        try {
-            val raw = ds.fetchGroup(groupId, after = 0L, waitSecs = 0)
-            for (m in raw.messages) {
-                epochOfMessage(m.payload)?.let { epoch = it }
-            }
+        // Paged to the head and read with `epochAfterMessage`: see
+        // `JournalHeadEpoch` for the two ways the single-page read went stale.
+        val epoch: ULong = try {
+            me.lakko.app.chat.JournalHeadEpoch.read(
+                fetchPage = { after, limit ->
+                    val raw = ds.fetchGroup(groupId, after = after, limit = limit, waitSecs = 0)
+                    me.lakko.app.chat.JournalHeadEpoch.Page(
+                        rows = raw.messages.map { me.lakko.app.chat.JournalHeadEpoch.Row(it.id, it.payload) },
+                        hasMore = raw.hasMore,
+                    )
+                },
+                epochAfter = { epochAfterMessage(it) },
+            )
         } catch (_: Throwable) {
-            // keep epoch 0
+            0uL // keep epoch 0
         }
         val proposal = identity.createExternalJoinProposal(groupId, epoch)
         ds.publishGroup(groupId, proposal)
@@ -257,25 +264,51 @@ public object CoPublisher {
         // has co-published to the channel before (null on a first join).
         existingSigningSeed: ByteArray? = null,
     ): ChannelPublisherKeys? {
-        val raw = ds.fetchGroup(groupId, after = 0L, waitSecs = 0)
-        for (m in raw.messages) {
-            val rendezvous = try {
-                parseWelcomeRendezvous(m.payload)
+        // Paged to the end: the Welcome is the newest row, and a single-page
+        // read never reached it on a journal longer than one page (see
+        // `JournalHeadEpoch.scan`).
+        val candidates = ArrayList<ByteArray>()
+        me.lakko.app.chat.JournalHeadEpoch.scan<Unit>(
+            fetchPage = { after, limit ->
+                val raw = ds.fetchGroup(groupId, after = after, limit = limit, waitSecs = 0)
+                me.lakko.app.chat.JournalHeadEpoch.Page(
+                    rows = raw.messages.map { me.lakko.app.chat.JournalHeadEpoch.Row(it.id, it.payload) },
+                    hasMore = raw.hasMore,
+                )
+            },
+            visit = { row ->
+                val rendezvous = try {
+                    parseWelcomeRendezvous(row.payload)
+                } catch (_: Throwable) {
+                    null
+                }
+                if (rendezvous != null && rendezvous.joinerSignatureKey.contentEquals(joinerKey)) {
+                    candidates += rendezvous.welcome
+                }
+                null
+            },
+        )
+        // Join the PublisherGroup from the Welcome — this persists the joined
+        // MLS state under the deterministic PublisherGroup `group_id` in the
+        // identity's provider. The handle itself is throwaway (close it);
+        // freshPublisherKeys re-opens the now-joined PublisherGroup by
+        // channel id and derives the shared content-key seed + a fresh
+        // per-device signing key so this device can publish. Newest first,
+        // and a Welcome sealed to a KeyPackage this device no longer holds is
+        // skipped rather than ending the wait.
+        var joined = false
+        for (welcome in candidates.asReversed()) {
+            try {
+                Group.joinFromWelcome(welcome, identity).close()
+                joined = true
+                break
             } catch (_: Throwable) {
-                continue
+                // try an older candidate
             }
-            if (!rendezvous.joinerSignatureKey.contentEquals(joinerKey)) continue
-            // Join the PublisherGroup from the Welcome — this persists the joined
-            // MLS state under the deterministic PublisherGroup `group_id` in the
-            // identity's provider. The handle itself is throwaway (close it);
-            // freshPublisherKeys re-opens the now-joined PublisherGroup by
-            // channel id and derives the shared content-key seed + a fresh
-            // per-device signing key so this device can publish.
-            Group.joinFromWelcome(rendezvous.welcome, identity).close()
-            return ChannelsComposer.freshPublisherKeys(
-                identity, channelIdHex, existingSigningSeed)
         }
-        return null
+        if (!joined) return null
+        return ChannelsComposer.freshPublisherKeys(
+            identity, channelIdHex, existingSigningSeed)
     }
 
     // -----------------------------------------------------------------

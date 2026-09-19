@@ -40,6 +40,7 @@
 import type { Wasm } from "../wasm";
 import { loadWasm } from "../wasm";
 import { DsClient } from "../ds/client";
+import { journalHeadEpoch, scanJournal } from "../chat/journal-head-epoch";
 import { base64Encode } from "../auth/account-id";
 import { withGroupMlsLock } from "../mls/group-lock";
 import {
@@ -229,13 +230,14 @@ export async function requestToCoPublish(
   const channelIdHex = bytesToHex(channelIdBytes);
   // Read the current epoch from the PublisherGroup journal head (public framing;
   // a non-member can do this). Empty / unreachable journal => epoch 0.
+  // Paged to the head and read with `epochAfterMessage`: see
+  // `journalHeadEpoch` for the two ways the single-page read went stale.
   let epoch = 0n;
   try {
-    const raw = await ds.fetchGroup(groupId, { after: 0, waitSecs: 0 });
-    for (const m of raw.messages) {
-      const e = wasm.epochOfMessage(m.payload);
-      if (e !== undefined) epoch = e;
-    }
+    epoch = await journalHeadEpoch(
+      (after, limit) => ds.fetchGroup(groupId, { after, limit, waitSecs: 0 }),
+      (payload) => wasm.epochAfterMessage(payload),
+    );
   } catch {
     // keep epoch 0
   }
@@ -266,20 +268,36 @@ export async function pollForCoPublishWelcome(
   existingSigningSeed?: Uint8Array,
 ): Promise<ChannelPublisherKeys | null> {
   const wasm = await loadWasm();
-  const raw = await ds.fetchGroup(groupId, { after: 0, waitSecs: 0 });
-  for (const m of raw.messages) {
-    const welcome = wasm.welcomeRendezvousFor(m.payload, joinerKey);
-    if (welcome !== undefined) {
-      const group = wasm.Group.joinFromWelcome(welcome, identity);
-      group.free();
-      // Now an MLS member of the PublisherGroup — `freshPublisherKeys` opens the
-      // (now-joined) group, derives the shared content-key seed, and reuses the
-      // persisted per-device signing seed (or mints one) so this device can
-      // publish.
-      return await freshPublisherKeys(identity, channelIdHex, existingSigningSeed);
+  // Paged to the end: the Welcome is the newest row, and a single-page read
+  // never reached it on a journal longer than one page (see `scanJournal`).
+  const candidates: Uint8Array[] = [];
+  await scanJournal<never>(
+    (after, limit) => ds.fetchGroup(groupId, { after, limit, waitSecs: 0 }),
+    (m) => {
+      const welcome = wasm.welcomeRendezvousFor(m.payload, joinerKey);
+      if (welcome !== undefined) candidates.push(welcome);
+      return undefined;
+    },
+  );
+  // Newest first, and a Welcome sealed to a KeyPackage this device no longer
+  // holds is skipped rather than ending the wait.
+  let group: InstanceType<typeof wasm.Group> | null = null;
+  for (const welcome of candidates.reverse()) {
+    try {
+      group = wasm.Group.joinFromWelcome(welcome, identity);
+      break;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("co-publish: a Welcome could not be opened; waiting for a newer one", err);
     }
   }
-  return null;
+  if (group === null) return null;
+  group.free();
+  // Now an MLS member of the PublisherGroup — `freshPublisherKeys` opens the
+  // (now-joined) group, derives the shared content-key seed, and reuses the
+  // persisted per-device signing seed (or mints one) so this device can
+  // publish.
+  return await freshPublisherKeys(identity, channelIdHex, existingSigningSeed);
 }
 
 /**

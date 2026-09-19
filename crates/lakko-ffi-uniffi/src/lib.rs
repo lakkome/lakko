@@ -4997,6 +4997,19 @@ pub fn epoch_of_message(bytes: Vec<u8>) -> Option<u64> {
     lakko_mls::epoch_of_message(&bytes)
 }
 
+/// ADR-0028 §3 — the epoch the group is in AFTER a journal row: the framed
+/// epoch, plus one when the row is a Commit (a Commit is framed at the epoch it
+/// was created in and moves the group to the next). This, over the journal's
+/// last MLS row, is what a joiner puts on its external-join proposal; the
+/// framed epoch alone is stale whenever the head is a Commit, and every member
+/// then refuses the proposal without telling the joiner. Returns `None`
+/// exactly where `epoch_of_message` does.
+#[uniffi::export]
+#[must_use]
+pub fn epoch_after_message(bytes: Vec<u8>) -> Option<u64> {
+    lakko_mls::epoch_after_message(&bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

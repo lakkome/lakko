@@ -151,6 +151,21 @@ without any group secret:
    is rare; the joiner's poll-loop simply re-derives on each pass until a
    Welcome arrives or the ticket expires.
 
+**Update (2026-09-19) — two corrections from the first live run.** Step 1 as
+shipped read the journal once with `after=0`, and the DS pages at 100 rows by
+default: on a 370-row journal the "head" was a row from hours earlier, the
+proposal carried a stale epoch, and every member refused it in silence (the
+step-4 retry never fired, because nothing tells a non-member its proposal was
+refused). The joiner now pages to the end of the journal (`hasMore`, the DS
+maximum page size) before reading. And step 2 was off by one whenever the head
+is a Commit: a Commit is framed at the epoch it was created in, while the group
+it leaves behind is one higher, so the joiner uses `epoch_after_message` (the
+framed epoch, plus one for a Commit; the content type rides the same cleartext
+framing). `epoch_of_message` keeps its framed-epoch meaning for the other
+callers. The joiner's poll for the admin's Welcome (step 4 of section 4) read
+the journal the same single-page way and so never saw a Welcome on a journal
+longer than one page; it now walks the journal through the same paged scan.
+
 ### 4. The full live flow
 
 ```text

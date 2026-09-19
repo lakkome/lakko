@@ -106,6 +106,7 @@ import type { ActingCommitter } from "../chat/committer-beacon";
 // never fetch again, so it has to build events for them, and it has to build
 // them the same way the poll does.
 import { rosterOf, toEvent } from "../chat/client";
+import { journalHeadEpoch, scanJournal } from "../chat/journal-head-epoch";
 import { resolveLeafSignatureKey, resolveMemberIdentity } from "../chat/author-identity";
 import type { IncomingChatEvent } from "../chat/client";
 // ADR-0045 UX §6 — the seventh refusal string, defined ONCE beside the rest of
@@ -808,6 +809,12 @@ function toSweepEntry(row: PendingCommitEntry): SweepDurableEntry {
 
 export class ContactsClient {
   private readonly identityProvider: (() => WasmIdentity | null) | undefined;
+  /** Journal rows holding a Welcome addressed to this device that it could not
+   *  open (the KeyPackage it was sealed to is gone: a reload before the fix in
+   *  `requestToJoinFromLink` persisted it, or a re-request minted a newer one).
+   *  Skipped on later polls so the wait goes on for a newer Welcome instead of
+   *  failing on the stale one every three seconds. */
+  private readonly unopenableWelcomes = new Set<number>();
   private readonly accountIdentityProvider: (() => WasmIdentity | null) | undefined;
   private readonly onPersist: (() => Promise<void>) | undefined;
   private readonly onPersistWithCommit:
@@ -3309,7 +3316,7 @@ export class ContactsClient {
    *  capability (the wire bytes the slug base64url-decodes to). Decodes +
    *  verifies the capability (fail-closed on a forged / malformed / expired
    *  link, before any post), reads the group's current epoch from the journal
-   *  head's public MLS framing (`epochOfMessage`, no group secret), crafts an
+   *  head's public MLS framing (`epochAfterMessage` over the paged journal, no group secret), crafts an
    *  external-join proposal (ADR-0027) for that epoch, and posts it to the
    *  group journal. Returns the `groupId` + the joiner's signature key — the
    *  caller drives `pollForJoinWelcome` on a loop until an admin approves and
@@ -3361,13 +3368,14 @@ export class ContactsClient {
     // Read the group's current epoch from the journal head. A non-member can
     // do this — the epoch rides the public MLS framing, not the encrypted body.
     // An empty / unreachable journal ⇒ epoch 0 (a freshly-created group).
+    // Paged to the head and read with `epochAfterMessage`: see
+    // `journalHeadEpoch` for the two ways the single-page read went stale.
     let epoch = 0n;
     try {
-      const raw = await this.ds.fetchGroup(groupId, { after: 0, waitSecs: 0 });
-      for (const m of raw.messages) {
-        const e = wasm.epochOfMessage(m.payload);
-        if (e !== undefined) epoch = e;
-      }
+      epoch = await journalHeadEpoch(
+        (after, limit) => this.ds.fetchGroup(groupId, { after, limit, waitSecs: 0 }),
+        (payload) => wasm.epochAfterMessage(payload),
+      );
     } catch {
       // keep epoch 0
     }
@@ -3382,6 +3390,11 @@ export class ContactsClient {
     } catch (err) {
       throw ContactsError.wrap(err);
     }
+    // The proposal's KeyPackage private key lives in the provider and is the
+    // only thing that can open the Welcome the admin will post, minutes or
+    // hours from now. Persist it now: a reload before then used to lose it,
+    // and the Welcome then failed with `NoMatchingKeyPackage`, unrecoverably.
+    await this.persistBestEffort();
     // ADR-0028 OQ2 — post a join-attribution envelope so the approving admin can
     // see *which member's* link this request arrived on. It binds our signature
     // key to the capability (whose embedded issuer pubkey the admin checks
@@ -3412,16 +3425,33 @@ export class ContactsClient {
     joinerSignatureKey: Uint8Array,
   ): Promise<WasmGroup | null> {
     const wasm = await loadWasm();
-    let raw;
+    // Paged to the end: the Welcome is the newest row, and a single-page read
+    // never reached it on a journal longer than one page (see `scanJournal`).
+    const candidates: Array<{ id: number; welcome: Uint8Array }> = [];
     try {
-      raw = await this.ds.fetchGroup(groupId, { after: 0, waitSecs: 0 });
+      await scanJournal<never>(
+        (after, limit) => this.ds.fetchGroup(groupId, { after, limit, waitSecs: 0 }),
+        (m) => {
+          if (this.unopenableWelcomes.has(m.id)) return undefined;
+          const welcome = wasm.welcomeRendezvousFor(m.payload, joinerSignatureKey);
+          if (welcome !== undefined) candidates.push({ id: m.id, welcome });
+          return undefined;
+        },
+      );
     } catch (err) {
       throw ContactsError.wrap(err);
     }
-    for (const m of raw.messages) {
-      const welcome = wasm.welcomeRendezvousFor(m.payload, joinerSignatureKey);
-      if (welcome !== undefined) {
-        return await this.joinGroupFromWelcome(identity, welcome);
+    // Newest first: after a re-request only the latest Welcome is sealed to
+    // the KeyPackage this device still holds. One that will not open is
+    // remembered and skipped, and the wait goes on for a newer one; it must
+    // not end the poll, which is what a thrown error does.
+    for (const candidate of candidates.reverse()) {
+      try {
+        return await this.joinGroupFromWelcome(identity, candidate.welcome);
+      } catch (err) {
+        this.unopenableWelcomes.add(candidate.id);
+        // eslint-disable-next-line no-console
+        console.warn(`join: Welcome row ${candidate.id} could not be opened; waiting for a newer one`, err);
       }
     }
     return null;
