@@ -34,6 +34,7 @@
  */
 
 import { createSignal, type Accessor } from "solid-js";
+import { captureFallbackNotice, type CaptureFallback } from "./capture-fallback";
 
 import { callActions, callState, type Participant } from "../state/call-state";
 import {
@@ -173,6 +174,8 @@ export function createSfuCallUi(
   const namingInputs = new Map<string, { pseudonym: string; peerTag: string | undefined }>();
 
   const localName = options.localDisplayName ?? "You";
+  /** What this device joined without (section 4.4), once capture ran. */
+  let captureFallback: CaptureFallback | null = null;
   const nameOf = (
     peerId: string,
     pseudonym: string,
@@ -189,8 +192,9 @@ export function createSfuCallUi(
     // `media.audio` is always true on web (a call with no audio transceiver
     // could never be unmuted). So the mute state comes from the store, not
     // from the capture flags.
-    micOn: callState.pendingMicOn(),
-    camOn: config.media.video,
+    micOn:
+      captureFallback?.missing === "camera-and-microphone" ? false : callState.pendingMicOn(),
+    camOn: config.media.video && captureFallback === null,
     quality: "good",
     speaking: false,
   });
@@ -318,6 +322,14 @@ export function createSfuCallUi(
     },
     onVideoPublishState: (state): void => {
       setVideoPublishState(state);
+    },
+    onCaptureFallback: (fallback): void => {
+      // Section 4.4: the device lacked what the call asked for. Turn the
+      // missing controls off on the own tile and say so once.
+      captureFallback = fallback;
+      callActions.setCamera(false);
+      if (fallback.missing === "camera-and-microphone") callActions.setMic(false);
+      callActions.showNotice(captureFallbackNotice(fallback));
     },
   });
 

@@ -85,6 +85,7 @@ import {
   isSFrameTransformSupported,
 } from "./sframe-transform";
 import { trackConstraint, type VideoPublishState } from "./call-session";
+import { captureWithFallback, type CaptureFallback } from "./capture-fallback";
 import { SFU_KEEPALIVE_TICK_MS, sfuKeepaliveAction } from "./sfu-keepalive";
 
 /** Lifecycle phases the SFU session can be in. */
@@ -226,6 +227,14 @@ export interface SfuCallCallbacks {
    * never parses the payload; a peer only speaks for its own outbound frames).
    */
   onRemoteMediaState?(peerId: string, cameraOn: boolean): void;
+  /**
+   * The device did not have everything the call asked for, so the person
+   * joined with less (`docs/ux/calls.md` section 4.4): the camera failed and
+   * only the microphone is live, or neither could be captured and they
+   * listen and watch. Fired once, before the offer is built; the UI turns
+   * the matching controls off and shows the one-line notice.
+   */
+  onCaptureFallback?(fallback: CaptureFallback): void;
 }
 
 const DEFAULT_ICE_SERVERS: readonly RTCIceServer[] = [
@@ -747,22 +756,31 @@ export class SfuCallSession {
       );
     }
     const seed = this.activeSeed;
-    // Honour the picker-selected device at publish time (an `{ exact }`
-    // deviceId constraint, else the OS default).
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: trackConstraint(
-        this.config.media.audio,
-        this.config.media.audioDeviceId,
-      ),
-      video: trackConstraint(
-        this.config.media.video,
-        this.config.media.videoDeviceId,
-      ),
-    });
+    // Capture what the device has (section 4.4): the camera and microphone
+    // when both work, the microphone alone when the camera fails, nothing
+    // when neither can be had — the person joins in every case. Honour the
+    // picker-selected device (an `{ exact }` deviceId constraint, else the
+    // OS default).
+    const captured = await captureWithFallback(
+      this.config.media,
+      (audio, video) =>
+        navigator.mediaDevices.getUserMedia({
+          audio: trackConstraint(audio, this.config.media.audioDeviceId),
+          video: trackConstraint(video, this.config.media.videoDeviceId),
+        }),
+    );
+    // An empty stream when nothing was captured, so a camera turned on later
+    // (`publishVideo`) has a stream to join.
+    const stream = captured.stream ?? new MediaStream();
     this.localStream = stream;
     // Surface the capture to the UI (group self-preview tile), mirroring the
     // 1×1 `onLocalStream`. Fired once, before the offer is built.
     this.callbacks.onLocalStream?.(stream);
+    if (captured.fallback !== null) {
+      // eslint-disable-next-line no-console
+      console.warn("SfuCallSession: joining with less than asked", captured.fallback);
+      this.callbacks.onCaptureFallback?.(captured.fallback);
+    }
 
     const pc = new RTCPeerConnection({
       iceServers: [...(this.config.iceServers ?? DEFAULT_ICE_SERVERS)],
@@ -790,6 +808,12 @@ export class SfuCallSession {
           localLeaf: this.publishLeaf,
         }),
       );
+    }
+    if (stream.getTracks().length === 0) {
+      // Nothing to send, but the offer still needs a media line to carry the
+      // ICE/DTLS transport the SFU's own offers will reuse for what this
+      // person receives. Receive-only: no sender, so nothing to seal.
+      pc.addTransceiver("audio", { direction: "recvonly" });
     }
 
     pc.onicecandidate = (ev): void => {

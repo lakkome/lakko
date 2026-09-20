@@ -66,6 +66,7 @@ import { callActions, callState, type Participant } from "../state/call-state";
 import { loadWasm } from "../wasm";
 import { groupIdHex } from "../devices/sync/state";
 import { CallJwtClient } from "./call-jwt-client";
+import { captureFallbackNotice, type CaptureFallback } from "./capture-fallback";
 import {
   SfuCallSession,
   type SfuCallState,
@@ -186,6 +187,8 @@ export class MultiJoinerCall {
    *  name learnt this way outranks the contact-list resolver: it is what the
    *  person calls themself, sealed under a key only members hold. */
   private readonly peerNames = new Map<string, string>();
+  /** What this device joined without (section 4.4), once capture ran. */
+  private captureFallback: CaptureFallback | null = null;
 
   /** G-22 dedup (FINDING 4). Keyed on the relay `from` SFU peer id → wrapped
    *  Welcome, so ONE SFU-admitted peer is admitted at most once per call —
@@ -287,8 +290,18 @@ export class MultiJoinerCall {
         onSignalRelay: (from, payload): void => this.onRelay(from, payload),
         onLocalStream: (stream): void => this.setLocalStream(stream),
         onVideoPublishState: (state): void => this.setVideoPublishState(state),
+        onCaptureFallback: (fallback): void => this.onCaptureFallback(fallback),
       },
     );
+  }
+
+  /** Section 4.4: the device lacked what the call asked for. Turn the missing
+   *  controls off on the own tile and say so once. */
+  private onCaptureFallback(fallback: CaptureFallback): void {
+    this.captureFallback = fallback;
+    callActions.setCamera(false);
+    if (fallback.missing === "camera-and-microphone") callActions.setMic(false);
+    callActions.showNotice(captureFallbackNotice(fallback));
   }
 
   // -----------------------------------------------------------------
@@ -867,8 +880,11 @@ export class MultiJoinerCall {
       isLocal: true,
       // See `sfu-call-ui.ts`: `media.audio` is always true on web, so a muted
       // start is carried in the store instead (docs/ux/calls.md section 3.2).
-      micOn: callState.pendingMicOn(),
-      camOn: this.opts.media.video,
+      micOn:
+        this.captureFallback?.missing === "camera-and-microphone"
+          ? false
+          : callState.pendingMicOn(),
+      camOn: this.opts.media.video && this.captureFallback === null,
       quality: "good",
       speaking: false,
     };

@@ -301,6 +301,16 @@ were each picking someone else and one of them was picking wrong:
   forwards ciphertext; a name never crosses it in clear. A name learnt this way
   is what the person calls themself and outranks the contact-list lookup; the
   contact list stays the fallback, and `Peer` is the last resort.
+- **The person joins with what the device has.** A video call asks for a
+  camera and a microphone; a device without a camera, or a browser that
+  blocks capture, used to fail the whole request and print the browser's own
+  words (`Failed: Invalid constraint`). Now the camera failing leaves the
+  microphone: the person joins with the camera off and one line says `No
+  camera was found. You joined with your microphone.` (or `Lakko was not
+  allowed to use the camera...`). The microphone failing too still lets them
+  in, to listen and watch, with the line saying so. The browser's error text
+  never reaches the screen. Nothing changes about encryption: whatever is
+  sent is sealed as before, and a person who sends nothing seals nothing.
 - **The link landing names the host or says nothing.** `Host:` followed by a
   sixty-digit fingerprint, or by `Member`, was found on every landing; a string
   of digits names nobody. The line shows the host's name when the device knows

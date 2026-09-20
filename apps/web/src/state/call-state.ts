@@ -289,6 +289,7 @@ interface CallStateInternal {
   readonly chatOpen: Accessor<boolean>;
   /** Chat-message log — oldest first. */
   readonly chatMessages: Accessor<readonly ChatMessage[]>;
+  readonly notice: Accessor<string | null>;
   /** Live in-progress text-box content (held in state so it
    *  survives panel close / reopen during a call). */
   readonly composeText: Accessor<string>;
@@ -332,6 +333,14 @@ const [hasMultipleCameras, setHasMultipleCameras] = createSignal(false);
 const [settings, setSettings] = createSignal<CallSettings>(DEFAULT_SETTINGS);
 const [chatOpen, setChatOpen] = createSignal(false);
 const [chatMessages, setChatMessages] = createSignal<readonly ChatMessage[]>([]);
+/** One line under the status row, shown for a few seconds: what the call did
+ *  on the person's behalf (joined without a camera, section 4.4). `null` when
+ *  nothing is up. Distinct from the chat's system events, which sit behind
+ *  the More menu and are never seen at the moment they matter. */
+const [notice, setNotice] = createSignal<string | null>(null);
+let noticeTimer: ReturnType<typeof setTimeout> | null = null;
+/** How long a notice stays on screen. */
+export const CALL_NOTICE_MS = 8_000;
 const [composeText, setComposeText] = createSignal("");
 const [chatUnreadCount, setChatUnreadCount] = createSignal(0);
 const [videoPublishState, setVideoPublishState] =
@@ -388,6 +397,7 @@ export const callState: CallStateInternal = {
   settings,
   chatOpen,
   chatMessages,
+  notice,
   composeText,
   chatUnreadCount,
   videoPublishState,
@@ -535,6 +545,9 @@ export const callActions = {
     // is the in-memory view + the unread counter.
     setChatOpen(false);
     setChatMessages([]);
+    if (noticeTimer !== null) clearTimeout(noticeTimer);
+    noticeTimer = null;
+    setNotice(null);
     setComposeText("");
     setChatUnreadCount(0);
     // Mid-call camera-on lifecycle — back to `off` so a fresh call
@@ -633,6 +646,18 @@ export const callActions = {
   /** Append a system event (peer joined, hand raised, screen
    *  share started). Does NOT bump the unread counter — these
    *  are background context. */
+  /** Show one line under the status row for `CALL_NOTICE_MS`, replacing any
+   *  line already up. Also kept in the chat as a system event, so it can be
+   *  read back later. */
+  showNotice(text: string): void {
+    setNotice(text);
+    if (noticeTimer !== null) clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => {
+      noticeTimer = null;
+      setNotice(null);
+    }, CALL_NOTICE_MS);
+    callActions.addSystemEvent(text);
+  },
   addSystemEvent(text: string): void {
     const msg: ChatMessage = {
       id: nextChatId(),

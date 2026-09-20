@@ -3456,6 +3456,15 @@ button.lk-reaction {
 .lk-call[data-surface="group"] .lk-call-state-text {
   font-size: 13px;
 }
+/* Section 4.4: one plain line under the status row for a few seconds (joined
+   without a camera). Same muted colour as the state text, never a banner. */
+.lk-call-notice {
+  margin: 6px 0 0;
+  color: var(--surface-muted);
+  font-size: 13px;
+  text-align: center;
+  max-width: 32em;
+}
 
 /* Section 4: "One small lock chip beside the status line: a lock and the word
    `Encrypted`". The digits are one tap behind it, in the sheet, and never on
@@ -3629,6 +3638,12 @@ button.lk-call-chip:focus-visible {
   gap: 12px;
   padding: 96px 16px 168px;
   overflow-y: auto;
+  transition: padding-top 160ms ease;
+}
+/* Section 4.4: while a notice line sits under the status row, the tiles
+   start below it instead of under it. */
+.lk-call[data-notice] .lk-call-main {
+  padding-top: 128px;
 }
 .lk-call-stage,
 .lk-call-gallery {

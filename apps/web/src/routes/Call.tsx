@@ -486,6 +486,13 @@ const CallStatus: Component<{
       <EncryptionChip onOpen={props.onOpenEncryption} />
       <QualityIndicator />
     </div>
+    <Show when={callState.notice()}>
+      {(text) => (
+        <p class="lk-call-notice" role="status" aria-live="polite">
+          {text()}
+        </p>
+      )}
+    </Show>
   </div>
 );
 
@@ -1314,6 +1321,7 @@ const Call: Component<{
       class="lk-call"
       data-surface={surface()}
       data-phase={phaseKind()}
+      data-notice={callState.notice() !== null ? "" : undefined}
       onPointerMove={wake}
       onPointerDown={(): void => {
         wake();
