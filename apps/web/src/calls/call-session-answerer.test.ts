@@ -463,7 +463,7 @@ describe("1×1 timeouts", () => {
     vi.useFakeTimers();
     const { session, published } = makeSession({
       ringTimeoutMs: 1000,
-      establishTimeoutMs: 60_000,
+      connectTimeoutMs: 60_000,
     });
     await session.applyIncomingSignaling(fakeOffer(false));
     await session.accept();
@@ -474,7 +474,7 @@ describe("1×1 timeouts", () => {
 
   it("a dial nobody answers ends as timedOut and says so", async () => {
     vi.useFakeTimers();
-    const { session, published, reasons } = makeSession({ establishTimeoutMs: 2000 });
+    const { session, published, reasons } = makeSession({ ringTimeoutMs: 2000 });
     await session.dial({ audio: true, video: false });
     expect(published).toEqual(["offer"]);
     await vi.advanceTimersByTimeAsync(2000);
@@ -483,9 +483,33 @@ describe("1×1 timeouts", () => {
     expect(reasons.at(-1)).toBe("timedOut");
   });
 
+  it("an answer late in the ring gets the whole connect window (section 3.4)", async () => {
+    vi.useFakeTimers();
+    const { session, published, reasons } = makeSession({
+      ringTimeoutMs: 1000,
+      connectTimeoutMs: 2000,
+    });
+    await session.dial({ audio: true, video: false });
+    // Answered 100 ms before the ring would have run out.
+    await vi.advanceTimersByTimeAsync(900);
+    await session.applyIncomingSignaling(fakeAnswer());
+    expect(session.getState()).toBe("connecting");
+    // The old dial clock would have ended the call here; the connect clock
+    // has 1900 ms left.
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(session.getState()).toBe("connecting");
+    expect(published).toEqual(["offer"]);
+    // The connect window runs out: answered but never connected is a failure,
+    // not a missed call.
+    await vi.advanceTimersByTimeAsync(600);
+    expect(session.getState()).toBe("done");
+    expect(published).toEqual(["offer", "end:error"]);
+    expect(reasons.at(-1)).toBe("error");
+  });
+
   it("a connected call does not time out", async () => {
     vi.useFakeTimers();
-    const { session, published } = makeSession({ establishTimeoutMs: 2000 });
+    const { session, published } = makeSession({ connectTimeoutMs: 2000 });
     await session.dial({ audio: true, video: false });
     await session.applyIncomingSignaling(fakeAnswer());
     at(pcs, 0).setIce("connected");
@@ -510,7 +534,7 @@ describe("1×1 timeouts", () => {
 
   it("a timeout racing a hang-up publishes one End", async () => {
     vi.useFakeTimers();
-    const { session, published } = makeSession({ establishTimeoutMs: 1000 });
+    const { session, published } = makeSession({ ringTimeoutMs: 1000 });
     await session.dial({ audio: true, video: false });
     const hangUp = session.hangUp();
     await vi.advanceTimersByTimeAsync(1000);

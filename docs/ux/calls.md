@@ -99,6 +99,14 @@ Accepting an incoming call never shows any preparation screen, for either kind.
 The caller sees the call screen with `Calling...` and can hang up. After 45 seconds it
 becomes `No answer`, with **Call again** and **Message**.
 
+**The 45 seconds are for the answer, not for the connection.** Once the other side
+answers, both sides get a fresh window of 30 seconds to connect; a call that was
+answered late is not cut off by a clock that started when the caller dialled (found
+live 2026-09-20: an answer at 33 seconds left 12 seconds to connect, and the caller
+ended the call as a timeout while the callee's screen said `Connecting...`). A call
+answered but never connected ends as `Call failed` on both sides, never as
+`No answer`.
+
 ## 4. The call screen
 
 One screen for both kinds, laid out for the eye and not for the debugger.

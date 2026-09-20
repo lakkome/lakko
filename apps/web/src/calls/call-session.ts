@@ -214,12 +214,16 @@ export function audioTrackConstraint(
  * expiry publishes `End{timedOut}` so the other side stops too.
  */
 export interface CallSessionTiming {
-  /** An incoming call rings for this long before it ends as `timedOut`. */
+  /** How long a call waits for the ANSWER: the callee rings for this long,
+   *  and the caller waits for this long from `dial()`, before either ends the
+   *  call as `timedOut` (`No answer`). */
   readonly ringTimeoutMs: number;
-  /** From `dial()` (or `accept()`) until ICE connects. A caller whose offer
-   *  is never answered, or a call whose transport never comes up, ends as
-   *  `timedOut` after this. */
-  readonly establishTimeoutMs: number;
+  /** From the answer (caller: the answer arriving; callee: the accept) until
+   *  ICE connects. A separate window from the ring, counted from the answer:
+   *  a call answered late in the ring must not be cut off by a clock that
+   *  started at the dial (`docs/ux/calls.md` section 3.4). Ends as `error`
+   *  (`Call failed`), never `timedOut`, because someone did answer. */
+  readonly connectTimeoutMs: number;
   /** ICE `disconnected` is often transient (a Wi-Fi roam, a brief loss); the
    *  call ends only if it has not recovered after this grace. `failed` still
    *  ends the call at once. */
@@ -227,11 +231,13 @@ export interface CallSessionTiming {
 }
 
 /** Default {@link CallSessionTiming}. Chosen, not measured: 45 s is the
- *  order of a phone's ring before voicemail; 10 s is long enough to ride out
- *  a roam and short enough that a dead call does not look alive. */
+ *  order of a phone's ring before voicemail; 30 s is several times what a
+ *  direct connection needs, so a call that has not connected by then is not
+ *  going to; 10 s is long enough to ride out a roam and short enough that a
+ *  dead call does not look alive. */
 export const DEFAULT_CALL_SESSION_TIMING: CallSessionTiming = {
   ringTimeoutMs: 45_000,
-  establishTimeoutMs: 45_000,
+  connectTimeoutMs: 30_000,
   iceDisconnectedGraceMs: 10_000,
 };
 
@@ -351,9 +357,10 @@ export class CallSession {
     this.isOfferer = true;
     this.setState("outgoing");
     // Nobody answering is a normal outcome, not a hang: end as `timedOut`
-    // (published, so the callee's banner stops too) unless ICE connects first.
-    this.armPhaseTimer(this.timing.establishTimeoutMs, () => {
-      if (this.state === "outgoing" || this.state === "connecting") {
+    // (published, so the callee's banner stops too) unless the answer comes
+    // first, which starts the connect window in its place.
+    this.armPhaseTimer(this.timing.ringTimeoutMs, () => {
+      if (this.state === "outgoing") {
         void this.endLocal("timedOut");
       }
     });
@@ -432,6 +439,8 @@ export class CallSession {
             });
             await this.applyQueuedCandidates();
             this.setState("connecting");
+            // Answered: the ring clock is over, the connect clock starts now.
+            this.armConnectTimer();
             // Arm onnegotiationneeded for future local track changes (B2b).
             this.negotiationReady = true;
           } catch (err) {
@@ -500,13 +509,9 @@ export class CallSession {
       return;
     }
     this.accepting = true;
-    // The ring timeout no longer applies; the establish timeout does (a
-    // capture prompt left open, or a transport that never comes up).
-    this.armPhaseTimer(this.timing.establishTimeoutMs, () => {
-      if (this.state === "ringing" || this.state === "connecting") {
-        void this.endLocal("timedOut");
-      }
-    });
+    // The ring timeout no longer applies; the connect window does (a capture
+    // prompt left open, or a transport that never comes up).
+    this.armConnectTimer();
     try {
       // Answerer capture is audio-only, regardless of the offerer's video
       // flag. The answerer's camera must NOT turn on just because the OFFERER
@@ -973,6 +978,17 @@ export class CallSession {
       // eslint-disable-next-line no-console
       console.warn("renegotiation offer apply failed", err);
     }
+  }
+
+  /** The window from the answer to a connected transport, on either side.
+   *  Expiry is `error` (`Call failed`): the call was answered, so `No answer`
+   *  would be a lie. */
+  private armConnectTimer(): void {
+    this.armPhaseTimer(this.timing.connectTimeoutMs, () => {
+      if (this.state === "ringing" || this.state === "connecting") {
+        void this.endLocal("error");
+      }
+    });
   }
 
   private armPhaseTimer(ms: number, onExpire: () => void): void {
