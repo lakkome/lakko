@@ -92,6 +92,13 @@ class HostedCallsTest {
             otherFreshMembers
         override suspend fun readSettledGroup(groupIdHex: String, callId: ByteArray): SettledGroupRead = read
         override suspend fun mintCallJwt(sessionToken: String, callIdHex: String): String = "jwt"
+        /** What the SFU's state route answers; `null` = unreachable. */
+        var sfuCallStateBody: String? = null
+        val probedUrls = mutableListOf<String>()
+        override suspend fun fetchSfuCallState(url: String): String? {
+            probedUrls += url
+            return sfuCallStateBody
+        }
         /** When set, a Join publish suspends here BEFORE it is recorded. */
         var joinGate: CompletableDeferred<Unit>? = null
 
@@ -144,6 +151,35 @@ class HostedCallsTest {
         h = GroupHarness(host, port, reports, null)
         runCurrent()
         return h
+    }
+
+    // ---- Asking the SFU whether an offered call is still there (section 4.3) ---
+
+    /** The SFU says the call ended: the record is closed for the chat with an
+     *  End this device publishes, though it was never in the call. */
+    @Test
+    fun `a probe answered ended closes the record for the chat`() = runTest {
+        val h = groupHarness()
+        h.port.sfuCallStateBody = """{"state":"ended","peers":0}"""
+        h.host.probeCallState(groupA, callHex)
+        runCurrent()
+        assertEquals(1, h.port.probedUrls.size)
+        assertTrue(h.port.probedUrls.first().startsWith("https://sfu.test/v1/calls/$callHex?token="))
+        val end = h.port.published.single().second as FfiCallSignalingBody.End
+        assertEquals(FfiCallEndReason.HUNG_UP, end.reason)
+    }
+
+    /** Any other answer, or none, changes nothing. */
+    @Test
+    fun `a probe answered live or not at all changes nothing`() = runTest {
+        val h = groupHarness()
+        for (body in listOf("""{"state":"live","peers":1}""", """{"state":"closing"}""", """{"state":"unknown"}""", "<html>", null)) {
+            h.port.sfuCallStateBody = body
+            h.host.probeCallState(groupA, callHex)
+            runCurrent()
+        }
+        assertEquals(5, h.port.probedUrls.size)
+        assertTrue(h.port.published.isEmpty())
     }
 
     // ---- Group call ---------------------------------------------------------------

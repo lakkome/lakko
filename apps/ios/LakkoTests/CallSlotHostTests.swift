@@ -484,6 +484,9 @@ final class GroupCallHostTests: XCTestCase {
         var handles: [FakeGroupCallHandle] = []
         var connectError: Error?
         var nowMs: Int64 = 0
+        /// What the SFU's state route answers a probe; `nil` = unreachable.
+        var sfuState: SfuCallState?
+        var probes = 0
         /// Heartbeat sleeps the test has allowed to finish.
         var heartbeatTicks = 0
         /// Heartbeat sleeps started so far.
@@ -556,8 +559,39 @@ final class GroupCallHostTests: XCTestCase {
             safetyNumber: { _ in nil },
             mintCallId: { Data(repeating: 0x0A, count: 16) },
             recordCall: { groupIdHex, row in h.rows.append((groupIdHex, row)) },
-            nowMs: { h.nowMs }
+            nowMs: { h.nowMs },
+            sfuCallState: { _, _, _ in
+                h.probes += 1
+                return h.sfuState
+            }
         ))
+    }
+
+    // MARK: - Asking the SFU whether an offered call is still there (section 4.3)
+
+    /// The SFU says the call ended: the record is closed for the chat with an
+    /// End this device publishes, though it was never in the call.
+    func testAProbeAnsweredEndedClosesTheRecordForTheChat() async {
+        let h = Harness()
+        let host = makeHost(h)
+        h.sfuState = .ended
+        await host.probeCallState(groupIdHex: "g", callIdHex: String(repeating: "ab", count: 16))
+        XCTAssertEqual(h.probes, 1)
+        XCTAssertEqual(kinds(h.published), ["end"])
+    }
+
+    /// Any other answer, or none, changes nothing.
+    func testAProbeAnsweredLiveOrNotAtAllChangesNothing() async {
+        let h = Harness()
+        let host = makeHost(h)
+        for state in [SfuCallState.live, .closing, .unknown] {
+            h.sfuState = state
+            await host.probeCallState(groupIdHex: "g", callIdHex: String(repeating: "ab", count: 16))
+        }
+        h.sfuState = nil
+        await host.probeCallState(groupIdHex: "g", callIdHex: String(repeating: "ab", count: 16))
+        XCTAssertEqual(h.probes, 4)
+        XCTAssertTrue(h.published.isEmpty)
     }
 
     private func startLiveCall(_ host: GroupCallHost, _ h: Harness) async throws -> FakeGroupCallHandle {

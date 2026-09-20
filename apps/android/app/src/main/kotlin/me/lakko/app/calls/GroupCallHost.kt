@@ -138,6 +138,10 @@ public interface GroupCallPort {
     /** The call-admission JWT. May throw. */
     public suspend fun mintCallJwt(sessionToken: String, callIdHex: String): String
 
+    /** `GET` the SFU's call-state route at [url] and return the body on a
+     *  200, else `null` (`SfuCallState.kt`). Never throws. */
+    public suspend fun fetchSfuCallState(url: String): String?
+
     /** Publish a group-call body to the group and fold it into the local record. */
     public suspend fun publishSignal(groupIdHex: String, body: FfiCallSignalingBody): Boolean
 
@@ -581,6 +585,32 @@ public class GroupCallHost(
         }
     }
 
+    /**
+     * Ask the SFU whether a call this device is offering to join is still
+     * there, and close its record when it is not (`SfuCallState.kt`). Never
+     * throws; a probe that cannot be answered changes nothing. The call this
+     * device is in needs no probe: its own socket is the proof.
+     */
+    public suspend fun probeCallState(groupIdHex: String, callIdHex: String) {
+        val p = port ?: return
+        if (active?.callIdHex == callIdHex) return
+        val base = p.sfuBaseUrl() ?: return
+        val token = p.sessionToken() ?: return
+        val state = try {
+            val jwt = p.mintCallJwt(token, callIdHex)
+            p.fetchSfuCallState(sfuCallStateUrl(base, callIdHex, jwt))?.let(::parseSfuCallState)
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (_: Throwable) {
+            null
+        }
+        if (state != SfuCallState.ENDED) return
+        // Still not in it after the awaits?
+        if (active?.callIdHex == callIdHex) return
+        val callId = unhex(callIdHex) ?: return
+        endRecordReportedBySfu(groupIdHex, callId)
+    }
+
     /** Close a group call's record on this device and for the chat: the SFU
      *  said the call ended. Any member may say so — the End signal carries
      *  only the call id, and a record that is over on the server is over for
@@ -686,4 +716,10 @@ private fun logGroupCallInfo(message: String) {
     } catch (_: Throwable) {
         // No Android logger (host unit tests).
     }
+}
+
+/** The 16 bytes of a lower-case hex call id, or `null` for anything else. */
+private fun unhex(hex: String): ByteArray? {
+    if (hex.length != 32 || !hex.all { it in '0'..'9' || it in 'a'..'f' }) return null
+    return ByteArray(16) { i -> hex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
 }

@@ -650,6 +650,7 @@ public final class ChatViewModel: ObservableObject {
             return
         }
         groupCallFreshnessTask = Task { @MainActor [weak self] in
+            self?.probeJoinableGroupCall()
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: UInt64(Self.groupCallFreshnessTickMs) * 1_000_000)
                 guard !Task.isCancelled, let self, let current = self.ongoingGroupCall else { return }
@@ -657,14 +658,29 @@ public final class ChatViewModel: ObservableObject {
                 // the view to re-read a verdict whose inputs include the time.
                 self.objectWillChange.send()
                 self.logGroupCallVerdict(current)
+                self.probeJoinableGroupCall()
             }
         }
     }
 
-    /// How often the banner re-reads a verdict that no row has changed. A tenth
-    /// of the freshness budget: the banner follows a call ending within a few
-    /// seconds, at a cost of four wakeups a minute while a call is on screen.
-    static let groupCallFreshnessTickMs: Int64 = 15_000
+    /// While the banner offers a call to join, ask the SFU whether it is still
+    /// there; the host closes the record when the answer is `ended`
+    /// (`SfuCallState.swift`, `docs/ux/calls.md` section 4.3).
+    private func probeJoinableGroupCall() {
+        guard case .joinable(let callId, _, _) = groupCallAffordance() else { return }
+        let callIdHex = callId.map { String(format: "%02x", $0) }.joined()
+        let host = groupCallHost
+        let groupIdHex = self.groupIdHex
+        Task { @MainActor in
+            await host.probeCallState(groupIdHex: groupIdHex, callIdHex: callIdHex)
+        }
+    }
+
+    /// How often the banner re-reads a verdict that no row has changed, and
+    /// asks the SFU whether the call is still there: the probe interval of
+    /// `SfuCallStateProbe`, so a stale banner lives at most this long past the
+    /// SFU's own five-second grace.
+    static let groupCallFreshnessTickMs: Int64 = SfuCallStateProbe.intervalMs
 
     /// The live-or-stale judgement, printed whenever this chat's record changes
     /// — which is the only moment it can change, since nothing re-evaluates it

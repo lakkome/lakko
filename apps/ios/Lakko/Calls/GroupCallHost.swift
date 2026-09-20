@@ -104,6 +104,12 @@ final class GroupCallHost: ObservableObject {
         /// (tests of other paths) keep their shorter initialiser.
         var recordCall: @MainActor (_ groupIdHex: String, _ row: CallTranscriptRow) -> Void = { _, _ in }
         var nowMs: () -> Int64
+        /// Whether a call is still there, as the SFU sees it (`SfuCallState.swift`).
+        /// Injectable so the probe is tested without a network.
+        var sfuCallState: @MainActor (_ sfuBaseUrl: String, _ callIdHex: String, _ jwt: String) async -> SfuCallState? = {
+            base, callIdHex, jwt in
+            await SfuCallStateProbe.fetch(sfuBaseUrl: base, callIdHex: callIdHex, jwt: jwt)
+        }
     }
 
     /// The group call this device is in.
@@ -372,8 +378,8 @@ final class GroupCallHost: ObservableObject {
                 NSLog("group call: the SFU says call %@ ended before we joined", callIdHex)
                 leave(hungUp: false)
                 dismissPresentation()
-                endRecordReportedBySfu(groupIdHex: groupIdHex, callId: callId)
                 callError = "That group call has ended."
+                await endRecordReportedBySfu(groupIdHex: groupIdHex, callId: callId)
                 return
             }
             NSLog("group call connect failed: %@", error.localizedDescription)
@@ -476,16 +482,50 @@ final class GroupCallHost: ObservableObject {
         }
     }
 
+    /// Ask the SFU whether a call this device is offering to join is still
+    /// there, and close its record when it is not (`SfuCallState.swift`).
+    /// Never throws; a probe that cannot be answered changes nothing. The
+    /// call this device is in needs no probe: its own socket is the proof.
+    func probeCallState(groupIdHex: String, callIdHex: String) async {
+        if activeCallId(groupIdHex: groupIdHex).map(Self.hex) == callIdHex { return }
+        guard let base = ports.sfuBaseUrl(), let token = ports.sessionToken() else { return }
+        guard let jwt = try? await ports.mintJwt(token, callIdHex) else { return }
+        guard await ports.sfuCallState(base, callIdHex, jwt) == .ended else { return }
+        // Still not in it after the awaits?
+        if activeCallId(groupIdHex: groupIdHex).map(Self.hex) == callIdHex { return }
+        guard let callId = Self.unhex(callIdHex), callId.count == 16 else { return }
+        await endRecordReportedBySfu(groupIdHex: groupIdHex, callId: callId)
+    }
+
+    private static func hex(_ data: Data) -> String {
+        data.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func unhex(_ hex: String) -> Data? {
+        let chars = Array(hex.utf8)
+        guard chars.count % 2 == 0 else { return nil }
+        var out = Data(capacity: chars.count / 2)
+        var i = 0
+        while i < chars.count {
+            guard let byte = UInt8(String(decoding: chars[i..<i + 2], as: UTF8.self), radix: 16) else {
+                return nil
+            }
+            out.append(byte)
+            i += 2
+        }
+        return out
+    }
+
     /// Close a group call's record on this device and for the chat: the SFU
     /// said the call ended. Any member may say so — the End signal carries
     /// only the call id, and a record that is over on the server is over for
     /// everyone.
-    func endRecordReportedBySfu(groupIdHex: String, callId: Data) {
+    func endRecordReportedBySfu(groupIdHex: String, callId: Data) async {
         ports.applySignal(groupIdHex, .end(callId: callId), ports.nowMs())
         guard let bytes = try? composeCallSignaling(body: .end(callId: callId, reason: .hungUp)) else {
             return
         }
-        _ = enqueueControl(groupIdHex: groupIdHex, bytes: bytes)
+        _ = await enqueueControl(groupIdHex: groupIdHex, bytes: bytes).value
     }
 
     private func announceDeparture(call: ActiveCall, hungUp: Bool) async {

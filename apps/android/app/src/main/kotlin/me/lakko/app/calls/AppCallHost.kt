@@ -4,6 +4,9 @@
 package me.lakko.app.calls
 
 import android.content.Context
+import kotlinx.coroutines.CancellationException
+import io.ktor.client.request.get
+import io.ktor.client.statement.bodyAsText
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -282,6 +285,22 @@ internal class ChatRepositoryGroupCallPort(
 
     override suspend fun publishSignal(groupIdHex: String, body: FfiCallSignalingBody): Boolean =
         repository.publishGroupCallSignal(groupIdHex, body)
+
+    override suspend fun fetchSfuCallState(url: String): String? {
+        val client = io.ktor.client.HttpClient(
+            me.lakko.app.transport.AntiCensorshipEngine(io.ktor.client.engine.okhttp.OkHttp.create {}),
+        )
+        return try {
+            val response = client.get(url)
+            if (response.status.value == 200) response.bodyAsText() else null
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (_: Throwable) {
+            null
+        } finally {
+            client.close()
+        }
+    }
 
     /** The name on the user's own tile (`docs/ux/calls.md` section 4.4): the
      *  profile name, `You` when none is set. Read at call start. */

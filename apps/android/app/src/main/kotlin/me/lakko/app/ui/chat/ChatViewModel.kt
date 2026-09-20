@@ -445,6 +445,14 @@ public class ChatViewModel(
                             groupSlot?.callIdHex,
                         )
                         if (!me.lakko.app.calls.isGroupCallLive(record, now, ignored)) break
+                        // While the banner offers a call to join, ask the SFU
+                        // whether it is still there; the host closes the record
+                        // when the answer is `ended` (`SfuCallState.kt`).
+                        val host = groupCallHost
+                        val offered = joinable?.callIdHex
+                        if (host != null && offered != null) {
+                            launch { host.probeCallState(groupIdHex, offered) }
+                        }
                         delay(GROUP_CALL_BANNER_TICK_MS)
                     }
                 }
@@ -3006,7 +3014,9 @@ public fun ownReadStateFor(
 
 /** How often the Join banner re-checks a shown call's liveness. The windows it
  *  checks are a minute and four hours wide, so this is precision, not load. */
-private const val GROUP_CALL_BANNER_TICK_MS: Long = 5_000L
+/** The banner's re-read tick, and how often it asks the SFU whether the call
+ *  it offers is still there ([me.lakko.app.calls.SFU_CALL_STATE_PROBE_MS]). */
+private const val GROUP_CALL_BANNER_TICK_MS: Long = me.lakko.app.calls.SFU_CALL_STATE_PROBE_MS
 
 /** The chat's Join banner: a live group call this device is not in. */
 public data class JoinableGroupCall(
