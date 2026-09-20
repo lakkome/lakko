@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "me.lakko.dev",
+      "sha256_cert_fingerprints": [
+        "2F:36:58:1F:FD:65:B7:60:B2:75:A9:C1:D1:5E:77:D2:A5:C1:A1:CF:23:76:96:05:27:24:B4:61:A8:9B:B2:12"
+      ]
+    }
+  }
+]
