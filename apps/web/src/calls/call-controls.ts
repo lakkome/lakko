@@ -46,7 +46,7 @@
 import type { CallPhaseKind, CallSurfaceKind } from "./call-screen-model";
 
 /** The controls the row can carry, in the order §4.1's table lists them. */
-export type CallControlId = "speaker" | "mic" | "camera" | "overflow" | "end";
+export type CallControlId = "speaker" | "mic" | "camera" | "participants" | "chat" | "end";
 
 /**
  * How a control is painted (§4.1.1).
@@ -64,7 +64,8 @@ export type CallControlIcon =
   | "micOff"
   | "video"
   | "videoOff"
-  | "more"
+  | "groups"
+  | "chat"
   | "phoneEnd";
 
 /** One circle in the row. */
@@ -87,8 +88,14 @@ export interface CallControlSpec {
 
 /** What {@link callControls} needs to know. */
 export interface CallControlsInput {
-  /** The layout, which only matters for the group overflow entry. */
+  /** The layout, which only matters for the group entries (participants,
+   *  chat). */
   readonly surface: CallSurfaceKind;
+  /** Whether the participant list is open (group only; the button reads
+   *  pressed while it is). */
+  readonly participantsOpen?: boolean;
+  /** Whether the chat panel is open (group only). */
+  readonly chatOpen?: boolean;
   readonly phase: CallPhaseKind;
   readonly micOn: boolean;
   readonly cameraOn: boolean;
@@ -153,13 +160,25 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
   });
 
   if (input.surface === "group") {
+    // Section 4.1: on the web there is room for the whole set, so the
+    // participants and chat entries sit in the row rather than behind a More
+    // button (the phones keep the overflow; six circles do not fit their row).
     out.push({
-      id: "overflow",
-      label: "More",
-      accessibleName: "Show participants and chat",
-      icon: "more",
+      id: "participants",
+      label: "Participants",
+      accessibleName: input.participantsOpen === true ? "Hide participants" : "Show participants",
+      icon: "groups",
       tone: "outline",
-      pressed: null,
+      pressed: input.participantsOpen === true,
+      disabled: dead,
+    });
+    out.push({
+      id: "chat",
+      label: "Chat",
+      accessibleName: input.chatOpen === true ? "Hide chat" : "Show chat",
+      icon: "chat",
+      tone: "outline",
+      pressed: input.chatOpen === true,
       disabled: dead,
     });
   }

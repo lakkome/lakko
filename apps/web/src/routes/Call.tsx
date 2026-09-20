@@ -924,51 +924,6 @@ const ChatPanel: Component = () => {
   );
 };
 
-/** The one overflow §4.1 permits, and only on a group call: participants and
- *  chat, the two entries it names. Rendered as a small sheet over the bar
- *  rather than a menu, so it is two round buttons like everything else. */
-const OverflowSheet: Component<{ onClose: () => void }> = (props) => (
-  <div
-    class="lk-call-overflow"
-    role="dialog"
-    aria-label="More"
-    onClick={(e): void => {
-      if (e.target === e.currentTarget) props.onClose();
-    }}
-  >
-    <div class="lk-call-overflow-sheet">
-      <button
-        type="button"
-        class="lk-call-overflow-item"
-        onClick={(): void => {
-          callActions.setParticipantListOpen(true);
-          props.onClose();
-        }}
-      >
-        <Icon name="contacts" size={22} />
-        <span>Participants</span>
-      </button>
-      <button
-        type="button"
-        class="lk-call-overflow-item"
-        onClick={(): void => {
-          callActions.setChatOpen(true);
-          props.onClose();
-        }}
-      >
-        <Icon name="chat" size={22} />
-        <span>
-          Chat
-          <Show when={callState.chatUnreadCount() > 0}>
-            {" "}
-            ({callState.chatUnreadCount() > 99 ? "99+" : callState.chatUnreadCount()})
-          </Show>
-        </span>
-      </button>
-    </div>
-  </div>
-);
-
 // ============================================================================
 // The ended screen (§4: "`Call ended` and the duration, the screen closes
 // itself after 2 s")
@@ -1087,7 +1042,6 @@ const Call: Component<{
 }> = (props) => {
   const navigate = useNavigate();
   const [encryptionSheetOpen, setEncryptionSheetOpen] = createSignal(false);
-  const [overflowOpen, setOverflowOpen] = createSignal(false);
   const [now, setNow] = createSignal(Date.now());
   const [lastInteraction, setLastInteraction] = createSignal(Date.now());
 
@@ -1258,6 +1212,8 @@ const Call: Component<{
       cameraBusy: callState.videoPublishState() === "starting",
       canSelectAudioOutput: canSelectAudioOutput(),
       nextAudioOutputLabel: audioOutputName(nextOutput()),
+      participantsOpen: callState.participantListOpen(),
+      chatOpen: callState.chatOpen(),
     }),
   );
 
@@ -1284,8 +1240,11 @@ const Call: Component<{
       case "camera":
         callActions.setCamera(local()?.camOn !== true);
         return;
-      case "overflow":
-        setOverflowOpen(!overflowOpen());
+      case "participants":
+        callActions.setParticipantListOpen(!callState.participantListOpen());
+        return;
+      case "chat":
+        callActions.setChatOpen(!callState.chatOpen());
         return;
       case "end":
         callActions.endCall();
@@ -1405,14 +1364,6 @@ const Call: Component<{
         cameraBusy={callState.videoPublishState() === "starting"}
         onPress={press}
       />
-
-      <Show when={overflowOpen()}>
-        <OverflowSheet
-          onClose={(): void => {
-            setOverflowOpen(false);
-          }}
-        />
-      </Show>
 
       <ParticipantList />
       <ChatPanel />

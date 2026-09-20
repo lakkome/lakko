@@ -1025,22 +1025,10 @@ private fun SettingsSheet(state: CallUiState) {
 
             Divider(color = LakkoDark.border, modifier = Modifier.padding(vertical = 4.dp))
 
-            DeviceSectionLabel("Audio processing")
-            SettingsToggleRow(
-                label = "Noise suppression",
-                checked = settings.noiseSuppression,
-                onChange = { state.setNoiseSuppression(it) },
-            )
-            SettingsToggleRow(
-                label = "Echo cancellation",
-                checked = settings.echoCancellation,
-                onChange = { state.setEchoCancellation(it) },
-            )
-            SettingsToggleRow(
-                label = "Automatic gain control",
-                checked = settings.autoGain,
-                onChange = { state.setAutoGain(it) },
-            )
+            // No "Audio processing" section: echo cancellation, noise
+            // suppression and gain control are always on in the engine, and the
+            // three switches that sat here changed a stored flag nothing read.
+            // A switch that does nothing is worse than none.
 
             DeviceSectionLabel("Video")
             SettingsToggleRow(

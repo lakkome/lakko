@@ -164,8 +164,17 @@ portrait.
 
 - **Flip camera does not belong in the row.** It lives on the self-view itself, as a
   small button in that rectangle's corner, where the thing it changes is visible.
-- A group call keeps its participants and chat entries, and those may live behind a
-  single overflow button — but mute, camera, speaker and end stay in the row.
+- A group call keeps its participants and chat entries. On a phone those live behind
+  a single overflow button, because six circles do not fit a 400 pt row at a size a
+  thumb can hit; on the web there is room, so the row shows them all — Speaker ·
+  Mute · Camera · Participants · Chat · End — at slightly smaller circles (56 pt, End
+  64 pt), shrinking further on a narrow window and never below the 44 pt floor. Mute,
+  camera, speaker and end stay in the row everywhere.
+- **No switches for echo cancellation, noise suppression or gain control.** The
+  engine keeps all three on; the settings sheet once offered three toggles that
+  changed a stored flag nothing read, and a switch that does nothing is worse than
+  none. Echo between two devices in one room is not something a switch fixes: each
+  device cancels only what it played itself.
 - The row sits inside one rounded translucent bar, floating above the bottom safe area
   with a margin, not welded to the edge. On a voice call it is vertically placed in the
   lower third, under the portrait, not at the very bottom of an empty screen.
@@ -240,6 +249,10 @@ by rules the clients share:
   connected; before that, the link's own expiry (an hour by default, a week at
   most) bounds how long it can be joined.
 
+- **A link is one call.** Once the call it names has ended, the link is spent
+  for everyone, the starter included: opening it says the call has ended, and
+  a new call means a new link. The starter's own page never restarts a call
+  on a spent link.
 - **Whoever leaves a link call can come back, the starter included.** Leaving
   (or dropping) takes the person out of the call's group: whoever holds the
   committer duty at that moment removes their leaf, so the key rotates away

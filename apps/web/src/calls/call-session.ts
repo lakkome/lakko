@@ -185,6 +185,27 @@ export function trackConstraint(
   return true;
 }
 
+/** The microphone constraint: the picked device (else the OS default) with
+ *  echo cancellation, noise suppression and gain control asked for by name.
+ *  Browsers default all three on, and asking explicitly keeps that so on one
+ *  that does not; each device cancels only what it played itself, so two
+ *  devices in one room still hear each other through the air. */
+export function audioTrackConstraint(
+  enabled: boolean,
+  deviceId: string | null | undefined,
+): boolean | MediaTrackConstraints {
+  if (!enabled) return false;
+  const processing: MediaTrackConstraints = {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+  };
+  if (deviceId != null && deviceId.length > 0) {
+    return { ...processing, deviceId: { exact: deviceId } };
+  }
+  return processing;
+}
+
 /**
  * Timers that bound how long a 1×1 call may sit in a non-terminal state.
  *
@@ -772,7 +793,7 @@ export class CallSession {
     // `deviceId` becomes an `{ exact }` constraint, else a bare boolean
     // (OS default). A disabled kind stays `false`.
     const constraints: MediaStreamConstraints = {
-      audio: trackConstraint(media.audio, media.audioDeviceId),
+      audio: audioTrackConstraint(media.audio, media.audioDeviceId),
       video: trackConstraint(media.video, media.videoDeviceId),
     };
     let stream: MediaStream;

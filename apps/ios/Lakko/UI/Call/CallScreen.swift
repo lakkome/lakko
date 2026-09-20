@@ -1281,23 +1281,10 @@ private struct SettingsSheet: View {
                             get: { state.settings.selectedAudioOutput },
                             set: { state.setSelectedAudioOutput($0) }))
                 }
-                Section(header: Text("Audio processing")) {
-                    Toggle(
-                        "Noise suppression",
-                        isOn: Binding(
-                            get: { state.settings.noiseSuppression },
-                            set: { state.setNoiseSuppression($0) }))
-                    Toggle(
-                        "Echo cancellation",
-                        isOn: Binding(
-                            get: { state.settings.echoCancellation },
-                            set: { state.setEchoCancellation($0) }))
-                    Toggle(
-                        "Automatic gain control",
-                        isOn: Binding(
-                            get: { state.settings.autoGain },
-                            set: { state.setAutoGain($0) }))
-                }
+                // No "Audio processing" section: echo cancellation, noise
+                // suppression and gain control are always on in the engine, and
+                // the three switches that sat here changed a stored flag nothing
+                // read. A switch that does nothing is worse than none.
                 Section(header: Text("Video")) {
                     Toggle(
                         "Mirror local preview",

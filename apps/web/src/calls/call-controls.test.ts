@@ -64,14 +64,21 @@ describe("callControls — which controls exist (section 4.1)", () => {
     }
   });
 
-  it("keeps mute, camera, speaker and end in the row on a group call, with one overflow", () => {
+  it("keeps mute, camera, speaker and end in the row on a group call, with participants and chat in the row too", () => {
     expect(ids({ surface: "group" })).toEqual([
       "speaker",
       "mic",
       "camera",
-      "overflow",
+      "participants",
+      "chat",
       "end",
     ]);
+  });
+
+  it("reads the participants and chat buttons as pressed while their panel is open", () => {
+    expect(control({ surface: "group" }, "participants").pressed).toBe(false);
+    expect(control({ surface: "group", participantsOpen: true }, "participants").pressed).toBe(true);
+    expect(control({ surface: "group", chatOpen: true }, "chat").pressed).toBe(true);
   });
 
   it("gives a 1x1 call the same row whatever the surface is doing", () => {
@@ -125,7 +132,7 @@ describe("callControls — the two states read the right way round (section 4.1.
   it("claims no pressed state for the buttons that are not toggles", () => {
     expect(control({}, "speaker").pressed).toBeNull();
     expect(control({}, "end").pressed).toBeNull();
-    expect(control({ surface: "group" }, "overflow").pressed).toBeNull();
+    expect(control({ surface: "group" }, "end").pressed).toBeNull();
   });
 });
 
@@ -139,7 +146,7 @@ describe("callControls — labels and spoken names (section 4.1.1)", () => {
 
   it("uses exactly the words section 4.1.1 lists", () => {
     const labels = callControls({ ...BASE, surface: "group" }).map((c) => c.label);
-    expect(labels).toEqual(["Speaker", "Mute", "Camera", "More", "End"]);
+    expect(labels).toEqual(["Speaker", "Mute", "Camera", "Participants", "Chat", "End"]);
   });
 
   it("names the action and the resulting state for a screen reader", () => {

@@ -4106,6 +4106,13 @@ button.lk-call-chip:focus-visible {
   white-space: nowrap;
 }
 
+/* Section 4.1: a group call's row carries participants and chat as well, so
+   its circles are a step smaller to keep the whole set on one row. */
+.lk-call[data-surface="group"] {
+  --call-ctl-size: 56px;
+  --call-ctl-end-size: 64px;
+  --call-ctl-gap: 14px;
+}
 /* Narrow windows: the circles shrink but never below the 44 pt touch target
    section 4.1.1 sets as the floor. */
 @media (max-width: 420px) {
@@ -4113,6 +4120,17 @@ button.lk-call-chip:focus-visible {
     --call-ctl-size: 56px;
     --call-ctl-end-size: 64px;
     --call-ctl-gap: 12px;
+  }
+}
+@media (max-width: 480px) {
+  .lk-call[data-surface="group"] {
+    --call-ctl-size: 46px;
+    --call-ctl-end-size: 54px;
+    --call-ctl-gap: 8px;
+  }
+  .lk-call-bar[data-surface="group"] {
+    padding-left: 12px;
+    padding-right: 12px;
   }
 }
 /* Short windows: the portrait figure gives up height before the controls do —
@@ -4208,51 +4226,6 @@ button.lk-call-chip:focus-visible {
   background: color-mix(in srgb, var(--success) 85%, #000);
 }
 
-/* ---------------------------------------------------------------------------
-   The group overflow (section 4.1 permits exactly one, and only on a group
-   call): participants and chat, as buttons rather than a menu.
---------------------------------------------------------------------------- */
-.lk-call-overflow {
-  position: absolute;
-  inset: 0;
-  z-index: 9;
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  padding: 0 16px calc(180px + env(safe-area-inset-bottom));
-}
-.lk-call-overflow-sheet {
-  display: flex;
-  gap: 10px;
-  padding: 10px;
-  border-radius: 20px;
-  background: var(--call-bar-bg);
-  border: 1px solid var(--call-bar-border);
-  box-shadow: var(--shadow-2);
-  backdrop-filter: blur(18px);
-}
-.lk-call-overflow-item {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  min-width: 92px;
-  padding: 12px 10px;
-  border: none;
-  border-radius: 14px;
-  background: transparent;
-  color: var(--call-ctl-on-fg);
-  font-size: 13px;
-  font-family: inherit;
-  cursor: pointer;
-}
-.lk-call-overflow-item:hover {
-  background: var(--call-ctl-on-bg);
-}
-.lk-call-overflow-item:focus-visible {
-  outline: 2px solid var(--call-ctl-on-fg);
-  outline-offset: 2px;
-}
 
 /* The ended line (section 4: "`Call ended` and the duration, the screen closes
    itself after 2 s"). */

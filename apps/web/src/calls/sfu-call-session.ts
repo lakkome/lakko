@@ -84,7 +84,7 @@ import {
   rekeySFrame,
   isSFrameTransformSupported,
 } from "./sframe-transform";
-import { trackConstraint, type VideoPublishState } from "./call-session";
+import { audioTrackConstraint, trackConstraint, type VideoPublishState } from "./call-session";
 import { captureWithFallback, type CaptureFallback } from "./capture-fallback";
 import { SFU_KEEPALIVE_TICK_MS, sfuKeepaliveAction } from "./sfu-keepalive";
 
@@ -765,7 +765,7 @@ export class SfuCallSession {
       this.config.media,
       (audio, video) =>
         navigator.mediaDevices.getUserMedia({
-          audio: trackConstraint(audio, this.config.media.audioDeviceId),
+          audio: audioTrackConstraint(audio, this.config.media.audioDeviceId),
           video: trackConstraint(video, this.config.media.videoDeviceId),
         }),
     );
