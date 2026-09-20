@@ -4,6 +4,7 @@
 package me.lakko.app.calls
 
 import android.content.Context
+import me.lakko.app.profile.toFfi
 import kotlinx.coroutines.CancellationException
 import io.ktor.client.request.get
 import io.ktor.client.statement.bodyAsText
@@ -429,6 +430,7 @@ internal class MultiJoinerLinkCallPort(
         } catch (error: Throwable) {
             throw IllegalStateException("Re-authenticate to join this call (no live identity).", error)
         }
+        val ownProfile = me.lakko.app.profile.OwnProfileStore.load(applicationContext, request.accountId)
         val options = MultiJoinerCall.Options(
             applicationContext = applicationContext,
             identity = identity,
@@ -441,6 +443,20 @@ internal class MultiJoinerLinkCallPort(
             video = request.mediaVideo,
             ui = ui,
             scope = scope,
+            // Section 4.4: the own tile carries the profile name from the
+            // first second, and the same profile is announced to every other
+            // member inside the call group (never through the SFU in clear).
+            localDisplayName = ownProfile?.displayName?.trim()?.takeIf { it.isNotEmpty() } ?: "You",
+            ownProfileEnvelope = {
+                ownProfile?.let { profile ->
+                    try {
+                        uniffi.lakko_ffi_uniffi.composeProfileEnvelope(profile.toFfi(request.accountId))
+                    } catch (e: Throwable) {
+                        android.util.Log.w("AppCallHost", "own profile refused by the composer", e)
+                        null
+                    }
+                }
+            },
             onJoined = events.onJoined,
             onEnded = events.onEnded,
             onNoCommitter = events.onNoCommitter,

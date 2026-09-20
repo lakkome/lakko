@@ -291,6 +291,22 @@ were each picking someone else and one of them was picking wrong:
   above the bar and the first row starts below the status line. The bar still
   fades on a tap, but a tile is never legible only while it is faded.
 
+- **Every tile carries the person's name, in a link call too.** A tile
+  labelled with eight hex characters (`01a0a045`) named nobody. In a chat group
+  call the name comes from the profile the group already carries. In a link
+  call the joiners are strangers to each other and the guest has no contact
+  list, so each participant seals its own profile into the call's own group
+  and every member relays it once it has joined and again whenever someone new
+  is admitted (the newcomer can only read from that moment on). The server
+  forwards ciphertext; a name never crosses it in clear. A name learnt this way
+  is what the person calls themself and outranks the contact-list lookup; the
+  contact list stays the fallback, and `Peer` is the last resort.
+- **The link landing names the host or says nothing.** `Host:` followed by a
+  sixty-digit fingerprint, or by `Member`, was found on every landing; a string
+  of digits names nobody. The line shows the host's name when the device knows
+  one (a contact or a received profile) and is absent otherwise; the owner's
+  own page (`Start your call`) never has it.
+
 The one line of the spec every client implements is: pinned, else speaking with
 video, else first with video, else nobody. `speaking` is a hint the transport may
 never set; the rule must read the same when it is always false.

@@ -338,7 +338,7 @@ public struct JoinCallLandingScreen: View {
     @ViewBuilder
     private var panel: some View {
         VStack(spacing: 16) {
-            Text("Join call")
+            Text(viewModel.decoded?.isOwner == true ? "Start your call" : "Join call")
                 .font(.title2)
                 .bold()
 
@@ -350,13 +350,24 @@ public struct JoinCallLandingScreen: View {
                     .foregroundStyle(.secondary)
                 closeButton
             } else if let decoded = viewModel.decoded {
-                Text("Host: \(decoded.ownerFingerprint)")
-                    .font(.footnote.monospaced())
-                    .foregroundStyle(.secondary)
+                if let host = hostName(decoded) {
+                    Text("Host: \(host)")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
                 content(decoded)
             }
         }
         .padding()
+    }
+
+    /// The host by name, when this device knows one — a contact or a
+    /// received profile. Never a fingerprint: a string of digits names nobody,
+    /// and the owner's own page has nothing to say about its host.
+    private func hostName(_ decoded: JoinCallLandingViewModel.Decoded) -> String? {
+        if decoded.isOwner { return nil }
+        let resolved = ProfileDirectory.shared.resolve(signatureKey: decoded.ownerSignatureKey)
+        return resolved.source == .placeholder ? nil : resolved.name
     }
 
     @ViewBuilder

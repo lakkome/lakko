@@ -347,6 +347,7 @@ class JoinCallViewModel(
                 slug = slug,
                 accountIdentitySeed = secrets.accountIdentitySeed,
                 sessionToken = secrets.sessionToken,
+                accountId = secrets.accountId,
             ),
         )
         when (outcome) {
@@ -479,16 +480,21 @@ fun JoinCallScreen(
             }
             else -> {
                 val decoded = ui.decoded!!
-                // ADR-0048 — the host through the one resolver: a name when this
-                // device knows one, else a neutral placeholder.
+                // ADR-0048 — the host through the one resolver, shown only
+                // when this device knows a name (a contact or a received
+                // profile). Never a fingerprint or a placeholder: a string of
+                // digits names nobody, and the owner's own page has nothing to
+                // say about its host.
                 val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
                 val host = androidx.compose.runtime.remember(decoded.ownerSignatureKey) {
                     me.lakko.app.profile.ProfileDirectory.get(appContext).resolve(decoded.ownerSignatureKey)
                 }
-                Text(
-                    text = "Host: ${host.listLabel}",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
+                if (!decoded.isOwner && !host.isPlaceholder) {
+                    Text(
+                        text = "Host: ${host.primary}",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
                 ui.busyMessage?.let { message ->
                     Text(text = message, color = MaterialTheme.colorScheme.error)
                     androidx.compose.foundation.layout.Row(

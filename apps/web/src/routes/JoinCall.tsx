@@ -94,6 +94,15 @@ export default function JoinCall() {
   const auth = useAuth();
   const chats = useChats();
   const profiles = useProfiles();
+  /** The host by name, when this device knows one — a contact or a received
+   *  profile. Never a fingerprint: a string of digits names nobody, and the
+   *  owner's own page has nothing to say about its host. */
+  const hostName = (): string | null => {
+    const d = decoded();
+    if (d === null || d === undefined || d.isOwner) return null;
+    const resolved = profiles.resolve(d.ownerSignatureKey);
+    return resolved.source === "fingerprint" ? null : resolved.name;
+  };
   const callHost: CallHostApi = useCallHost();
 
   // ADR-0048 UX §4 — a guest (no account yet) is asked their name here,
@@ -316,9 +325,9 @@ export default function JoinCall() {
               decoded()?.valid === true
             }
           >
-            <p>
-              Host: <code>{decoded()?.ownerFingerprint}</code>
-            </p>
+            <Show when={hostName()}>
+              {(name) => <p>Host: {name()}</p>}
+            </Show>
             <Show when={busyMessage()}>
               {(message) => (
                 <div role="alert">

@@ -82,6 +82,7 @@ import {
 import type {
   Group as WasmGroup,
   Identity as WasmIdentity,
+  ProcessedMessage as WasmProcessedMessage,
 } from "../../wasm/lakko_ffi_wasm";
 
 /** MLS exporter label for the per-call SFrame seed (audit-pack C-1). Must
@@ -127,6 +128,11 @@ export interface MultiJoinerCallOptions {
   /** The name on the local tile (§4.4: the user's own profile name). Defaults
    *  to "You". */
   readonly localDisplayName?: string;
+  /** The user's own ADR-0048 profile envelope, or `null` when none is set.
+   *  Sealed into the call's MLS group and relayed, so every other member — a
+   *  guest with no contact list included — names this tile (§4.4). The SFU
+   *  relays ciphertext only. */
+  readonly ownProfileEnvelope?: () => Promise<Uint8Array | null>;
   /** `services/auth` base URL for the JWT mint (default `/api/auth`). */
   readonly authBaseUrl?: string;
   /** ICE servers (default public STUN; TURN is a follow-up). */
@@ -176,6 +182,10 @@ export class MultiJoinerCall {
   /** This client's MLS leaf once it has a group. */
   private localLeaf: number | null = null;
   private joined = false;
+  /** Names members announced over the call group (SFU peer id -> name). A
+   *  name learnt this way outranks the contact-list resolver: it is what the
+   *  person calls themself, sealed under a key only members hold. */
+  private readonly peerNames = new Map<string, string>();
 
   /** G-22 dedup (FINDING 4). Keyed on the relay `from` SFU peer id → wrapped
    *  Welcome, so ONE SFU-admitted peer is admitted at most once per call —
@@ -317,6 +327,7 @@ export class MultiJoinerCall {
     call.joined = true;
     opts.onJoined?.();
     await call.start();
+    void call.broadcastOwnProfile();
     return call;
   }
 
@@ -512,6 +523,7 @@ export class MultiJoinerCall {
     // Forget the departed peer's sticky camera state so a later rejoin under
     // the same id starts from a clean slate (join-race guard).
     this.lastKnownCameraOn.delete(id);
+    this.peerNames.delete(peerId);
     callActions.participantLeft(id);
     // The committer may have left → recompute (this client might now be it).
     // No action needed beyond keeping presence current; the next inbound KP
@@ -581,13 +593,13 @@ export class MultiJoinerCall {
       case K.IntroMessage:
         // Not a call envelope — the fallback carries verbatim bytes, which
         // for us is a broadcast MLS commit an existing member must apply.
-        this.onMaybeCommit(env.payload);
+        this.onMaybeCommit(from, env.payload);
         break;
       case K.Profile:
-        // ADR-0048 — a profile belongs to a chat group's MLS application
-        // stream, never to the SFU relay. One arriving here is dropped: it is
-        // not a commit, and the call roster names people through the ADR-0021
-        // peer tag, not through relayed profiles.
+        // ADR-0048 — a bare (unsealed) profile on the relay binds to nobody:
+        // the SFU peer id is not an identity. Names travel sealed inside the
+        // call group instead (`broadcastOwnProfile`), and surface through
+        // `onMaybeCommit` as an MLS application message. Dropped here.
         break;
       default:
         break;
@@ -653,6 +665,8 @@ export class MultiJoinerCall {
     // The add advanced our epoch → rekey to the new seed.
     this.rekeyToCurrentEpoch();
     this.refreshRoster();
+    // The newcomer decrypts only from this epoch on: tell it who we are.
+    void this.broadcastOwnProfile();
   }
 
   /** Joiner side: open the committer's Welcome and go live. */
@@ -711,21 +725,70 @@ export class MultiJoinerCall {
       this.opts.onError?.(err);
     });
     this.refreshRoster();
+    void this.broadcastOwnProfile();
   }
 
-  /** Existing member: apply a broadcast commit (epoch advance) + rekey. */
-  private onMaybeCommit(bytes: Uint8Array): void {
+  /** Existing member: apply a broadcast MLS message — a commit (epoch
+   *  advance → rekey) or a member's sealed application message (today: the
+   *  ADR-0048 profile that names its tile). */
+  private onMaybeCommit(from: string, bytes: Uint8Array): void {
     if (this.group === null) return;
+    let processed: WasmProcessedMessage;
     try {
       // The call group has no ADR-0022 role table — plain apply (the call
-      // path caveat). A non-commit / wrong-epoch / junk payload throws and
-      // is ignored.
-      this.group.processIncoming(this.opts.identity, bytes);
+      // path caveat). A wrong-epoch / junk payload throws and is ignored.
+      processed = this.group.processIncoming(this.opts.identity, bytes);
     } catch {
       return;
     }
+    if (processed.kind === "Application") {
+      if (processed.applicationData !== undefined) {
+        this.onMemberApplication(from, processed.applicationData);
+      }
+      return;
+    }
+    if (processed.kind !== "Commit") return;
     this.rekeyToCurrentEpoch();
     this.refreshRoster();
+    // Someone was admitted: they decrypt only from this epoch on, so every
+    // member re-announces its name for the newcomer.
+    void this.broadcastOwnProfile();
+  }
+
+  /** A member's sealed application message. Only a profile is understood;
+   *  anything else is ignored. The name binds to the relaying SFU peer — the
+   *  same binding the peer's media tracks already rest on. */
+  private onMemberApplication(from: string, plaintext: Uint8Array): void {
+    let name: string | undefined;
+    try {
+      name = this.wasm.decodeProfileEnvelope(plaintext).displayName?.trim();
+    } catch {
+      return;
+    }
+    if (name === undefined || name.length === 0) return;
+    this.peerNames.set(from, name);
+    callActions.setParticipantName(`${PEER_PREFIX}${from}`, name);
+  }
+
+  /** Seal the own profile into the call group and relay it to every member.
+   *  Best-effort: a missing profile or a failed send only leaves the tile on
+   *  its fallback label. */
+  private async broadcastOwnProfile(): Promise<void> {
+    if (this.group === null || !this.joined) return;
+    let envelope: Uint8Array | null;
+    try {
+      envelope = (await this.opts.ownProfileEnvelope?.()) ?? null;
+    } catch {
+      return;
+    }
+    if (envelope === null || this.group === null) return;
+    try {
+      const sealed = this.group.createApplicationMessage(this.opts.identity, envelope);
+      this.session.sendSignalRelayToCall(sealed);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("multi-joiner: own profile not announced", err);
+    }
   }
 
   // -----------------------------------------------------------------
@@ -791,6 +854,7 @@ export class MultiJoinerCall {
     peerTag: string | undefined,
   ): string {
     return (
+      this.peerNames.get(peerId) ??
       this.opts.resolveDisplayName?.(peerId, pseudonym, peerTag) ??
       (pseudonym.length > 0 ? pseudonym.slice(0, 8) : "Peer")
     );

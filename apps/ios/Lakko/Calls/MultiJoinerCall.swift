@@ -85,6 +85,13 @@ final class MultiJoinerCall {
         /// `services/auth` base URL for the JWT mint (default `CallJwtClient`
         /// default).
         var authBaseUrl: String?
+        /// The name on the local tile (`docs/ux/calls.md` section 4.4).
+        var localDisplayName: String = "You"
+        /// The user's own ADR-0048 profile envelope, or `nil` when none is
+        /// set. Sealed into the call's MLS group and relayed, so every other
+        /// member — a guest with no contact list included — names this tile.
+        /// The SFU relays ciphertext only.
+        var ownProfileEnvelope: (() -> Data?)?
     }
 
     /// Landing-screen callbacks.
@@ -125,6 +132,10 @@ final class MultiJoinerCall {
     /// This client's MLS leaf once it has a group.
     private var localLeaf: UInt32?
     private var joined = false
+    /// Names members announced over the call group (SFU peer id -> name). A
+    /// name learnt this way outranks the contact-list resolver: it is what the
+    /// person calls themself, sealed under a key only members hold.
+    private var peerNames: [String: String] = [:]
 
     /// G-22 dedup: relay `from` SFU peer id → wrapped Welcome, so ONE
     /// SFU-admitted peer is admitted at most once per call — even if it re-mints
@@ -294,6 +305,7 @@ final class MultiJoinerCall {
         call.joined = true
         call.cbs.onJoined?()
         try await call.start()
+        call.broadcastOwnProfile()
         return call
     }
 
@@ -458,6 +470,7 @@ final class MultiJoinerCall {
         // Forget the departed peer's sticky camera state so a later rejoin
         // under the same id starts from a clean slate (join-race guard).
         lastKnownCameraOn.removeValue(forKey: id)
+        peerNames.removeValue(forKey: peerId)
         ui.participantLeft(id)
         // The committer may have left → the next inbound KP is evaluated against
         // the fresh election (this client might now be it). No action here.
@@ -479,8 +492,9 @@ final class MultiJoinerCall {
             onIncomingWelcome(from: from, welcomeEnvelope: env.payload)
         case .introMessage:
             // Not a call envelope — the fallback carries verbatim bytes, which
-            // for us is a broadcast MLS commit an existing member must apply.
-            onMaybeCommit(env.payload)
+            // for us is a broadcast MLS message: a commit an existing member
+            // must apply, or a member's sealed profile.
+            onMaybeCommit(from: from, env.payload)
         case .mediaState:
             // Camera-off-cleanup: a camera on/off signal is intercepted +
             // handled in `SfuCallSession.dispatchSignalRelay` (it fires
@@ -506,10 +520,10 @@ final class MultiJoinerCall {
             // the variant.
             break
         case .profile:
-            // ADR-0048 — a profile envelope rides the GROUP JOURNAL as an MLS
-            // application message (handled in `ChatClient.pollMessages`), never
-            // the SFU signal-relay. A relay payload that classifies as one is
-            // out of place here and carries no authenticated sender key — drop.
+            // ADR-0048 — a bare (unsealed) profile on the relay binds to
+            // nobody: the SFU peer id is not an identity. Names travel sealed
+            // inside the call group instead (`broadcastOwnProfile`) and surface
+            // through `onMaybeCommit` as an MLS application message. Dropped.
             break
         case .groupName:
             // ADR-0051 — a group-name envelope likewise rides the GROUP
@@ -570,6 +584,8 @@ final class MultiJoinerCall {
         session.sendSignalRelayToCall(payload: commit)
         // The add advanced our epoch → rekey to the new seed.
         rekeyToCurrentEpoch()
+        // The newcomer decrypts only from this epoch on: tell it who we are.
+        broadcastOwnProfile()
     }
 
     /// Joiner side: open the committer's Welcome and go live.
@@ -630,6 +646,7 @@ final class MultiJoinerCall {
             presence.bindPeerToMember(peerId: from, memberKeyHex: ownerKeyHex)
         }
         cbs.onJoined?()
+        broadcastOwnProfile()
         // Publish media ONLY now — after joining + deriving the seed (invariant #4).
         Task { [weak self] in
             guard let self else { return }
@@ -641,18 +658,55 @@ final class MultiJoinerCall {
         }
     }
 
-    /// Existing member: apply a broadcast commit (epoch advance) + rekey.
-    private func onMaybeCommit(_ bytes: Data) {
+    /// Existing member: apply a broadcast MLS message — a commit (epoch
+    /// advance → rekey) or a member's sealed application message (today: the
+    /// ADR-0048 profile that names its tile).
+    private func onMaybeCommit(from: String, _ bytes: Data) {
         guard let group else { return }
+        let processed: ProcessedMessage
         do {
             // The call group has no ADR-0022 role table — plain apply (the
-            // call-path caveat). A non-commit / wrong-epoch / junk payload
-            // throws and is ignored.
-            _ = try group.processIncoming(identity: opts.identity, bytes: bytes)
+            // call-path caveat). A wrong-epoch / junk payload throws and is
+            // ignored.
+            processed = try group.processIncoming(identity: opts.identity, bytes: bytes)
         } catch {
             return
         }
-        rekeyToCurrentEpoch()
+        switch processed {
+        case .application(let data, _, _):
+            onMemberApplication(from: from, plaintext: data)
+        case .commit:
+            rekeyToCurrentEpoch()
+            // Someone was admitted: they decrypt only from this epoch on, so
+            // every member re-announces its name for the newcomer.
+            broadcastOwnProfile()
+        default:
+            break
+        }
+    }
+
+    /// A member's sealed application message. Only a profile is understood;
+    /// anything else is ignored. The name binds to the relaying SFU peer — the
+    /// same binding the peer's media tracks already rest on.
+    private func onMemberApplication(from: String, plaintext: Data) {
+        guard let decoded = try? decodeProfileEnvelope(plaintext: plaintext) else { return }
+        let name = decoded.displayName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !name.isEmpty else { return }
+        peerNames[from] = name
+        ui.setParticipantName("\(peerPrefix)\(from)", name)
+    }
+
+    /// Seal the own profile into the call group and relay it to every member.
+    /// Best-effort: a missing profile or a failed send only leaves the tile on
+    /// its fallback label.
+    private func broadcastOwnProfile() {
+        guard let group, joined, let envelope = opts.ownProfileEnvelope?() else { return }
+        do {
+            let sealed = try group.createApplicationMessage(identity: opts.identity, plaintext: envelope)
+            session.sendSignalRelayToCall(payload: sealed)
+        } catch {
+            NSLog("multi-joiner: own profile not announced: %@", String(describing: error))
+        }
     }
 
     // MARK: - Election + epoch helpers
@@ -701,6 +755,7 @@ final class MultiJoinerCall {
     // MARK: - Store-participant helpers
 
     private func nameOf(peerId: String, pseudonym: String, peerTag: String) -> String {
+        if let announced = peerNames[peerId] { return announced }
         if let resolve = opts.resolveDisplayName {
             return resolve(peerId, pseudonym, peerTag)
         }
@@ -710,7 +765,7 @@ final class MultiJoinerCall {
     private func localParticipant() -> CallUiState.Participant {
         CallUiState.Participant(
             id: "local",
-            displayName: "You",
+            displayName: opts.localDisplayName,
             isLocal: true,
             micOn: opts.audio,
             camOn: opts.video,

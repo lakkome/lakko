@@ -13,8 +13,10 @@ import org.webrtc.VideoTrack
 import uniffi.lakko_ffi_uniffi.FfiIncomingEnvelopeKind
 import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.Identity
+import uniffi.lakko_ffi_uniffi.ProcessedMessage
 import uniffi.lakko_ffi_uniffi.SfuPeerSnapshot
 import uniffi.lakko_ffi_uniffi.callSafetyNumber
+import uniffi.lakko_ffi_uniffi.decodeProfileEnvelope
 import uniffi.lakko_ffi_uniffi.dispatchIncomingEnvelope
 import uniffi.lakko_ffi_uniffi.keyPackageSignatureKey
 import uniffi.lakko_ffi_uniffi.sfuPeerTag
@@ -114,6 +116,13 @@ class MultiJoinerCall private constructor(
         val scope: CoroutineScope,
         /** Resolve a peer to a contact name (ADR-0021 peer_tag lookup). */
         val resolveDisplayName: ((peerId: String, accountPseudonym: String, peerTag: String) -> String)? = null,
+        /** The name on the local tile (`docs/ux/calls.md` section 4.4). */
+        val localDisplayName: String = "You",
+        /** The user's own ADR-0048 profile envelope, or `null` when none is
+         *  set. Sealed into the call's MLS group and relayed, so every other
+         *  member — a guest with no contact list included — names this tile.
+         *  The SFU relays ciphertext only. */
+        val ownProfileEnvelope: (() -> ByteArray?)? = null,
         /** Fired once this client has an MLS group + derived seed (owner: at
          *  founding; joiner: on the Welcome). The landing screen switches from
          *  "waiting for owner" to the in-call view. */
@@ -139,6 +148,10 @@ class MultiJoinerCall private constructor(
     /** This client's MLS leaf once it has a group. */
     private var localLeaf: Int? = initialLeaf
     private var joined = false
+    /** Names members announced over the call group (SFU peer id -> name). A
+     *  name learnt this way outranks the contact-list resolver: it is what the
+     *  person calls themself, sealed under a key only members hold. */
+    private val peerNames = HashMap<String, String>()
 
     /** G-22 dedup (FINDING 4). Keyed on the relay `from` SFU peer id ->
      *  wrapped Welcome, so ONE SFU-admitted peer is admitted at most once per
@@ -265,6 +278,7 @@ class MultiJoinerCall private constructor(
             call.joined = true
             opts.onJoined()
             call.start()
+            call.broadcastOwnProfile()
             return call
         }
 
@@ -426,6 +440,7 @@ class MultiJoinerCall private constructor(
 
     private fun onSfuPeerLeft(peerId: String) {
         presence.removePeer(peerId)
+        peerNames.remove(peerId)
         ui.participantLeft("$PEER_PREFIX$peerId")
         lastKnownCameraOn.remove("$PEER_PREFIX$peerId")
         // The committer may have left -> the next inbound KP is evaluated
@@ -468,8 +483,9 @@ class MultiJoinerCall private constructor(
             FfiIncomingEnvelopeKind.CALL_KEY_PACKAGE -> onIncomingKeyPackage(from, env.payload)
             FfiIncomingEnvelopeKind.CALL_WELCOME -> onIncomingWelcome(from, env.payload)
             // Not a call envelope — the fallback carries verbatim bytes, which
-            // for us is a broadcast MLS commit an existing member must apply.
-            FfiIncomingEnvelopeKind.INTRO_MESSAGE -> onMaybeCommit(env.payload)
+            // for us is a broadcast MLS message: a commit an existing member
+            // must apply, or a member's sealed profile.
+            FfiIncomingEnvelopeKind.INTRO_MESSAGE -> onMaybeCommit(from, env.payload)
             // camera-off-cleanup — a camera on/off media-state signal is
             // intercepted UPSTREAM by SfuCallSession's classifier, which fires
             // onRemoteMediaState (now wired above to flip the peer's roster
@@ -487,11 +503,10 @@ class MultiJoinerCall private constructor(
             // ADR-0032 election here is leaf/presence-based and independent).
             // A peer that relays one is off-contract — fail-closed drop.
             FfiIncomingEnvelopeKind.COMMITTER_BEACON -> Unit
-            // ADR-0048 — a profile envelope rides the GROUP JOURNAL as an MLS
-            // application message, where the sender is the MLS-authenticated
-            // leaf. A relay payload has no such binding (the SFU peer id is not
-            // an identity), so a profile arriving here could be bound to nobody
-            // and is dropped, never stored (C-68).
+            // ADR-0048 — a bare (unsealed) profile on the relay binds to
+            // nobody: the SFU peer id is not an identity. Names travel sealed
+            // inside the call group instead (`broadcastOwnProfile`) and surface
+            // through `onMaybeCommit` as an MLS application message. Dropped.
             FfiIncomingEnvelopeKind.PROFILE -> Unit
             // ADR-0051 — a group-name envelope likewise rides the GROUP JOURNAL,
             // where the chat receive loop checks the sender's role. A relay
@@ -560,6 +575,8 @@ class MultiJoinerCall private constructor(
         session.sendSignalRelayToCall(commit)
         // The add advanced our epoch -> rekey to the new seed.
         rekeyToCurrentEpoch()
+        // The newcomer decrypts only from this epoch on: tell it who we are.
+        broadcastOwnProfile()
     }
 
     /** Joiner side: open the committer's Welcome and go live. */
@@ -612,6 +629,7 @@ class MultiJoinerCall private constructor(
             presence.bindPeerToMember(from, ownerKeyHex)
         }
         opts.onJoined()
+        broadcastOwnProfile()
         // Publish media ONLY now — after joining + deriving the seed
         // (invariant #4).
         opts.scope.launch {
@@ -623,17 +641,56 @@ class MultiJoinerCall private constructor(
         }
     }
 
-    /** Existing member: apply a broadcast commit (epoch advance) + rekey. */
-    private fun onMaybeCommit(bytes: ByteArray) {
+    /** Existing member: apply a broadcast MLS message — a commit (epoch
+     *  advance -> rekey) or a member's sealed application message (today: the
+     *  ADR-0048 profile that names its tile). */
+    private fun onMaybeCommit(from: String, bytes: ByteArray) {
         val g = group ?: return
-        try {
+        val processed = try {
             // The call group has no ADR-0022 role table — plain apply. A
-            // non-commit / wrong-epoch / junk payload throws and is ignored.
+            // wrong-epoch / junk payload throws and is ignored.
             g.processIncoming(opts.identity, bytes)
         } catch (e: Throwable) {
             return
         }
-        rekeyToCurrentEpoch()
+        when (processed) {
+            is ProcessedMessage.Application -> onMemberApplication(from, processed.data)
+            is ProcessedMessage.Commit -> {
+                rekeyToCurrentEpoch()
+                // Someone was admitted: they decrypt only from this epoch on,
+                // so every member re-announces its name for the newcomer.
+                broadcastOwnProfile()
+            }
+            else -> Unit
+        }
+    }
+
+    /** A member's sealed application message. Only a profile is understood;
+     *  anything else is ignored. The name binds to the relaying SFU peer — the
+     *  same binding the peer's media tracks already rest on. */
+    private fun onMemberApplication(from: String, plaintext: ByteArray) {
+        val name = try {
+            decodeProfileEnvelope(plaintext).displayName?.trim().orEmpty()
+        } catch (e: Throwable) {
+            return
+        }
+        if (name.isEmpty()) return
+        peerNames[from] = name
+        ui.setParticipantName("$PEER_PREFIX$from", name)
+    }
+
+    /** Seal the own profile into the call group and relay it to every member.
+     *  Best-effort: a missing profile or a failed send only leaves the tile on
+     *  its fallback label. */
+    private fun broadcastOwnProfile() {
+        val g = group ?: return
+        if (!joined) return
+        val envelope = opts.ownProfileEnvelope?.invoke() ?: return
+        try {
+            session.sendSignalRelayToCall(g.createApplicationMessage(opts.identity, envelope))
+        } catch (e: Throwable) {
+            Log.w("MultiJoinerCall", "own profile not announced", e)
+        }
     }
 
     // -----------------------------------------------------------------
@@ -679,13 +736,14 @@ class MultiJoinerCall private constructor(
     // -----------------------------------------------------------------
 
     private fun nameOf(peerId: String, pseudonym: String, peerTag: String): String =
-        opts.resolveDisplayName?.invoke(peerId, pseudonym, peerTag)
+        peerNames[peerId]
+            ?: opts.resolveDisplayName?.invoke(peerId, pseudonym, peerTag)
             ?: if (pseudonym.isNotEmpty()) pseudonym.take(8) else "Peer"
 
     private fun localParticipant(): CallUiState.Participant =
         CallUiState.Participant(
             id = "local",
-            displayName = "You",
+            displayName = opts.localDisplayName,
             isLocal = true,
             micOn = opts.audio,
             camOn = opts.video,

@@ -579,6 +579,7 @@ class HostedCallsTest {
         slug = "slug-$callByte",
         accountIdentitySeed = ByteArray(64),
         sessionToken = "token",
+        accountId = ByteArray(16),
     )
 
     // ---- Link call ------------------------------------------------------------------

@@ -397,7 +397,12 @@ extension LinkCallHost {
                     audio: true,
                     video: video,
                     resolveDisplayName: nil,
-                    authBaseUrl: nil
+                    authBaseUrl: nil,
+                    // Section 4.4: the own tile carries the profile name from
+                    // the first second, and the same profile is announced to
+                    // every other member inside the call group.
+                    localDisplayName: GroupCallHost.ownTileName(),
+                    ownProfileEnvelope: { ProfileDirectory.shared.ownProfileEnvelope() }
                 )
                 if request.isOwner {
                     // Owner founds + hosts; `onJoined` fires inside `host`.

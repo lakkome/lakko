@@ -1648,6 +1648,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       sessionToken: secrets.sessionToken,
       media: { audio: true, video: opts.mediaVideo },
       localDisplayName: ownTileName(),
+      ownProfileEnvelope: () => profiles.ownProfileEnvelope(),
       onJoined: () => applyLinkEvent(attempt, { kind: "joined" }),
       onEnded: () => applyLinkEvent(attempt, { kind: "ended" }),
       onNoCommitter: () => applyLinkEvent(attempt, { kind: "no-committer" }),

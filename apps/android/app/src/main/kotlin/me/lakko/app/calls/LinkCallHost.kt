@@ -47,6 +47,8 @@ public class LinkCallRequest(
     public val slug: String,
     public val accountIdentitySeed: ByteArray,
     public val sessionToken: String,
+    /** The raw account id, to read the own profile the call announces. */
+    public val accountId: ByteArray,
 )
 
 /** The orchestrator's reports, as [MultiJoinerCall.Options] carries them. */
