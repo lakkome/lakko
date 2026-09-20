@@ -62,9 +62,11 @@ settings:
     Debug:
       LAKKO_API_BASE_URL: "https://test.lakko.me/native"
       LAKKO_SFU_URL: "wss://test.lakko.me/sfu"
+      LAKKO_WEB_ORIGIN: "https://test.lakko.me"
     Release:
       LAKKO_API_BASE_URL: ""
       LAKKO_SFU_URL: ""
+      LAKKO_WEB_ORIGIN: "https://lakko.me"
 
 # Single iOS app target — `Lakko`. The SwiftUI source lives at
 # `apps/ios/Lakko/` (committed); the `Info.plist` is
@@ -108,6 +110,10 @@ targets:
         # settings at the top of this file.
         LakkoApiBaseUrl: "$(LAKKO_API_BASE_URL)"
         LakkoSfuUrl: "$(LAKKO_SFU_URL)"
+        # The web origin this build mints its `/i/`, `/g/` and `/c/` links
+        # under (`ApiEndpoints.webOrigin`): the host the same stack's web
+        # client and app-link association live on. Debug: the test stack.
+        LakkoWebOrigin: "$(LAKKO_WEB_ORIGIN)"
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         # KT-log S3d — transparency-log integration config (mirror of
@@ -266,6 +272,12 @@ targets:
       properties:
         com.apple.developer.associated-domains:
           - applinks:lakko.me
+          # The test stack: a Debug build mints links under this host and a
+          # phone tapping one must open the app. Each host needs its own
+          # `apple-app-site-association` naming this bundle id under the
+          # signing team's id; the test deploy writes it from
+          # LAKKO_APPLE_TEAM_ID when that is set.
+          - applinks:test.lakko.me
         # 1.20c — Push Notifications entitlement. `development`
         # routes APNs requests through the sandbox endpoint
         # (`api.sandbox.push.apple.com`); production builds

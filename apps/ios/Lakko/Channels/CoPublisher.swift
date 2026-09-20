@@ -28,8 +28,9 @@ import LakkoCore
 public enum CoPublisher {
     /// Path prefix every `/g/` co-publisher invite URL starts with.
     public static let urlPrefix = "/g/"
-    /// Default origin Lakko shares its invite links under.
-    public static let defaultOrigin = "https://lakko.me"
+    /// Default origin Lakko shares its invite links under: the web origin of
+    /// the stack this build talks to (`ApiEndpoints.webOrigin`).
+    public static var defaultOrigin: String { ApiEndpoints.webOrigin }
 
     /// Open (or create) the persistent PublisherGroup handle for a channel.
     public static func openPublisherGroup(

@@ -33,10 +33,11 @@ public enum CallInviteUrl {
     /// of the web `CALL_INVITE_URL_PREFIX = "/c/"`.
     public static let urlPrefix: String = "/c/"
 
-    /// Default origin Lakko shares its invite links under.
-    /// Stays in sync with the web + Android sides; a link
-    /// generated on iOS works when consumed on any platform.
-    public static let defaultOrigin: String = "https://lakko.me"
+    /// Default origin Lakko shares its invite links under: the
+    /// web origin of the stack this build talks to
+    /// (`ApiEndpoints.webOrigin`), so a link made against the
+    /// test stack opens on the test stack.
+    public static var defaultOrigin: String { ApiEndpoints.webOrigin }
 
     /// Hard cap on the human-visible label, in bytes (UTF-8).
     /// Mirrors `lakko_contacts::invite::MAX_LABEL_LEN` (64) —

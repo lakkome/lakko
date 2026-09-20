@@ -2506,7 +2506,8 @@ public class ChatRepository(
             try {
                 composeInlineGroupInviteUrl(wire)
             } catch (fallbackError: Throwable) {
-                "https://lakko.me/g/" + me.lakko.app.auth.base64UrlEncodeNoPad(wire)
+                GROUP_INVITE_DEFAULT_ORIGIN + GROUP_INVITE_URL_PREFIX +
+                    me.lakko.app.auth.base64UrlEncodeNoPad(wire)
             }
         }
     }

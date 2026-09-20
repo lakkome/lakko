@@ -130,6 +130,15 @@
                 <data android:scheme="https" />
                 <data android:scheme="http" />
                 <data android:host="lakko.me" />
+                <!--
+                  The test stack. A link a phone taps must open the installed
+                  app, so the app claims every host a build can mint links
+                  under; each host is verified on its own against the
+                  `/.well-known/assetlinks.json` it serves (the web client
+                  ships the file), and one host failing verification does not
+                  take the others down.
+                -->
+                <data android:host="test.lakko.me" />
                 <data android:pathPrefix="/i/" />
                 <!-- ADR-0028 (G-3) — group join-ticket deep links. -->
                 <data android:pathPrefix="/g/" />

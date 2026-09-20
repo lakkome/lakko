@@ -29,9 +29,10 @@ import me.lakko.app.auth.base64UrlEncodeNoPad
  *  `GROUP_INVITE_URL_PREFIX = "/g/"`. */
 public const val GROUP_INVITE_URL_PREFIX: String = "/g/"
 
-/** Default origin Lakko shares its invite links under. Stays in sync with the
- *  web + iOS sides; a link generated on Android works on any platform. */
-public const val GROUP_INVITE_DEFAULT_ORIGIN: String = "https://lakko.me"
+/** Default origin Lakko shares its invite links under: the web origin of
+ *  the stack this build talks to ([ApiEndpoints.webOrigin]). */
+public val GROUP_INVITE_DEFAULT_ORIGIN: String
+    get() = me.lakko.app.config.ApiEndpoints.webOrigin
 
 /** Length of a content-addressed `blob_id` from
  *  `services/discovery/src/group_invite.rs` — SHA-256, 32 bytes. */

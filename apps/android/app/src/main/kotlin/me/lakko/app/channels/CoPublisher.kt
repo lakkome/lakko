@@ -45,8 +45,10 @@ public object CoPublisher {
     /** Path prefix every `/g/` co-publisher invite URL starts with. */
     public const val URL_PREFIX: String = "/g/"
 
-    /** Default origin Lakko shares its invite links under. */
-    public const val DEFAULT_ORIGIN: String = "https://lakko.me"
+    /** Default origin Lakko shares its invite links under: the web origin of
+     *  the stack this build talks to ([me.lakko.app.config.ApiEndpoints.webOrigin]). */
+    public val DEFAULT_ORIGIN: String
+        get() = me.lakko.app.config.ApiEndpoints.webOrigin
 
     /** Errors surfaced by the co-publisher flow. */
     public sealed class CoPublisherException(msg: String) : Exception(msg) {

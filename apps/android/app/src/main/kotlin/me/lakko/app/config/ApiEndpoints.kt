@@ -64,6 +64,21 @@ public object ApiEndpoints {
     public fun baseUrlFor(service: ApiService): String = resolve(configuredApiBaseUrl, service)
 
     /**
+     * The web origin this build shares its links under (`/i/`, `/g/`, `/c/`),
+     * read from [BuildConfig.LAKKO_WEB_ORIGIN]. It must be the host the same
+     * build's servers live behind: a link minted here is opened by people on
+     * that stack's web client and by phones whose app claims that host, so a
+     * debug build against the test stack mints `https://test.lakko.me/...`,
+     * never the production host. Empty -> the production origin.
+     */
+    public val webOrigin: String by lazy {
+        normalizedBase(BuildConfig.LAKKO_WEB_ORIGIN) ?: PRODUCTION_WEB_ORIGIN
+    }
+
+    /** The production web origin, the fallback when a build sets none. */
+    public const val PRODUCTION_WEB_ORIGIN: String = "https://lakko.me"
+
+    /**
      * Pure resolution: `<apiBase>/<segment>` when [apiBase] is non-empty after
      * trimming whitespace and trailing slashes, else the service's local
      * development base URL.

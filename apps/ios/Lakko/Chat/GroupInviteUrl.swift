@@ -26,9 +26,9 @@ public enum GroupInviteUrl {
     /// `GROUP_INVITE_URL_PREFIX = "/g/"`.
     public static let urlPrefix: String = "/g/"
 
-    /// Default origin Lakko shares its invite links under. Stays in sync with
-    /// the web + Android sides; a link generated on iOS works on any platform.
-    public static let defaultOrigin: String = "https://lakko.me"
+    /// Default origin Lakko shares its invite links under: the web origin of
+    /// the stack this build talks to (`ApiEndpoints.webOrigin`).
+    public static var defaultOrigin: String { ApiEndpoints.webOrigin }
 
     /// Length of a content-addressed `blob_id` from
     /// `services/discovery/src/group_invite.rs` — SHA-256, 32 bytes.

@@ -72,3 +72,22 @@ Logs: `journalctl -u lakko-test-<service>`.
 - nginx 1.18 knows no `.wasm` MIME type; the vhost sets `application/wasm` itself.
 - coturn loads its certificate only at startup. `/etc/letsencrypt/renewal-hooks/deploy/lakko-reload.sh`
   restarts the matching coturn after a renewal and reloads nginx.
+
+## App links (a tapped link opens the installed app)
+
+The web build ships `/.well-known/assetlinks.json` (Android; it names the
+package `me.lakko.dev` and the debug signing key's SHA-256, so it is per
+developer machine until a release key exists) and nginx serves both
+association files as JSON from the web root. Android verifies
+`test.lakko.me` against it on install (`adb shell pm get-app-links
+me.lakko.dev` shows `verified`), and the debug app mints its `/i/`, `/g/` and
+`/c/` links under `https://test.lakko.me` (`LAKKO_WEB_ORIGIN`).
+
+iOS needs `/.well-known/apple-app-site-association` naming
+`<team id>.me.lakko.dev`. The team id is not in the repository: set
+`LAKKO_APPLE_TEAM_ID=<team id>` in `/etc/lakko-test/lakko.env` and the next
+web deploy writes the file; without it the deploy prints a WARN and an iPhone
+opens the link in Safari. The app's entitlement already claims
+`applinks:test.lakko.me`, but a simulator build signed without a team embeds
+no entitlements at all, so this can only be checked on a device signed by that
+team.

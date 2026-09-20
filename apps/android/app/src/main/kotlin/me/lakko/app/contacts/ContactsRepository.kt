@@ -1315,11 +1315,11 @@ private const val DEFAULT_INVITE_EXPIRY_MS: Long = 7L * 24 * 60 * 60 * 1000
 /** Server-side sentinel for `max_uses = single-use`. */
 private val SINGLE_USE: UInt = 0u
 
-/** URL prefix Lakko shares its invite links under. Should
- *  remain in sync with the web `composePointerInviteUrl` host
- *  + path so a link generated on web works when consumed on
- *  Android and vice versa. */
-internal const val INVITE_URL_PREFIX: String = "https://lakko.me/i/"
+/** URL prefix Lakko shares its invite links under: the web origin of the
+ *  stack this build talks to plus the web `composePointerInviteUrl` path,
+ *  so a link generated on either side opens on the other. */
+internal val INVITE_URL_PREFIX: String
+    get() = me.lakko.app.config.ApiEndpoints.webOrigin + "/i/"
 
 /** A request the user has accepted locally.
  *

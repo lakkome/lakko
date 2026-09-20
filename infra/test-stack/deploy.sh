@@ -87,6 +87,18 @@ if [[ $SKIP_BACKEND != 1 ]]; then
 fi
 if [[ $SKIP_WEB != 1 ]]; then
   rsync -a --delete web/ /var/www/lakko-test-web/
+  # iOS app-link association. Apple matches the app by "<team id>.<bundle id>",
+  # and the team id is not in the repository, so the file is written here from
+  # LAKKO_APPLE_TEAM_ID in the stack's env; without it there is no file and an
+  # iPhone opens the link in Safari.
+  team_id="$(sed -n 's/^LAKKO_APPLE_TEAM_ID=//p' /etc/lakko-test/lakko.env | tr -d '"'"'"' \r' | head -n1)"
+  if [[ -n $team_id ]]; then
+    install -d -m 755 /var/www/lakko-test-web/.well-known
+    printf '{"applinks":{"details":[{"appIDs":["%s.me.lakko.dev"],"components":[{"/":"/i/*"},{"/":"/g/*"},{"/":"/c/*"}]}]}}\n' "$team_id" \
+      > /var/www/lakko-test-web/.well-known/apple-app-site-association
+  else
+    echo "[deploy-test] WARN LAKKO_APPLE_TEAM_ID is not set in /etc/lakko-test/lakko.env; no apple-app-site-association written (iOS links open in Safari)"
+  fi
   chown -R root:root /var/www/lakko-test-web
   find /var/www/lakko-test-web -type d -exec chmod 755 {} +
   find /var/www/lakko-test-web -type f -exec chmod 644 {} +

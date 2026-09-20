@@ -316,9 +316,18 @@ android {
         // unaffected).
         //   debug:   wss://test.lakko.me/sfu
         //   release: empty
+        //
+        // `LAKKO_WEB_ORIGIN` — the web origin this build mints its `/i/`, `/g/`
+        // and `/c/` links under (`ApiEndpoints.webOrigin`). It must be the host
+        // the same stack's web client and app-link association live on, or a
+        // link made on the test stack sends people to production. Empty ->
+        // `https://lakko.me`.
+        //   debug:   https://test.lakko.me
+        //   release: https://lakko.me
         fun com.android.build.api.dsl.ApplicationBuildType.endpointFields(
             apiDefault: String,
             sfuDefault: String,
+            webOriginDefault: String,
         ) {
             buildConfigField(
                 "String",
@@ -330,15 +339,21 @@ android {
                 "LAKKO_SFU_URL",
                 "\"${project.findProperty("lakko.sfu.url") as String? ?: sfuDefault}\"",
             )
+            buildConfigField(
+                "String",
+                "LAKKO_WEB_ORIGIN",
+                "\"${project.findProperty("lakko.web.origin") as String? ?: webOriginDefault}\"",
+            )
         }
         debug {
             endpointFields(
                 apiDefault = "https://test.lakko.me/native",
                 sfuDefault = "wss://test.lakko.me/sfu",
+                webOriginDefault = "https://test.lakko.me",
             )
         }
         release {
-            endpointFields(apiDefault = "", sfuDefault = "")
+            endpointFields(apiDefault = "", sfuDefault = "", webOriginDefault = "https://lakko.me")
             // Smoke build only — release shrinking is wired
             // properly in 1.15d when there's enough code to
             // shrink. The lakko-core consumer-rules.pro keeps

@@ -65,6 +65,21 @@ public enum ApiEndpoints {
     )
 
     /// The base URL (no trailing slash) for `service` in this build.
+    /// Info.plist key carrying the web origin this build mints its links under.
+    public static let webOriginInfoPlistKey = "LakkoWebOrigin"
+
+    /// The production web origin, the fallback when a build sets none.
+    public static let productionWebOrigin = "https://lakko.me"
+
+    /// The web origin this build shares its links under (`/i/`, `/g/`, `/c/`).
+    /// It must be the host the same build's servers live behind: a link minted
+    /// here is opened by people on that stack's web client and by phones whose
+    /// app claims that host, so a Debug build against the test stack mints
+    /// `https://test.lakko.me/...`, never the production host.
+    public static let webOrigin: String = normalizedBase(
+        Bundle.main.object(forInfoDictionaryKey: webOriginInfoPlistKey) as? String
+    ) ?? productionWebOrigin
+
     public static func baseURL(for service: ApiService) -> String {
         if configuredApiBaseURL == nil {
             _ = warnIfReleaseWithoutBase

@@ -727,11 +727,11 @@ public final class ContactsRepository: ObservableObject {
     /// Server-side sentinel for `max_uses = single-use`.
     public static let singleUse: UInt32 = 0
 
-    /// URL prefix Lakko shares its invite links under. Stays in
-    /// sync with the web `composePointerInviteUrl` host + path so a
-    /// link generated on web works when consumed on iOS and vice
-    /// versa.
-    public static let inviteUrlPrefix: String = "https://lakko.me/i/"
+    /// URL prefix Lakko shares its invite links under: the web origin
+    /// of the stack this build talks to plus the web
+    /// `composePointerInviteUrl` path, so a link generated on either
+    /// side opens on the other.
+    public nonisolated static var inviteUrlPrefix: String { ApiEndpoints.webOrigin + "/i/" }
 
     // MARK: - Joiner-side invite consume (1.14e8)
 

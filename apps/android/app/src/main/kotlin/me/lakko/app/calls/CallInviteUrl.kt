@@ -35,10 +35,11 @@ import me.lakko.app.auth.base64UrlEncodeNoPad
  *  the web `CALL_INVITE_URL_PREFIX = "/c/"`. */
 public const val CALL_INVITE_URL_PREFIX: String = "/c/"
 
-/** Default origin Lakko shares its invite links under. Stays
- *  in sync with the web + iOS sides; a link generated on
- *  Android works when consumed on any platform. */
-public const val CALL_INVITE_DEFAULT_ORIGIN: String = "https://lakko.me"
+/** Default origin Lakko shares its invite links under: the web origin of
+ *  the stack this build talks to ([ApiEndpoints.webOrigin]), so a link made
+ *  against the test stack opens on the test stack. */
+public val CALL_INVITE_DEFAULT_ORIGIN: String
+    get() = me.lakko.app.config.ApiEndpoints.webOrigin
 
 /** Hard cap on the human-visible label, in bytes (UTF-8).
  *  Mirrors `lakko_contacts::invite::MAX_LABEL_LEN` (64). */

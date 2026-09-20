@@ -58,6 +58,8 @@
 	<string></string>
 	<key>LakkoTransparencyWitnessThreshold</key>
 	<string></string>
+	<key>LakkoWebOrigin</key>
+	<string>$(LAKKO_WEB_ORIGIN)</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Lakko uses the camera to scan QR codes from devices you want to link to your account, to capture video for in-call streams, and to record video messages you choose to send. Everything the camera captures is end-to-end encrypted on your device before it is sent.</string>
 	<key>NSMicrophoneUsageDescription</key>
