@@ -16,6 +16,13 @@ private let peerPrefix = "peer-"
 /// window the joiner stops rebroadcasting and surfaces "this call has ended or
 /// isn't active" rather than waiting forever.
 private let joinerAdmissionTimeoutNs: UInt64 = 18_000_000_000
+/// A pending joiner re-sends its KeyPackage this often until admitted, so an
+/// admission is never lost to ordering: a committer that founds the group
+/// after the joiner's first broadcast, or that arrives later, still gets it.
+let keyPackageRebroadcastNs: UInt64 = 3_000_000_000
+/// The owner, finding other peers already in the room, asks to be admitted for
+/// this long before concluding nobody there holds a group and founding one.
+let ownerRejoinProbeNs: UInt64 = 5_000_000_000
 
 /// ADR-0032 multi-joiner call-link orchestrator (iOS) — the native mirror of
 /// `apps/web/src/calls/multi-joiner-call.ts`.
@@ -143,6 +150,13 @@ final class MultiJoinerCall {
     /// exact-KP-bytes guard for an identical re-send.
     private var admittedByPeer: [String: Data] = [:]
     private var admittedByKp: Set<String> = []
+    /// The exact-KeyPackage guard entry each admitted peer holds, so a
+    /// departure can forget it along with the rest of the admission.
+    private var kpKeyByPeer: [String: String] = [:]
+    /// Periodic KeyPackage re-send while `pendingKeyPackage` is set.
+    private var rebroadcastTask: Task<Void, Never>?
+    /// The owner's rejoin probe (see `ownerRejoinProbeNs`).
+    private var ownerProbeTask: Task<Void, Never>?
     /// G-22: PRIMARY admission dedup — the joiner's stable MLS signature (leaf)
     /// key, so a peer re-minting FRESH KeyPackages under one identity is admitted
     /// at most once. Maps signature-key hex → the stored wrapped Welcome.
@@ -200,7 +214,10 @@ final class MultiJoinerCall {
             localLeaf: initialLeaf,
             audio: opts.audio,
             video: opts.video,
-            deferPublish: role == .joiner
+            // Media waits for a seed on both sides: the joiner for its Welcome,
+            // the owner for the SFU roster, which decides whether it founds the
+            // group or comes back into one a successor is holding.
+            deferPublish: true
         )
         // All stored properties except `session` are now set, so `self` is
         // fully initialised and the callbacks may capture it (weakly). The
@@ -279,16 +296,12 @@ final class MultiJoinerCall {
         let jwt = try await mintJwt(options: options, callIdHex: callIdHex)
         let ownerKeyHex = hexEncode(options.ownerSignatureKey)
 
-        // Found the group (sole-founder — no race).
-        let group = try Group.create(identity: options.identity)
-        let seed = try group.exportSecret(
-            identity: options.identity,
-            label: callSeedLabel,
-            context: options.callId,
-            length: callSeedLen
-        )
-        let leaf = try group.ownLeafIndex()
-        // Owner-presence rides `self` (ownerPeerTag = nil on the owner's client).
+        // The SFU roster decides (see `onSfuWelcome`): an empty room means the
+        // owner founds the call group (sole founder, no race); a room with
+        // people in it means the owner is coming BACK to a call a successor
+        // kept alive, so it asks to be admitted like anyone else and the
+        // election hands it the committer duty once it is in. Owner-presence
+        // rides `self` (ownerPeerTag = nil on the owner's client).
         let call = MultiJoinerCall(
             opts: options,
             cbs: callbacks,
@@ -297,16 +310,94 @@ final class MultiJoinerCall {
             jwt: jwt,
             ownerKeyHex: ownerKeyHex,
             ownerPeerTag: nil,
-            initialSeed: seed,
-            initialLeaf: leaf
+            initialSeed: nil,
+            initialLeaf: nil
         )
-        call.group = group
-        call.safetyNumber = safeSafetyNumber(seed)
-        call.joined = true
-        call.cbs.onJoined?()
         try await call.start()
-        call.broadcastOwnProfile()
         return call
+    }
+
+    /// Owner: found the call group and go live (an empty room, or a probe that
+    /// nobody answered).
+    private func foundGroup() {
+        guard group == nil, !joined else { return }
+        let founded: Group
+        let seed: Data
+        let leaf: UInt32
+        do {
+            founded = try Group.create(identity: opts.identity)
+            seed = try deriveSeed(founded)
+            leaf = try founded.ownLeafIndex()
+        } catch {
+            cbs.onError?(error)
+            return
+        }
+        group = founded
+        localLeaf = leaf
+        joined = true
+        pendingKeyPackage = nil
+        clearAdmissionTimer()
+        clearRebroadcast()
+        clearOwnerProbe()
+        safetyNumber = MultiJoinerCall.safeSafetyNumber(seed)
+        cbs.onJoined?()
+        broadcastOwnProfile()
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.session.publish(seed: seed, localLeaf: leaf)
+            } catch {
+                self.cbs.onError?(error)
+            }
+        }
+    }
+
+    /// Owner, in a room with people: ask to be admitted (the successor holds
+    /// the group) and fall back to founding when nobody answers.
+    private func beginOwnerRejoinProbe() {
+        guard group == nil, !joined, pendingKeyPackage == nil else { return }
+        do {
+            let kp = try opts.identity.createKeyPackage()
+            pendingKeyPackage = wrapCallKeyPackage(kpBytes: kp)
+        } catch {
+            cbs.onError?(error)
+            return
+        }
+        broadcastKeyPackage()
+        startRebroadcast()
+        ownerProbeTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: ownerRejoinProbeNs)
+            guard !Task.isCancelled, let self, !self.joined else { return }
+            self.ownerProbeTask = nil
+            self.pendingKeyPackage = nil
+            self.clearRebroadcast()
+            self.foundGroup()
+        }
+    }
+
+    private func startRebroadcast() {
+        guard rebroadcastTask == nil else { return }
+        rebroadcastTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: keyPackageRebroadcastNs)
+                guard !Task.isCancelled, let self else { return }
+                if self.pendingKeyPackage == nil {
+                    self.rebroadcastTask = nil
+                    return
+                }
+                self.broadcastKeyPackage()
+            }
+        }
+    }
+
+    private func clearRebroadcast() {
+        rebroadcastTask?.cancel()
+        rebroadcastTask = nil
+    }
+
+    private func clearOwnerProbe() {
+        ownerProbeTask?.cancel()
+        ownerProbeTask = nil
     }
 
     /// Joiner: mint a fresh KeyPackage, connect signaling-only, relay the KP,
@@ -359,6 +450,8 @@ final class MultiJoinerCall {
     /// Tear down the call. Idempotent.
     func hangUp() {
         clearAdmissionTimer()
+        clearRebroadcast()
+        clearOwnerProbe()
         session.hangUp()
     }
 
@@ -415,6 +508,7 @@ final class MultiJoinerCall {
         if joined { return }
         timedOut = true
         pendingKeyPackage = nil
+        clearRebroadcast()
         session.hangUp()
         cbs.onNoCommitter?()
     }
@@ -451,7 +545,16 @@ final class MultiJoinerCall {
                 )
             }
         ui.setParticipants([localParticipant()] + remotes)
+        if role == .owner, group == nil, !joined {
+            if remotes.isEmpty {
+                foundGroup()
+            } else {
+                beginOwnerRejoinProbe()
+            }
+            return
+        }
         broadcastKeyPackage()
+        if pendingKeyPackage != nil { startRebroadcast() }
     }
 
     private func onSfuPeerJoined(peerId: String, pseudonym: String, peerTag: String) {
@@ -465,7 +568,14 @@ final class MultiJoinerCall {
     }
 
     private func onSfuPeerLeft(peerId: String) {
+        let memberKeyHex = presence.memberKeyFor(peerId: peerId)
         presence.removePeer(peerId: peerId)
+        // Someone who leaves can come back: forget their admission (else the
+        // G-22 dedup re-serves a Welcome a fresh app cannot open and they wait
+        // forever) and, if this client is now the acting committer, remove
+        // their leaf so the key rotates away from them.
+        forgetAdmission(peerId: peerId, memberKeyHex: memberKeyHex)
+        if let memberKeyHex { removeDepartedMember(memberKeyHex: memberKeyHex) }
         let id = "\(peerPrefix)\(peerId)"
         // Forget the departed peer's sticky camera state so a later rejoin
         // under the same id starts from a clean slate (join-race guard).
@@ -575,6 +685,7 @@ final class MultiJoinerCall {
         if let sigKeyHex { admittedBySigKey[sigKeyHex] = welcomeWrapped }
         admittedByPeer[from] = welcomeWrapped
         admittedByKp.insert(kpKey)
+        kpKeyByPeer[from] = kpKey
         // Bind the new joiner's peer → its member key for presence.
         for member in groupMembers() where !beforeKeys.contains(member.signatureKeyHex) {
             presence.bindPeerToMember(peerId: from, memberKeyHex: member.signatureKeyHex)
@@ -588,9 +699,10 @@ final class MultiJoinerCall {
         broadcastOwnProfile()
     }
 
-    /// Joiner side: open the committer's Welcome and go live.
+    /// Joiner side: open the committer's Welcome and go live. The returning
+    /// owner is a joiner here too (see `host`).
     private func onIncomingWelcome(from: String, welcomeEnvelope: Data) {
-        guard role == .joiner, !joined else { return }
+        guard !joined, pendingKeyPackage != nil else { return }
         let joinedGroup: Group
         do {
             joinedGroup = try Group.joinFromWelcome(welcome: welcomeEnvelope, identity: opts.identity)
@@ -638,6 +750,8 @@ final class MultiJoinerCall {
         joined = true
         pendingKeyPackage = nil
         clearAdmissionTimer()
+        clearRebroadcast()
+        clearOwnerProbe()
 
         safetyNumber = MultiJoinerCall.safeSafetyNumber(seed)
         // The committer (during the happy path, the owner) admitted us; bind its
@@ -673,7 +787,14 @@ final class MultiJoinerCall {
             return
         }
         switch processed {
-        case .application(let data, _, _):
+        case .application(let data, let senderLeaf, _):
+            // The MLS-authenticated sender leaf names the member behind this
+            // SFU peer: bind them, so a later departure of that peer can be
+            // answered with the removal of the right leaf whoever is committer.
+            if let senderLeaf,
+               let sender = groupMembers().first(where: { $0.leafIndex == senderLeaf }) {
+                presence.bindPeerToMember(peerId: from, memberKeyHex: sender.signatureKeyHex)
+            }
             onMemberApplication(from: from, plaintext: data)
         case .commit:
             rekeyToCurrentEpoch()
@@ -694,6 +815,31 @@ final class MultiJoinerCall {
         guard !name.isEmpty else { return }
         peerNames[from] = name
         ui.setParticipantName("\(peerPrefix)\(from)", name)
+    }
+
+    private func forgetAdmission(peerId: String, memberKeyHex: String?) {
+        admittedByPeer.removeValue(forKey: peerId)
+        if let kpKey = kpKeyByPeer.removeValue(forKey: peerId) {
+            admittedByKp.remove(kpKey)
+        }
+        if let memberKeyHex { admittedBySigKey.removeValue(forKey: memberKeyHex) }
+    }
+
+    /// Acting committer: remove a departed member's leaf and rekey.
+    private func removeDepartedMember(memberKeyHex: String) {
+        guard let group, joined else { return }
+        if memberKeyHex == hexEncode(opts.identity.signaturePublicKey()) { return }
+        guard let member = groupMembers().first(where: { $0.signatureKeyHex == memberKeyHex }) else { return }
+        guard isActingCommitter() else { return }
+        let commit: Data
+        do {
+            commit = try group.removeMember(identity: opts.identity, leafIndex: member.leafIndex)
+        } catch {
+            NSLog("multi-joiner: could not remove a departed member: %@", String(describing: error))
+            return
+        }
+        session.sendSignalRelayToCall(payload: commit)
+        rekeyToCurrentEpoch()
     }
 
     /// Seal the own profile into the call group and relay it to every member.

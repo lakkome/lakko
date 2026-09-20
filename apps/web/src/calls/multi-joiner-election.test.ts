@@ -111,6 +111,16 @@ describe("CallPresence", () => {
     expect(p.ownerPresent()).toBe(true);
   });
 
+  it("remembers who a peer is until the peer leaves, so a departure can be answered", () => {
+    const p = new CallPresence("self", "owner", "tag-owner");
+    p.addPeer("p1");
+    p.bindPeerToMember("p1", "member-1");
+    expect(p.memberKeyFor("p1")).toBe("member-1");
+    expect(p.memberKeyFor("p2")).toBeUndefined();
+    p.removePeer("p1");
+    expect(p.memberKeyFor("p1")).toBeUndefined();
+  });
+
   it("counts a bound peer present only while its peer is in the roster", () => {
     const p = new CallPresence(OWNER_HEX, OWNER_HEX, null);
     p.addPeer("p-c", "tag-c");

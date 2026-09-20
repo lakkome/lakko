@@ -240,6 +240,20 @@ by rules the clients share:
   connected; before that, the link's own expiry (an hour by default, a week at
   most) bounds how long it can be joined.
 
+- **Whoever leaves a link call can come back, the starter included.** Leaving
+  (or dropping) takes the person out of the call's group: whoever holds the
+  committer duty at that moment removes their leaf, so the key rotates away
+  from them and the group holds only the people in the room, and forgets
+  their admission, so the next time that person opens the link they are
+  admitted afresh. Before this a person who left sat at `Waiting for the
+  owner to admit you...` for good, because the one-admission-per-person guard
+  kept re-serving a welcome their new page could not open. The starter comes
+  back the same way: opening their own link, they ask to be admitted like
+  anyone else when people are in the room, the person keeping the call alive
+  admits them, and the committer duty returns to them; only an empty room
+  makes them found the call. A pending joiner re-sends its request every few
+  seconds until admitted, so an admission is never lost to who arrived first.
+
 Neither rule changes what is announced to the group: the leaving device tells the
 group it left, and ends the call for the chat when its record shows nobody else
 still in it, exactly as a hang-up does.

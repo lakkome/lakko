@@ -99,6 +99,14 @@ const PEER_PREFIX = "peer-";
  * has ended or isn't active" rather than waiting forever.
  */
 const JOINER_ADMISSION_TIMEOUT_MS = 18_000;
+/** A pending joiner re-sends its KeyPackage this often until admitted, so an
+ *  admission is never lost to ordering: a committer that founds the group
+ *  after the joiner's first broadcast, or that arrives later, still gets it. */
+export const KEY_PACKAGE_REBROADCAST_MS = 3_000;
+/** The owner, finding other peers already in the room, asks to be admitted
+ *  for this long before concluding nobody there holds a group and founding
+ *  one (the peers are then joiners waiting for exactly that). */
+export const OWNER_REJOIN_PROBE_MS = 5_000;
 
 /** Runtime view of the loaded wasm namespace. */
 type WasmModule = Awaited<ReturnType<typeof loadWasm>>;
@@ -207,6 +215,13 @@ export class MultiJoinerCall {
   private pendingKeyPackage: Uint8Array | null = null;
   /** Joiner admission-timeout handle; `null` once cleared (joined / dead). */
   private admissionTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Periodic KeyPackage re-send while `pendingKeyPackage` is set. */
+  private rebroadcastTimer: ReturnType<typeof setInterval> | null = null;
+  /** The owner's rejoin probe (see `OWNER_REJOIN_PROBE_MS`). */
+  private ownerProbeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The exact-KeyPackage guard entry each admitted peer holds, so a
+   *  departure can forget it along with the rest of the admission. */
+  private readonly kpKeyByPeer = new Map<string, string>();
   /** `true` once the admission timeout fired — stops any further rebroadcast. */
   private timedOut = false;
   /** Canonical safety number of the CURRENT epoch (owner: from founding;
@@ -262,9 +277,10 @@ export class MultiJoinerCall {
         sfuBaseUrl: opts.sfuBaseUrl,
         jwt,
         media: opts.media,
-        // The joiner defers media until it holds a Welcome + seed; the owner
-        // has its seed at founding and publishes immediately.
-        deferPublish: role === "joiner",
+        // Media waits for a seed on both sides: the joiner for its Welcome,
+        // the owner for the SFU roster, which decides whether it founds the
+        // group or comes back into one a successor is holding.
+        deferPublish: true,
         // Omit undefined optionals (exactOptionalPropertyTypes).
         ...(initialSeed !== undefined ? { seed: initialSeed } : {}),
         ...(initialLeaf !== undefined ? { localLeaf: initialLeaf } : {}),
@@ -308,22 +324,19 @@ export class MultiJoinerCall {
   // Factories
   // -----------------------------------------------------------------
 
-  /** Owner: found the call MLS group, derive the seed, connect + publish,
-   *  and start admitting joiners. */
+  /** Owner: connect, then let the SFU roster decide. An empty room means the
+   *  owner founds the call group (sole founder, no race) and starts admitting
+   *  joiners. A room with people in it means the owner is coming BACK to a
+   *  call a successor kept alive (the maintainer's rule: a joiner who arrived
+   *  in the meantime is admin until the starter returns), so the owner asks
+   *  to be admitted like anyone else and the election hands it the committer
+   *  duty once it is in; if nobody admits it within `OWNER_REJOIN_PROBE_MS`,
+   *  the peers are joiners waiting for a group and the owner founds one. */
   static async host(opts: MultiJoinerCallOptions): Promise<MultiJoinerCall> {
     const wasm = await loadWasm();
     const callIdHex = groupIdHex(opts.callId);
     const jwt = await mintJwt(wasm, opts, callIdHex);
     const ownerKeyHex = hexKey(opts.ownerSignatureKey);
-
-    // Found the group (sole-founder — no race).
-    const group = new wasm.Group(opts.identity);
-    const seed = group.exportSecret(
-      opts.identity,
-      CALL_SEED_LABEL,
-      opts.callId,
-      CALL_SEED_LEN,
-    );
     // Owner-presence rides `self` (ownerPeerTag = null on the owner's client).
     const call = new MultiJoinerCall(
       wasm,
@@ -332,16 +345,88 @@ export class MultiJoinerCall {
       jwt,
       ownerKeyHex,
       null,
-      seed,
-      group.ownLeafIndex,
+      undefined,
+      undefined,
     );
-    call.group = group;
-    call.safetyNumber = safeSafetyNumber(wasm, seed);
-    call.joined = true;
-    opts.onJoined?.();
     await call.start();
-    void call.broadcastOwnProfile();
     return call;
+  }
+
+  /** Owner: found the call group and go live (an empty room, or a probe
+   *  that nobody answered). */
+  private foundGroup(): void {
+    if (this.group !== null || this.joined) return;
+    let group: WasmGroup;
+    let seed: Uint8Array;
+    try {
+      group = new this.wasm.Group(this.opts.identity);
+      seed = this.deriveSeed(group);
+    } catch (err) {
+      this.opts.onError?.(err);
+      return;
+    }
+    this.group = group;
+    this.localLeaf = group.ownLeafIndex;
+    this.joined = true;
+    this.pendingKeyPackage = null;
+    this.clearAdmissionTimer();
+    this.clearRebroadcast();
+    this.clearOwnerProbe();
+    this.clearRebroadcast();
+    this.clearOwnerProbe();
+    this.safetyNumber = safeSafetyNumber(this.wasm, seed);
+    this.opts.onJoined?.();
+    void this.session.publish(seed, this.localLeaf).catch((err) => {
+      this.opts.onError?.(err);
+    });
+    void this.broadcastOwnProfile();
+  }
+
+  /** Owner, in a room with people: ask to be admitted (the successor holds
+   *  the group) and fall back to founding when nobody answers. */
+  private beginOwnerRejoinProbe(): void {
+    if (this.group !== null || this.joined || this.pendingKeyPackage !== null) return;
+    try {
+      const kp = this.opts.identity.createKeyPackage();
+      this.pendingKeyPackage = this.wasm.wrapCallKeyPackage(kp);
+    } catch (err) {
+      this.opts.onError?.(err);
+      return;
+    }
+    this.broadcastKeyPackage();
+    this.startRebroadcast();
+    this.ownerProbeTimer = setTimeout(() => {
+      this.ownerProbeTimer = null;
+      if (this.joined) return;
+      this.pendingKeyPackage = null;
+      this.clearRebroadcast();
+      this.foundGroup();
+    }, OWNER_REJOIN_PROBE_MS);
+  }
+
+  private startRebroadcast(): void {
+    if (this.rebroadcastTimer !== null) return;
+    this.rebroadcastTimer = setInterval(() => {
+      if (this.pendingKeyPackage === null) {
+        this.clearRebroadcast();
+        return;
+      }
+      this.broadcastKeyPackage();
+    }, KEY_PACKAGE_REBROADCAST_MS);
+  }
+
+  private clearRebroadcast(): void {
+    if (this.rebroadcastTimer !== null) {
+      clearInterval(this.rebroadcastTimer);
+      this.rebroadcastTimer = null;
+    }
+  }
+
+  private clearOwnerProbe(): void {
+    if (this.ownerProbeTimer !== null) {
+      clearTimeout(this.ownerProbeTimer);
+      this.ownerProbeTimer = null;
+    }
   }
 
   /** Joiner: mint a fresh KeyPackage, connect signaling-only, relay the KP,
@@ -403,6 +488,8 @@ export class MultiJoinerCall {
   /** Tear down the call. Idempotent. */
   hangUp(): void {
     this.clearAdmissionTimer();
+    this.clearRebroadcast();
+    this.clearOwnerProbe();
     this.lastKnownCameraOn.clear();
     this.session.hangUp();
     this.setRemoteStreams(() => new Map());
@@ -431,6 +518,7 @@ export class MultiJoinerCall {
     if (this.joined) return;
     this.timedOut = true;
     this.pendingKeyPackage = null;
+    this.clearRebroadcast();
     this.session.hangUp();
     this.opts.onNoCommitter?.();
   }
@@ -510,7 +598,16 @@ export class MultiJoinerCall {
         ),
       );
     callActions.setParticipants([this.localParticipant(), ...remotes]);
+    if (this.role === "owner" && this.group === null && !this.joined) {
+      if (remotes.length === 0) {
+        this.foundGroup();
+      } else {
+        this.beginOwnerRejoinProbe();
+      }
+      return;
+    }
     this.broadcastKeyPackage();
+    if (this.pendingKeyPackage !== null) this.startRebroadcast();
   }
 
   private onSfuPeerJoined(
@@ -531,6 +628,7 @@ export class MultiJoinerCall {
   }
 
   private onSfuPeerLeft(peerId: string): void {
+    const memberKeyHex = this.presence.memberKeyFor(peerId);
     this.presence.removePeer(peerId);
     const id = `${PEER_PREFIX}${peerId}`;
     // Forget the departed peer's sticky camera state so a later rejoin under
@@ -538,9 +636,43 @@ export class MultiJoinerCall {
     this.lastKnownCameraOn.delete(id);
     this.peerNames.delete(peerId);
     callActions.participantLeft(id);
-    // The committer may have left → recompute (this client might now be it).
-    // No action needed beyond keeping presence current; the next inbound KP
-    // is evaluated against the fresh election.
+    // Someone who leaves can come back: forget their admission (else the
+    // G-22 dedup re-serves a Welcome a fresh page cannot open and they wait
+    // forever) and, if this client is now the acting committer, remove their
+    // leaf so the key rotates away from them and the group holds only the
+    // people in the room.
+    this.forgetAdmission(peerId, memberKeyHex);
+    if (memberKeyHex !== undefined) this.removeDepartedMember(memberKeyHex);
+  }
+
+  private forgetAdmission(peerId: string, memberKeyHex: string | undefined): void {
+    this.admittedByPeer.delete(peerId);
+    const kpKey = this.kpKeyByPeer.get(peerId);
+    if (kpKey !== undefined) {
+      this.admittedByKp.delete(kpKey);
+      this.kpKeyByPeer.delete(peerId);
+    }
+    if (memberKeyHex !== undefined) this.admittedBySigKey.delete(memberKeyHex);
+  }
+
+  /** Acting committer: remove a departed member's leaf and rekey. */
+  private removeDepartedMember(memberKeyHex: string): void {
+    if (this.group === null || !this.joined) return;
+    if (memberKeyHex === hexKey(this.opts.identity.signaturePublicKey)) return;
+    const member = this.groupMembers().find((m) => m.signatureKeyHex === memberKeyHex);
+    if (member === undefined) return;
+    if (!this.isActingCommitter()) return;
+    let commit: Uint8Array;
+    try {
+      commit = this.group.removeMember(this.opts.identity, member.leafIndex);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("multi-joiner: could not remove a departed member", err);
+      return;
+    }
+    this.session.sendSignalRelayToCall(commit);
+    this.rekeyToCurrentEpoch();
+    this.refreshRoster();
   }
 
   private onRemoteTrack(rt: SfuRemoteTrack): void {
@@ -666,6 +798,7 @@ export class MultiJoinerCall {
     if (sigKeyHex !== null) this.admittedBySigKey.set(sigKeyHex, welcomeWrapped);
     this.admittedByPeer.set(from, welcomeWrapped);
     this.admittedByKp.add(kpKey);
+    this.kpKeyByPeer.set(from, kpKey);
     // Bind the new joiner's peer → its member key for presence.
     for (const m of this.groupMembers()) {
       if (!beforeKeys.has(m.signatureKeyHex)) {
@@ -684,7 +817,8 @@ export class MultiJoinerCall {
 
   /** Joiner side: open the committer's Welcome and go live. */
   private onIncomingWelcome(from: string, welcomeEnvelope: Uint8Array): void {
-    if (this.role !== "joiner" || this.joined) return;
+    // The returning owner is a joiner here too (see `host`).
+    if (this.joined || this.pendingKeyPackage === null) return;
     let group: WasmGroup;
     try {
       group = this.wasm.Group.joinFromWelcome(welcomeEnvelope, this.opts.identity);
@@ -755,6 +889,13 @@ export class MultiJoinerCall {
       return;
     }
     if (processed.kind === "Application") {
+      // The MLS-authenticated sender leaf names the member behind this SFU
+      // peer: bind them, so a later departure of that peer can be answered
+      // with the removal of the right leaf whoever ends up committer.
+      if (processed.senderLeaf !== undefined) {
+        const sender = this.groupMembers().find((m) => m.leafIndex === processed.senderLeaf);
+        if (sender !== undefined) this.presence.bindPeerToMember(from, sender.signatureKeyHex);
+      }
       if (processed.applicationData !== undefined) {
         this.onMemberApplication(from, processed.applicationData);
       }

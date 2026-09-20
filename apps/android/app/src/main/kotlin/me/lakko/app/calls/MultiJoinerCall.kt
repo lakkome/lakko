@@ -160,6 +160,13 @@ class MultiJoinerCall private constructor(
      *  re-send. */
     private val admittedByPeer = HashMap<String, ByteArray>()
     private val admittedByKp = HashSet<String>()
+    /** The exact-KeyPackage guard entry each admitted peer holds, so a
+     *  departure can forget it along with the rest of the admission. */
+    private val kpKeyByPeer = HashMap<String, String>()
+    /** Periodic KeyPackage re-send while `pendingKeyPackage` is set. */
+    private var rebroadcastJob: Job? = null
+    /** The owner's rejoin probe (see [OWNER_REJOIN_PROBE_MS]). */
+    private var ownerProbeJob: Job? = null
 
     /** G-22: PRIMARY admission dedup — the joiner's stable MLS signature (leaf)
      *  key, so a peer re-minting FRESH KeyPackages under one identity is admitted
@@ -201,7 +208,10 @@ class MultiJoinerCall private constructor(
                 localLeaf = initialLeaf ?: 0,
                 audio = opts.audio,
                 video = opts.video,
-                deferPublish = role == Role.JOINER,
+                // Media waits for a seed on both sides: the joiner for its
+                // Welcome, the owner for the SFU roster, which decides whether
+                // it founds the group or comes back into one a successor holds.
+                deferPublish = true,
             ),
             scope = opts.scope,
             callbacks = SfuCallSession.Callbacks(
@@ -247,6 +257,17 @@ class MultiJoinerCall private constructor(
          */
         private const val JOINER_ADMISSION_TIMEOUT_MS = 18_000L
 
+        /** A pending joiner re-sends its KeyPackage this often until admitted,
+         *  so an admission is never lost to ordering: a committer that founds
+         *  the group after the joiner's first broadcast, or that arrives
+         *  later, still gets it. */
+        private const val KEY_PACKAGE_REBROADCAST_MS = 3_000L
+
+        /** The owner, finding other peers already in the room, asks to be
+         *  admitted for this long before concluding nobody there holds a
+         *  group and founding one. */
+        private const val OWNER_REJOIN_PROBE_MS = 5_000L
+
         /** Owner: found the call MLS group, derive the seed, connect +
          *  publish, and start admitting joiners. */
         suspend fun host(opts: Options): MultiJoinerCall {
@@ -254,14 +275,11 @@ class MultiJoinerCall private constructor(
             val jwt = mintJwt(opts, callIdHex)
             val ownerKeyHex = hexKey(opts.ownerSignatureKey)
 
-            // Found the group (sole-founder — no race).
-            val group = Group.create(opts.identity)
-            val seed = group.exportSecret(
-                opts.identity,
-                CALL_SEED_LABEL,
-                opts.callId,
-                CALL_SEED_LEN,
-            )
+            // The SFU roster decides (see `onSfuWelcome`): an empty room means
+            // the owner founds the call group (sole founder, no race); a room
+            // with people in it means the owner is coming BACK to a call a
+            // successor kept alive, so it asks to be admitted like anyone else
+            // and the election hands it the committer duty once it is in.
             // Owner-presence rides `self` (ownerPeerTag = null on the owner).
             val call = MultiJoinerCall(
                 applicationContext = opts.applicationContext,
@@ -270,15 +288,10 @@ class MultiJoinerCall private constructor(
                 jwt = jwt,
                 ownerKeyHex = ownerKeyHex,
                 ownerPeerTag = null,
-                initialSeed = seed,
-                initialLeaf = group.ownLeafIndex().toInt(),
+                initialSeed = null,
+                initialLeaf = null,
             )
-            call.group = group
-            call.safetyNumber = safeSafetyNumber(seed)
-            call.joined = true
-            opts.onJoined()
             call.start()
-            call.broadcastOwnProfile()
             return call
         }
 
@@ -352,8 +365,90 @@ class MultiJoinerCall private constructor(
     /** Tear down the call. Idempotent. */
     fun hangUp() {
         clearAdmissionTimer()
+        clearRebroadcast()
+        clearOwnerProbe()
         lastKnownCameraOn.clear()
         session.hangUp()
+    }
+
+    /** Owner: found the call group and go live (an empty room, or a probe
+     *  that nobody answered). */
+    private fun foundGroup() {
+        if (group != null || joined) return
+        val founded: Group
+        val seed: ByteArray
+        val leaf: Int
+        try {
+            founded = Group.create(opts.identity)
+            seed = deriveSeed(founded)
+            leaf = founded.ownLeafIndex().toInt()
+        } catch (err: Throwable) {
+            opts.onError(err)
+            return
+        }
+        group = founded
+        localLeaf = leaf
+        joined = true
+        pendingKeyPackage = null
+        clearAdmissionTimer()
+        clearRebroadcast()
+        clearOwnerProbe()
+        safetyNumber = safeSafetyNumber(seed)
+        opts.onJoined()
+        broadcastOwnProfile()
+        opts.scope.launch {
+            try {
+                session.publish(seed, leaf)
+            } catch (err: Throwable) {
+                opts.onError(err)
+            }
+        }
+    }
+
+    /** Owner, in a room with people: ask to be admitted (the successor holds
+     *  the group) and fall back to founding when nobody answers. */
+    private fun beginOwnerRejoinProbe() {
+        if (group != null || joined || pendingKeyPackage != null) return
+        try {
+            pendingKeyPackage = wrapCallKeyPackage(opts.identity.createKeyPackage())
+        } catch (err: Throwable) {
+            opts.onError(err)
+            return
+        }
+        broadcastKeyPackage()
+        startRebroadcast()
+        ownerProbeJob = opts.scope.launch {
+            delay(OWNER_REJOIN_PROBE_MS)
+            ownerProbeJob = null
+            if (joined) return@launch
+            pendingKeyPackage = null
+            clearRebroadcast()
+            foundGroup()
+        }
+    }
+
+    private fun startRebroadcast() {
+        if (rebroadcastJob != null) return
+        rebroadcastJob = opts.scope.launch {
+            while (true) {
+                delay(KEY_PACKAGE_REBROADCAST_MS)
+                if (pendingKeyPackage == null) {
+                    rebroadcastJob = null
+                    return@launch
+                }
+                broadcastKeyPackage()
+            }
+        }
+    }
+
+    private fun clearRebroadcast() {
+        rebroadcastJob?.cancel()
+        rebroadcastJob = null
+    }
+
+    private fun clearOwnerProbe() {
+        ownerProbeJob?.cancel()
+        ownerProbeJob = null
     }
 
     /** Mute / unmute the local mic. */
@@ -392,6 +487,7 @@ class MultiJoinerCall private constructor(
         if (joined) return
         timedOut = true
         pendingKeyPackage = null
+        clearRebroadcast()
         session.hangUp()
         opts.onNoCommitter()
     }
@@ -427,7 +523,12 @@ class MultiJoinerCall private constructor(
             .filter { it.peerId != selfPeerId }
             .map { remoteParticipant(nameOf(it.peerId, it.accountPseudonym, it.peerTag), it.peerId) }
         ui.setParticipants(listOf(localParticipant()) + remotes)
+        if (role == Role.OWNER && group == null && !joined) {
+            if (remotes.isEmpty()) foundGroup() else beginOwnerRejoinProbe()
+            return
+        }
         broadcastKeyPackage()
+        if (pendingKeyPackage != null) startRebroadcast()
     }
 
     private fun onSfuPeerJoined(peerId: String, accountPseudonym: String, peerTag: String) {
@@ -439,7 +540,14 @@ class MultiJoinerCall private constructor(
     }
 
     private fun onSfuPeerLeft(peerId: String) {
+        val memberKeyHex = presence.memberKeyFor(peerId)
         presence.removePeer(peerId)
+        // Someone who leaves can come back: forget their admission (else the
+        // G-22 dedup re-serves a Welcome a fresh app cannot open and they wait
+        // forever) and, if this client is now the acting committer, remove
+        // their leaf so the key rotates away from them.
+        forgetAdmission(peerId, memberKeyHex)
+        if (memberKeyHex != null) removeDepartedMember(memberKeyHex)
         peerNames.remove(peerId)
         ui.participantLeft("$PEER_PREFIX$peerId")
         lastKnownCameraOn.remove("$PEER_PREFIX$peerId")
@@ -563,6 +671,7 @@ class MultiJoinerCall private constructor(
         if (sigKeyHex != null) admittedBySigKey[sigKeyHex] = welcomeWrapped
         admittedByPeer[from] = welcomeWrapped
         admittedByKp.add(kpKey)
+        kpKeyByPeer[from] = kpKey
         // Bind the new joiner's peer -> its member key for presence.
         for (m in groupMembers()) {
             if (!beforeKeys.contains(m.signatureKeyHex)) {
@@ -579,9 +688,10 @@ class MultiJoinerCall private constructor(
         broadcastOwnProfile()
     }
 
-    /** Joiner side: open the committer's Welcome and go live. */
+    /** Joiner side: open the committer's Welcome and go live. The returning
+     *  owner is a joiner here too (see `host`). */
     private fun onIncomingWelcome(from: String, welcomeEnvelope: ByteArray) {
-        if (role != Role.JOINER || joined) return
+        if (joined || pendingKeyPackage == null) return
         val joinedGroup: Group
         try {
             joinedGroup = Group.joinFromWelcome(welcomeEnvelope, opts.identity)
@@ -620,6 +730,8 @@ class MultiJoinerCall private constructor(
         joined = true
         pendingKeyPackage = null
         clearAdmissionTimer()
+        clearRebroadcast()
+        clearOwnerProbe()
 
         val seed = deriveSeed(joinedGroup)
         safetyNumber = safeSafetyNumber(seed)
@@ -654,7 +766,18 @@ class MultiJoinerCall private constructor(
             return
         }
         when (processed) {
-            is ProcessedMessage.Application -> onMemberApplication(from, processed.data)
+            is ProcessedMessage.Application -> {
+                // The MLS-authenticated sender leaf names the member behind
+                // this SFU peer: bind them, so a later departure of that peer
+                // can be answered with the removal of the right leaf whoever
+                // is committer.
+                val senderLeaf = processed.senderLeaf?.toInt()
+                if (senderLeaf != null) {
+                    groupMembers().firstOrNull { it.leafIndex == senderLeaf }
+                        ?.let { presence.bindPeerToMember(from, it.signatureKeyHex) }
+                }
+                onMemberApplication(from, processed.data)
+            }
             is ProcessedMessage.Commit -> {
                 rekeyToCurrentEpoch()
                 // Someone was admitted: they decrypt only from this epoch on,
@@ -677,6 +800,29 @@ class MultiJoinerCall private constructor(
         if (name.isEmpty()) return
         peerNames[from] = name
         ui.setParticipantName("$PEER_PREFIX$from", name)
+    }
+
+    private fun forgetAdmission(peerId: String, memberKeyHex: String?) {
+        admittedByPeer.remove(peerId)
+        kpKeyByPeer.remove(peerId)?.let { admittedByKp.remove(it) }
+        if (memberKeyHex != null) admittedBySigKey.remove(memberKeyHex)
+    }
+
+    /** Acting committer: remove a departed member's leaf and rekey. */
+    private fun removeDepartedMember(memberKeyHex: String) {
+        val g = group ?: return
+        if (!joined) return
+        if (memberKeyHex == hexKey(opts.identity.signaturePublicKey())) return
+        val member = groupMembers().firstOrNull { it.signatureKeyHex == memberKeyHex } ?: return
+        if (!isActingCommitter()) return
+        val commit = try {
+            g.removeMember(opts.identity, member.leafIndex.toUInt())
+        } catch (err: Throwable) {
+            Log.w("MultiJoinerCall", "could not remove a departed member", err)
+            return
+        }
+        session.sendSignalRelayToCall(commit)
+        rekeyToCurrentEpoch()
     }
 
     /** Seal the own profile into the call group and relay it to every member.

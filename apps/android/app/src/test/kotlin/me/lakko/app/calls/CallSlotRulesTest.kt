@@ -177,7 +177,7 @@ class CallSlotRulesTest {
 
     @Test
     fun `the alone-end window is the one shared with iOS and web`() {
-        assertEquals(10_000L, GROUP_CALL_ALONE_END_MS)
+        assertEquals(5_000L, GROUP_CALL_ALONE_END_MS)
     }
 
     // ---- Link call --------------------------------------------------------------

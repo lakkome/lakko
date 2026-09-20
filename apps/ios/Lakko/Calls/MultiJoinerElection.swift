@@ -117,6 +117,14 @@ final class CallPresence {
         roster[peerId] = peerTag
     }
 
+    /// The member signature-key hex bound to a peer, or `nil` when this client
+    /// never learnt who that peer is. Read it BEFORE `removePeer`, which forgets
+    /// the binding: it is what lets the committer remove a departed member's
+    /// leaf and forget its admission so the person can come back.
+    func memberKeyFor(peerId: String) -> String? {
+        peerToMember[peerId]
+    }
+
     /// A peer left the SFU room. Also drops any member binding it had.
     func removePeer(peerId: String) {
         roster.removeValue(forKey: peerId)
