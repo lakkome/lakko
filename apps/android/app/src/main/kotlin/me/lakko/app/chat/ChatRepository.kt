@@ -3354,6 +3354,13 @@ public class ChatRepository(
             publish = { groupIdHex -> publishOwnProfile(groupIdHex) },
         )
 
+    /** This account's own profile name, or `null` when none is set. The call
+     *  host puts it on the user's own tile (`docs/ux/calls.md` section 4.4). */
+    public fun ownDisplayName(): String? {
+        val accountId = keyPackageAccount.get()?.accountId ?: return null
+        return me.lakko.app.profile.OwnProfileStore.load(applicationContext, accountId)?.displayName
+    }
+
     /** This account's own profile in wire form, or `null` when none is stored
      *  yet (nothing to publish). */
     private fun ownProfileForWire(): uniffi.lakko_ffi_uniffi.FfiProfile? {

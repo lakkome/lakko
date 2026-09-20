@@ -767,6 +767,9 @@ extension GroupCallHost {
                 SfuCallUi(
                     config: config,
                     ui: ui,
+                    // Section 4.4: the user's own tile carries their own name
+                    // from the first second; `You` only when no name is set.
+                    localDisplayName: GroupCallHost.ownTileName(),
                     resolveDisplayName: GroupCallHost.displayNameResolver(callIdHex: callIdHex, ui: ui)
                 )
             },
@@ -778,6 +781,15 @@ extension GroupCallHost {
             },
             nowMs: { ChatRepository.nowMs() }
         ))
+    }
+
+    /// The name on the user's own tile (`docs/ux/calls.md` section 4.4): the
+    /// profile name, `You` when none is set. Read at call start.
+    @MainActor
+    static func ownTileName() -> String {
+        let name = ProfileDirectory.shared.ownProfile?.displayName?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return name.isEmpty ? "You" : name
     }
 
     /// ADR-0021 — the per-call peer_tag -> label resolver, so the SFU roster

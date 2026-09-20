@@ -328,6 +328,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   const auth = useAuth();
   const chats = useChats();
   const profiles = useProfiles();
+  /** The name on the user's own tile (§4.4): the profile name, `You` when
+   *  none is set. Read at call start; a rename mid-call lands next call. */
+  const ownTileName = (): string => profiles.ownProfile().displayName?.trim() || "You";
   const callLog = useCallLog();
   const groupNames = useGroupNames();
 
@@ -1167,7 +1170,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
           },
         },
         {
-          localDisplayName: "You",
+          localDisplayName: ownTileName(),
           safetyNumber,
           resolveDisplayName,
           onSessionStateChange: (state) => onGroupSessionState(hex, state),
@@ -1584,6 +1587,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       sfuBaseUrl: base,
       sessionToken: secrets.sessionToken,
       media: { audio: true, video: opts.mediaVideo },
+      localDisplayName: ownTileName(),
       onJoined: () => applyLinkEvent(attempt, { kind: "joined" }),
       onEnded: () => applyLinkEvent(attempt, { kind: "ended" }),
       onNoCommitter: () => applyLinkEvent(attempt, { kind: "no-committer" }),
@@ -1992,6 +1996,7 @@ export function CallHostView(): JSX.Element {
           <>
             <Call
               embedded={true}
+              group={true}
               onExit={() => void host.leaveGroupCall()}
               remoteStreamFor={(participantId): MediaStream | undefined =>
                 // The roster id is `peer-<peerId>`; the SFU sets the downstream
@@ -2015,6 +2020,7 @@ export function CallHostView(): JSX.Element {
       <Show when={host.linkCall()?.phase === "live"}>
         <Call
           embedded={true}
+          group={true}
           onExit={() => host.leaveLinkCall()}
           remoteStreamFor={(participantId): MediaStream | undefined =>
             internals.linkHandle()?.remoteStreamFor(participantId)

@@ -105,6 +105,21 @@ final class CallScreenPresentationTests: XCTestCase {
             CallScreenPresentation.layout(remoteCount: 1, remotePicture: true), .video)
     }
 
+    /// Section 4.4: a group call is the gallery from its first second, whoever
+    /// has joined yet. A second person joining a group call turned the screen
+    /// into the 1x1 video fill, with no names and no own tile, on a live call.
+    func testAGroupCallIsAGalleryWhoeverHasJoined() {
+        XCTAssertEqual(
+            CallScreenPresentation.layout(groupCall: true, remoteCount: 0, remotePicture: false),
+            .gallery)
+        XCTAssertEqual(
+            CallScreenPresentation.layout(groupCall: true, remoteCount: 1, remotePicture: true),
+            .gallery)
+        XCTAssertEqual(
+            CallScreenPresentation.layout(groupCall: true, remoteCount: 1, remotePicture: false),
+            .gallery)
+    }
+
     func testMoreThanOneOtherPersonIsAGallery() {
         XCTAssertEqual(
             CallScreenPresentation.layout(remoteCount: 2, remotePicture: false), .gallery)

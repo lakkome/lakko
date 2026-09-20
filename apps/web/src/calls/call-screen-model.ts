@@ -58,6 +58,12 @@ export type CallPhaseKind =
 
 /** What {@link callSurfaceKind} needs to know. */
 export interface CallSurfaceInput {
+  /** What KIND of call this is, not how many people are in it right now. A
+   *  group call is the group surface from its first second (§4.4): the person
+   *  who started it is its first participant and sees their own tile, never a
+   *  portrait of a person who is not there. Defaults to `false` for the 1x1
+   *  paths, which never set it. */
+  readonly groupCall?: boolean;
   /** How many participants are not this device. */
   readonly remoteCount: number;
   /** Whether the sole remote is sending a picture. Ignored when
@@ -70,13 +76,15 @@ export interface CallSurfaceInput {
 /**
  * The layout for this call, right now.
  *
- * Two or more remotes is a group call and keeps the roster grid. One remote and
+ * A group call is the group surface whoever is in it yet (§4.4); on the 1x1
+ * paths two or more remotes also means the roster grid. One remote and
  * a camera on at either end fills the screen (§4.1: the layout changes "for
  * both", and it changes back when the camera stops). Everything else — nobody
  * there yet, or two cameras off — is the portrait, because a portrait of the
  * person you are talking to is never an empty box.
  */
 export function callSurfaceKind(input: CallSurfaceInput): CallSurfaceKind {
+  if (input.groupCall === true) return "group";
   if (input.remoteCount >= 2) return "group";
   if (input.remoteCount === 1 && (input.remoteCameraOn || input.localCameraOn)) return "video";
   return "voice";

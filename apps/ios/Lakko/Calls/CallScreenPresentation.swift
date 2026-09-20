@@ -114,12 +114,20 @@ public enum CallScreenPresentation {
     /// What the screen draws behind the controls.
     ///
     /// - Parameters:
+    ///   - groupCall: what KIND of call this is, not how many people are in it
+    ///     right now. A group call is the gallery from its first second
+    ///     (section 4.4): the person who started it is its first participant
+    ///     and sees their own tile, and a second person joining does not turn
+    ///     it into the 1x1 video fill, which shows no names and no own tile.
+    ///     The 1x1 paths never set it.
     ///   - remoteCount: how many other people are on the call.
     ///   - remotePicture: a remote video frame has actually been rendered —
     ///     ``hasRemotePicture(trackPresent:framesArrived:)``, never a bare track
     ///     handle. With no picture the portrait is the honest thing to show.
-    public static func layout(remoteCount: Int, remotePicture: Bool) -> CallScreenLayout {
-        if remoteCount > 1 { return .gallery }
+    public static func layout(
+        groupCall: Bool = false, remoteCount: Int, remotePicture: Bool
+    ) -> CallScreenLayout {
+        if groupCall || remoteCount > 1 { return .gallery }
         return remotePicture ? .video : .portrait
     }
 

@@ -678,6 +678,9 @@ public struct CallScreen: View {
 
     private var layout: CallScreenLayout {
         CallScreenPresentation.layout(
+            // The SFU group call drives this screen from outside; the 1x1
+            // `CallSession` path never does.
+            groupCall: externallyDriven,
             remoteCount: remoteParticipants.count,
             remotePicture: hasRemotePicture)
     }

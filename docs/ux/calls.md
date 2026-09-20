@@ -242,6 +242,12 @@ were each picking someone else and one of them was picking wrong:
   avatar while other people's cameras run in small tiles was the defect - the
   first person to join took the big slot for the whole call, whatever they were
   sending.
+- **The user sees themself the moment they are in the call.** The person who
+  starts a group call is its first participant, so there is no waiting screen
+  and no message about others joining: the screen is the group screen from the
+  first second, with the user's own tile, their own camera when it is on, and
+  their own name on it (the profile name; `You` only when no name is set). The
+  status line already carries the count.
 - **The user's own tile is never the large one** unless they are alone in the
   call, when their own preview is the only thing there is to show. With others
   present it sits in the grid like everyone else's.

@@ -283,11 +283,19 @@ internal class ChatRepositoryGroupCallPort(
     override suspend fun publishSignal(groupIdHex: String, body: FfiCallSignalingBody): Boolean =
         repository.publishGroupCallSignal(groupIdHex, body)
 
+    /** The name on the user's own tile (`docs/ux/calls.md` section 4.4): the
+     *  profile name, `You` when none is set. Read at call start. */
+    private fun ownTileName(): String =
+        repository.ownDisplayName()?.trim()?.takeIf { it.isNotEmpty() } ?: "You"
+
     override fun createSession(request: GroupCallSessionRequest, ui: CallUiState): GroupCallSessionHandle {
         val profileNames = me.lakko.app.profile.ProfileDirectory.get(applicationContext)
         val names = peerDisplayNameResolver(request.callIdHex, profileNames)
         val sfu = SfuCallUi(
             applicationContext = applicationContext,
+            // Section 4.4: the user's own tile carries their own name from the
+            // first second; `You` only when no profile name is set.
+            localDisplayName = ownTileName(),
             config = SfuCallSession.Config(
                 sfuBaseUrl = request.sfuBaseUrl,
                 jwt = request.jwt,

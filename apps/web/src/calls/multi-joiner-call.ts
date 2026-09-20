@@ -124,6 +124,9 @@ export interface MultiJoinerCallOptions {
   readonly sessionToken: string;
   /** Mic / camera request. */
   readonly media: { readonly audio: boolean; readonly video: boolean };
+  /** The name on the local tile (§4.4: the user's own profile name). Defaults
+   *  to "You". */
+  readonly localDisplayName?: string;
   /** `services/auth` base URL for the JWT mint (default `/api/auth`). */
   readonly authBaseUrl?: string;
   /** ICE servers (default public STUN; TURN is a follow-up). */
@@ -796,7 +799,7 @@ export class MultiJoinerCall {
   private localParticipant(): Participant {
     return {
       id: "local",
-      displayName: "You",
+      displayName: this.opts.localDisplayName ?? "You",
       isLocal: true,
       // See `sfu-call-ui.ts`: `media.audio` is always true on web, so a muted
       // start is carried in the store instead (docs/ux/calls.md section 3.2).

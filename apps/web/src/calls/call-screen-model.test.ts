@@ -331,3 +331,33 @@ describe("featuredParticipant (§4.4)", () => {
     expect(galleryParticipants([], null)).toEqual([]);
   });
 });
+
+describe("callSurfaceKind on a group call (§4.4)", () => {
+  it("is the group surface before anyone else has joined", () => {
+    // The person who started the call is its first participant; a portrait
+    // of a person who is not there was what the web drew instead.
+    expect(
+      callSurfaceKind({
+        groupCall: true,
+        remoteCount: 0,
+        remoteCameraOn: false,
+        localCameraOn: true,
+      }),
+    ).toBe("group");
+  });
+
+  it("stays the group surface with one other person, camera or no camera", () => {
+    expect(
+      callSurfaceKind({ groupCall: true, remoteCount: 1, remoteCameraOn: true, localCameraOn: false }),
+    ).toBe("group");
+    expect(
+      callSurfaceKind({ groupCall: true, remoteCount: 1, remoteCameraOn: false, localCameraOn: false }),
+    ).toBe("group");
+  });
+
+  it("leaves the 1x1 paths alone when the flag is absent", () => {
+    expect(
+      callSurfaceKind({ remoteCount: 1, remoteCameraOn: false, localCameraOn: false }),
+    ).toBe("voice");
+  });
+});

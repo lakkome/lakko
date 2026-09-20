@@ -1062,6 +1062,9 @@ function seedMockCall(): () => void {
 const Call: Component<{
   embedded?: boolean;
   onExit?: () => void;
+  /** A group call (SFU or call link): the group surface from the first
+   *  second, whoever has joined yet (§4.4). */
+  group?: boolean;
   /** The other person, for the portrait, the status line and the encryption
    *  sheet's one sentence (§5). Omitted on a group call, where there is no
    *  "other person". */
@@ -1181,6 +1184,7 @@ const Call: Component<{
 
   const surface = createMemo<CallSurfaceKind>(() =>
     callSurfaceKind({
+      groupCall: props.group === true,
       remoteCount: remotes().length,
       remoteCameraOn: remoteCameraOn(),
       localCameraOn: localCameraOn(),

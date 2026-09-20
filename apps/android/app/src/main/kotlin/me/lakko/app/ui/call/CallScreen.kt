@@ -958,19 +958,6 @@ private fun ParticipantGrid(
             }
         }
 
-        // Waiting overlay when alone.
-        if (state.isAlone() && phase is CallUiState.CallPhase.Connected) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Box(
-                    modifier = Modifier
-                        .background(LakkoDark.surface.copy(alpha = 0.9f), RoundedCornerShape(12.dp))
-                        .border(1.dp, LakkoDark.border, RoundedCornerShape(12.dp))
-                        .padding(horizontal = 24.dp, vertical = 16.dp),
-                ) {
-                    Text("Waiting for others to join...", color = LakkoDark.text, fontSize = 14.sp)
-                }
-            }
-        }
     }
 }
 
