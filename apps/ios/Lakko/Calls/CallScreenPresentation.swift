@@ -59,6 +59,30 @@ public enum CallControlFace: String, Equatable, Sendable {
     case solid
 }
 
+/// The sizes one control row is drawn at — see
+/// ``CallScreenPresentation/fitControlBar(availableWidth:count:)``.
+public struct CallControlBarFit: Equatable, Sendable {
+    /// Width of every column; the row is `count` of these plus the gaps and
+    /// the bar's padding.
+    public let column: CGFloat
+    /// Diameter of an ordinary control's circle.
+    public let diameter: CGFloat
+    /// Diameter of the end button's circle.
+    public let endDiameter: CGFloat
+
+    public init(column: CGFloat, diameter: CGFloat, endDiameter: CGFloat) {
+        self.column = column
+        self.diameter = diameter
+        self.endDiameter = endDiameter
+    }
+
+    /// The spec sizes, for a row with room to spare.
+    public static let spec = CallControlBarFit(
+        column: CallScreenPresentation.endDiameter,
+        diameter: CallScreenPresentation.controlDiameter,
+        endDiameter: CallScreenPresentation.endDiameter)
+}
+
 // MARK: - The screen's shape
 
 /// What the call screen is showing behind the controls.
@@ -82,16 +106,54 @@ public enum CallScreenPresentation {
     public static let controlDiameter: CGFloat = 64
     /// The end button is bigger, and the only red thing on the screen.
     public static let endDiameter: CGFloat = 72
-    /// The even gap between controls.
-    public static let controlGap: CGFloat = 16
+    /// The even gap between controls. The same 12 as Android's row, so the
+    /// two shrink alike under `fitControlBar` (the spec fixes the circles and
+    /// "twice the gap" for the end button, not the gap itself).
+    public static let controlGap: CGFloat = 12
     /// The end button is set apart by twice that gap.
     public static var endGap: CGFloat { controlGap * 2 }
     /// A touch target never falls below this, however narrow the screen.
     public static let minimumTouchTarget: CGFloat = 44
+    /// A circle never shrinks below this under `fitControlBar` (Android's
+    /// floor, above the touch-target minimum so the glyph stays legible).
+    public static let minimumControlDiameter: CGFloat = 48
     /// A control that cannot be used is dimmed to this, never hidden.
     public static let disabledOpacity: Double = 0.4
     /// How long a connected video call waits before fading the row out.
     public static let autoHideAfter: TimeInterval = 5
+
+    /// The bar's own horizontal padding, inside the rounded container.
+    public static let barHorizontalPadding: CGFloat = 16
+
+    /// Size the control row so that every control, the end button included,
+    /// is on the screen.
+    ///
+    /// At the spec sizes five controls do not fit a 402 pt iPhone: five
+    /// columns of 72, five gaps and the bar's padding come to 452 pt, and on
+    /// the four-way call the Speaker circle was clipped at the
+    /// left edge while the bar ran past the right. When the room is short the
+    /// circles shrink together, keeping their ratio and never going under the
+    /// minimum touch target; with room to spare they stay at the spec sizes.
+    /// The same rule as Android's `fitCallControlBar`, so the two rows shrink
+    /// alike on the same width.
+    ///
+    /// - Parameters:
+    ///   - availableWidth: the width the bar may take, margins already removed.
+    ///   - count: how many controls the row holds.
+    public static func fitControlBar(availableWidth: CGFloat, count: Int) -> CallControlBarFit {
+        guard count > 0 else {
+            return CallControlBarFit(
+                column: endDiameter, diameter: controlDiameter, endDiameter: endDiameter)
+        }
+        // One gap per control: `count - 1` between them plus the extra one that
+        // sets the end button apart.
+        let room = availableWidth - 2 * barHorizontalPadding - CGFloat(count) * controlGap
+        let column = min(room / CGFloat(count), endDiameter)
+        let scale = min(max(column / endDiameter, 0), 1)
+        let end = max(endDiameter * scale, minimumControlDiameter)
+        let normal = max(controlDiameter * scale, minimumControlDiameter)
+        return CallControlBarFit(column: max(column, end), diameter: normal, endDiameter: end)
+    }
 
     // MARK: Layout
 

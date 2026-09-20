@@ -86,6 +86,47 @@ final class CallScreenPresentationTests: XCTestCase {
         }
     }
 
+    // MARK: - Fitting the row to the screen (section 4.1.1)
+
+    /// The iPhone 17 that showed the defect: 402 pt across, the bar inset 12 pt
+    /// each side. Five columns at the spec sizes come to 452 pt.
+    func testFiveControlsFitA402PointPhoneWithTheEndButtonOnTheScreen() {
+        let fit = CallScreenPresentation.fitControlBar(availableWidth: 402 - 24, count: 5)
+        let row = 5 * fit.column + 5 * CallScreenPresentation.controlGap
+            + 2 * CallScreenPresentation.barHorizontalPadding
+        XCTAssertLessThanOrEqual(row, 378 + 0.01, "row \(row) must fit 378 pt")
+        XCTAssertLessThanOrEqual(fit.endDiameter, fit.column)
+        XCTAssertGreaterThanOrEqual(fit.diameter, CallScreenPresentation.minimumControlDiameter)
+        XCTAssertGreaterThan(fit.endDiameter, fit.diameter)
+    }
+
+    func testWithRoomToSpareTheControlsKeepTheSpecSizes() {
+        let fit = CallScreenPresentation.fitControlBar(availableWidth: 800, count: 5)
+        XCTAssertEqual(fit, .spec)
+    }
+
+    func testANarrowPhoneNeverDropsAControlUnderTheMinimumTouchTarget() {
+        let fit = CallScreenPresentation.fitControlBar(availableWidth: 320 - 24, count: 5)
+        XCTAssertGreaterThanOrEqual(fit.diameter, CallScreenPresentation.minimumControlDiameter)
+        XCTAssertGreaterThanOrEqual(fit.endDiameter, CallScreenPresentation.minimumControlDiameter)
+    }
+
+    func testTheFourControlRowOfAOneToOneCallFitsAtSpecSizesOnA402PointPhone() {
+        let fit = CallScreenPresentation.fitControlBar(availableWidth: 402 - 24, count: 4)
+        XCTAssertEqual(fit.diameter, CallScreenPresentation.controlDiameter)
+        XCTAssertEqual(fit.endDiameter, CallScreenPresentation.endDiameter)
+    }
+
+    /// The same numbers Android's `fitCallControlBar` produces for its 411 dp
+    /// phone, so the two rows shrink alike.
+    func testTheFitAgreesWithAndroidOnItsOwnWidth() {
+        let fit = CallScreenPresentation.fitControlBar(availableWidth: 411 - 24, count: 5)
+        // (411 - 24 - 32 - 60) / 5 = 59; 64 * 59 / 72 = 52.44.
+        XCTAssertEqual(fit.column, 59, accuracy: 0.01)
+        XCTAssertEqual(fit.diameter, 52.4444, accuracy: 0.01)
+        XCTAssertEqual(fit.endDiameter, 59, accuracy: 0.01)
+    }
+
     // MARK: - Which screen is drawn (section 4)
 
     func testAVoiceCallIsAPortrait() {

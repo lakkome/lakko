@@ -256,6 +256,13 @@ were each picking someone else and one of them was picking wrong:
 - **The grid keeps roster order** and never reorders on its own. When the person
   in the large tile stops sending video, the next one sending video takes the
   slot and they drop into the grid where their roster position puts them.
+- **The control bar fits the screen it is on.** Five circles at the sizes of
+  section 4.1.1 do not fit a 402 pt phone, so when the room is short the
+  circles shrink together, keeping their ratio and never going under the 44 pt
+  touch target; with room to spare they stay at the spec sizes. The same rule
+  on every client, so the rows shrink alike on the same width. A row wider than
+  the screen was found on the iPhone 17 with the Speaker circle clipped at the
+  left edge and the End button past the right one.
 - **The tiles never sit under the status line or the control bar.** The scroll
   area reserves the height of both, so the last row of tiles is fully visible
   above the bar and the first row starts below the status line. The bar still

@@ -60,11 +60,14 @@ struct CameraCheckScreen: View {
                 .accessibilityHidden(true)
             }
 
-            VStack(spacing: 0) {
-                header
-                Spacer()
-                controls
-                    .padding(.bottom, 28)
+            GeometryReader { geo in
+                VStack(spacing: 0) {
+                    header
+                    Spacer()
+                    controls(width: geo.size.width - 24)
+                        .padding(.bottom, 28)
+                }
+                .frame(maxWidth: .infinity)
             }
         }
         .preferredColorScheme(.dark)
@@ -136,8 +139,8 @@ struct CameraCheckScreen: View {
     /// Microphone and camera either side of the Call button — the same round
     /// buttons the call itself uses, in the same floating bar, so nothing on
     /// this screen looks like a settings row.
-    private var controls: some View {
-        CallControlsBar {
+    private func controls(width: CGFloat) -> some View {
+        CallControlsBar(availableWidth: width, count: 3) {
             CallControlButton(
                 control: .microphone,
                 systemImage: micOn ? "mic.fill" : "mic.slash.fill",

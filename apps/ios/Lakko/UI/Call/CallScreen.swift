@@ -832,6 +832,15 @@ public struct CallScreen: View {
     // MARK: - The call
 
     private var callView: some View {
+        GeometryReader { geo in
+            callView(width: geo.size.width)
+        }
+    }
+
+    /// The bar's margin from each screen edge.
+    private static let barMargin: CGFloat = 12
+
+    private func callView(width: CGFloat) -> some View {
         ZStack {
             CallBackdrop(identity: tintIdentity)
 
@@ -882,7 +891,7 @@ public struct CallScreen: View {
                 }
                 Spacer(minLength: 0)
                 if controlsVisible {
-                    controlsBar
+                    controlsBar(width: width - 2 * Self.barMargin)
                         .padding(.bottom, layout == .portrait ? 56 : 24)
                         .transition(.opacity)
                 }
@@ -1063,8 +1072,8 @@ public struct CallScreen: View {
 
     // MARK: - Controls
 
-    private var controlsBar: some View {
-        CallControlsBar {
+    private func controlsBar(width: CGFloat) -> some View {
+        CallControlsBar(availableWidth: width, count: controls.count) {
             ForEach(controls) { control in
                 if control == .end { CallControlsEndSpacer() }
                 controlButton(control)
@@ -1143,15 +1152,7 @@ public struct CallScreen: View {
                 Label("Settings", systemImage: "gearshape")
             }
         } label: {
-            VStack(spacing: 6) {
-                CallControlFaceView(
-                    systemImage: "ellipsis",
-                    face: CallScreenPresentation.face(.overflow, on: false))
-                Text(CallControl.overflow.label)
-                    .font(.caption2)
-                    .foregroundStyle(Color.white.opacity(0.75))
-            }
-            .opacity(enabled ? 1 : CallScreenPresentation.disabledOpacity)
+            CallControlMenuLabel(control: .overflow, systemImage: "ellipsis", enabled: enabled)
         }
         .disabled(!enabled)
         .accessibilityLabel(CallStatusText.spokenControlLabel(.overflow, on: false))

@@ -11,6 +11,21 @@ import SwiftUI
 /// Which controls exist and whether each can be pressed is decided in
 /// ``CallScreenPresentation``, so this file only draws.
 
+// MARK: - The fit
+
+/// The sizes the row is drawn at, set by ``CallControlsBar`` from the width it
+/// is given and read by every ``CallControlButton`` inside it.
+private struct CallControlFitKey: EnvironmentKey {
+    static let defaultValue = CallControlBarFit.spec
+}
+
+extension EnvironmentValues {
+    var callControlFit: CallControlBarFit {
+        get { self[CallControlFitKey.self] }
+        set { self[CallControlFitKey.self] = newValue }
+    }
+}
+
 // MARK: - The circle
 
 /// One control's face. Off is the loud state: solid white with a dark slashed
@@ -62,11 +77,10 @@ struct CallControlButton: View {
     var enabled: Bool = true
     var busy: Bool = false
     let action: () -> Void
+    @Environment(\.callControlFit) private var fit
 
     private var diameter: CGFloat {
-        control == .end
-            ? CallScreenPresentation.endDiameter
-            : CallScreenPresentation.controlDiameter
+        control == .end ? fit.endDiameter : fit.diameter
     }
 
     var body: some View {
@@ -92,13 +106,43 @@ struct CallControlButton: View {
             // A control is dimmed when it cannot be used, never hidden: a
             // disappearing button moves every other one under the thumb.
             .opacity(enabled ? 1 : CallScreenPresentation.disabledOpacity)
-            // Touch targets stay at least 44 pt however narrow the screen gets.
+            // Every column is the same width, sized to the screen by the bar;
+            // touch targets stay at least 44 pt however narrow it gets.
             .contentShape(Rectangle())
-            .frame(minWidth: CallScreenPresentation.minimumTouchTarget)
+            .frame(width: fit.column)
         }
         .buttonStyle(.plain)
         .disabled(!enabled || busy)
         .accessibilityLabel(CallStatusText.spokenControlLabel(control, on: on))
+    }
+}
+
+// MARK: - A menu's face
+
+/// The face of a control that opens a menu rather than toggling (the group
+/// call's More). Drawn here so it reads the same fit as every button in the
+/// bar; when it was built inline in the call screen it kept the spec size
+/// while the others shrank and sat a size larger than its neighbours.
+struct CallControlMenuLabel: View {
+    let control: CallControl
+    let systemImage: String
+    var enabled: Bool = true
+    @Environment(\.callControlFit) private var fit
+
+    var body: some View {
+        VStack(spacing: 6) {
+            CallControlFaceView(
+                systemImage: systemImage,
+                face: CallScreenPresentation.face(control, on: false),
+                diameter: fit.diameter)
+            Text(control.label)
+                .font(.caption2)
+                .foregroundStyle(Color.white.opacity(0.75))
+                .fixedSize()
+        }
+        .opacity(enabled ? 1 : CallScreenPresentation.disabledOpacity)
+        .contentShape(Rectangle())
+        .frame(width: fit.column)
     }
 }
 
@@ -107,13 +151,26 @@ struct CallControlButton: View {
 /// The row itself: equal circles, evenly spaced, the end button set apart by
 /// twice the gap, all inside one rounded translucent container.
 struct CallControlsBar<Content: View>: View {
+    /// The width the bar may take, margins already removed. `nil` draws the
+    /// spec sizes (a preview, or a screen that has not measured itself).
+    var availableWidth: CGFloat? = nil
+    /// How many controls the row holds; with `availableWidth`, what the fit is
+    /// computed from (`docs/ux/calls.md` section 4.1.1, and see
+    /// `CallScreenPresentation.fitControlBar`).
+    var count: Int = 0
     @ViewBuilder let content: () -> Content
+
+    private var fit: CallControlBarFit {
+        guard let width = availableWidth, count > 0 else { return .spec }
+        return CallScreenPresentation.fitControlBar(availableWidth: width, count: count)
+    }
 
     var body: some View {
         HStack(spacing: CallScreenPresentation.controlGap) {
             content()
         }
-        .padding(.horizontal, 20)
+        .environment(\.callControlFit, fit)
+        .padding(.horizontal, CallScreenPresentation.barHorizontalPadding)
         .padding(.vertical, 14)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 32, style: .continuous))
         .overlay(
