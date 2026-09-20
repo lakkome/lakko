@@ -54,7 +54,10 @@ export type SfuErrorCode =
   | "backpressure-drop"
   | "rate-limited"
   | "bad-sdp"
-  | "bad-ice-candidate";
+  | "bad-ice-candidate"
+  /** The call ended before this socket arrived (`services/sfu` call
+   *  lifetime): sent in place of the Welcome, then the socket closes. */
+  | "call-ended";
 
 export interface SfuWelcome {
   readonly kind: "welcome";

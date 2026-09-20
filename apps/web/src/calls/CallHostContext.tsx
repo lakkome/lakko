@@ -171,6 +171,8 @@ import {
   liveGroupCallsFor,
 } from "./group-call-store";
 import type { SfuCallState } from "./sfu-call-session";
+import { SFU_CALL_STATE_PROBE_MS, parseSfuCallState, sfuCallStateUrl } from "./sfu-call-state";
+import { callEndedAtMs } from "./sfu-keepalive";
 import { createSfuCallUi, type SfuCallUiHandle } from "./sfu-call-ui";
 import { sfuBaseUrl } from "./sfu-config";
 import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
@@ -1185,7 +1187,15 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       await handle.connect();
       return { kind: "connected" };
     } catch (err) {
+      // The SFU says the call ended before this device arrived
+      // (`sfu-call-state.ts`): close the chat's record for everyone rather
+      // than report a failure, since nothing failed on this side.
+      const endedByServer = groupHandle()?.session.callEndedByServer() === true;
       await leaveGroupCall("error");
+      if (endedByServer) {
+        await endGroupCallRecord(groupIdB64, hex, callId);
+        return { kind: "ended" };
+      }
       return {
         kind: "failed",
         message: `Could not ${verb} group call: ${err instanceof Error ? err.message : String(err)}`,
@@ -1233,6 +1243,53 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
 
   /** Publish this device's `GroupCallJoin` (first Join or heartbeat) and apply
    *  it locally: our own publish never comes back through the poll. */
+  /**
+   * Close a group call's record on this device and for the chat: the SFU
+   * said the call ended (`sfu-call-state.ts`). Any member may say so — the
+   * End signal carries only the call id, and a record that is over on the
+   * server is over for everyone.
+   */
+  async function endGroupCallRecord(
+    groupIdB64: string,
+    callIdHex: string,
+    callId: Uint8Array,
+  ): Promise<void> {
+    applyGroupCallEvent(groupIdB64, { kind: "end", callIdHex });
+    dismissGroupCall(callIdHex);
+    try {
+      await publishGroupControl(groupIdB64, (w) => w.composeCallEndSignaling(callId, "hungUp"));
+    } catch (err) {
+      console.warn("group call: could not publish the End the SFU reported", err);
+    }
+  }
+
+  /**
+   * Ask the SFU whether a call this device is offering to join is still
+   * there, and close its record when it is not (`sfu-call-state.ts`). Never
+   * throws; a probe that cannot be answered changes nothing.
+   */
+  async function probeGroupCallState(groupIdB64: string, callIdHex: string): Promise<void> {
+    const base = sfuBaseUrl();
+    const secrets = auth.identitySecrets();
+    const callId = hexToBytes(callIdHex);
+    if (base === null || secrets === null || callId === null) return;
+    try {
+      const wasm = await loadWasm();
+      const jwt = new CallJwtClient(wasm);
+      jwt.setSessionToken(secrets.sessionToken);
+      const minted = await jwt.mint(callIdHex, "participant");
+      const res = await fetch(sfuCallStateUrl(base, callIdHex, minted.jwt));
+      if (!res.ok) return;
+      const state = parseSfuCallState((await res.json()) as unknown);
+      if (state !== "ended") return;
+      // Still shown as live, and this device is still not in it?
+      if (activeGroupCall?.callIdHex === callIdHex) return;
+      await endGroupCallRecord(groupIdB64, callIdHex, callId);
+    } catch {
+      // Unreachable SFU, a refused mint: the record stays as it is.
+    }
+  }
+
   function publishGroupJoin(g: ActiveGroupCall): void {
     // The leaf the receivers check the body against is the sender leaf of
     // the frame, so name the leaf this device holds NOW.
@@ -1299,7 +1356,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
    * group call this device never joined: nothing rang, so nothing was missed,
    * and the group-call banner is what announces a live one.
    */
-  function recordGroupCall(g: ActiveGroupCall): void {
+  function recordGroupCall(g: ActiveGroupCall, endedAtMs: number): void {
     const connected = g.connectedAtMs !== null;
     callLog.record(g.groupIdB64, {
       id: g.callIdHex,
@@ -1309,15 +1366,18 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       // missed, and the group-call banner is what announces a live one.
       outcome: g.initiator ? "outgoing" : "incoming",
       video: g.video,
-      durationMs: connected ? Math.max(0, Date.now() - (g.connectedAtMs as number)) : null,
+      durationMs: connected ? Math.max(0, endedAtMs - (g.connectedAtMs as number)) : null,
       startedAtMs: g.startedAtMs,
     });
   }
 
   async function leaveGroupCall(reason: GroupLeaveReason): Promise<void> {
+    // Read before the slot is released: the call ended when the link was last
+    // known alive, not when this device noticed (`callEndedAtMs`).
+    const lastInbound = groupHandle()?.session.lastInboundAtMs() ?? 0;
     const { call: g, failed } = releaseGroupSlot();
     if (g === null) return;
-    recordGroupCall(g);
+    recordGroupCall(g, callEndedAtMs(Date.now(), lastInbound));
     const account = accountId();
     const rec = account === null ? undefined : groupCallsFor(account, g.groupIdB64).get(g.callIdHex);
     const plan = planGroupCallLeave({
@@ -1818,6 +1878,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     dismissedGroupCalls,
     dismissGroupCall,
     anyCallInProgress,
+    probeGroupCallState,
     linkHandle,
     linkViewShown: () => linkViewClaims() > 0,
   };
@@ -1833,6 +1894,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
 
 /** What only the host's own view needs. */
 interface CallHostInternals {
+  /** Ask the SFU whether a call offered as joinable is still there; close
+   *  its record when the SFU says it ended (`sfu-call-state.ts`). */
+  probeGroupCallState(groupIdB64: string, callIdHex: string): Promise<void>;
   readonly remoteStream: Accessor<MediaStream | null>;
   readonly localStream: Accessor<MediaStream | null>;
   readonly remoteWantsVideo: Accessor<boolean>;
@@ -2197,10 +2261,10 @@ function GroupCallBanner(): JSX.Element {
   const [failure, setFailure] = createSignal<{ callIdHex: string; message: string } | null>(null);
   const [joining, setJoining] = createSignal(false);
 
-  const banner = createMemo(() => {
+  /** The calls the chat records say are in progress, one per group. */
+  const liveCalls = createMemo((): { groupIdB64: string; callIdHex: string }[] => {
     const s = auth.state();
-    if (s.kind !== "session") return null;
-    foregroundVersion();
+    if (s.kind !== "session") return [];
     const groups = chats.groups();
     const ownId = chats.identity();
     const viewer: GroupCallViewer | undefined =
@@ -2210,12 +2274,34 @@ function GroupCallBanner(): JSX.Element {
             ownMemberKey: base64Encode(ownId.signaturePublicKey),
             inCallIdHex: host.groupCall()?.callIdHex ?? null,
           };
-    const live = liveGroupCallsFor(
+    return liveGroupCallsFor(
       s.account.accountId,
       groups.map((g) => g.groupIdB64),
       clock(),
       viewer,
     ).map((l) => ({ groupIdB64: l.groupIdB64, callIdHex: l.call.callIdHex }));
+  });
+
+  // While a call is offered as joinable, ask the SFU every
+  // `SFU_CALL_STATE_PROBE_MS` whether it is still there, and close the record
+  // when it is not (`sfu-call-state.ts`). The call this device is in needs
+  // no probe: its own socket is the proof.
+  createEffect(() => {
+    const targets = liveCalls().filter((l) => l.callIdHex !== host.groupCall()?.callIdHex);
+    if (targets.length === 0) return;
+    const probe = (): void => {
+      for (const t of targets) void internals.probeGroupCallState(t.groupIdB64, t.callIdHex);
+    };
+    probe();
+    const timer = setInterval(probe, SFU_CALL_STATE_PROBE_MS);
+    onCleanup(() => clearInterval(timer));
+  });
+
+  const banner = createMemo(() => {
+    const s = auth.state();
+    if (s.kind !== "session") return null;
+    foregroundVersion();
+    const live = liveCalls();
     return selectGroupCallBanner({
       live,
       isChatOpen: (g) => receive.coordinator.isForeground(g),

@@ -363,6 +363,11 @@ pub enum ErrorCode {
     BadSdp,
     /// `ClientFrame::IceCandidate.candidate_sdp` failed to parse.
     BadIceCandidate,
+    /// The call this socket's token names ended before it arrived: the last
+    /// participant left more than the SFU's empty grace ago. Sent in place of
+    /// the Welcome, after which the SFU closes the socket. The member that
+    /// receives it closes the call's record for its chat.
+    CallEnded,
 }
 
 // ---------------------------------------------------------------------------

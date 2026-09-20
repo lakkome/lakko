@@ -231,7 +231,7 @@ final class GroupCallHostRulesTests: XCTestCase {
     func testSomeoneComingBackDisarmsTheAloneEnd() {
         XCTAssertEqual(GroupCallHostRules.aloneAction(remoteCount: 1, sawRemote: true, armed: true), .disarm)
         XCTAssertEqual(GroupCallHostRules.aloneAction(remoteCount: 0, sawRemote: true, armed: true), .none)
-        XCTAssertEqual(GroupCallHostRules.aloneEndMs, 10_000)
+        XCTAssertEqual(GroupCallHostRules.aloneEndMs, 5_000)
     }
 }
 
@@ -407,6 +407,8 @@ final class FakeGroupCallHandle: GroupCallHandle {
     var rekeys: [Data] = []
     var micGates: [Bool] = []
     var sessionState: SfuCallSession.State = .idle
+    var lastInboundAtMs: Int64 = 0
+    var callEndedByServer = false
     var connectError: Error?
 
     func connect() async throws {

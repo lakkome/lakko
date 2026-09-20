@@ -42,7 +42,7 @@ use lakko_svc_sfu::{
     build_app,
     config::Config,
     jwks::JwksCache,
-    protocol::{ClientFrame, RelayTarget, ServerFrame},
+    protocol::{ClientFrame, ErrorCode, RelayTarget, ServerFrame},
 };
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -620,4 +620,111 @@ async fn a_peer_that_answers_pings_is_kept_through_several_idle_windows() {
     );
     let b_frames = b_reader.await.expect("B reader");
     assert!(b_frames.is_empty(), "B received {b_frames:?} while idle");
+}
+
+// ---------------------------------------------------------
+// When a call is over (`call_lifetime.rs`)
+// ---------------------------------------------------------
+
+/// The state route follows the room, and a join after the empty grace is
+/// refused with `CallEnded` in place of the Welcome. The wait is the real
+/// grace: this test is about the wiring, the rule itself is unit-tested
+/// against an injected clock.
+#[tokio::test]
+async fn a_call_left_empty_past_the_grace_is_over_for_the_next_joiner() {
+    let key = test_key(0x21);
+    let addr = spawn_server(key.jwks.clone()).await;
+    let call = "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e";
+    let jwt_a = mint(
+        &key,
+        "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        call,
+        CallRole::Participant,
+    );
+    let jwt_b = mint(
+        &key,
+        "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        call,
+        CallRole::Participant,
+    );
+    let state = |jwt: &str| format!("http://{addr}/v1/calls/{call}?token={jwt}");
+
+    // Never seen: a first join founds it.
+    let body: serde_json::Value = reqwest::get(state(&jwt_a))
+        .await
+        .expect("state request")
+        .json()
+        .await
+        .expect("state json");
+    assert_eq!(body["state"], "unknown");
+
+    let (mut ws_a, _) = tokio_tungstenite::connect_async(ws_url(&addr, &jwt_a))
+        .await
+        .expect("ws connect");
+    assert!(matches!(
+        recv_frame(&mut ws_a).await,
+        ServerFrame::Welcome { .. }
+    ));
+    let body: serde_json::Value = reqwest::get(state(&jwt_b))
+        .await
+        .expect("state request")
+        .json()
+        .await
+        .expect("state json");
+    assert_eq!(body["state"], "live");
+    assert_eq!(body["peers"], 1);
+
+    // The last one out starts the grace.
+    ws_a.close(None).await.expect("close");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let body: serde_json::Value = reqwest::get(state(&jwt_b))
+        .await
+        .expect("state request")
+        .json()
+        .await
+        .expect("state json");
+    assert_eq!(body["state"], "closing");
+
+    tokio::time::sleep(lakko_svc_sfu::call_lifetime::CALL_EMPTY_GRACE).await;
+    let body: serde_json::Value = reqwest::get(state(&jwt_b))
+        .await
+        .expect("state request")
+        .json()
+        .await
+        .expect("state json");
+    assert_eq!(body["state"], "ended");
+
+    // A late joiner is told so in place of the Welcome, and the socket closes.
+    let (mut ws_b, _) = tokio_tungstenite::connect_async(ws_url(&addr, &jwt_b))
+        .await
+        .expect("ws connect");
+    match recv_frame(&mut ws_b).await {
+        ServerFrame::Error { code, .. } => assert_eq!(code, ErrorCode::CallEnded),
+        other => panic!("expected CallEnded, got {other:?}"),
+    }
+}
+
+/// A token for another call learns nothing about this one.
+#[tokio::test]
+async fn the_state_route_answers_only_for_the_call_the_token_names() {
+    let key = test_key(0x22);
+    let addr = spawn_server(key.jwks.clone()).await;
+    let jwt = mint(
+        &key,
+        "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+        "11111111111111111111111111111111",
+        CallRole::Participant,
+    );
+    let resp = reqwest::get(format!(
+        "http://{addr}/v1/calls/22222222222222222222222222222222?token={jwt}"
+    ))
+    .await
+    .expect("state request");
+    assert_eq!(resp.status(), 403);
+    let resp = reqwest::get(format!(
+        "http://{addr}/v1/calls/22222222222222222222222222222222?token=not-a-jwt"
+    ))
+    .await
+    .expect("state request");
+    assert_eq!(resp.status(), 401);
 }

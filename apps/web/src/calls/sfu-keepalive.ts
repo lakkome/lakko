@@ -38,3 +38,23 @@ export function sfuKeepaliveAction(
   if (nowMs - lastPingMs >= SFU_KEEPALIVE_PING_INTERVAL_MS) return "ping";
   return "wait";
 }
+
+/**
+ * When a call being recorded actually ended.
+ *
+ * `lastInboundMs` is the last time the server proved it was there. A device
+ * that notices the end only after the keepalive deadline has passed since that
+ * proof was asleep, or its link died and the tick ran late; either way the call
+ * ended when the link did, not when the device woke up. Two devices left in a
+ * call overnight (their End taps had not landed) each wrote an
+ * `8:20:53` row the next morning at the moment their laptop woke: the row must
+ * say how long the two sides were connected, never how long a screen sat
+ * open. Shared word-for-word with iOS and Android.
+ *
+ * A `lastInboundMs` of 0 means the link never came up; the caller's clock is
+ * then the only time there is.
+ */
+export function callEndedAtMs(nowMs: number, lastInboundMs: number): number {
+  if (lastInboundMs <= 0) return nowMs;
+  return nowMs - lastInboundMs > SFU_KEEPALIVE_DEADLINE_MS ? lastInboundMs : nowMs;
+}

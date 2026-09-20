@@ -81,6 +81,9 @@ pub enum SfuErrorCode {
     BadSdp,
     /// ICE candidate failed to parse.
     BadIceCandidate,
+    /// The call ended before this socket arrived; the SFU sent this in
+    /// place of the Welcome and closed the socket.
+    CallEnded,
 }
 
 impl From<ErrorCode> for SfuErrorCode {
@@ -94,6 +97,7 @@ impl From<ErrorCode> for SfuErrorCode {
             ErrorCode::RateLimited => Self::RateLimited,
             ErrorCode::BadSdp => Self::BadSdp,
             ErrorCode::BadIceCandidate => Self::BadIceCandidate,
+            ErrorCode::CallEnded => Self::CallEnded,
         }
     }
 }

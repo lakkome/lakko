@@ -61,6 +61,12 @@ public interface GroupCallSessionHandle {
     /** The SFU session reported `FAILED`. */
     public val failed: Boolean
 
+    /** The last time the SFU proved it was there; 0 before the link came up. */
+    public val lastInboundAtMs: Long
+
+    /** The SFU refused this device because the call had already ended. */
+    public val callEndedByServer: Boolean
+
     public suspend fun connect()
 
     public fun hangUp()
@@ -488,6 +494,16 @@ public class GroupCallHost(
             release()
             throw cancel
         } catch (error: Throwable) {
+            val endedByServer = handle?.callEndedByServer == true
+            if (endedByServer) {
+                // The SFU says the call ended before this device arrived
+                // (`docs/ux/calls.md` section 4.3): close the chat's record
+                // for everyone rather than report a failure.
+                warn("group call: the SFU says the call ended before we joined", error)
+                if (active != null) leaveWith(GroupLeaveReason.ERROR)
+                endRecordReportedBySfu(groupIdHex, callId)
+                return GroupCallStartOutcome.Ended
+            }
             warn("group call: connect failed", error)
             if (active != null) leaveWith(GroupLeaveReason.ERROR)
             return GroupCallStartOutcome.Failed("The call could not connect.")
@@ -565,6 +581,27 @@ public class GroupCallHost(
         }
     }
 
+    /** Close a group call's record on this device and for the chat: the SFU
+     *  said the call ended. Any member may say so — the End signal carries
+     *  only the call id, and a record that is over on the server is over for
+     *  everyone. */
+    private fun endRecordReportedBySfu(groupIdHex: String, callId: ByteArray) {
+        val p = port ?: return
+        // `publishSignal` folds the End into this device's own record as it
+        // goes out, the way every other signal this host publishes is.
+        scope.launch {
+            publishLock.withLock {
+                try {
+                    p.publishSignal(groupIdHex, FfiCallSignalingBody.End(callId, FfiCallEndReason.HUNG_UP))
+                } catch (cancel: CancellationException) {
+                    throw cancel
+                } catch (error: Throwable) {
+                    warn("group call: could not publish the End the SFU reported", error)
+                }
+            }
+        }
+    }
+
     /** Leave the call and tell the group what [planGroupCallLeave] decides. */
     private fun leaveWith(reason: GroupLeaveReason) {
         val p = port
@@ -573,9 +610,13 @@ public class GroupCallHost(
             return
         }
         val failed = handle?.failed == true
+        // Read before the session is released: the call ended when the link
+        // was last known alive, not when this device noticed.
+        val lastInbound = handle?.lastInboundAtMs ?: 0L
         val otherFresh = p?.recordOtherFreshMembers(a.groupIdHex, a.callIdHex, clock())
         release()
-        groupCallTranscriptEntry(a.initiator, a.video, a.connectedAtMs, clock())?.let { entry ->
+        val endedAtMs = callEndedAtMs(clock(), lastInbound)
+        groupCallTranscriptEntry(a.initiator, a.video, a.connectedAtMs, endedAtMs)?.let { entry ->
             p?.recordCall(a.groupIdHex, entry)
         }
         val plan = planGroupCallLeave(

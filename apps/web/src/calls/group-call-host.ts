@@ -162,8 +162,10 @@ export function selectGroupCallBanner(input: GroupCallBannerInput): LiveGroupCal
   return null;
 }
 
-/** Chosen: long enough for a peer whose app blinked to come back, short enough that nobody sits in an empty room. */
-export const GROUP_CALL_ALONE_END_MS = 10_000;
+/** Chosen: long enough for a peer whose app blinked to come back, short enough
+ *  that nobody sits in an empty room. The same five seconds the SFU gives an
+ *  empty room before it calls the call over (`docs/ux/calls.md` section 4.3). */
+export const GROUP_CALL_ALONE_END_MS = 5_000;
 
 export type GroupCallAloneAction = "none" | "arm-end" | "disarm";
 

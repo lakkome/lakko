@@ -280,6 +280,7 @@ export class SfuCallSession {
   // is answered.
   private readonly polite = true;
   private frameDescriptorWarned = false;
+  private endedByServer = false;
   private makingOffer = false;
   private isSettingRemoteAnswerPending = false;
   private negotiationReady = false;
@@ -382,7 +383,18 @@ export class SfuCallSession {
         onPong: (): void => {
           this.lastInboundMs = this.nowMs();
         },
-        onServerError: (f): void => this.callbacks.onServerError?.(f),
+        onServerError: (f): void => {
+          if (f.code === "call-ended") {
+            // The SFU's answer in place of the Welcome (`sfu-call-state.ts`):
+            // the room stood empty past its grace before this device
+            // arrived. Not an error of this device's; the host closes the
+            // chat's record and says the call ended.
+            this.endedByServer = true;
+            this.fail("the call ended before this device joined");
+            return;
+          }
+          this.callbacks.onServerError?.(f);
+        },
         onClose: (): void => this.onSignalingClosed(),
         onSocketError: (): void => this.onSignalingClosed(),
       },
@@ -844,6 +856,21 @@ export class SfuCallSession {
     this.lastInboundMs = this.nowMs();
     this.selfPeerId = frame.peer_id;
     this.callbacks.onWelcome?.(frame.peer_id, frame.roster);
+  }
+
+  /** Whether the SFU refused this device because the call had already
+   *  ended (`ErrorCode::CallEnded`). Read by the host after a failed
+   *  `connect()` to tell that from a connection failure. */
+  callEndedByServer(): boolean {
+    return this.endedByServer;
+  }
+
+  /** The last time the SFU proved it was there (the Welcome or a Pong), on
+   *  this session's clock; 0 before the socket opened. What the call record
+   *  ends at when the link died before the device noticed
+   *  (`callEndedAtMs`). */
+  lastInboundAtMs(): number {
+    return this.lastInboundMs;
   }
 
   /** One keepalive tick (`SFU_KEEPALIVE_TICK_MS`): ping when due, fail the

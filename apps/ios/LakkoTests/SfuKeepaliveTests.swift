@@ -35,4 +35,27 @@ final class SfuKeepaliveTests: XCTestCase {
         XCTAssertEqual(SfuKeepalive.deadlineMs, 45_000)
         XCTAssertEqual(SfuKeepalive.tickMs, 5_000)
     }
+
+    // MARK: - When a call ended
+
+    func testACallEndsAtTheClockWhileTheLinkWasAliveWithinTheDeadline() {
+        XCTAssertEqual(SfuKeepalive.callEndedAtMs(nowMs: 100_000, lastInboundMs: 90_000), 100_000)
+        XCTAssertEqual(
+            SfuKeepalive.callEndedAtMs(nowMs: 100_000, lastInboundMs: 100_000 - SfuKeepalive.deadlineMs),
+            100_000)
+    }
+
+    /// The overnight case: the laptop slept at 22:58 and woke at 07:16; the
+    /// row must not say 8:20:53.
+    func testACallEndsAtTheLastProofOfLifeOnceTheDeadlineHasPassed() {
+        let slept: Int64 = 100_000
+        let woke = slept + 8 * 3_600_000
+        XCTAssertEqual(SfuKeepalive.callEndedAtMs(nowMs: woke, lastInboundMs: slept), slept)
+        let edge = 100_000 - SfuKeepalive.deadlineMs - 1
+        XCTAssertEqual(SfuKeepalive.callEndedAtMs(nowMs: 100_000, lastInboundMs: edge), edge)
+    }
+
+    func testACallWhoseLinkNeverCameUpEndsAtTheClock() {
+        XCTAssertEqual(SfuKeepalive.callEndedAtMs(nowMs: 100_000, lastInboundMs: 0), 100_000)
+    }
 }

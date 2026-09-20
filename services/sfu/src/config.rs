@@ -38,12 +38,16 @@ const DEFAULT_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
 const DEFAULT_PEER_MSG_RATE_PER_SEC: u32 = 100;
 /// How often the signaling socket pings a silent peer.
 /// Chosen, not measured: three unanswered pings inside the
-/// idle window below declare the peer gone.
-const DEFAULT_SIGNALING_PING_SECS: u64 = 20;
+/// idle window below declare the peer gone. Tightened from
+/// 20 s / 60 s once the call's end became the server's
+/// call (`call_lifetime.rs`): a participant whose app died
+/// is the last one in the room more often than not, and
+/// the room cannot be seen to be empty until the socket is.
+const DEFAULT_SIGNALING_PING_SECS: u64 = 5;
 /// How long a peer may go without any inbound frame (a
 /// Pong answers a ping, so a live peer is never silent this
 /// long) before it is dropped and announced as left.
-const DEFAULT_SIGNALING_IDLE_SECS: u64 = 60;
+const DEFAULT_SIGNALING_IDLE_SECS: u64 = 15;
 
 /// Failure modes for loading the runtime config.
 #[derive(Debug, Error)]
@@ -446,14 +450,14 @@ mod tests {
         );
     }
 
-    /// The liveness defaults: a ping every 20 s, gone after 60 s
+    /// The liveness defaults: a ping every 5 s, gone after 15 s
     /// of silence. Pinned so a change is a decision, not a drift.
     #[test]
     fn signaling_liveness_defaults() {
         with_env(&[("LAKKO_SFU_JWKS_URL", "https://a/x")], || {
             let cfg = Config::from_env().expect("valid minimal env");
-            assert_eq!(cfg.signaling_ping_interval, Duration::from_secs(20));
-            assert_eq!(cfg.signaling_idle_timeout, Duration::from_secs(60));
+            assert_eq!(cfg.signaling_ping_interval, Duration::from_secs(5));
+            assert_eq!(cfg.signaling_idle_timeout, Duration::from_secs(15));
         });
     }
 

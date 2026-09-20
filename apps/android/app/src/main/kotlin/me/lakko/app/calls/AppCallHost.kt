@@ -324,6 +324,10 @@ internal class ChatRepositoryGroupCallPort(
         return object : GroupCallSessionHandle {
             override val failed: Boolean
                 get() = sfu.session.state == SfuCallSession.State.FAILED
+            override val lastInboundAtMs: Long
+                get() = sfu.session.lastInboundAtMs()
+            override val callEndedByServer: Boolean
+                get() = sfu.session.endedByServer
 
             override suspend fun connect() = sfu.connect()
 

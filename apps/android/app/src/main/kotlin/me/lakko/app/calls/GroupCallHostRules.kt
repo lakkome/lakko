@@ -178,8 +178,10 @@ public fun decideGroupCallStart(
 
 // ---- Group call: ending by itself when everyone else has left ---------------
 
-/** Chosen: long enough for a peer whose app blinked to come back, short enough that nobody sits in an empty room. */
-public const val GROUP_CALL_ALONE_END_MS: Long = 10_000L
+/** Chosen: long enough for a peer whose app blinked to come back, short enough
+ *  that nobody sits in an empty room — the same five seconds the SFU gives an
+ *  empty room before it calls the call over (`docs/ux/calls.md` section 4.3). */
+public const val GROUP_CALL_ALONE_END_MS: Long = 5_000L
 
 public enum class GroupCallAloneAction { NONE, ARM_END, DISARM }
 

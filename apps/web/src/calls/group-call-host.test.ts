@@ -227,7 +227,7 @@ describe("planGroupCallLeave and the person's other device", () => {
 
 describe("groupCallAloneAction", () => {
   it("pins the shared constant", () => {
-    expect(GROUP_CALL_ALONE_END_MS).toBe(10_000);
+    expect(GROUP_CALL_ALONE_END_MS).toBe(5_000);
   });
 
   it("arms only when a remote was seen and the roster is now empty", () => {

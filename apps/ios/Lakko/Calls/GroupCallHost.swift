@@ -20,6 +20,10 @@ protocol GroupCallHandle: AnyObject {
     func setCameraEnabled(_ on: Bool)
     func publishVideo() async throws
     var sessionState: SfuCallSession.State { get }
+    /// The last time the SFU proved it was there; 0 before the link came up.
+    var lastInboundAtMs: Int64 { get }
+    /// The SFU refused this device because the call had already ended.
+    var callEndedByServer: Bool { get }
 }
 
 extension SfuCallUi: GroupCallHandle {
@@ -28,6 +32,8 @@ extension SfuCallUi: GroupCallHandle {
     }
 
     var sessionState: SfuCallSession.State { session.state }
+    var lastInboundAtMs: Int64 { session.lastInboundAtMs }
+    var callEndedByServer: Bool { session.endedByServer }
 }
 
 /// The app-level owner of the group (SFU) call — the group-call slot beside the
@@ -359,6 +365,17 @@ final class GroupCallHost: ObservableObject {
             try await handle.connect()
         } catch {
             guard self.handle === handle else { return }
+            if handle.callEndedByServer {
+                // The SFU says the call ended before this device arrived
+                // (`docs/ux/calls.md` section 4.3): close the chat's record
+                // for everyone rather than report a failure.
+                NSLog("group call: the SFU says call %@ ended before we joined", callIdHex)
+                leave(hungUp: false)
+                dismissPresentation()
+                endRecordReportedBySfu(groupIdHex: groupIdHex, callId: callId)
+                callError = "That group call has ended."
+                return
+            }
             NSLog("group call connect failed: %@", error.localizedDescription)
             callError = "Could not connect to the call: \(error.localizedDescription)"
             leave(hungUp: false)
@@ -442,9 +459,13 @@ final class GroupCallHost: ObservableObject {
     /// decides. Idempotent. The presentation stays until the call screen is
     /// dismissed.
     func leave(hungUp: Bool = true) {
+        // Read before the session is released: the call ended when the link
+        // was last known alive, not when this device noticed.
+        let lastInbound = handle?.lastInboundAtMs ?? 0
         guard let call = releaseSession() else { return }
+        let endedAtMs = SfuKeepalive.callEndedAtMs(nowMs: ports.nowMs(), lastInboundMs: lastInbound)
         if let row = GroupCallHostRules.transcriptRow(
-            initiator: call.initiator, connectedAtMs: call.connectedAtMs, endedAtMs: ports.nowMs()) {
+            initiator: call.initiator, connectedAtMs: call.connectedAtMs, endedAtMs: endedAtMs) {
             ports.recordCall(call.groupIdHex, row)
         }
         // A device that neither joined nor announced the call has nothing to
@@ -453,6 +474,18 @@ final class GroupCallHost: ObservableObject {
         Task { @MainActor [weak self] in
             await self?.announceDeparture(call: call, hungUp: hungUp)
         }
+    }
+
+    /// Close a group call's record on this device and for the chat: the SFU
+    /// said the call ended. Any member may say so — the End signal carries
+    /// only the call id, and a record that is over on the server is over for
+    /// everyone.
+    func endRecordReportedBySfu(groupIdHex: String, callId: Data) {
+        ports.applySignal(groupIdHex, .end(callId: callId), ports.nowMs())
+        guard let bytes = try? composeCallSignaling(body: .end(callId: callId, reason: .hungUp)) else {
+            return
+        }
+        _ = enqueueControl(groupIdHex: groupIdHex, bytes: bytes)
     }
 
     private func announceDeparture(call: ActiveCall, hungUp: Bool) async {

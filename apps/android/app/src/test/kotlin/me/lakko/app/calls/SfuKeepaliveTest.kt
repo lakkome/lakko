@@ -64,4 +64,28 @@ class SfuKeepaliveTest {
         assertEquals(45_000L, SFU_KEEPALIVE_DEADLINE_MS)
         assertEquals(5_000L, SFU_KEEPALIVE_TICK_MS)
     }
+
+    // ---- When a call ended -------------------------------------------------
+
+    @Test
+    fun `a call ends at the clock while the link was alive within the deadline`() {
+        assertEquals(100_000L, callEndedAtMs(nowMs = 100_000L, lastInboundMs = 90_000L))
+        assertEquals(100_000L, callEndedAtMs(nowMs = 100_000L, lastInboundMs = 100_000L - SFU_KEEPALIVE_DEADLINE_MS))
+    }
+
+    @Test
+    fun `a call ends at the last proof of life once the deadline has passed`() {
+        // The overnight case: the laptop slept at 22:58 and woke at 07:16; the
+        // row must not say 8:20:53.
+        val slept = 100_000L
+        val woke = slept + 8L * 3_600_000L
+        assertEquals(slept, callEndedAtMs(nowMs = woke, lastInboundMs = slept))
+        val edge = 100_000L - SFU_KEEPALIVE_DEADLINE_MS - 1L
+        assertEquals(edge, callEndedAtMs(nowMs = 100_000L, lastInboundMs = edge))
+    }
+
+    @Test
+    fun `a call whose link never came up ends at the clock`() {
+        assertEquals(100_000L, callEndedAtMs(nowMs = 100_000L, lastInboundMs = 0L))
+    }
 }

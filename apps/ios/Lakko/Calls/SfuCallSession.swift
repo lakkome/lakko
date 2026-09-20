@@ -186,6 +186,10 @@ final class SfuCallSession {
     /// `hangUp`. `nil` for an audio-only call (or when no camera exists).
     private var localCameraCapture: LocalCameraCapture?
     private(set) var state: State = .idle
+    /// Whether the SFU refused this device because the call had already
+    /// ended (`ErrorCode::CallEnded`). Read by the host after a failed
+    /// `connect()` to tell that from a connection failure.
+    private(set) var endedByServer = false
 
     /// Serializes SFU-initiated offers so two `createAnswer` cycles
     /// never overlap.
@@ -216,6 +220,11 @@ final class SfuCallSession {
     private var keepaliveTask: Task<Void, Never>?
     /// When the server last proved it was there (Welcome or Pong).
     private var lastInboundMs: Int64 = 0
+    /// The last time the SFU proved it was there (the Welcome or a Pong), on
+    /// this session's clock; 0 before the socket opened. What the call record
+    /// ends at when the link died before the device noticed
+    /// (`SfuKeepalive.callEndedAtMs`).
+    var lastInboundAtMs: Int64 { lastInboundMs }
     /// When this device last pinged.
     private var lastPingMs: Int64 = 0
     private var pingNonce: UInt64 = 0
@@ -678,7 +687,19 @@ final class SfuCallSession {
         cb.onServerError = { [weak self] code, detail in
             // Logged here rather than left to the adapter, which discards it.
             NSLog("SfuCallSession: server error code=%@ detail=%@", "\(code)", detail)
-            Task { @MainActor in self?.callbacks.onServerError?(code, detail) }
+            Task { @MainActor in
+                guard let self else { return }
+                if code == .callEnded {
+                    // The SFU's answer in place of the Welcome: the room stood
+                    // empty past its grace before this device arrived. Not a
+                    // failure of this device's; the host closes the chat's
+                    // record and says the call ended.
+                    self.endedByServer = true
+                    self.fail()
+                    return
+                }
+                self.callbacks.onServerError?(code, detail)
+            }
         }
         cb.onSignalRelay = { [weak self] from, payloadB64 in
             Task { @MainActor in self?.dispatchSignalRelay(from: from, payloadB64: payloadB64) }

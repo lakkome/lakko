@@ -37,6 +37,8 @@ class HostedCallsTest {
         GroupCallSessionHandle {
         var failedFlag = false
         override val failed: Boolean get() = failedFlag
+        override var lastInboundAtMs: Long = 0L
+        override var callEndedByServer: Boolean = false
         val rekeys = mutableListOf<Byte>()
         var hangUps = 0
         val mic = mutableListOf<Boolean>()

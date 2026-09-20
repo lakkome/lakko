@@ -28,21 +28,22 @@
 //! not leak diagnostic detail.
 
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
     extract::{
         ws::{Message, WebSocket},
-        Query, State, WebSocketUpgrade,
+        Path, Query, State, WebSocketUpgrade,
     },
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Json, Response},
 };
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use crate::call_lifetime::{Admission, CallLifetimes, CallStatus};
 use crate::config::Config;
 use crate::jwks::{JwksCache, JwksError};
 use crate::media::MediaTaskHandle;
@@ -77,6 +78,10 @@ pub struct AppState {
     /// How the signaling socket tells a live peer from one whose
     /// network went away without a close frame.
     pub liveness: SignalingLiveness,
+    /// When each call is over, as this server sees it
+    /// (`call_lifetime.rs`): fed by every admission and departure,
+    /// read by the admission gate and the state route.
+    pub calls: CallLifetimes,
 }
 
 /// Signaling-socket liveness: the SFU pings every peer on the
@@ -121,6 +126,7 @@ impl AppState {
             peers,
             media: None,
             liveness,
+            calls: CallLifetimes::new(),
         })
     }
 
@@ -139,6 +145,7 @@ impl AppState {
             peers,
             media: Some(media),
             liveness,
+            calls: CallLifetimes::new(),
         })
     }
 }
@@ -200,6 +207,38 @@ pub async fn ws_handler(
         .on_upgrade(move |socket| handle_socket(socket, peer, out_rx, state))
 }
 
+/// `GET /v1/calls/{call_id}?token=<jwt>` — whether the call the token
+/// names is still there (`call_lifetime.rs`). Gated by the same
+/// call-admission JWT as the socket, and the token must name the call
+/// asked about, so a member learns about a call it could join and
+/// nothing else. A member whose chat shows a call in progress asks this
+/// before offering Join, and closes the chat's record when the answer is
+/// `ended`.
+pub async fn call_state_handler(
+    Path(call_id): Path<String>,
+    Query(query): Query<ConnectQuery>,
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    let claims = match state.jwks.verify(&query.token).await {
+        Ok(c) => c,
+        Err(JwksError::Verify(_) | JwksError::UnknownKid { .. }) => {
+            return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
+        },
+        Err(_) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "auth unavailable").into_response();
+        },
+    };
+    if claims.call_id != call_id {
+        return (StatusCode::FORBIDDEN, "token names another call").into_response();
+    }
+    let status = state.calls.status(&call_id, Instant::now());
+    let peers = match status {
+        CallStatus::Live { peers } => peers,
+        CallStatus::Unknown | CallStatus::Closing | CallStatus::Ended => 0,
+    };
+    Json(serde_json::json!({ "state": status.as_str(), "peers": peers })).into_response()
+}
+
 /// Per-connection task — owns the socket for the lifetime
 /// of the WebSocket. Registers the peer, broadcasts the
 /// join, drives the reader / writer split, and on close
@@ -219,6 +258,22 @@ async fn handle_socket(
 ) {
     if !state.peers.register(peer.clone()).await {
         warn!(peer = %peer.id, "ws: peer registry collision; closing");
+        return;
+    }
+    // A call that stood empty past its grace is over (`call_lifetime.rs`):
+    // say so in place of the Welcome and close, so the member closes the
+    // chat's record instead of founding a second call under the old id.
+    if state.calls.admit(&peer.call_id, Instant::now()) == Admission::Ended {
+        info!(peer = %peer.id, call = %peer.call_id, "ws: join refused, call ended");
+        let refusal = ServerFrame::Error {
+            code: ErrorCode::CallEnded,
+            detail: "the call ended before you joined".to_owned(),
+        };
+        if let Err(e) = send_via_self(&peer, refusal) {
+            warn!(peer = %peer.id, error = %e, "ws: refusal enqueue failed");
+        }
+        state.peers.unregister(&peer.id).await;
+        drain_and_close(socket, out_rx).await;
         return;
     }
     metrics::counter!(names::PEERS_ADMITTED_TOTAL).increment(1);
@@ -253,6 +308,7 @@ async fn handle_socket(
     if let Err(e) = send_via_self(&peer, welcome) {
         warn!(peer = %peer.id, error = %e, "ws: welcome enqueue failed; closing");
         state.peers.unregister(&peer.id).await;
+        state.calls.depart(&peer.call_id, Instant::now());
         metrics::gauge!(names::PEERS_ACTIVE).decrement(1.0);
         return;
     }
@@ -401,6 +457,7 @@ async fn handle_socket(
     // outbound sender so the writer task exits.
     router.announce_leave(&peer).await;
     state.peers.unregister(&peer.id).await;
+    state.calls.depart(&peer.call_id, Instant::now());
     // The media half keeps its own per-peer state and learns of the
     // departure only from here; left alone, a peer whose ICE never
     // connected would stay in the router for the life of the process.
@@ -420,6 +477,21 @@ async fn handle_socket(
 /// outbound channel is full or closed — the connection is
 /// almost certainly about to close, so the caller breaks
 /// out of the read loop.
+/// Write whatever is queued for a socket that was refused (the one
+/// `Error` frame), then close it. The writer half never started for
+/// this socket, so the queue is drained here.
+async fn drain_and_close(mut socket: WebSocket, mut out_rx: mpsc::Receiver<ServerFrame>) {
+    while let Ok(frame) = out_rx.try_recv() {
+        let Ok(json) = serde_json::to_string(&frame) else {
+            break;
+        };
+        if socket.send(Message::Text(json.into())).await.is_err() {
+            break;
+        }
+    }
+    let _ = socket.send(Message::Close(None)).await;
+}
+
 fn send_via_self(peer: &Peer, frame: ServerFrame) -> Result<(), &'static str> {
     let Some(tx) = peer.outbound.as_ref() else {
         return Err("no outbound channel");

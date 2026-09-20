@@ -21,6 +21,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   SFU_KEEPALIVE_DEADLINE_MS,
+  callEndedAtMs,
   SFU_KEEPALIVE_PING_INTERVAL_MS,
   SFU_KEEPALIVE_TICK_MS,
   sfuKeepaliveAction,
@@ -203,5 +204,27 @@ describe("SfuCallSession — signaling keepalive", () => {
     await vi.advanceTimersByTimeAsync(SFU_KEEPALIVE_DEADLINE_MS);
     expect(hooks.pings).toEqual([]);
     expect(session.getState()).toBe("closed");
+  });
+});
+
+describe("callEndedAtMs", () => {
+  it("ends at the clock when the link was alive within the deadline", () => {
+    expect(callEndedAtMs(100_000, 100_000 - 10_000)).toBe(100_000);
+    expect(callEndedAtMs(100_000, 100_000 - SFU_KEEPALIVE_DEADLINE_MS)).toBe(100_000);
+  });
+
+  it("ends at the last proof of life once the deadline has passed", () => {
+    // The overnight case: the laptop slept at 22:58 and woke at 07:16; the
+    // row must not say 8:20:53.
+    const slept = 100_000;
+    const woke = slept + 8 * 3_600_000;
+    expect(callEndedAtMs(woke, slept)).toBe(slept);
+    expect(callEndedAtMs(100_000, 100_000 - SFU_KEEPALIVE_DEADLINE_MS - 1)).toBe(
+      100_000 - SFU_KEEPALIVE_DEADLINE_MS - 1,
+    );
+  });
+
+  it("falls back to the clock when the link never came up", () => {
+    expect(callEndedAtMs(100_000, 0)).toBe(100_000);
   });
 });

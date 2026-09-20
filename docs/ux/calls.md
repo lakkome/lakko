@@ -219,14 +219,37 @@ by rules the clients share:
   face for the rest of the hour. There is no `Reconnecting...` on a group call
   today: the transport does not resume a session, so the honest word is the end.
 - **Everyone else has left a group call.** When the last other person leaves a
-  call that had other people in it, the call ends by itself 10 seconds later,
-  as `Call ended`; someone rejoining inside those 10 seconds cancels it. The
+  call that had other people in it, the call ends by itself 5 seconds later,
+  as `Call ended`; someone rejoining inside those 5 seconds cancels it. The
   person who started a call and is still waiting for the first one to join is
   not in this case: nobody left, so they wait until they hang up.
+- **The last person in a call left or dropped, and nobody was there to
+  notice.** A phone whose app dies publishes no `Leave`, so on every other
+  phone the call it was alone in stayed "in progress" until its last sign of
+  life aged out, and whoever tapped Join sat alone in an empty room. The call
+  server decides this case, once: a room that has stood empty for 5 seconds is
+  over. The 5 seconds are for a bad connection — a socket that blips and comes
+  back inside them finds the call still there, and anyone who joins inside
+  them keeps it alive (they are then a participant like any other; a group
+  call has no admin, and a link call's owner duties pass by the election of
+  ADR-0032 to whoever is present and back when the owner returns). Anyone who
+  tries to join after that is told the call ended, and the first member device
+  to learn it — on a refused join, or by asking the server every 10 seconds
+  while it shows a call as joinable — closes the record for the whole chat.
+  The same applies to a link call from the moment its first participant
+  connected; before that, the link's own expiry (an hour by default, a week at
+  most) bounds how long it can be joined.
 
 Neither rule changes what is announced to the group: the leaving device tells the
 group it left, and ends the call for the chat when its record shows nobody else
 still in it, exactly as a hang-up does.
+
+**The row says how long the two sides were connected, never how long a screen sat
+open.** When a device notices the end only after the keepalive deadline has passed
+since the server last answered (it was asleep, or the link died and it found out
+late), the call ended when the link did, and the row's duration runs to that
+moment. Two devices left in a call overnight each wrote `8:20:53` the next morning
+at the moment the laptop woke; the same rule on every client stops that.
 
 ### 4.4 A group call: the big tile and the grid
 

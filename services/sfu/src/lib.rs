@@ -20,6 +20,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod call_lifetime;
 pub mod config;
 pub mod frame_descriptor;
 pub mod jwks;
@@ -64,6 +65,7 @@ pub fn build_router(state: Arc<AppState>, cfg: Config, jwks: JwksCache) -> Route
             }),
         )
         .route("/v1/connect", get(signaling::ws_handler))
+        .route("/v1/calls/{call_id}", get(signaling::call_state_handler))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

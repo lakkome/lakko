@@ -160,6 +160,12 @@ class SfuCallSession(
     var state: State = State.IDLE
         private set
 
+    /** Whether the SFU refused this device because the call had already
+     *  ended (`ErrorCode::CallEnded`). Read by the host after a failed
+     *  `connect()` to tell that from a connection failure. */
+    var endedByServer: Boolean = false
+        private set
+
     private var signaling: SfuSignalingClient? = null
     private var pc: WebRtcPeerConnection? = null
     /** Local camera capturer — held for the call's lifetime so it
@@ -176,6 +182,11 @@ class SfuCallSession(
     private var keepaliveJob: Job? = null
     /** Last time the SFU proved it is there (the Welcome frame or a Pong). */
     private var lastInboundMs = 0L
+
+    /** The last time the SFU proved it was there (the Welcome or a Pong), on
+     *  this session's clock; 0 before the socket opened. What the call record
+     *  ends at when the link died before the device noticed ([callEndedAtMs]). */
+    public fun lastInboundAtMs(): Long = lastInboundMs
     /** Last time we sent a Ping. */
     private var lastPingMs = 0L
     private var pingNonce = 0UL
@@ -759,6 +770,17 @@ class SfuCallSession(
             }
 
             override fun onServerError(code: SfuErrorCode, detail: String) {
+                if (code == SfuErrorCode.CALL_ENDED) {
+                    // The SFU's answer in place of the Welcome: the room stood
+                    // empty past its grace before this device arrived. Not a
+                    // failure of this device's; the host closes the chat's
+                    // record and says the call ended.
+                    scope.launch {
+                        endedByServer = true
+                        fail()
+                    }
+                    return
+                }
                 callbacks.onServerError(code, detail)
             }
 

@@ -91,8 +91,10 @@ enum GroupCallHostRules {
     // MARK: - Alone in the call
 
     /// Chosen: long enough for a peer whose app blinked to come back, short
-    /// enough that nobody sits in an empty room (`docs/ux/calls.md` §4.3).
-    static let aloneEndMs: Int64 = 10_000
+    /// enough that nobody sits in an empty room — the same five seconds the
+    /// SFU gives an empty room before it calls the call over
+    /// (`docs/ux/calls.md` §4.3).
+    static let aloneEndMs: Int64 = 5_000
 
     enum AloneAction: Equatable {
         case none

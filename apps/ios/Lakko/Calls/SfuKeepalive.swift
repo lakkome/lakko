@@ -31,6 +31,20 @@ enum SfuKeepalive {
     ///   - nowMs: the instant of the tick.
     ///   - lastInboundMs: when the server last proved it was there.
     ///   - lastPingMs: when this device last asked.
+    /// When a call being recorded actually ended.
+    ///
+    /// `lastInboundMs` is the last time the server proved it was there. A
+    /// device that notices the end only after the deadline has passed since
+    /// that proof was asleep, or its link died and the tick ran late; either
+    /// way the call ended when the link did, not when the device woke up. Two
+    /// devices left in a call overnight each wrote an `8:20:53` row the next
+    /// morning at the moment the laptop woke. Shared word-for-word with web
+    /// and Android. A `lastInboundMs` of 0 means the link never came up.
+    static func callEndedAtMs(nowMs: Int64, lastInboundMs: Int64) -> Int64 {
+        if lastInboundMs <= 0 { return nowMs }
+        return nowMs - lastInboundMs > deadlineMs ? lastInboundMs : nowMs
+    }
+
     static func action(nowMs: Int64, lastInboundMs: Int64, lastPingMs: Int64) -> Action {
         if nowMs &- lastInboundMs >= deadlineMs { return .dead }
         if nowMs &- lastPingMs >= pingIntervalMs { return .ping }

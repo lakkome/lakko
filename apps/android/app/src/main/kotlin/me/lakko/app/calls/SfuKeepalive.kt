@@ -34,3 +34,19 @@ public fun sfuKeepaliveAction(nowMs: Long, lastInboundMs: Long, lastPingMs: Long
         nowMs - lastPingMs >= SFU_KEEPALIVE_PING_INTERVAL_MS -> SfuKeepaliveAction.PING
         else -> SfuKeepaliveAction.WAIT
     }
+
+/**
+ * When a call being recorded actually ended.
+ *
+ * [lastInboundMs] is the last time the server proved it was there. A device
+ * that notices the end only after the deadline has passed since that proof was
+ * asleep, or its link died and the tick ran late; either way the call ended
+ * when the link did, not when the device woke up. Two devices left in a call
+ * overnight each wrote an `8:20:53` row the next morning at the moment the
+ * laptop woke. Shared word-for-word with web and iOS. A [lastInboundMs] of 0
+ * means the link never came up.
+ */
+public fun callEndedAtMs(nowMs: Long, lastInboundMs: Long): Long {
+    if (lastInboundMs <= 0L) return nowMs
+    return if (nowMs - lastInboundMs > SFU_KEEPALIVE_DEADLINE_MS) lastInboundMs else nowMs
+}
