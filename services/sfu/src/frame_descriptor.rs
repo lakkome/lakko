@@ -15,7 +15,10 @@
 //!
 //! The cure is to carry those facts *outside* the payload, in the
 //! `generic-frame-descriptor-00` header extension, which both native
-//! clients advertise (field trial `WebRTC-GenericDescriptorAdvertised`).
+//! clients advertise (field trial `WebRTC-GenericDescriptorAdvertised`) and
+//! the web client turns on per transceiver through the Header Extension
+//! Control API (`apps/web/src/calls/frame-descriptor.ts`), since a page
+//! cannot set a field trial.
 //! On the peer-to-peer path that is enough. On the group path the media
 //! goes through this SFU, so the SFU has to negotiate the extension with
 //! each peer and put its value back on every packet it relays — otherwise

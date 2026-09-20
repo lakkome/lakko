@@ -63,6 +63,10 @@
  */
 
 import {
+  armGenericFrameDescriptor,
+  type HeaderExtensionTransceiver,
+} from "./frame-descriptor";
+import {
   SfuSignalingClient,
   type SfuErrorFrame,
   type SfuPeerJoined,
@@ -275,6 +279,7 @@ export class SfuCallSession {
   // the first offer is not sent twice); it flips true once the initial offer
   // is answered.
   private readonly polite = true;
+  private frameDescriptorWarned = false;
   private makingOffer = false;
   private isSettingRemoteAnswerPending = false;
   private negotiationReady = false;
@@ -813,7 +818,10 @@ export class SfuCallSession {
       }
     };
 
-    // Publish offer (client-initiated).
+    // Publish offer (client-initiated). The video transceivers negotiate the
+    // generic frame descriptor first, or a native phone cannot find the key
+    // frames in the sealed VP8 this browser sends (`frame-descriptor.ts`).
+    this.armFrameDescriptor(pc);
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     if (offer.sdp === undefined) {
@@ -949,6 +957,21 @@ export class SfuCallSession {
     }
   }
 
+  /** See `frame-descriptor.ts`. Logged once per session when a browser
+   *  cannot do it, because the symptom (a smeared or blank picture on the
+   *  phones) shows nowhere on this side. */
+  private armFrameDescriptor(pc: RTCPeerConnection): void {
+    const outcome = armGenericFrameDescriptor(
+      pc.getTransceivers() as unknown as readonly HeaderExtensionTransceiver[],
+    );
+    if (outcome.unsupported > 0 && !this.frameDescriptorWarned) {
+      this.frameDescriptorWarned = true;
+      console.warn(
+        `SfuCallSession: ${outcome.unsupported} video transceiver(s) cannot negotiate the generic frame descriptor; native receivers may not decode this browser's video`,
+      );
+    }
+  }
+
   /**
    * Renegotiate on a local track change (piece B: publishVideo added a
    * camera track). The POLITE offer initiator: gated so it only fires after
@@ -966,6 +989,9 @@ export class SfuCallSession {
     if (this.makingOffer || pc.signalingState !== "stable") return;
     try {
       this.makingOffer = true;
+      // A camera added mid-call is a new video transceiver: same rule as the
+      // publish offer, or its frames reach the phones with no descriptor.
+      this.armFrameDescriptor(pc);
       await pc.setLocalDescription(); // implicit createOffer
       const sdp = pc.localDescription?.sdp;
       if (sdp !== undefined) signaling.sendSdpOffer(sdp);
