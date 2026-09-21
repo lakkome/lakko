@@ -114,6 +114,13 @@ class FakePeerConnection {
   getSenders(): FakeSender[] {
     return this.senders;
   }
+  /** The session arms the generic frame descriptor on every video transceiver
+   *  before each description (`frame-descriptor.ts`). An empty list is the
+   *  honest answer for a fake that models senders and not transceivers: the
+   *  arming is a no-op here and the answer path is what these tests are for. */
+  getTransceivers(): unknown[] {
+    return [];
+  }
   closed = false;
   async createOffer(): Promise<{ type: string; sdp: string }> {
     return { type: "offer", sdp: "v=0 fake-offer" };

@@ -53,6 +53,10 @@
  * the canonical home-broadband case. TURN relay arrives in
  * 3a2.
  */
+import {
+  armGenericFrameDescriptor,
+  type HeaderExtensionTransceiver,
+} from "./frame-descriptor";
 import { loadWasm } from "../wasm";
 import type { ParsedCallSignaling } from "../../wasm/lakko_ffi_wasm";
 
@@ -289,6 +293,9 @@ export class CallSession {
   private makingOffer = false;
   private isSettingRemoteAnswerPending = false;
   private negotiationReady = false;
+  /** Logged once per session; see {@link armFrameDescriptor}. */
+  private frameDescriptorWarned = false;
+
   /** In-flight guard for {@link addLocalVideo} (no double-acquire). */
   private addingVideo = false;
   /** Mid-call camera-on lifecycle (piece B). */
@@ -369,6 +376,7 @@ export class CallSession {
     // (read through the getter: the narrowing above predates the await).
     if (this.getState() !== "outgoing") return;
     if (this.pc === null) throw new Error("peer connection not initialised");
+    this.armFrameDescriptor(this.pc);
     const offer = await this.pc.createOffer();
     await this.pc.setLocalDescription(offer);
     if (offer.sdp === undefined) {
@@ -540,6 +548,7 @@ export class CallSession {
           `cannot answer in signaling state ${pc.signalingState}`,
         );
       }
+      this.armFrameDescriptor(pc);
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       if (answer.sdp === undefined) {
@@ -923,6 +932,35 @@ export class CallSession {
    * `onnegotiationneeded` on the next stable transition while the change is
    * still pending (also how a glare-rolled-back offer gets re-sent).
    */
+  /**
+   * Put the generic frame descriptor on every video transceiver before the
+   * description that negotiates it.
+   *
+   * Without it a native receiver reads the key-frame flag off the first byte
+   * of a VP8 payload this session has already sealed whole, so it never
+   * assembles a frame: measured 2026-09-21 on a 1x1 web-to-Android video call
+   * as `framesDecoded=0` on the caller against 373 video packets received, and
+   * `Frames received: 0` on the phone's remote renderer while its own
+   * self-preview rendered 34 in the same four seconds.
+   *
+   * The group path has armed this since `1424bd8`; this 1x1 path was missed,
+   * which is the whole of why a two-person video call showed no picture while
+   * a group one did. See `frame-descriptor.ts` for what the API is and what
+   * the descriptor puts on the wire in the clear.
+   */
+  private armFrameDescriptor(pc: RTCPeerConnection): void {
+    const outcome = armGenericFrameDescriptor(
+      pc.getTransceivers() as unknown as readonly HeaderExtensionTransceiver[],
+    );
+    if (outcome.unsupported > 0 && !this.frameDescriptorWarned) {
+      this.frameDescriptorWarned = true;
+      // eslint-disable-next-line no-console
+      console.warn(
+        `CallSession: ${outcome.unsupported} video transceiver(s) cannot negotiate the generic frame descriptor; a phone may not decode this browser's video`,
+      );
+    }
+  }
+
   private async onNegotiationNeeded(): Promise<void> {
     if (!this.negotiationReady) return;
     const pc = this.pc;
@@ -930,6 +968,10 @@ export class CallSession {
     if (this.makingOffer || pc.signalingState !== "stable") return;
     try {
       this.makingOffer = true;
+      // The camera that triggered this renegotiation is a NEW video
+      // transceiver, and it starts with the descriptor stopped like every
+      // other: arm it before the offer that first describes it.
+      this.armFrameDescriptor(pc);
       await pc.setLocalDescription(); // implicit createOffer
       const sdp = pc.localDescription?.sdp;
       if (sdp === undefined) return;
