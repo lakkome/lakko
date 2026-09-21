@@ -80,6 +80,13 @@
       straight to the call screen, so there is no silent failure.
     -->
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+
+    <!-- An incoming call vibrates. While the app is in the foreground it rings
+         itself rather than through the call notification (the platform turns a
+         full-screen intent into a heads-up on an unlocked phone, which covers
+         the app's own incoming-call screen), so the vibration the channel
+         would have carried has to come from here. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
     <uses-feature
         android:name="android.hardware.microphone"
         android:required="false" />

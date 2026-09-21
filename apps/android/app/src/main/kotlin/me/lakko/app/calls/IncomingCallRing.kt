@@ -102,6 +102,50 @@ public fun callRingRemainingMs(
     return windowMs - age
 }
 
+/** Where an incoming call rings. */
+public enum class RingSurface {
+    /** Nothing rings: nothing is ringing, or the window has run out. */
+    NONE,
+
+    /** The app's own full-screen incoming call, ringing from inside the app. */
+    IN_APP,
+
+    /** The call notification, whose full-screen intent reaches a locked phone. */
+    NOTIFICATION,
+}
+
+/**
+ * Which surface rings, given what the device is doing.
+ *
+ * The rule exists as a function because it is consulted at three moments that
+ * must agree — a ring starting, the app coming to the front during one, and
+ * the app going away during one — and a disagreement between them is either
+ * two things ringing at once or nothing ringing at all.
+ *
+ * **Why the app takes over when it is in front.** A call notification asks for
+ * a full-screen intent, which is what puts the ring screen over a lock screen.
+ * On an unlocked, in-use phone the platform honours no such thing: it shows a
+ * heads-up strip instead, which lands on top of the app's own full-screen
+ * incoming call, covers it, and folds away after a few seconds — so answering
+ * meant hitting a notification that was already going (four of seven calls
+ * lost on the 2026-09-21 walk). `docs/ux/calls.md` section 2.1 asks for the
+ * full-screen call over the app in that case, and only the app can draw it.
+ *
+ * @param ringing whether a call is ringing at all.
+ * @param appInForeground whether the app's own window is resumed.
+ * @param remainingMs what is left of the ring window ([callRingRemainingMs]).
+ */
+public fun ringSurface(
+    ringing: Boolean,
+    appInForeground: Boolean,
+    remainingMs: Long,
+): RingSurface = when {
+    !ringing -> RingSurface.NONE
+    remainingMs <= 0L -> RingSurface.NONE
+    appInForeground -> RingSurface.IN_APP
+    else -> RingSurface.NOTIFICATION
+}
+
 /**
  * One call-signaling frame, as much of it as the ring cares about.
  *

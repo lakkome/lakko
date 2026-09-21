@@ -222,18 +222,29 @@ internal fun routeOneToOneSignaling(
 
 /** How the app-wide overlay presents the call in the slot. */
 public enum class OneToOneCallPresentation {
-    /** An incoming call not yet answered: the ringing banner above any screen. */
-    RINGING_BANNER,
+    /**
+     * An incoming call not yet answered: the full-screen incoming call over
+     * whatever screen is showing (`docs/ux/calls.md` section 2.1, first row).
+     *
+     * This was a top banner until 2026-09-21, and the banner could not work:
+     * the ring notification's heads-up lands in the same place on an unlocked
+     * phone, covers it, and folds away after a few seconds, so answering meant
+     * catching a notification mid-collapse. The call slot admits one call at a
+     * time ([callSlotOccupant]) and a second offer is answered busy without
+     * ringing, so a ringing 1x1 call is ALWAYS the app-open case and there is
+     * no in-call variant for a banner to serve.
+     */
+    RINGING_SCREEN,
 
     /** The prejoin of an outgoing call, a call being set up or live, or the
      *  ended state awaiting dismissal: the full-screen in-call screen. */
     IN_CALL_SCREEN,
 }
 
-/** The presentation for a session in [state]; an accepted call leaves the banner at once. */
+/** The presentation for a session in [state]; an accepted call leaves the ring screen at once. */
 public fun oneToOneCallPresentation(state: CallSession.WebCallState, accepted: Boolean): OneToOneCallPresentation =
     if (state == CallSession.WebCallState.Ringing && !accepted) {
-        OneToOneCallPresentation.RINGING_BANNER
+        OneToOneCallPresentation.RINGING_SCREEN
     } else {
         OneToOneCallPresentation.IN_CALL_SCREEN
     }

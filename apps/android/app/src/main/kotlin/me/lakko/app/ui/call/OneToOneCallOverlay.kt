@@ -48,10 +48,10 @@ import me.lakko.app.calls.oneToOneCallPresentation
  * The app-wide presentation of the 1x1 call, mounted once above every session
  * screen by `MainActivity` (chat list, contacts, home, any chat).
  *
- *  - An incoming call that has not been answered is a banner at the top of
- *    whatever screen is showing: Accept, Accept with video (only when the offer
- *    carries video, since an answer cannot add a media section the offer does
- *    not have), Decline.
+ *  - An incoming call that has not been answered is the full-screen incoming
+ *    call over whatever screen is showing (`docs/ux/calls.md` section 2.2):
+ *    Decline, Accept, and for a video offer an Accept-without-video between
+ *    them, since an answer cannot add a media section the offer does not have.
  *  - An outgoing VIDEO call that has not been dialled yet is the camera check
  *    of `docs/ux/calls.md` section 3.2. A voice call never reaches that state:
  *    the host dials it as it prepares it (section 3.1).
@@ -75,14 +75,37 @@ public fun BoxScope.OneToOneCallOverlay(
     val state by call.session.state.collectAsStateWithLifecycle()
     val name = nameForGroup(call.groupIdHex)
     when (oneToOneCallPresentation(state, call.accepted)) {
-        OneToOneCallPresentation.RINGING_BANNER -> IncomingCallBanner(
-            call = call,
-            callerName = name,
-            onAccept = { permissions.request(video = false) { host.accept(withVideo = false) } },
-            onAcceptWithVideo = { permissions.request(video = true) { v -> host.accept(withVideo = v) } },
-            onDecline = { host.decline() },
-            modifier = Modifier.align(Alignment.TopCenter),
-        )
+        // docs/ux/calls.md section 2.1, first row: an app that is open shows
+        // the full-screen incoming call, not a strip at the top. The ring
+        // notification cannot deliver that on an unlocked phone -- the
+        // platform downgrades its full-screen intent to a heads-up -- so this
+        // is the only surface that can, and it is the SAME composable the
+        // notification's full-screen intent shows when the phone is locked.
+        OneToOneCallPresentation.RINGING_SCREEN -> Dialog(
+            onDismissRequest = { /* a ring is accepted or declined, never dismissed */ },
+            properties = DialogProperties(
+                usePlatformDefaultWidth = false,
+                dismissOnBackPress = false,
+                dismissOnClickOutside = false,
+                decorFitsSystemWindows = false,
+            ),
+        ) {
+            EdgeToEdgeDialogWindow()
+            IncomingCallContent(
+                callerName = name,
+                video = call.remoteOffersVideo,
+                // The chat's own avatar colour, so the ring, the call screen
+                // and the chat row are one person.
+                avatarSeed = call.groupIdHex,
+                // A choice made on the notification is taken by the activity
+                // that notification opens; nothing arrives pre-answered here.
+                pendingAnswer = null,
+                onAnswerConsumed = {},
+                // IncomingCallContent runs the microphone/camera gate itself.
+                onAccept = { withVideo -> host.accept(withVideo = withVideo) },
+                onDecline = { host.decline() },
+            )
+        }
         OneToOneCallPresentation.IN_CALL_SCREEN -> Dialog(
             onDismissRequest = { /* exit only via the End button */ },
             properties = DialogProperties(
@@ -140,63 +163,3 @@ public fun BoxScope.OneToOneCallOverlay(
     }
 }
 
-@Composable
-private fun IncomingCallBanner(
-    call: OneToOneCall<CallSession>,
-    callerName: String?,
-    onAccept: () -> Unit,
-    onAcceptWithVideo: () -> Unit,
-    onDecline: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Surface(
-        modifier = modifier
-            .fillMaxWidth()
-            .statusBarsPadding()
-            .padding(horizontal = 12.dp, vertical = 8.dp)
-            .semantics { liveRegion = LiveRegionMode.Assertive },
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        contentColor = MaterialTheme.colorScheme.onSurface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-        shadowElevation = 4.dp,
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector = if (call.remoteOffersVideo) Icons.Filled.Videocam else Icons.Filled.Call,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                )
-                Spacer(Modifier.width(12.dp))
-                Column {
-                    Text(
-                        text = if (call.remoteOffersVideo) "Incoming video call" else "Incoming call",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Text(
-                        text = callerName ?: "Someone",
-                        style = MaterialTheme.typography.titleMedium,
-                        maxLines = 1,
-                    )
-                }
-            }
-            Spacer(Modifier.height(12.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-            ) {
-                OutlinedButton(onClick = onDecline) { Text("Decline") }
-                Button(onClick = onAccept) { Text("Accept") }
-            }
-            if (call.remoteOffersVideo) {
-                Spacer(Modifier.height(8.dp))
-                OutlinedButton(
-                    onClick = onAcceptWithVideo,
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("Accept with video") }
-            }
-        }
-    }
-}

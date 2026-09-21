@@ -9,7 +9,12 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.media.AudioAttributes
+import android.media.AudioManager
+import android.media.MediaPlayer
 import android.media.RingtoneManager
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -44,8 +49,15 @@ import kotlinx.coroutines.launch
  *    channel built for message previews.
  * 2. `CATEGORY_CALL` plus a **full-screen intent**, which is what puts
  *    [me.lakko.app.ui.call.IncomingCallActivity] over the lock screen. On an
- *    unlocked device the platform shows a heads-up instead — deliberately, and
- *    the reason the actions are on the notification as well as on the screen.
+ *    unlocked device the platform shows a heads-up instead, which is why this
+ *    whole notification is skipped while the app itself is in the foreground
+ *    ([setAppForeground]): the heads-up lands on top of the app's own
+ *    full-screen ring, covers it, and folds away after a few seconds, so
+ *    answering became a race against a disappearing strip — four of seven
+ *    calls were lost that way on the 2026-09-21 walk. When the app is open it
+ *    rings itself instead, with the device ringtone and the same vibration
+ *    pattern the channel carries, and the notification is posted the moment
+ *    the app goes away.
  * 3. [ringing], which the ring screen observes so that a ring stopped anywhere
  *    — the caller hung up, another device answered, the window ran out —
  *    closes it without a second mechanism.
@@ -87,6 +99,52 @@ public object IncomingCallRinger : IncomingCallRingPort {
         appContext = context.applicationContext
     }
 
+    /** `true` while the app's own window is resumed, so it is showing the ring
+     *  itself and the notification would only cover it. */
+    @Volatile
+    private var appInForeground: Boolean = false
+
+    private var ringtonePlayer: MediaPlayer? = null
+
+    /**
+     * The app came to the front, or went away. Reported by `MainActivity`.
+     *
+     * Moving either way DURING a ring swaps the two surfaces rather than
+     * doubling them: coming to the front cancels the notification and takes
+     * over the ringing, going away posts the notification and stops.
+     */
+    public fun setAppForeground(foreground: Boolean) {
+        if (appInForeground == foreground) return
+        appInForeground = foreground
+        val ring = mutableRinging.value ?: return
+        val context = appContext ?: return
+        applySurface(context, ring, callRingRemainingMs(ring.offeredAtMs, System.currentTimeMillis()))
+    }
+
+    /**
+     * Make exactly one surface ring, per [ringSurface], and stop the other.
+     *
+     * Every moment the answer can change goes through here — the ring starting
+     * and each foreground transition during one — so the two can never both
+     * run and can never both stop.
+     */
+    private fun applySurface(context: Context, ring: IncomingCallRing, remainingMs: Long) {
+        when (ringSurface(ringing = true, appInForeground = appInForeground, remainingMs = remainingMs)) {
+            RingSurface.IN_APP -> {
+                cancel(context, ring.callIdHex)
+                startInAppRing(context)
+            }
+            RingSurface.NOTIFICATION -> {
+                stopInAppRing()
+                post(context, ring, remainingMs)
+            }
+            RingSurface.NONE -> {
+                stopInAppRing()
+                cancel(context, ring.callIdHex)
+            }
+        }
+    }
+
     /**
      * An offer arrived: ring for it.
      *
@@ -102,7 +160,7 @@ public object IncomingCallRinger : IncomingCallRingPort {
             return
         }
         mutableRinging.value = ring
-        post(context, ring, remaining)
+        applySurface(context, ring, remaining)
         timeoutJob?.cancel()
         timeoutJob = scope.launch {
             delay(remaining)
@@ -122,6 +180,7 @@ public object IncomingCallRinger : IncomingCallRingPort {
         timeoutJob?.cancel()
         timeoutJob = null
         mutableRinging.value = null
+        stopInAppRing()
         appContext?.let { cancel(it, callIdHex) }
     }
 
@@ -131,6 +190,87 @@ public object IncomingCallRinger : IncomingCallRingPort {
     }
 
     // -----------------------------------------------------------------------
+
+    /**
+     * Ring from inside the app: the device ringtone on a loop plus the
+     * channel's vibration pattern.
+     *
+     * The ringer mode is read rather than assumed, because suppressing the
+     * notification also gives up the channel's own silent/vibrate handling and
+     * an app that rings aloud on a silenced phone is worse than the defect
+     * this replaces. Do Not Disturb is NOT re-implemented here — a phone in
+     * DND that would have let the channel through is the one case the app
+     * rings quieter than the notification would have, which is the safe
+     * direction to be wrong in.
+     */
+    private fun startInAppRing(context: Context) {
+        stopInAppRing()
+        val mode = try {
+            context.getSystemService(AudioManager::class.java)?.ringerMode
+        } catch (cause: Throwable) {
+            Log.w(TAG, "could not read the ringer mode", cause)
+            null
+        } ?: AudioManager.RINGER_MODE_NORMAL
+        if (mode == AudioManager.RINGER_MODE_NORMAL) {
+            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+            if (uri != null) {
+                try {
+                    ringtonePlayer = MediaPlayer().apply {
+                        setAudioAttributes(
+                            AudioAttributes.Builder()
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                                .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                                .build(),
+                        )
+                        setDataSource(context, uri)
+                        isLooping = true
+                        prepare()
+                        start()
+                    }
+                } catch (cause: Throwable) {
+                    // A ringtone the device will not play is not a reason to
+                    // fail the call: the screen is up either way.
+                    Log.w(TAG, "could not play the incoming-call ringtone", cause)
+                    ringtonePlayer = null
+                }
+            }
+        }
+        if (mode != AudioManager.RINGER_MODE_SILENT) {
+            try {
+                vibrator(context)?.vibrate(
+                    VibrationEffect.createWaveform(RING_VIBRATION_PATTERN, 0),
+                )
+            } catch (cause: Throwable) {
+                Log.w(TAG, "could not vibrate for the incoming call", cause)
+            }
+        }
+    }
+
+    private fun stopInAppRing() {
+        ringtonePlayer?.let { player ->
+            try {
+                player.stop()
+            } catch (cause: Throwable) {
+                Log.w(TAG, "could not stop the incoming-call ringtone", cause)
+            }
+            player.release()
+        }
+        ringtonePlayer = null
+        val context = appContext ?: return
+        try {
+            vibrator(context)?.cancel()
+        } catch (cause: Throwable) {
+            Log.w(TAG, "could not stop the incoming-call vibration", cause)
+        }
+    }
+
+    private fun vibrator(context: Context): Vibrator? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            context.getSystemService(VibratorManager::class.java)?.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            context.getSystemService(Vibrator::class.java)
+        }
 
     private fun post(context: Context, ring: IncomingCallRing, remainingMs: Long) {
         ensureChannel(context)

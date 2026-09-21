@@ -282,6 +282,24 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Tell the ringer whether the app is showing, so a ring raised while the
+     * user is in the app never posts a notification: the platform downgrades a
+     * full-screen intent to a heads-up on an unlocked phone, and that strip
+     * lands on top of the app's own full-screen incoming call and folds away
+     * (`docs/ux/calls.md` section 2.1, first row).
+     */
+    override fun onResume() {
+        super.onResume()
+        me.lakko.app.calls.IncomingCallRinger.attach(applicationContext)
+        me.lakko.app.calls.IncomingCallRinger.setAppForeground(true)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        me.lakko.app.calls.IncomingCallRinger.setAppForeground(false)
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         // Standard `singleTask` /`launchMode = singleInstance`
