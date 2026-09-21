@@ -3,6 +3,8 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  cameraStartFailure,
+  cameraStartFailureNotice,
   captureFailureReason,
   captureFallbackNotice,
   captureWithFallback,
@@ -97,5 +99,46 @@ describe("captureFallbackNotice", () => {
     expect(captureFallbackNotice({ missing: "camera", reason: "not-found" })).toBe(
       "No camera was found. You joined with your microphone.",
     );
+  });
+});
+
+describe("cameraStartFailure — the camera that would not start mid-call", () => {
+  it("stops the call claiming video, which is what ends the retry", () => {
+    // The live defect (2026-09-21): reverting only `camOn` left `videoCall()`
+    // true, the next roster rebuild read `camOn` back off it, and the failed
+    // capture was retried forever — six identical NotReadableError warnings
+    // inside one second, with nothing said to the person.
+    const outcome = cameraStartFailure(named("NotReadableError"));
+    expect(outcome.videoCall).toBe(false);
+    expect(outcome.camOn).toBe(false);
+  });
+
+  it("says the camera may be in use when the device refuses to start it", () => {
+    const outcome = cameraStartFailure(named("NotReadableError"));
+    expect(outcome.notice).toBe(
+      "The camera could not be started. It may be in use by another app.",
+    );
+  });
+
+  it("names the permission when that is what went wrong", () => {
+    expect(cameraStartFailureNotice("not-allowed")).toBe(
+      "Lakko was not allowed to use the camera. The call continues without it.",
+    );
+  });
+
+  it("never says the call was joined — this call was already running", () => {
+    for (const reason of ["not-found", "not-allowed", "other"] as const) {
+      const line = cameraStartFailureNotice(reason);
+      expect(line).not.toMatch(/joined/u);
+      expect(line.split(".").filter((s) => s.trim() !== "")).toHaveLength(2);
+    }
+  });
+
+  it("keeps the browser's own words out of it", () => {
+    for (const reason of ["not-found", "not-allowed", "other"] as const) {
+      expect(cameraStartFailureNotice(reason)).not.toMatch(
+        /NotReadableError|getUserMedia|track/u,
+      );
+    }
   });
 });

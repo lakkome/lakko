@@ -90,6 +90,7 @@ import {
 } from "solid-js";
 import { A } from "@solidjs/router";
 
+import { cameraStartFailure } from "./capture-fallback";
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
 import { ChatClient } from "../chat/client";
@@ -907,13 +908,20 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   });
 
   // Camera toggle -> mid-call camera-on / off. A capture failure reverts the
-  // toggle; the call stays up audio-only.
+  // toggle AND the call's own "this is a video call" flag, and says one line.
+  // Reverting the toggle alone does not hold: `localParticipant()` reads
+  // `camOn` from `videoCall()`, so the next roster rebuild put it straight
+  // back and the failed capture was retried forever (see `cameraStartFailure`,
+  // which owns that rule and the copy).
   createEffect(() => {
     const local = callUi.participants().find((p) => p.isLocal);
     if (local === undefined || activeCall === null) return;
     if (local.camOn) {
       void activeCall.addLocalVideo().catch((err: unknown) => {
-        callActions.setCamera(false);
+        const outcome = cameraStartFailure(err);
+        setVideoCall(outcome.videoCall);
+        callActions.setCamera(outcome.camOn);
+        callActions.showNotice(outcome.notice);
         // eslint-disable-next-line no-console
         console.warn("could not start the camera", err);
       });

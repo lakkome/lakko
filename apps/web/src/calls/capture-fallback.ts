@@ -119,3 +119,57 @@ export function captureFallbackNotice(fallback: CaptureFallback): string {
       return "The microphone and camera could not be started. You can listen and watch.";
   }
 }
+
+/** What the call must do when the camera fails to start MID-call. */
+export interface CameraStartFailure {
+  /** The call is no longer a video call: the roster must stop saying the
+   *  camera is on, and `false` here is what ends the retry loop below. */
+  readonly videoCall: false;
+  readonly camOn: false;
+  /** One plain line, what happened and what the call is now. */
+  readonly notice: string;
+}
+
+/**
+ * A camera that would not start after the call was already up.
+ *
+ * ## Why this is a rule and not two lines in the catch
+ *
+ * The 1x1 camera toggle is an effect over the roster: `camOn` true asks the
+ * session for the camera, and a failure reverts the toggle. Reverting the
+ * toggle alone is not enough, and the gap is not obvious — the roster is
+ * rebuilt from the session's state on every transition, and it takes `camOn`
+ * from "was this started as a video call", NOT from the toggle. So a revert
+ * survives only until the next rebuild, which puts `camOn` back, which asks
+ * for the camera again, which fails again: measured live on 2026-09-21 as six
+ * identical `NotReadableError: Could not start video source` warnings inside
+ * one second, with nothing said to the person and the UI still showing their
+ * camera as on. Both flags have to fall together, so both are returned here.
+ *
+ * The call itself is never ended: a camera is not a call, and the audio was
+ * already flowing.
+ */
+export function cameraStartFailure(err: unknown): CameraStartFailure {
+  const reason = captureFailureReason(err);
+  return { videoCall: false, camOn: false, notice: cameraStartFailureNotice(reason) };
+}
+
+/**
+ * The one line for a mid-call camera failure.
+ *
+ * Deliberately not {@link captureFallbackNotice}: that one says "You joined
+ * with your microphone", which is the right sentence for a call being joined
+ * and the wrong one for a call that has been running for a minute.
+ * `not-found` is absent for the same reason — a camera that was there when
+ * the call started is not "not found", and the third line covers it.
+ */
+export function cameraStartFailureNotice(reason: CaptureFailureReason): string {
+  switch (reason) {
+    case "not-allowed":
+      return "Lakko was not allowed to use the camera. The call continues without it.";
+    case "not-found":
+      return "No camera was found. The call continues without it.";
+    default:
+      return "The camera could not be started. It may be in use by another app.";
+  }
+}
