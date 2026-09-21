@@ -281,16 +281,6 @@ final class CallHost: ObservableObject {
         }
     }
 
-    /// The camera check's Call button (`docs/ux/calls.md` section 3.2): place
-    /// the call with whatever the two round buttons were left at. A camera the
-    /// user turned off there makes this a voice call, honestly announced as one.
-    func placeCheckedCall(micOn: Bool, cameraOn: Bool) {
-        guard let session = activeCall, session.state == .idle else { return }
-        let media = CallMediaChoice.offeredMedia(micOn: micOn, cameraOn: cameraOn)
-        outgoingSurface = .dial(video: media.video)
-        ports.placeCall(session, media.audio, media.video)
-    }
-
     /// Accept the ringing call — after the microphone permission, and the
     /// camera permission too when accepting with video. A refusal leaves the
     /// call ringing (so Decline, or an audio-only accept, still works).

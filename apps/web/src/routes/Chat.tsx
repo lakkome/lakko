@@ -141,8 +141,6 @@ import { useReadWatermarks } from "../chat/ReadWatermarkContext";
 import { useCallLog } from "../calls/CallLogContext";
 import { callBackKind, type CallLogEntry } from "../calls/call-log";
 import { planCallStart } from "../calls/call-start-flow";
-import { CameraCheck } from "../calls/CameraCheck";
-import { callActions } from "../state/call-state";
 import { mergeConversationEntries } from "../chat/call-timeline";
 import {
   GROUP_NAME_LABEL,
@@ -802,7 +800,6 @@ function ChatView(props: {
    * `null` when no check is up. Holding the stream here rather than a boolean
    * is what lets the check open on a live picture instead of on a placeholder.
    */
-  const [cameraCheckStream, setCameraCheckStream] = createSignal<MediaStream | null>(null);
 
   /** Place a call of the given media, routed to whichever kind of call this
    *  chat is. */
@@ -827,10 +824,11 @@ function ChatView(props: {
   /**
    * The header's two call buttons (docs/ux/calls.md section 3).
    *
-   * The phone button dials immediately — no preparation screen, which is what
-   * section 3.1 asks for and what every phone app does. The video button opens
-   * the camera check, because "a person about to be seen deserves to know what
-   * they look like".
+   * Both dial immediately — no preparation screen for either kind. Section 3.1
+   * always said so for the phone button; section 3.2 said the same for the
+   * video button from 2026-09-21, when its camera check was removed. The
+   * self-view that check existed for is on the calling screen, so the caller
+   * still sees themselves, a moment later and without a second press.
    */
   function onCallButton(withVideo: boolean): void {
     if (callAffordance() === "hidden") return;
@@ -838,19 +836,22 @@ function ChatView(props: {
       placeCall(false);
       return;
     }
-    void openCameraCheck();
+    void placeVideoCall();
   }
 
   /**
-   * Open section 3.2's camera check, or fall back to a voice call.
+   * Place a video call, or the voice call this device can actually place.
    *
-   * The camera is acquired BEFORE the screen opens, so a device that has none
-   * never sees a check with nothing in it — section 3.2: "If the device has no
-   * camera, the video button starts a voice call and says so in one line."
-   * That one line is `planCallStart`'s, so the words live where a test can
-   * read them.
+   * The camera is probed first and released again. That looks wasteful next to
+   * dialling straight away, and it is deliberate: the 1x1 session asks for the
+   * camera and the microphone in ONE `getUserMedia` and has no per-track
+   * fallback of its own (unlike the SFU path's `capture-fallback.ts`), so on a
+   * device with no camera the whole request fails and no call is placed at
+   * all. Section 3.2 owes that person a voice call and one line saying why,
+   * and the probe is what lets `planCallStart` say it. The probe's own stream
+   * is stopped immediately; the session acquires its own.
    */
-  async function openCameraCheck(): Promise<void> {
+  async function placeVideoCall(): Promise<void> {
     let stream: MediaStream | null = null;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ video: true });
@@ -859,16 +860,10 @@ function ChatView(props: {
       // placeable, just not as a video call.
       stream = null;
     }
-    const plan = planCallStart("video", stream !== null);
-    if (plan.kind === "camera-check" && stream !== null) {
-      setCameraCheckStream(stream);
-      return;
-    }
     if (stream !== null) for (const track of stream.getTracks()) track.stop();
-    if (plan.kind === "dial") {
-      if (plan.notice !== null) setNotice(plan.notice);
-      placeCall(plan.media.video);
-    }
+    const plan = planCallStart("video", stream !== null);
+    if (plan.notice !== null) setNotice(plan.notice);
+    placeCall(plan.media.video);
   }
 
   // A contact detail's Call / Video buttons open this chat with `?call=audio`
@@ -7006,26 +7001,6 @@ function ChatView(props: {
       </form>
       </Show>
 
-      {/* docs/ux/calls.md section 3.2 — the one pre-call screen that survives,
-          and only for a video call. It owns the camera it was handed. */}
-      <Show when={cameraCheckStream()}>
-        {(stream) => (
-          <CameraCheck
-            peerName={resolvePeerName()}
-            peerId={props.entry.groupIdB64}
-            initialStream={stream()}
-            onCancel={() => setCameraCheckStream(null)}
-            onCall={(media, micOn) => {
-              setCameraCheckStream(null);
-              // A call left muted on the check has to START muted; every
-              // `localParticipant()` constructor used to hardcode a live
-              // microphone (see `state/call-state.ts`).
-              callActions.setPendingMicOn(micOn);
-              placeCall(media.video);
-            }}
-          />
-        )}
-      </Show>
     </div>
   );
 }

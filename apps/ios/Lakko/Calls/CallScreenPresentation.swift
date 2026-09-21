@@ -255,7 +255,7 @@ public enum CallScreenPresentation {
         switch phase {
         case .calling, .ended:
             return false
-        case .cameraCheck, .connecting, .connected, .reconnecting:
+        case .preparing, .connecting, .connected, .reconnecting:
             return true
         }
     }
@@ -363,7 +363,7 @@ public enum CallStatusText {
     ///   ``CallUiState/CallPhase/connected``, where the line IS the clock.
     public static func line(phase: CallUiState.CallPhase, durationMs: Int64?) -> String? {
         switch phase {
-        case .cameraCheck:
+        case .preparing:
             return nil
         case .calling:
             return "Calling..."

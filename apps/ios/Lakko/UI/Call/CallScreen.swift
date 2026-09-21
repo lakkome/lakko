@@ -583,17 +583,10 @@ public struct CallScreen: View {
     /// screen can say it (section 4's state table). `nil` for a call that never
     /// connected.
     @State private var endedDurationMs: Int64?
-    /// What the button that opened this call opened: a call already on the wire,
-    /// or the camera check (`docs/ux/calls.md` sections 3.1 and 3.2). Which
-    /// button it was is not kept, because nothing on this screen depends on it
-    /// any more — the row is the same four controls either way (section 4.1).
-    private let surface: CallStartSurface?
     /// The other person's name, resolved by the call's owner.
     private let peerName: String?
     /// One plain line about this call's media (today: the no-camera downgrade).
     private let notice: String?
-    /// Place the call from the camera check.
-    private let onPlaceCall: ((_ micOn: Bool, _ cameraOn: Bool) -> Void)?
 
     /// Section 4 — the controls fade out on a connected video call and come
     /// back on a tap; on a voice call they never hide.
@@ -609,52 +602,36 @@ public struct CallScreen: View {
 
     public init(
         session: CallSession? = nil,
-        surface: CallStartSurface? = nil,
         peerName: String? = nil,
         notice: String? = nil,
-        onPlaceCall: ((_ micOn: Bool, _ cameraOn: Bool) -> Void)? = nil,
         onExit: @escaping () -> Void
     ) {
         self.session = session
         self.externallyDriven = false
-        self.surface = surface
         self.peerName = peerName
         self.notice = notice
-        self.onPlaceCall = onPlaceCall
         self.onExit = onExit
     }
 
     /// SFU group-call init: render a `CallUiState` that an external owner
-    /// (`SfuCallUi`) already drives. No session, and never a camera check —
-    /// the call is already connecting when presented.
+    /// (`SfuCallUi`) already drives. No session — the call is already
+    /// connecting when presented.
     public init(externalState: CallUiState, onExit: @escaping () -> Void) {
         _state = StateObject(wrappedValue: externalState)
         self.session = nil
         self.externallyDriven = true
-        self.surface = nil
         self.peerName = nil
         self.notice = nil
-        self.onPlaceCall = nil
         self.onExit = onExit
     }
 
     // MARK: - What the screen is showing
 
-    /// The camera check is shown only for the one case that asked for it: an
-    /// outgoing video call, before it is placed. Everything else — a voice call
-    /// (which is already on the wire), an accepted incoming call, a group call —
-    /// goes straight to the call.
-    private var showsCameraCheck: Bool {
-        guard !externallyDriven, session != nil, surface == .cameraCheck else { return false }
-        if case .cameraCheck = state.phase { return true }
-        return false
-    }
-
-    /// A voice call is dialed before this screen is ever presented, so the
-    /// session's brief `.idle` must not read as "camera check" — it reads as
+    /// Every call is dialled before this screen is presented, so the session's
+    /// brief `.preparing` is never something to draw: it reads as
     /// `Calling...`, which is what is happening.
     private var displayPhase: CallUiState.CallPhase {
-        if case .cameraCheck = state.phase, !showsCameraCheck { return .calling }
+        if case .preparing = state.phase { return .calling }
         return state.phase
     }
 
@@ -723,22 +700,10 @@ public struct CallScreen: View {
 
     public var body: some View {
         ZStack {
-            if showsCameraCheck {
-                CameraCheckScreen(
-                    peerName: state.peerName ?? peerName,
-                    identity: tintIdentity,
-                    onCall: { micOn, cameraOn in
-                        onPlaceCall?(micOn, cameraOn)
-                    },
-                    onCancel: {
-                        // Abandon a prepared-but-unplaced call: hanging up an
-                        // idle session drives it to done, and `onExit` clears it.
-                        session?.hangUp(reason: .hungUp)
-                        onExit()
-                    })
-            } else {
-                callView
-            }
+            // docs/ux/calls.md section 3: the screen's first state IS the call,
+            // for both kinds and both directions. A camera check stood here for
+            // an outgoing video call until 2026-09-21.
+            callView
         }
         .onChange(of: state.phase) { _, newPhase in
             // Section 4 — the running time starts when media does, and only
@@ -752,7 +717,7 @@ public struct CallScreen: View {
                 connectedAt = nil
             }
             switch newPhase {
-            case .cameraCheck:
+            case .preparing:
                 sounds.controller.stopAll()
             case .calling, .connecting:
                 sounds.controller.startLoop(.ringbackOutgoing)

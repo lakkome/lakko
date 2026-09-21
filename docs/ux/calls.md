@@ -78,17 +78,21 @@ is the thing that made the old screen feel like a settings page.
 
 The camera stays off, and the callee is told `Voice call`.
 
-### 3.2 A video call shows the camera first
+### 3.2 A video call just calls too
 
-The video button opens a **camera check**, because a person about to be seen deserves
-to know what they look like. It fills the screen with the live self-view, the callee's
-name across the top, and three round controls above the bottom edge: microphone,
-camera, and a large **Call** button between them. Cancel is a plain close control in
-the top corner. No card, no toggle rows, no labels reading like settings.
+The video button places the call immediately, with the camera on. One press of a call
+button is one call, for both kinds.
 
-Turning the camera off there does not leave a hole: the preview becomes the callee's
-avatar on the call background, and the button still reads **Call**. If the device has
-no camera, the video button starts a voice call and says so in one line.
+**This replaced a camera check** (a full-screen live self-view with a Call button
+under it), removed 2026-09-21. Its reason was sound — a person about to be seen
+deserves to know what they look like — and nothing about that reason is abandoned:
+the self-view is already on the calling screen, so the caller sees themselves while it
+rings, which is the same look a moment later and without a second press. What the
+check cost was the thing section 3.1 refuses for a voice call, one press further
+along: a question before a call.
+
+If the device has no camera, the video button starts a voice call and says so in one
+line.
 
 ### 3.3 Answering
 
@@ -186,8 +190,6 @@ portrait.
 - The row sits inside one rounded translucent bar, floating above the bottom safe area
   with a margin, not welded to the edge. On a voice call it is vertically placed in the
   lower third, under the portrait, not at the very bottom of an empty screen.
-- **The pre-call camera check** (section 3.2) uses the same round buttons, not switches:
-  microphone and camera either side of the Call button.
 
 ### 4.1.1 How each button looks
 

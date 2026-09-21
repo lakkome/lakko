@@ -39,12 +39,32 @@ class CallEntryPointTest {
         )
     }
 
+    // The camera check this used to assert was removed on 2026-09-21: one
+    // press of a call button is one call, for both kinds (docs/ux/calls.md
+    // section 3.2). The self-view the check existed for is on the calling
+    // screen already, so the caller still sees themselves while it rings.
     @Test
-    fun `the video button opens the camera check`() {
+    fun `the video button dials, carrying the camera`() {
         assertEquals(
-            CallEntrySurface.CAMERA_CHECK,
+            CallEntrySurface.DIAL_IMMEDIATELY,
             callEntrySurface(RequestedCallKind.VIDEO, hasCamera = true),
         )
+        val media = immediateDialMedia(RequestedCallKind.VIDEO, hasCamera = true)
+        assertTrue("a call always carries an audio section", media.audio)
+        assertTrue("the video button that dials dials WITH the camera", media.video)
+    }
+
+    @Test
+    fun `no call button asks a question first`() {
+        for (kind in RequestedCallKind.entries) {
+            for (hasCamera in listOf(true, false)) {
+                assertEquals(
+                    "$kind with hasCamera=$hasCamera must dial",
+                    CallEntrySurface.DIAL_IMMEDIATELY,
+                    callEntrySurface(kind, hasCamera),
+                )
+            }
+        }
     }
 
     @Test

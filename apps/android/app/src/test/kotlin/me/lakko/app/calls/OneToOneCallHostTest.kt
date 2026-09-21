@@ -436,18 +436,14 @@ class OneToOneCallHostTest {
     @Test
     fun `an outgoing call is prepared, dialed, and times out unanswered`() = runTest {
         val h = harness()
-        // A VIDEO call is the only kind that still waits to be dialled: it
-        // stops at the camera check of `docs/ux/calls.md` section 3.2. A voice
-        // call is dialled by `startOutgoing` itself — see the test below.
-        assertTrue(h.host.startOutgoing(groupA, RequestedCallKind.VIDEO))
+        // Since the camera check went (2026-09-21) both kinds are dialled by
+        // `startOutgoing` itself, so what this test watches is the dial and
+        // the unanswered window, not a wait in between.
+        assertTrue(h.host.startOutgoing(groupA, RequestedCallKind.VOICE))
         runCurrent()
         val call = h.host.active.value!!
         assertFalse(call.incoming)
         assertNotNull(call.session.keySeed)
-        assertEquals(CallSession.WebCallState.Idle, call.session.state.value)
-
-        h.host.dial(audio = true, video = false)
-        runCurrent()
         assertEquals(true to false, call.session.dialed)
 
         advanceTimeBy(OneToOneCallTiming().establishTimeoutMs + 1)
@@ -467,15 +463,25 @@ class OneToOneCallHostTest {
     }
 
     @Test
-    fun `cancelling a prepared call clears the slot`() = runTest {
+    fun `no outgoing call is ever left prepared and undialled`() = runTest {
+        // This replaces `cancelling a prepared call clears the slot`, whose
+        // premise the 2026-09-21 removal of the camera check took away: both
+        // kinds now dial in the same breath as they are prepared, so there is
+        // no undialled state for a close control to cancel. `cancelPrepared`
+        // and `AppCallHost.endCurrentCall`'s Idle branch are kept as the
+        // state machine's own defence, not as a reachable route, and this
+        // pins the reason they are unreachable rather than deleting them.
         val h = harness()
-        // Only a video call is ever cancellable-before-dialling now: it is the
-        // camera check's close control that cancels it.
-        h.host.startOutgoing(groupA, RequestedCallKind.VIDEO)
-        runCurrent()
-        h.host.cancelPrepared()
-        runCurrent()
-        assertNull(h.host.active.value)
+        for (kind in RequestedCallKind.entries) {
+            assertTrue(h.host.startOutgoing(groupA, kind, hasCamera = true))
+            runCurrent()
+            val call = h.host.active.value!!
+            assertNotNull("$kind must be dialled by startOutgoing itself", call.session.dialed)
+            h.host.hangUp()
+            runCurrent()
+            h.host.clearFinished()
+            runCurrent()
+        }
     }
 
     @Test
@@ -893,14 +899,17 @@ class OneToOneCallHostTest {
     }
 
     @Test
-    fun `the video button stops at the camera check`() = runTest {
+    fun `the video button dials at once, carrying the camera`() = runTest {
+        // Was `the video button stops at the camera check` until 2026-09-21.
+        // docs/ux/calls.md section 3.2: one press of a call button is one
+        // call, for both kinds; the self-view the check existed for is on the
+        // calling screen already.
         val h = harness()
         assertTrue(h.host.startOutgoing(groupA, RequestedCallKind.VIDEO, hasCamera = true))
         runCurrent()
         val call = h.host.active.value!!
         assertEquals(RequestedCallKind.VIDEO, call.requestedKind)
-        assertNull("nothing is dialled until the check is passed", call.session.dialed)
-        assertEquals(CallSession.WebCallState.Idle, call.session.state.value)
+        assertEquals("dialled at once, with the camera", true to true, call.session.dialed)
     }
 
     @Test

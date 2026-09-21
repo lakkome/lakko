@@ -57,10 +57,13 @@ public final class CallUiState: ObservableObject {
 
     /// Lifecycle phase (`docs/ux/calls.md` section 4).
     public enum CallPhase: Equatable {
-        /// The camera check a video call opens with (section 3.2). A voice call
-        /// never passes through it — it dials immediately — and an accepted
-        /// incoming call never does either (section 3.3).
-        case cameraCheck
+        /// The instant between a session existing and its offer being on the
+        /// wire. Nothing is drawn for it: section 3 gives neither kind of call
+        /// a preparation screen, and an outgoing call is dialled in the same
+        /// breath as it is built, so this maps to `Calling...` on screen. It
+        /// was `cameraCheck` until 2026-09-21, when the check it named was
+        /// removed.
+        case preparing
         /// Ringing out: the offer is on the wire, nobody has answered.
         case calling
         /// Answered; the transport is coming up.
@@ -203,7 +206,7 @@ public final class CallUiState: ObservableObject {
 
     // MARK: - Published state
 
-    @Published public private(set) var phase: CallPhase = .cameraCheck
+    @Published public private(set) var phase: CallPhase = .preparing
     @Published public private(set) var participants: [Participant] = []
     /// `nil` = follow active speaker.
     @Published public private(set) var pinnedId: String?
@@ -728,7 +731,7 @@ public final class CallUiState: ObservableObject {
     }
 
     public func reset() {
-        self.phase = .cameraCheck
+        self.phase = .preparing
         self.participants = []
         self.pinnedId = nil
         self.participantListOpen = false
@@ -1042,7 +1045,7 @@ extension CallUiState {
     /// until the terminal `done` flips to `.ended`.
     private static func mapSessionPhase(_ s: CallSession.WebCallState) -> CallPhase {
         switch s {
-        case .idle: return .cameraCheck
+        case .idle: return .preparing
         case .outgoing, .ringing: return .calling
         case .connecting: return .connecting
         case .connected, .ending: return .connected

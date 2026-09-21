@@ -384,30 +384,32 @@ final class CallHostTests: XCTestCase {
         XCTAssertNil(host.outgoingNotice)
     }
 
-    /// Section 3.2 — the video button shows the camera first, so nothing is on
-    /// the wire until the check's Call button is pressed.
-    func testTheVideoButtonOpensTheCameraCheckAndDialsNothingYet() async throws {
+    /// Section 3.2 since 2026-09-21 — the video button dials at once, carrying
+    /// the camera. It opened a camera check until then, and these two tests
+    /// replace the pair that watched it stop there and be released by the
+    /// check's own Call button.
+    func testTheVideoButtonDialsAtOnceCarryingTheCamera() async throws {
         let h = Harness(nowMs: t0)
         let host = makeHost(h)
         host.startOutgoingCall(groupIdHex: groupA, button: .video)
-        try await waitUntil { host.activeCall != nil }
+        try await waitUntil { !h.placed.isEmpty }
         XCTAssertEqual(host.outgoingButton, .video)
-        XCTAssertEqual(host.outgoingSurface, .cameraCheck)
-        XCTAssertTrue(h.placed.isEmpty, "the camera check must not place the call by itself")
-    }
-
-    /// The check's Call button places the call with what its two round buttons
-    /// were left at — a camera turned off there makes this a voice call.
-    func testTheCameraChecksCallButtonPlacesWhatTheButtonsSay() async throws {
-        let h = Harness(nowMs: t0)
-        let host = makeHost(h)
-        host.startOutgoingCall(groupIdHex: groupA, button: .video)
-        try await waitUntil { host.activeCall != nil }
-        host.placeCheckedCall(micOn: true, cameraOn: false)
+        XCTAssertEqual(host.outgoingSurface, .dial(video: true))
         XCTAssertEqual(h.placed.count, 1)
         XCTAssertTrue(h.placed[0].audio)
-        XCTAssertFalse(h.placed[0].video)
-        XCTAssertEqual(host.outgoingSurface, .dial(video: false))
+        XCTAssertTrue(h.placed[0].video)
+    }
+
+    /// Neither button asks a question before the call.
+    func testNoCallButtonStopsBeforeDialling() async throws {
+        for button in [CallButtonKind.voice, CallButtonKind.video] {
+            let h = Harness(nowMs: t0)
+            let host = makeHost(h)
+            host.startOutgoingCall(groupIdHex: groupA, button: button)
+            try await waitUntil { !h.placed.isEmpty }
+            XCTAssertEqual(h.placed.count, 1, "\(button) must place exactly one call")
+            XCTAssertTrue(h.placed[0].audio, "\(button) must carry an audio section")
+        }
     }
 
     /// Section 3.2 — a device with no camera answers the video button with a

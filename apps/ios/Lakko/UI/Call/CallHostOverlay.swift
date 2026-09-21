@@ -87,18 +87,13 @@ struct CallHostOverlay: ViewModifier {
                         onAcceptWithoutVideo: { host.acceptIncomingCall(withVideo: false) },
                         onDecline: { host.declineIncomingCall() })
                 case .oneToOne(let session)?:
-                    // `docs/ux/calls.md` sections 3 and 4 — the button the
-                    // caller tapped decides whether this opens on the camera
-                    // check or on a call already ringing out, and the resolved
-                    // name is who the screen says is on it.
+                    // `docs/ux/calls.md` sections 3 and 4 — the call is
+                    // already ringing out when this opens, for both kinds, and
+                    // the resolved name is who the screen says is on it.
                     CallScreen(
                         session: session,
-                        surface: host.outgoingSurface,
                         peerName: host.activePeerName,
-                        notice: host.outgoingNotice,
-                        onPlaceCall: { micOn, cameraOn in
-                            host.placeCheckedCall(micOn: micOn, cameraOn: cameraOn)
-                        }
+                        notice: host.outgoingNotice
                     ) {
                         host.clearFinishedCall()
                     }

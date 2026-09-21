@@ -29,15 +29,16 @@ final class CallMediaChoiceTests: XCTestCase {
             .dial(video: false))
     }
 
-    /// Section 3.2 — a person about to be seen gets to look first.
-    func testTheVideoButtonOpensTheCameraCheck() {
+    /// Section 3.2 since 2026-09-21 — the video button dials at once, with the
+    /// camera. It opened a camera check until then; the self-view that check
+    /// existed for is on the calling screen, so nothing is lost but the press.
+    func testTheVideoButtonDialsCarryingTheCamera() {
         XCTAssertEqual(
             CallMediaChoice.startSurface(for: .video, hasCamera: true),
-            .cameraCheck)
+            .dial(video: true))
     }
 
-    /// Section 3.2 — checking a camera that does not exist is a screen with
-    /// nothing on it, so the call is simply placed with voice.
+    /// Section 3.2 — a video call a device cannot make is placed with voice.
     func testTheVideoButtonPlacesAVoiceCallWhenThereIsNoCamera() {
         XCTAssertEqual(
             CallMediaChoice.startSurface(for: .video, hasCamera: false),
@@ -102,10 +103,6 @@ final class CallMediaChoiceTests: XCTestCase {
             switch CallMediaChoice.startSurface(for: button, hasCamera: true) {
             case .dial(let video):
                 camera = video
-            case .cameraCheck:
-                // The check opens with the camera running, which is the whole
-                // reason it is shown; an untouched check places a video call.
-                camera = true
             }
             let media = CallMediaChoice.offeredMedia(micOn: true, cameraOn: camera)
             XCTAssertEqual(

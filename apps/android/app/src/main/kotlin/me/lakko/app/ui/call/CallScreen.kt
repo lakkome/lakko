@@ -360,7 +360,7 @@ public fun CallScreen(
     // There is no branch on the phase any more. `docs/ux/calls.md` section 3
     // removed the preparation screen from every path — a voice call dials
     // immediately, a video call shows the camera check before the call exists
-    // ([CameraCheckScreen], presented by the overlay, not by this screen), and
+    // (the camera check, removed 2026-09-21 -- docs/ux/calls.md section 3.2), and
     // "accepting an incoming call never shows any preparation screen". So the
     // only thing this composable draws is the call.
     LakkoTheme(dark = true) {

@@ -359,7 +359,7 @@ final class CallScreenPresentationTests: XCTestCase {
 
     /// The camera check has its own words; it is not a call yet.
     func testTheCameraCheckHasNoStatusLine() {
-        XCTAssertNil(CallStatusText.line(phase: .cameraCheck, durationMs: nil))
+        XCTAssertNil(CallStatusText.line(phase: .preparing, durationMs: nil))
     }
 
     // MARK: - Spoken labels (section 8)

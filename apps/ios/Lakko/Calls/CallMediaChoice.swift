@@ -13,13 +13,15 @@ public enum CallButtonKind: String, Equatable, Sendable {
 }
 
 /// What a call button opens (`docs/ux/calls.md` sections 3.1 and 3.2).
+///
+/// One case, and that is the decision: every call button dials. The enum is
+/// kept so the call sites keep asking one question in one place, and so a
+/// future pre-call surface has somewhere to be added. `cameraCheck` was the
+/// other case until 2026-09-21.
 public enum CallStartSurface: Equatable, Sendable {
     /// No screen at all before the call: dial now with these media flags, and
     /// let the call screen open on `Calling...`.
     case dial(video: Bool)
-    /// The camera check of section 3.2 — the live self-view, the callee's name,
-    /// and three round buttons. Call dials from there.
-    case cameraCheck
 }
 
 /// The one place that decides what a call button opens and what the offer then
@@ -40,11 +42,14 @@ public enum CallStartSurface: Equatable, Sendable {
 ///
 ///   * the **phone button dials immediately** — there is nothing to decide, and
 ///     every control that could change the call is on the call screen anyway;
-///   * the **video button opens the camera check**, because a person about to be
-///     seen deserves to know what they look like first;
+///   * the **video button dials too**, carrying the camera. It opened a camera
+///     check until 2026-09-21 — a full-screen self-view with a Call button —
+///     on the ground that a person about to be seen deserves to know what they
+///     look like. That reason is met without the second press: the self-view is
+///     on the calling screen, so the caller sees themselves while it rings;
 ///   * a device with **no camera** answers the video button with a voice call
-///     and says so in one line, rather than opening a check of a camera that
-///     does not exist.
+///     and says so in one line, rather than dialling a video call it cannot
+///     make.
 public enum CallMediaChoice {
 
     /// The button for a `video:` flag, for the call sites that still speak in
@@ -64,7 +69,7 @@ public enum CallMediaChoice {
         case .voice:
             return .dial(video: false)
         case .video:
-            return hasCamera ? .cameraCheck : .dial(video: false)
+            return .dial(video: hasCamera)
         }
     }
 
