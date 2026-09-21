@@ -57,6 +57,41 @@ import {
   armGenericFrameDescriptor,
   type HeaderExtensionTransceiver,
 } from "./frame-descriptor";
+import {
+  attachReceiverSFrame,
+  attachSenderSFrame,
+  isSFrameTransformSupported,
+} from "./sframe-transform";
+
+/**
+ * The three SFrame calls this session makes, injectable so a test can prove
+ * that every sender and receiver is sealed without a browser.
+ *
+ * It is a seam and not a switch: the default is the real transform and there
+ * is no "off". A caller that supplies its own is a test.
+ */
+export interface SFrameAttachers {
+  readonly supported: () => boolean;
+  readonly attachSender: (
+    sender: RTCRtpSender,
+    opts: { readonly seed: Uint8Array; readonly localLeaf: number },
+  ) => void;
+  readonly attachReceiver: (
+    receiver: RTCRtpReceiver,
+    opts: { readonly seed: Uint8Array },
+  ) => void;
+}
+
+/** The real transforms (`sframe-transform.ts`). */
+export const DEFAULT_SFRAME_ATTACHERS: SFrameAttachers = {
+  supported: isSFrameTransformSupported,
+  attachSender: (sender, opts) => {
+    attachSenderSFrame(sender, opts);
+  },
+  attachReceiver: (receiver, opts) => {
+    attachReceiverSFrame(receiver, opts);
+  },
+};
 import { loadWasm } from "../wasm";
 import type { ParsedCallSignaling } from "../../wasm/lakko_ffi_wasm";
 
@@ -293,6 +328,11 @@ export class CallSession {
   private makingOffer = false;
   private isSettingRemoteAnswerPending = false;
   private negotiationReady = false;
+  /** The per-call SFrame seed and this client's MLS leaf, armed by
+   *  {@link setCallKey} before the peer connection opens. `null` means the
+   *  call refuses rather than sending anything unsealed (invariant #4). */
+  private callKey: { readonly seed: Uint8Array; readonly localLeaf: number } | null = null;
+
   /** Logged once per session; see {@link armFrameDescriptor}. */
   private frameDescriptorWarned = false;
 
@@ -330,9 +370,36 @@ export class CallSession {
     callId: Uint8Array,
     private readonly callbacks: CallSessionCallbacks,
     timing: Partial<CallSessionTiming> = {},
+    private readonly sframe: SFrameAttachers = DEFAULT_SFRAME_ATTACHERS,
   ) {
     this.callId = callId;
     this.timing = { ...DEFAULT_CALL_SESSION_TIMING, ...timing };
+  }
+
+  /**
+   * Arm the per-call SFrame key before the peer connection opens.
+   *
+   * `seed` is the MLS exporter output
+   * `group.exportSecret(identity, "lakko/call/v1", callId, 32)` and
+   * `localLeaf` this client's leaf index — the same two values iOS and Android
+   * derive for the same call, which is what makes the keys agree across
+   * stacks (audit-pack C-1). The seed becomes this session's frame key and the
+   * leaf is stamped into every sealed frame's KID (ADR-0035).
+   *
+   * Call it before {@link dial} or {@link accept}. Without it the call
+   * refuses: until 2026-09-21 this path attached no SFrame at all while both
+   * natives sealed every 1x1 frame and required sealing on receipt, so a call
+   * between a browser and a phone exchanged media neither end could use -
+   * the phone rendered no frame of the browser's video and the browser
+   * assembled none of the phone's.
+   */
+  setCallKey(seed: Uint8Array, localLeaf: number): void {
+    this.callKey = { seed, localLeaf };
+  }
+
+  /** Whether media on this call is sealed — what the encryption chip reads. */
+  hasCallKey(): boolean {
+    return this.callKey !== null;
   }
 
   /** Current state — UI re-reads after every callback. */
@@ -667,7 +734,17 @@ export class CallSession {
         return;
       }
       localStream.addTrack(track);
-      pc2.addTrack(track, localStream); // fires onnegotiationneeded -> reneg
+      const sender = pc2.addTrack(track, localStream); // fires onnegotiationneeded -> reneg
+      // The camera arriving mid-call is a new sender and needs its own seal;
+      // without this the video would leave unsealed while the audio beside it
+      // is sealed, and the peer would drop every frame of it.
+      const midCallKey = this.callKey;
+      if (midCallKey !== null) {
+        this.sframe.attachSender(sender, {
+          seed: midCallKey.seed,
+          localLeaf: midCallKey.localLeaf,
+        });
+      }
       // Refresh the self-preview stream (it now carries a video track).
       this.callbacks.onLocalStream?.(localStream);
       // The local self-preview is live now (the track is captured + attached);
@@ -803,6 +880,23 @@ export class CallSession {
   // -----------------------------------------------------------------
 
   private async openPeerConnection(media: CallMedia): Promise<void> {
+    // Fail closed BEFORE any capture, the way the group session does: a call
+    // that cannot seal its media does not open the microphone at all.
+    const key = this.callKey;
+    if (key === null) {
+      // eslint-disable-next-line no-console
+      console.warn("CallSession: no call key armed — refusing the call (invariant #4)");
+      void this.endLocal("error");
+      throw new Error("call key not armed");
+    }
+    if (!this.sframe.supported()) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "CallSession: this browser has no RTCRtpScriptTransform — refusing the call (invariant #4)",
+      );
+      void this.endLocal("error");
+      throw new Error("SFrame transform unsupported");
+    }
     // Honour the picker-selected device at capture time: a non-null
     // `deviceId` becomes an `{ exact }` constraint, else a bare boolean
     // (OS default). A disabled kind stays `false`.
@@ -848,7 +942,11 @@ export class CallSession {
     };
 
     for (const track of stream.getTracks()) {
-      pc.addTrack(track, stream);
+      const sender = pc.addTrack(track, stream);
+      // Attached between `addTrack` and the SDP build, the ordering the native
+      // shims keep (C-48): the sender's track decides the stream index the
+      // KID carries, so it must already be set.
+      this.sframe.attachSender(sender, { seed: key.seed, localLeaf: key.localLeaf });
     }
 
     pc.onicecandidate = (ev): void => {
@@ -873,6 +971,11 @@ export class CallSession {
       // and video if they are sending it). The UI binds it to an
       // `<audio>` sink + a remote-video tile; a mid-call camera-on
       // by the peer arrives as a later `ontrack` on the same stream.
+      // One decrypt transform per receiver: each frame's own KID selects the
+      // sender leaf and stream, so audio and camera need no separate arming.
+      // A frame that fails to open is dropped in the worker, never forwarded
+      // as plaintext.
+      this.sframe.attachReceiver(ev.receiver, { seed: key.seed });
       const remote = ev.streams[0];
       if (remote !== undefined) {
         this.callbacks.onRemoteStream(remote);

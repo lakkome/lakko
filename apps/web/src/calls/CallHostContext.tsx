@@ -530,6 +530,28 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     speaking: false,
   });
 
+  /** The safety number of the live 1x1 call, derived once when its key is
+   *  armed. Display-only: a derivation failure never affects the call. */
+  let oneToOneSafety: string | null = null;
+
+  /**
+   * Say whether this 1x1 call's media is sealed, and show its safety number
+   * when it is.
+   *
+   * This used to publish `active: false` unconditionally with a comment that
+   * the 1x1 web path was P2P DTLS-SRTP and had no safety number. That was
+   * true until the path gained SFrame; leaving it would now have the chip
+   * denying an encryption that is actually running, which is the same class of
+   * lie as claiming one that is not.
+   */
+  function publishOneToOneE2ee(): void {
+    const armed = activeCall?.hasCallKey() === true;
+    callActions.setE2ee({
+      active: armed,
+      shortFingerprint: armed ? oneToOneSafety : null,
+    });
+  }
+
   function syncCallUiFromState(s: WebCallState): void {
     switch (s) {
       // `docs/ux/calls.md` §4's state table separates these two, and the store
@@ -539,18 +561,17 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       case "outgoing":
         callActions.setPhase({ kind: "calling" });
         callActions.setParticipants([localParticipant()]);
-        callActions.setE2ee({ active: false, shortFingerprint: null });
+        publishOneToOneE2ee();
         break;
       case "connecting":
         callActions.setPhase({ kind: "connecting" });
         callActions.setParticipants([localParticipant()]);
-        // 1x1 web media is P2P DTLS-SRTP, not SFrame: no safety number, so no
-        // chip (see `encryption-chip.ts`).
-        callActions.setE2ee({ active: false, shortFingerprint: null });
+        publishOneToOneE2ee();
         break;
       case "connected":
         callActions.setPhase({ kind: "connected" });
         callActions.setParticipants([localParticipant(), remoteParticipant()]);
+        publishOneToOneE2ee();
         break;
       case "ending":
         break;
@@ -559,6 +580,34 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       case "done":
         callActions.reset();
         break;
+    }
+  }
+
+  /**
+   * The per-call SFrame key for a 1x1 call, or `null` when this device cannot
+   * derive one (no live identity, or the chat is not a group this device is
+   * in). A `null` leaves the session unarmed, which makes it refuse before it
+   * opens the microphone rather than send media unsealed.
+   *
+   * The same exporter label, call id and leaf the natives use, so both ends of
+   * a 1x1 call arrive at identical bytes (audit-pack C-1).
+   */
+  function oneToOneCallKey(
+    groupIdB64: string,
+    callId: Uint8Array,
+  ): { seed: Uint8Array; localLeaf: number } | null {
+    const id = chats.identity();
+    const entry = groupEntry(groupIdB64);
+    if (id === null || entry === undefined) return null;
+    try {
+      return {
+        seed: entry.group.exportSecret(id, "lakko/call/v1", callId, 32),
+        localLeaf: entry.group.ownLeafIndex,
+      };
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("1x1 call key derivation failed; the call will refuse", err);
+      return null;
     }
   }
 
@@ -607,6 +656,24 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         callActions.setQuality("local", qualityTierForRtt(stats.rttMs));
       },
     });
+    // Armed before anything opens a device: an unarmed session refuses rather
+    // than putting unsealed media on the wire.
+    const key = oneToOneCallKey(groupIdB64, callId);
+    oneToOneSafety = null;
+    if (key !== null) {
+      session.setCallKey(key.seed, key.localLeaf);
+      // Display-only, and deliberately not awaited: the call must not wait on
+      // a string, and a failure here leaves the chip without digits rather
+      // than affecting the media.
+      void loadWasm()
+        .then((wasm) => {
+          oneToOneSafety = wasm.callSafetyNumber(key.seed);
+          if (activeCall === session) publishOneToOneE2ee();
+        })
+        .catch(() => {
+          oneToOneSafety = null;
+        });
+    }
     return session;
   }
 

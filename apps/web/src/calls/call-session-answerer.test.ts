@@ -228,6 +228,8 @@ function makeSession(timing: Partial<CallSessionTiming> = {}): {
    *  the mocked composers emit (`offer`, `answer`, `ice`, `end:<reason>`). */
   published: string[];
   reasons: (WebCallEndReason | undefined)[];
+  /** Every SFrame attach the session made: `sender:<kind>` / `receiver`. */
+  sealed: string[];
 } {
   const states: WebCallState[] = [];
   const reasons: (WebCallEndReason | undefined)[] = [];
@@ -243,8 +245,17 @@ function makeSession(timing: Partial<CallSessionTiming> = {}): {
     },
     onVideoPublishState: (s) => videoStates.push(s),
   };
-  const session = new CallSession(new Uint8Array(16), callbacks, timing);
-  return { session, states, videoStates, published, reasons };
+  // The session refuses to open a device without a call key and without a
+  // working transform, so a test has to supply both — which is the point: an
+  // unarmed 1x1 call is not a call this build will place.
+  const sealed: string[] = [];
+  const session = new CallSession(new Uint8Array(16), callbacks, timing, {
+    supported: () => true,
+    attachSender: (sender) => sealed.push(`sender:${sender.track?.kind ?? "?"}`),
+    attachReceiver: () => sealed.push("receiver"),
+  });
+  session.setCallKey(new Uint8Array(32), 3);
+  return { session, states, videoStates, published, reasons, sealed };
 }
 
 /** Let every pending promise continuation run (the session's handlers are
@@ -387,6 +398,66 @@ describe("1×1 answerer: ringing, repeats and accept", () => {
     await session.accept();
     expect(at(pcs, 0).remoteDescription?.type).toBe("offer");
     expect(at(pcs, 0).addedCandidates).toHaveLength(1);
+  });
+
+  // Until 2026-09-21 this path attached no SFrame at all while both natives
+  // sealed every 1x1 frame and required sealing on receipt, so a call between
+  // a browser and a phone exchanged media neither end could use.
+  it("seals every local track it publishes", async () => {
+    const { session, sealed } = makeSession();
+    await session.applyIncomingSignaling(fakeOffer(false));
+    await session.accept();
+    // The answerer captures audio only (it opts into sending video later).
+    expect(sealed).toContain("sender:audio");
+    expect(sealed.filter((s) => s.startsWith("sender:"))).toHaveLength(1);
+  });
+
+  it("refuses the call rather than publish unsealed media when no key is armed", async () => {
+    const states: WebCallState[] = [];
+    const published: string[] = [];
+    const session = new CallSession(
+      new Uint8Array(16),
+      {
+        onRemoteStream: () => {},
+        onLocalStream: () => {},
+        onOutboundSignaling: (bytes) => published.push(new TextDecoder().decode(bytes)),
+        onStateChange: (st) => states.push(st),
+      },
+      {},
+      {
+        supported: () => true,
+        attachSender: () => {},
+        attachReceiver: () => {},
+      },
+    );
+    // No `setCallKey`.
+    await session.applyIncomingSignaling(fakeOffer(false));
+    await session.accept();
+    expect(published.filter((p) => p === "answer")).toHaveLength(0);
+    expect(states).toContain("done");
+  });
+
+  it("refuses when the browser has no encoded transform", async () => {
+    const published: string[] = [];
+    const session = new CallSession(
+      new Uint8Array(16),
+      {
+        onRemoteStream: () => {},
+        onLocalStream: () => {},
+        onOutboundSignaling: (bytes) => published.push(new TextDecoder().decode(bytes)),
+        onStateChange: () => {},
+      },
+      {},
+      {
+        supported: () => false,
+        attachSender: () => {},
+        attachReceiver: () => {},
+      },
+    );
+    session.setCallKey(new Uint8Array(32), 0);
+    await session.applyIncomingSignaling(fakeOffer(false));
+    await session.accept();
+    expect(published.filter((p) => p === "answer")).toHaveLength(0);
   });
 
   it("a double Accept answers once", async () => {
