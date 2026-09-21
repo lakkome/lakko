@@ -1113,6 +1113,16 @@ export class CallSession {
     if (ignoreOffer) return;
     try {
       await pc.setRemoteDescription({ type: "offer", sdp });
+      // The peer turning its camera on mid-call is a NEW video transceiver,
+      // created by the line above, and a fresh transceiver starts with the
+      // descriptor stopped. Arm it here, between the remote offer and the
+      // answer, or the answer omits the extension for exactly the m-line
+      // that carries the peer's camera INTO this browser -- and a browser
+      // that has no descriptor to read assembles no frames at all from a
+      // sealed payload (measured: packets arrive, `framesReceived` stays 0).
+      // The other three sites arm the m-lines this browser SENDS on; this
+      // one is the only site that arms the one it RECEIVES on.
+      this.armFrameDescriptor(pc);
       await pc.setLocalDescription(); // implicit createAnswer
       const answerSdp = pc.localDescription?.sdp;
       if (answerSdp === undefined) return;

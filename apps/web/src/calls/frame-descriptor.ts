@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Put the `generic-frame-descriptor-00` RTP header extension on the video
- * this browser publishes.
+ * Put the `generic-frame-descriptor-00` RTP header extension on every video
+ * m-line of a call — the ones this browser publishes on AND the ones it
+ * receives on.
  *
  * ## Why a native phone cannot decode web video without it
  *
@@ -25,6 +26,30 @@
  * what this does for every video transceiver. The dependency descriptor stays
  * as it is: with both enabled libwebrtc sends only the dependency descriptor,
  * which the natives did not negotiate (see the Android field-trial note).
+ *
+ * ## Why this browser needs it on the m-lines it RECEIVES on, too
+ *
+ * The paragraphs above read as a publisher's concern, and reading them that
+ * way is what left the other half open: the extension was armed on every
+ * m-line this browser offers and on none of the m-lines the peer opens, which
+ * is the only kind a remote camera arrives on. A receiver without the descriptor is in exactly the position
+ * the native receivers were in — it must read the key-frame flag and the
+ * picture size out of a payload that is ciphertext — except that it fails
+ * harder, assembling no frame at all rather than a smeared one.
+ *
+ * Measured in a Chrome loopback (2026-09-21), one canvas source, three runs:
+ *
+ * | payload | descriptor | packets | framesReceived | framesDecoded |
+ * |---|---|---|---|---|
+ * | plain   | no  | 112 | 8 | 8 |
+ * | opaque  | no  | 115 | 0 | 0 (41 PLIs) |
+ * | opaque  | yes | 101 | 8 | 8 |
+ *
+ * So a browser reads the descriptor perfectly well; the belief that it could
+ * not was wrong. It simply has to be ASKED, per call and per m-line, and a
+ * transceiver the peer's offer created starts `stopped` like every other.
+ * Hence the rule every caller follows: arm between `setRemoteDescription`
+ * (which creates the transceiver) and the answer, not only before an offer.
  *
  * The descriptor puts the frame type and picture size on the wire in the
  * clear, where a relay that chose to look could read them. That is the same

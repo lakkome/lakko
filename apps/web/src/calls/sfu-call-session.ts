@@ -1104,6 +1104,13 @@ export class SfuCallSession {
           // No-arg setLocalDescription() so the (polite) rollback + answer is
           // atomic.
           await pc.setRemoteDescription({ type: "offer", sdp });
+          // An SFU-initiated offer IS a new subscription: the line above
+          // creates the video transceiver another participant's camera
+          // arrives on, and it starts with the descriptor stopped. Arm it
+          // before the answer, or this browser negotiates no descriptor on
+          // every remote video m-line and assembles no frames from the
+          // sealed payload -- a blank tile for a peer who is sending fine.
+          this.armFrameDescriptor(pc);
           await pc.setLocalDescription();
           const answerSdp = pc.localDescription?.sdp;
           if (answerSdp === undefined) {
