@@ -165,10 +165,27 @@ export class ReceiveCoordinator<E> {
     return this.buffers.get(groupId)?.length ?? 0;
   }
 
-  /** Sign-out: forget every cursor, claim, buffer and view. */
+  /**
+   * Sign-out: forget every cursor, buffer and view.
+   *
+   * **Claims are deliberately NOT cleared**, and the omission is the point. A
+   * claim is owned by a mounted chat view and ended by that view's own
+   * `onCleanup`; nothing else knows when it is over. Clearing it here was a
+   * live defect rather than a tidy-up, because of the order the two run in:
+   * the chat view claims its group in its component body, and the auth effect
+   * that calls `start()` — which calls `stop()`, which calls this — fires
+   * afterwards. The claim made at mount was therefore wiped a moment later and
+   * never remade, so for the rest of the session the group the user had open
+   * was treated as unclaimed: the background sweep polled it alongside the
+   * view's own long poll, and during a call the dedicated call lane opened a
+   * third reader on it. Found live 2026-09-21, by logging the claim and the
+   * sweep's question against the same coordinator instance.
+   *
+   * A view still mounted across a sign-out releases its claim when it
+   * unmounts, which is the only moment that means anything.
+   */
   reset(): void {
     this.cursors.clear();
-    this.claims.clear();
     this.buffers.clear();
     this.views.clear();
     this.pollRequests.clear();

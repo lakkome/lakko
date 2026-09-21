@@ -114,14 +114,35 @@ describe("ReceiveCoordinator — event hand-off", () => {
     expect(seen[0]).toBe(5);
   });
 
-  it("reset forgets everything (sign-out)", () => {
+  it("reset forgets the cursors, buffers and views (sign-out)", () => {
     const c = new ReceiveCoordinator<number>();
     c.noteCursor("g", 3);
-    c.claimForeground("g");
     c.deliver("h", [1]);
     c.reset();
     expect(c.cursor("g")).toBeUndefined();
-    expect(c.isForeground("g")).toBe(false);
     expect(c.bufferedCount("h")).toBe(0);
+  });
+
+  // The claim belongs to the mounted chat view, not to the receive loop, and
+  // `start()` calls `stop()` calls `reset()` AFTER the view's body has already
+  // claimed. Clearing claims here left the open chat unclaimed for the rest of
+  // the session, so the background sweep polled it alongside the view's own
+  // long poll and a call opened a third reader on it (found live 2026-09-21).
+  it("reset leaves a mounted view's claim standing", () => {
+    const c = new ReceiveCoordinator<number>();
+    const release = c.claimForeground("g");
+    c.reset();
+    expect(c.isForeground("g")).toBe(true);
+    release();
+    expect(c.isForeground("g")).toBe(false);
+  });
+
+  it("a claim made before the loop starts still excludes the group after it", () => {
+    const c = new ReceiveCoordinator<number>();
+    c.claimForeground("g");
+    // What `start()` does on its first run: stop(), which resets.
+    c.reset();
+    c.noteCursor("g", 10);
+    expect(c.isForeground("g")).toBe(true);
   });
 });
