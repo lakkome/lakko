@@ -3777,10 +3777,10 @@ output here. **Corrected 2026-09-22:** `cargo deny` does
 run on the maintainer's box - the G-41 analysis below was
 produced by `just audit` locally.
 
-### G-41: three `libcrux` advisories under the MLS crypto provider - **OPEN, blocked on an upstream exact-version knot**
+### G-41: three `libcrux` advisories under the MLS crypto provider - **OPEN as a `cargo deny` failure; NOT reachable in Lakko's build (analysed 2026-09-22)**
 
-`just audit` reports three vulnerabilities, all in the same
-dependency chain and none in code Lakko controls:
+`just audit` reports three vulnerabilities, all in one dependency
+chain and none in code Lakko controls:
 
 | Advisory | Crate | Fixed in |
 |---|---|---|
@@ -3788,62 +3788,97 @@ dependency chain and none in code Lakko controls:
 | RUSTSEC-2026-0207 | `libcrux-sha3 0.0.8` | `>= 0.0.10` |
 | RUSTSEC-2026-0208 | `libcrux-sha3 0.0.8` | `>= 0.0.10` |
 
-The chain is `libcrux-* <- hpke-rs 0.6.1 <- openmls_rust_crypto
-0.5.1 <- lakko-mls`, so this is the MLS HPKE backend every client
-ships.
+The chain is `libcrux-secrets <- libcrux-traits 0.0.6 <- libcrux-sha3
+0.0.8 <- hpke-rs 0.6.1 <- openmls_rust_crypto 0.5.1 <- lakko-mls`, so
+this sits under the MLS HPKE backend every client ships, and
+RUSTSEC-2026-0212 is a constant-time failure on **aarch64** - every
+iPhone and most Android devices. That is why it was worth reading
+rather than waving through.
 
-**Reachability, two different answers - do not read the section
-heading as one verdict.**
+**Reachability: no, and by three independent arguments.** Any one of
+them is sufficient; all three were checked against the resolved graph
+for `aarch64-apple-ios` and `aarch64-linux-android`.
 
-The two SHAKE advisories are **not on a path Lakko executes.**
-`libcrux_sha3` has exactly two call sites in `hpke-rs`
-(`src/kem.rs`, `derive_key_pair`), both inside the
-post-quantum arms - `XWingDraft06`, `MlKem768`, `MlKem1024`.
-Lakko's four ciphersuites
-([`crates/lakko-mls/src/ciphersuite.rs`](../../crates/lakko-mls/src/ciphersuite.rs))
-are all DH-KEM over X25519 / P-256 / P-384, which take the
-preceding match arm; no Lakko source names SHA3, SHAKE or a PQ
-KEM anywhere.
+1. **The broken primitive has no callers.** RUSTSEC-2026-0212 is in
+   `Select::select` / `Swap::cswap`, whose aarch64 bodies do
+   `cmp {cond:w}, 0` on an 8-bit selector widened to a 32-bit
+   register - the unspecified high 24 bits can make a zero selector
+   compare non-zero, so `csel` picks the wrong operand
+   (`libcrux-secrets-0.0.5/src/int.rs`, `mod aarch64`). Those two
+   traits are **defined in `libcrux-secrets` and named nowhere else**:
+   no crate in the dependency set calls `.cswap(`, and every crate
+   that imports from `libcrux_secrets` takes only the type-level
+   wrappers (`Classify`, `ClassifyRef`, `Declassify`, `DeclassifyRef`,
+   `DeclassifyRefMut`, `U8`). The only glob importers are
+   `libcrux-ml-kem`, which is not in the graph.
 
-RUSTSEC-2026-0212 **cannot be dismissed the same way.**
-`libcrux-traits 0.0.7` pins `libcrux-secrets = "=0.0.5"` (the
-vulnerable version) and uses it in its `aead/`, `ecdh/` and
-`kem/` modules - which IS the path an X25519 HPKE handshake
-takes. The defect is a constant-time swap/select that compares
-an 8-bit selector with a 32-bit `cmp` on **aarch64**, i.e. every
-iPhone and most Android devices. Whether the specific broken
-function is called from the AEAD/ECDH paths has **not** been
-established here; until it is, treat 0212 as live.
+2. **`libcrux-sha3` is only called from the post-quantum arms.**
+   `libcrux_sha3::shake256` has exactly two call sites in `hpke-rs`
+   (`src/kem.rs`, `derive_key_pair`), both inside the
+   `XWingDraft06` / `MlKem768` / `MlKem1024` match arms. Lakko's four
+   ciphersuites
+   ([`crates/lakko-mls/src/ciphersuite.rs`](../../crates/lakko-mls/src/ciphersuite.rs))
+   are DH-KEM over X25519 / P-256 / P-384 and take the preceding arm.
+   No Lakko source names SHA3, SHAKE or a PQ KEM anywhere.
 
-**Why `cargo update` cannot fix it.** `libcrux-traits 0.0.8`
-already pins the FIXED `libcrux-secrets = "=0.0.6"`, so the
-vendored-manifest idiom that closed G-23 should reach it - and
-it does not, because of an exact-version knot one level down:
-`libcrux-secrets 0.0.6` requires `hax-lib =0.3.7` while
-`libcrux-sha3 0.0.8` requires `hax-lib =0.3.6`, and both pins
-are exact. Bumping the traits alone fails to resolve.
+3. **The libcrux HPKE backend is not compiled at all.** `hpke-rs`
+   gates both backends behind optional features (`libcrux` /
+   `rustcrypto`), and `cargo tree -i` resolves `hpke-rs-rust-crypto`
+   while `hpke-rs-libcrux`, `libcrux-aead`, `libcrux-kem`,
+   `libcrux-hkdf`, `libcrux-ecdh` and `libcrux-curve25519` are all
+   absent from the graph on every target checked. `libcrux-sha3` is a
+   NON-optional dependency of `hpke-rs`, which is the only reason any
+   libcrux crate is present.
 
-**The route, unbuilt and not costed.** Both crates have to move
-together: `libcrux-traits 0.0.7 -> 0.0.8` in the existing
-vendored [`crates/vendor/hpke-rs-libcrux`](../../crates/vendor/hpke-rs-libcrux/Cargo.toml),
+So the vulnerable code is compiled on aarch64 and never executed.
+**This is an argument from the current resolved graph, not a
+guarantee**: adopting a PQ or hybrid ciphersuite would make argument 2
+false, and a feature-unification change upstream could make argument 3
+false, so this reasoning must be re-run whenever the MLS crypto
+provider or the ciphersuite set moves.
+
+**Why it nevertheless stays OPEN.** `cargo deny check advisories`
+fails on it, so `just ci` is red. The clean-audit posture the G-25
+entry argues for is a real property worth keeping: a red gate that
+everyone knows to ignore stops being a gate. The fix is not
+available, though - see below - so the choice is between a red
+`just audit` and an `[advisories] ignore` entry pinned to these three
+IDs with a pointer here.
+
+**Why `cargo update` cannot fix it.** `libcrux-traits 0.0.8` already
+pins the FIXED `libcrux-secrets = "=0.0.6"`, so the vendored-manifest
+idiom that closed G-23 looks like it should reach it - and does not,
+because of an exact-version knot one level down: `libcrux-secrets
+0.0.6` requires `hax-lib =0.3.7` while `libcrux-sha3 0.0.8` requires
+`hax-lib =0.3.6`, and both pins are exact. Bumping the traits alone
+fails to resolve (verified).
+
+**The route, unbuilt.** Both lines have to move together:
+`libcrux-traits 0.0.7 -> 0.0.8` in the existing vendored
+[`crates/vendor/hpke-rs-libcrux`](../../crates/vendor/hpke-rs-libcrux/Cargo.toml),
 plus a SECOND vendored crate - `hpke-rs 0.6.1` with its
 `libcrux-sha3 ^0.0.8` requirement relaxed to `0.0.10` - since
-`hpke-rs`, not the libcrux backend, is what pins the sha3 line.
-That is a fourth `[patch.crates-io]` entry on the MLS crypto
-graph. Neither the compile nor the test outcome has been tried.
-The alternative is upstream: `openmls_rust_crypto 0.6.0` and
-`hpke-rs 0.7.0` both exist, and moving to them is an openmls
-version bump rather than a manifest delta.
+`hpke-rs`, not the libcrux backend, pins the sha3 line. That is a
+fourth `[patch.crates-io]` entry on the MLS crypto graph, for code
+argument 1 says is never called. The alternative is upstream:
+`openmls_rust_crypto 0.6.0` and `hpke-rs 0.7.0` both exist, and moving
+to them is an openmls bump rather than a manifest delta.
 
-**Two advisories from the same audit run WERE closed** by plain
-lock bumps, with `just lint` and the 2779-test workspace suite
-green afterwards: `h2 0.4.13 -> 0.4.19` (RUSTSEC-2026-0258,
-unbounded empty DATA frames) and `rustls 0.23.40 -> 0.23.45`
-with `rustls-webpki 0.103.13 -> 0.103.15` (RUSTSEC-2026-0285,
-TLS 1.3 handshake messages accepted across encryption-level
-boundaries - which matters here because the whole
-anti-censorship stack of [ADR-0026](../adr/0026-anti-censorship-wiring.md)
-is built on rustls).
+**Side finding, unresolved.** The G-23 vendored `hpke-rs-libcrux` fork
+patches a crate that is **not in the resolved graph on any target
+checked here** (argument 3), so that fix may be a no-op in the current
+feature set. It may have been reachable when it was made, and this was
+not investigated - recorded so the next audit pass does not assume the
+patch is load-bearing.
+
+**Two advisories from the same run WERE closed** by plain lock bumps,
+with `just lint` and the 2779-test workspace suite green afterwards:
+`h2 0.4.13 -> 0.4.19` (RUSTSEC-2026-0258, unbounded empty DATA frames)
+and `rustls 0.23.40 -> 0.23.45` with `rustls-webpki 0.103.13 ->
+0.103.15` (RUSTSEC-2026-0285, TLS 1.3 handshake messages accepted
+across encryption-level boundaries - which matters here because the
+whole anti-censorship stack of
+[ADR-0026](../adr/0026-anti-censorship-wiring.md) is built on rustls).
 
 ## Client concurrency
 

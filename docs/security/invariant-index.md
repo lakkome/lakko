@@ -27,7 +27,7 @@ for some time — G-29..G-36 were minted by later arcs and never reflected here.
 by the client commit-serialization arc, **G-39 by [ADR-0046](../adr/0046-external-crypto-review.md)**,
 which moved the external crypto review out of four separate ADRs and into one
 tracked release gate); the mechanical *not-marked-`CLOSED`* tally is **13** —
-G-1, G-2, G-4, G-14, G-15, G-16, G-20, G-26, G-29, G-30, G-32, G-36, **G-39**, **G-40** (minted 2026-09-15: a second device never joins the account's existing conversations, ADR-0007 Phase 2b unbuilt), **G-41** (minted 2026-09-22: three `libcrux` advisories under the MLS HPKE backend, two of them unreachable from Lakko's DH-KEM ciphersuites and the third not yet adjudicated, blocked on an upstream `hax-lib` exact-version knot).
+G-1, G-2, G-4, G-14, G-15, G-16, G-20, G-26, G-29, G-30, G-32, G-36, **G-39**, **G-40** (minted 2026-09-15: a second device never joins the account's existing conversations, ADR-0007 Phase 2b unbuilt), **G-41** (minted 2026-09-22: three `libcrux` advisories under the MLS HPKE backend, all three shown unreachable in Lakko's build, open only because `cargo deny` fails and the upstream fix is blocked by a `hax-lib` exact-version knot).
 **Two changes since this note was written, and they are not the same kind.**
 G-38 left that list because S7 (`576ea14`) closed its remaining membership-path
 residual and its heading now says `CLOSED`; G-39 joined it on being minted. The
@@ -438,7 +438,7 @@ should not re-discover them.
 | G-23 | `libcrux-chacha20poly1305 0.0.7` — RUSTSEC-2026-0124 (HIGH 8.2) — upstream-blocked |
 | G-24 | `rsa 0.9.10` — RUSTSEC-2023-0071 (MEDIUM 5.9) — Marvin Attack — `sqlx-mysql` MariaDB-auth transitive (NOT TLS-stack — see known-gaps.md G-24 for reachability analysis) |
 | G-25 | Three unmaintained-crate warnings |
-| G-41 | Three `libcrux` advisories under the MLS HPKE backend — RUSTSEC-2026-0212 (`libcrux-secrets`, constant-time swap/select on aarch64) plus RUSTSEC-2026-0207 / -0208 (`libcrux-sha3`, SHAKE). The two SHAKE ones sit on `hpke-rs`'s post-quantum KEM arms, which Lakko's DH-KEM ciphersuites never take; 0212 reaches the AEAD/ECDH traits and is NOT yet adjudicated. Blocked on an upstream exact-version knot (`hax-lib =0.3.6` vs `=0.3.7`) — see known-gaps.md G-41 |
+| G-41 | Three `libcrux` advisories under the MLS HPKE backend — RUSTSEC-2026-0212 (`libcrux-secrets`, constant-time swap/select on aarch64) plus RUSTSEC-2026-0207 / -0208 (`libcrux-sha3`, SHAKE). **Analysed 2026-09-22: not reachable in Lakko's build**, by three independent arguments — the broken `Select`/`Swap` have no caller in the whole dependency set; `libcrux-sha3` is called only from `hpke-rs`'s post-quantum KEM arms, which Lakko's four DH-KEM ciphersuites never take; and the libcrux HPKE backend is not compiled at all (`hpke-rs-rust-crypto` is what resolves). Stays open because `cargo deny` still fails: the fix is blocked by an upstream exact-version knot (`hax-lib =0.3.6` vs `=0.3.7`), so the choice is a red gate or a pinned `ignore`. Re-run the analysis if the ciphersuite set or the crypto provider moves — see known-gaps.md G-41 |
 
 ## How to add a new invariant
 
