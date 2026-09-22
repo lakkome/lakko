@@ -67,3 +67,12 @@ path = "apps/ios/Lakko/Resources/Emoji/emoji-data.json"
 precedence = "override"
 SPDX-FileCopyrightText = "1991-2023 Unicode, Inc."
 SPDX-License-Identifier = "Unicode-3.0"
+
+# Screenshots of the clients taken during the 2026-09-21 capture run, and the
+# matrix rendered from them. Binary, so they are annotated here rather than
+# with a .license file each.
+[[annotations]]
+path = ["docs/ux/screens/**/*.png", "docs/ux/screen-matrix-captured.png"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Lakko Contributors"
+SPDX-License-Identifier = "AGPL-3.0-or-later"
