@@ -386,6 +386,14 @@ public final class WebRTCPeerConnection: NSObject {
         public let hasActivePair: Bool
         public let bytesReceived: Int64
         public let bytesSent: Int64
+        /// Inbound RTP packets, summed across every receiver.
+        ///
+        /// Separate from `bytesReceived` on purpose: that one is the candidate
+        /// pair's, which counts ICE consent checks, so it keeps climbing for
+        /// as long as the peer's ICE agent is alive whether or not there is a
+        /// call left. Only this one moves when media actually arrives, which
+        /// is what `MediaWatchdog` needs.
+        public let mediaPacketsReceived: Int64
     }
 
     public func sampleConnectionStats() async -> ConnectionStatsSnapshot? {
@@ -394,6 +402,11 @@ public final class WebRTCPeerConnection: NSObject {
             peer.statistics { cont.resume(returning: $0) }
         }
         let stats = report.statistics
+        let mediaPackets = stats.values
+            .filter { $0.type == "inbound-rtp" }
+            .reduce(Int64(0)) { sum, s in
+                sum + ((s.values["packetsReceived"] as? NSNumber)?.int64Value ?? 0)
+            }
         // Prefer the nominated succeeded pair; fall back to any
         // succeeded pair (some stacks don't flag `nominated`).
         let pairs = stats.values.filter { $0.type == "candidate-pair" }
@@ -404,7 +417,7 @@ public final class WebRTCPeerConnection: NSObject {
         guard let pair = active else {
             return ConnectionStatsSnapshot(
                 rttMs: nil, relayed: false, hasActivePair: false,
-                bytesReceived: 0, bytesSent: 0
+                bytesReceived: 0, bytesSent: 0, mediaPacketsReceived: mediaPackets
             )
         }
         let rttSec = (pair.values["currentRoundTripTime"] as? NSNumber)?.doubleValue
@@ -419,7 +432,8 @@ public final class WebRTCPeerConnection: NSObject {
         let bytesSent = (pair.values["bytesSent"] as? NSNumber)?.int64Value ?? 0
         return ConnectionStatsSnapshot(
             rttMs: rttMs, relayed: relayed, hasActivePair: true,
-            bytesReceived: bytesReceived, bytesSent: bytesSent
+            bytesReceived: bytesReceived, bytesSent: bytesSent,
+            mediaPacketsReceived: mediaPackets
         )
     }
 

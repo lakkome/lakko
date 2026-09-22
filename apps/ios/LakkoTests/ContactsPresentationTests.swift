@@ -132,7 +132,11 @@ final class ContactsPresentationTests: XCTestCase {
         XCTAssertEqual(rows[1].title, "Team")
         XCTAssertEqual(rows[1].usesLeft, "8 of 10 left")
         XCTAssertEqual(rows[1].origin, .server)
-        XCTAssertEqual(rows[1].url, "https://lakko.me/i/srv")
+        // The link must point at the stack the account lives on, so the
+        // prefix comes from configuration (`ApiEndpoints.webOrigin`) and a
+        // hardcoded production host here failed every Debug run - which is
+        // worse than it sounds: three red tests are how a real failure hides.
+        XCTAssertEqual(rows[1].url, ContactsRepository.inviteUrlPrefix + "srv")
         XCTAssertEqual(rows[0].title, "Invite link")
         XCTAssertEqual(rows[0].usesLeft, "1 use left")
         if case .session(let blobId) = rows[0].origin {

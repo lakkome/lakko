@@ -47,7 +47,22 @@ final class SfuHealthTest: XCTestCase {
         return URL(string: "http://127.0.0.1:7880")!
     }
 
+    /// Skipped unless a live SFU is named. The default below is a compose
+    /// stack a developer may have launched by hand; without one this test has
+    /// nothing to talk to, and FAILING for that is how a suite becomes noise
+    /// that a real failure can hide in.
+    private func requireLiveSfu() throws {
+        // The scheme interpolates `$(LAKKO_SFU_E2E_URL)`, so on a local run
+        // the variable is PRESENT and EMPTY rather than absent: a `!= nil`
+        // check passes and the skip never fires.
+        let raw = ProcessInfo.processInfo.environment["LAKKO_SFU_E2E_URL"] ?? ""
+        guard !raw.trimmingCharacters(in: .whitespaces).isEmpty else {
+            throw XCTSkip("LAKKO_SFU_E2E_URL is empty; no SFU to reach")
+        }
+    }
+
     func testHealthEndpointReturnsOk() async throws {
+        try requireLiveSfu()
         // `URLSession` does the heavy lifting — no third-party
         // HTTP client necessary. iOS App Transport Security
         // permits cleartext to 127.0.0.1 by default for debug

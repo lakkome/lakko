@@ -69,6 +69,15 @@ final class SfuSignalingTest: XCTestCase {
     }
 
     func testWebSocketUpgradeAndWelcomeFrame() async throws {
+        // Skipped, not failed, without the workflow's minted token: a suite
+        // that is red for want of an environment is a suite a real failure
+        // can hide in.
+        // The scheme interpolates `$(LAKKO_SFU_E2E_URL)`, so on a local run
+        // the variable is PRESENT and EMPTY rather than absent.
+        let sfuRaw = ProcessInfo.processInfo.environment["LAKKO_SFU_E2E_URL"] ?? ""
+        guard !sfuRaw.trimmingCharacters(in: .whitespaces).isEmpty else {
+            throw XCTSkip("LAKKO_SFU_E2E_URL is empty; no SFU to reach")
+        }
         guard let jwt = ProcessInfo.processInfo.environment["LAKKO_SFU_E2E_JWT"],
               !jwt.isEmpty
         else {

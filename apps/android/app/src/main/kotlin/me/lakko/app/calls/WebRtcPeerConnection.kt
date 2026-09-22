@@ -485,6 +485,16 @@ public class WebRtcPeerConnection(
         public val hasActivePair: Boolean,
         public val bytesReceived: Long,
         public val bytesSent: Long,
+        /**
+         * Inbound RTP packets, summed across every receiver.
+         *
+         * Separate from [bytesReceived] on purpose: that one is the candidate
+         * pair's, which counts ICE consent checks, so it keeps climbing for as
+         * long as the peer's ICE agent is alive whether or not there is a call
+         * left. Only this one moves when media actually arrives, which is what
+         * [MediaWatchdog] needs.
+         */
+        public val mediaPacketsReceived: Long,
     )
 
     public suspend fun sampleConnectionStats(): ConnectionStatsSnapshot? {
@@ -497,6 +507,9 @@ public class WebRtcPeerConnection(
             }
         } ?: return null
         val stats = report.statsMap
+        val mediaPackets = stats.values
+            .filter { it.type == "inbound-rtp" }
+            .sumOf { (it.members["packetsReceived"] as? Number)?.toLong() ?: 0L }
         val pairs = stats.values.filter { it.type == "candidate-pair" }
         val active = pairs.firstOrNull {
             (it.members["state"] as? String) == "succeeded" &&
@@ -505,6 +518,7 @@ public class WebRtcPeerConnection(
             ?: return ConnectionStatsSnapshot(
                 rttMs = null, relayed = false, hasActivePair = false,
                 bytesReceived = 0L, bytesSent = 0L,
+                mediaPacketsReceived = mediaPackets,
             )
         val rttSec = (active.members["currentRoundTripTime"] as? Number)?.toDouble()
         val rttMs = rttSec?.let { Math.round(it * 1000.0).toInt() }
@@ -517,6 +531,7 @@ public class WebRtcPeerConnection(
         return ConnectionStatsSnapshot(
             rttMs = rttMs, relayed = relayed, hasActivePair = true,
             bytesReceived = bytesReceived, bytesSent = bytesSent,
+            mediaPacketsReceived = mediaPackets,
         )
     }
 

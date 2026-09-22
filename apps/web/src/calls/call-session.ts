@@ -54,6 +54,11 @@
  * 3a2.
  */
 import {
+  inboundHasGoneSilent,
+  noteInboundMedia,
+  type InboundActivity,
+} from "./media-watchdog";
+import {
   armGenericFrameDescriptor,
   type HeaderExtensionTransceiver,
 } from "./frame-descriptor";
@@ -267,17 +272,25 @@ export interface CallSessionTiming {
    *  call ends only if it has not recovered after this grace. `failed` still
    *  ends the call at once. */
   readonly iceDisconnectedGraceMs: number;
+  /** How long a CONNECTED call may receive nothing at all before it is over
+   *  (`media-watchdog.ts`). The ICE state answers whether two addresses can
+   *  still reach each other, which is not whether there is still a call; this
+   *  is the window for the case the ICE state cannot see. `0` disables it. */
+  readonly mediaSilenceTimeoutMs: number;
 }
 
 /** Default {@link CallSessionTiming}. Chosen, not measured: 45 s is the
  *  order of a phone's ring before voicemail; 30 s is several times what a
  *  direct connection needs, so a call that has not connected by then is not
  *  going to; 10 s is long enough to ride out a roam and short enough that a
- *  dead call does not look alive. */
+ *  dead call does not look alive; 30 s of NOTHING arriving is several times
+ *  any renegotiation gap and is how a call that outlived its peer by 45
+ *  minutes would have been caught. */
 export const DEFAULT_CALL_SESSION_TIMING: CallSessionTiming = {
   ringTimeoutMs: 45_000,
   connectTimeoutMs: 30_000,
   iceDisconnectedGraceMs: 10_000,
+  mediaSilenceTimeoutMs: 30_000,
 };
 
 /** Public STUN fallback. Replaced by self-hosted in Phase
@@ -351,6 +364,8 @@ export class CallSession {
     sent: number;
     atMs: number;
   } | null = null;
+  /** How long inbound media has been silent (`media-watchdog.ts`). */
+  private inboundActivity: InboundActivity | null = null;
 
   /** The inbound offer this callee is ringing for. Held, not applied: the
    *  answerer captures media and builds its `RTCPeerConnection` only when the
@@ -847,6 +862,7 @@ export class CallSession {
       this.statsTimer = null;
     }
     this.prevStatsBytes = null;
+    this.inboundActivity = null;
     if (this.pc !== null) {
       try {
         this.pc.close();
@@ -1206,20 +1222,47 @@ export class CallSession {
   /**
    * G3-3-conn-quality — poll `getStats()` every 2 s while
    * connected and push a derived quality sample to the caller.
-   * No-op when the caller wired no `onConnectionStats` handler
-   * (the poll never starts, so there's zero cost for callers
-   * that don't render a quality indicator). Cleared in
-   * `dispose()`.
+   * The poll runs whether or not the caller wired an
+   * `onConnectionStats` handler: it used to return early without
+   * one, and since the media watchdog (`media-watchdog.ts`) reads
+   * the same samples, skipping the poll would silently skip the
+   * one thing that ends a call whose peer has gone. Only the
+   * handler call is conditional. Cleared in `dispose()`.
    */
   private startStatsPolling(): void {
     if (this.statsTimer !== null) return;
     const onStats = this.callbacks.onConnectionStats;
-    if (onStats === undefined) return;
     this.statsTimer = setInterval(() => {
       void this.sampleConnectionStats().then((sample) => {
-        if (sample !== null) onStats(sample);
+        if (sample !== null && onStats !== undefined) onStats(sample);
+        this.endIfMediaHasGoneSilent();
       });
     }, 2000);
+  }
+
+  /**
+   * End a connected call that has received nothing for
+   * {@link CallSessionTiming.mediaSilenceTimeoutMs}.
+   *
+   * Only while `connected`: a call still being set up has not received
+   * anything YET, which is a different thing from having stopped.
+   */
+  private endIfMediaHasGoneSilent(): void {
+    if (this.state !== "connected") return;
+    if (
+      !inboundHasGoneSilent(
+        this.inboundActivity,
+        performance.now(),
+        this.timing.mediaSilenceTimeoutMs,
+      )
+    ) {
+      return;
+    }
+    // eslint-disable-next-line no-console
+    console.warn(
+      `call ended: nothing received for ${this.timing.mediaSilenceTimeoutMs} ms`,
+    );
+    void this.endLocal("error");
   }
 
   /**
@@ -1243,10 +1286,23 @@ export class CallSession {
     }
     const byId = new Map<string, unknown>();
     const pairs: unknown[] = [];
+    // The watchdog's meter is INBOUND RTP, not the candidate pair. The pair's
+    // byte counters include ICE consent checks, which a peer's ICE agent keeps
+    // answering for as long as its process is alive whether or not there is a
+    // call left: metering the pair would have watched the 45-minute call climb
+    // and called it healthy.
+    let mediaPackets = 0;
     report.forEach((value: unknown, id: string) => {
       byId.set(id, value);
-      if (statString(value, "type") === "candidate-pair") pairs.push(value);
+      const type = statString(value, "type");
+      if (type === "candidate-pair") pairs.push(value);
+      if (type === "inbound-rtp") mediaPackets += statNumber(value, "packetsReceived") ?? 0;
     });
+    this.inboundActivity = noteInboundMedia(
+      this.inboundActivity,
+      mediaPackets,
+      performance.now(),
+    );
     const succeeded = (s: unknown): boolean =>
       statString(s, "state") === "succeeded";
     const isNominated = (s: unknown): boolean => {

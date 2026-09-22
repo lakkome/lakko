@@ -7,6 +7,7 @@ import android.content.Context
 import java.security.SecureRandom
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -343,6 +344,21 @@ public class CallSession(
         CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     public companion object {
+        /**
+         * A CONNECTED call that has received nothing for this long is over
+         * ([MediaWatchdog]). Chosen, not measured: several times any
+         * renegotiation gap, and short enough that a call whose peer has gone
+         * does not sit there counting time.
+         */
+        public const val MEDIA_SILENCE_TIMEOUT_MS: Long = 30_000
+
+        /**
+         * DISCONNECTED is often transient (a Wi-Fi roam, an LTE handover); the
+         * call ends only if it has not recovered after this. The same window
+         * the web uses. FAILED still ends the call at once.
+         */
+        public const val ICE_DISCONNECTED_GRACE_MS: Long = 10_000
+
         /** Generate a fresh 16-byte call_id. */
         public fun mintCallId(): ByteArray {
             val bytes = ByteArray(16)
@@ -1028,6 +1044,7 @@ public class CallSession(
     /** Map PeerConnection.PeerConnectionState transitions
      *  to the public [WebCallState]. */
     private fun handleConnectionState(newState: PeerConnection.PeerConnectionState) {
+        lastConnectionState = newState
         when (newState) {
             PeerConnection.PeerConnectionState.CONNECTED -> {
                 if (mutableState.value == WebCallState.Connecting ||
@@ -1035,22 +1052,31 @@ public class CallSession(
                 ) {
                     mutableState.value = WebCallState.Connected
                 }
+                // A recovery after a blip is what cancels the grace.
+                cancelIceGrace()
                 // G3-2-conn-quality — begin polling connection
                 // stats once the transport is up. Idempotent.
                 startStatsPollingIfNeeded()
             }
             PeerConnection.PeerConnectionState.FAILED -> {
+                cancelIceGrace()
                 endLocal(WebCallEndReason.Error)
             }
             PeerConnection.PeerConnectionState.DISCONNECTED -> {
-                // libwebrtc sometimes flaps disconnected →
-                // connected on a transient network glitch
-                // (e.g. wifi → LTE handover). Don't tear
-                // down — let the wrapper recover. The
-                // upper-layer watchdog handles permanent
-                // stalls via [WebCallEndReason.TimedOut].
+                // libwebrtc sometimes flaps disconnected → connected on a
+                // transient network glitch (wifi → LTE handover), so this is
+                // a grace and not an ending: a recovery through CONNECTED
+                // cancels it.
+                //
+                // This used to do nothing at all, on the ground that "the
+                // upper-layer watchdog handles permanent stalls". It does
+                // not: the host's establish timer matches only Outgoing,
+                // Connecting and an accepted Ringing, so a CONNECTED call
+                // whose transport had gone was never ended by anything.
+                armIceGrace()
             }
             PeerConnection.PeerConnectionState.CLOSED -> {
+                cancelIceGrace()
                 if (mutableState.value != WebCallState.Done) {
                     endRemote(WebCallEndReason.HungUp)
                 }
@@ -1372,6 +1398,61 @@ public class CallSession(
      *  `RTCStatsReport` every 2 s and republishes [rttMs] /
      *  [connectionRelayed]. Ends when [statsJob] is cancelled
      *  (teardown) or the peer goes away. */
+    /** How long inbound media has been silent ([MediaWatchdog]). */
+    private var inboundActivity: MediaWatchdog.InboundActivity? = null
+
+    /** The ICE-DISCONNECTED grace, armed on the transition and cancelled by a
+     *  recovery. See [handleConnectionState]. */
+    private var iceGraceJob: Job? = null
+
+    /** The last transport state seen, so the grace can ask what it decided on
+     *  without the pod having to publish a getter for it. */
+    private var lastConnectionState: PeerConnection.PeerConnectionState =
+        PeerConnection.PeerConnectionState.NEW
+
+    /**
+     * Arm the ICE-DISCONNECTED grace. Idempotent: a second DISCONNECTED while
+     * one is already running keeps the first window rather than extending it,
+     * so a flapping transport cannot postpone the ending indefinitely.
+     */
+    private fun armIceGrace() {
+        if (iceGraceJob != null) return
+        val s = mutableState.value
+        if (s != WebCallState.Connected && s != WebCallState.Connecting) return
+        iceGraceJob = scope.launch {
+            delay(ICE_DISCONNECTED_GRACE_MS)
+            iceGraceJob = null
+            when (lastConnectionState) {
+                PeerConnection.PeerConnectionState.DISCONNECTED,
+                PeerConnection.PeerConnectionState.FAILED,
+                -> endLocal(WebCallEndReason.Error)
+                else -> Unit
+            }
+        }
+    }
+
+    private fun cancelIceGrace() {
+        iceGraceJob?.cancel()
+        iceGraceJob = null
+    }
+
+    /**
+     * End a connected call that has received nothing for
+     * [MEDIA_SILENCE_TIMEOUT_MS] ([MediaWatchdog]).
+     *
+     * Only while Connected: a call still being set up has not received
+     * anything YET, which is a different thing from having stopped.
+     */
+    private fun endIfMediaHasGoneSilent(nowMs: Long) {
+        if (mutableState.value != WebCallState.Connected) return
+        if (!MediaWatchdog.hasGoneSilent(inboundActivity, nowMs, MEDIA_SILENCE_TIMEOUT_MS)) return
+        android.util.Log.w(
+            "CallSession",
+            "nothing received for $MEDIA_SILENCE_TIMEOUT_MS ms; ending the call",
+        )
+        endLocal(WebCallEndReason.Error)
+    }
+
     private fun startStatsPollingIfNeeded() {
         if (statsJob != null) return
         statsJob = scope.launch {
@@ -1400,6 +1481,10 @@ public class CallSession(
                     } else {
                         null
                     }
+                    val nowMs = nowNanos / 1_000_000L
+                    inboundActivity =
+                        MediaWatchdog.note(inboundActivity, snap.mediaPacketsReceived, nowMs)
+                    endIfMediaHasGoneSilent(nowMs)
                 }
                 delay(2_000)
             }

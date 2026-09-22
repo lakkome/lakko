@@ -225,6 +225,25 @@ public final class CallSession: ObservableObject {
     /// / [`downBps`] / [`upBps`]. Started on the first `.connected`
     /// transition, cancelled in `teardownMediaPipeline`.
     private var statsTask: Task<Void, Never>?
+    /// How long inbound media has been silent (`MediaWatchdog`).
+    private var inboundActivity: MediaWatchdog.InboundActivity?
+    /// The ICE-`disconnected` grace, armed on the transition and cancelled by
+    /// a recovery. See `handleConnectionState`.
+    private var iceGraceTask: Task<Void, Never>?
+    /// The last transport state seen, so the grace can ask what it decided on
+    /// without reaching into the pod for a state it does not publish.
+    private var lastConnectionState: RTCPeerConnectionState = .new
+
+    /// A CONNECTED call that has received nothing for this long is over
+    /// (`MediaWatchdog`). Chosen, not measured: several times any
+    /// renegotiation gap, and short enough that a call whose peer has gone
+    /// does not sit there counting time.
+    private static let mediaSilenceTimeoutSeconds: TimeInterval = 30
+
+    /// ICE `.disconnected` is often transient (a Wi-Fi roam, a handover); the
+    /// call ends only if it has not recovered after this. The same window the
+    /// web uses. `.failed` still ends the call at once.
+    private static let iceDisconnectedGraceSeconds: TimeInterval = 10
 
     /// G3-sframe-native N-6 — per-call MLS exporter seed +
     /// local participant leaf index. Both must be set before
@@ -1024,6 +1043,7 @@ public final class CallSession: ObservableObject {
         self.downBps = nil
         self.upBps = nil
         self.prevStatsBytes = nil
+        self.inboundActivity = nil
         // Reset perfect-negotiation state (B2b) so a late
         // renegotiation tick after teardown no-ops.
         self.negotiationReady = false
@@ -1066,6 +1086,11 @@ public final class CallSession: ObservableObject {
                     self.prevStatsBytes = snap.hasActivePair
                         ? (received: snap.bytesReceived, sent: snap.bytesSent, atSec: nowSec)
                         : nil
+                    self.inboundActivity = MediaWatchdog.note(
+                        self.inboundActivity,
+                        packets: snap.mediaPacketsReceived,
+                        atSec: nowSec)
+                    await MainActor.run { self.endIfMediaHasGoneSilent(atSec: nowSec) }
                     await MainActor.run {
                         self.rttMs = snap.rttMs
                         self.connectionRelayed = snap.relayed
@@ -1300,12 +1325,14 @@ public final class CallSession: ObservableObject {
     /// `.failed`, `.closed` are actionable — `.new` /
     /// `.connecting` are transient.
     private func handleConnectionState(_ newState: RTCPeerConnectionState) {
+        lastConnectionState = newState
         switch newState {
         case .connected:
             // First `.connected` after connecting → move to
             // the public connected state. Reconnects after a
             // brief `.disconnected` interlude also pass
-            // through here.
+            // through here, which is what cancels the grace.
+            cancelIceGrace()
             if state == .connecting || state == .outgoing {
                 state = .connected
             }
@@ -1314,15 +1341,22 @@ public final class CallSession: ObservableObject {
             // through `.connected` won't spawn a second loop.
             startStatsPollingIfNeeded()
         case .failed:
+            cancelIceGrace()
             endLocal(reason: .error)
         case .disconnected:
-            // WebRTC sometimes flaps disconnected → connected
-            // on a transient network glitch (e.g. wifi → LTE
-            // handover). Don't tear down the session — let
-            // the wrapper recover. If it sticks for too long
-            // the upper-layer watchdog will fire `.timedOut`.
+            // WebRTC sometimes flaps disconnected → connected on a transient
+            // network glitch (wifi → LTE handover), so this is a grace and
+            // not an ending: a recovery through `.connected` cancels it.
+            //
+            // This used to do nothing at all, on the ground that "the
+            // upper-layer watchdog will fire `.timedOut`". It does not: the
+            // host's establish timer matches only `.outgoing` / `.connecting`
+            // / an accepted `.ringing`, so a CONNECTED call whose transport
+            // had gone was never ended by anything.
+            armIceGrace()
             break
         case .closed:
+            cancelIceGrace()
             if state != .done {
                 endRemote(reason: .hungUp)
             }
@@ -1331,6 +1365,51 @@ public final class CallSession: ObservableObject {
         @unknown default:
             break
         }
+    }
+
+    /// Arm the ICE-`disconnected` grace. Idempotent: a second `.disconnected`
+    /// while one is already running keeps the first window rather than
+    /// extending it, so a flapping transport cannot postpone the ending
+    /// indefinitely.
+    private func armIceGrace() {
+        guard iceGraceTask == nil, state == .connecting || state == .connected else { return }
+        iceGraceTask = Task { [weak self] in
+            try? await Task.sleep(
+                nanoseconds: UInt64(Self.iceDisconnectedGraceSeconds * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self else { return }
+                self.iceGraceTask = nil
+                switch self.lastConnectionState {
+                case .disconnected, .failed:
+                    self.endLocal(reason: .error)
+                default:
+                    break
+                }
+            }
+        }
+    }
+
+    private func cancelIceGrace() {
+        iceGraceTask?.cancel()
+        iceGraceTask = nil
+    }
+
+    /// End a connected call that has received nothing for
+    /// ``mediaSilenceTimeoutSeconds`` (`MediaWatchdog`).
+    ///
+    /// Only while `.connected`: a call still being set up has not received
+    /// anything YET, which is a different thing from having stopped.
+    private func endIfMediaHasGoneSilent(atSec: TimeInterval) {
+        guard state == .connected else { return }
+        guard
+            MediaWatchdog.hasGoneSilent(
+                inboundActivity, atSec: atSec, timeoutSec: Self.mediaSilenceTimeoutSeconds)
+        else { return }
+        NSLog(
+            "CallSession: nothing received for %.0f s; ending the call",
+            Self.mediaSilenceTimeoutSeconds)
+        endLocal(reason: .error)
     }
 
     private static func endReason(from ffi: FfiCallEndReason) -> WebCallEndReason {
