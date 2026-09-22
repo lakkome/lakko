@@ -54,11 +54,17 @@ The four rules in
 
 | Workstream | Skill | Deliverable | Status |
 |---|---|---|---|
-| Familiarisation and claim verification | `audit-recon` | `01-surface.md` | dispatched |
-| Independent threat model | `audit-recon` | `02-threat-model.md` | dispatched |
+| Familiarisation and claim verification | `audit-recon` | `01-surface.md` | delivered |
+| Independent threat model | `audit-recon` | `02-threat-model.md` | delivered |
 
 Findings file under `findings/` with the `LAK-RC-NN` prefix.
 
 ## Progress
 
 - 2026-09-22 — engagement opened, commit frozen, `audit-recon` dispatched.
+- 2026-09-22 — `audit-recon` delivered both notes and filed ten findings,
+  `LAK-RC-01` … `LAK-RC-10` (3 High, 5 Medium, 2 Low as proposed by the
+  finder; no verification pass has run, so no severity is final).
+  Coverage limits are stated in `01-surface.md` §7 and `02-threat-model.md` §6;
+  `HEAD` moved during the pass and the delta was checked against every citation
+  (see the note at the top of `01-surface.md`).

@@ -8,6 +8,15 @@
 **Every number below came out of a command run this session.** Where I did not
 measure something, the note says so rather than leaving a gap the reader fills in.
 
+> **Note on the tree moving under the engagement.** `HEAD` advanced during this
+> pass (to `5a9130d`, via one unrelated commit plus the commit of this directory).
+> Every measurement and every `path:line` citation refers to the frozen commit.
+> I checked the delta: `git diff --stat ab1a85e HEAD -- . ':!docs/audit'` touches
+> five files — `apps/android/.../{MainActivity,ContactsRepository,ContactsScreen}.kt`,
+> `docs/PRODUCT-READINESS.md`, `docs/ux/screens/INVENTORY.md` — **none of which is
+> cited in any finding**, so no citation is stale. The Android line count in §1.1
+> is measured at the frozen commit and is now slightly behind `HEAD`.
+
 ---
 
 ## 0. What this note is, and what it is not
