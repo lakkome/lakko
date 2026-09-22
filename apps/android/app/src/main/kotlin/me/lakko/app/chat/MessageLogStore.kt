@@ -430,8 +430,16 @@ public fun PersistedMessage.Companion.from(msg: ChatMessage): PersistedMessage =
             Direction.Incoming -> "incoming"
             Direction.System -> "system"
         },
-        text = msg.text,
-        attachments = msg.attachments.map(PersistedAttachment.Companion::from),
+        // ADR-0023 — a deleted message is stored EMPTY. The bubble and the
+        // conversation row both draw the tombstone from `deleted` alone, so
+        // nothing reads either of these again; keeping them would write the
+        // words of a message someone chose to delete - and the content keys
+        // of its attachments, which open the blobs on the server - to this
+        // device for as long as the transcript lives, in exchange for
+        // nothing. The web client stores it the same way.
+        text = if (msg.deleted) "" else msg.text,
+        attachments =
+            if (msg.deleted) emptyList() else msg.attachments.map(PersistedAttachment.Companion::from),
         createdAt = msg.createdAt,
         // ADR-0023 — the identity we resolved at receipt (or stamped at send),
         // written back verbatim: the store is the record of who wrote this, not

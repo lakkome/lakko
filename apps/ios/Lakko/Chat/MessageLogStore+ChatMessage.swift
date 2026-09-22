@@ -36,8 +36,15 @@ extension PersistedMessage {
             case .system: return "system"
             }
         }()
-        self.text = msg.text
-        self.attachments = msg.attachments.map(PersistedAttachment.init(from:))
+        // ADR-0023 — a deleted message is stored EMPTY. The bubble and the
+        // conversation row both draw the tombstone from `deleted` alone, so
+        // nothing reads either of these again; keeping them would write the
+        // words of a message someone chose to delete - and the content keys
+        // of its attachments, which open the blobs on the server - to this
+        // device for as long as the transcript lives, in exchange for
+        // nothing. The web client stores it the same way.
+        self.text = msg.deleted ? "" : msg.text
+        self.attachments = msg.deleted ? [] : msg.attachments.map(PersistedAttachment.init(from:))
         self.createdAt = msg.createdAt
         // ADR-0023 — the author's signature key, written verbatim for BOTH
         // directions: the key we stamped at send, and the key the receive loop
