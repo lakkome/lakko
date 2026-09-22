@@ -1276,6 +1276,11 @@ export class CallSession {
       const local = new Map<string, number>();
       const remote = new Map<string, number>();
       const pairs = new Map<string, number>();
+      let inPackets = 0;
+      let outPackets = 0;
+      let inBytes = 0;
+      let outBytes = 0;
+      const num = (v: unknown): number => (typeof v === "number" ? v : 0);
       const bump = (m: Map<string, number>, k: string): void => {
         m.set(k, (m.get(k) ?? 0) + 1);
       };
@@ -1287,11 +1292,20 @@ export class CallSession {
           bump(remote, String(stat["candidateType"] ?? "?"));
         } else if (type === "candidate-pair") {
           bump(pairs, String(stat["state"] ?? "?"));
+        } else if (type === "inbound-rtp") {
+          inPackets += num(stat["packetsReceived"]);
+          inBytes += num(stat["bytesReceived"]);
+        } else if (type === "outbound-rtp") {
+          outPackets += num(stat["packetsSent"]);
+          outBytes += num(stat["bytesSent"]);
         }
       });
       const fmt = (m: Map<string, number>): string =>
         m.size === 0 ? "none" : [...m].map(([k, n]) => `${k}:${n}`).join(",");
-      return `${head} local=[${fmt(local)}] remote=[${fmt(remote)}] pairs=[${fmt(pairs)}]`;
+      return (
+        `${head} local=[${fmt(local)}] remote=[${fmt(remote)}] pairs=[${fmt(pairs)}] ` +
+        `rtpIn=${inPackets}pkt/${inBytes}B rtpOut=${outPackets}pkt/${outBytes}B`
+      );
     } catch (err) {
       return `${head} stats unavailable: ${String(err)}`;
     }
@@ -1352,11 +1366,9 @@ export class CallSession {
     ) {
       return;
     }
-    // eslint-disable-next-line no-console
-    console.warn(
-      `call ended: nothing received for ${this.timing.mediaSilenceTimeoutMs} ms`,
+    void this.endWithTransport(
+      `nothing received for ${this.timing.mediaSilenceTimeoutMs} ms`,
     );
-    void this.endLocal("error");
   }
 
   /**

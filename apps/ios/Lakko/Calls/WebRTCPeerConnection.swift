@@ -394,6 +394,12 @@ public final class WebRTCPeerConnection: NSObject {
         /// call left. Only this one moves when media actually arrives, which
         /// is what `MediaWatchdog` needs.
         public let mediaPacketsReceived: Int64
+        /// RTP packets this device has SENT. Paired with
+        /// ``mediaPacketsReceived`` so one sample can say which DIRECTION of a
+        /// silent call is dead: a call with `in == 0` and `out > 0` is not the
+        /// same defect as one with both at zero, and from one end alone the
+        /// two are indistinguishable.
+        public let mediaPacketsSent: Int64
     }
 
     public func sampleConnectionStats() async -> ConnectionStatsSnapshot? {
@@ -407,6 +413,11 @@ public final class WebRTCPeerConnection: NSObject {
             .reduce(Int64(0)) { sum, s in
                 sum + ((s.values["packetsReceived"] as? NSNumber)?.int64Value ?? 0)
             }
+        let sentPackets = stats.values
+            .filter { $0.type == "outbound-rtp" }
+            .reduce(Int64(0)) { sum, s in
+                sum + ((s.values["packetsSent"] as? NSNumber)?.int64Value ?? 0)
+            }
         // Prefer the nominated succeeded pair; fall back to any
         // succeeded pair (some stacks don't flag `nominated`).
         let pairs = stats.values.filter { $0.type == "candidate-pair" }
@@ -417,7 +428,8 @@ public final class WebRTCPeerConnection: NSObject {
         guard let pair = active else {
             return ConnectionStatsSnapshot(
                 rttMs: nil, relayed: false, hasActivePair: false,
-                bytesReceived: 0, bytesSent: 0, mediaPacketsReceived: mediaPackets
+                bytesReceived: 0, bytesSent: 0, mediaPacketsReceived: mediaPackets,
+                mediaPacketsSent: sentPackets
             )
         }
         let rttSec = (pair.values["currentRoundTripTime"] as? NSNumber)?.doubleValue
@@ -433,7 +445,8 @@ public final class WebRTCPeerConnection: NSObject {
         return ConnectionStatsSnapshot(
             rttMs: rttMs, relayed: relayed, hasActivePair: true,
             bytesReceived: bytesReceived, bytesSent: bytesSent,
-            mediaPacketsReceived: mediaPackets
+            mediaPacketsReceived: mediaPackets,
+            mediaPacketsSent: sentPackets
         )
     }
 

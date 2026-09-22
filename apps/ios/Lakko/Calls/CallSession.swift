@@ -225,6 +225,8 @@ public final class CallSession: ObservableObject {
     /// / [`downBps`] / [`upBps`]. Started on the first `.connected`
     /// transition, cancelled in `teardownMediaPipeline`.
     private var statsTask: Task<Void, Never>?
+    /// The media-flow line is said once per call, not every two seconds.
+    private var loggedMediaFlow = false
     /// How long inbound media has been silent (`MediaWatchdog`).
     private var inboundActivity: MediaWatchdog.InboundActivity?
     /// The ICE-`disconnected` grace, armed on the transition and cancelled by
@@ -1070,6 +1072,7 @@ public final class CallSession: ObservableObject {
     private func startStatsPollingIfNeeded() {
         guard statsTask == nil else { return }
         statsTask = Task { [weak self] in
+            let startedAtSec = ProcessInfo.processInfo.systemUptime
             while !Task.isCancelled {
                 guard let self, let rtc = self.rtc else { return }
                 if let snap = await rtc.sampleConnectionStats() {
@@ -1096,6 +1099,18 @@ public final class CallSession: ObservableObject {
                         self.inboundActivity,
                         packets: snap.mediaPacketsReceived,
                         atSec: nowSec)
+                    // Say the flow once, a few samples into a connected call.
+                    // "Nothing is arriving" is half the question; whether this
+                    // device was SENDING is the other half, and only the pair
+                    // names the direction that is dead. The web side logs the
+                    // same two numbers, so either end can blame a direction
+                    // on its own.
+                    if !self.loggedMediaFlow, nowSec - startedAtSec > 8 {
+                        self.loggedMediaFlow = true
+                        NSLog(
+                            "CallSession: media flow rtpIn=%lldpkt rtpOut=%lldpkt",
+                            snap.mediaPacketsReceived, snap.mediaPacketsSent)
+                    }
                     await MainActor.run { self.endIfMediaHasGoneSilent(atSec: nowSec) }
                     await MainActor.run {
                         self.rttMs = snap.rttMs
