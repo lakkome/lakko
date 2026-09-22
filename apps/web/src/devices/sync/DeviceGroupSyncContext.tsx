@@ -51,6 +51,7 @@ import {
 import { useAuth } from "../../auth/AuthContext";
 import { ensureDeviceIdentitySeed } from "../../auth/device-identity-store";
 import { getDeviceKey } from "../../auth/key-store";
+import { deleteSyncState, loadSyncState, saveSyncState } from "./sync-state-idb";
 import { DsClient, DsHttpError, DsNetworkError } from "../../ds/client";
 import { loadWasm } from "../../wasm";
 import type {
@@ -77,6 +78,10 @@ import {
   type OrderState,
   type ReadCursorState,
 } from "./state";
+
+/** How long a change waits before the snapshot is rewritten. A draft moves on
+ *  a keystroke, and the row is one encrypt plus one IndexedDB write. */
+const SYNC_PERSIST_DEBOUNCE_MS = 500;
 
 // ---------- Reactive maps + public API shape ---------------------
 
@@ -248,6 +253,26 @@ export function DeviceGroupSyncProvider(props: {
 
     identity = ensured.identity;
     group = ensured.group;
+
+    // Seed the four maps from this device's own disk BEFORE the poll starts.
+    // They used to begin empty on every load and the journal could not refill
+    // them - this client resumes from a persisted cursor, so the rows that
+    // carried a pin or a draft are behind it and are never read again. The
+    // snapshot is a head start, not an authority: the poll folds newer rows
+    // on top through the same HLC comparison, so a sibling device's later
+    // write still wins.
+    try {
+      const restored = await loadSyncState(accountIdB64, deviceKey);
+      if (restored !== null) {
+        setDrafts(restored.drafts);
+        setFlags(restored.flags);
+        setReadCursors(restored.readCursors);
+        setOrder(restored.order);
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("device-sync snapshot restore failed; starting empty", err);
+    }
     setReady(true);
 
     // Kick off the poll loop. The abort controller is the
@@ -283,6 +308,7 @@ export function DeviceGroupSyncProvider(props: {
       }
       identity = null;
     }
+    const closing = activeAccountIdB64;
     activeAccountIdB64 = null;
     ownPublishedIds.clear();
     setReady(false);
@@ -290,7 +316,49 @@ export function DeviceGroupSyncProvider(props: {
     setFlags({});
     setReadCursors({});
     setOrder(null);
+    // Forget the snapshot too. Logout and forget-this-device both come
+    // through here, and a draft left behind for the next account to sign in
+    // on this browser is the one piece of this state that reads as a message.
+    if (closing !== null) {
+      void deleteSyncState(closing).catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn("device-sync snapshot delete failed", err);
+      });
+    }
   }
+
+  // Write the snapshot whenever any of the four maps moves - a local set or a
+  // sibling's row folded by the poll, since both land in these signals.
+  // Debounced because a draft changes on a keystroke.
+  let persistTimer: ReturnType<typeof setTimeout> | null = null;
+  createEffect(() => {
+    const snapshot = {
+      drafts: drafts(),
+      flags: flags(),
+      readCursors: readCursors(),
+      order: order(),
+    };
+    const account = activeAccountIdB64;
+    if (account === null) return;
+    if (persistTimer !== null) clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => {
+      persistTimer = null;
+      void (async () => {
+        try {
+          const deviceKey = await getDeviceKey(account);
+          await saveSyncState(account, deviceKey, snapshot);
+        } catch (err) {
+          // Best-effort: the in-memory state stays good and the next change
+          // rewrites the row.
+          // eslint-disable-next-line no-console
+          console.warn("device-sync snapshot persist failed", err);
+        }
+      })();
+    }, SYNC_PERSIST_DEBOUNCE_MS);
+  });
+  onCleanup(() => {
+    if (persistTimer !== null) clearTimeout(persistTimer);
+  });
 
   // ----- Inbound poll loop ---------------------------------------
 
