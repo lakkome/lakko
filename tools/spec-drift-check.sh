@@ -49,18 +49,23 @@ while IFS= read -r line; do
   [ -n "$line" ] && changed+=("$line")
 done < <(collect_changed "${1:-}" | sed '/^$/d' | sort -u)
 
+# An empty array expands to an "unbound variable" error under `set -u` on
+# bash 3.2, which macOS still ships — so every expansion below carries the
+# `${arr[@]+...}` guard. Without it the gate fails precisely when there is
+# nothing to check: a clean tree, which is the state right after a commit.
+
 # Fast membership test over the changed set.
 is_changed() {
   local needle="$1"
   local f
-  for f in "${changed[@]}"; do
+  for f in ${changed[@]+"${changed[@]}"}; do
     [ "$f" = "$needle" ] && return 0
   done
   return 1
 }
 
 drift=0
-for f in "${changed[@]}"; do
+for f in ${changed[@]+"${changed[@]}"}; do
   # Only source files can drift a spec; skip the specs themselves + everything else.
   if ! printf '%s' "$f" | grep -Eq "$SRC_EXT_RE"; then
     continue

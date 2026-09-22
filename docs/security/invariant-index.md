@@ -15,9 +15,9 @@ section that describes it.
 | **I-** | 8   | I-1..I-8   | [`mls-state-machine.md`](./mls-state-machine.md) |
 | **C-** | 69  | C-1..C-69  | [`calls.md`](./calls.md) |
 | **T-** | 16  | T-1..T-16  | [`transport.md`](./transport.md) |
-| **G-** | 40  | G-1..G-40 | [`known-gaps.md`](./known-gaps.md) — open / deferred |
+| **G-** | 41  | G-1..G-41 | [`known-gaps.md`](./known-gaps.md) — open / deferred |
 | Total invariants  | 93  | (I + C + T) | live properties |
-| Total open gaps   | 15  | (G)         | tracked + scoped |
+| Total open gaps   | 16  | (G)         | tracked + scoped |
 
 **Note on the `G-` counts.** These two rows had drifted badly and were corrected
 on 2026-08-14: they claimed `G-1..G-27` with 27 open, while
@@ -27,7 +27,7 @@ for some time — G-29..G-36 were minted by later arcs and never reflected here.
 by the client commit-serialization arc, **G-39 by [ADR-0046](../adr/0046-external-crypto-review.md)**,
 which moved the external crypto review out of four separate ADRs and into one
 tracked release gate); the mechanical *not-marked-`CLOSED`* tally is **13** —
-G-1, G-2, G-4, G-14, G-15, G-16, G-20, G-26, G-29, G-30, G-32, G-36, **G-39**, **G-40** (minted 2026-09-15: a second device never joins the account's existing conversations, ADR-0007 Phase 2b unbuilt).
+G-1, G-2, G-4, G-14, G-15, G-16, G-20, G-26, G-29, G-30, G-32, G-36, **G-39**, **G-40** (minted 2026-09-15: a second device never joins the account's existing conversations, ADR-0007 Phase 2b unbuilt), **G-41** (minted 2026-09-22: three `libcrux` advisories under the MLS HPKE backend, two of them unreachable from Lakko's DH-KEM ciphersuites and the third not yet adjudicated, blocked on an upstream `hax-lib` exact-version knot).
 **Two changes since this note was written, and they are not the same kind.**
 G-38 left that list because S7 (`576ea14`) closed its remaining membership-path
 residual and its heading now says `CLOSED`; G-39 joined it on being minted. The
@@ -438,6 +438,7 @@ should not re-discover them.
 | G-23 | `libcrux-chacha20poly1305 0.0.7` — RUSTSEC-2026-0124 (HIGH 8.2) — upstream-blocked |
 | G-24 | `rsa 0.9.10` — RUSTSEC-2023-0071 (MEDIUM 5.9) — Marvin Attack — `sqlx-mysql` MariaDB-auth transitive (NOT TLS-stack — see known-gaps.md G-24 for reachability analysis) |
 | G-25 | Three unmaintained-crate warnings |
+| G-41 | Three `libcrux` advisories under the MLS HPKE backend — RUSTSEC-2026-0212 (`libcrux-secrets`, constant-time swap/select on aarch64) plus RUSTSEC-2026-0207 / -0208 (`libcrux-sha3`, SHAKE). The two SHAKE ones sit on `hpke-rs`'s post-quantum KEM arms, which Lakko's DH-KEM ciphersuites never take; 0212 reaches the AEAD/ECDH traits and is NOT yet adjudicated. Blocked on an upstream exact-version knot (`hax-lib =0.3.6` vs `=0.3.7`) — see known-gaps.md G-41 |
 
 ## How to add a new invariant
 
