@@ -11,7 +11,7 @@
 - **Component:** `infra/systemd/`, `infra/scripts/deploy.sh:34`,
   `infra/nginx/sites-available/lakko.conf`,
   `apps/web/src/transparency/config.ts:26-45`,
-  `.github/workflows/deploy-web.yml:83-96`
+  `.github/workflows/deploy-web.yml:58-61, 88-94`
 - **Invariants touched:** #6 (identity rotation only via the KT log supersession
   proof), #4, C-56, C-57
 - **Vendor claim contradicted:** `CLAUDE.md` ADR table for ADR-0019, 0020, 0036,
@@ -63,7 +63,7 @@ assignments in `apps/web/.env.example` is **zero**
 (`grep -E '^VITE_LAKKO_[A-Z_]+=' apps/web/.env.example` → no output; every
 occurrence is inside a comment). `.github/workflows/deploy-web.yml` declares only
 `CARGO_TERM_COLOR`, `RUST_BACKTRACE`, `CARGO_INCREMENTAL` in `env:` (`:58-61`)
-and its build step (`:89-96`) is bare `npm ci && npm run build`. `**/.env` is
+and its build step (`:88-94`) is bare `npm ci && npm run build`. `**/.env` is
 gitignored (`.gitignore:29`), so `actions/checkout` cannot supply one either.
 
 The CI-deployed web client therefore ships with: the transparency check off, the
@@ -92,7 +92,7 @@ refusal. The failure is silent in both directions.
 git grep -l transparency infra/                     # → no output
 grep -n SERVICES= infra/scripts/deploy.sh           # → 34: SERVICES=(auth ds storage discovery push-gw channels sfu gif-proxy)
 grep -E '^VITE_LAKKO_[A-Z_]+=' apps/web/.env.example # → no output
-sed -n '58,96p' .github/workflows/deploy-web.yml     # → no VITE_* anywhere
+sed -n '58,94p' .github/workflows/deploy-web.yml     # → no VITE_* anywhere
 ```
 
 ## Impact

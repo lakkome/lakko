@@ -341,7 +341,7 @@ Web pins referenced in `apps/web/src`
 (`grep -rhoE 'VITE_LAKKO_[A-Z_]+'`, 12 distinct). Uncommented assignments in
 `apps/web/.env.example`: **zero** (`grep -E '^VITE_LAKKO_[A-Z_]+=' ` → no output).
 `.github/workflows/deploy-web.yml` sets no `VITE_*` variable in its build step
-(lines 89-96 are `npm ci && npm run build` with only `CARGO_*`/`RUST_*` in `env:`).
+(lines 88-94 are `npm ci && npm run build` with only `CARGO_*`/`RUST_*` in `env:`).
 `**/.env` is gitignored (`.gitignore:29`), so `actions/checkout` cannot supply one.
 
 Therefore the CI-deployed web client ships with the transparency check off, the

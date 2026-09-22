@@ -8,7 +8,7 @@
 - **Workstream:** recon
 - **Tracking id:** LAK-RC-07
 - **Status:** Open
-- **Component:** `.github/workflows/ci.yml:7-11`, and every other file in
+- **Component:** `.github/workflows/ci.yml:44-49`, and every other file in
   `.github/workflows/`
 - **Invariants touched:** none directly; this is the control that would catch
   violations of all of them
@@ -39,7 +39,7 @@ Trigger blocks for all 11 workflows, extracted this session:
 | `sframe-interop.yml` | `workflow_dispatch` only |
 | `sfu-e2e.yml` | `workflow_dispatch` only |
 
-`ci.yml:7-11` is explicit — the automatic triggers are present and commented out:
+`ci.yml:44-49` is explicit — the automatic triggers are present and commented out:
 
 ```yaml
 on:
@@ -64,7 +64,7 @@ dependency advisories or licences.
 ```
 for f in .github/workflows/*.yml; do printf '%-24s' "$(basename $f)"; \
   sed -n '/^on:/,/^[a-z]/p' "$f" | grep -E '^  [a-z_]+:'; done
-sed -n '5,12p' .github/workflows/ci.yml
+sed -n '44,49p' .github/workflows/ci.yml
 ```
 
 ## Impact
