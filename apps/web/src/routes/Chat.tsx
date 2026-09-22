@@ -50,6 +50,7 @@ import { groupIdHex as hexOf } from "../devices/sync/state";
 import { useCallHost } from "../calls/CallHostContext";
 import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
 import { eventToPersistedMessage, mergeForegroundSlot } from "../chat/background-log";
+import { opsFromPersisted, persistedWithOps } from "../chat/message-ops-store";
 import { memberKeysOf, peerName } from "../chat/peer-name";
 import { ownPersonKeyB64, peopleCountOf, personKeyOf } from "../chat/person-key";
 import { groupTitle } from "../chat/group-title";
@@ -5086,6 +5087,17 @@ function ChatView(props: {
       if (rows().length === 0) {
         setRows(seeded);
       }
+      // ADR-0023 — restore the edit / delete / reaction overlay. Guarded on
+      // the overlay rather than on `rows`, because it is keyed on DS ids and
+      // lands correctly on whichever rows are present; and not seeded over a
+      // non-empty overlay, which can only mean the poll has already applied
+      // ops this session that the stored rows predate. This is also what
+      // stops the next persist writing the restored rows back WITHOUT their
+      // ops: that write reads the overlay, not the row.
+      if (msgOps().size === 0) {
+        const storedOps = opsFromPersisted(slot.messages);
+        if (storedOps.size > 0) setMsgOps(storedOps);
+      }
       const cur = Number(slot.cursor);
       if (Number.isFinite(cur) && cur > cursor()) {
         setCursor(cur);
@@ -5106,9 +5118,16 @@ function ChatView(props: {
       if (accountIdB64 === null) return;
       const deviceKey = await getDeviceKey(accountIdB64);
       if (deviceKey === null) return;
+      // ADR-0023 — fold the mutation overlay in on the way out. Without this
+      // the row written here is the message as first received, so a reload
+      // brings back text the author replaced and messages they deleted - and
+      // brings them back for good, because the op rows are long behind the
+      // cursor and MLS forward secrecy will not decrypt them a second time.
+      const ops = msgOps();
       const messages = rows()
         .map((r) => timelineRowToPersisted(r, hub.playedKeys()))
-        .filter((m): m is PersistedMessage => m !== null);
+        .filter((m): m is PersistedMessage => m !== null)
+        .map((m) => persistedWithOps(m, ops.get(Number(m.messageId))));
       const hex = groupIdHexForLog();
       const at = cursor();
       // Serialized with every other writer of this account's log, and MERGED

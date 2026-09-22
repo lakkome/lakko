@@ -197,6 +197,13 @@ export function summarizeGroupSlot(
 }
 
 function previewText(m: PersistedMessage): string {
+  // ADR-0023 — a deleted message reads as the tombstone, the same words the
+  // bubble shows and the same rule Android's `previewLine` applies. Checked
+  // FIRST: the row is stored with no text and no attachments, so without this
+  // the conversation would show a blank second line rather than saying what
+  // happened - and before the delete was persisted at all it showed the
+  // deleted text, which is worse than blank.
+  if (m.deleted === true) return "Message deleted";
   const text = m.text.replace(/\s+/g, " ").trim();
   if (text.length > 0) {
     return text.length > PREVIEW_MAX_CHARS ? `${text.slice(0, PREVIEW_MAX_CHARS - 1)}…` : text;

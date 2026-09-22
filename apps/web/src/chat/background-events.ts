@@ -15,9 +15,9 @@
  *   |-----------------------|-------------------------------|-------------------------|
  *   | application, system   | persisted to the message log  | yes (timeline)          |
  *   | op (read-receipt)     | the read-watermark store      | yes (idempotent)        |
- *   | op                    | —                             | yes (edit / delete /    |
- *   |                       |                               | reaction / typing /     |
- *   |                       |                               | read-receipt overlays)  |
+ *   | op (edit/delete/      | folded into the stored rows   | yes (overlay)           |
+ *   |     reaction)         |                               |                         |
+ *   | op (typing)           | —                             | yes (overlay)           |
  *   | externalJoinRequest   | —                             | yes (members panel)     |
  *   | membershipProposal    | observation recorded if stored| yes (panel refresh)     |
  *   | callSignaling         | the app-level call host       | no                      |
@@ -27,17 +27,38 @@
  *   | committerBeacon       | the beacon observation store  | no                      |
  *   | group-name            | the gated group-name store    | no                      |
  *
- * The edit / delete / reaction / typing overlays are in-memory state in the
- * chat view and were never persisted — a reload always started them empty —
- * so handing them over matches what the chat would have shown had it been
- * open this session. Read receipts are the exception: they are durable
- * (`read-watermark-store.ts`) and settled here, because a receipt the chat
- * view never sees would otherwise leave a read message showing "Sent".
+ * Typing is in-memory state in the chat view, so handing it over matches what
+ * the chat would have shown had it been open this session. Read receipts are
+ * durable (`read-watermark-store.ts`) and settled here, because a receipt the
+ * chat view never sees would otherwise leave a read message showing "Sent".
+ *
+ * Edit / delete / reaction used to be handed over the same way as typing, and
+ * that was wrong: they are not status, they are the message. The view that
+ * would have applied them may never mount, the buffer holding them does not
+ * survive a reload, and MLS forward secrecy means the op rows can never be
+ * decrypted again - so a message deleted while its chat was closed came back
+ * permanently. They are now also settled here, against the stored rows
+ * (`messageOps`, folded by `message-ops-store.ts`), and still handed to the
+ * view, whose own fold is idempotent for a delete and an edit. A reaction
+ * TOGGLES, so the view must not apply one it has already seen; it does not,
+ * because an event delivered while a view is attached never enters the
+ * buffer it would later replay.
  */
 import type { InboundSignalingRow } from "../calls/call-signaling-dispatch";
 import type { IncomingChatEvent } from "./client";
 
 type Of<K extends IncomingChatEvent["kind"]> = Extract<IncomingChatEvent, { kind: K }>;
+
+/** An `op` event that mutates a message, as opposed to typing or a receipt. */
+export type MessageOpEvent = Of<"op"> & { op: "edit" | "delete" | "reaction" };
+
+/** Narrows an op event to the three that change a message. A predicate rather
+ *  than an inline test because `op` is a union of literals on ONE object type,
+ *  not a discriminant between several, so testing it narrows the property and
+ *  not the event. */
+function isMessageOp(e: Of<"op">): e is MessageOpEvent {
+  return e.op === "edit" || e.op === "delete" || e.op === "reaction";
+}
 
 export interface BackgroundEventPlan {
   /** Rows filed into the persisted timeline. */
@@ -55,6 +76,11 @@ export interface BackgroundEventPlan {
   /** ADR-0024 — read receipts, for the durable watermark store. Also in
    *  `toView`; the store's fold is monotone, so the second ingest is a no-op. */
   readonly readReceipts: readonly Of<"op">[];
+  /** ADR-0023 — edit / delete / reaction, for the stored rows. Also in
+   *  `toView`, for a chat view that is attached now or mounts later.
+   *  Narrowed to the three message ops so a consumer cannot be handed a
+   *  typing signal to fold into a transcript. */
+  readonly messageOps: readonly MessageOpEvent[];
   /** ADR-0051 — shared group names, for the role-gated receive. */
   readonly groupNames: readonly Of<"group-name">[];
   /** Proposals the receipt gate STORED; a refused one is a pending request
@@ -76,6 +102,7 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
   const beacons: Of<"committerBeacon">[] = [];
   const groupNames: Of<"group-name">[] = [];
   const readReceipts: Of<"op">[] = [];
+  const messageOps: MessageOpEvent[] = [];
   const storedProposals: Of<"membershipProposal">[] = [];
   let sawCommit = false;
   for (const e of events) {
@@ -91,6 +118,7 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
         break;
       case "op":
         if (e.op === "read-receipt") readReceipts.push(e);
+        if (isMessageOp(e)) messageOps.push(e);
         toView.push(e);
         break;
       case "externalJoinRequest":
@@ -142,6 +170,7 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
     pushSecrets,
     beacons,
     readReceipts,
+    messageOps,
     groupNames,
     storedProposals,
     sawCommit,

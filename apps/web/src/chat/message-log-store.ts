@@ -59,8 +59,17 @@ const IV_LEN = 12;
  * row did before the field existed. There is no migration and none
  * is owed; discarding the transcript would cost history to fix
  * nothing.
+ *
+ * v3 adds [`PersistedMessage.edited`] / [`deleted`] / [`reactions`],
+ * which is what makes an edit or a delete outlive the tab. Before
+ * it, the op was folded into a session-scoped overlay in `Chat.tsx`
+ * and nowhere else: a reload dropped the overlay, the journal cursor
+ * had long since passed the op rows, and MLS forward secrecy means
+ * they can never be decrypted again — so a deleted message came back
+ * and stayed back, for good. An older payload reads with all three
+ * absent, which is exactly the row as it was written.
  */
-export const MESSAGE_LOG_VERSION = 2;
+export const MESSAGE_LOG_VERSION = 3;
 
 export interface PersistedAttachment {
   /** Base64-encoded 32-byte SHA-256 blob id. */
@@ -131,6 +140,48 @@ export interface PersistedMessage {
    * MLS snapshot store beside it.
    */
   readonly authorKeyB64?: string | null;
+  /**
+   * ADR-0023 — this message was edited. `text` above is the EDITED
+   * text, not the original, which matches iOS and Android and means
+   * a reader that knows nothing of this flag still shows the right
+   * words; the flag only adds the "(edited)" marker.
+   *
+   * Absent on a row written before v3, which reads as `false`.
+   */
+  readonly edited?: boolean;
+  /**
+   * ADR-0023 — this message was deleted; the bubble is the tombstone.
+   *
+   * Such a row carries an EMPTY `text` and no `attachments`, which
+   * is a deliberate divergence from iOS and Android: they keep both.
+   * Nothing renders either one once the flag is set, so keeping them
+   * would write the plaintext of a message the user deleted - and
+   * the content keys of its attachments - to disk permanently, in
+   * exchange for nothing. The natives should follow.
+   */
+  readonly deleted?: boolean;
+  /**
+   * ADR-0023 — the folded reactions, as `(reactor, emoji)` pairs.
+   * The same flat shape iOS and Android store. Sorted on write so a
+   * re-persist of unchanged state produces identical bytes.
+   */
+  readonly reactions?: readonly PersistedReaction[];
+}
+
+/** ADR-0023 — one reaction, keyed on the reactor's IDENTITY. */
+export interface PersistedReaction {
+  /**
+   * The reactor's Ed25519 signature key, base64, resolved from the
+   * MLS sender leaf at receipt. Never a leaf index: OpenMLS hands a
+   * vacated leaf to the next member added, so a leaf-keyed reaction
+   * lets a newcomer toggle a departed member's reaction off and
+   * merge their own into that member's count (C-68).
+   *
+   * May be the own-reaction sentinel, for a reaction this device
+   * made before it could resolve its own key.
+   */
+  readonly reactorKeyB64: string;
+  readonly emoji: string;
 }
 
 export interface PersistedGroup {

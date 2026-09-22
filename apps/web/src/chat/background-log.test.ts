@@ -112,6 +112,28 @@ describe("summarizeGroupSlot (the chat list row)", () => {
     expect(s.previewIsOwn).toBe(false);
   });
 
+  it("previews a deleted message as the tombstone, never as its text", () => {
+    // ADR-0023 — the stored row carries no text and no attachments, so
+    // without the rule the conversation row would go blank; and the reason
+    // it carries none is that keeping a deleted message's words on disk is
+    // the thing being fixed.
+    const slot: PersistedGroup = {
+      cursor: "2",
+      messages: [{ ...msg(2, "incoming", ""), deleted: true }],
+    };
+    expect(summarizeGroupSlot(slot, null).preview).toBe("Message deleted");
+  });
+
+  it("prefers the tombstone over any text a deleted row still carries", () => {
+    // Belt and braces for a row written by an older build, or by a native
+    // client, which keeps the text beside the flag.
+    const slot: PersistedGroup = {
+      cursor: "2",
+      messages: [{ ...msg(2, "incoming", "the secret"), deleted: true }],
+    };
+    expect(summarizeGroupSlot(slot, null).preview).toBe("Message deleted");
+  });
+
   it("labels an attachment-only message and truncates long text", () => {
     const photo: PersistedMessage = {
       ...msg(1, "outgoing", ""),

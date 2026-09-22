@@ -75,7 +75,8 @@ import {
   appendToGroupSlot,
   eventToPersistedMessage,
 } from "./background-log";
-import { planBackgroundEvents } from "./background-events";
+import { planBackgroundEvents, type MessageOpEvent } from "./background-events";
+import { foldOpsIntoStored } from "./message-ops-store";
 import {
   BACKGROUND_CONCURRENCY,
   BACKGROUND_SWEEP_INTERVAL_MS,
@@ -773,8 +774,16 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     // The chat view gets the rest, now or when it next mounts.
     coordinator.deliver(groupIdB64, plan.toView);
 
-    if (plan.timeline.length > 0 || cursorMoved) {
-      await fileIntoLog(account, entry, plan.timeline.map((e) => eventToPersistedMessage(e)));
+    // ADR-0023 — an op with no timeline row of its own still has to reach the
+    // log: a delete that arrives while its chat is closed is otherwise lost
+    // with the in-memory buffer, and its row can never be decrypted again.
+    if (plan.timeline.length > 0 || plan.messageOps.length > 0 || cursorMoved) {
+      await fileIntoLog(
+        account,
+        entry,
+        plan.timeline.map((e) => eventToPersistedMessage(e)),
+        plan.messageOps,
+      );
     }
   }
 
@@ -782,6 +791,9 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     account: string,
     entry: ActiveGroup,
     messages: ReturnType<typeof eventToPersistedMessage>[],
+    /** ADR-0023 — edit / delete / reaction, applied to the slot after the
+     *  append so an op and the row it targets can arrive in one batch. */
+    ops: readonly MessageOpEvent[],
   ): Promise<void> {
     try {
       const deviceKey = await getDeviceKey(account);
@@ -790,9 +802,15 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       const cursor = coordinator.cursor(entry.groupIdB64) ?? 0;
       await updateMessageLog(account, deviceKey, (current) => {
         const groups = current?.groups ?? {};
+        const appended = appendToGroupSlot(groups[hex], messages, cursor);
+        const folded = foldOpsIntoStored(appended.messages, ops);
         return {
           version: MESSAGE_LOG_VERSION,
-          groups: { ...groups, [hex]: appendToGroupSlot(groups[hex], messages, cursor) },
+          groups: {
+            ...groups,
+            [hex]:
+              folded === appended.messages ? appended : { ...appended, messages: folded },
+          },
         };
       });
     } catch (err) {

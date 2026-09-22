@@ -144,6 +144,33 @@ describe("planBackgroundEvents", () => {
     expect(plan.readReceipts.some((e) => e.op !== "read-receipt")).toBe(false);
   });
 
+  it("settles a message op against the stored rows and still hands it to the view (ADR-0023)", () => {
+    // Edit / delete / reaction are the message, not status: a view that never
+    // mounts must not be the only place they land, or a delete that arrives
+    // while its chat is closed is lost with the in-memory buffer and its row
+    // can never be decrypted again.
+    expect(plan.messageOps.map((e) => e.messageId)).toEqual([4]);
+    expect(plan.toView.some((e) => e.kind === "op" && e.messageId === 4)).toBe(true);
+  });
+
+  it("keeps typing and read receipts out of the message ops", () => {
+    // They share the `op` kind and nothing else: folding a typing signal into
+    // a transcript would write a status change into the record. Planned over
+    // its own batch, because the shared fixture carries no typing event and
+    // the assertion would otherwise hold vacuously.
+    const typing: IncomingChatEvent = {
+      ...edit,
+      messageId: 12,
+      op: "typing",
+      target: 0,
+      text: "",
+      isTyping: true,
+    };
+    const own = planBackgroundEvents([typing, receipt, edit]);
+    expect(own.messageOps.map((e) => e.messageId)).toEqual([4]);
+    expect(own.toView).toHaveLength(3);
+  });
+
   it("flags a commit so the membership-shrink rotation runs (ADR-0043)", () => {
     expect(plan.sawCommit).toBe(true);
     expect(planBackgroundEvents([chat]).sawCommit).toBe(false);
