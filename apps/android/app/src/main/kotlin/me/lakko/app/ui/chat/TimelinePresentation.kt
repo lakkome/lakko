@@ -3,6 +3,7 @@
 
 package me.lakko.app.ui.chat
 
+import me.lakko.app.chat.Ack
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.Direction
 import me.lakko.app.media.KIND_GIF
@@ -195,8 +196,30 @@ public sealed class TimelineItem {
         /** "14:05" from the DS row, or `null` when the row carries no usable time. */
         val time: String?,
     ) : TimelineItem() {
-        override val key: String get() = "m-${message.messageId}"
+        /**
+         * Keyed on the row's identity rather than its `messageId`, because an
+         * unsent row does not have one yet: two of them would then share a
+         * key, and the lazy list would draw one row for two messages. It does
+         * not move when the send lands, so the row is not rebuilt mid-send.
+         */
+        override val key: String get() = "m-${message.rowId}"
     }
+}
+
+/**
+ * What an outgoing row's time slot says.
+ *
+ * A message that has not reached the server has no server time to show, so
+ * the slot carries its state instead: it is the same place the eye already
+ * looks for "when", and it means the row needs no second line. "Not sent" is
+ * the word the web client, the media bubbles and iOS all use
+ * (`docs/ux/media-messages.md` section 3) - two spellings of the same thing
+ * would be one of them being wrong.
+ */
+public fun statusLabel(ack: Ack, time: String?): String? = when (ack) {
+    Ack.PENDING -> "Sending..."
+    Ack.FAILED -> "Not sent"
+    Ack.SENT -> time
 }
 
 /**
@@ -231,7 +254,7 @@ public fun buildTimeline(
             message = msg,
             firstInRun = first,
             lastInRun = last,
-            time = ms?.let { formatClockTime(it, zone, use24h, locale) },
+            time = statusLabel(msg.ack, ms?.let { formatClockTime(it, zone, use24h, locale) }),
         )
     }
     return out

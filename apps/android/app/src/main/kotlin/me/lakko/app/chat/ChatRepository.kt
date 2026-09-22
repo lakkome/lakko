@@ -2879,6 +2879,99 @@ public class ChatRepository(
                 IllegalStateException("unknown group"),
             )
 
+        // The row goes into the conversation BEFORE the publish, reading
+        // "Sending...". It used to be appended only on success, so a message
+        // written on a bad connection left the person looking at an error
+        // over an unchanged composer with nothing in the conversation - the
+        // words were safe but the message was not there. On failure the row
+        // stays and says "Not sent" with a Retry beside it
+        // (`docs/ux/media-messages.md` section 3), which is the same contract
+        // the web and iOS clients keep.
+        val localId = record.nextLocalId()
+        record.appendPending(
+            localId = localId,
+            text = plaintext,
+            attachments = attachments,
+            createdAt = java.time.Instant.now().toString(),
+            authorKey = null,
+        )
+        publishThreadList()
+        try {
+            sendLocked(
+                groupIdHex = groupIdHex,
+                record = record,
+                identity = identity,
+                localId = localId,
+                plaintext = plaintext,
+                attachments = attachments,
+            )
+        } catch (e: Throwable) {
+            record.markFailed(localId)
+            publishThreadList()
+            // Deliberately NOT persisted: an unsent row is not written to the
+            // message log, so a relaunch is where a failed send stops being
+            // retryable. Making that survive is a durable outbox, which no
+            // client has.
+            throw e
+        }
+    }
+
+    /**
+     * Send a row that did not get there the first time.
+     *
+     * Re-publishes the envelope from the row itself, so the words the person
+     * wrote are the words that go - they were never anywhere else to be
+     * fetched from.
+     *
+     * **It can deliver the message twice.** A publish that reached the server
+     * and lost its answer is indistinguishable here from one that never
+     * arrived: the send is not idempotent, there is no key to de-duplicate
+     * on, and our own message is one the MLS ratchet will not decrypt a
+     * second time, so the journal cannot be consulted either. The same is
+     * true of a person re-typing a message by hand, which is what they did
+     * before this existed; a button makes it cheaper to reach, not newly
+     * possible. Losing the message is the worse failure.
+     */
+    public suspend fun retrySend(groupIdHex: String, localId: Long): Unit =
+        withContext(mlsDispatcher) { retrySendOnMlsThread(groupIdHex, localId) }
+
+    private suspend fun retrySendOnMlsThread(groupIdHex: String, localId: Long) {
+        val identity = canonicalIdentity.get()
+            ?: throw IllegalStateException("ChatRepository not bootstrapped")
+        val record = groups[groupIdHex]
+            ?: throw ChatError(
+                "no live Group handle for $groupIdHex",
+                IllegalStateException("unknown group"),
+            )
+        val row = record.snapshot().firstOrNull { it.localId == localId } ?: return
+        if (row.ack != Ack.FAILED) return
+        record.markPending(localId)
+        publishThreadList()
+        try {
+            sendLocked(
+                groupIdHex = groupIdHex,
+                record = record,
+                identity = identity,
+                localId = localId,
+                plaintext = row.text,
+                attachments = row.attachments,
+            )
+        } catch (e: Throwable) {
+            record.markFailed(localId)
+            publishThreadList()
+            throw e
+        }
+    }
+
+    /** The publish itself, under this group's lock. */
+    private suspend fun sendLocked(
+        groupIdHex: String,
+        record: GroupRecord,
+        identity: Identity,
+        localId: Long,
+        plaintext: String,
+        attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef>,
+    ) {
         groupLock(groupIdHex).withLock {
             // 1.19c4: build the JSON envelope before
             // encrypting. `composeEnvelopeBytes` routes through
@@ -2924,9 +3017,8 @@ public class ChatRepository(
                 prepared to ownKey
             }
             val result = chatClient.publishPreparedSend(prepared)
-            record.appendOutgoing(
-                text = plaintext,
-                attachments = attachments,
+            record.markSent(
+                localId = localId,
                 messageId = result.messageId,
                 createdAt = result.createdAt,
                 authorKey = ownKey,
@@ -6636,9 +6728,7 @@ public class ChatRepository(
             for ((hex, record) in groups) {
                 slots[hex] = PersistedGroup(
                     cursor = record.cursor,
-                    messages = record.snapshot().map {
-                        PersistedMessage.Companion.from(it)
-                    },
+                    messages = persistableMessages(record.snapshot()),
                 )
             }
         }
@@ -6829,7 +6919,58 @@ public data class ChatMessage(
      * received, never sent. `null` for every other row.
      */
     val call: me.lakko.app.calls.CallTranscriptEntry? = null,
-)
+    /**
+     * Whether this row reached the server.
+     *
+     * A message the user wrote appears in the conversation immediately and
+     * settles afterwards, so the words are somewhere they can be seen and
+     * retried rather than only in the composer. Before this the send was
+     * awaited first and the row appended only on success: a message written
+     * on a bad connection left the person looking at an error and an
+     * unchanged composer, with nothing in the conversation at all.
+     *
+     * Defaults to [Ack.SENT] so every row that comes off the journal, the
+     * message log or a call transcript is correct without naming it: those
+     * rows exist BECAUSE they were delivered. Only the local send path sets
+     * anything else.
+     */
+    val ack: Ack = Ack.SENT,
+    /**
+     * A client-side identity for a row this device created, `0` for a row
+     * that came from the server.
+     *
+     * Needed because an unsent row has no [messageId] yet, and two of them
+     * would then share the same lazy-list key - which means one row drawn for
+     * two messages. It survives the flip to [Ack.SENT] so the row is not torn
+     * down and rebuilt at the moment it lands, and it is never persisted: an
+     * unsent row is not written at all.
+     */
+    val localId: Long = 0,
+) {
+    /**
+     * The stable identity of this row.
+     *
+     * A row this device created prefers its [localId], and keeps preferring
+     * it after the send lands: an identity that changed at that moment would
+     * tear the row down and rebuild it mid-send.
+     */
+    val rowId: Long get() = if (localId != 0L) localId else messageId
+}
+
+/** Whether an outgoing row reached the server. */
+public enum class Ack {
+    /** On its way. The row reads "Sending...". */
+    PENDING,
+
+    /** The server has it; [ChatMessage.messageId] and `createdAt` are real. */
+    SENT,
+
+    /**
+     * It did not get there and nothing reached the other side. The row reads
+     * "Not sent" and keeps the text, with a Retry beside it.
+     */
+    FAILED,
+}
 
 /** ADR-0023 — one reaction on a [ChatMessage], attributed to its sender's
  *  signature key for dedup + per-user toggle.
@@ -6951,6 +7092,88 @@ private class GroupRecord(
      * the group. See [runSplitPoll] and [PollLatch].
      */
     val pollInFlight: PollLatch = PollLatch()
+
+    /**
+     * The next identity for a row this device creates.
+     *
+     * Negative and below every id this group already holds. DS ids are
+     * positive and monotone, so a local row can never collide with one.
+     * Allocated over [ChatMessage.rowId] rather than over `messageId`,
+     * because identity is what must be unique and the two are not the same
+     * field for a row that has not landed yet - a call row and an unsent
+     * message both live down here.
+     */
+    fun nextLocalId(): Long = minOf(0L, messages.minOfOrNull { it.rowId } ?: 0L) - 1
+
+    /**
+     * Put a message the user just wrote into the conversation, before it has
+     * been anywhere. It settles through [markSent] or [markFailed].
+     */
+    fun appendPending(
+        localId: Long,
+        text: String,
+        attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef>,
+        createdAt: String,
+        authorKey: MemberIdentity?,
+    ) {
+        messages.add(
+            ChatMessage(
+                messageId = 0,
+                direction = Direction.Outgoing,
+                text = text,
+                attachments = attachments,
+                createdAt = createdAt,
+                authorKey = authorKey,
+                ack = Ack.PENDING,
+                localId = localId,
+            ),
+        )
+    }
+
+    /**
+     * The send landed: take the server's id and time, and stop saying
+     * "Sending...". The identity does not move, so the row is not rebuilt.
+     */
+    fun markSent(
+        localId: Long,
+        messageId: Long,
+        createdAt: String,
+        /**
+         * ADR-0023 — our own IDENTITY, stamped here rather than at append
+         * time because G-37 requires it to be read in the same provider
+         * critical section as the ratchet advance: taken outside it, the
+         * stamp can be read across another group's commit. A row that never
+         * lands therefore carries no author, which is correct - it is not a
+         * message anyone can edit or delete, and nothing can target it.
+         */
+        authorKey: MemberIdentity?,
+    ) {
+        val idx = messages.indexOfFirst { it.localId == localId }
+        if (idx < 0) return
+        messages[idx] = messages[idx].copy(
+            messageId = messageId,
+            createdAt = createdAt,
+            authorKey = authorKey,
+            ack = Ack.SENT,
+        )
+    }
+
+    /** Trying again: back to "Sending...". */
+    fun markPending(localId: Long) {
+        val idx = messages.indexOfFirst { it.localId == localId }
+        if (idx < 0) return
+        messages[idx] = messages[idx].copy(ack = Ack.PENDING)
+    }
+
+    /**
+     * The send did not get there. The row STAYS, with its text: that is the
+     * whole point of appending it before the publish.
+     */
+    fun markFailed(localId: Long) {
+        val idx = messages.indexOfFirst { it.localId == localId }
+        if (idx < 0) return
+        messages[idx] = messages[idx].copy(ack = Ack.FAILED)
+    }
 
     fun appendOutgoing(
         text: String,

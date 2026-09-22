@@ -119,6 +119,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.lakko.app.chat.AttachmentBridge
+import androidx.compose.ui.text.style.TextDecoration
+import me.lakko.app.chat.Ack
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.Direction
 import me.lakko.app.chat.GroupPollOutcome
@@ -621,6 +623,7 @@ public fun ChatScreen(
                             onReact = { emoji ->
                                 viewModel.onReactToMessage(msg.messageId, emoji)
                             },
+                            onRetrySend = { viewModel.onRetrySend(it) },
                         )
                     }
                     // ADR-0047 — outgoing media still uploading or not sent.
@@ -923,6 +926,9 @@ private fun MessageRow(
     onEdit: () -> Unit,
     onDelete: () -> Unit,
     onReact: (String) -> Unit,
+    /** Send this row again, by its client-side id. Only ever reached from a
+     *  row whose send failed. */
+    onRetrySend: (Long) -> Unit,
     /** `docs/ux/calls.md` section 6 — tapping a finished call's row calls back,
      *  with the same kind of call the row records. */
     onCallBack: (video: Boolean) -> Unit,
@@ -959,6 +965,7 @@ private fun MessageRow(
                 onEdit = onEdit,
                 onDelete = onDelete,
                 onReact = onReact,
+                onRetrySend = onRetrySend,
             )
         }
 
@@ -1012,6 +1019,7 @@ private fun MessageRow(
                     onEdit = onEdit,
                     onDelete = onDelete,
                     onReact = onReact,
+                    onRetrySend = onRetrySend,
                 )
             }
         }
@@ -1170,6 +1178,9 @@ private fun Bubble(
     onEdit: () -> Unit,
     onDelete: () -> Unit,
     onReact: (String) -> Unit,
+    /** Send this row again, by its client-side id. Only ever reached from a
+     *  row whose send failed. */
+    onRetrySend: (Long) -> Unit,
 ) {
     // ADR-0023 — every affordance is gated on the message having a
     // real DS messageId (0 ⇒ a not-yet-acked outgoing row that no
@@ -1293,6 +1304,11 @@ private fun Bubble(
                             time = time,
                             readState = if (isOwn) readState else OwnReadState.None,
                             contentColor = contentColor,
+                            onRetry = if (msg.ack == Ack.FAILED) {
+                                { onRetrySend(msg.localId) }
+                            } else {
+                                null
+                            },
                         )
                     }
                 }
@@ -1404,8 +1420,12 @@ private fun BubbleMeta(
     modifier: Modifier = Modifier,
     /** `false` inside the §10 media pill, which wraps its content. */
     fillWidth: Boolean = true,
+    /** Send this row again. `null` unless this row's send failed - the action
+     *  sits next to the message it belongs to, which is the only place that
+     *  can say WHICH message failed. */
+    onRetry: (() -> Unit)? = null,
 ) {
-    if (!edited && time == null && readState == OwnReadState.None) return
+    if (!edited && time == null && readState == OwnReadState.None && onRetry == null) return
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -1424,6 +1444,17 @@ private fun BubbleMeta(
                 text = time,
                 style = MaterialTheme.typography.labelSmall,
                 color = contentColor.copy(alpha = 0.7f),
+            )
+        }
+        if (onRetry != null) {
+            Text(
+                text = "Retry",
+                style = MaterialTheme.typography.labelSmall,
+                textDecoration = TextDecoration.Underline,
+                color = contentColor,
+                modifier = Modifier
+                    .clickable(onClick = onRetry)
+                    .semantics { contentDescription = "Send again" },
             )
         }
         if (readState != OwnReadState.None) {

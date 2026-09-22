@@ -2347,7 +2347,21 @@ public class ChatViewModel(
         // typing signal (`typing:false` once).
         sendTypingStop()
 
-        composer.update { it.copy(sending = true, sendError = null) }
+        // Cleared HERE rather than on success, because the message is now in
+        // the conversation from this moment: the words live in the row, which
+        // keeps them and offers Retry if the send does not land. They used to
+        // be cleared only on success - which was right while a failure left
+        // nothing in the conversation, and is wrong now that it would leave
+        // the same text in two places.
+        composer.update {
+            it.copy(
+                sending = true,
+                sendError = null,
+                draft = "",
+                pendingAttachments = emptyList(),
+                pendingPreviews = emptyMap(),
+            )
+        }
         viewModelScope.launch {
             try {
                 repo.sendMessage(
@@ -2355,25 +2369,32 @@ public class ChatViewModel(
                     plaintext = trimmed,
                     attachments = stagedAttachments,
                 )
-                composer.update {
-                    it.copy(
-                        sending = false,
-                        sendError = null,
-                        draft = "",
-                        pendingAttachments = emptyList(),
-                        pendingPreviews = emptyMap(),
-                    )
-                }
+                composer.update { it.copy(sending = false, sendError = null) }
             } catch (err: Throwable) {
-                // 1.19c4: leave `pendingAttachments` populated
-                // on send failure so the user can retry without
-                // re-picking the same files.
+                // One sentence; the action is on the row, next to the message
+                // it belongs to. Same words as the web client
+                // (`chat/send-failure.ts`) and iOS. A refusal that names
+                // itself keeps its own words - "you are no longer a member of
+                // this group" is the difference between retrying usefully and
+                // retrying forever.
                 composer.update {
                     it.copy(
                         sending = false,
-                        sendError = err.message ?: "Send failed.",
+                        sendError = err.message ?: "Could not send.",
                     )
                 }
+            }
+        }
+    }
+
+    /** Send a message that did not get there. Drives the row's Retry. */
+    public fun onRetrySend(localId: Long) {
+        composer.update { it.copy(sendError = null) }
+        viewModelScope.launch {
+            try {
+                repo.retrySend(groupIdHex = groupIdHex, localId = localId)
+            } catch (err: Throwable) {
+                composer.update { it.copy(sendError = err.message ?: "Could not send.") }
             }
         }
     }

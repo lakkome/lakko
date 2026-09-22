@@ -25,6 +25,19 @@ import LakkoCore
 // MARK: - ChatMessage ↔ PersistedMessage helpers
 
 extension PersistedMessage {
+    /// The rows of a group that get written to the log: the ones that
+    /// reached the server.
+    ///
+    /// A row still in flight, or one whose send failed, is not written. It
+    /// has no server id to be keyed on, the other side has never heard of
+    /// it, and a relaunch that restored it would show a message as if it had
+    /// been sent. That is also why a failed send stops being retryable at a
+    /// relaunch: keeping it would be a durable outbox, which is a different
+    /// thing and is unbuilt.
+    public static func persistable(_ messages: [ChatMessage]) -> [PersistedMessage] {
+        messages.filter { $0.ack == .sent }.map(PersistedMessage.init(from:))
+    }
+
     /// Build the JSON projection from a live in-memory
     /// ``ChatMessage``.
     public init(from msg: ChatMessage) {

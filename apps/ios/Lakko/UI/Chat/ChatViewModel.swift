@@ -2155,6 +2155,14 @@ public final class ChatViewModel: ObservableObject {
         // ADR-0024 — sending clears the outgoing typing state (publishes
         // a single `{ typing: false }` if a `true` is outstanding).
         stopTyping()
+        // Cleared HERE rather than on success, because the message is now in
+        // the conversation from this moment: the words live in the bubble,
+        // which keeps them and offers Retry if the send does not land. They
+        // used to be cleared only on success - which was right while a
+        // failure left nothing in the conversation, and is wrong now that it
+        // would leave the same text in two places.
+        draft = ""
+        pendingAttachments = []
         Task {
             do {
                 try await repository.sendMessage(
@@ -2164,15 +2172,29 @@ public final class ChatViewModel: ObservableObject {
                 )
                 sending = false
                 sendError = nil
-                draft = ""
-                pendingAttachments = []
             } catch {
                 sending = false
-                // 1.19c3: leave `pendingAttachments` populated
-                // on send failure so the user can retry without
-                // re-picking the same files.
+                // One sentence; the action is on the bubble, next to the
+                // message it belongs to. Same words as the web client
+                // (`chat/send-failure.ts`). A refusal that names itself keeps
+                // its own words - "you are no longer a member of this group"
+                // is the difference between retrying usefully and retrying
+                // forever.
                 sendError = (error as? LocalizedError)?.errorDescription
-                    ?? "Send failed."
+                    ?? "Could not send."
+            }
+        }
+    }
+
+    /// Send a message that did not get there. Drives the bubble's Retry.
+    public func onRetrySend(localId: Int64) {
+        sendError = nil
+        Task {
+            do {
+                try await repository.retrySend(groupIdHex: groupIdHex, localId: localId)
+            } catch {
+                sendError = (error as? LocalizedError)?.errorDescription
+                    ?? "Could not send."
             }
         }
     }

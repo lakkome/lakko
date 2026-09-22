@@ -66,6 +66,22 @@ public enum ChatTimeline {
 
     /// The bubble-corner time in the device's time style ("14:05" or
     /// "2:05 PM").
+    /// What an outgoing bubble's time slot says.
+    ///
+    /// A message that has not reached the server has no server time to show,
+    /// so the slot carries its state instead: it is the same place the eye
+    /// already looks for "when", and it means the bubble needs no second
+    /// line. "Not sent" is the word the web client and the media bubbles
+    /// both use (`docs/ux/media-messages.md` section 3) - two spellings of
+    /// the same thing would be one of them being wrong.
+    public static func statusLabel(ack: ChatMessage.Ack, time: String?) -> String? {
+        switch ack {
+        case .pending: return "Sending..."
+        case .failed: return "Not sent"
+        case .sent: return time
+        }
+    }
+
     public static func timeLabel(ms: Int64, calendar: Calendar, locale: Locale) -> String {
         let date = Date(timeIntervalSince1970: Double(ms) / 1000)
         let style = Date.FormatStyle(locale: locale, calendar: calendar, timeZone: calendar.timeZone)
@@ -128,7 +144,9 @@ public enum ChatTimeline {
                     dateLabel: dateLabel,
                     startsRun: startsRun,
                     endsRun: endsRun,
-                    timeLabel: ms.map { timeLabel(ms: $0, calendar: calendar, locale: locale) }))
+                    timeLabel: statusLabel(
+                        ack: message.ack,
+                        time: ms.map { timeLabel(ms: $0, calendar: calendar, locale: locale) })))
         }
         return entries
     }

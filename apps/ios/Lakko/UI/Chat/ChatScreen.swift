@@ -480,6 +480,7 @@ public struct ChatScreen: View {
                                 // messages, derived from the other members'
                                 // read watermarks.
                                 readState: viewModel.readState(of: entry.message),
+                                onRetrySend: { viewModel.onRetrySend(localId: $0) },
                                 onPreview: openAttachmentPreview,
                                 onEdit: { viewModel.beginEdit(entry.message) },
                                 onDelete: { viewModel.deleteMessage(entry.message) },
@@ -1127,6 +1128,9 @@ private struct MessageRow: View {
     /// (sent / read). `nil` for incoming / system rows and
     /// pre-ack outgoing rows (no glyph rendered).
     let readState: OwnMessageReadState?
+    /// Send this row again, by its client-side id. Only ever reached from a
+    /// row whose send failed.
+    var onRetrySend: (Int64) -> Void = { _ in }
     /// 1.19c3 — bubble taps on attachment chips call into the
     /// screen's preview / share helpers. `onPreview` opens the
     /// inline image sheet; the `ShareLink` is wired inline.
@@ -1424,6 +1428,15 @@ private struct MessageRow: View {
                 Text(timeLabel)
                     .font(.caption2)
                     .monospacedDigit()
+            }
+            // The action sits next to the message it belongs to, which is the
+            // only place that can say WHICH message failed.
+            if message.ack == .failed {
+                Button("Retry") { onRetrySend(message.localId) }
+                    .font(.caption2)
+                    .buttonStyle(.plain)
+                    .underline()
+                    .accessibilityLabel("Send again")
             }
             if isOutgoing, !message.deleted {
                 deliveryGlyph

@@ -4100,6 +4100,15 @@ function ChatView(props: {
    * "Not sent - Retry" the bubble already drew for a composer row with an
    * attachment called into the media path, found no job for that tempId and
    * returned silently - a button that did nothing, every time.
+   *
+   * **It can deliver the message twice.** A publish that reached the server
+   * and lost its answer is indistinguishable here from one that never
+   * arrived: the send is not idempotent, there is no key to de-duplicate on,
+   * and our own message is one the MLS ratchet will not decrypt a second
+   * time, so the journal cannot be consulted either. The same is true of a
+   * person re-typing a message by hand, which is what they did before this
+   * existed; a button makes it cheaper to reach, not newly possible. Losing
+   * the message is the worse failure.
    */
   function retrySend(tempId: number): void {
     const job = mediaJobs.get(tempId);

@@ -980,7 +980,7 @@ public final class ChatRepository: ObservableObject {
     /// wire, and cannot move the journal cursor.
     public func appendCallRow(groupIdHex: String, row: CallTranscriptRow, atMs: Int64? = nil) {
         guard let record = groups[groupIdHex] else { return }
-        let lowest = record.messages.map(\.messageId).min() ?? 0
+        let lowest = record.messages.map(\.id).min() ?? 0
         record.appendLocalRow(
             text: row.marker,
             messageId: min(0, lowest) - 1,
@@ -2451,6 +2451,62 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
+    /// Send a row that did not get there the first time.
+    ///
+    /// Re-publishes the envelope from the row itself, so the words the person
+    /// wrote are the words that go - they were never anywhere else to be
+    /// fetched from.
+    ///
+    /// **It can deliver the message twice.** A publish that reached the
+    /// server and lost its answer is indistinguishable here from one that
+    /// never arrived: the send is not idempotent, there is no key to
+    /// de-duplicate on, and our own message is one the MLS ratchet will not
+    /// decrypt a second time, so the journal cannot be consulted either. The
+    /// same is true of a person re-typing a message by hand, which is what
+    /// they did before this existed; a button makes it cheaper to reach, not
+    /// newly possible. Losing the message is the worse failure.
+    public func retrySend(groupIdHex: String, localId: Int64) async throws {
+        guard let record = groups[groupIdHex] else {
+            throw ChatError.argument("no live Group handle for \(groupIdHex)")
+        }
+        guard let row = record.messages.first(where: { $0.localId == localId }),
+              row.ack == .failed
+        else { return }
+        record.markPending(localId: localId)
+        state = state.with(threads: buildThreadList())
+        let envelopeBytes: Data
+        do {
+            envelopeBytes = try AttachmentBridge.composeEnvelopeBytes(
+                text: row.text,
+                attachments: row.attachments
+            )
+        } catch {
+            record.markFailed(localId: localId)
+            state = state.with(threads: buildThreadList())
+            throw ChatError.wrapped("envelope compose failed", underlying: error)
+        }
+        let result: SendMessageResult
+        do {
+            result = try await withCommitLock(groupIdHex: groupIdHex) { [self] in
+                try await sealAndPublishLocked(
+                    groupIdHex: groupIdHex, plaintextBytes: envelopeBytes)
+            }
+        } catch {
+            record.markFailed(localId: localId)
+            state = state.with(threads: buildThreadList())
+            throw error
+        }
+        record.markSent(
+            localId: localId, messageId: result.messageId, createdAt: result.createdAt)
+        persistMessageLogBestEffort()
+        state = state.with(threads: buildThreadList())
+        Task { @MainActor [weak self, groupIdHex, messageId = result.messageId] in
+            await self?.notifyPushGroupBestEffort(
+                groupIdHex: groupIdHex,
+                messageId: messageId)
+        }
+    }
+
     public func sendMessage(
         groupIdHex: String,
         plaintext: String,
@@ -2480,11 +2536,14 @@ public final class ChatRepository: ObservableObject {
                 underlying: error
             )
         }
-        // ADR-0045 — the seal and the publish are SERIALIZED against the
-        // regions that move this group's epoch. See ``sealAndPublishLocked``.
-        let result = try await withCommitLock(groupIdHex: groupIdHex) { [self] in
-            try await sealAndPublishLocked(groupIdHex: groupIdHex, plaintextBytes: envelopeBytes)
-        }
+        // The row goes into the conversation BEFORE the publish, reading
+        // "Sending...". It used to be appended only on success, so a message
+        // written on a bad connection left the person looking at an error
+        // over an unchanged composer with nothing in the conversation - the
+        // words were safe but the message was not there. On failure the row
+        // stays and says "Not sent - Retry" (`docs/ux/media-messages.md`
+        // section 3), which is the same contract the web client keeps.
+        //
         // ADR-0023 — stamp our own IDENTITY as the author so a later edit /
         // delete of this message passes the author-only gate locally (and, on
         // every peer, against the identity they resolved for us at receipt).
@@ -2494,13 +2553,36 @@ public final class ChatRepository: ObservableObject {
         // for everyone else. Reading a leaf here and comparing it at gate time
         // is what let any leaf, ours included, be reassigned to a member added
         // later.
-        record.appendOutgoing(
+        let localId = record.nextLocalId()
+        record.appendPending(
+            localId: localId,
             text: plaintext,
             attachments: attachments,
-            messageId: result.messageId,
-            createdAt: result.createdAt,
+            createdAt: Self.isoTimestamp(ms: Self.nowMs()),
             authorKeyB64: AuthorIdentity.own(group: record.group)
         )
+        state = state.with(threads: buildThreadList())
+        // ADR-0045 — the seal and the publish are SERIALIZED against the
+        // regions that move this group's epoch. See ``sealAndPublishLocked``.
+        let result: SendMessageResult
+        do {
+            result = try await withCommitLock(groupIdHex: groupIdHex) { [self] in
+                try await sealAndPublishLocked(
+                    groupIdHex: groupIdHex, plaintextBytes: envelopeBytes)
+            }
+        } catch {
+            record.markFailed(localId: localId)
+            state = state.with(threads: buildThreadList())
+            // Deliberately NOT persisted: an unsent row is not written to the
+            // message log, so a relaunch is where a failed send stops being
+            // retryable. Making that survive is a durable outbox, which no
+            // client has.
+            throw error
+        }
+        record.markSent(
+            localId: localId,
+            messageId: result.messageId,
+            createdAt: result.createdAt)
         // The MLS ratchet snapshot was already durably persisted
         // (fail-closed) inside `chatClient.sendMessage` BEFORE the publish,
         // and neither the publish nor `appendOutgoing` advances MLS state,
@@ -5350,7 +5432,14 @@ public final class ChatRepository: ObservableObject {
         for (hex, record) in groups {
             slots[hex] = PersistedGroup(
                 cursor: record.cursor,
-                messages: record.messages.map { PersistedMessage(from: $0) }
+                // A row that has not reached the server is not written. It
+                // has no server id to be keyed on, the other side has never
+                // heard of it, and a relaunch that restored it would show a
+                // message as if it had been sent. That is also why a failed
+                // send stops being retryable at a relaunch: keeping it would
+                // be a durable outbox, which is a different thing and is
+                // unbuilt.
+                messages: PersistedMessage.persistable(record.messages)
             )
         }
         let payload = MessageLogPayload(groups: slots)
@@ -5500,6 +5589,40 @@ public struct ChatMessage: Equatable, Identifiable {
     /// toggles the entry off. The UI aggregates by emoji into
     /// chips with counts.
     public internal(set) var reactions: [Reaction]
+    /// Whether this row reached the server.
+    ///
+    /// A message the user wrote appears in the conversation immediately and
+    /// settles afterwards, so the words are somewhere they can be seen and
+    /// retried rather than only in the composer. Before this the send was
+    /// awaited first and the row appended only on success: a message written
+    /// on a bad connection left the person looking at an error and an
+    /// unchanged composer, with nothing in the conversation at all.
+    ///
+    /// Defaults to ``Ack/sent`` so every row that comes off the journal, the
+    /// message log or a call transcript is correct without naming it: those
+    /// rows exist BECAUSE they were delivered. Only the local send path sets
+    /// anything else.
+    public internal(set) var ack: Ack
+    /// A client-side identity for a row this device created, `0` for a row
+    /// that came from the server.
+    ///
+    /// Needed because an unsent row has no `messageId` yet, and two of them
+    /// would then share the same identity - which for SwiftUI's `ForEach`
+    /// means one row drawn for two messages. It survives the flip to
+    /// ``Ack/sent`` so the row is not torn down and rebuilt at the moment it
+    /// lands, and it is never persisted: an unsent row is not written at all.
+    public let localId: Int64
+
+    /// Whether an outgoing row reached the server.
+    public enum Ack: Equatable {
+        /// On its way. The bubble reads "Sending...".
+        case pending
+        /// The server has it; `messageId` and `createdAt` are real.
+        case sent
+        /// It did not get there and nothing reached the other side. The
+        /// bubble reads "Not sent - Retry" and keeps the text.
+        case failed
+    }
 
     public init(
         messageId: Int64,
@@ -5510,7 +5633,9 @@ public struct ChatMessage: Equatable, Identifiable {
         authorKeyB64: MemberIdentity? = nil,
         edited: Bool = false,
         deleted: Bool = false,
-        reactions: [Reaction] = []
+        reactions: [Reaction] = [],
+        ack: Ack = .sent,
+        localId: Int64 = 0
     ) {
         self.messageId = messageId
         self.direction = direction
@@ -5521,12 +5646,18 @@ public struct ChatMessage: Equatable, Identifiable {
         self.edited = edited
         self.deleted = deleted
         self.reactions = reactions
+        self.ack = ack
+        self.localId = localId
     }
 
-    /// `Identifiable` conformance for SwiftUI `ForEach`. The
-    /// messageId is server-assigned + monotonic per journal, so
-    /// it doubles as the stable identity.
-    public var id: Int64 { messageId }
+    /// `Identifiable` conformance for SwiftUI `ForEach`.
+    ///
+    /// The server-assigned messageId is monotonic per journal and doubles as
+    /// the identity for every row that has one. A row this device created
+    /// prefers its ``localId``, and keeps preferring it after the send lands:
+    /// an identity that changed at that moment would tear the bubble down and
+    /// build a new one, losing any selection or animation mid-send.
+    public var id: Int64 { localId != 0 ? localId : messageId }
 
     /// ADR-0023 — aggregate the reaction list into `(emoji,
     /// count, reactedByMe)` rows for the chip UI.
@@ -5645,6 +5776,75 @@ private final class GroupRecord {
     /// never wind it backward.
     func advanceCursor(to newCursor: Int64) {
         if newCursor > cursor { cursor = newCursor }
+    }
+
+    /// The next identity for a row this device creates.
+    ///
+    /// Negative and below every id this group already holds. DS ids are
+    /// positive and monotone, so a local row can never collide with one.
+    /// Allocated over ``ChatMessage/id`` rather than over `messageId`,
+    /// because identity is what must be unique and the two are not the same
+    /// field for a row that has not landed yet - a call row and an unsent
+    /// message both live down here.
+    func nextLocalId() -> Int64 {
+        min(0, messages.map(\.id).min() ?? 0) - 1
+    }
+
+    /// Put a message the user just wrote into the conversation, before it has
+    /// been anywhere. It settles through ``markSent(localId:messageId:createdAt:)``
+    /// or ``markFailed(localId:)``.
+    func appendPending(
+        localId: Int64,
+        text: String,
+        attachments: [AttachmentRef],
+        createdAt: String,
+        authorKeyB64: MemberIdentity?
+    ) {
+        messages.append(
+            ChatMessage(
+                messageId: 0,
+                direction: .outgoing,
+                text: text,
+                attachments: attachments,
+                createdAt: createdAt,
+                authorKeyB64: authorKeyB64,
+                ack: .pending,
+                localId: localId
+            )
+        )
+    }
+
+    /// The send landed: take the server's id and time, and stop saying
+    /// "Sending...". The identity does not move, so the bubble is not rebuilt.
+    func markSent(localId: Int64, messageId: Int64, createdAt: String) {
+        guard let idx = messages.firstIndex(where: { $0.localId == localId }) else { return }
+        let old = messages[idx]
+        messages[idx] = ChatMessage(
+            messageId: messageId,
+            direction: old.direction,
+            text: old.text,
+            attachments: old.attachments,
+            createdAt: createdAt,
+            authorKeyB64: old.authorKeyB64,
+            edited: old.edited,
+            deleted: old.deleted,
+            reactions: old.reactions,
+            ack: .sent,
+            localId: localId
+        )
+    }
+
+    /// Trying again: back to "Sending...".
+    func markPending(localId: Int64) {
+        guard let idx = messages.firstIndex(where: { $0.localId == localId }) else { return }
+        messages[idx].ack = .pending
+    }
+
+    /// The send did not get there. The row STAYS, with its text: that is the
+    /// whole point of appending it before the publish.
+    func markFailed(localId: Int64) {
+        guard let idx = messages.firstIndex(where: { $0.localId == localId }) else { return }
+        messages[idx].ack = .failed
     }
 
     func appendOutgoing(
