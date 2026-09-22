@@ -164,6 +164,10 @@ public final class WebRTCPeerConnection: NSObject {
     /// `init`; cleared in `close()`.
     private var peer: RTCPeerConnection?
 
+    /// This device's own SDP, for diagnostics that compare what was announced
+    /// against what is actually on the wire.
+    public var localDescriptionSdp: String { peer?.localDescription?.sdp ?? "" }
+
     /// Local audio track. Held so the caller can toggle
     /// `isEnabled` from the UI's mic-mute control.
     private var localAudioTrack: RTCAudioTrack?
@@ -400,6 +404,8 @@ public final class WebRTCPeerConnection: NSObject {
         /// same defect as one with both at zero, and from one end alone the
         /// two are indistinguishable.
         public let mediaPacketsSent: Int64
+        /// The SSRC this device is sending on (0 when nothing is sent yet).
+        public let mediaSsrcSent: Int64
     }
 
     public func sampleConnectionStats() async -> ConnectionStatsSnapshot? {
@@ -418,6 +424,12 @@ public final class WebRTCPeerConnection: NSObject {
             .reduce(Int64(0)) { sum, s in
                 sum + ((s.values["packetsSent"] as? NSNumber)?.int64Value ?? 0)
             }
+        // The SSRC actually being sent on. The peer can only demux what its
+        // own answer announced, so a value here that differs from the
+        // signalled one is a call whose media is dropped on arrival.
+        let sentSsrc = stats.values
+            .first(where: { $0.type == "outbound-rtp" })
+            .flatMap { ($0.values["ssrc"] as? NSNumber)?.int64Value } ?? 0
         // Prefer the nominated succeeded pair; fall back to any
         // succeeded pair (some stacks don't flag `nominated`).
         let pairs = stats.values.filter { $0.type == "candidate-pair" }
@@ -429,7 +441,7 @@ public final class WebRTCPeerConnection: NSObject {
             return ConnectionStatsSnapshot(
                 rttMs: nil, relayed: false, hasActivePair: false,
                 bytesReceived: 0, bytesSent: 0, mediaPacketsReceived: mediaPackets,
-                mediaPacketsSent: sentPackets
+                mediaPacketsSent: sentPackets, mediaSsrcSent: sentSsrc
             )
         }
         let rttSec = (pair.values["currentRoundTripTime"] as? NSNumber)?.doubleValue
@@ -446,7 +458,8 @@ public final class WebRTCPeerConnection: NSObject {
             rttMs: rttMs, relayed: relayed, hasActivePair: true,
             bytesReceived: bytesReceived, bytesSent: bytesSent,
             mediaPacketsReceived: mediaPackets,
-            mediaPacketsSent: sentPackets
+            mediaPacketsSent: sentPackets,
+            mediaSsrcSent: sentSsrc
         )
     }
 

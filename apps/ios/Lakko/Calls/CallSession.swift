@@ -227,6 +227,18 @@ public final class CallSession: ObservableObject {
     private var statsTask: Task<Void, Never>?
     /// The media-flow line is said once per call, not every two seconds.
     private var loggedMediaFlow = false
+
+    /// The `a=ssrc:` this device announced in its own description, as text.
+    /// Paired with the SSRC actually sent: a peer can only demux what was
+    /// announced, so the two differing is a call whose media is dropped on
+    /// arrival while every other signal says the transport is healthy.
+    static func signalledSsrc(sdp: String) -> String {
+        for line in sdp.split(separator: "\r\n") where line.hasPrefix("a=ssrc:") {
+            let rest = line.dropFirst("a=ssrc:".count)
+            return String(rest.split(separator: " ").first ?? "")
+        }
+        return "none"
+    }
     /// How long inbound media has been silent (`MediaWatchdog`).
     private var inboundActivity: MediaWatchdog.InboundActivity?
     /// The ICE-`disconnected` grace, armed on the transition and cancelled by
@@ -348,6 +360,7 @@ public final class CallSession: ObservableObject {
             return
         }
         installDelegate(on: rtc)
+        CallAudioSession.describe("dial: before local audio track")
         rtc.addLocalAudioTrack(enabled: audio)
 
         // G3-1-video-ui — local video track + camera capture.
@@ -723,6 +736,7 @@ public final class CallSession: ObservableObject {
             return
         }
         installDelegate(on: rtc)
+        CallAudioSession.describe("accept: before local audio track")
         // Mic on by default for the answerer; if the call
         // UI later supports "accept muted" we will pass the
         // user pick through this method.
@@ -1061,6 +1075,9 @@ public final class CallSession: ObservableObject {
         self.addingVideo = false
         // B2a — a fresh call starts with no camera-on in flight.
         setVideoPublishState(.off)
+        // The next call's microphone depends on what this one leaves behind
+        // (see `CallAudioSession`), and nothing else reports it.
+        CallAudioSession.describe("teardown")
     }
 
     /// G3-1-conn-quality — start the connection-stats poll loop
@@ -1107,9 +1124,13 @@ public final class CallSession: ObservableObject {
                     // on its own.
                     if !self.loggedMediaFlow, nowSec - startedAtSec > 8 {
                         self.loggedMediaFlow = true
+                        let signalled = Self.signalledSsrc(
+                            sdp: self.rtc?.localDescriptionSdp ?? "")
                         NSLog(
-                            "CallSession: media flow rtpIn=%lldpkt rtpOut=%lldpkt",
-                            snap.mediaPacketsReceived, snap.mediaPacketsSent)
+                            "CallSession: media flow rtpIn=%lldpkt rtpOut=%lldpkt "
+                                + "ssrcSending=%lld ssrcSignalled=%@",
+                            snap.mediaPacketsReceived, snap.mediaPacketsSent,
+                            snap.mediaSsrcSent, signalled)
                     }
                     await MainActor.run { self.endIfMediaHasGoneSilent(atSec: nowSec) }
                     await MainActor.run {

@@ -79,6 +79,8 @@ interface TransformState {
   readonly ring: CallKeyRing;
   /** Encrypt side only: the current epoch's seal key, re-derived on rekey. */
   sealKey: ParticipantKey | null;
+  /** Decrypt side only: what became of each frame (`noteDecrypt`). */
+  readonly decryptCounts: Partial<Record<"opened" | "badHeader" | "openFailed", number>>;
 }
 
 /** Live transforms keyed by `SFrameTransformOptions.id`. */
@@ -118,6 +120,47 @@ function encryptStream(
   });
 }
 
+/** Relay one diagnostic line to the main thread, which logs it where the
+ *  call's own lines are. A worker's console is a separate context nobody is
+ *  watching during a call. */
+function diag(text: string): void {
+  try {
+    (self as unknown as { postMessage: (m: unknown) => void }).postMessage({
+      kind: "sframe-diag",
+      text,
+    });
+  } catch {
+    // A relay that cannot report must not take the media path down with it.
+  }
+}
+
+/**
+ * Count what the receive side does with each frame, and say it - once at the
+ * first of each kind, then rarely.
+ *
+ * The two drops in `decryptStream` were silent, so from outside a call whose
+ * frames all failed to open looked exactly like one where no media arrived at
+ * all. Those are different defects with different fixes, and the counters are
+ * what separate them. Bounded on purpose: the first of each kind, then every
+ * 250th, so a call that drops everything costs a handful of lines rather than
+ * fifty a second.
+ */
+function noteDecrypt(
+  state: TransformState,
+  what: "opened" | "badHeader" | "openFailed",
+  kid?: bigint,
+): void {
+  const seen = (state.decryptCounts[what] ?? 0) + 1;
+  state.decryptCounts[what] = seen;
+  if (seen !== 1 && seen % 250 !== 0) return;
+  const counts = state.decryptCounts;
+  diag(
+    `sframe receive ${what}${kid === undefined ? "" : ` kid=${kid}`}: ` +
+      `opened=${counts.opened ?? 0} badHeader=${counts.badHeader ?? 0} ` +
+      `openFailed=${counts.openFailed ?? 0}`,
+  );
+}
+
 /** Build the decrypting `TransformStream`: read each frame's whole header
  *  KID `(sender_leaf << 8) | stream_index` and open through the ring's overlap
  *  fall-back (current then, during a rekey window, previous). */
@@ -129,7 +172,14 @@ function decryptStream(
     transform(frame, controller): void {
       const wire = new Uint8Array(frame.data);
       const kid = unwrapKid(wire);
-      if (kid === null) return; // malformed header — drop
+      if (kid === null) {
+        // Malformed header - drop. Counted and said out loud, because a
+        // receiver that silently discards every frame is indistinguishable
+        // from one that never received any: both render as a call that
+        // connects and then dies of silence.
+        noteDecrypt(state, "badHeader");
+        return;
+      }
       let plaintext: Uint8Array;
       try {
         // The whole KID selects the per-(leaf, stream) key straight off the
@@ -141,10 +191,12 @@ function decryptStream(
         // Wrong key / tampered / replayed counter, under BOTH the current
         // and the overlap-window previous key — drop, never forward
         // unverified bytes (invariant #4).
+        noteDecrypt(state, "openFailed", kid);
         return;
       }
       frame.data = toArrayBuffer(plaintext);
       controller.enqueue(frame);
+      noteDecrypt(state, "opened", kid);
     },
   });
 }
@@ -156,6 +208,14 @@ async function runTransform(
   opts: SFrameTransformOptions,
 ): Promise<void> {
   const wasm = await loadWasm();
+  // Said once per transform, so the absence of the per-frame lines below can
+  // be read: with this line present and no `sframe receive` lines after it,
+  // no frame ever reached the transform, which is a different defect from
+  // frames arriving and failing to open.
+  diag(
+    `sframe transform armed: op=${opts.operation} id=${opts.id} ` +
+      `leaf=${opts.localLeaf ?? "-"} stream=${opts.streamIndex ?? "-"}`,
+  );
   const ring = new wasm.CallKeyRing(opts.seed);
   const state: TransformState = {
     operation: opts.operation,
@@ -163,6 +223,7 @@ async function runTransform(
     streamIndex: opts.streamIndex,
     ring,
     sealKey: null,
+    decryptCounts: {},
   };
 
   let stream: TransformStream<EncodedFrame, EncodedFrame>;

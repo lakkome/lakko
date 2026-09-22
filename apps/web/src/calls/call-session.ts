@@ -1302,9 +1302,21 @@ export class CallSession {
       });
       const fmt = (m: Map<string, number>): string =>
         m.size === 0 ? "none" : [...m].map(([k, n]) => `${k}:${n}`).join(",");
+      // The SSRC the peer SAID it would send on. With BUNDLE, a peer that
+      // sends on a different one cannot be demuxed and its packets are
+      // dropped before any inbound stream exists - which looks exactly like
+      // receiving nothing, so the expected value belongs in the same line.
+      const sdp = pc.currentRemoteDescription?.sdp ?? "";
+      const expect =
+        sdp
+          .split("\r\n")
+          .find((l) => l.startsWith("a=ssrc:"))
+          ?.slice("a=ssrc:".length)
+          .split(" ")[0] ?? "none";
       return (
         `${head} local=[${fmt(local)}] remote=[${fmt(remote)}] pairs=[${fmt(pairs)}] ` +
-        `rtpIn=${inPackets}pkt/${inBytes}B rtpOut=${outPackets}pkt/${outBytes}B`
+        `rtpIn=${inPackets}pkt/${inBytes}B rtpOut=${outPackets}pkt/${outBytes}B ` +
+        `peerSsrcSignalled=${expect}`
       );
     } catch (err) {
       return `${head} stats unavailable: ${String(err)}`;

@@ -122,6 +122,22 @@ function transformWorker(): Worker {
       new URL("./sframe-transform-worker.ts", import.meta.url),
       { type: "module", name: "lakko-sframe" },
     );
+    // The worker's own console goes to a context the page's console does not
+    // show and a devtools session has to be attached to separately, so a
+    // receive side that discards every frame says nothing where anyone is
+    // looking. Diagnostics are relayed here instead, where they sit beside
+    // the call's own lines.
+    sharedWorker.addEventListener("message", (ev: MessageEvent<unknown>) => {
+      const data = ev.data;
+      if (
+        typeof data === "object" &&
+        data !== null &&
+        (data as { kind?: unknown }).kind === "sframe-diag"
+      ) {
+        // eslint-disable-next-line no-console
+        console.warn(String((data as { text?: unknown }).text ?? ""));
+      }
+    });
   }
   return sharedWorker;
 }

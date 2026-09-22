@@ -34,23 +34,36 @@ public enum MediaAudioSession {
     /// Configure and activate the session for `use`. Returns `false` (and
     /// leaves the session alone) while a call is live; throws when the system
     /// refuses the category, which the caller treats as a failed capture.
+    /// Every mutation goes through ``CallAudioSession`` rather than
+    /// `AVAudioSession` directly. WebRTC's `RTCAudioSession` is a locking proxy
+    /// whose header forbids direct setters, and a media owner shares the
+    /// process with the call stack's one long-lived audio device module — so a
+    /// category applied behind its back outlives this recording and breaks the
+    /// next call's microphone.
     @discardableResult
     public static func begin(_ use: Use, callActive: Bool) throws -> Bool {
-        guard !callActive else { return false }
-        let session = AVAudioSession.sharedInstance()
+        guard !callActive, !CallAudioSession.callOwnsSession else { return false }
         switch use {
         case .record:
-            try session.setCategory(
-                .playAndRecord,
+            guard CallAudioSession.apply(
+                category: .playAndRecord,
                 mode: .default,
                 options: [.defaultToSpeaker, .allowBluetoothHFP]
-            )
+            ) else {
+                throw MediaAudioSessionError.categoryRefused
+            }
         case .playback:
             // A voice message the user tapped plays even in silent mode, like
             // any other deliberate playback.
-            try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
+            guard CallAudioSession.apply(
+                category: .playback,
+                mode: .spokenAudio,
+                options: [.duckOthers]
+            ) else {
+                throw MediaAudioSessionError.categoryRefused
+            }
         }
-        try session.setActive(true)
+        CallAudioSession.setActive(true)
         owner = use
         return true
     }
@@ -60,12 +73,13 @@ public enum MediaAudioSession {
     public static func end(_ use: Use) {
         guard owner == use else { return }
         owner = nil
-        let session = AVAudioSession.sharedInstance()
-        do {
-            try session.setActive(false, options: [.notifyOthersOnDeactivation])
-            try session.setCategory(.ambient, mode: .default, options: [.mixWithOthers, .duckOthers])
-        } catch {
-            log.warning("media audio session release failed: \(error.localizedDescription, privacy: .public)")
-        }
+        CallAudioSession.setActive(false)
+        CallAudioSession.applyCuePosture()
     }
+}
+
+/// Why a media owner could not take the session.
+public enum MediaAudioSessionError: Error {
+    /// The system refused the category this use needs.
+    case categoryRefused
 }

@@ -209,23 +209,26 @@ public final class CallSoundController {
     ///   stops when we play a cue (`.mixWithOthers`,
     ///   `.duckOthers`).
     ///
-    /// CallKit will override this category to
-    /// `.playAndRecord` when an actual call begins; we play
-    /// nicely with that by re-applying our category on
-    /// `activate()` from a `notInterrupted` interrupted
-    /// state. For now we set the initial posture once.
+    /// This runs from `init`, and the controller is a
+    /// `@StateObject` on both call screens — so it runs again
+    /// on every presentation, i.e. once per call.
+    ///
+    /// It used to set the category straight on
+    /// `AVAudioSession.sharedInstance()`, and the note here
+    /// claimed CallKit would override it with
+    /// `.playAndRecord` once a call began. That reasoning was
+    /// wrong twice over. `IncomingCallPresentation.decide`
+    /// returns `.inApp` whenever the app is active, so a call
+    /// answered in the open app never reaches CallKit at all
+    /// and nothing overrides anything. And `.ambient` cannot
+    /// record, so the second and later calls in a process came
+    /// up with a silent microphone — see ``CallAudioSession``
+    /// for the full mechanism and the evidence.
+    ///
+    /// Now it goes through ``CallAudioSession``, which holds
+    /// `RTCAudioSession`'s lock and declines to touch the
+    /// session at all while a call owns it.
     private static func configureAudioSession() {
-        #if os(iOS) || os(tvOS) || os(watchOS)
-        let session = AVAudioSession.sharedInstance()
-        do {
-            try session.setCategory(
-                .ambient,
-                mode: .default,
-                options: [.mixWithOthers, .duckOthers]
-            )
-        } catch {
-            log.warning("AVAudioSession.setCategory failed: \(error.localizedDescription)")
-        }
-        #endif
+        CallAudioSession.applyCuePosture()
     }
 }
