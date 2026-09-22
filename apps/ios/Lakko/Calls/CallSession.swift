@@ -904,6 +904,12 @@ public final class CallSession: ObservableObject {
 
     private func endLocal(reason: WebCallEndReason) {
         guard state != .done else { return }
+        // A call that ends itself looks, from the other end and from the
+        // transcript, exactly like one nobody answered. The reason and the
+        // state it ended from are the only things that tell them apart.
+        NSLog(
+            "CallSession: ending locally, reason %@, from state %@",
+            String(describing: reason), String(describing: state))
         state = .ending
         endReason = reason
         do {

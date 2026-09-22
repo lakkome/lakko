@@ -150,6 +150,20 @@ final class CallKitProvider: NSObject, @unchecked Sendable {
     /// one. The app has already begun dialing by the time this runs — the
     /// transaction is a notification to the system, not permission to proceed.
     @MainActor func startOutgoingCall(uuid: UUID, update: CallKitCallUpdate) {
+        // The Simulator has no system in-call UI to host a CallKit call, so
+        // `callservicesd` fulfils the start action and then immediately
+        // disconnects the call itself, logging "Disconnecting call because
+        // there wont be a UI to host the call" after failing to open
+        // `facetime://?showInCallUI=1`. The app sees a `CXEndCallAction` about
+        // 60 ms after its own start action and, having no way to tell it from
+        // the user pressing End, hangs the call up while it is still dialing —
+        // so no outgoing 1x1 call can survive on a Simulator. A device has the
+        // UI and does not do this (Apple developer forums, thread 749657), so
+        // the call is reported there exactly as before; this only keeps a
+        // two-Simulator rig usable for testing calls.
+        #if targetEnvironment(simulator)
+        return
+        #else
         guard !liveCalls.contains(uuid) else { return }
         liveCalls.insert(uuid)
         let handle = CXHandle(type: .generic, value: update.localizedCallerName)
@@ -172,6 +186,7 @@ final class CallKitProvider: NSObject, @unchecked Sendable {
             Self.log.error("CXStartCallAction failed: \(error.localizedDescription)")
             Task { @MainActor in self.liveCalls.remove(uuid) }
         }
+        #endif
     }
 
     /// Media is flowing — the system call screen starts its timer.
@@ -220,6 +235,7 @@ extension CallKitProvider: CXProviderDelegate {
     /// an async hop — an action must be fulfilled or failed before it times
     /// out, and a dispatch would put that on the far side of a turn.
     func providerDidReset(_ provider: CXProvider) {
+        NSLog("CallKitProvider: providerDidReset")
         MainActor.assumeIsolated {
             liveCalls.removeAll()
             onReset?()
@@ -240,6 +256,7 @@ extension CallKitProvider: CXProviderDelegate {
     }
 
     func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
+        NSLog("CallKitProvider: system performed CXEndCallAction")
         MainActor.assumeIsolated {
             liveCalls.remove(action.callUUID)
             onEnd?(action.callUUID)

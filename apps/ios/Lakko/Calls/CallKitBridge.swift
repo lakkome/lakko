@@ -155,6 +155,13 @@ final class CallKitBridge {
             appIsActive: appIsActive(),
             alreadyReported: provider.isReported(uuid)
         )
+        // Which surface rings is the difference between a call the user sees
+        // and one that is silent everywhere: `.none` reports to neither, and
+        // from outside it looks exactly like an offer that never arrived.
+        NSLog(
+            "CallKitBridge: incoming surface %@ (appIsActive %@, alreadyReported %@)",
+            String(describing: surface), appIsActive() ? "yes" : "no",
+            provider.isReported(uuid) ? "yes" : "no")
         // Record the choice so `CallHostOverlay` can honour it for as long as
         // the call rings, not just at the instant it started.
         host.setRingingOnSystemUi(surface != .inApp)

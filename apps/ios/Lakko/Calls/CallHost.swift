@@ -214,6 +214,21 @@ final class CallHost: ObservableObject {
             endedCallIds: endedCallIds,
             otherCallBusy: otherCallBusy
         )
+        // Every incoming OFFER is accounted for, whatever the verdict. A call
+        // that does not ring is silent on both ends until the caller's own ring
+        // window writes `Missed call`, and the three silent verdicts are
+        // indistinguishable from the outside: `drop` (stale or unreadable row
+        // time), `busy` (a slot this device never released) and `apply` (a row
+        // for a call already in the slot). Nine calls in a row were lost to
+        // this on 2026-09-22, with only `drop` instrumented.
+        if case .offer = row.body {
+            let age = ChatRepository.parseDsTimestampMs(row.createdAt)
+                .map { String(ports.nowMs() - $0) } ?? "unreadable"
+            NSLog(
+                "CallHost: incoming offer -> %@, row age %@ ms (createdAt %@, slot %@)",
+                String(describing: action), age, row.createdAt,
+                active.map { "busy:" + $0.callIdHex } ?? "free")
+        }
         switch action {
         case .drop:
             return
