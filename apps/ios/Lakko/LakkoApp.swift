@@ -134,7 +134,10 @@ struct LakkoApp: App {
         let auth = AuthRepository()
         self._authRepository = StateObject(wrappedValue: auth)
         let chat = ChatRepository()
-        let host = CallHost.live(repository: chat)
+        let host = CallHost.live(
+            repository: chat,
+            sessionTokenProvider: { [weak auth] in auth?.identitySecrets?.sessionToken }
+        )
         host.attach(to: chat)
         let groupHost = GroupCallHost.live(
             repository: chat,

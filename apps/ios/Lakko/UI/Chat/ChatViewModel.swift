@@ -287,7 +287,9 @@ public final class ChatViewModel: ObservableObject {
         // The composition root passes the app-level host. A view model built
         // without one (previews) gets a host of its own that is NOT attached to
         // the repository's signaling feed, so it can never steal it.
-        self.callHost = callHost ?? CallHost.live(repository: repository)
+        self.callHost = callHost
+            ?? CallHost.live(
+                repository: repository, sessionTokenProvider: sessionTokenProvider)
         // Same for the group call host: one of its own is not attached to the
         // repository's MLS chain, so it observes nothing it does not own.
         self.groupCallHost = groupCallHost

@@ -80,6 +80,13 @@ final class CallHost: ObservableObject {
         var placeCall: @MainActor (_ session: CallSession, _ audio: Bool, _ video: Bool) -> Void = {
             session, audio, video in session.dial(audio: audio, video: video)
         }
+        /// The TURN-credential client handed to each new session, or `nil` for
+        /// STUN-only ICE.
+        ///
+        /// A port rather than a stored client because the credential is minted
+        /// against the current session token, and a test must be able to watch
+        /// a call be placed without reaching the auth service.
+        var turnClient: @MainActor () -> TurnCredentialClient? = { nil }
     }
 
     // MARK: - Published state
@@ -413,6 +420,11 @@ final class CallHost: ObservableObject {
         } else {
             NSLog("CallHost: call-key derivation failed; the call will refuse per invariant #4")
         }
+        // Without this the session resolves STUN-only ICE, and two peers that
+        // cannot reach each other directly never connect. Fail-soft by
+        // contract: a `nil` client, or a credential the auth service declines
+        // to mint, leaves the call on STUN rather than refusing it.
+        session.setTurnClient(ports.turnClient())
         activeCall = session
         activeGroupIdHex = groupIdHex
         sessionWasPresented = false
@@ -583,8 +595,18 @@ final class CallHost: ObservableObject {
 
 extension CallHost {
     /// The composition root's ports over the live repository.
-    static func live(repository: ChatRepository) -> CallHost {
-        CallHost(ports: Ports(
+    ///
+    /// `sessionTokenProvider` is read at each call rather than captured once,
+    /// because the token is rebound on login, recover and pairing, and a TURN
+    /// credential minted against a stale one is refused.
+    static func live(
+        repository: ChatRepository,
+        sessionTokenProvider: @escaping @MainActor () -> String? = { nil }
+    ) -> CallHost {
+        // One client for the process: it holds no per-call state, only the
+        // bearer token, which the port refreshes before every mint.
+        let turn = TurnCredentialClient()
+        return CallHost(ports: Ports(
             publish: { [weak repository] groupIdHex, bytes in
                 guard let repository else { return false }
                 do {
@@ -626,6 +648,11 @@ extension CallHost {
             mintCallId: { CallSession.mintCallId() },
             recordCall: { [weak repository] groupIdHex, row in
                 repository?.appendCallRow(groupIdHex: groupIdHex, row: row)
+            },
+            turnClient: {
+                guard let token = sessionTokenProvider(), !token.isEmpty else { return nil }
+                turn.setSessionToken(token)
+                return turn
             }
         ))
     }

@@ -293,8 +293,8 @@ export const DEFAULT_CALL_SESSION_TIMING: CallSessionTiming = {
   mediaSilenceTimeoutMs: 30_000,
 };
 
-/** Public STUN fallback. Replaced by self-hosted in Phase
- *  3a2. */
+/** STUN-only base list. A TURN row from the auth service is appended to it
+ *  per call when one can be minted; see `setTurnProvider`. */
 const PUBLIC_ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
@@ -381,6 +381,9 @@ export class CallSession {
   private iceGraceTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly timing: CallSessionTiming;
 
+  /** Set by the call-host layer; `null` means STUN-only ICE. */
+  private turnProvider: (() => Promise<RTCIceServer | null>) | null = null;
+
   constructor(
     callId: Uint8Array,
     private readonly callbacks: CallSessionCallbacks,
@@ -389,6 +392,29 @@ export class CallSession {
   ) {
     this.callId = callId;
     this.timing = { ...DEFAULT_CALL_SESSION_TIMING, ...timing };
+  }
+
+  /**
+   * Bind the TURN-credential source used when the peer connection is built.
+   *
+   * A provider rather than a list, because the credential is short-lived and
+   * minted per call. Fail-soft: a provider that resolves `null`, or throws,
+   * leaves the call on STUN.
+   */
+  setTurnProvider(provider: (() => Promise<RTCIceServer | null>) | null): void {
+    this.turnProvider = provider;
+  }
+
+  /** Resolve the ICE servers for this call: STUN always, TURN when minted. */
+  private async resolveIceServers(): Promise<RTCIceServer[]> {
+    const provider = this.turnProvider;
+    if (provider === null) return PUBLIC_ICE_SERVERS;
+    try {
+      const turn = await provider();
+      return turn === null ? PUBLIC_ICE_SERVERS : [...PUBLIC_ICE_SERVERS, turn];
+    } catch {
+      return PUBLIC_ICE_SERVERS;
+    }
   }
 
   /**
@@ -946,7 +972,7 @@ export class CallSession {
     this.callbacks.onLocalStream?.(stream);
 
     const pc = new RTCPeerConnection({
-      iceServers: PUBLIC_ICE_SERVERS,
+      iceServers: await this.resolveIceServers(),
       // P2P 1×1 uses native DTLS-SRTP. SFrame insertable
       // streams land in 3b when an SFU sits between peers.
       bundlePolicy: "max-bundle",

@@ -120,7 +120,8 @@ public object AppCallHost {
         repository: ChatRepository,
         sessionTokenProvider: () -> String?,
     ) {
-        instance.attach(ChatRepositoryCallPort(applicationContext, repository))
+        instance.attach(
+            ChatRepositoryCallPort(applicationContext, repository, sessionTokenProvider))
         // docs/ux/calls.md section 2.1 — the phone rings for an offer this
         // path delivers, not only for one a push wake carries. On the test
         // stack, which has no FCM credentials, this is the ONLY path that runs.
@@ -166,7 +167,16 @@ public object AppCallHost {
 public class ChatRepositoryCallPort(
     private val applicationContext: Context,
     private val repository: ChatRepository,
+    private val sessionTokenProvider: () -> String? = { null },
 ) : OneToOneCallPort<CallSession> {
+
+    /**
+     * One client for the process: it holds no per-call state, only the bearer
+     * token, which is rebound before every mint because login, recover and
+     * pairing all replace it and a credential minted against a stale one is
+     * refused by the relay.
+     */
+    private val turn = TurnCredentialClient()
 
     override fun createSession(
         groupIdHex: String,
@@ -176,7 +186,17 @@ public class ChatRepositoryCallPort(
         applicationContext = applicationContext,
         callId = callId,
         onOutboundSignaling = outbound,
-    )
+    ).also { session ->
+        // Without this the session resolves STUN-only ICE, and two peers that
+        // cannot reach each other directly never connect. Fail-soft by
+        // contract: no token, or a credential the auth service declines to
+        // mint, leaves the call on STUN rather than refusing it.
+        val token = sessionTokenProvider()
+        if (!token.isNullOrEmpty()) {
+            turn.setSessionToken(token)
+            session.setTurnClient(turn)
+        }
+    }
 
     override suspend fun deriveCallKey(groupIdHex: String, callId: ByteArray): OneToOneCallKey? =
         repository.deriveCallKey(groupIdHex = groupIdHex, callId = callId)

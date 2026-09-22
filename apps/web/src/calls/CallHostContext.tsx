@@ -91,6 +91,7 @@ import {
 import { A } from "@solidjs/router";
 
 import { cameraStartFailure } from "./capture-fallback";
+import { TurnCredentialClient } from "./turn-credential-client";
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
 import { ChatClient } from "../chat/client";
@@ -329,6 +330,10 @@ export function qualityTierForRtt(rttMs: number | null): QualityTier {
 
 export function CallHostProvider(props: { children: JSX.Element }): JSX.Element {
   const auth = useAuth();
+  // One TURN-credential client for the session. Without it a 1x1 call
+  // resolves STUN-only ICE, and two peers that cannot reach each other
+  // directly never connect.
+  const turn = new TurnCredentialClient();
   const chats = useChats();
   const profiles = useProfiles();
   /** The name on the user's own tile (§4.4): the profile name, `You` when
@@ -675,6 +680,13 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
           oneToOneSafety = null;
         });
     }
+    // Read the token at call time rather than at build time: login, recover
+    // and pairing all replace it, and a credential minted against a stale one
+    // is refused by the relay.
+    session.setTurnProvider(async () => {
+      turn.setSessionToken(auth.identitySecrets()?.sessionToken ?? null);
+      return turn.fetchOrNull();
+    });
     return session;
   }
 
