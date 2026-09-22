@@ -53,6 +53,7 @@
 import {
   createContext,
   createSignal,
+  onCleanup,
   onMount,
   type Accessor,
   type JSX,
@@ -140,6 +141,8 @@ import { clearOwnProfile } from "../profile/own-profile";
 import { rehydrateMlsState } from "../chat/rehydrate";
 import { subscribeToPush, unsubscribeFromPush } from "../push/subscribe";
 import { bootstrapBackupFromPhraseString } from "../backup/bootstrap";
+import { startAutoBackup } from "../backup/auto-backup-driver";
+import { clearAutoBackupState } from "../backup/auto-backup";
 import { deletePhrase, getPhrase, putPhrase } from "../backup/phrase-store";
 import { clearRestored, markRestored } from "./restore-marker";
 import {
@@ -751,6 +754,39 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // 1.16e5: drop active groups on logout/forgetDevice so MLS
   // state doesn't bleed across user sessions on the same tab.
   const chats = useChats();
+
+  // Keep the encrypted backup current. Until this ran, the blob was written
+  // exactly twice in an account's life - an empty baseline at signup and one
+  // at recover - so a restore on a new device landed the person back at
+  // registration day. The driver is inert while nothing has changed; see
+  // `backup/auto-backup.ts` for what counts as a change and why.
+  onCleanup(
+    startAutoBackup({
+      accountId: () => identitySecrets()?.accountId ?? null,
+      // `null` until the chat layer has loaded, so an empty list during
+      // startup is never mistaken for "left every group".
+      knownGroupIds: () =>
+        chats.identity() === null ? null : chats.groups().map((g) => g.groupIdB64),
+      accountIdB64: () => {
+        const id = identitySecrets()?.accountId;
+        return id === undefined ? null : base64Encode(id);
+      },
+      // The signing seed lives on the canonical Identity, not in the auth
+      // secrets: the backup envelope is sealed under the recovery phrase but
+      // signed with this.
+      ed25519Seed: () => chats.identity()?.ed25519Seed ?? null,
+      deviceKey: async () => {
+        const id = identitySecrets()?.accountId;
+        if (id === undefined) return null;
+        return getDeviceKey(base64Encode(id));
+      },
+      sessionToken: () => identitySecrets()?.sessionToken ?? null,
+      snapshot: () => {
+        const id = chats.identity();
+        return id === null ? null : id.snapshotStorage();
+      },
+    }),
+  );
 
   // The account the KeyPackage publisher publishes for. Set the moment a
   // canonical identity is installed for a session, cleared on logout /
@@ -3274,6 +3310,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         } catch {
           // best-effort
         }
+        // The auto-backup bookkeeping is per-account and keyed on the same id,
+        // so a later signin on this device would otherwise inherit a
+        // `lastUploadAtMs` that throttles the first backup of a new session
+        // and a group key describing groups it no longer has.
+        clearAutoBackupState(cached.accountIdB64);
         // ADR-0042: wipe the push-routing secrets + the push_gid reverse
         // index. The secret is wrapped under the device-root key just
         // wiped, but a stale reverse-index row (plaintext push_gid →

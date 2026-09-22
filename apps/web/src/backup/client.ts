@@ -287,6 +287,11 @@ export class BackupClient {
     accountId: Uint8Array,
     ed25519Seed: Uint8Array,
     deviceKey: CryptoKey,
+    /** The current whole-storage MLS snapshot. This parameter did not exist
+     *  while the method had no callers, and its absence was not cosmetic: the
+     *  body passed an empty snapshot, so the first caller would have uploaded
+     *  a backup carrying contacts but no groups. */
+    wholeStorageSnapshot: Uint8Array = new Uint8Array(0),
   ): Promise<UploadResult> {
     const accountIdB64 = base64Encode(accountId);
     let cached;
@@ -306,7 +311,7 @@ export class BackupClient {
         accountId,
         ed25519Seed,
         cached.phrase,
-        new Uint8Array(0),
+        wholeStorageSnapshot,
         deviceKey,
       );
     } finally {
