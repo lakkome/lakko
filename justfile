@@ -167,6 +167,24 @@ fuzz-list:
 audit-index-check:
     ./tools/audit-index-check
 
+# Public API that nothing in the shipping code calls.
+#
+# A feature can be fully written, correct and tested, and still
+# never run because no caller exists — invisible in review, since
+# the function reads fine. Three such defects landed in one day
+# (2026-09-22): `setTurnClient` on both natives (calls between
+# networks never connected) and `uploadFromCache` on all three
+# clients (the backup was never refreshed).
+#
+# Reports CANDIDATES, not verdicts: protocol conformances,
+# reflection and future-facing APIs land here legitimately. Read
+# each one. NOT a CI gate — the list needs judgement.
+#
+#     just dead-seams            # everything
+#     just dead-seams --lang ios # one platform
+dead-seams *args:
+    python3 tools/dead-seams/dead_seams.py {{args}}
+
 # Codespeak spec-drift gate — a covered module `X.<ext>` has a
 # sibling behavioral spec `X.sc.md` (see the `spec` skill); this
 # fails when a covered source file changes without its spec.
