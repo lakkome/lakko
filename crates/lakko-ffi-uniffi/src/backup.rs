@@ -107,6 +107,18 @@ pub struct ParsedBackupPayload {
     /// state had been published at upload time. The restore
     /// path feeds this into `Identity.restoreStorage(...)`.
     pub whole_storage_snapshot: Vec<u8>,
+    /// The MLS `group_id`s the backup was taken with.
+    ///
+    /// Empty for a payload written before v4, and for a device that knew no
+    /// groups - the two are indistinguishable, and a restore treats both the
+    /// same way: with no index it rebuilds nothing rather than guessing.
+    ///
+    /// Carried because [`Self::whole_storage_snapshot`] restores the provider,
+    /// which holds every group, but the provider offers no way to enumerate
+    /// them - so a client's chat list is built from a separately persisted
+    /// index of ids, and a restore without it lands a device holding every
+    /// group and showing none.
+    pub known_group_ids: Vec<Vec<u8>>,
 }
 
 // ============================================================================
@@ -133,6 +145,9 @@ pub fn build_backup_payload(
     // (signup baseline before the DeviceGroup-bootstrap path
     // runs, etc.).
     whole_storage_snapshot: Vec<u8>,
+    // The MLS `group_id`s this device knows about - the index the snapshot
+    // above cannot supply.
+    known_group_ids: Vec<Vec<u8>>,
 ) -> Result<Vec<u8>, FfiError> {
     if account_id.len() != 16 {
         return Err(FfiError::Backup("account_id must be 16 bytes".into()));
@@ -194,6 +209,16 @@ pub fn build_backup_payload(
         });
     }
 
+    for id in &known_group_ids {
+        if id.len() > lakko_backup::payload::MAX_GROUP_ID_LEN {
+            return Err(FfiError::Backup(format!(
+                "group_id length {} exceeds cap {}",
+                id.len(),
+                lakko_backup::payload::MAX_GROUP_ID_LEN,
+            )));
+        }
+    }
+
     let payload = BackupPayload {
         account_id: acct,
         created_at_ms,
@@ -201,6 +226,7 @@ pub fn build_backup_payload(
         accepted_contacts,
         mls_snapshots: Vec::new(),
         whole_storage_snapshot,
+        known_group_ids,
     };
     Ok(payload.encode()?)
 }
@@ -232,6 +258,7 @@ pub fn parse_backup_payload(wire: Vec<u8>) -> Result<ParsedBackupPayload, FfiErr
         ed25519_seed: inner.ed25519_seed.to_vec(),
         accepted_contacts,
         whole_storage_snapshot: inner.whole_storage_snapshot,
+        known_group_ids: inner.known_group_ids,
     })
 }
 
@@ -512,6 +539,7 @@ mod tests {
             vec![0x42u8; 32],
             vec![with_id, sample_contact()],
             vec![],
+            Vec::new(),
         )
         .expect("build");
         let parsed = parse_backup_payload(wire).expect("parse");
@@ -531,7 +559,14 @@ mod tests {
             display_name: "alice".to_string(),
             account_id: Some(vec![0xABu8; 8]), // wrong length
         };
-        let err = build_backup_payload(vec![0xA1u8; 16], 1, vec![0x42u8; 32], vec![bad], vec![]);
+        let err = build_backup_payload(
+            vec![0xA1u8; 16],
+            1,
+            vec![0x42u8; 32],
+            vec![bad],
+            vec![],
+            Vec::new(),
+        );
         assert!(err.is_err(), "an 8-byte account_id must be rejected");
     }
 
@@ -547,6 +582,7 @@ mod tests {
             seed.clone(),
             contacts,
             snapshot.clone(),
+            Vec::new(),
         )
         .expect("build");
         let parsed = parse_backup_payload(wire).expect("parse");
@@ -573,9 +609,15 @@ mod tests {
         let account_id = vec![0xCDu8; 16];
         let seed = vec![0x77u8; 32];
         let contacts = vec![sample_contact()];
-        let payload =
-            build_backup_payload(account_id.clone(), 99, seed.clone(), contacts, Vec::new())
-                .expect("build");
+        let payload = build_backup_payload(
+            account_id.clone(),
+            99,
+            seed.clone(),
+            contacts,
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("build");
         let envelope = seal_backup(phrase.clone(), payload).expect("seal");
         let opened = open_backup(phrase, envelope).expect("open");
         let parsed = parse_backup_payload(opened).expect("parse");
@@ -585,8 +627,15 @@ mod tests {
 
     #[test]
     fn wrong_phrase_rejected() {
-        let payload = build_backup_payload(vec![0u8; 16], 0, vec![0u8; 32], vec![], Vec::new())
-            .expect("build");
+        let payload = build_backup_payload(
+            vec![0u8; 16],
+            0,
+            vec![0u8; 32],
+            vec![],
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("build");
         let envelope = seal_backup(b"right".to_vec(), payload).expect("seal");
         let err = open_backup(b"wrong".to_vec(), envelope).expect_err("wrong phrase");
         match err {
@@ -596,9 +645,49 @@ mod tests {
     }
 
     #[test]
+    fn the_group_index_round_trips_so_a_restore_can_rebuild_the_chat_list() {
+        // The whole-storage snapshot holds every group but cannot be
+        // enumerated, so without this index a restore lands a device holding
+        // every group and showing none.
+        let ids = vec![vec![0x11u8; 32], vec![0x22u8; 32]];
+        let wire = build_backup_payload(
+            vec![0u8; 16],
+            0,
+            vec![0u8; 32],
+            vec![],
+            b"snapshot".to_vec(),
+            ids.clone(),
+        )
+        .expect("build");
+        let parsed = parse_backup_payload(wire).expect("parse");
+        assert_eq!(parsed.known_group_ids, ids);
+    }
+
+    #[test]
+    fn an_over_long_group_id_is_refused() {
+        let err = build_backup_payload(
+            vec![0u8; 16],
+            0,
+            vec![0u8; 32],
+            vec![],
+            Vec::new(),
+            vec![vec![0u8; lakko_backup::payload::MAX_GROUP_ID_LEN + 1]],
+        )
+        .expect_err("over-long group id accepted");
+        assert!(format!("{err}").contains("group_id length"));
+    }
+
+    #[test]
     fn wrong_length_account_id_rejected() {
-        let err = build_backup_payload(vec![0u8; 8], 0, vec![0u8; 32], vec![], Vec::new())
-            .expect_err("wrong len");
+        let err = build_backup_payload(
+            vec![0u8; 8],
+            0,
+            vec![0u8; 32],
+            vec![],
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect_err("wrong len");
         match err {
             FfiError::Backup(msg) => assert!(msg.contains("16 bytes")),
             other => panic!("expected Backup variant, got {other:?}"),

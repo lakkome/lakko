@@ -82,6 +82,10 @@ public class BackupClient(
          *  back to the freshness window). */
         context: Context? = null,
         accountIdB64: String? = null,
+        /** The MLS `group_id`s this device knows about, hex as the repository
+         *  holds them. The index the snapshot cannot supply: a restored
+         *  provider holds every group and offers no way to enumerate them. */
+        knownGroupIdsHex: List<String> = emptyList(),
     ) {
         val createdAtMs = System.currentTimeMillis().toULong()
         val payload = buildBackupPayload(
@@ -90,6 +94,10 @@ public class BackupClient(
             ed25519Seed = ed25519Seed,
             contacts = contacts,
             wholeStorageSnapshot = wholeStorageSnapshot,
+            // A row that is not a group id is dropped rather than failing the
+            // backup: one malformed local entry must not cost the whole
+            // envelope.
+            knownGroupIds = knownGroupIdsHex.mapNotNull(::groupIdBytesOrNull),
         )
         val envelope = sealBackup(phrase = phraseBytes, payloadBytes = payload)
         // ADR-0037: mint the auth-signed head, frame `TAG ‖ head ‖ envelope`,
@@ -147,6 +155,7 @@ public class BackupClient(
         ed25519Seed: ByteArray,
         contacts: List<BackupContactRecord> = emptyList(),
         wholeStorageSnapshot: ByteArray = ByteArray(0),
+        knownGroupIdsHex: List<String> = emptyList(),
     ): UploadResult {
         val cached = PhraseStore.getPhrase(context, accountIdB64)
             ?: return UploadResult.CacheMiss
@@ -160,6 +169,7 @@ public class BackupClient(
                 // ADR-0037: mint the head + advance the monotonic version floor.
                 context = context,
                 accountIdB64 = accountIdB64,
+                knownGroupIdsHex = knownGroupIdsHex,
             )
             return UploadResult.Uploaded
         } catch (cause: Throwable) {
@@ -341,4 +351,20 @@ public sealed interface GatedRestoreOutcome {
  *  can skip threading the seed through the public surface. */
 public fun ed25519SeedFromIdentitySeed(identitySeed: ByteArray): ByteArray {
     return Identity.fromSeed(identitySeed).use { it.ed25519Seed() }
+}
+
+/**
+ * Decode one hex group id, or `null` when it is not one.
+ *
+ * Lakko mints 32-byte ids; anything else names no group a restore could load,
+ * so carrying it would only make that restore try and fail.
+ */
+internal fun groupIdBytesOrNull(hex: String): ByteArray? {
+    if (hex.length != 64) return null
+    val out = ByteArray(32)
+    for (i in 0 until 32) {
+        val byte = hex.substring(i * 2, i * 2 + 2).toIntOrNull(16) ?: return null
+        out[i] = byte.toByte()
+    }
+    return out
 }

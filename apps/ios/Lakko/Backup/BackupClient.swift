@@ -53,6 +53,23 @@ public final class BackupClient {
     /// Bind / rebind the bearer token used for the `/backup` routes AND the
     /// `/auth/backup/head` mint (ADR-0037). Mirror of the web
     /// `BackupClient.setSessionToken`.
+    /// Decode one hex group id, or `nil` when it is not one.
+    ///
+    /// Lakko mints 32-byte ids; anything else names no group this device could
+    /// load, so carrying it would only make a restore try and fail.
+    static func groupIdBytes(fromHex hex: String) -> Data? {
+        guard hex.count == 64, hex.count % 2 == 0 else { return nil }
+        var out = Data(capacity: hex.count / 2)
+        var index = hex.startIndex
+        while index < hex.endIndex {
+            let next = hex.index(index, offsetBy: 2)
+            guard let byte = UInt8(hex[index..<next], radix: 16) else { return nil }
+            out.append(byte)
+            index = next
+        }
+        return out
+    }
+
     public func setSessionToken(_ token: String?) {
         self.sessionToken = token
         storage.setSessionToken(token)
@@ -79,14 +96,22 @@ public final class BackupClient {
         // Phase 2a3d3: whole-storage MLS snapshot from
         // `Identity.snapshotStorage()`. Pass `Data()` on signup
         // baseline when there is no MLS state yet.
-        wholeStorageSnapshot: Data = Data()
+        wholeStorageSnapshot: Data = Data(),
+        /// The MLS `group_id`s this device knows about, hex as the repository
+        /// holds them. The index the snapshot cannot supply: a restored
+        /// provider holds every group and offers no way to enumerate them.
+        knownGroupIdsHex: [String] = []
     ) async throws {
         let payloadBytes = try buildBackupPayload(
             accountId: accountId,
             createdAtMs: UInt64(Date().timeIntervalSince1970 * 1000),
             ed25519Seed: ed25519Seed,
             contacts: contacts,
-            wholeStorageSnapshot: wholeStorageSnapshot
+            wholeStorageSnapshot: wholeStorageSnapshot,
+            // A row that is not a group id is dropped rather than failing the
+            // backup: one malformed local entry must not cost the whole
+            // envelope.
+            knownGroupIds: knownGroupIdsHex.compactMap(Self.groupIdBytes(fromHex:))
         )
         let envelope = try sealBackup(phrase: phraseBytes, payloadBytes: payloadBytes)
         let (blob, floor) = await frameWithHead(envelope: envelope)
@@ -133,7 +158,8 @@ public final class BackupClient {
         accountIdB64: String,
         ed25519Seed: Data,
         contacts: [BackupContactRecord],
-        wholeStorageSnapshot: Data = Data()
+        wholeStorageSnapshot: Data = Data(),
+        knownGroupIdsHex: [String] = []
     ) async -> UploadResult {
         let cachedOrNil: Data?
         do {
@@ -158,7 +184,8 @@ public final class BackupClient {
                 ed25519Seed: ed25519Seed,
                 phraseBytes: phraseBytes,
                 contacts: contacts,
-                wholeStorageSnapshot: wholeStorageSnapshot
+                wholeStorageSnapshot: wholeStorageSnapshot,
+                knownGroupIdsHex: knownGroupIdsHex
             )
             return .uploaded
         } catch {

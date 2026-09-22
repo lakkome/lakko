@@ -134,6 +134,10 @@ public class AutoBackupDriver(
                 ed25519Seed = seed,
                 contacts = contacts,
                 wholeStorageSnapshot = snapshot,
+                // The index the snapshot cannot supply. Read from the same
+                // accessor the membership check above uses, so an upload
+                // always carries the set it was marked dirty for.
+                knownGroupIdsHex = groups ?: emptyList(),
             )
         } catch (cause: Throwable) {
             Log.w(TAG, "upload threw", cause)

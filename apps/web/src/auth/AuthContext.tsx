@@ -109,7 +109,7 @@ import {
 } from "../discovery/client";
 import { clearAll as clearContactsStore } from "../contacts/local-store";
 import { useChats } from "../chat/ChatContext";
-import { deleteMlsSnapshot } from "../chat/mls-store";
+import { deleteMlsSnapshot, saveMlsSnapshot } from "../chat/mls-store";
 import { clearAllGroupRouting } from "../push/group-routing-store";
 import { deleteOutboxForAccount } from "../chat/commit-outbox";
 // ADR-0045 — the pending-request observation store follows the outbox's
@@ -2934,11 +2934,24 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
                   // copy carries the restored state instead of
                   // the just-bootstrapped empty one.
                   try {
-                    await chats.persistSnapshot(accountIdB64);
+                    // NOT `chats.persistSnapshot`, which writes the group
+                    // index from the in-memory list - empty on a fresh
+                    // device, because nothing has rehydrated yet. That left
+                    // the restored provider holding every group while
+                    // `rehydrate` (whose only source is this index) rebuilt
+                    // none of them, so the person saw no chats at all. The
+                    // backup carries the index for exactly this moment.
+                    await saveMlsSnapshot(
+                      accountIdB64,
+                      deviceKey,
+                      canonical.snapshotStorage(),
+                      restored.knownGroupIds,
+                      base64Encode(canonical.signaturePublicKey),
+                    );
                   } catch (err) {
                     // eslint-disable-next-line no-console
                     console.warn(
-                      "post-restore MLS persistSnapshot failed",
+                      "post-restore MLS snapshot write failed",
                       err,
                     );
                   }

@@ -141,7 +141,11 @@ public final class AutoBackupDriver {
             accountIdB64: accountIdB64,
             ed25519Seed: identity.ed25519Seed(),
             contacts: contacts,
-            wholeStorageSnapshot: snapshot
+            wholeStorageSnapshot: snapshot,
+            // The index the snapshot cannot supply. Read from the same
+            // accessor the membership check above uses, so an upload always
+            // carries the set it was marked dirty for.
+            knownGroupIdsHex: inputs.knownGroupIds() ?? []
         )
         guard case .uploaded = result else {
             // `cacheMiss` is the ordinary state for a device that joined by

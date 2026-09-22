@@ -73,6 +73,9 @@ export function startAutoBackup(inputs: AutoBackupDriverInputs): () => void {
         ed25519Seed,
         deviceKey,
         snapshot,
+        // The index the snapshot cannot supply. Read here rather than passed
+        // through the rules, which have no business knowing what a group is.
+        inputs.knownGroupIds() ?? [],
       );
       if (result.kind !== "uploaded") {
         // `no-cached-phrase` is the ordinary state for a device that joined by

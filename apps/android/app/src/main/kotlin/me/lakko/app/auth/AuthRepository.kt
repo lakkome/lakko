@@ -1082,13 +1082,22 @@ public class AuthRepository(
                     // contacts; the chat list says "Synchronizing..." until the
                     // first chat arrives.
                     me.lakko.app.devices.StateBundle.markRestored(applicationContext)
-                    val restoredSnapshot = restoreFromServerBackupBestEffort(
+                    val restoredBackup = restoreFromServerBackupBestEffort(
                         sessionToken = result.sessionToken,
                         accountId = accountIdBytes,
                         accountIdB64 = accountIdB64,
                         phrase = mnemonicPhrase,
                         context = "recover",
                     )
+                    val restoredSnapshot = restoredBackup.snapshot
+                    // Written BEFORE the bootstrap below, because that is what
+                    // reads the set to rebuild `Group` handles. Additive: a
+                    // group this device already knew is not dropped by a
+                    // backup that predates it.
+                    val knownGroups = me.lakko.app.chat.KnownGroupsStore(applicationContext)
+                    for (groupIdHex in restoredBackup.knownGroupIdsHex) {
+                        knownGroups.add(accountIdB64, groupIdHex)
+                    }
                     if (restoredSnapshot.isNotEmpty()) {
                         // Drop the restored MLS blob into the
                         // local snapshot store. ChatRepository's
@@ -2618,7 +2627,7 @@ public class AuthRepository(
         accountIdB64: String,
         phrase: String,
         context: String,
-    ): ByteArray {
+    ): RestoredBackup {
         val phraseBytes = phrase.toByteArray(Charsets.UTF_8)
         val client = me.lakko.app.backup.BackupClient()
         try {
@@ -2638,11 +2647,11 @@ public class AuthRepository(
                 is me.lakko.app.backup.GatedRestoreOutcome.Restored -> outcome.payload
                 is me.lakko.app.backup.GatedRestoreOutcome.NoBackup -> {
                     Log.i("lakko-auth", "backup restore ($context): no prior backup")
-                    return ByteArray(0)
+                    return RestoredBackup(ByteArray(0), emptyList())
                 }
                 is me.lakko.app.backup.GatedRestoreOutcome.WrongPhraseOrTampered -> {
                     Log.w("lakko-auth", "backup restore ($context): wrong phrase or tampered")
-                    return ByteArray(0)
+                    return RestoredBackup(ByteArray(0), emptyList())
                 }
                 is me.lakko.app.backup.GatedRestoreOutcome.RollbackBlocked -> {
                     if (outcome.hard) {
@@ -2660,11 +2669,11 @@ public class AuthRepository(
                             "backup restore ($context): stale head override declined - ${outcome.reason}",
                         )
                     }
-                    return ByteArray(0)
+                    return RestoredBackup(ByteArray(0), emptyList())
                 }
                 is me.lakko.app.backup.GatedRestoreOutcome.TransportFailed -> {
                     Log.w("lakko-auth", "backup restore ($context) failed", outcome.cause)
-                    return ByteArray(0)
+                    return RestoredBackup(ByteArray(0), emptyList())
                 }
             }
             Log.i(
@@ -2710,12 +2719,33 @@ public class AuthRepository(
             } catch (cause: Throwable) {
                 Log.w("lakko-auth", "backup restore ($context): contact merge failed", cause)
             }
-            return parsed.wholeStorageSnapshot
+            // The index the snapshot cannot supply: `restoreStorage` lays
+            // down a provider holding every group, but nothing can enumerate
+            // it, so `ChatRepository.bootstrap` rebuilds handles from a
+            // separately persisted set of ids. Without this the restored
+            // device held every group and listed none.
+            val groupIdsHex = parsed.knownGroupIds.map { id ->
+                id.joinToString("") { b -> "%02x".format(b) }
+            }
+            if (groupIdsHex.isNotEmpty()) {
+                Log.i(
+                    "lakko-auth",
+                    "backup restore ($context): ${groupIdsHex.size} known group(s)",
+                )
+            }
+            return RestoredBackup(parsed.wholeStorageSnapshot, groupIdsHex)
         } finally {
             client.close()
             phraseBytes.fill(0)
         }
     }
+
+    /** What a restore recovered: the provider snapshot and the group index
+     *  that snapshot cannot supply on its own. */
+    private data class RestoredBackup(
+        val snapshot: ByteArray,
+        val knownGroupIdsHex: List<String>,
+    )
 
     /**
      * Phase 2a1c — cache the phrase + post a baseline backup

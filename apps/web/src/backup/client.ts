@@ -109,6 +109,15 @@ export type RestoreResult =
        *  Identity so the new device lands with the same group
        *  state the upload-side device had at backup time. */
       readonly wholeStorageSnapshot: Uint8Array;
+      /** The MLS group ids the backup was taken with, base64.
+       *
+       *  The snapshot above restores the provider, which holds every group,
+       *  but nothing can enumerate it - a client's chat list is built from a
+       *  separately persisted index of ids. Without this a restored device
+       *  holds every group and shows none. Empty for a backup written before
+       *  payload v4, and for a device that knew no groups; a restore treats
+       *  both the same and rebuilds nothing rather than guessing. */
+      readonly knownGroupIds: string[];
     }
   | { readonly kind: "no-backup" }
   | { readonly kind: "wrong-phrase-or-tampered" }
@@ -171,6 +180,21 @@ function defaultStaleConfirm(reason: string): Promise<boolean> {
  * session-token plumbing. Constructed lazily by the route layer
  * — same shape as `ContactsClient` / `ChatClient`.
  */
+/** Lakko mints 32-byte MLS group ids; the payload carries them
+ *  flat-concatenated, so the width is what splits them back apart. */
+const GROUP_ID_LEN = 32;
+
+/** Split the flat-concatenated ids the payload carries back into base64 rows.
+ *  A trailing partial id is dropped: the codec never writes one, so its
+ *  presence means damage, and half a group id names nothing. */
+function splitGroupIds(flat: Uint8Array): string[] {
+  const out: string[] = [];
+  for (let i = 0; i + GROUP_ID_LEN <= flat.length; i += GROUP_ID_LEN) {
+    out.push(base64Encode(flat.subarray(i, i + GROUP_ID_LEN)));
+  }
+  return out;
+}
+
 export class BackupClient {
   /** Bearer token for both the storage `/backup` routes and the
    *  `/auth/backup/head` mint (ADR-0037). Set via [`setSessionToken`]. */
@@ -216,6 +240,8 @@ export class BackupClient {
      *  (the mint + framing still happen; a future restore falls back to the
      *  freshness window). */
     deviceKey?: CryptoKey,
+    /** The MLS group ids this device knows about, base64. */
+    knownGroupIds: readonly string[] = [],
   ): Promise<UploadResult> {
     try {
       const envelope = await this.composeEnvelope(
@@ -223,6 +249,7 @@ export class BackupClient {
         ed25519Seed,
         phraseBytes,
         wholeStorageSnapshot,
+        knownGroupIds,
       );
       // ADR-0037: mint the auth-signed head, frame `TAG ‖ head ‖ envelope`,
       // and PUT the framed blob. Soft-fail — a mint failure writes the legacy
@@ -292,6 +319,7 @@ export class BackupClient {
      *  body passed an empty snapshot, so the first caller would have uploaded
      *  a backup carrying contacts but no groups. */
     wholeStorageSnapshot: Uint8Array = new Uint8Array(0),
+    knownGroupIds: readonly string[] = [],
   ): Promise<UploadResult> {
     const accountIdB64 = base64Encode(accountId);
     let cached;
@@ -313,6 +341,7 @@ export class BackupClient {
         cached.phrase,
         wholeStorageSnapshot,
         deviceKey,
+        knownGroupIds,
       );
     } finally {
       // Best-effort scrub — JS doesn't give us guaranteed zeroize
@@ -439,6 +468,7 @@ export class BackupClient {
       ed25519Seed: parsed.ed25519Seed,
       acceptedContacts,
       wholeStorageSnapshot: parsed.wholeStorageSnapshot,
+      knownGroupIds: splitGroupIds(parsed.knownGroupIds),
     };
   }
 
@@ -453,6 +483,7 @@ export class BackupClient {
     ed25519Seed: Uint8Array,
     phraseBytes: Uint8Array,
     wholeStorageSnapshot: Uint8Array,
+    knownGroupIds: readonly string[],
   ): Promise<Uint8Array> {
     const wasm = await loadWasm();
 
@@ -469,12 +500,30 @@ export class BackupClient {
       return new wasm.BackupContact(ed, x, c.displayName, accountId);
     });
 
+    // Flat-concatenated 32-byte ids: the index the snapshot cannot supply,
+    // because the restored provider holds every group and offers no way to
+    // enumerate them. An id of the wrong width is dropped rather than failing
+    // the backup - a malformed local row must not cost the user the whole
+    // envelope - and the payload codec caps the rest.
+    const idBytes = knownGroupIds
+      .map((id) => {
+        try {
+          return base64Decode(id);
+        } catch {
+          return null;
+        }
+      })
+      .filter((b): b is Uint8Array => b !== null && b.length === GROUP_ID_LEN);
+    const flatGroupIds = new Uint8Array(idBytes.length * GROUP_ID_LEN);
+    idBytes.forEach((b, i) => flatGroupIds.set(b, i * GROUP_ID_LEN));
+
     const payload = wasm.buildBackupPayload(
       accountId,
       BigInt(Date.now()),
       ed25519Seed,
       contacts,
       wholeStorageSnapshot,
+      flatGroupIds,
     );
     return wasm.sealBackup(phraseBytes, payload);
   }

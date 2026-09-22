@@ -1006,13 +1006,20 @@ public final class AuthRepository: ObservableObject {
         // upsert into (mirror of the Android situation). For
         // now restore logs the outcome; the merge layer lands
         // alongside the iOS contact-persistence sub-sprint.
-        let restoredSnapshot = await restoreFromServerBackupBestEffort(
+        let (restoredSnapshot, restoredGroupIdsHex) = await restoreFromServerBackupBestEffort(
             accountId: accountIdBytes,
             accountIdB64: accountIdB64,
             sessionToken: result.sessionToken,
             phrase: trimmedPhrase,
             context: "recover"
         )
+        // Written BEFORE the bootstrap below, because that is what reads the
+        // set to rebuild `Group` handles. Additive: a group this device
+        // already knew is not dropped by a backup that predates it.
+        let knownGroups = KnownGroupsStore()
+        for groupIdHex in restoredGroupIdsHex {
+            knownGroups.add(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        }
         if !restoredSnapshot.isEmpty {
             // Drop the restored MLS blob into the local snapshot
             // store. `ChatRepository.bootstrap`'s rehydrate path
@@ -2395,7 +2402,7 @@ public final class AuthRepository: ObservableObject {
         sessionToken: String,
         phrase: String,
         context: String
-    ) async -> Data {
+    ) async -> (snapshot: Data, knownGroupIdsHex: [String]) {
         let phraseBytes = Data(phrase.utf8)
         let client = BackupClient()
         client.setSessionToken(sessionToken)
@@ -2427,16 +2434,16 @@ public final class AuthRepository: ObservableObject {
             } else {
                 NSLog("backup restore (\(context)): user declined a stale backup: \(reason)")
             }
-            return Data()
+            return (Data(), [])
         case .noBackup:
             NSLog("backup restore (\(context)): no prior backup")
-            return Data()
+            return (Data(), [])
         case .wrongPhraseOrTampered:
             NSLog("backup restore (\(context)) failed: wrong phrase or tampered blob")
-            return Data()
+            return (Data(), [])
         case .transportFailed(let error):
             NSLog("backup restore (\(context)) failed: \(error)")
-            return Data()
+            return (Data(), [])
         case .restored(let payload):
             parsed = payload
         }
@@ -2463,7 +2470,22 @@ public final class AuthRepository: ObservableObject {
             AcceptedContactsStore.save(existingContacts + restoredContacts)
             NSLog("backup restore (\(context)): merged \(restoredContacts.count) contact(s)")
         }
-        return parsed.wholeStorageSnapshot
+        // The index the snapshot cannot supply: `restoreStorage` lays down a
+        // provider holding every group, but nothing can enumerate it, so
+        // `ChatRepository.bootstrap` rebuilds handles from a separately
+        // persisted set of ids. Without this the restored device held every
+        // group and listed none.
+        let restoredGroupIdsHex = parsed.knownGroupIds.map(Self.hexString(fromBytes:))
+        if !restoredGroupIdsHex.isEmpty {
+            NSLog(
+                "backup restore (\(context)): \(restoredGroupIdsHex.count) known group(s)")
+        }
+        return (parsed.wholeStorageSnapshot, restoredGroupIdsHex)
+    }
+
+    /// Lowercase hex, matching the form `KnownGroupsStore` holds.
+    private static func hexString(fromBytes bytes: Data) -> String {
+        bytes.map { String(format: "%02x", $0) }.joined()
     }
 
     /// Cache the recovery phrase under the Keychain + post a

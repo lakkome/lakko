@@ -150,6 +150,11 @@ impl BackupContact {
     }
 }
 
+/// Lakko mints 32-byte MLS group ids, which is what lets the caller hand them
+/// over flat-concatenated and this split them back apart with no per-id length
+/// prefix.
+const GROUP_ID_LEN: usize = 32;
+
 /// Build the structured backup payload wire bytes that go into
 /// [`seal_backup`].
 ///
@@ -167,7 +172,9 @@ impl BackupContact {
 /// `mls_snapshots` (the per-group reserved slot) stays empty;
 /// `whole_storage_snapshot` (Phase 2a3d1) carries the bytes
 /// `Identity.snapshotStorage()` emits for the wholesale MLS
-/// provider state.
+/// provider state; `known_group_ids` carries the index that
+/// snapshot cannot supply, because the provider holds every group
+/// but offers no way to enumerate them.
 ///
 /// # Errors
 ///
@@ -185,6 +192,11 @@ pub fn build_backup_payload(
     // `Uint8Array` when no MLS state is published yet
     // (signup baseline pre-DeviceGroup-bootstrap, etc.).
     whole_storage_snapshot: &[u8],
+    // The MLS `group_id`s this device knows about, flat-concatenated
+    // 32-byte ids. Carried because the snapshot restores the provider but
+    // cannot be enumerated, so without this a restored device holds every
+    // group and lists none.
+    known_group_ids: &[u8],
 ) -> Result<Vec<u8>, JsError> {
     if account_id.len() != 16 {
         return Err(JsError::new("account_id must be 16 bytes"));
@@ -202,6 +214,12 @@ pub fn build_backup_payload(
         .map(BackupContact::into_inner)
         .collect();
 
+    if known_group_ids.len() % GROUP_ID_LEN != 0 {
+        return Err(JsError::new(
+            "known_group_ids must be a flat concatenation of 32-byte ids",
+        ));
+    }
+
     let payload = BackupPayload {
         account_id: acct,
         created_at_ms,
@@ -209,6 +227,10 @@ pub fn build_backup_payload(
         accepted_contacts,
         mls_snapshots: Vec::new(),
         whole_storage_snapshot: whole_storage_snapshot.to_vec(),
+        known_group_ids: known_group_ids
+            .chunks(GROUP_ID_LEN)
+            .map(<[u8]>::to_vec)
+            .collect(),
     };
     payload.encode().map_err(err_to_js)
 }
@@ -263,6 +285,21 @@ impl ParsedBackupPayload {
     #[wasm_bindgen(getter, js_name = wholeStorageSnapshot)]
     pub fn whole_storage_snapshot(&self) -> Vec<u8> {
         self.inner.whole_storage_snapshot.clone()
+    }
+
+    /// The MLS `group_id`s the backup was taken with, flat-concatenated.
+    ///
+    /// Empty for a payload written before v4, and for a device that knew no
+    /// groups - the two are indistinguishable, and a restore treats both the
+    /// same way: it has no index to rebuild the chat list from, so it rebuilds
+    /// nothing rather than guessing.
+    ///
+    /// The restore path writes these into the per-device group index that
+    /// `rehydrate` reads; the whole-storage snapshot alone cannot supply it,
+    /// because the provider offers no way to enumerate what it holds.
+    #[wasm_bindgen(getter, js_name = knownGroupIds)]
+    pub fn known_group_ids(&self) -> Vec<u8> {
+        self.inner.known_group_ids.concat()
     }
 }
 
@@ -643,8 +680,15 @@ mod tests {
         let seed = vec![0x42u8; 32];
         let contacts = vec![sample_contact()];
         let snapshot = vec![0xEFu8; 8];
-        let wire = build_backup_payload(&account_id, 1_700_000_000_000, &seed, contacts, &snapshot)
-            .unwrap();
+        let wire = build_backup_payload(
+            &account_id,
+            1_700_000_000_000,
+            &seed,
+            contacts,
+            &snapshot,
+            &[],
+        )
+        .unwrap();
         let parsed = parse_backup_payload(&wire).unwrap();
         assert_eq!(parsed.account_id(), account_id);
         assert_eq!(parsed.created_at_ms(), 1_700_000_000_000);
@@ -670,8 +714,8 @@ mod tests {
         let without_id = sample_contact();
         let account_id = vec![0xA1u8; 16];
         let seed = vec![0x42u8; 32];
-        let wire =
-            build_backup_payload(&account_id, 1, &seed, vec![with_id, without_id], &[]).unwrap();
+        let wire = build_backup_payload(&account_id, 1, &seed, vec![with_id, without_id], &[], &[])
+            .unwrap();
         let parsed = parse_backup_payload(&wire).unwrap();
         let recovered = parsed.contacts();
         assert_eq!(recovered.len(), 2);
@@ -694,7 +738,7 @@ mod tests {
         let account_id = vec![0xCDu8; 16];
         let seed = vec![0x77u8; 32];
         let contacts = vec![sample_contact()];
-        let payload = build_backup_payload(&account_id, 99, &seed, contacts, &[]).unwrap();
+        let payload = build_backup_payload(&account_id, 99, &seed, contacts, &[], &[]).unwrap();
         let envelope = seal_backup(phrase, &payload).unwrap();
         let opened = open_backup(phrase, &envelope).unwrap();
         let parsed = parse_backup_payload(&opened).unwrap();
