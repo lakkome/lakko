@@ -348,6 +348,12 @@ internal class ChatRepositoryGroupCallPort(
             ui = ui,
             resolveDisplayName = names::resolve,
         )
+        // The SFU has a public address, so most clients reach it on a
+        // server-reflexive candidate - but one behind a symmetric NAT has
+        // none, and for it the relay is the only way into the room.
+        sessionTokenProvider()?.takeIf { it.isNotEmpty() }?.let { token ->
+            sfu.session.setTurnClient(TurnCredentialClient().apply { setSessionToken(token) })
+        }
         // A profile that arrives during the call (the newcomer's introduce-
         // yourself request is answered within about half a minute) bumps the
         // directory's version; rename the tiles already on screen rather than

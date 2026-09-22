@@ -1265,6 +1265,13 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
           onSessionStateChange: (state) => onGroupSessionState(hex, state),
         },
       );
+      // The SFU has a public address, so most clients reach it on a
+      // server-reflexive candidate - but one behind a symmetric NAT has none,
+      // and for it the relay is the only way into the room.
+      handle.session.setTurnProvider(async () => {
+        turn.setSessionToken(auth.identitySecrets()?.sessionToken ?? null);
+        return turn.fetchOrNull();
+      });
       setGroupHandle(handle);
       setGroupSlot({ groupIdB64, callIdHex: hex, starting: false });
       // The awaits above (JWT mint, the Start publish — which itself runs under

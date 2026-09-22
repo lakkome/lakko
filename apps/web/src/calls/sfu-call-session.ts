@@ -748,6 +748,36 @@ export class SfuCallSession {
   // Peer connection + publish
   // -----------------------------------------------------------------
 
+  /** Set by the call-host layer; `null` means STUN-only ICE. */
+  private turnProvider: (() => Promise<RTCIceServer | null>) | null = null;
+
+  /**
+   * Bind the TURN-credential source used when the peer connection is built.
+   *
+   * The SFU has a public address, so a client usually reaches it on a
+   * server-reflexive candidate - but a peer behind a symmetric NAT or an
+   * outbound-UDP-blocking network has no such candidate, and for it the relay
+   * is the only way in. Fail-soft: a provider that resolves `null`, or throws,
+   * leaves the call on STUN.
+   */
+  setTurnProvider(provider: (() => Promise<RTCIceServer | null>) | null): void {
+    this.turnProvider = provider;
+  }
+
+  /** STUN always - explicit config wins over the default - plus TURN when
+   *  one can be minted. */
+  private async resolveIceServers(): Promise<RTCIceServer[]> {
+    const base = [...(this.config.iceServers ?? DEFAULT_ICE_SERVERS)];
+    const provider = this.turnProvider;
+    if (provider === null) return base;
+    try {
+      const turn = await provider();
+      return turn === null ? base : [...base, turn];
+    } catch {
+      return base;
+    }
+  }
+
   private async openPeerConnectionAndPublish(): Promise<void> {
     if (this.activeSeed === null) {
       throw new Error(
@@ -783,7 +813,7 @@ export class SfuCallSession {
     }
 
     const pc = new RTCPeerConnection({
-      iceServers: [...(this.config.iceServers ?? DEFAULT_ICE_SERVERS)],
+      iceServers: await this.resolveIceServers(),
       bundlePolicy: "max-bundle",
       rtcpMuxPolicy: "require",
     });

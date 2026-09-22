@@ -416,14 +416,34 @@ final class SfuCallSession {
 
     // MARK: - Peer connection + publish
 
+    /// TURN-credential client, injected by the call-UI layer. `nil` means
+    /// STUN-only ICE.
+    ///
+    /// The SFU has a public address, so most clients reach it on a
+    /// server-reflexive candidate - but one behind a symmetric NAT has none,
+    /// and for it the relay is the only way into the room.
+    private var turnClient: TurnCredentialClient?
+
+    public func setTurnClient(_ client: TurnCredentialClient?) {
+        self.turnClient = client
+    }
+
+    /// STUN always, plus TURN when one can be minted. Fail-soft: a client that
+    /// answers `nil` leaves the call on STUN rather than refusing it.
+    private func resolveIceServers() async -> [RTCIceServer] {
+        var servers = WebRTCPeerConnection.defaultIceServers()
+        if let turn = turnClient, let row = await turn.fetchOrNil() {
+            servers.append(row)
+        }
+        return servers
+    }
+
     private func openPeerConnectionAndPublish() async throws {
         guard let seed = activeSeed else {
             // Never publish media without a seed (invariant #4).
             throw SfuCallError.sframeUnavailable
         }
-        let connection = WebRTCPeerConnection(
-            iceServers: WebRTCPeerConnection.defaultIceServers()
-        )
+        let connection = WebRTCPeerConnection(iceServers: await resolveIceServers())
         connection.installDelegate(makePeerDelegate())
         pc = connection
 

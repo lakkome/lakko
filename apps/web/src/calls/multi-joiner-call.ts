@@ -74,6 +74,7 @@ import {
   type VideoPublishState,
 } from "./sfu-call-session";
 import type { SfuPeerSnapshot } from "./sfu-signaling-client";
+import { TurnCredentialClient } from "./turn-credential-client";
 import {
   CallPresence,
   electActingCommitterLeaf,
@@ -144,7 +145,8 @@ export interface MultiJoinerCallOptions {
   readonly ownProfileEnvelope?: () => Promise<Uint8Array | null>;
   /** `services/auth` base URL for the JWT mint (default `/api/auth`). */
   readonly authBaseUrl?: string;
-  /** ICE servers (default public STUN; TURN is a follow-up). */
+  /** Extra ICE servers. A TURN row is minted from `sessionToken` on top of
+   *  whatever this carries; the default base is public STUN. */
   readonly iceServers?: readonly RTCIceServer[];
   /** Resolve a peer to a contact name (ADR-0021 peer_tag lookup). */
   readonly resolveDisplayName?: (
@@ -309,6 +311,12 @@ export class MultiJoinerCall {
         onCaptureFallback: (fallback): void => this.onCaptureFallback(fallback),
       },
     );
+    // A joiner behind a symmetric NAT has no server-reflexive candidate and
+    // reaches the room only through the relay. Fail-soft: no credential
+    // leaves the call on STUN.
+    const turn = new TurnCredentialClient(opts.authBaseUrl);
+    turn.setSessionToken(opts.sessionToken);
+    this.session.setTurnProvider(() => turn.fetchOrNull());
   }
 
   /** Section 4.4: the device lacked what the call asked for. Turn the missing

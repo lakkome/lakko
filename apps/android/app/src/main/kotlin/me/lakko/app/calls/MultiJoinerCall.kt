@@ -239,6 +239,13 @@ class MultiJoinerCall private constructor(
                 onSignalRelay = { from, payload -> onRelay(from, payload) },
             ),
         )
+        // A joiner behind a symmetric NAT has no server-reflexive candidate
+        // and reaches the room only through the relay. Fail-soft: no
+        // credential leaves the call on STUN.
+        if (opts.sessionToken.isNotEmpty()) {
+            session.setTurnClient(
+                TurnCredentialClient().apply { setSessionToken(opts.sessionToken) })
+        }
     }
 
     companion object {

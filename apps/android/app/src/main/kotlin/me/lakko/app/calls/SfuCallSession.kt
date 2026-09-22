@@ -411,6 +411,30 @@ class SfuCallSession(
 
     // ---- Peer connection + publish ----------------------------------
 
+    /**
+     * TURN-credential client, injected by the call-UI layer; `null` means
+     * STUN-only ICE.
+     *
+     * The SFU has a public address, so most clients reach it on a
+     * server-reflexive candidate - but one behind a symmetric NAT has none,
+     * and for it the relay is the only way into the room.
+     */
+    private var turnClient: TurnCredentialClient? = null
+
+    public fun setTurnClient(client: TurnCredentialClient?) {
+        this.turnClient = client
+    }
+
+    /**
+     * STUN always, plus TURN when one can be minted. Fail-soft: a client that
+     * answers `null` leaves the call on STUN rather than refusing it.
+     */
+    private suspend fun resolveIceServers(): List<PeerConnection.IceServer> {
+        val base = WebRtcPeerConnection.defaultIceServers()
+        val row = turnClient?.fetchOrNull() ?: return base
+        return base + row
+    }
+
     private suspend fun openPeerConnectionAndPublish() {
         // Fail-closed: never open the media path without an SFrame seed
         // (invariant #4). On the normal path `config.seed` is non-null; on
@@ -419,10 +443,10 @@ class SfuCallSession(
             ?: throw SfuCallException(
                 "no SFrame seed — refusing to publish media (invariant #4)",
             )
-        // The pod's ctor defaults `iceServers` to its own
-        // `defaultIceServers()` (STUN; TURN arrives via the rendezvous
-        // bootstrap config), so we don't pass it explicitly.
-        val connection = WebRtcPeerConnection(applicationContext = applicationContext)
+        val connection = WebRtcPeerConnection(
+            applicationContext = applicationContext,
+            iceServers = resolveIceServers(),
+        )
         connection.installDelegate(peerDelegate())
         pc = connection
 

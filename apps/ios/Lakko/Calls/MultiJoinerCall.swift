@@ -281,6 +281,14 @@ final class MultiJoinerCall {
             }
         )
         self.session = SfuCallSession(config: config, callbacks: callbacks)
+        // A joiner behind a symmetric NAT has no server-reflexive candidate and
+        // reaches the room only through the relay. Fail-soft: no credential
+        // leaves the call on STUN.
+        if !opts.sessionToken.isEmpty {
+            let turn = TurnCredentialClient()
+            turn.setSessionToken(opts.sessionToken)
+            self.session.setTurnClient(turn)
+        }
     }
 
     // MARK: - Factories

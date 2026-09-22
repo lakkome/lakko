@@ -837,7 +837,7 @@ extension GroupCallHost {
                 return try await client.mint(callId: callIdHex, role: .participant).jwt
             },
             makeHandle: { config, ui, callIdHex in
-                SfuCallUi(
+                let handle = SfuCallUi(
                     config: config,
                     ui: ui,
                     // Section 4.4: the user's own tile carries their own name
@@ -845,6 +845,15 @@ extension GroupCallHost {
                     localDisplayName: GroupCallHost.ownTileName(),
                     resolveDisplayName: GroupCallHost.displayNameResolver(callIdHex: callIdHex, ui: ui)
                 )
+                // The SFU has a public address, so most clients reach it on a
+                // server-reflexive candidate - but one behind a symmetric NAT
+                // has none, and for it the relay is the only way into the room.
+                if let token = sessionTokenProvider(), !token.isEmpty {
+                    let turn = TurnCredentialClient()
+                    turn.setSessionToken(token)
+                    handle.session.setTurnClient(turn)
+                }
+                return handle
             },
             conversationTitle: { [weak repository] in repository?.conversationTitle(groupIdHex: $0) },
             safetyNumber: { try? callSafetyNumber(seed: $0) },
