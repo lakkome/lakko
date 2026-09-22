@@ -531,6 +531,8 @@ export class CallSession {
             this.setState("connecting");
             // Answered: the ring clock is over, the connect clock starts now.
             this.armConnectTimer();
+            // ICE may already have connected during the two awaits above.
+            this.promoteIfTransportUp();
             // Arm onnegotiationneeded for future local track changes (B2b).
             this.negotiationReady = true;
           } catch (err) {
@@ -640,6 +642,8 @@ export class CallSession {
       // after the local description applies advances connecting → connected
       // rather than being overwritten back to connecting.
       this.setState("connecting");
+      // And ask, in case it connected before this line ran at all.
+      this.promoteIfTransportUp();
       // Arm onnegotiationneeded for future local track changes (B2b): the
       // answer is sent + our local description is set, so the initial
       // negotiation is applied on our side.
@@ -1003,11 +1007,7 @@ export class CallSession {
       if (this.pc !== pc) return;
       const s = pc.iceConnectionState;
       if (s === "connected" || s === "completed") {
-        this.clearIceGraceTimer();
-        if (this.state === "connecting") {
-          this.clearPhaseTimer();
-          this.setState("connected");
-        }
+        this.promoteIfTransportUp();
       } else if (s === "disconnected") {
         // Often transient. End only if it has not recovered after the grace;
         // a recovery (`connected` / `completed`) clears the timer above.
@@ -1020,12 +1020,12 @@ export class CallSession {
             if (this.pc !== pc) return;
             const now = pc.iceConnectionState;
             if (now === "disconnected" || now === "failed") {
-              void this.endLocal("error");
+              void this.endWithTransport("ICE stayed " + now + " past the grace");
             }
           }, this.timing.iceDisconnectedGraceMs);
         }
       } else if (s === "failed") {
-        void this.endLocal("error");
+        void this.endWithTransport("ICE failed");
       }
     };
   }
@@ -1157,7 +1157,9 @@ export class CallSession {
   private armConnectTimer(): void {
     this.armPhaseTimer(this.timing.connectTimeoutMs, () => {
       if (this.state === "ringing" || this.state === "connecting") {
-        void this.endLocal("error");
+        void this.endWithTransport(
+          `no connected transport within ${this.timing.connectTimeoutMs} ms`,
+        );
       }
     });
   }
@@ -1184,10 +1186,26 @@ export class CallSession {
     }
   }
 
-  private async endLocal(reason: WebCallEndReason): Promise<void> {
+  /**
+   * End the call from this side.
+   *
+   * `cause` is not decoration. A call that ends with `error` renders as
+   * "Last call ended (error)." and nothing else, and three of the paths that
+   * reach here used to be silent - the connect timeout, the ICE grace expiry
+   * and an outright ICE failure - so a web-to-iOS call that never connected
+   * produced an empty console and no way to tell those three apart. Every
+   * caller passing `error` names its cause, and this logs it once here rather
+   * than at each site.
+   */
+  private async endLocal(reason: WebCallEndReason, cause?: string): Promise<void> {
     // `ending` too: a timer firing while a hang-up is already publishing its
     // End must not publish a second one.
     if (this.state === "ending" || this.state === "done") return;
+    // eslint-disable-next-line no-console
+    console.warn(
+      `call ending locally: reason=${reason}, state=${this.state}` +
+        (cause === undefined ? "" : `, cause=${cause}`),
+    );
     this.clearPhaseTimer();
     this.clearIceGraceTimer();
     this.setState("ending", reason);
@@ -1201,6 +1219,82 @@ export class CallSession {
     }
     this.dispose();
     this.setState("done", reason);
+  }
+
+  /**
+   * Become `connected` if the transport already is.
+   *
+   * This asks the peer connection rather than waiting to be told, and that is
+   * the whole point. It used to live inside `oniceconnectionstatechange` and
+   * promote only when the session was already `connecting` - but on the
+   * offerer that state is set AFTER two awaits (`setRemoteDescription` for the
+   * answer, then the queued candidates), and ICE can reach `connected` inside
+   * that window. The event then arrived while the session still read
+   * `outgoing`, the promotion was skipped, and no further ICE transition was
+   * ever coming: the call sat in `connecting` over a working transport until
+   * the connect timer killed it as a failure. Seen live on a web-to-iOS call
+   * on 2026-09-22, where the diagnostic read `ice=connected conn=connected
+   * pairs=[succeeded:1]` at the moment it gave up. Calling this after every
+   * transition into `connecting` as well closes the window, and it is
+   * idempotent, so calling it twice costs nothing.
+   */
+  private promoteIfTransportUp(): void {
+    const pc = this.pc;
+    if (pc === null) return;
+    const s = pc.iceConnectionState;
+    if (s !== "connected" && s !== "completed") return;
+    this.clearIceGraceTimer();
+    if (this.state !== "connecting") return;
+    this.clearPhaseTimer();
+    this.setState("connected");
+  }
+
+  /** End with `error`, naming the transport as it was before the teardown. */
+  private async endWithTransport(what: string): Promise<void> {
+    const transport = await this.describeTransport();
+    await this.endLocal("error", `${what}; ${transport}`);
+  }
+
+  /**
+   * What the transport looked like at the moment a call gave up, as one line.
+   *
+   * The counts are what separate the failure modes that all surface as "the
+   * call did not connect": no remote candidates at all means signalling never
+   * delivered them; remote candidates present with no succeeded pair means
+   * connectivity checks failed, which is where a missing TURN relay or a
+   * candidate the other stack cannot resolve shows up. Read before ending,
+   * because ending disposes the peer connection.
+   */
+  private async describeTransport(): Promise<string> {
+    const pc = this.pc;
+    if (pc === null) return "no peer connection";
+    const head =
+      `ice=${pc.iceConnectionState} conn=${pc.connectionState} ` +
+      `gathering=${pc.iceGatheringState} signaling=${pc.signalingState}`;
+    try {
+      const report = await pc.getStats();
+      const local = new Map<string, number>();
+      const remote = new Map<string, number>();
+      const pairs = new Map<string, number>();
+      const bump = (m: Map<string, number>, k: string): void => {
+        m.set(k, (m.get(k) ?? 0) + 1);
+      };
+      report.forEach((stat: Record<string, unknown>) => {
+        const type = stat["type"];
+        if (type === "local-candidate") {
+          bump(local, String(stat["candidateType"] ?? "?"));
+        } else if (type === "remote-candidate") {
+          bump(remote, String(stat["candidateType"] ?? "?"));
+        } else if (type === "candidate-pair") {
+          bump(pairs, String(stat["state"] ?? "?"));
+        }
+      });
+      const fmt = (m: Map<string, number>): string =>
+        m.size === 0 ? "none" : [...m].map(([k, n]) => `${k}:${n}`).join(",");
+      return `${head} local=[${fmt(local)}] remote=[${fmt(remote)}] pairs=[${fmt(pairs)}]`;
+    } catch (err) {
+      return `${head} stats unavailable: ${String(err)}`;
+    }
   }
 
   private endRemote(reason: WebCallEndReason): void {

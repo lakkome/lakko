@@ -661,3 +661,52 @@ describe("1×1 ICE disconnected grace", () => {
     expect(session.getState()).toBe("done");
   });
 });
+
+/**
+ * The offerer's promotion to `connected` must not depend on WHEN ICE connects.
+ *
+ * Every other test here drives ICE after the answer has been applied, which is
+ * the ordering that always worked - and is why this survived. Live on a
+ * web-to-iOS call on 2026-09-22, ICE reached `connected` while the answer was
+ * still being applied, so the transition arrived before the session read
+ * `connecting`, the promotion was skipped, and no further ICE transition was
+ * ever coming. The call then sat in `connecting` over a working transport
+ * (`ice=connected conn=connected pairs=[succeeded:1]`) until the connect timer
+ * ended it as a failure.
+ */
+describe("offerer: ICE that connects while the answer is still being applied", () => {
+  /** Drive ICE to `connected` from inside `setRemoteDescription`, which is
+   *  where the browser really does it: the answer is what unblocks the
+   *  connectivity checks. */
+  function connectIceDuringAnswer(pc: FakePeerConnection): void {
+    const apply = pc.setRemoteDescription.bind(pc);
+    pc.setRemoteDescription = async (desc: {
+      type: string;
+      sdp: string;
+    }): Promise<void> => {
+      await apply(desc);
+      pc.setIce("connected");
+    };
+  }
+
+  it("reaches connected rather than sitting in connecting", async () => {
+    const { session } = makeSession();
+    await session.dial({ audio: true, video: false });
+    connectIceDuringAnswer(at(pcs, 0));
+    await session.applyIncomingSignaling(fakeAnswer());
+    await settle();
+    expect(session.getState()).toBe("connected");
+  });
+
+  it("is not killed by the connect timer", async () => {
+    vi.useFakeTimers();
+    const { session, published } = makeSession({ connectTimeoutMs: 2000 });
+    await session.dial({ audio: true, video: false });
+    connectIceDuringAnswer(at(pcs, 0));
+    await session.applyIncomingSignaling(fakeAnswer());
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(session.getState()).toBe("connected");
+    // The failure this pins published an End carrying `error`.
+    expect(published.filter((p) => p.startsWith("end:"))).toEqual([]);
+  });
+});
