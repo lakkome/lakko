@@ -27,6 +27,12 @@ Lakko source, whether you were dispatched by `audit-lead` or invoked directly:
   silent, read-only).
 - [`.claude/skills/audit-lead/severity.md`](../audit-lead/severity.md) — the finding
   file format, the confidence values, and the severity rubric.
+- [`.claude/skills/audit-lead/example-finding.md`](../audit-lead/example-finding.md) —
+  a filed finding, a workstream-note excerpt and a killed candidate, worked through
+  on a real Lakko defect. **Read this one even if you are short of room.** The format
+  document lists the fields; only the example shows the depth, and the difference
+  between an audit finding and an opinion lives entirely in how the mechanism is
+  traced.
 
 If no engagement directory was given to you, create one before you start:
 `docs/audit/$(date +%F)-<slug>/findings/`, and record the frozen commit
@@ -168,6 +174,29 @@ wasm-bindgen for TS, a slim decrypt-only surface for the iOS extension).
   decision. Check whether any client matches on error *strings*.
 - Anything a client computes itself that the core also computes — compare the two
   implementations.
+
+## Priority ladder — work it in order
+
+Read the budget rule in [`methodology.md`](../audit-lead/methodology.md) first.
+Cheap-and-broad before deep, because the cheap checks here find real things:
+
+1. **The coverage matrix** (§1). Mechanical, and a discipline present on two
+   platforms and absent on the third is a finding before you read a line of it.
+2. **The four priority disciplines** (§2): `AuthorIdentity`, `DurableCursor`,
+   `CommitterSweep`, `MembershipEnded`. Identity keying, cursor-versus-durable-state
+   ordering, the durable wedge, and what a client does after its own removal.
+3. **Invariant #7 per platform, and any silent fallback to a weaker store** (§3). A
+   silent fallback on a mandatory invariant carries the invariant's severity.
+4. **Cross-process boundaries** (§4) — verify "read-only" structurally, not by comment.
+5. **What the user is told** (§5), in particular any security indicator wired to
+   something that is not the security condition.
+6. **The remaining disciplines** (§2), in the order the matrix suggests.
+7. **FFI surface agreement** (§6).
+
+If the engagement is a **retest**, follow the retest rules in
+[`methodology.md`](../audit-lead/methodology.md) instead of this ladder: you are
+given specific findings, you re-derive each mechanism against the changed code, and
+you answer per finding rather than re-reviewing the surface.
 
 ## Findings
 

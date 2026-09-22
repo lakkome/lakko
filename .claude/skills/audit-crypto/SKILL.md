@@ -24,6 +24,12 @@ Lakko source, whether you were dispatched by `audit-lead` or invoked directly:
   silent, read-only).
 - [`.claude/skills/audit-lead/severity.md`](../audit-lead/severity.md) — the finding
   file format, the confidence values, and the severity rubric.
+- [`.claude/skills/audit-lead/example-finding.md`](../audit-lead/example-finding.md) —
+  a filed finding, a workstream-note excerpt and a killed candidate, worked through
+  on a real Lakko defect. **Read this one even if you are short of room.** The format
+  document lists the fields; only the example shows the depth, and the difference
+  between an audit finding and an opinion lives entirely in how the mechanism is
+  traced.
 
 If no engagement directory was given to you, create one before you start:
 `docs/audit/$(date +%F)-<slug>/findings/`, and record the frozen commit
@@ -53,7 +59,7 @@ Start at `crates/lakko-crypto/src/` and enumerate what is actually used — `aea
 - Which algorithm, which parameters, which upstream crate and version
   (`grep -n '^\[dependencies\]' -A40 crates/lakko-crypto/Cargo.toml`).
 - Is the crate a well-regarded implementation, is the version current, does it carry
-  an advisory (`cargo audit` output belongs to `audit-dynamic` — ask for it, do not
+  an advisory (`cargo audit` output belongs to `audit-impl`'s tooling half — ask for it, do not
   invent it).
 - Is the primitive used through a **misuse-resistant** wrapper, or does a caller get
   handed a nonce and a key and the chance to repeat them?
@@ -213,6 +219,34 @@ claimed. For each: does it hold, under which adversary, and what breaks it.
   forward secrecy usually dies.
 - Metadata confidentiality — state what is *not* protected, precisely.
 - Deniability — claimed or not, and what the signatures actually commit a user to.
+
+## Priority ladder — work it in order
+
+Read the budget rule in [`methodology.md`](../audit-lead/methodology.md) first.
+Ordered by where this system has actually been wrong, and by consequence:
+
+1. **AEAD key/nonce reuse across everything that shares a key** (§3). Two prior
+   defects here, the second being an incomplete fix for the first — which is the
+   strongest available evidence about where the third one is. Enumerate everything a
+   participant can hold *more than one of at once* and check each pair.
+2. **The key-derivation graph for the media chain and for account identity** (§2, §6)
+   — the two roots with the widest blast radius.
+3. **The domain-separation sweep** (§2.1). Cheap, mechanical, covers the whole
+   repository, and a near-miss found here is worth more than an hour elsewhere.
+4. **Signature and attestation cross-kind confusion** (§4) — four kinds under one
+   signing key is a deliberate risk concentration and deserves a direct check.
+5. **KDF parameters, with the word-vault arithmetic** (§7). Do the sums; this is the
+   one place the design knowingly trades away zero trust and it deserves a number.
+6. **Key transparency** (§5), including what invariant #6 reduces to if the log is
+   not deployed.
+7. **Randomness, constant-time, secret lifetime** (§8).
+8. **The whole-system property verdicts** (§9) — but write at least a partial version
+   of this even if you stop early, because it is what the report quotes.
+
+If the engagement is a **retest**, follow the retest rules in
+[`methodology.md`](../audit-lead/methodology.md) instead of this ladder: you are
+given specific findings, you re-derive each mechanism against the changed code, and
+you answer per finding rather than re-reviewing the surface.
 
 ## Findings
 

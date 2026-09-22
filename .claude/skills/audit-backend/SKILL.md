@@ -27,6 +27,12 @@ Lakko source, whether you were dispatched by `audit-lead` or invoked directly:
   silent, read-only).
 - [`.claude/skills/audit-lead/severity.md`](../audit-lead/severity.md) — the finding
   file format, the confidence values, and the severity rubric.
+- [`.claude/skills/audit-lead/example-finding.md`](../audit-lead/example-finding.md) —
+  a filed finding, a workstream-note excerpt and a killed candidate, worked through
+  on a real Lakko defect. **Read this one even if you are short of room.** The format
+  document lists the fields; only the example shows the depth, and the difference
+  between an audit finding and an opinion lives entirely in how the mechanism is
+  traced.
 
 If no engagement directory was given to you, create one before you start:
 `docs/audit/$(date +%F)-<slug>/findings/`, and record the frozen commit
@@ -176,6 +182,30 @@ ls infra/systemd/ ; grep -n 'SERVICES' infra/scripts/deploy.sh
   from outside. Read the nginx vhosts in `infra/nginx/`.
 - Secrets in configuration: what is in the repository, what is expected in the
   environment, and whether any default is a real value rather than empty.
+
+## Priority ladder — work it in order
+
+Read the budget rule in [`methodology.md`](../audit-lead/methodology.md) first. Three
+negative claims are the job, and a negative claim is tested by inventory:
+
+1. **The storage inventory from the migrations** (§1). Read every migration. This is
+   the direct test of invariants #1 and #2 and nothing substitutes for it.
+2. **Authorisation on any endpoint keyed by an identifier a third party could know**
+   (§3). Where "nobody else knows the id" is the whole defence, say so plainly —
+   that sentence is the finding.
+3. **The metadata inventory** (§2) — invariant #5's real test, and the half a schema
+   review misses.
+4. **Deployed posture versus documented posture** (§6). A service in no deploy target
+   enforces nothing, whatever its code says.
+5. **The fail-open set** (§4), judged together, with attention to whether any chain
+   reaches an *authorisation* decision rather than an abuse counter.
+6. **Tokens, recovery factors and the account lifecycle** (§5).
+7. **Enumeration, replay and resource limits** across the remaining routes (§3).
+
+If the engagement is a **retest**, follow the retest rules in
+[`methodology.md`](../audit-lead/methodology.md) instead of this ladder: you are
+given specific findings, you re-derive each mechanism against the changed code, and
+you answer per finding rather than re-reviewing the surface.
 
 ## Findings
 

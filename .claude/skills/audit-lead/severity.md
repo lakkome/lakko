@@ -22,7 +22,7 @@ publication.
 | `audit-impl` | `IM` | `LAK-IM-01` |
 | `audit-clients` | `CL` | `LAK-CL-01` |
 | `audit-backend` | `BE` | `LAK-BE-01` |
-| `audit-dynamic` | `DY` | `LAK-DY-01` |
+| `audit-impl`, tooling half | `DY` | `LAK-DY-01` |
 
 **At consolidation**, `audit-verify` assigns the report id — `LAK-01..` in severity
 order — and records the mapping in `20-verification.md`. The filing id stays in the

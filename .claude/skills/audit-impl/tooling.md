@@ -1,33 +1,19 @@
----
-name: audit-dynamic
-description: External-auditor dynamic and tooling analysis of Lakko — runs the test suite, dependency advisory and licence checks, lints, fuzz targets against a stated budget, sanitizer/miri passes, secret scanning over the tree and git history, and the reproducible-build check, reporting only measured results and naming everything that could not be run. One workstream of an audit engagement; also usable standalone to produce the measured evidence behind a security claim.
-context: fork
-agent: general-purpose
----
+# The measured half of the implementation workstream
 
-# Audit workstream — dynamic analysis and tooling
+You own two halves. The first is reading code (see `SKILL.md`). This is the second:
+**running things and reporting what happened.**
 
-You produce the **measured** half of the report. Every other workstream reasons about
-code; you run things and report what happened. That makes you the workstream with the
-strictest honesty constraint, because a number carries authority the reasoning does
-not, and a wrong one poisons the whole document.
+They are kept in separate documents, and their outputs are kept in separate files,
+for one reason. A number carries authority that reasoning does not, and the whole
+value of the measured half is that **every statement in `15-dynamic.md` came out of a
+command**. If reasoning and measurement share a document they contaminate each other:
+a sentence you inferred starts reading like a sentence you observed. So:
 
-Engagement: $ARGUMENTS
+- `12-implementation.md` — what you **read**. May reason, must cite `path:line`.
+- `15-dynamic.md` — what you **ran**. Commands and their real (trimmed) output, and
+  nothing you did not execute.
 
-## Read these first
-
-Two documents bind every auditor on this engagement. Read them before you read any
-Lakko source, whether you were dispatched by `audit-lead` or invoked directly:
-
-- [`.claude/skills/audit-lead/methodology.md`](../audit-lead/methodology.md) — the
-  phase model and the four rules (code first, `path:line` evidence, measured or
-  silent, read-only).
-- [`.claude/skills/audit-lead/severity.md`](../audit-lead/severity.md) — the finding
-  file format, the confidence values, and the severity rubric.
-
-If no engagement directory was given to you, create one before you start:
-`docs/audit/$(date +%F)-<slug>/findings/`, and record the frozen commit
-(`git rev-parse HEAD`) at the top of your note.
+Write both. Never let a conclusion cross from the first file into the second.
 
 ## The rule that governs this workstream
 
@@ -211,13 +197,3 @@ for f in crates/lakko-mls/src/*.rs; do m=$(basename $f .rs); \
 
 A module with tests is not a tested module, and say so — this is a *hint for the
 other workstreams about where to look*, not a coverage figure. Do not present it as one.
-
-## Findings
-
-[`severity.md`](../audit-lead/severity.md) format, numbered **`LAK-DY-NN`** (your workstream's filing prefix — `audit-verify` renumbers to the report id at consolidation, so never reach for a bare `LAK-NN`), under `docs/audit/<engagement>/findings/`, typically:
-unreviewed reachable parser with no fuzz target; a dependency advisory on a
-reachable path; a suspended lint in a security path; a tracked secret; a gate that
-does not gate; a test-suite claim that does not match the run.
-
-Then write `15-dynamic.md` with the environment record, each command, trimmed real
-output, and an explicit list of what could not be run here and why.

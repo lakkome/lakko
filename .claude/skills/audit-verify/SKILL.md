@@ -24,6 +24,12 @@ Lakko source, whether you were dispatched by `audit-lead` or invoked directly:
   silent, read-only).
 - [`.claude/skills/audit-lead/severity.md`](../audit-lead/severity.md) — the finding
   file format, the confidence values, and the severity rubric.
+- [`.claude/skills/audit-lead/example-finding.md`](../audit-lead/example-finding.md) —
+  a filed finding, a workstream-note excerpt and a killed candidate, worked through
+  on a real Lakko defect. **Read this one even if you are short of room.** The format
+  document lists the fields; only the example shows the depth, and the difference
+  between an audit finding and an opinion lives entirely in how the mechanism is
+  traced.
 
 If no engagement directory was given to you, create one before you start:
 `docs/audit/$(date +%F)-<slug>/findings/`, and record the frozen commit
@@ -165,6 +171,22 @@ answer, for the report's §9:
 - **Is the finding count a function of the surface or of the attention?** A workstream
   that reported nothing may have found nothing or may have run out of room. Ask it
   directly and record the answer.
+
+## In retest mode
+
+When the engagement is a retest, you verify **verdicts** rather than findings, and
+the same adversarial stance applies to the other side of the question.
+
+- For each `Fixed`, re-derive the original mechanism against the current code
+  yourself. A verdict reached by reading the fix's description is not a verdict.
+- Look specifically for the fix that **relocated** the defect and the fix that closed
+  **the reported instance while leaving the class open** — the second is the more
+  common and the easier to accept, because the original reproduction genuinely stops
+  working. Ask what the original reproduction was an *instance of*, and try the
+  neighbouring one.
+- A `Risk accepted` verdict is not yours to challenge, but the *reasoning* is: if the
+  acceptance rests on a factual claim, check the fact.
+- Findings raised against the fixes go through the full gate like any other.
 
 ## Deliverable — `20-verification.md`
 

@@ -39,7 +39,7 @@ docs/audit/<YYYY-MM-DD>-<slug>/
   12-implementation.md
   13-clients.md
   14-backend.md
-  15-dynamic.md         measured runs, with real output
+  15-dynamic.md         measured runs, with real output (audit-impl's second half)
   findings/LAK-NN.md    one file per finding
   20-verification.md    kill attempts, severity calibration, non-findings
   REPORT.md             the deliverable

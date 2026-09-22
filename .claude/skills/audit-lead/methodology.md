@@ -43,6 +43,53 @@ under the engagement directory, never inside `crates/` or `apps/`.
 
 ---
 
+## Working to a budget — the rule every workstream follows
+
+A real reviewer has a fixed number of days and a surface larger than those days. So
+do you. The failure mode is not running out; it is **running out invisibly** — going
+wide, going shallow everywhere, and producing a note whose silence reads as coverage.
+
+Every workstream therefore carries a **priority ladder**: its areas ordered by where
+the risk is, most-likely-to-matter first. Work it in order and obey three rules.
+
+**1. Depth before breadth.** Finish a rung before starting the next. Two rungs read
+properly are worth more than seven skimmed, because a skim finds only what is
+obvious, and what is obvious has usually already been found by the people who wrote it.
+
+**2. Stop while you can still write.** When you judge you have room for about one
+more rung, take no new rung: spend what is left on the note. An unwritten conclusion
+helps nobody, and a workstream that stops mid-investigation with a good note is a
+useful workstream, while one that investigated further and reported badly is not.
+
+**3. "Found nothing" and "did not reach" are different sentences and may never be
+written as one.** For every rung you did not take, say so explicitly, and say what
+you would have done. A rung you skipped is *unknown*, not *clear*, and the report's
+coverage statement is assembled from exactly these sentences. If you leave the
+distinction to the reader, they will read silence as safety, which is the one
+inference an audit must never invite.
+
+When the lead asks "was that a finding count or an attention count?", the answer must
+already be in your note.
+
+## Retest mode — when the engagement is a re-check of earlier findings
+
+A retest is not a smaller audit. You are handed specific findings from a previous
+engagement and a new frozen commit, and you answer one question per finding.
+
+- **Do not re-review the surface.** New findings outside the retest scope are welcome
+  but are not the job; note them briefly and stay on the list.
+- **Re-derive the original mechanism against the changed code.** Read the code as it
+  is now and walk the original steps against it. Never verify a fix by reading the
+  commit message, the ADR, or the vendor's account of what they changed — those
+  describe the intent, and the intent was not what was broken.
+- **Verdict per finding:** `Fixed` · `Partially fixed` (say which part, and the
+  residual severity) · `Not fixed` · `Risk accepted by vendor` (quote the acceptance).
+- **A fix that relocates the defect is `Not fixed`**, and the note says where it went.
+  So is a fix that closes the reported instance and leaves the class open — the
+  project has one of those in its own history and it is the more instructive kind.
+- **Raise findings against the fixes themselves.** A change made under time pressure
+  to close an audit finding is exactly the kind that introduces the next one.
+
 ## Phase 0 — Engagement setup (lead)
 
 Produces `00-engagement.md`.
@@ -104,7 +151,7 @@ They run in parallel and do not read each other's notes while working — conver
 independent findings are a signal, and cross-reading destroys it. Overlap at the
 seams is expected and is resolved in phase 5, not avoided in phase 3.
 
-## Phase 4 — Dynamic analysis (`audit-dynamic`)
+## Phase 4 — Dynamic analysis (`audit-impl`, its tooling half)
 
 Produces `15-dynamic.md`. Runs concurrently with phase 3.
 

@@ -24,6 +24,12 @@ Lakko source, whether you were dispatched by `audit-lead` or invoked directly:
   silent, read-only).
 - [`.claude/skills/audit-lead/severity.md`](../audit-lead/severity.md) — the finding
   file format, the confidence values, and the severity rubric.
+- [`.claude/skills/audit-lead/example-finding.md`](../audit-lead/example-finding.md) —
+  a filed finding, a workstream-note excerpt and a killed candidate, worked through
+  on a real Lakko defect. **Read this one even if you are short of room.** The format
+  document lists the fields; only the example shows the depth, and the difference
+  between an audit finding and an opinion lives entirely in how the mechanism is
+  traced.
 
 If no engagement directory was given to you, create one before you start:
 `docs/audit/$(date +%F)-<slug>/findings/`, and record the frozen commit
@@ -166,6 +172,29 @@ Then open the vendor's model and the seven invariants, and produce three lists:
 
 Finally, rank: where do *you* think the risk is, before any deep review has run.
 The other workstreams will confirm or embarrass that ranking, and either is useful.
+
+## Priority ladder — work it in order
+
+Read the budget rule in [`methodology.md`](../audit-lead/methodology.md) first. Your
+ladder is unusual: **rungs 1 and 2 are not optional**, because five other workstreams
+are blocked on them and a wrong map propagates into every note downstream.
+
+1. **The attack-surface inventory** (§1.2). Everything else consumes it.
+2. **The claim checks that change other workstreams' assumptions** — what is actually
+   deployed, and which security gates default to off. These two decide whether an
+   invariant is enforced in the shipped system at all, so a later workstream that
+   does not know them will reason about a configuration nobody runs.
+3. **The key and trust-boundary map** (§1.3).
+4. **Your own threat model** (§2) — write it before reading the vendor's, or its
+   value is gone and cannot be recovered.
+5. **The cheap counted claims** — test totals, fuzz-target totals, invariant counts.
+6. **Module-doc drift**, in the crates the engagement's scope names first.
+7. **Everything else in the claim log.**
+
+If the engagement is a **retest**, follow the retest rules in
+[`methodology.md`](../audit-lead/methodology.md) instead of this ladder: you are
+given specific findings, you re-derive each mechanism against the changed code, and
+you answer per finding rather than re-reviewing the surface.
 
 ## Findings
 

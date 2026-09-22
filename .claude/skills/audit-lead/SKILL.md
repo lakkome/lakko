@@ -31,7 +31,11 @@ other, and never let a specialist fall back into diff-review.
    whole team is bound by it.
 2. [`severity.md`](severity.md) — the finding format and the severity rubric.
 3. [`report-template.md`](report-template.md) — what you assemble at the end.
-4. `docs/security/external-review-scope.md` — the vendor's own scope brief. It is
+4. [`example-finding.md`](example-finding.md) — a filed finding, a workstream-note
+   excerpt and a killed candidate, worked through on a real (and already-fixed)
+   Lakko defect. Pass it to every specialist: the format documents the fields and
+   only the example conveys the depth.
+5. `docs/security/external-review-scope.md` — the vendor's own scope brief. It is
    the natural anchor for scope and the natural **first target** for claim
    verification. It ends by telling you it cannot guarantee it stays true. Believe
    that sentence.
@@ -81,10 +85,9 @@ them:
 |---|---|
 | `audit-crypto` | `10-crypto.md` |
 | `audit-protocol` | `11-protocol.md` |
-| `audit-impl` | `12-implementation.md` |
+| `audit-impl` | `12-implementation.md` **and** `15-dynamic.md` (it owns both the reading and the measured tooling pass) |
 | `audit-clients` | `13-clients.md` |
 | `audit-backend` | `14-backend.md` |
-| `audit-dynamic` | `15-dynamic.md` |
 
 Pass each one, as arguments: the engagement directory path, the frozen SHA, the
 in-scope components for that workstream, and any question from the maintainer that
@@ -123,6 +126,34 @@ Write `REPORT.md` from `report-template.md`. Your own work, not a concatenation:
   could not be exercised.
 - Never claim the release gate can close unless the scope actually covered what the
   gate is about, at a depth you can name.
+
+## Resuming an engagement that stopped mid-way
+
+An engagement is long and a context is not. Assume you will be picked up by a
+successor who was not here, and make that cheap rather than trying to avoid it.
+
+**While running**, keep `00-engagement.md` as the live record, not as a document
+written once. After each phase, update a `## Progress` section at its foot: which
+workstreams have delivered their note, which findings exist by filing id, and what
+is outstanding. One line each. A workstream whose note is missing has not run, and
+that must be legible without reading anything else.
+
+**When resuming**, do this before anything else:
+
+1. Read `00-engagement.md`, including its progress log.
+2. `git rev-parse HEAD` and compare with the frozen SHA. **If the tree has moved,
+   do not silently continue** — either resume against the original SHA (`git show`
+   for every read, which is correct and slower) or declare a new frozen commit and
+   record that findings in the engagement were filed against two different states.
+   The second is acceptable; hiding it is not.
+3. List `findings/` and the workstream notes to see what actually landed, rather
+   than trusting the progress log alone — the log is written by an agent that may
+   have stopped before updating it.
+4. Re-dispatch only the missing workstreams. Never re-run a completed one for
+   tidiness: two runs of the same workstream produce two overlapping finding sets
+   and hand `audit-verify` a deduplication problem that did not need to exist.
+
+A resumed engagement says so in the report's methodology section, with the dates.
 
 ## Phase 7 — retest
 

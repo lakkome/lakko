@@ -1,6 +1,6 @@
 ---
 name: audit-impl
-description: External-auditor implementation review of Lakko's Rust code — parser bounds and panic surfaces, integer and slice arithmetic, error paths and whether failures land open or closed, secret lifetime and logging, unsafe in the FFI crates, locking and read-modify-write races, durability ordering, and resource exhaustion. One workstream of an audit engagement; also usable standalone to review a Rust crate for implementation-level defects rather than design ones.
+description: External-auditor implementation review of Lakko's Rust code, plus the measured tooling pass — parser bounds and panic surfaces, integer and slice arithmetic, error paths and whether failures land open or closed, secret lifetime and logging, unsafe in the FFI crates, locking and read-modify-write races, durability ordering and resource exhaustion; then the runs that produce numbers (test suite, cargo audit and deny, clippy, fuzzing against a stated budget, miri, secret scanning, reproducible build). One workstream of an audit engagement; also usable standalone to review a Rust crate for implementation-level defects, or to produce the measured evidence behind a security claim.
 context: fork
 agent: general-purpose
 ---
@@ -24,10 +24,35 @@ Lakko source, whether you were dispatched by `audit-lead` or invoked directly:
   silent, read-only).
 - [`.claude/skills/audit-lead/severity.md`](../audit-lead/severity.md) — the finding
   file format, the confidence values, and the severity rubric.
+- [`.claude/skills/audit-lead/example-finding.md`](../audit-lead/example-finding.md) —
+  a filed finding, a workstream-note excerpt and a killed candidate, worked through
+  on a real Lakko defect. **Read this one even if you are short of room.** The format
+  document lists the fields; only the example shows the depth, and the difference
+  between an audit finding and an opinion lives entirely in how the mechanism is
+  traced.
 
 If no engagement directory was given to you, create one before you start:
 `docs/audit/$(date +%F)-<slug>/findings/`, and record the frozen commit
 (`git rev-parse HEAD`) at the top of your note.
+
+## You have two halves
+
+**Reading** is this document. **Running** is
+[`tooling.md`](tooling.md) in this directory — the test suite, dependency
+advisories, lints, fuzzing against a stated budget, miri, secret scanning and the
+reproducible-build check. Both are yours; a reviewer who reads a parser and then
+fuzzes it is one person in any real firm, and the two halves feed each other: the
+reading tells you which target to fuzz, the running tells you which path to read.
+
+They produce **two separate files**, and the separation is not cosmetic:
+
+- `12-implementation.md` — what you read. May reason; every claim cites `path:line`.
+- `15-dynamic.md` — what you ran. Commands and their real output, and **nothing you
+  did not execute**. The value of that file is that a reader can trust every number
+  in it without checking, so a single inferred sentence in it costs more than it
+  saves.
+
+Do the reading first where you can: it tells you what is worth measuring.
 
 ## Your stance
 
@@ -163,13 +188,48 @@ surface: causing an eviction is causing a bypass.
 
 ## 8. Dependency and build hygiene
 
-Observational only — the measured advisory run belongs to `audit-dynamic`:
+Observational here; the measured advisory run is your own second half ([`tooling.md`](tooling.md) §3):
 
 - Vendored forks under `crates/vendor/`: what is the delta from upstream, is it
   frozen by a test, and does the fork still track a maintained upstream?
 - Build-time configuration that changes a security property: feature flags, `cfg`
   gates, `debug_assertions`-only behaviour, test-only hooks that could arm in a
   release build. Grep for `debug_assertions` and for fixed-seed or override env vars.
+
+## Priority ladder — work it in order
+
+Read the budget rule in [`methodology.md`](../audit-lead/methodology.md) first. You
+have two halves, so interleave deliberately: rung 1 of the tooling half is cheap and
+tells you where to spend the reading.
+
+**Reading half:**
+
+1. **Parsers reachable from an untrusted source that have no fuzz target** (§1) —
+   the intersection of "attacker-controlled" and "never machine-explored".
+2. **The fail-open inventory, judged as a set** (§3). Nobody has done this and the
+   vendor asks for it; individually-argued choices are exactly what accumulates into
+   an unintended path.
+3. **Panic surfaces inside the rung-1 parsers** (§2).
+4. **Secret lifetime and logging** (§4).
+5. **`unsafe` in the exempt crates** (§5).
+6. **Concurrency and durability ordering** (§6) — a documented defect class here.
+7. **Resource exhaustion** (§7), then **dependency and build hygiene** (§8).
+
+**Tooling half** ([`tooling.md`](tooling.md)), whose first three rungs are cheap
+enough to take early whatever else you do:
+
+1. The test-suite reality and the ignored-test enumeration.
+2. Dependency advisories and the duplicate-version check.
+3. **The fuzz gap analysis** — doable with no fuzzing at all, and it produces rung 1
+   of the reading half.
+4. Secret scanning.
+5. Actual fuzz runs, with the budget stated in seconds.
+6. miri on the exempt crates; the reproducible-build configuration check.
+
+If the engagement is a **retest**, follow the retest rules in
+[`methodology.md`](../audit-lead/methodology.md) instead of this ladder: you are
+given specific findings, you re-derive each mechanism against the changed code, and
+you answer per finding rather than re-reviewing the surface.
 
 ## Findings
 
