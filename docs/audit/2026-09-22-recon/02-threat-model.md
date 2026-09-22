@@ -258,7 +258,7 @@ grepping the three client trees for `PresenceToken`, `deriveToken`,
 `PresenceTracker` or `presence_seed` returns zero hits in each
 (`01-surface.md` §1.2). The `presence_seed` MLS exporter the crate specifies
 itself against does not exist in `lakko-mls`. The document lists a mitigation
-that is not wired. See **LAK-RC-10**.
+that is not wired. See **LAK-RC-10** (and **LAK-RC-05** for the dead-code half).
 
 **On the local-disk attacker.** The row reads: *"Every at-rest piece is wrapped
 under a hardware-backed key […]. Plaintext is unreachable without the device's

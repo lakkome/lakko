@@ -460,6 +460,11 @@ with a developer-console warning. See **LAK-RC-09**.
 - `CLAUDE.md` says `lakko-crypto` provides HPKE and OPRF; it does not (the crate's
   own row in `CLAUDE.md` already corrects this — the correction is present and the
   original claim is in the crate's `Cargo.toml` description).
+- `docs/security/threat-model.md` names the hard boundary as
+  *"(client wasm/uniffi) ↔ (server gRPC / HTTP)"*. There is no gRPC anywhere in
+  the tree; every service is axum over HTTP.
+- The same document's invariant #7 omits "TPM 2.0", which `CLAUDE.md`'s copy of
+  the same invariant includes. Two lists of the same invariant disagree.
 - `CLAUDE.md` claims 268 tests in `lakko-mls`; measured 291 (§4.4).
 - `crates/lakko-tuf` module doc describes "defense-in-depth delegation rejection";
   `CLAUDE.md` already notes the delegation walk superseded it. Moot either way —
@@ -482,6 +487,11 @@ with a developer-console warning. See **LAK-RC-09**.
 | LAK-RC-07 | No automated CI gate runs tests, lints, formatting, licensing or dependency checks | Medium |
 | LAK-RC-08 | 23 database-backed security tests pass without executing when no test DB is configured | Medium |
 | LAK-RC-09 | A transparency-log mismatch is reported only to the developer console | Medium |
+| LAK-RC-10 | The threat model cites blinded presence tokens as an active invariant-#5 defence; none is wired | Low |
+
+Severities are the finder's proposal. `audit-verify` calibrates, and LAK-RC-01 /
+LAK-RC-02 share a root cause (*authorisation by possession of a published
+pseudonym*) that a verification pass may prefer to merge.
 
 ---
 
