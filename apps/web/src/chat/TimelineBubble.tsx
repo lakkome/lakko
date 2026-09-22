@@ -22,6 +22,7 @@ import { formatAttachmentSize, type AttachmentRefBytes } from "./attachments";
 import { useChats } from "./ChatContext";
 import { OWN_REACTION_SENTINEL, REACTION_EMOJI, type MessageOpState } from "./message-ops";
 import { ownPersonKeyB64 } from "./person-key";
+import { NotSent } from "../media/MediaBubbles";
 import { shortTime } from "./timeline-layout";
 import type { TimelineRow } from "./timeline-row";
 import { EmojiPicker } from "../media/EmojiPicker";
@@ -71,7 +72,10 @@ export interface BubbleHost {
   /** ADR-0047 — the media runtime, this row's upload state and its retry. */
   hub: MediaHub;
   mediaUpload: MediaUpload;
-  onRetryMedia: () => void;
+  /** Send this row again. One handler for both kinds of outgoing row: from
+   *  the bubble a failed take and a failed composer message are the same
+   *  gesture, and the person cannot tell them apart. */
+  onRetrySend: () => void;
   /** ADR-0047 — the reaction bar's "+" opens the full picker for this id. */
   fullReactPickerId: number | null;
   onOpenFullReactPicker: (messageId: number) => void;
@@ -369,7 +373,7 @@ function ChatBubbleBody(
                           mediaKey={keyFor(ref)}
                           incoming={isIncoming}
                           upload={props.mediaUpload}
-                          onRetry={props.onRetryMedia}
+                          onRetry={props.onRetrySend}
                         />
                       )}
                     </For>
@@ -476,7 +480,16 @@ function ChatBubbleBody(
         </Show>
 
         <div class="lk-bubble-meta">
-          <span>{props.time}</span>
+          {/* A failed row offers Retry where the message is. The media
+              bubbles draw their own, so this is for a row that has none:
+              before it, a plain text message that did not send showed the
+              words "Not sent" and no way to act on them. */}
+          <Show
+            when={props.ack === "failed" && mediaRefs().length === 0}
+            fallback={<span>{props.time}</span>}
+          >
+            <NotSent onRetry={() => props.onRetrySend()} />
+          </Show>
           {/* ADR-0024 — read state on our OWN acked messages. A single
               check once published ("Sent"); a double check once
               EVERY other member's read watermark covers this message

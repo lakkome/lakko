@@ -51,6 +51,7 @@ import { useCallHost } from "../calls/CallHostContext";
 import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
 import { eventToPersistedMessage, mergeForegroundSlot } from "../chat/background-log";
 import { opsFromPersisted, persistedWithOps } from "../chat/message-ops-store";
+import { sendFailureNotice, withSendAck } from "../chat/send-failure";
 import { memberKeysOf, peerName } from "../chat/peer-name";
 import { ownPersonKeyB64, peopleCountOf, personKeyOf } from "../chat/person-key";
 import { groupTitle } from "../chat/group-title";
@@ -3399,7 +3400,26 @@ function ChatView(props: {
     ]);
     setInput("");
     setPendingAttachments([]);
+    await publishOutgoing(tempId, text, attached);
+  }
 
+  /**
+   * Publish one outgoing row's envelope and settle its ack.
+   *
+   * Shared by the first attempt and by Retry, so the two cannot drift on
+   * what a send is. A failure leaves the bubble in the timeline reading
+   * "Not sent - Retry" (`docs/ux/media-messages.md` section 3), which is
+   * the whole point: it used to DELETE the row, and since `setInput("")`
+   * had already run and nothing put the words back, a message typed on a
+   * bad connection simply vanished. The attachments were handed back to
+   * the composer; the text was not handed back anywhere.
+   */
+  async function publishOutgoing(
+    tempId: number,
+    text: string,
+    attached: AttachmentRefBytes[],
+  ): Promise<void> {
+    setRows([...withSendAck(rows(), tempId, "pending")]);
     try {
       // 1.19c2: compose the JSON envelope from (text, refs).
       // Empty refs ⇒ pure-text envelope; non-empty ⇒ multi-
@@ -3424,14 +3444,8 @@ function ChatView(props: {
         ),
       );
     } catch (err) {
-      // Roll back the optimistic bubble + restore the
-      // attachments to the composer so the user can retry
-      // without re-picking the same files.
-      setRows(
-        rows().filter((r) => !(r.kind === "outgoing" && r.tempId === tempId)),
-      );
-      setPendingAttachments(attached);
-      setError(formatError(err));
+      setRows([...withSendAck(rows(), tempId, "failed")]);
+      setError(sendFailureNotice(membershipRefusalOf(err, membershipRetryMaySucceed)));
     }
   }
 
@@ -4076,9 +4090,27 @@ function ChatView(props: {
     }
   }
 
-  function retryMediaSend(tempId: number): void {
+  /**
+   * Send that row again.
+   *
+   * One entry point for both kinds of outgoing row, because from the bubble
+   * they are the same gesture and the user cannot tell them apart. A media
+   * take has an upload job to re-run; a row from the composer has only its
+   * envelope, which is re-published from the row itself. Before this, the
+   * "Not sent - Retry" the bubble already drew for a composer row with an
+   * attachment called into the media path, found no job for that tempId and
+   * returned silently - a button that did nothing, every time.
+   */
+  function retrySend(tempId: number): void {
     const job = mediaJobs.get(tempId);
-    if (job !== undefined) void runMediaJob(job);
+    if (job !== undefined) {
+      void runMediaJob(job);
+      return;
+    }
+    const row = rows().find((r) => r.kind === "outgoing" && r.tempId === tempId);
+    if (row === undefined || row.kind !== "outgoing") return;
+    setError(null);
+    void publishOutgoing(tempId, row.plaintext, row.attachments);
   }
 
   /** A finished recording the user chose to send. */
@@ -6635,9 +6667,9 @@ function ChatView(props: {
                 actionsAvailable={messageActionsAvailable()}
                 hub={hub}
                 mediaUpload={mediaUploadFor(row())}
-                onRetryMedia={() => {
+                onRetrySend={() => {
                   const r = row();
-                  if (r.kind === "outgoing") retryMediaSend(r.tempId);
+                  if (r.kind === "outgoing") retrySend(r.tempId);
                 }}
                 fullReactPickerId={fullReactPickerId()}
                 onOpenFullReactPicker={(id) => {

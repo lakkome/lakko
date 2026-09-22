@@ -45,7 +45,11 @@ export interface MediaBubbleProps {
 const WAVE_BARS = 40;
 const SEEK_STEP_MS = 5000;
 
-function NotSent(props: { onRetry: () => void }): JSX.Element {
+/** The affordance for a row that did not reach the server: says what happened
+ *  and offers the one action, in the place the message is. Exported so the
+ *  text bubble shows the SAME thing a failed media bubble does - two spellings
+ *  of "this did not send" is one of them being wrong. */
+export function NotSent(props: { onRetry: () => void }): JSX.Element {
   return (
     <button
       type="button"

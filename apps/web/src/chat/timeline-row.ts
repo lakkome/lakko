@@ -28,9 +28,14 @@ export type TimelineRow =
       tempId: number;
       plaintext: string;
       attachments: AttachmentRefBytes[];
-      /** ADR-0047 — `"failed"` is an outgoing media message whose upload or
-       *  publish failed: it stays in the timeline with `Not sent · Retry`
-       *  and nothing reached the other side. Never persisted. */
+      /** `"failed"` is an outgoing message that did not reach the server:
+       *  it stays in the timeline with `Not sent · Retry` and nothing
+       *  reached the other side. Never persisted.
+       *
+       *  It began as a media-only state (ADR-0047) and now covers every
+       *  outgoing row. A composer message used to be DELETED on failure -
+       *  and since the composer had already been cleared, the words went
+       *  with it. */
       ack: "pending" | "sent" | "failed";
       /** ADR-0047 — set on an outgoing media message: the key its local
        *  bytes are filed under in the media hub until the upload lands. */
