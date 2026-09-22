@@ -880,6 +880,48 @@ private fun SessionRoot(
     // cursor is one value on the repository, so a second long poll racing this
     // one could advance it past events the other is still handling. The
     // Contacts screen keeps its one-shot refresh (a manual pull, `waitSecs 0`).
+    // Keep the encrypted backup current. Until this ran, the blob was written
+    // exactly twice in an account's life - an empty baseline at signup and one
+    // at recover - so a restore on a new device landed the person back at
+    // registration day. Inert while nothing has changed; see
+    // `backup/AutoBackup.kt` for what counts as a change.
+    val backupContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
+    LaunchedEffect(lifecycleOwner, authRepository, chatRepository) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+            val driver = me.lakko.app.backup.AutoBackupDriver(
+                applicationContext = backupContext,
+                scope = this,
+                inputs = me.lakko.app.backup.AutoBackupDriver.Inputs(
+                    accountId = { authRepository.identitySecrets.value?.accountId },
+                    accountIdB64 = {
+                        authRepository.identitySecrets.value?.let {
+                            me.lakko.app.auth.base64Encode(it.accountId)
+                        }
+                    },
+                    sessionToken = { authRepository.identitySecrets.value?.sessionToken },
+                    accountIdentitySeed = {
+                        authRepository.identitySecrets.value?.accountIdentitySeed
+                    },
+                    // `null` until the chat layer has bootstrapped, so an empty
+                    // list during startup is never mistaken for "left every
+                    // group".
+                    knownGroupIds = {
+                        chatRepository.state.value.let { st ->
+                            if (st.bootstrapped) st.threads.map { it.groupIdHex } else null
+                        }
+                    },
+                    snapshot = { chatRepository.currentStorageSnapshot() },
+                ),
+            )
+            driver.start()
+            try {
+                kotlinx.coroutines.awaitCancellation()
+            } finally {
+                driver.stop()
+            }
+        }
+    }
+
     LaunchedEffect(lifecycleOwner, contactsRepository) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
             while (true) {

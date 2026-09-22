@@ -4041,6 +4041,17 @@ public final class ChatRepository: ObservableObject {
     /// pre-bootstrap) there is nothing durable to persist and no
     /// reload-from-snapshot path that could re-consume a generation, so
     /// this resolves as a no-op (mirror of the web no-op-when-`onPersist`-
+    /// The whole MLS storage snapshot, for the automatic backup.
+    ///
+    /// `nil` when no canonical identity is loaded - which is not the same as
+    /// an empty snapshot, and the caller must not upload one for the other.
+    /// Safe to read beside the persist paths because both run on the main
+    /// actor, so neither can observe the other mid-write.
+    public func currentStorageSnapshot() -> Data? {
+        guard let identity = canonicalIdentity else { return nil }
+        return try? identity.snapshotStorage()
+    }
+
     /// unset posture).
     private func persistSnapshotDurableOrThrow() throws {
         guard let identity = canonicalIdentity,

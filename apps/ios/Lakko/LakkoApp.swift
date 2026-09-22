@@ -785,6 +785,34 @@ private struct SessionRoot: View, Equatable {
         // `identitySecrets` first, so the read below sees them. Runs on every
         // login/signup/recover AND on a relaunch that restored the session from
         // the Keychain; bootstrap is idempotent for the same account id.
+        // Keep the encrypted backup current. Until this ran, the blob was
+        // written exactly twice in an account's life - an empty baseline at
+        // signup and one at recover - so a restore on a new device landed the
+        // person back at registration day. Inert while nothing has changed;
+        // see `Backup/AutoBackup.swift` for what counts as a change.
+        .task(id: account.accountIdB64) {
+            let driver = AutoBackupDriver(inputs: .init(
+                accountId: { authRepository.identitySecrets?.accountId },
+                accountIdB64: { authRepository.identitySecrets.map { base64Encode($0.accountId) } },
+                sessionToken: { authRepository.identitySecrets?.sessionToken },
+                accountIdentitySeed: { authRepository.identitySecrets?.accountIdentitySeed },
+                // `nil` until the chat layer has bootstrapped, so an empty
+                // list during startup is never mistaken for "left every group".
+                knownGroupIds: {
+                    chatRepository.state.bootstrapped
+                        ? chatRepository.state.threads.map(\.groupIdHex)
+                        : nil
+                },
+                snapshot: { chatRepository.currentStorageSnapshot() }
+            ))
+            driver.start()
+            // The task is cancelled when the account changes or the shell goes
+            // away; the loop observes that, and this stops the timer with it.
+            defer { driver.stop() }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
         .task(id: account.accountIdB64) {
             if let secrets = authRepository.identitySecrets {
                 // ADR-0048 — the profile directory first: the chat bootstrap

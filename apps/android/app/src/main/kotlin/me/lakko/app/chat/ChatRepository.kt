@@ -670,6 +670,23 @@ public class ChatRepository(
     }
 
     /**
+     * The whole MLS storage snapshot, for the automatic backup.
+     *
+     * `null` when no canonical identity is loaded - which is not the same as
+     * an empty snapshot, and the caller must not upload one for the other.
+     * Taken under [providerLock] on [mlsDispatcher], because one provider
+     * serves every group and a snapshot captured mid-commit would record a
+     * group torn between two epochs.
+     */
+    public suspend fun currentStorageSnapshot(): ByteArray? =
+        withContext(mlsDispatcher) {
+            providerLock.withLock {
+                val identity = canonicalIdentity.get() ?: return@withLock null
+                runCatching { identity.snapshotStorage() }.getOrNull()
+            }
+        }
+
+    /**
      * Publish a KeyPackage this device can be added to a group with: mint it
      * from the canonical [Identity], persist the provider snapshot durably
      * under [providerLock], and only then upload it with the session token.
