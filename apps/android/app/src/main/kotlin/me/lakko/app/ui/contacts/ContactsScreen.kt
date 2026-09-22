@@ -72,8 +72,6 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import me.lakko.app.contacts.GeneratedInvite
 import me.lakko.app.contacts.INVITE_URL_PREFIX
 import me.lakko.app.contacts.IncomingContactRequest
@@ -127,17 +125,14 @@ public fun ContactsScreen(
     val nameVersion by directory.version.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
-    // Auto-refresh on first arrival + continuous long-poll while the screen is
-    // visible. The coroutine cancels when the composable leaves composition.
+    // Refresh on arrival only. The continuous long poll moved to the session
+    // root (`SessionRoot` in `MainActivity`), because the account mailbox
+    // carries contact requests, acknowledgements and the Welcome that makes a
+    // peer's 1x1 chat appear — none of which may wait for this screen to be
+    // open. Two continuous readers would race the repository's single cursor,
+    // so this one is a one-shot.
     LaunchedEffect(Unit) {
         viewModel.onRefreshClicked()
-        while (isActive) {
-            try {
-                viewModel.pollOnceLongPoll()
-            } catch (_: Throwable) {
-                delay(POLL_RETRY_BACKOFF_MS)
-            }
-        }
     }
 
     var query by remember { mutableStateOf("") }
@@ -1038,5 +1033,3 @@ internal fun launchShareIntent(context: Context, url: String) {
     context.startActivity(chooser)
 }
 
-/** Back-off delay between failed long-poll iterations. */
-private const val POLL_RETRY_BACKOFF_MS: Long = 5_000L

@@ -5,8 +5,10 @@ package me.lakko.app.contacts
 
 import android.util.Log
 import android.content.Context
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import me.lakko.app.auth.AuthRepository
@@ -403,130 +405,140 @@ public class ContactsRepository(
         if (isManualRefresh) {
             mutableState.update { it.copy(refreshing = true, lastError = null) }
         }
-        try {
-            useClientWith(secrets) { client, sender ->
-                val result = client.pollStrangerInbox(
-                    mySignaturePubkey = sender.signaturePubkey,
-                    myX25519Secret = sender.x25519Secret,
-                    after = mutableState.value.cursor,
-                    waitSecs = waitSecs,
-                )
-                val newIncoming = result.events.filterIsInstance<
-                    IncomingMailboxEvent.ContactRequest>(
-                ).map { it.request }
-                val welcomes = result.events.filterIsInstance<
-                    IncomingMailboxEvent.Welcome>(
-                )
-                val acks = result.events.filterIsInstance<
-                    IncomingMailboxEvent.ContactAck>(
-                ).map { it.ack }
-                // Forward Welcomes to the chat repository so the
-                // peer's startGroupWith lands a live 1×1 chat.
-                // Best-effort: a single bad Welcome doesn't
-                // block the inbox poll from advancing the
-                // cursor for the rest of the events.
-                // `joinGroupFromWelcome` republishes this device's
-                // KeyPackage after every attempt, success or failure.
-                var joinFailure: String? = null
-                for (welcome in welcomes) {
-                    if (chatRepo != null) {
-                        try {
-                            chatRepo.joinGroupFromWelcome(welcome.welcomeBytes)
-                        } catch (e: kotlinx.coroutines.CancellationException) {
-                            throw e
-                        } catch (e: Throwable) {
-                            // A dropped Welcome is a chat someone started
-                            // with this user that will never appear, so it
-                            // must not vanish silently. The detail goes to
-                            // the log; the inline error tells the user.
-                            android.util.Log.w(
-                                "ContactsRepository",
-                                "joining a group from a Welcome failed",
-                                e,
-                            )
-                            joinFailure = WELCOME_JOIN_FAILED_MESSAGE
+        // Off the main thread, for every caller. Everything below blocks:
+        // `useClientWith` opens the identity over the FFI, and the poll holds
+        // the connection for up to `waitSecs`. Both callers reach this from a
+        // `LaunchedEffect` or a `viewModelScope`, i.e. the main dispatcher, so
+        // without this the long poll freezes the UI for its whole window and
+        // Android raises "Lakko isn't responding". Nothing here needs the main
+        // thread: the state is a `MutableStateFlow` and the stores below it
+        // are their own.
+        withContext(Dispatchers.IO) {
+            try {
+                useClientWith(secrets) { client, sender ->
+                    val result = client.pollStrangerInbox(
+                        mySignaturePubkey = sender.signaturePubkey,
+                        myX25519Secret = sender.x25519Secret,
+                        after = mutableState.value.cursor,
+                        waitSecs = waitSecs,
+                    )
+                    val newIncoming = result.events.filterIsInstance<
+                        IncomingMailboxEvent.ContactRequest>(
+                    ).map { it.request }
+                    val welcomes = result.events.filterIsInstance<
+                        IncomingMailboxEvent.Welcome>(
+                    )
+                    val acks = result.events.filterIsInstance<
+                        IncomingMailboxEvent.ContactAck>(
+                    ).map { it.ack }
+                    // Forward Welcomes to the chat repository so the
+                    // peer's startGroupWith lands a live 1×1 chat.
+                    // Best-effort: a single bad Welcome doesn't
+                    // block the inbox poll from advancing the
+                    // cursor for the rest of the events.
+                    // `joinGroupFromWelcome` republishes this device's
+                    // KeyPackage after every attempt, success or failure.
+                    var joinFailure: String? = null
+                    for (welcome in welcomes) {
+                        if (chatRepo != null) {
+                            try {
+                                chatRepo.joinGroupFromWelcome(welcome.welcomeBytes)
+                            } catch (e: kotlinx.coroutines.CancellationException) {
+                                throw e
+                            } catch (e: Throwable) {
+                                // A dropped Welcome is a chat someone started
+                                // with this user that will never appear, so it
+                                // must not vanish silently. The detail goes to
+                                // the log; the inline error tells the user.
+                                android.util.Log.w(
+                                    "ContactsRepository",
+                                    "joining a group from a Welcome failed",
+                                    e,
+                                )
+                                joinFailure = WELCOME_JOIN_FAILED_MESSAGE
+                            }
                         }
                     }
-                }
-                // ADR-0048 §3 — a request's profile is bound to its
-                // signature-verified `from_pubkey`; store it (strictly newer
-                // only) so the request card can say who is asking.
-                profileDirectory?.let { directory ->
-                    for (req in newIncoming) {
-                        val profile = req.profile ?: continue
-                        directory.onProfileReceived(
-                            signatureKeyB64 = java.util.Base64.getEncoder()
-                                .encodeToString(req.fromPubkey),
-                            profile = profile,
+                    // ADR-0048 §3 — a request's profile is bound to its
+                    // signature-verified `from_pubkey`; store it (strictly newer
+                    // only) so the request card can say who is asking.
+                    profileDirectory?.let { directory ->
+                        for (req in newIncoming) {
+                            val profile = req.profile ?: continue
+                            directory.onProfileReceived(
+                                signatureKeyB64 = java.util.Base64.getEncoder()
+                                    .encodeToString(req.fromPubkey),
+                                profile = profile,
+                            )
+                        }
+                    }
+                    // The session ended (or switched) during the poll: this batch
+                    // belongs to the previous account's inbox. `clear()` already
+                    // reset the state; do not land the rows or the cursor in it.
+                    if (boundInboxAccountB64 != accountB64) return@useClientWith
+
+                    var dropped: List<IncomingContactRequest> = emptyList()
+                    var acceptedChanged = false
+                    mutableState.update { state ->
+                        // Someone accepted one of this device's requests: they are
+                        // a contact here too, with their account id.
+                        val applied = applyContactAcks(state.accepted, state.sent, acks)
+                        acceptedChanged = applied.acceptedChanged
+                        // Dedupe: a row already pending (same DS messageId) or a
+                        // sender already accepted is not a new request.
+                        val merged = mergeFetchedRequests(
+                            pending = state.pending,
+                            accepted = applied.accepted,
+                            fetched = newIncoming,
+                        )
+                        dropped = merged.dropped
+                        state.copy(
+                            accepted = applied.accepted,
+                            sent = applied.sent,
+                            pending = withoutAcceptedSenders(merged.pending, applied.accepted),
+                            // Never backwards: a stale batch cannot re-arm a
+                            // re-fetch of rows this device already handled.
+                            cursor = advanceInboxCursor(state.cursor, result.cursor),
+                            // Always clear the refreshing flag —
+                            // even if this was a long-poll that
+                            // didn't raise it, clearing is a no-op.
+                            refreshing = false,
+                            // Secrets were present for this poll, so any earlier
+                            // re-auth prompt no longer applies.
+                            requiresReauth = false,
+                            // A failed join stays visible across the silent
+                            // background long polls (which would otherwise clear
+                            // it within seconds) until the user refreshes by hand.
+                            lastError = joinFailure
+                                ?: state.lastError.takeIf {
+                                    !isManualRefresh && it == WELCOME_JOIN_FAILED_MESSAGE
+                                },
                         )
                     }
+                    if (dropped.isNotEmpty()) {
+                        android.util.Log.d(
+                            "ContactsRepository",
+                            "inbox: dropped ${dropped.size} fetched request(s) already pending " +
+                                "or from an accepted contact (ids ${dropped.map { it.messageId }})",
+                        )
+                    }
+                    // Both writes strictly after the batch landed in state: a
+                    // crash between the poll and here re-fetches the batch (the
+                    // dedupe above absorbs it) rather than losing it.
+                    if (acceptedChanged) persistAccepted()
+                    if (newIncoming.isNotEmpty() || acceptedChanged) persistInboxPending()
+                    persistInboxCursor()
                 }
-                // The session ended (or switched) during the poll: this batch
-                // belongs to the previous account's inbox. `clear()` already
-                // reset the state; do not land the rows or the cursor in it.
-                if (boundInboxAccountB64 != accountB64) return@useClientWith
-
-                var dropped: List<IncomingContactRequest> = emptyList()
-                var acceptedChanged = false
-                mutableState.update { state ->
-                    // Someone accepted one of this device's requests: they are
-                    // a contact here too, with their account id.
-                    val applied = applyContactAcks(state.accepted, state.sent, acks)
-                    acceptedChanged = applied.acceptedChanged
-                    // Dedupe: a row already pending (same DS messageId) or a
-                    // sender already accepted is not a new request.
-                    val merged = mergeFetchedRequests(
-                        pending = state.pending,
-                        accepted = applied.accepted,
-                        fetched = newIncoming,
-                    )
-                    dropped = merged.dropped
-                    state.copy(
-                        accepted = applied.accepted,
-                        sent = applied.sent,
-                        pending = withoutAcceptedSenders(merged.pending, applied.accepted),
-                        // Never backwards: a stale batch cannot re-arm a
-                        // re-fetch of rows this device already handled.
-                        cursor = advanceInboxCursor(state.cursor, result.cursor),
-                        // Always clear the refreshing flag —
-                        // even if this was a long-poll that
-                        // didn't raise it, clearing is a no-op.
-                        refreshing = false,
-                        // Secrets were present for this poll, so any earlier
-                        // re-auth prompt no longer applies.
-                        requiresReauth = false,
-                        // A failed join stays visible across the silent
-                        // background long polls (which would otherwise clear
-                        // it within seconds) until the user refreshes by hand.
-                        lastError = joinFailure
-                            ?: state.lastError.takeIf {
-                                !isManualRefresh && it == WELCOME_JOIN_FAILED_MESSAGE
-                            },
-                    )
+            } catch (e: ContactsError) {
+                // Background long-polls surface failures on the `lastError`
+                // slot too — the UI renders one plain sentence, never the
+                // transport's own message (endpoint paths and pseudonyms are
+                // not user copy). The raw error goes to the log; the caller
+                // (a `LaunchedEffect` loop) retries on the next iteration.
+                Log.w(TAG, "contacts inbox: poll failed", e)
+                mutableState.update {
+                    it.copy(refreshing = false, lastError = INBOX_FETCH_FAILURE_MESSAGE)
                 }
-                if (dropped.isNotEmpty()) {
-                    android.util.Log.d(
-                        "ContactsRepository",
-                        "inbox: dropped ${dropped.size} fetched request(s) already pending " +
-                            "or from an accepted contact (ids ${dropped.map { it.messageId }})",
-                    )
-                }
-                // Both writes strictly after the batch landed in state: a
-                // crash between the poll and here re-fetches the batch (the
-                // dedupe above absorbs it) rather than losing it.
-                if (acceptedChanged) persistAccepted()
-                if (newIncoming.isNotEmpty() || acceptedChanged) persistInboxPending()
-                persistInboxCursor()
-            }
-        } catch (e: ContactsError) {
-            // Background long-polls surface failures on the `lastError`
-            // slot too — the UI renders one plain sentence, never the
-            // transport's own message (endpoint paths and pseudonyms are
-            // not user copy). The raw error goes to the log; the caller
-            // (a `LaunchedEffect` loop) retries on the next iteration.
-            Log.w(TAG, "contacts inbox: poll failed", e)
-            mutableState.update {
-                it.copy(refreshing = false, lastError = INBOX_FETCH_FAILURE_MESSAGE)
             }
         }
     }

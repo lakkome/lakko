@@ -844,8 +844,7 @@ private fun SessionRoot(
     // ADR-0050 section 2.7 — this DEVICE's mailbox, where Welcomes sealed to
     // this device's own KeyPackages arrive (a contact's new chat, the pairing
     // fan-out, a re-admission). Long-polled while the app is in the foreground,
-    // whatever screen is showing; the account mailbox stays with the contacts
-    // screen as before.
+    // whatever screen is showing.
     LaunchedEffect(lifecycleOwner, chatRepository) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
             while (true) {
@@ -857,6 +856,43 @@ private fun SessionRoot(
                 } catch (_: Throwable) {
                     kotlinx.coroutines.delay(APP_POLL_RETRY_BACKOFF_MS)
                 }
+                val elapsed = android.os.SystemClock.elapsedRealtime() - startedAt
+                if (elapsed < APP_POLL_MIN_ITERATION_MS) {
+                    kotlinx.coroutines.delay(APP_POLL_MIN_ITERATION_MS - elapsed)
+                }
+            }
+        }
+    }
+
+    // The ACCOUNT mailbox, for the whole session rather than one screen.
+    //
+    // This loop used to live inside the Contacts screen, so nothing was read
+    // from the account mailbox while the user sat on Chats, Groups, Channels
+    // or Settings — and three things ride it: a contact request, a contact
+    // acknowledgement, and the Welcome a peer sends from `startGroupWith` when
+    // they accept, which is the only thing that makes their 1x1 chat appear.
+    // A person added to a chat would not see it until they happened to open
+    // Contacts. iOS moved the same loop to its session root on 2026-09-17 and
+    // Android was not carried along; found on 2026-09-22 while timing a
+    // contact request that had in fact been waiting for the screen.
+    //
+    // It is deliberately the ONLY continuous reader of this mailbox: the
+    // cursor is one value on the repository, so a second long poll racing this
+    // one could advance it past events the other is still handling. The
+    // Contacts screen keeps its one-shot refresh (a manual pull, `waitSecs 0`).
+    LaunchedEffect(lifecycleOwner, contactsRepository) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+            while (true) {
+                val startedAt = android.os.SystemClock.elapsedRealtime()
+                try {
+                    contactsRepository.refreshInbox(waitSecs = APP_LONG_POLL_SECS)
+                } catch (cancel: kotlinx.coroutines.CancellationException) {
+                    throw cancel
+                } catch (_: Throwable) {
+                    kotlinx.coroutines.delay(APP_POLL_RETRY_BACKOFF_MS)
+                }
+                // A poll that returns at once (no session yet, a refused
+                // request) must not become a busy loop.
                 val elapsed = android.os.SystemClock.elapsedRealtime() - startedAt
                 if (elapsed < APP_POLL_MIN_ITERATION_MS) {
                     kotlinx.coroutines.delay(APP_POLL_MIN_ITERATION_MS - elapsed)
