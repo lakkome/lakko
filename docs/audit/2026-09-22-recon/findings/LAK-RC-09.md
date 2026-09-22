@@ -54,7 +54,7 @@ not:
 ```
 
 `console.warn` is the entire user-facing consequence. The verdict is persisted
-next to the pin (`recordLogStatus(accountIdB64, status)` at `:1616`), so the
+next to the pin (`recordLogStatus(accountIdB64, status)` at `:1617`), so the
 information exists in the client's own store — it simply never reaches a person.
 Grepping the web tree for a consumer of that recorded status outside the
 contacts client and its tests returns nothing that renders it.

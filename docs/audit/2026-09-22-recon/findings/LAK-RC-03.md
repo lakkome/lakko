@@ -10,7 +10,7 @@
 - **Status:** Open
 - **Component:** `infra/systemd/`, `infra/scripts/deploy.sh:34`,
   `infra/nginx/sites-available/lakko.conf`,
-  `apps/web/src/transparency/config.ts:26-45`,
+  `apps/web/src/transparency/config.ts:12-26`,
   `.github/workflows/deploy-web.yml:58-61, 88-94`
 - **Invariants touched:** #6 (identity rotation only via the KT log supersession
   proof), #4, C-56, C-57
@@ -44,7 +44,7 @@ So `services/transparency` (3,756 lines), `services/witness` (826) and
 compiled by the workspace and run nowhere.
 
 **Step 2 — the client gate is off unless pinned at build time, and fails open.**
-`apps/web/src/transparency/config.ts:26-45` says so in its own words:
+`apps/web/src/transparency/config.ts:12-26` says so in its own words:
 
 ```
  *   * `VITE_LAKKO_TRANSPARENCY_URL` … **Unset → the whole log check is OFF.**
@@ -53,7 +53,7 @@ compiled by the workspace and run nowhere.
  * The skip path is deliberately fail-OPEN for availability …
 ```
 
-`pinnedWitnessKeys()` (`:113-135`) returns `[]` when unset, which the same file
+`pinnedWitnessKeys()` (`:112-135`) returns `[]` when unset, which the same file
 documents as "the witness gate is OFF (dormant, the operator-only transition
 posture)".
 
@@ -135,7 +135,7 @@ order:
    largest single source of false confidence in the corpus.
 2. **Make the client state its own posture to the user.** The client already
    computes `"off"` as a distinct log verdict and records it
-   (`client.ts:1616`). Surfacing "this conversation's key has not been checked
+   (`client.ts:1617`). Surfacing "this conversation's key has not been checked
    against a transparency log" — once, in the safety-number UI — turns an
    invisible default into an informed one.
 
