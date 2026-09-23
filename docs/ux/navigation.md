@@ -7,6 +7,17 @@ Date: 2026-09-23. Scope: web, iOS, Android. Supersedes the destination list in
 [`client-redesign.md`](client-redesign.md) section "Navigation" and updates
 section 4 of the design system.
 
+**How to read this.** Everything below is a requirement for all three
+clients. Where a platform genuinely has to differ, the difference is stated
+inline, at the requirement it belongs to, marked **Per platform**. There is
+no mapping table at the end and no per-client section: a spec whose body
+describes one client and whose tail translates it makes that client's
+accidents into everyone's contract.
+
+What is BUILT, on which client, is not here - that is
+[`PRODUCT-READINESS.md`](../PRODUCT-READINESS.md), whose job is to be honest
+about the product rather than about the intent.
+
 ## 0. Why
 
 Two things are wrong with the shipped navigation, and they have opposite
@@ -64,6 +75,10 @@ is - no badge, no label, no differing avatar shape.
 A conversation the person has left, or a channel they unsubscribed from, is
 not in the list.
 
+**Per platform.** Opening a row is a click or a tap; the row's own menu is a
+right-click on the web and a long press on both natives. That is the whole
+difference - the row itself is the same row.
+
 ### 2.2 Ordering
 
 1. Pinned, newest first.
@@ -95,8 +110,8 @@ kind at a time.
 ## 3. The create menu
 
 One button, top right of the Chats list, an unambiguous "compose" affordance
-(not a bare `+`, which on the natives reads as "add contact"). Tapping it
-opens a menu of exactly three items, in this order:
+(not a bare `+`, which reads as "add contact"). Tapping it opens a menu of
+exactly three items, in this order:
 
 1. **New chat** - pick from contacts. A contact with no conversation yet
    starts one; a contact with one opens it.
@@ -105,6 +120,11 @@ opens a menu of exactly three items, in this order:
 
 Each item is a row with a leading icon and a label. No descriptions; if an
 item needs a sentence to explain it, the label is wrong.
+
+**Per platform.** The menu is whatever that platform's people already know a
+menu to be - a popover under the button on the web, a `Menu` on the toolbar
+button on iOS, a `DropdownMenu` on the top-app-bar action on Android. Same
+three items, same order, same labels.
 
 The empty state's button opens this same menu, and so does the keyboard
 shortcut on web.
@@ -120,6 +140,10 @@ The field at the top of the Chats list, because a group and a channel are
 kinds of conversation rather than kinds of contact, and because finding a
 person to talk to starts a conversation too. Contacts is about people you
 already know.
+
+**Per platform.** Pinned above the list on the web, `.searchable` on iOS, a
+search bar above the list on Android - the same field where each platform
+puts one.
 
 The LOCAL half is settled and built: fuzzy over the titles and previews of
 what this device already holds. **How the whole field should present itself
@@ -216,53 +240,51 @@ web does not - its call log is a store the chat list never reads). Those are
 defects against the existing spec, not new work from this one, and they are
 tracked in `PRODUCT-READINESS.md`.
 
-## 6. Data each client must expose
+## 6. What the data has to provide
 
-This is what has to exist before the screens can be built, and it is where
-the three clients currently differ most.
+Requirements, not an inventory of who has what. Where a client is further
+from one than another, that is a fact about today and belongs in
+[`PRODUCT-READINESS.md`](../PRODUCT-READINESS.md).
 
 ### 6.1 The merged list
 
-Each client needs ONE ordered sequence of conversations carrying, per row:
-kind, id, title, avatar source, last-activity timestamp, preview line,
-unread count, pinned, muted, archived.
+ONE ordered sequence of conversations, each row carrying: kind, id, title,
+avatar source, last-activity timestamp, preview line, unread count, pinned,
+muted, archived.
 
-- **Web** has chats and groups in one store already, and channels in a
-  separate one (`channels/`). They must be merged into one sorted sequence.
-- **iOS / Android** have the same split. The chat list is built from
-  `ChatThread`s; channels are their own screen and their own model.
+Chats and groups already share a store everywhere, so they merge by dropping
+a filter. Channels do not, and the mapping that costs something is the same
+everywhere: a channel's "last post time" has to become the same field as a
+chat's "last message time", or the one ordering has nothing to order by.
 
-None of the three has a channel's "last post time" in the same shape as a
-chat's "last message time". That mapping is the first thing to build.
+Pinned, muted, archived and unread are keyed on a conversation id a channel
+does not carry. Until that is resolved a channel row shows none of them,
+which is honest; inventing a badge that can never be non-zero is not.
 
 ### 6.2 The calls list
 
-A **flat, cross-conversation, time-ordered** sequence, which none of the
-three can produce today:
+A **flat, cross-conversation, time-ordered** sequence, holding per row:
+conversation id, kind, outcome, whether it was a video call, start time,
+duration.
 
-- **Web** keeps a per-group call log (`calls/call-log-store.ts`, encrypted,
-  capped at 200 per group). A global list is a flatten-and-sort over every
-  group's list - correct, and cheap at this size.
-- **iOS / Android** keep call rows as *system rows inside each
-  conversation's message log* (`CallTranscriptRow`, `CallTranscriptEntry`).
-  Producing a global list means scanning every conversation's whole
-  transcript on every open, which is the wrong cost and gets worse with use.
-  **The natives need a call index** - the same shape the web store already
-  has - written at the moment a call row is written. That is the one piece of
-  new persistence this redesign requires.
+Two requirements follow from the shape rather than from any platform.
 
-Either way the row needs: conversation id, kind, outcome, whether it was a
-video call, start time, duration. The natives' current row carries the human
-label rather than the parts (`callRowText` returns "Missed call"), so the
-index must carry the parts and let the label be derived - a list cannot sort
-or filter on a sentence.
+**It must be an index, not a scan.** A call belongs to a conversation, so the
+tempting place to keep it is inside that conversation's transcript - and then
+the Calls screen costs a walk of every transcript on every open, which gets
+worse with use. Whatever each client already does, the list reads an index
+written when the call row is.
+
+**It must hold the parts, not the sentence.** A list sorts and filters on an
+outcome and a timestamp. A row that stores the finished words ("Missed call")
+cannot be sorted on, so the index carries the parts and the words are derived
+from them.
 
 ### 6.3 Search
 
-Nothing to specify until section 4 is settled. Worth recording now: matching
-over titles and contact names is local and needs no new data, the exact
-lookup reuses the existing discovery client unchanged, and searching message
-TEXT would need an index no client has.
+Matching over titles and previews is local and needs no new data. The network
+lookup reuses the existing discovery client unchanged. Searching message TEXT
+needs an index that does not exist and is out of this spec.
 
 ## 7. Not in this spec
 
@@ -274,41 +296,18 @@ TEXT would need an index no client has.
   the message log. Making it follow the person is the same question as
   cross-device message history and belongs with it.
 
-## 7.1 What is built, on web
+## 8. One model, three implementations
 
-- **Calls** is a destination again and lists real history, day by day.
-- **Chats and groups are one list.** The pane took a `kind` prop and was
-  rendered twice; the prop is gone, a row routes by its own kind, and the
-  rail's Groups entry is folded into Chats.
-- **The create menu** is the three items, opened by the compose button and by
-  the empty state alike.
-- **Channels are in the list**, ordered with everything else by when
-  something last happened in them. Their row is shorter by necessity rather
-  than by design: a channel is not the MLS-group shape the row is written
-  against, so it carries no unread badge and no pin / mute / archive, which
-  are keyed on a conversation group id it does not have. A badge that can
-  never be non-zero would be a worse lie than none.
-- **The Channels destination is gone.** The find-by-`@handle` field it used
-  to hold moved to Contacts, beside "Add by username", which is where it
-  belonged: a lookup is a function, and keeping a whole destination alive
-  because a field happened to sit on it is backwards. The `/channels`
-  screens stay at their URLs and count as Chats while open.
-- **"Create call link" left the Contacts menu** for Calls, where section 3
-  puts it.
-- **Search** is the local filter plus the single network-lookup row of
-  section 4.3, in Chats. What is still open is only how the field should
-  present itself once it also covers message text.
-- **iOS and Android have none of this yet.**
+Nothing in this document is a web requirement that the other two approximate.
+The four destinations, their order, the one row shape, the ordering rule, the
+three create items and the single lookup row are the same on all three; the
+only differences are the **Per platform** notes above, and each is there
+because the platform gives a person a different idiom for the same act, never
+because one client was written first.
 
-## 8. Cross-platform shape
-
-| | web | iOS | Android |
-|---|---|---|---|
-| destinations | left rail at >= 720 px, bottom bar below | bottom `TabView` | bottom `NavigationBar` |
-| create menu | popover under the compose button | `Menu` on the toolbar button | `DropdownMenu` on the top-app-bar action |
-| search | field pinned above the list | `.searchable` on the list | `SearchBar` above the list |
-| row press | click opens; right-click the row menu | tap opens; long-press the row menu | tap opens; long-press the row menu |
-
-The three implement the same model: same four destinations in the same
-order, one row shape that says nothing about the kind of conversation, the
-same ordering rule and the same three create items.
+The rules that decide any of it - the ordering, what counts as a lookable
+name - are shared code rather than three translations of a paragraph. Where
+that code lives is a question for the maintainer (the project's precedent is
+the Rust core behind both FFI surfaces, which is why `should_request_profiles`
+and `acting_committer_verdict` are written once); what this spec requires is
+only that there be one of each.
