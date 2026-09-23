@@ -18,7 +18,7 @@ export default function GroupsLayout(props: RouteSectionProps): JSX.Element {
   const open = (): boolean => params.id !== undefined || location.pathname === paths.newGroup;
   return (
     <div class="lk-split" data-open={open() ? "true" : "false"}>
-      <ChatList kind="group" activeGroupIdB64={params.id ?? null} />
+      <ChatList activeGroupIdB64={params.id ?? null} />
       <div class="lk-main">{props.children}</div>
     </div>
   );

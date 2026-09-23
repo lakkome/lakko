@@ -18,7 +18,7 @@ export default function ChatsLayout(props: RouteSectionProps): JSX.Element {
   const open = (): boolean => params.id !== undefined;
   return (
     <div class="lk-split" data-open={open() ? "true" : "false"}>
-      <ChatList kind="chat" activeGroupIdB64={params.id ?? null} />
+      <ChatList activeGroupIdB64={params.id ?? null} />
       <div class="lk-main">{props.children}</div>
     </div>
   );

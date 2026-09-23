@@ -251,6 +251,25 @@ TEXT would need an index no client has.
   the message log. Making it follow the person is the same question as
   cross-device message history and belongs with it.
 
+## 7.1 What is built, on web
+
+- **Calls** is a destination again and lists real history, day by day.
+- **Chats and groups are one list.** The pane took a `kind` prop and was
+  rendered twice; the prop is gone, a row routes by its own kind, and the
+  rail's Groups entry is folded into Chats.
+- **The create menu** is the three items, opened by the compose button and by
+  the empty state alike.
+- **Channels are NOT in the list yet**, so Channels keeps its rail entry.
+  Mapping them in is not a matter of appending rows: a channel is not the
+  MLS-group shape the row is written against, and the pin / mute / archive
+  flags, the unread summary and the row menu are all keyed on a conversation
+  group id it does not have. Until that is done the rail keeps the entry,
+  because removing it first would leave a person's channels reachable only
+  by typing a URL.
+- **Search** is untouched and still the local filter it was: section 4 is
+  open.
+- **iOS and Android have none of this yet.**
+
 ## 8. Cross-platform shape
 
 | | web | iOS | Android |

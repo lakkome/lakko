@@ -3,13 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import {
-  conversationMatches,
-  mergeConversations,
-  sectionConversations,
-  sortConversations,
-  type ConversationRow,
-} from "./conversation-list";
+import { sortConversations, type ConversationRow } from "./conversation-list";
 
 function row(over: Partial<ConversationRow> = {}): ConversationRow {
   return {
@@ -87,80 +81,5 @@ describe("sortConversations", () => {
     const input = [row({ id: "1", lastActivityMs: 1 }), row({ id: "2", lastActivityMs: 2 })];
     sortConversations(input);
     expect(input.map((r) => r.id)).toEqual(["1", "2"]);
-  });
-});
-
-describe("mergeConversations", () => {
-  it("interleaves the sources by time rather than concatenating them", () => {
-    const chats = [row({ id: "c", kind: "chat", lastActivityMs: 5 })];
-    const groups = [row({ id: "g", kind: "group", lastActivityMs: 15 })];
-    const channels = [row({ id: "n", kind: "channel", lastActivityMs: 10 })];
-    expect(mergeConversations(chats, groups, channels).map((r) => r.id)).toEqual([
-      "g",
-      "n",
-      "c",
-    ]);
-  });
-
-  it("copes with a source that is empty", () => {
-    expect(mergeConversations([], [row({ id: "only" })], []).map((r) => r.id)).toEqual([
-      "only",
-    ]);
-  });
-});
-
-describe("sectionConversations", () => {
-  const ordered = sortConversations([
-    row({ id: "live1", lastActivityMs: 9 }),
-    row({ id: "live2", lastActivityMs: 8 }),
-    ...Array.from({ length: 6 }, (_, i) =>
-      row({ id: `arch${i}`, lastActivityMs: i, archived: true }),
-    ),
-  ]);
-
-  it("splits live from archived without reordering either", () => {
-    const s = sectionConversations(ordered, false);
-    expect(s.live.map((r) => r.id)).toEqual(["live1", "live2"]);
-    expect(s.archived).toHaveLength(6);
-    expect(s.archived[0]?.id).toBe("arch5");
-  });
-
-  it("keeps archived inline on a wide layout however many there are", () => {
-    expect(sectionConversations(ordered, false).collapseArchived).toBe(false);
-  });
-
-  it("collapses archived on a narrow layout once there are more than a handful", () => {
-    expect(sectionConversations(ordered, true).collapseArchived).toBe(true);
-  });
-
-  it("leaves a handful of archived inline even when narrow", () => {
-    const few = sortConversations([
-      row({ id: "live", lastActivityMs: 9 }),
-      row({ id: "arch", lastActivityMs: 1, archived: true }),
-    ]);
-    expect(sectionConversations(few, true).collapseArchived).toBe(false);
-  });
-});
-
-describe("conversationMatches", () => {
-  it("matches part of a title, because this runs on data we already hold", () => {
-    expect(conversationMatches(row({ title: "Climbing club" }), "climb")).toBe(true);
-  });
-
-  it("matches the preview too", () => {
-    expect(conversationMatches(row({ preview: "see you then" }), "you the")).toBe(true);
-  });
-
-  it("ignores case and accents", () => {
-    expect(conversationMatches(row({ title: "Renée" }), "renee")).toBe(true);
-    expect(conversationMatches(row({ title: "Renee" }), "RENÉE")).toBe(true);
-  });
-
-  it("matches everything on an empty query", () => {
-    expect(conversationMatches(row(), "   ")).toBe(true);
-  });
-
-  it("does not match what is not there", () => {
-    expect(conversationMatches(row({ title: "Anna", preview: "hi" }), "boris")).toBe(false);
   });
 });

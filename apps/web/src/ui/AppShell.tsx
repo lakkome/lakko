@@ -34,12 +34,15 @@ import { Icon, type IconName } from "./icons";
  * information architecture kept it as destination 4 throughout.
  */
 const ITEMS: ReadonlyArray<{ href: string; label: string; icon: IconName; prefix: string[] }> = [
-  { href: paths.home, label: "Chats", icon: "chat", prefix: ["/chat/"] },
-  // Groups and Channels leave when the merged conversation list lands
-  // (`docs/ux/navigation.md` section 2). They stay until then because
-  // removing them first would make a person's groups and channels reachable
-  // only by typing a URL.
-  { href: paths.groups, label: "Groups", icon: "groups", prefix: [] },
+  // A group conversation still lives under `/groups/<id>`, so that prefix
+  // keeps Chats lit while one is open - the list is one list now, and which
+  // URL a conversation happens to sit at is not something the rail should
+  // show.
+  { href: paths.home, label: "Chats", icon: "chat", prefix: ["/chat/", "/groups"] },
+  // Channels leaves when channels are mapped into the merged list
+  // (`docs/ux/navigation.md` section 6.1). It stays until then because
+  // removing it first would make a person's channels reachable only by
+  // typing a URL.
   { href: paths.channels, label: "Channels", icon: "channels", prefix: [] },
   { href: paths.contacts, label: "Contacts", icon: "contacts", prefix: [] },
   { href: paths.calls, label: "Calls", icon: "calls", prefix: [] },

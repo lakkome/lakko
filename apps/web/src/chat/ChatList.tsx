@@ -35,6 +35,7 @@ import { restoredKind } from "../auth/restore-marker";
 import { ownPersonKeyB64, peopleCountOf, personKeysOf } from "./person-key";
 import { decideConversationKind, type ConversationKind } from "./conversation-kind";
 import { conversationTitle } from "./conversation-title";
+import { sortConversations, type ConversationRow } from "./conversation-list";
 import {
   observeConversationKind,
   persistedConversationKind,
@@ -67,37 +68,78 @@ import { createLongPress } from "../ui/long-press";
 
 type Flag = "pinned" | "muted" | "archived";
 
-const COPY: Record<
-  ConversationKind,
-  { title: string; compose: string; emptyTitle: string; emptyAction: string; aria: string }
-> = {
+const COPY: {
+  readonly chat: {
+    title: string;
+    compose: string;
+    emptyTitle: string;
+    emptyAction: string;
+    aria: string;
+  };
+} = {
   chat: {
     title: "Chats",
-    compose: "New chat",
-    emptyTitle: "No chats yet",
-    emptyAction: "Start a chat",
+    compose: "New",
+    emptyTitle: "No conversations yet",
+    emptyAction: "Start one",
     aria: "Chats",
-  },
-  group: {
-    title: "Groups",
-    compose: "New group",
-    emptyTitle: "No groups yet",
-    emptyAction: "Create a group",
-    aria: "Groups",
   },
 };
 
-export function ChatList(props: {
-  kind: ConversationKind;
-  activeGroupIdB64: string | null;
-}): JSX.Element {
+/**
+ * Every conversation in one list: one-to-one chats, groups and - once they
+ * are mapped in - channels.
+ *
+ * `docs/ux/navigation.md` section 2. It used to be one pane per container,
+ * rendered twice with a `kind` prop, and the newest thing that happened to
+ * you was in one of them and you had to remember which. The prop is gone
+ * rather than defaulted: a list sorted by WHEN cannot be filtered by kind
+ * and still be that list.
+ */
+/**
+ * The three ways to start something, `docs/ux/navigation.md` section 3.
+ *
+ * A row with an icon and a label and nothing else: an item that needs a
+ * sentence to explain it has the wrong label. Reached from the compose
+ * button and from the empty state, so a person never meets two different
+ * sets of choices for the same intent.
+ */
+function CreateMenu(props: { onClose: () => void }): JSX.Element {
+  const navigate = useNavigate();
+  const go = (href: string): void => {
+    props.onClose();
+    navigate(href);
+  };
+  return (
+    <>
+      {/* Clicking anywhere else closes it, which is what makes the menu
+          dismissable without a keyboard. */}
+      <div class="lk-menu-backdrop" onClick={() => props.onClose()} />
+      <div class="lk-menu" role="menu" aria-label="Create">
+        <button type="button" role="menuitem" onClick={() => go(paths.contacts)}>
+          <Icon name="compose" size={16} />
+          New chat
+        </button>
+        <button type="button" role="menuitem" onClick={() => go(paths.newGroup)}>
+          <Icon name="groups" size={16} />
+          Create group
+        </button>
+        <button type="button" role="menuitem" onClick={() => go(paths.channelNew)}>
+          <Icon name="channels" size={16} />
+          Create channel
+        </button>
+      </div>
+    </>
+  );
+}
+
+export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Element {
   const chats = useChats();
   const profiles = useProfiles();
   const groupNames = useGroupNames();
   const sync = useDeviceGroupSync();
   const auth = useAuth();
-  const navigate = useNavigate();
-  const copy = (): (typeof COPY)[ConversationKind] => COPY[props.kind];
+  const copy = (): (typeof COPY)["chat"] => COPY.chat;
 
   const accountId = (): string | null => {
     const s = auth.state();
@@ -260,24 +302,41 @@ export function ChatList(props: {
     return `${n} ${n === 1 ? "person" : "people"}`;
   };
 
-  /** This list's half of the store: pinned first, archived last, otherwise
-   *  the newest conversation on top. */
-  const sortedGroups = createMemo((): readonly ActiveGroup[] => {
+  /**
+   * Every conversation, ordered.
+   *
+   * The rule lives in `conversation-list.ts` rather than here, because it is
+   * the rule all three clients need and because a comparator written inside
+   * a component cannot be run by a test. This maps the store into the shape
+   * that module takes; when channels join the list they are mapped the same
+   * way and nothing about the ordering changes.
+   */
+  const orderedRows = createMemo((): readonly ConversationRow[] => {
     const flagsMap = sync.flags();
-    const items = chats.groups().filter((g) => kindOf(g) === props.kind);
-    const activity = new Map(items.map((g) => [g.groupIdB64, lastActivityMs(g)]));
-    items.sort((a, b) => {
-      const fa = flagsMap[syncGroupIdHex(a.group.groupId)];
-      const fb = flagsMap[syncGroupIdHex(b.group.groupId)];
-      const aPinned = fa?.pinned === true;
-      const bPinned = fb?.pinned === true;
-      if (aPinned !== bPinned) return aPinned ? -1 : 1;
-      const aArchived = fa?.archived === true;
-      const bArchived = fb?.archived === true;
-      if (aArchived !== bArchived) return aArchived ? 1 : -1;
-      return (activity.get(b.groupIdB64) ?? 0) - (activity.get(a.groupIdB64) ?? 0);
+    return sortConversations(
+      chats.groups().map((g) => {
+        const f = flagsMap[syncGroupIdHex(g.group.groupId)];
+        return {
+          id: g.groupIdB64,
+          kind: kindOf(g),
+          title: chatLabel(g),
+          preview: subOf(g),
+          lastActivityMs: lastActivityMs(g),
+          unread: summaryFor(g.group.groupId).unread,
+          pinned: f?.pinned === true,
+          muted: f?.muted === true,
+          archived: f?.archived === true,
+        };
+      }),
+    );
+  });
+
+  const sortedGroups = createMemo((): readonly ActiveGroup[] => {
+    const byId = new Map(chats.groups().map((g) => [g.groupIdB64, g]));
+    return orderedRows().flatMap((row) => {
+      const g = byId.get(row.id);
+      return g === undefined ? [] : [g];
     });
-    return items;
   });
 
   // The search field in the pane head filters by name and preview.
@@ -323,12 +382,16 @@ export function ChatList(props: {
   // Opened by a right click or by a long press (the touch path).
   const [menu, setMenu] = createSignal<{ g: ActiveGroup; x: number; y: number } | null>(null);
 
-  const compose = (): void => {
-    navigate(props.kind === "chat" ? paths.contacts : paths.newGroup);
-  };
+  /** The create menu of `docs/ux/navigation.md` section 3: three items, no
+   *  descriptions. Opened by the compose button and by the empty state
+   *  alike, so there is one set of choices rather than two. */
+  const [createOpen, setCreateOpen] = createSignal(false);
+
+  /** Routed by the ROW's own kind, not the pane's: one list holds both, so
+   *  there is no pane kind left to ask. */
   const hrefOf = (g: ActiveGroup): string => {
     const slug = base64UrlEncodeNoPad(g.group.groupId);
-    return props.kind === "chat" ? paths.chat(slug) : paths.groupChat(slug);
+    return kindOf(g) === "chat" ? paths.chat(slug) : paths.groupChat(slug);
   };
 
   return (
@@ -344,15 +407,22 @@ export function ChatList(props: {
             Synchronizing...
           </span>
         </Show>
-        <button
-          type="button"
-          class="lk-icon-button accent"
-          title={copy().compose}
-          aria-label={copy().compose}
-          onClick={compose}
-        >
-          <Icon name={props.kind === "chat" ? "compose" : "plus"} size={18} />
-        </button>
+        <div class="lk-menu-anchor">
+          <button
+            type="button"
+            class="lk-icon-button accent"
+            title={copy().compose}
+            aria-label={copy().compose}
+            aria-haspopup="menu"
+            aria-expanded={createOpen()}
+            onClick={() => setCreateOpen((open) => !open)}
+          >
+            <Icon name="compose" size={18} />
+          </button>
+          <Show when={createOpen()}>
+            <CreateMenu onClose={() => setCreateOpen(false)} />
+          </Show>
+        </div>
       </div>
       <Show when={sortedGroups().length > 0}>
         <label class="lk-search lk-pane-search">
@@ -370,9 +440,17 @@ export function ChatList(props: {
         when={sortedGroups().length > 0}
         fallback={
           <div class="lk-empty">
-            <Icon name={props.kind === "chat" ? "chat" : "groups"} size={40} strokeWidth={1.4} />
+            <Icon name="chat" size={40} strokeWidth={1.4} />
             <strong>{copy().emptyTitle}</strong>
-            <button type="button" class="primary" onClick={compose}>
+            {/* The SAME menu the compose button opens, not a different set
+                of choices in a different place. */}
+            <button
+              type="button"
+              class="primary"
+              aria-haspopup="menu"
+              aria-expanded={createOpen()}
+              onClick={() => setCreateOpen((open) => !open)}
+            >
               {copy().emptyAction}
             </button>
           </div>
