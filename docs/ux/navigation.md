@@ -259,13 +259,17 @@ TEXT would need an index no client has.
   rail's Groups entry is folded into Chats.
 - **The create menu** is the three items, opened by the compose button and by
   the empty state alike.
-- **Channels are NOT in the list yet**, so Channels keeps its rail entry.
-  Mapping them in is not a matter of appending rows: a channel is not the
-  MLS-group shape the row is written against, and the pin / mute / archive
-  flags, the unread summary and the row menu are all keyed on a conversation
-  group id it does not have. Until that is done the rail keeps the entry,
-  because removing it first would leave a person's channels reachable only
-  by typing a URL.
+- **Channels are in the list**, ordered with everything else by when
+  something last happened in them. Their row is shorter by necessity rather
+  than by design: a channel is not the MLS-group shape the row is written
+  against, so it carries no unread badge and no pin / mute / archive, which
+  are keyed on a conversation group id it does not have. A badge that can
+  never be non-zero would be a worse lie than none.
+- **The Channels destination stays anyway**, and this is the one place the
+  merge is blocked on something else: that screen holds the only way to find
+  a channel by `@handle`, which is a network lookup and therefore part of
+  the open question in section 4. Removing the destination first would
+  delete the entry point without replacing it.
 - **Search** is untouched and still the local filter it was: section 4 is
   open.
 - **iOS and Android have none of this yet.**

@@ -35,6 +35,8 @@ import { restoredKind } from "../auth/restore-marker";
 import { ownPersonKeyB64, peopleCountOf, personKeysOf } from "./person-key";
 import { decideConversationKind, type ConversationKind } from "./conversation-kind";
 import { conversationTitle } from "./conversation-title";
+import { channelRowModel } from "../channels/channel-row";
+import { channelsState } from "../state/channels-state";
 import { sortConversations, type ConversationRow } from "./conversation-list";
 import {
   observeConversationKind,
@@ -130,6 +132,39 @@ function CreateMenu(props: { onClose: () => void }): JSX.Element {
         </button>
       </div>
     </>
+  );
+}
+
+/**
+ * A subscribed channel in the conversation list.
+ *
+ * Deliberately short: the list says nothing about which kind a row is, so
+ * this draws the same avatar, title and second line as every other row. What
+ * it does NOT have is the unread badge, the pin / mute glyphs and the row
+ * menu - those are keyed on a conversation group id a channel does not
+ * carry, and giving a channel a badge that can never be non-zero would be a
+ * worse lie than leaving it out.
+ */
+function ChannelRow(props: { row: ConversationRow }): JSX.Element {
+  return (
+    <A
+      href={paths.channel(props.row.id)}
+      class="lk-row"
+      activeClass=""
+      inactiveClass=""
+    >
+      <Avatar label={props.row.title} id={props.row.id} />
+      <div class="lk-row-body">
+        <div class="lk-row-line">
+          <span class="lk-row-title">
+            <span class="lk-ellipsis">{props.row.title}</span>
+          </span>
+        </div>
+        <div class="lk-row-line">
+          <span class="lk-row-sub">{props.row.preview}</span>
+        </div>
+      </div>
+    </A>
   );
 }
 
@@ -311,10 +346,47 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
    * that module takes; when channels join the list they are mapped the same
    * way and nothing about the ordering changes.
    */
+  /** A subscribed channel, in the shape the ordering takes. Its title,
+   *  second line and time come from `channelRowModel`, which the Channels
+   *  screen already uses - one vocabulary, not a second one. */
+  const channelRows = (): readonly ConversationRow[] => {
+    const meta = channelsState.metaByChannel();
+    const posts = channelsState.postsByChannel();
+    return channelsState.channels().map((c) => {
+      const lastPostMs = posts.get(c.id)?.at(-1)?.serverTsMs ?? null;
+      const model = channelRowModel(
+        {
+          id: c.id,
+          sharedName: meta.get(c.id)?.name,
+          localName: c.localName,
+          localHandle: c.localHandle,
+          isOwner: false,
+          subscriberCount: null,
+          lastPostMs,
+        },
+        clock(),
+      );
+      return {
+        id: c.id,
+        kind: "channel" as const,
+        title: model.title,
+        preview: model.subtitle,
+        // Nothing posted yet sorts by when it was added, the same way a chat
+        // with no messages sorts by when it was created.
+        lastActivityMs: lastPostMs ?? c.addedAtMs,
+        unread: 0,
+        pinned: false,
+        muted: false,
+        archived: false,
+      };
+    });
+  };
+
   const orderedRows = createMemo((): readonly ConversationRow[] => {
     const flagsMap = sync.flags();
-    return sortConversations(
-      chats.groups().map((g) => {
+    return sortConversations([
+      ...channelRows(),
+      ...chats.groups().map((g) => {
         const f = flagsMap[syncGroupIdHex(g.group.groupId)];
         return {
           id: g.groupIdB64,
@@ -328,24 +400,26 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           archived: f?.archived === true,
         };
       }),
-    );
+    ]);
   });
 
-  const sortedGroups = createMemo((): readonly ActiveGroup[] => {
-    const byId = new Map(chats.groups().map((g) => [g.groupIdB64, g]));
-    return orderedRows().flatMap((row) => {
-      const g = byId.get(row.id);
-      return g === undefined ? [] : [g];
-    });
-  });
 
   // The search field in the pane head filters by name and preview.
   const [query, setQuery] = createSignal("");
-  const visibleGroups = (): readonly ActiveGroup[] => {
+  /** The ordered list, filtered by what was typed. Local and loose, over
+   *  data this device already holds - the network lookup is a different
+   *  thing and `docs/ux/navigation.md` section 4 leaves it open. */
+  const visibleRows = (): readonly ConversationRow[] => {
     const q = query();
-    if (q.trim().length === 0) return sortedGroups();
-    return sortedGroups().filter((g) => rowMatchesQuery(q, chatLabel(g), subOf(g)));
+    if (q.trim().length === 0) return orderedRows();
+    return orderedRows().filter((row) => rowMatchesQuery(q, row.title, row.preview));
   };
+
+  /** The store entry behind a chat or group row. */
+  const groupById = createMemo(
+    (): ReadonlyMap<string, ActiveGroup> =>
+      new Map(chats.groups().map((g) => [g.groupIdB64, g])),
+  );
 
   /** ADR-0050 — a device that landed through a recovery route (three words,
    *  the phrase, another device, a passkey) holds the identity and is admitted
@@ -424,7 +498,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           </Show>
         </div>
       </div>
-      <Show when={sortedGroups().length > 0}>
+      <Show when={orderedRows().length > 0}>
         <label class="lk-search lk-pane-search">
           <Icon name="search" size={16} />
           <input
@@ -437,7 +511,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
         </label>
       </Show>
       <Show
-        when={sortedGroups().length > 0}
+        when={orderedRows().length > 0}
         fallback={
           <div class="lk-empty">
             <Icon name="chat" size={40} strokeWidth={1.4} />
@@ -457,11 +531,18 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
         }
       >
         <div class="lk-pane-body">
-          <Show when={visibleGroups().length === 0}>
+          <Show when={visibleRows().length === 0}>
             <p class="lk-pane-nomatch">No results</p>
           </Show>
-          <For each={visibleGroups()}>
-            {(g) => {
+          <For each={visibleRows()}>
+            {(row) => {
+              // A channel is not the MLS-group shape the rest of this row is
+              // written against - no roster, no unread summary, no flags
+              // keyed on a conversation id - so it draws its own short row
+              // and the group row below is untouched.
+              if (row.kind === "channel") return <ChannelRow row={row} />;
+              const g = groupById().get(row.id);
+              if (g === undefined) return null;
               const key = syncGroupIdHex(g.group.groupId);
               const flags = (): { pinned: boolean; muted: boolean; archived: boolean } => {
                 const f = sync.flags()[key];

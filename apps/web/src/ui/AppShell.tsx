@@ -39,10 +39,12 @@ const ITEMS: ReadonlyArray<{ href: string; label: string; icon: IconName; prefix
   // URL a conversation happens to sit at is not something the rail should
   // show.
   { href: paths.home, label: "Chats", icon: "chat", prefix: ["/chat/", "/groups"] },
-  // Channels leaves when channels are mapped into the merged list
-  // (`docs/ux/navigation.md` section 6.1). It stays until then because
-  // removing it first would make a person's channels reachable only by
-  // typing a URL.
+  // Channels are IN the merged list now, but this entry stays: the Channels
+  // screen also holds the only way to find a channel by `@handle`, which is
+  // a network lookup and therefore part of the search question
+  // `docs/ux/navigation.md` section 4 deliberately leaves open. Removing the
+  // destination before that is settled would delete the entry point without
+  // replacing it.
   { href: paths.channels, label: "Channels", icon: "channels", prefix: [] },
   { href: paths.contacts, label: "Contacts", icon: "contacts", prefix: [] },
   { href: paths.calls, label: "Calls", icon: "calls", prefix: [] },
