@@ -86,8 +86,8 @@ kind at a time.
 - **Empty** (no conversations at all): the wordmark, one line - "No
   conversations yet" - and a button that opens the **same create menu** as
   section 3. Not a different set of choices in a different place.
-- **Empty after search**: "Nothing matches". What else this state offers
-  depends on section 4, which is not settled.
+- **Empty after search**: "No results", plus the single "Look up @name" row
+  of section 4.3 when the text could be a name.
 - **Loading**: the list is local, so it is drawn from disk immediately and
   there is no spinner. A conversation whose content has not arrived yet shows
   its title and no second line rather than a placeholder shimmer.
@@ -114,11 +114,16 @@ which is where a person goes when they are thinking about calling. It was put
 in the Contacts "+" menu by the redesign only because Calls had been removed;
 with Calls back, it goes home.
 
-## 4. Search - OPEN, needs a decision before anything is built
+## 4. Search
 
-**Deferred.** The brief asks for search that covers users, groups and
-channels together; how that field behaves is not settled and nothing should
-be built against this section until it is.
+The field at the top of the Chats list, because a group and a channel are
+kinds of conversation rather than kinds of contact, and because finding a
+person to talk to starts a conversation too. Contacts is about people you
+already know.
+
+The LOCAL half is settled and built: fuzzy over the titles and previews of
+what this device already holds. **How the whole field should present itself
+once it covers messages as well is still open** - that part is deferred.
 
 What is NOT open is the constraint any answer has to live with, because it
 is a property of the system rather than a design choice.
@@ -156,24 +161,22 @@ one field presents two different kinds of reach without lying about either.
 
 ### 4.3 There is ONE network lookup, not one per kind
 
-Worth stating because the code currently implies otherwise. Looking up
-`@username` and looking up a channel's `@handle` are the same mechanism over
-two namespaces - blind the name, ask, get an exact answer or nothing - and a
-group handle would be a third namespace and the same mechanism again. The
-person does not know or care which namespace a name they were given lives
-in.
+Looking up `@username` and looking up a channel's `@handle` are the same
+mechanism over two namespaces - blind the name, ask, get an exact answer or
+nothing - and a group handle would be a third namespace and the same
+mechanism again. The person typing does not know which namespace the name
+they were given lives in, and should not have to.
 
-Today they are two entry points, "Add by username" and "Find a channel",
-sitting next to each other in the Contacts add menu. That is better than the
-two screens they were, and it is still the wrong shape: it should be one
-field that resolves whatever the name turns out to be and opens it -
-a person leads to a contact request, a channel leads to subscribing.
+So it is one row, "Look up @name", offered under the conversation list when
+nothing local matches and the text could be a name. It asks both namespaces
+and routes what it finds: a channel opens its subscribe page, a person hands
+the name to Contacts, which is where the contact request lives because that
+flow asks for an introduction this field has no room for.
 
-It is not done here because the contact path asks for an introduction
-alongside the name, so merging the fields means splitting that flow into
-find-then-introduce, and that is a change to a working flow rather than a
-rename. It belongs with whatever section 4 decides, since it is the same
-question.
+Two things it must keep doing. A name that cannot be canonical never costs a
+lookup - the same `[a-z0-9_]`, 3-32 rule the blinder enforces is checked
+first. And a network failure says so: telling someone their friend does not
+exist because the connection dropped is the worst thing this can do.
 
 ## 5. Calls
 
@@ -263,9 +266,8 @@ TEXT would need an index no client has.
 
 ## 7. Not in this spec
 
-- **Search**, in full - see section 4. The constraint is recorded; the
-  behaviour is not decided.
-- **Message search** in particular. It needs a local index no client has.
+- **Message search.** It needs a local index no client has, and it is what
+  the remaining open part of section 4 is about.
 - **Folders / custom filters.** The merged list is the point; a filter
   mechanism on top of it is a separate decision.
 - **Call history sync across devices.** The calls list is this device's, like
@@ -293,8 +295,9 @@ TEXT would need an index no client has.
   screens stay at their URLs and count as Chats while open.
 - **"Create call link" left the Contacts menu** for Calls, where section 3
   puts it.
-- **Search** is untouched and still the local filter it was: section 4 is
-  open.
+- **Search** is the local filter plus the single network-lookup row of
+  section 4.3, in Chats. What is still open is only how the field should
+  present itself once it also covers message text.
 - **iOS and Android have none of this yet.**
 
 ## 8. Cross-platform shape
@@ -303,7 +306,7 @@ TEXT would need an index no client has.
 |---|---|---|---|
 | destinations | left rail at >= 720 px, bottom bar below | bottom `TabView` | bottom `NavigationBar` |
 | create menu | popover under the compose button | `Menu` on the toolbar button | `DropdownMenu` on the top-app-bar action |
-| search | *deferred, section 4* | *deferred, section 4* | *deferred, section 4* |
+| search | field pinned above the list | `.searchable` on the list | `SearchBar` above the list |
 | row press | click opens; right-click the row menu | tap opens; long-press the row menu | tap opens; long-press the row menu |
 
 The three implement the same model: same four destinations in the same

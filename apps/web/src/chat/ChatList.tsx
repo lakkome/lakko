@@ -35,6 +35,9 @@ import { restoredKind } from "../auth/restore-marker";
 import { ownPersonKeyB64, peopleCountOf, personKeysOf } from "./person-key";
 import { decideConversationKind, type ConversationKind } from "./conversation-kind";
 import { conversationTitle } from "./conversation-title";
+import { bareName, findByName, findByNameMessage, looksLikeAName } from "./find-by-name";
+import { DiscoveryClient } from "../discovery/client";
+import { bytesToHex } from "../channels/composer";
 import { channelRowModel } from "../channels/channel-row";
 import { channelsState } from "../state/channels-state";
 import { sortConversations, type ConversationRow } from "./conversation-list";
@@ -174,6 +177,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
   const groupNames = useGroupNames();
   const sync = useDeviceGroupSync();
   const auth = useAuth();
+  const navigate = useNavigate();
   const copy = (): (typeof COPY)["chat"] => COPY.chat;
 
   const accountId = (): string | null => {
@@ -421,6 +425,51 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
       new Map(chats.groups().map((g) => [g.groupIdB64, g])),
   );
 
+  /**
+   * Look the typed name up on the network.
+   *
+   * Both namespaces, because the person does not know which one holds the
+   * name they were given. A channel can be opened straight away; a person
+   * leads into the contact request, which is Contacts' flow, so the name
+   * travels there rather than being half-answered here.
+   */
+  const [lookupBusy, setLookupBusy] = createSignal(false);
+  const [lookupNote, setLookupNote] = createSignal<string | null>(null);
+  const lookUp = async (): Promise<void> => {
+    if (lookupBusy()) return;
+    setLookupBusy(true);
+    setLookupNote(null);
+    const typed = query();
+    try {
+      const client = new DiscoveryClient();
+      const found = await findByName(typed, {
+        channel: async (handle) => {
+          const found = await client.lookupChannel(handle);
+          return found.channel === null ? null : bytesToHex(found.channel);
+        },
+        person: async (username) => {
+          const found = await client.lookup(username);
+          return found.account === null ? null : found.normalisedUsername;
+        },
+      });
+      if (found.kind === "channel") {
+        setQuery("");
+        navigate(paths.channelSubscribe(found.channelIdHex), {
+          state: { handle: found.handle },
+        });
+        return;
+      }
+      if (found.kind === "person") {
+        setQuery("");
+        navigate(paths.contacts, { state: { username: found.username } });
+        return;
+      }
+      setLookupNote(findByNameMessage(found, typed));
+    } finally {
+      setLookupBusy(false);
+    }
+  };
+
   /** ADR-0050 — a device that landed through a recovery route (three words,
    *  the phrase, another device, a passkey) holds the identity and is admitted
    *  to the account's chats by its other devices or its contacts. Until the
@@ -533,6 +582,30 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
         <div class="lk-pane-body">
           <Show when={visibleRows().length === 0}>
             <p class="lk-pane-nomatch">No results</p>
+          </Show>
+          {/* `docs/ux/navigation.md` section 4 - a group and a channel are
+              kinds of conversation, so finding one belongs here rather than
+              in Contacts, and so does finding a person to talk to. Offered
+              as ONE row for the whole name, never as partial matches: the
+              server answers the blinded name it was given and cannot answer
+              a prefix. */}
+          <Show when={visibleRows().length === 0 && looksLikeAName(query())}>
+            <button
+              type="button"
+              class="lk-pane-lookup"
+              disabled={lookupBusy()}
+              onClick={() => void lookUp()}
+            >
+              <Icon name="search" size={16} />
+              {lookupBusy() ? "Looking up..." : `Look up @${bareName(query())}`}
+            </button>
+          </Show>
+          <Show when={lookupNote()}>
+            {(note) => (
+              <p class="lk-pane-nomatch" role="status">
+                {note()}
+              </p>
+            )}
           </Show>
           <For each={visibleRows()}>
             {(row) => {

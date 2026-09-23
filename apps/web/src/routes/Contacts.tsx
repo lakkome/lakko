@@ -27,11 +27,10 @@
  * way back to the sign-in form.
  */
 import { createEffect, createMemo, createSignal, on, Show, type JSX } from "solid-js";
-import { useNavigate } from "@solidjs/router";
+import { useLocation, useNavigate } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
 import { base64Decode, base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
-import FindChannelPanel from "../channels/FindChannelPanel";
 import { useChats } from "../chat/ChatContext";
 import { recordConversationKind } from "../chat/conversation-kind-store";
 import { ContactsClient } from "../contacts/client";
@@ -285,7 +284,23 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   const [selectedKey, setSelectedKey] = createSignal<string | null>(null);
   // The add menu's pick: add by username, the invite links, or a call link.
   // `null` = nothing open.
+  const location = useLocation();
   const [adding, setAdding] = createSignal<AddMode | null>(null);
+
+  // `docs/ux/navigation.md` section 4 - the Chats search looks a name up in
+  // both namespaces; a person lands here, because sending a contact request
+  // is this screen's flow and asks for an introduction the search field has
+  // no room for. The name travels rather than being typed twice.
+  const handedOver = (): string | undefined => {
+    const state = location.state as { readonly username?: string } | null;
+    return typeof state?.username === "string" ? state.username : undefined;
+  };
+  createEffect(() => {
+    const username = handedOver();
+    if (username === undefined) return;
+    setAdding("username");
+    setSearchInput(username);
+  });
   const [filter, setFilter] = createSignal("");
   const selected = (): AcceptedContact | undefined =>
     accepted().find((c) => c.signaturePubkeyB64 === selectedKey());
@@ -415,13 +430,6 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
                     <p>Share a link with someone you want to hear from.</p>
                   </div>
                   <InviteLinksPanel />
-                </Show>
-                <Show when={adding() === "channel"}>
-                  <div class="lk-page-head">
-                    <h1>Find a channel</h1>
-                    <p>Type the whole handle. Partial names cannot be looked up.</p>
-                  </div>
-                  <FindChannelPanel />
                 </Show>
               </div>
             </article>

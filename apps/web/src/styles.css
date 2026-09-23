@@ -518,6 +518,31 @@ a.lk-row:hover {
   background: var(--surface-hover);
   text-decoration: none;
 }
+/* The one network-lookup row under the conversation search: a whole name,
+   never a list of partial matches, because the server answers the blinded
+   name it was given and cannot answer a prefix. */
+.lk-pane-lookup {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  border: none;
+  border-radius: 12px;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.lk-pane-lookup:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+.lk-pane-lookup:disabled {
+  color: var(--text-muted);
+  cursor: default;
+}
+
 /* A row that carries its own trailing action (the Calls list: the row opens
    the conversation, the button places the call). The chat list's row is one
    link with nothing beside it, so it needs no such wrapper. */

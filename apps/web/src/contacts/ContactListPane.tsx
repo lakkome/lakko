@@ -29,19 +29,19 @@ import type { AcceptedContact } from "./local-store";
 
 /** What the add menu offers. Web has no contact QR flow, so there is no
  *  "Show my QR code" / "Scan QR code" here. */
-export type AddMode = "username" | "invite" | "channel";
+export type AddMode = "username" | "invite";
 
 /**
- * Finding someone and finding a channel are the same act - an exact,
- * blinded lookup of a name you were given - so they sit together.
+ * Contacts is about people. Finding a channel is not here, and neither is
+ * finding a group: both are kinds of conversation, so both belong to Chats
+ * (`docs/ux/navigation.md` section 4).
  *
- * "Create call link" left: it belongs to Calls
- * (`docs/ux/navigation.md` section 3), which is where a person thinking
- * about calling looks. It was put here only because Calls had been removed.
+ * "Create call link" left too - it belongs to Calls, which is where a person
+ * thinking about calling looks. It was put here only because Calls had been
+ * removed.
  */
 const ADD_ITEMS: ReadonlyArray<{ mode: AddMode; label: string; icon: IconName }> = [
   { mode: "username", label: "Add by username", icon: "user" },
-  { mode: "channel", label: "Find a channel", icon: "channels" },
   { mode: "invite", label: "Share invite link", icon: "link" },
 ];
 
