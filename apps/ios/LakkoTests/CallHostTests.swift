@@ -42,7 +42,7 @@ final class CallHostTests: XCTestCase {
         var micGranted = true
         var camGranted = true
         /// `docs/ux/calls.md` section 6 — the rows the host filed.
-        var recorded: [(group: String, row: CallTranscriptRow)] = []
+        var recorded: [FinishedCall] = []
         /// `docs/ux/calls.md` sections 3.1 and 3.2 — the calls the host put on
         /// the wire, and with which media. A port rather than a real
         /// `session.dial`, so no peer connection is ever built here.
@@ -77,7 +77,7 @@ final class CallHostTests: XCTestCase {
             cameraGranted: { video in !video || h.camGranted },
             peerName: { _ in "Alice" },
             mintCallId: { Data(repeating: 0x0C, count: 16) },
-            recordCall: { group, row in h.recorded.append((group, row)) },
+            recordCall: { call in h.recorded.append(call) },
             hasCamera: { h.hasCamera },
             placeCall: { _, audio, video in h.placed.append((audio, video)) }
         ))
@@ -448,7 +448,7 @@ final class CallHostTests: XCTestCase {
         host.declineIncomingCall()
         try await waitUntil { host.activeCall == nil }
         XCTAssertEqual(h.recorded.count, 1)
-        XCTAssertEqual(h.recorded.first?.group, groupA)
+        XCTAssertEqual(h.recorded.first?.groupIdHex, groupA)
         XCTAssertEqual(h.recorded.first?.row.direction, .incoming)
         XCTAssertEqual(h.recorded.first?.row.text, "Declined")
     }

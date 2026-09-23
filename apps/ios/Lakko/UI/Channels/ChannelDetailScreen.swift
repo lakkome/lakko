@@ -5,6 +5,26 @@ import Foundation
 import LakkoCore
 import SwiftUI
 
+/// Channels, as screens of the Chats stack.
+///
+/// `docs/ux/navigation.md` section 1 — Channels is no longer a destination: a
+/// channel is a row of the one conversation list, and these screens are pushed
+/// from it. One screen per file under `UI/Channels/`:
+///
+/// - ``ChannelDetailScreen`` (this file) — the channel view: posts as cards,
+///   the publish composer for owners, the reader flow for everyone else.
+/// - ``NewChannelScreen`` — the create form, reached from the create menu.
+/// - ``ChannelReaderScreen`` — subscribe, wait for access, read.
+/// - ``ChannelManageScreen`` — subscribers, co-publishers and access refresh
+///   for owners (``SubscribersPanel``, ``CoPublishersPanel``,
+///   ``RotationPanel``).
+/// - ``JoinCoPublisherScreen`` — the joiner side of a co-publisher link.
+///
+/// The screens share one `ChannelsUiState`, owned by the signed-in shell so
+/// the conversation list and the pushed screens read one store; each child
+/// receives it through `@ObservedObject`, so a publish in one view surfaces in
+/// the list of another without manual rebroadcast.
+
 /// The channel view (UX spec section 5.4): posts as cards, newest at the
 /// bottom. A device holding publisher keys gets the publish composer and a
 /// Manage button; everyone else gets the reader flow (``ChannelReaderScreen``)

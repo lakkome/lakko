@@ -87,7 +87,11 @@ public final class InviteIntake: ObservableObject {
     /// Extract + trim the slug after `prefix`, or `nil` if the path
     /// doesn't start with `prefix` / the slug is empty. Strips any
     /// trailing slash so `…/<slug>/` works the same as `…/<slug>`.
-    private static func slug(from path: String, prefix: String) -> String? {
+    /// Internal rather than private since the Calls screen's "Join by link"
+    /// validates a PASTED link with the same rule a TAPPED one goes through —
+    /// two spellings of "is this a call link" is how the two paths start
+    /// disagreeing about the same string.
+    static func slug(from path: String, prefix: String) -> String? {
         guard path.hasPrefix(prefix) else { return nil }
         let trimmed = String(path.dropFirst(prefix.count))
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))

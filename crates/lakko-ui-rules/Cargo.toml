@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-ui-rules"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Presentation rules the three clients must agree on, written once"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The canonical username rule, so "is this worth a lookup" is the SAME
+# predicate the blinder enforces rather than a third spelling of it.
+lakko-contacts.workspace = true

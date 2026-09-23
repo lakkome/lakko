@@ -343,7 +343,7 @@ final class OwnEchoRegistryTests: XCTestCase {
             cameraGranted: { _ in true },
             peerName: { _ in "Alice" },
             mintCallId: { Data(repeating: 0x0C, count: 16) },
-            recordCall: { _, _ in }
+            recordCall: { _ in }
         ))
     }
 }

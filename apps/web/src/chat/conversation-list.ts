@@ -9,27 +9,23 @@
  * to the Groups place", they think of a conversation and look for it - and a
  * list sorted by WHEN cannot be three lists.
  *
- * The ordering rule is not new: the chat pane already sorted pinned first,
- * archived last, newest between. What changes is the set it sorts. Chats and
- * groups were already one store split by a filter, so they merge by dropping
- * it; channels are their own store and have to be mapped in, which is the
- * only real work and the reason this module exists.
- *
- * Pure and source-agnostic on purpose. The caller maps each store into a
- * [`ConversationRow`] and this decides nothing except order - so it can be
- * run by a test (vitest has no jsdom and no Solid transform here, so nothing
- * in the components is reachable) and so neither store's internals leak into
- * the rule.
+ * **The order itself is not here.** It is `order_conversations` in
+ * `crates/lakko-ui-rules`, shared with iOS and Android; what this module owns
+ * is the mapping between the rich row the web draws and the six fields that
+ * order reads. Chats and groups were already one store split by a filter, so
+ * they merge by dropping it; channels are their own store and have to be
+ * mapped in, which is the real work and the reason this module exists.
  *
  * **The row says nothing about which kind it is.** `kind` is here to route a
  * tap and for nothing else: no badge, no label, no differing avatar. A
  * person who subscribed to a channel knows they subscribed to a channel.
  */
+import type { UiRules } from "./ui-rules";
 
 /** Which screen a row opens. Not rendered. */
 export type ConversationRowKind = "chat" | "group" | "channel";
 
-/** One row of the merged list. */
+/** One row of the merged list, as the web draws it. */
 export interface ConversationRow {
   /** Stable within a kind; the pair `(kind, id)` is unique in the list. */
   readonly id: string;
@@ -50,27 +46,43 @@ export interface ConversationRow {
 }
 
 /**
- * Pinned first, archived last, newest between.
+ * Pinned first, archived last, newest between - decided by the shared rule.
  *
- * Ties break on the title and then on `(kind, id)`, so the order is total:
- * two conversations with no activity yet - both `null` - would otherwise sit
- * in whatever order the stores happened to yield, and a list that reshuffles
- * on an unrelated refresh reads as a bug.
+ * The rule hands back the input INDICES rather than rows, so the avatar, the
+ * preview and the unread count never cross the wasm boundary at all: this
+ * reorders the array it was already given.
  */
 export function sortConversations(
   rows: readonly ConversationRow[],
+  rules: UiRules,
 ): readonly ConversationRow[] {
-  return [...rows].sort(compareRows);
+  const order = rules.orderConversations(
+    rows.map(
+      (r) =>
+        new rules.ConversationRow(
+          r.id,
+          kindFor(rules, r.kind),
+          r.title,
+          r.lastActivityMs === null ? undefined : BigInt(r.lastActivityMs),
+          r.pinned,
+          r.archived,
+        ),
+    ),
+  );
+  return Array.from(order, (i) => rows[i]).filter(
+    (r): r is ConversationRow => r !== undefined,
+  );
 }
 
-function compareRows(a: ConversationRow, b: ConversationRow): number {
-  if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
-  if (a.archived !== b.archived) return a.archived ? 1 : -1;
-  const byActivity = (b.lastActivityMs ?? 0) - (a.lastActivityMs ?? 0);
-  if (byActivity !== 0) return byActivity;
-  const byTitle = a.title.localeCompare(b.title);
-  if (byTitle !== 0) return byTitle;
-  if (a.kind !== b.kind) return a.kind < b.kind ? -1 : 1;
-  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
-}
+type WasmConversationKind = UiRules["ConversationKind"][keyof UiRules["ConversationKind"]];
 
+function kindFor(rules: UiRules, kind: ConversationRowKind): WasmConversationKind {
+  switch (kind) {
+    case "group":
+      return rules.ConversationKind.Group;
+    case "channel":
+      return rules.ConversationKind.Channel;
+    default:
+      return rules.ConversationKind.Chat;
+  }
+}

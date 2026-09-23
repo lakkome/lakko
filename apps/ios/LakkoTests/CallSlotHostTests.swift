@@ -495,7 +495,7 @@ final class GroupCallHostTests: XCTestCase {
         var aloneTicks = 0
         var aloneSleeps = 0
         /// Conversation rows the host filed.
-        var rows: [(String, CallTranscriptRow)] = []
+        var rows: [FinishedCall] = []
         /// The seed a given epoch derives, so a rekey is checkable.
         static func seed(_ epoch: UInt64?) -> Data {
             Data(repeating: UInt8(truncatingIfNeeded: epoch ?? 0), count: 32)
@@ -558,7 +558,7 @@ final class GroupCallHostTests: XCTestCase {
             conversationTitle: { _ in "Test group" },
             safetyNumber: { _ in nil },
             mintCallId: { Data(repeating: 0x0A, count: 16) },
-            recordCall: { groupIdHex, row in h.rows.append((groupIdHex, row)) },
+            recordCall: { call in h.rows.append(call) },
             nowMs: { h.nowMs },
             sfuCallState: { _, _, _ in
                 h.probes += 1
@@ -857,8 +857,8 @@ final class GroupCallHostTests: XCTestCase {
         host.leave()
         host.dismissPresentation()
         XCTAssertEqual(h.rows.count, 1)
-        XCTAssertEqual(h.rows.first?.0, group)
-        XCTAssertEqual(h.rows.first?.1, CallTranscriptRow(direction: .outgoing, outcome: .answered(durationMs: 74_000)))
+        XCTAssertEqual(h.rows.first?.groupIdHex, group)
+        XCTAssertEqual(h.rows.first?.row, CallTranscriptRow(direction: .outgoing, outcome: .answered(durationMs: 74_000)))
     }
 
     func testAJoinThatNeverConnectedLeavesNoRow() async throws {

@@ -34,7 +34,10 @@ public struct CallTranscriptRow: Equatable, Sendable {
 
     /// Which side placed the call, from the point of view of the device
     /// writing the row.
-    public enum Direction: String, Equatable, Sendable {
+    /// `Codable` so the flat Calls index (``CallHistoryEntry``) stores the
+    /// direction as one of the two words this type already spells, rather
+    /// than inventing a second vocabulary for the same fact.
+    public enum Direction: String, Codable, Equatable, Sendable {
         case outgoing
         case incoming
     }

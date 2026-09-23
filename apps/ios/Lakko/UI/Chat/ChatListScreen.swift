@@ -2,64 +2,103 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Combine
+import LakkoCore
 import SwiftUI
 
-/// The conversation list, used twice (UX spec section 5.1): the Chats tab
-/// shows the two-person conversations, the Groups tab everything else. Same
-/// rows, same actions; only the title, the compose action and the row title
-/// rule differ.
+/// The one conversation list (`docs/ux/navigation.md` section 2): one-to-one
+/// chats, groups and channels, in one list, ordered by when something last
+/// happened in them.
 ///
 /// Mirror of:
 ///
-///   * `apps/web/src/chat/ChatListRoute.tsx` (1.17f4b)
-///   * `apps/android/.../ui/chat/ChatListScreen.kt` (1.15f4b)
+///   * `apps/web/src/chat/ChatList.tsx`
+///   * `apps/android/.../ui/chat/ChatListScreen.kt`
 ///
-/// Rendered as the root of its tab's `NavigationStack`; tapping a row asks
-/// the host to push ``ChatScreen``.
+/// This screen used to be rendered TWICE with a `kind` parameter — once for
+/// the Chats tab and once for Groups — and a list sorted by WHEN cannot be
+/// filtered by kind: the newest thing that happened to you landed in one of
+/// three places and you had to remember which. The parameter is gone, the
+/// filter with it, and channels are mapped in from their own store.
+///
+/// **The row says nothing about which kind it is.** No badge, no label, no
+/// differing avatar; the kind only routes a tap. A channel additionally draws
+/// no pin, mute, archive or unread mark, because those are keyed on a
+/// conversation id a channel does not carry — a badge that can never be
+/// non-zero would be a lie about what the app knows.
+///
+/// Rendered as the root of the Chats tab's `NavigationStack`; tapping a row
+/// asks the host to push the screen that row's kind opens.
 public struct ChatListScreen: View {
 
-    @ObservedObject public var viewModel: ChatListViewModel
-    /// Which list this is.
-    public var kind: ConversationKind
-    public var onOpenChat: (String) -> Void
-    /// New chat (Chats) or New group (Groups).
-    public var onCompose: () -> Void
+    /// What the create menu was asked for (spec section 3).
+    public enum CreateChoice: Equatable {
+        case chat
+        case group
+        case channel
+    }
 
-    /// Phase 2a3e2c-iOS — cross-device per-thread flags
-    /// (pinned / muted / archived). The Combine subscription
-    /// inside ``DeviceGroupSyncRepository`` keeps the row
-    /// indicators + the sort order live as sibling devices
+    @ObservedObject public var viewModel: ChatListViewModel
+    /// The channel store, so the list can hold channels beside chats and
+    /// groups. Observed rather than passed as a snapshot: a post arriving
+    /// re-times a channel's row, and re-timing is re-ordering.
+    @ObservedObject public var channels: ChannelsUiState
+    /// Open the conversation this row names, whichever kind it is.
+    public var onOpen: (ConversationListRow) -> Void
+    /// One of the three create-menu items.
+    public var onCreate: (CreateChoice) -> Void
+    /// A channel the network lookup found, which this device may not hold yet.
+    public var onFoundChannel: (_ channelIdHex: String, _ handle: String) -> Void
+    /// A person the network lookup found. The contact request asks for an
+    /// introduction this field has no room for, so the name travels to
+    /// Contacts rather than being half-answered here.
+    public var onFoundPerson: (_ username: String) -> Void
+
+    /// Phase 2a3e2c-iOS — cross-device per-thread flags (pinned / muted /
+    /// archived). The Combine subscription inside ``DeviceGroupSyncRepository``
+    /// keeps the row indicators + the sort order live as sibling devices
     /// publish updates.
     @EnvironmentObject private var deviceGroupSync: DeviceGroupSyncRepository
 
     public init(
         viewModel: ChatListViewModel,
-        kind: ConversationKind,
-        onOpenChat: @escaping (String) -> Void,
-        onCompose: @escaping () -> Void
+        channels: ChannelsUiState,
+        onOpen: @escaping (ConversationListRow) -> Void,
+        onCreate: @escaping (CreateChoice) -> Void,
+        onFoundChannel: @escaping (String, String) -> Void,
+        onFoundPerson: @escaping (String) -> Void
     ) {
         self.viewModel = viewModel
-        self.kind = kind
-        self.onOpenChat = onOpenChat
-        self.onCompose = onCompose
+        self.channels = channels
+        self.onOpen = onOpen
+        self.onCreate = onCreate
+        self.onFoundChannel = onFoundChannel
+        self.onFoundPerson = onFoundPerson
     }
 
-    /// UX spec section 5.1 — the search field filters by name and preview.
+    /// Spec section 4 — the field covers users, groups and channels. The local
+    /// half filters what this device holds; the network half is the single
+    /// lookup row below the list.
     @State private var searchText: String = ""
-
-    private var title: String { kind == .chat ? "Chats" : "Groups" }
+    @State private var lookupBusy = false
+    @State private var lookupNote: String?
 
     public var body: some View {
 #if DEBUG
         let _ = BodyEvaluationCounter.tick("ChatListScreen")
 #endif
         content
-            .navigationTitle(title)
+            .navigationTitle("Chats")
             .navigationBarTitleDisplayMode(.large)
             .searchable(text: $searchText, prompt: "Search")
+            .onChange(of: searchText) { _, _ in lookupNote = nil }
             // Receiving is automatic; the pull gesture runs the same poll
             // once more, on demand (UX spec section 2, principle 3).
-            .refreshable { await viewModel.pollNow(kind: kind) }
+            .refreshable { await viewModel.pollNow() }
+            // A channel's last post time is a server read, and it is the only
+            // thing the shared order has to sort a channel by. Without this the
+            // channels sit at the bottom of the list until something else
+            // fetches them.
+            .task { await refreshChannels() }
             .toolbar {
                 // ADR-0050 / docs/ux/second-device.md section 2: one label
                 // while this device is still being admitted to the chats a
@@ -73,115 +112,237 @@ public struct ChatListScreen: View {
                             .accessibilityAddTraits(.updatesFrequently)
                     }
                 }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: onCompose) {
-                        Image(systemName: kind == .chat ? "square.and.pencil" : "person.badge.plus")
-                    }
-                    .accessibilityLabel(kind == .chat ? "New chat" : "New group")
-                }
+                ToolbarItem(placement: .navigationBarTrailing) { createMenu }
             }
     }
 
-    /// One row's rendered data, computed once per body pass so the sort, the
-    /// search filter and the row read the same strings.
-    private struct RowData: Identifiable {
-        let thread: ChatThread
-        let title: String
-        let preview: String
-        let lastMessageMs: Int64?
-        var id: String { thread.groupIdHex }
-    }
+    // MARK: - Create menu
 
-    /// This list's rows with the active flags applied (UX spec section 5.1):
-    ///   * pinned first
-    ///   * archived last
-    ///   * otherwise by the time of the last message, newest first
-    /// and the search text applied to name and preview.
-    private var sortedRows: [RowData] {
-        let flagsMap = deviceGroupSync.flags
-        let isGroup = kind == .group
-        let rows = viewModel.threads(of: kind).map { thread in
-            RowData(
-                thread: thread,
-                title: viewModel.title(groupIdHex: thread.groupIdHex),
-                preview: viewModel.preview(thread: thread, isGroup: isGroup),
-                lastMessageMs: viewModel.lastMessageMs(thread: thread))
+    /// Spec section 3 — one button that opens a menu of exactly three items,
+    /// not a compose action. A bare `+` reads as "add contact", so the icon is
+    /// the compose one.
+    private var createMenu: some View {
+        Menu {
+            Button { onCreate(.chat) } label: {
+                Label("New chat", systemImage: "bubble.left")
+            }
+            Button { onCreate(.group) } label: {
+                Label("Create group", systemImage: "person.3")
+            }
+            Button { onCreate(.channel) } label: {
+                Label("Create channel", systemImage: "megaphone")
+            }
+        } label: {
+            Image(systemName: "square.and.pencil")
         }
-        .filter { ChatListFormatting.matches(query: searchText, title: $0.title, preview: $0.preview) }
-        return rows.sorted { lhs, rhs in
-            let lf = flagsMap[lhs.thread.groupIdHex]
-            let rf = flagsMap[rhs.thread.groupIdHex]
-            let lpinned = lf?.pinned == true
-            let rpinned = rf?.pinned == true
-            if lpinned != rpinned { return lpinned }
-            let larchived = lf?.archived == true
-            let rarchived = rf?.archived == true
-            if larchived != rarchived { return !larchived }
-            switch (lhs.lastMessageMs, rhs.lastMessageMs) {
-            case let (l?, r?) where l != r: return l > r
-            case (_?, nil): return true
-            case (nil, _?): return false
-            default: return lhs.thread.groupIdHex < rhs.thread.groupIdHex
-            }
+        .accessibilityLabel("New conversation")
+    }
+
+    // MARK: - Rows
+
+    /// Every conversation this device holds, ordered by the shared rule.
+    ///
+    /// The mapping is the work; the order is not here. Chats and groups come
+    /// from one store that used to be split by a filter, channels from their
+    /// own — and a channel's last post time has to become the same field as a
+    /// chat's last message time, or the one ordering has nothing to order by.
+    private var rows: [ConversationListRow] {
+        let flagsMap = deviceGroupSync.flags
+        let chatRows = viewModel.threads.map { thread -> ConversationListRow in
+            let kind = viewModel.kind(of: thread.groupIdHex)
+            let flags = flagsMap[thread.groupIdHex]
+            return ConversationListRow(
+                id: thread.groupIdHex,
+                kind: kind == .group ? .group : .chat,
+                title: viewModel.title(groupIdHex: thread.groupIdHex),
+                preview: viewModel.preview(thread: thread, isGroup: kind == .group),
+                lastActivityMs: viewModel.lastMessageMs(thread: thread),
+                unread: UnreadCounting.displayed(
+                    local: thread.unread,
+                    cursorDerived: Self.unreadCount(
+                        thread: thread,
+                        cursor: deviceGroupSync.readCursors[thread.groupIdHex])),
+                pinned: flags?.pinned == true,
+                muted: flags?.muted == true,
+                archived: flags?.archived == true,
+                // ADR-0045 UX §6.2.4 — the chat STAYS in the list and gains one
+                // muted line in the slot the preview occupies. Removing it
+                // would delete a transcript the user still has as a side effect
+                // of something somebody else did.
+                endedLine: chatListLine(
+                    membershipState(
+                        isActive: !thread.membershipEnded, leaveRequestedAtMs: nil)))
+        }
+        return ConversationList.filtered(
+            ConversationList.sorted(chatRows + channelRows), query: searchText)
+    }
+
+    /// A subscribed channel, in the shape the ordering takes.
+    ///
+    /// Its title and second line come from ``ChannelsFormatting/rowModel`` —
+    /// the vocabulary the channel screens already use, so there is one of them
+    /// rather than two. Nothing posted yet sorts by when the channel was
+    /// added, the same way a chat with no messages sorts by when it was
+    /// created; the alternative is a freshly subscribed channel invisible at
+    /// the bottom of a long list until a fetch lands.
+    private var channelRows: [ConversationListRow] {
+        let nowMs = ChatRepository.nowMs()
+        return channels.channels.map { channel in
+            let posts = channels.postsByChannel[channel.id] ?? []
+            let lastPostMs = ChannelsFormatting.newestPostMs(posts.map(\.serverTsMs))
+            let model = ChannelsFormatting.rowModel(
+                sharedName: channel.sharedName,
+                name: channel.localName,
+                handle: channel.handle,
+                isOwner: channels.keysByChannel[channel.id] != nil,
+                subscriberCount: channels.subscriberCountByChannel[channel.id],
+                newestPostMs: lastPostMs,
+                nowMs: nowMs,
+                calendar: .current,
+                locale: .current)
+            return ConversationListRow(
+                id: channel.id,
+                kind: .channel,
+                title: model.title,
+                preview: model.secondLine,
+                lastActivityMs: lastPostMs ?? Int64(clamping: channel.addedAtMs))
         }
     }
 
     @ViewBuilder
     private var content: some View {
-        let rows = sortedRows
-        if rows.isEmpty {
-            // Inside a scroll view so the pull gesture works on the empty list too.
+        let visible = rows
+        if visible.isEmpty {
+            // Inside a scroll view so the pull gesture works on the empty list
+            // too.
             ScrollView {
-                if searchText.trimmingCharacters(in: .whitespaces).isEmpty {
+                if query.isEmpty {
                     emptyState
                 } else {
-                    Text("No results")
-                        .foregroundStyle(Color.lakkoTextMuted)
-                        .frame(maxWidth: .infinity)
-                        .padding(.top, 80)
+                    VStack(spacing: 12) {
+                        Text("No results")
+                            .foregroundStyle(Color.lakkoTextMuted)
+                        lookupSection
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 80)
                 }
             }
         } else {
-            List(rows) { row in
-                let thread = row.thread
-                Button(action: { onOpenChat(thread.groupIdHex) }) {
-                    ThreadRow(
-                        thread: thread,
-                        title: row.title,
-                        preview: row.preview,
-                        timeLabel: row.lastMessageMs.map {
-                            ChatListFormatting.lastMessageTime(
-                                ms: $0, nowMs: ChatRepository.nowMs(),
-                                calendar: .current, locale: .current)
-                        },
-                        isGroup: kind == .group,
-                        flags: deviceGroupSync.flags[thread.groupIdHex],
-                        unread: UnreadCounting.displayed(
-                            local: thread.unread,
-                            cursorDerived: Self.unreadCount(
-                                thread: thread,
-                                cursor: deviceGroupSync.readCursors[thread.groupIdHex]
-                            )
-                        )
-                    )
-                }
-                .buttonStyle(.plain)
-                .listRowSeparator(.hidden)
-                .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
-                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    swipeActions(thread: thread)
+            List {
+                ForEach(visible) { row in
+                    Button { onOpen(row) } label: {
+                        ConversationRowView(row: row, timeLabel: timeLabel(row))
+                    }
+                    .buttonStyle(.plain)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        rowActions(row: row)
+                    }
+                    // Spec section 2.1, Per platform — the row's own menu is a
+                    // long press on both natives. Same three actions as the
+                    // swipe, because they are the same menu reached two ways.
+                    .contextMenu { rowActions(row: row) }
                 }
             }
             .listStyle(.plain)
         }
     }
 
+    private var query: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func timeLabel(_ row: ConversationListRow) -> String? {
+        row.lastActivityMs.map {
+            ChatListFormatting.lastMessageTime(
+                ms: $0, nowMs: ChatRepository.nowMs(), calendar: .current, locale: .current)
+        }
+    }
+
+    // MARK: - The one network lookup
+
+    /// Spec section 4.3 — ONE row, for the whole name, offered only when
+    /// nothing local matched and the text could be a name.
+    ///
+    /// Never a list of partial matches: the server evaluates the blinded name
+    /// it was given and can answer "does this exact name exist" and nothing
+    /// about prefixes, because a prefix search is the server learning the
+    /// prefix.
+    @ViewBuilder
+    private var lookupSection: some View {
+        if NameLookup.looksLikeAName(query) {
+            Button { Task { await lookUp() } } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(Color.lakkoAccent)
+                    Text(lookupBusy ? "Looking up..." : NameLookup.rowLabel(for: query))
+                        .foregroundStyle(Color.lakkoText)
+                }
+            }
+            .disabled(lookupBusy)
+        }
+        if let lookupNote {
+            Text(lookupNote)
+                .font(.footnote)
+                .foregroundStyle(Color.lakkoTextMuted)
+                .multilineTextAlignment(.center)
+                .accessibilityAddTraits(.updatesFrequently)
+        }
+    }
+
+    private func lookUp() async {
+        if lookupBusy { return }
+        lookupBusy = true
+        lookupNote = nil
+        defer { lookupBusy = false }
+        let typed = query
+        // A client per namespace rather than one captured across both: the two
+        // lookups are sequential, a `DiscoveryClient` is a thin wrapper over a
+        // session, and the alternative is a shared reference crossing a
+        // concurrency boundary for no gain.
+        let found = await NameLookup.find(
+            typed: typed,
+            lookups: NameLookups(
+                channel: { try await DiscoveryClient().lookupChannel(handle: $0) },
+                person: { handle in
+                    let result = try await DiscoveryClient().lookup(username: handle)
+                    return result.account == nil ? nil : result.normalisedUsername
+                }))
+        switch found {
+        case .channel(let channelIdHex, let handle):
+            searchText = ""
+            onFoundChannel(channelIdHex, handle)
+        case .person(let username):
+            searchText = ""
+            onFoundPerson(username)
+        case .nothing, .unreachable:
+            lookupNote = NameLookup.message(for: found, typed: typed)
+        }
+    }
+
+    // MARK: - Channel refresh
+
+    /// Re-read each channel's posts, for the last-post time the order sorts on.
+    /// Best effort: a failure leaves the cached value in place.
+    private func refreshChannels() async {
+        let client = ChannelsClient()
+        for channel in channels.channels {
+            if let page = try? await client.fetchPosts(channelIdHex: channel.id, after: 0) {
+                channels.setPosts(channelId: channel.id, posts: page.posts)
+            }
+        }
+    }
+
+    // MARK: - Flags
+
     /// Compute unread count for a thread (Phase 2a3e2c-followup).
     ///
-    /// Counts every incoming / system row whose `messageId` is
-    /// strictly greater than the last broadcast read cursor.
-    /// Outgoing rows never count — the sender already "read"
-    /// them by composing.
+    /// Counts every incoming / system row whose `messageId` is strictly greater
+    /// than the last broadcast read cursor. Outgoing rows never count — the
+    /// sender already "read" them by composing.
     ///
     /// Returns `nil` when no read cursor has been broadcast for the thread, so
     /// the list falls back to the local count of messages the foreground
@@ -210,39 +371,36 @@ public struct ChatListScreen: View {
         return Int64(bitPattern: v)
     }
 
+    /// The row's own actions, rendered both as a trailing swipe and as the
+    /// long-press menu (spec section 2.1).
+    ///
+    /// Pin / mute / archive are keyed on a conversation id a channel does not
+    /// carry, so a channel row offers none of them rather than offering one
+    /// that could not be honoured.
     @ViewBuilder
-    private func swipeActions(thread: ChatThread) -> some View {
-        let cur = deviceGroupSync.flags[thread.groupIdHex]
-        let pinned = cur?.pinned == true
-        let muted = cur?.muted == true
-        let archived = cur?.archived == true
-        Button {
-            Task { await toggleFlag(thread: thread, field: .pin) }
-        } label: {
-            Label(
-                pinned ? "Unpin" : "Pin",
-                systemImage: pinned ? "pin.slash" : "pin"
-            )
+    private func rowActions(row: ConversationListRow) -> some View {
+        if row.kind != .channel {
+            Button {
+                Task { await toggleFlag(groupIdHex: row.id, field: .pin) }
+            } label: {
+                Label(row.pinned ? "Unpin" : "Pin", systemImage: row.pinned ? "pin.slash" : "pin")
+            }
+            .tint(Color.lakkoAccent)
+            Button {
+                Task { await toggleFlag(groupIdHex: row.id, field: .mute) }
+            } label: {
+                Label(row.muted ? "Unmute" : "Mute", systemImage: row.muted ? "bell" : "bell.slash")
+            }
+            .tint(.gray)
+            Button {
+                Task { await toggleFlag(groupIdHex: row.id, field: .archive) }
+            } label: {
+                Label(
+                    row.archived ? "Unarchive" : "Archive",
+                    systemImage: row.archived ? "tray.and.arrow.up" : "archivebox")
+            }
+            .tint(Color.lakkoTextMuted)
         }
-        .tint(Color.lakkoAccent)
-        Button {
-            Task { await toggleFlag(thread: thread, field: .mute) }
-        } label: {
-            Label(
-                muted ? "Unmute" : "Mute",
-                systemImage: muted ? "bell" : "bell.slash"
-            )
-        }
-        .tint(.gray)
-        Button {
-            Task { await toggleFlag(thread: thread, field: .archive) }
-        } label: {
-            Label(
-                archived ? "Unarchive" : "Archive",
-                systemImage: archived ? "tray.and.arrow.up" : "archivebox"
-            )
-        }
-        .tint(Color.lakkoTextMuted)
     }
 
     private enum FlagField {
@@ -250,9 +408,9 @@ public struct ChatListScreen: View {
     }
 
     @MainActor
-    private func toggleFlag(thread: ChatThread, field: FlagField) async {
-        guard let groupId = Self.hexToBytes(thread.groupIdHex) else { return }
-        let cur = deviceGroupSync.flags[thread.groupIdHex]
+    private func toggleFlag(groupIdHex: String, field: FlagField) async {
+        guard let groupId = Self.hexToBytes(groupIdHex) else { return }
+        let cur = deviceGroupSync.flags[groupIdHex]
         var pinned = cur?.pinned ?? false
         var muted = cur?.muted ?? false
         var archived = cur?.archived ?? false
@@ -289,17 +447,35 @@ public struct ChatListScreen: View {
         return out
     }
 
-    /// UX spec section 5.1: one sentence and one action.
+    /// Spec section 2.3 — one line, and a button that opens the SAME create
+    /// menu as the toolbar. Not a different set of choices in a different
+    /// place.
     @ViewBuilder
     private var emptyState: some View {
         VStack(spacing: 12) {
-            Image(systemName: kind == .chat ? "bubble.left.and.bubble.right" : "person.3")
+            Image(systemName: "bubble.left.and.bubble.right")
                 .font(.system(size: 40))
                 .foregroundStyle(Color.lakkoTextMuted)
-            Text(kind == .chat ? "No chats yet" : "No groups yet")
+            Text("No conversations yet")
                 .font(.headline)
-            Button(kind == .chat ? "Start a chat" : "Create a group", action: onCompose)
-                .buttonStyle(.borderedProminent)
+            Menu {
+                Button { onCreate(.chat) } label: {
+                    Label("New chat", systemImage: "bubble.left")
+                }
+                Button { onCreate(.group) } label: {
+                    Label("Create group", systemImage: "person.3")
+                }
+                Button { onCreate(.channel) } label: {
+                    Label("Create channel", systemImage: "megaphone")
+                }
+            } label: {
+                Text("Start a conversation")
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Color.lakkoAccent)
+                    .foregroundStyle(Color.lakkoAccentForeground)
+                    .clipShape(Capsule())
+            }
         }
         .padding(24)
         .frame(maxWidth: .infinity)
@@ -307,61 +483,38 @@ public struct ChatListScreen: View {
     }
 }
 
-private struct ThreadRow: View {
-    let thread: ChatThread
-    /// The row title: the other person's name in a chat, the group's
-    /// member-derived title in a group. Never a hex id.
-    let title: String
-    /// The second line (``ChatListFormatting/preview``), already prefixed.
-    let preview: String
-    /// The last message's time, `nil` when the thread has no timed message.
+/// One row of the merged list, drawn identically for all three kinds (spec
+/// section 2.1): same avatar treatment, same title, same second line, same
+/// trailing column.
+private struct ConversationRowView: View {
+    let row: ConversationListRow
+    /// The last activity's time, `nil` when nothing has happened yet.
     let timeLabel: String?
-    let isGroup: Bool
-    /// Phase 2a3e2c-iOS — cross-device flags snapshot for this
-    /// thread. `nil` until a `Flags` payload lands.
-    let flags: FlagsState?
-    /// Phase 2a3e2c-followup — unread count derived from the
-    /// per-thread read cursor + the incoming/system row IDs.
-    let unread: Int
-
-    /// The row goes quiet once this device's membership has ended (ADR-0045
-    /// UX §6.2.4 / §6.2.11): no badge, and the ended line in the preview slot.
-    private var showsUnread: Bool { unread > 0 && endedLine == nil }
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
             InitialsAvatar(
-                name: title,
-                // The group id is hashed for the tint only, never shown.
-                identity: thread.groupIdHex,
-                size: 40,
-                isGroup: isGroup
-            )
+                // The id is hashed for the tint only, never shown.
+                name: row.title, identity: row.id, size: 40)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(title)
+                    Text(row.title)
                         .font(.body)
-                        .fontWeight(showsUnread ? .semibold : .regular)
+                        .fontWeight(row.showsUnread ? .semibold : .regular)
                         .foregroundStyle(Color.lakkoText)
                         .lineLimit(1)
                     Spacer(minLength: 8)
                     if let timeLabel {
                         Text(timeLabel)
                             .font(.caption)
-                            .foregroundStyle(showsUnread ? Color.lakkoAccent : Color.lakkoTextMuted)
+                            .foregroundStyle(
+                                row.showsUnread ? Color.lakkoAccent : Color.lakkoTextMuted)
                             .lineLimit(1)
                             .fixedSize()
                     }
                 }
                 HStack(alignment: .center, spacing: 6) {
-                    // ADR-0045 UX §6.2.4 — the chat STAYS in the list and gains
-                    // one muted line, in the slot the last-message preview
-                    // already occupies. Removing it would delete a transcript
-                    // the user still has as a side effect of something somebody
-                    // else did; the flags are deliberately untouched too, since
-                    // auto-archiving would be the client reorganising the
-                    // user's list on their behalf.
-                    Text(endedLine ?? preview)
+                    Text(row.secondLine)
                         .font(.subheadline)
                         .foregroundStyle(Color.lakkoTextMuted)
                         .lineLimit(1)
@@ -372,40 +525,41 @@ private struct ThreadRow: View {
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
-        .opacity(flags?.archived == true ? 0.6 : 1)
+        .opacity(row.archived ? 0.6 : 1)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityText)
     }
 
-    /// Muted and pinned glyphs, then the unread capsule (UX spec section 5.1).
+    /// Muted and pinned glyphs, then the unread capsule. A channel carries
+    /// none of them, because none of them is keyed on anything a channel has.
     @ViewBuilder
     private var trailingMarks: some View {
         HStack(spacing: 6) {
-            if flags?.muted == true {
+            if row.muted {
                 Image(systemName: "bell.slash.fill")
                     .font(.caption2)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
-            if flags?.pinned == true {
+            if row.pinned {
                 Image(systemName: "pin.fill")
                     .font(.caption2)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
-            if flags?.archived == true {
+            if row.archived {
                 Image(systemName: "archivebox.fill")
                     .font(.caption2)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
-            if showsUnread {
-                // Accent capsule; a muted thread renders it grey so a
-                // muted-but-unread row still surfaces a hint without
-                // grabbing attention.
-                Text(unread > 99 ? "99+" : "\(unread)")
+            if row.showsUnread {
+                // Accent capsule; a muted conversation renders it grey so a
+                // muted-but-unread row still surfaces a hint without grabbing
+                // attention.
+                Text(row.unread > 99 ? "99+" : "\(row.unread)")
                     .font(.caption2)
                     .fontWeight(.semibold)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 2)
-                    .background(flags?.muted == true ? Color.lakkoTextMuted : Color.lakkoAccent)
+                    .background(row.muted ? Color.lakkoTextMuted : Color.lakkoAccent)
                     .foregroundStyle(Color.lakkoAccentForeground)
                     .clipShape(Capsule())
             }
@@ -413,22 +567,13 @@ private struct ThreadRow: View {
     }
 
     private var accessibilityText: String {
-        var parts = [title]
+        var parts = [row.title]
         if let timeLabel { parts.append(timeLabel) }
-        parts.append(endedLine ?? preview)
-        if showsUnread { parts.append(unread == 1 ? "1 unread" : "\(unread) unread") }
-        if flags?.muted == true { parts.append("muted") }
-        if flags?.pinned == true { parts.append("pinned") }
+        parts.append(row.secondLine)
+        if row.showsUnread { parts.append(row.unread == 1 ? "1 unread" : "\(row.unread) unread") }
+        if row.muted { parts.append("muted") }
+        if row.pinned { parts.append("pinned") }
         return parts.joined(separator: ", ")
-    }
-
-    /// ADR-0045 UX §6.2.4 — the ended line, or `nil` while the reader is still
-    /// a member. The `left` / `removed` distinction deliberately does NOT
-    /// reach this line (§6.2.4 gives it one string): the list is a glance
-    /// surface and the distinction belongs in the transcript's terminal row.
-    private var endedLine: String? {
-        chatListLine(
-            membershipState(isActive: !thread.membershipEnded, leaveRequestedAtMs: nil))
     }
 }
 
@@ -476,30 +621,14 @@ public final class ChatListViewModel: ObservableObject {
         StateBundle.pendingKnownGroups(joinedGroupIdHexes: threads.map { $0.groupIdHex }) > 0
     }
 
-    /// The threads of one list (UX spec section 3): two people make a chat,
-    /// more make a group, counted by account rather than device leaf
-    /// (``ChatRepository/memberCount(groupIdHex:)``).
-    func threads(of kind: ConversationKind) -> [ChatThread] {
-        threads.filter { self.kind(of: $0.groupIdHex) == kind }
-    }
-
-    /// The persisted kind wins; the people count is the first-sight fallback
-    /// and the one observation that can promote a chat to a group
-    /// (``ConversationKindDecision``). Whatever the decision says to persist
-    /// is written here, so a conversation first seen through a Welcome or a
-    /// restore is decided once and then stays put.
+    /// The conversation's kind. Only routes a tap and picks the preview's
+    /// sender prefix; the list draws both the same.
+    ///
+    /// The decision — and the write it can make — lives on the repository,
+    /// because the Calls index asks the same question and two copies of a
+    /// decision that also writes would race each other.
     func kind(of groupIdHex: String) -> ConversationKind {
-        let account = repository.accountIdB64
-        let stored = account.flatMap {
-            repository.conversationKindStore.load(accountIdB64: $0, groupIdHex: groupIdHex)
-        }
-        let verdict = ConversationKindDecision.resolve(
-            stored: stored, peopleCount: repository.memberCount(groupIdHex: groupIdHex))
-        if let persist = verdict.persist, let account {
-            repository.conversationKindStore.record(
-                accountIdB64: account, groupIdHex: groupIdHex, kind: persist)
-        }
-        return verdict.kind
+        repository.conversationKind(groupIdHex: groupIdHex)
     }
 
     /// The row title (ADR-0051 §5): the shared group name whenever the
@@ -564,9 +693,10 @@ public final class ChatListViewModel: ObservableObject {
     }
 
     /// The pull-to-refresh action: the same poll the app already runs, once,
-    /// for every thread of this list. Best-effort; a failing group is skipped.
-    func pollNow(kind: ConversationKind) async {
-        for thread in threads(of: kind) {
+    /// for every conversation in the list. Best-effort; a failing group is
+    /// skipped.
+    func pollNow() async {
+        for thread in threads {
             try? await repository.pollGroup(groupIdHex: thread.groupIdHex)
         }
     }

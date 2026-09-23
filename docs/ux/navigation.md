@@ -306,8 +306,25 @@ because the platform gives a person a different idiom for the same act, never
 because one client was written first.
 
 The rules that decide any of it - the ordering, what counts as a lookable
-name - are shared code rather than three translations of a paragraph. Where
-that code lives is a question for the maintainer (the project's precedent is
+name - are shared code rather than three translations of a paragraph. What
+this spec requires is only that there be one of each; where that one copy
+lives was the maintainer's call, and it followed the project's own precedent -
 the Rust core behind both FFI surfaces, which is why `should_request_profiles`
-and `acting_committer_verdict` are written once); what this spec requires is
-only that there be one of each.
+and `acting_committer_verdict` are written once. So they live in
+`crates/lakko-ui-rules`: `order_conversations` and `looks_like_a_name`, reached
+over wasm on web and over UniFFI on iOS and Android.
+
+Two consequences worth stating, because they are what make it a shared rule
+rather than a shared file.
+
+`order_conversations` returns the input **indices**, not the rows. A client's
+real row carries an avatar, a preview, an unread count and a handle to open,
+and none of that has anything to do with the order; handing it all across an
+FFI boundary twice, in both directions, to learn a permutation would be waste.
+Each client maps its rows down to the six fields the order reads, and reorders
+the list it already holds.
+
+`looks_like_a_name` does not restate the username rule - it calls the very
+function the discovery blinder calls. A gate that merely agrees with a rule
+today is a gate that disagrees with it later, silently, in the direction that
+costs a person a proof of work to be told no.

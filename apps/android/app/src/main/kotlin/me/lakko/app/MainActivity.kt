@@ -16,14 +16,12 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Campaign
+import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.ChatBubble
-import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.outlined.Campaign
+import androidx.compose.material.icons.outlined.Call
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
-import androidx.compose.material.icons.outlined.Groups
 import androidx.compose.material.icons.outlined.People
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
@@ -86,7 +84,6 @@ import me.lakko.app.ui.chat.ChatViewModel
 import me.lakko.app.ui.channels.ChannelDetailScreen
 import me.lakko.app.ui.channels.ChannelManageScreen
 import me.lakko.app.ui.channels.ChannelSubscribeScreen
-import me.lakko.app.ui.channels.ChannelsListScreen
 import me.lakko.app.ui.channels.JoinCoPublisherScreen
 import me.lakko.app.ui.channels.NewChannelScreen
 import me.lakko.app.ui.channels.rememberChannelsUiState
@@ -97,7 +94,6 @@ import me.lakko.app.ui.contacts.InviteLandingViewModel
 import me.lakko.app.transport.AntiCensorshipManager
 import me.lakko.app.ui.devices.DevicesScreen
 import me.lakko.app.ui.settings.SettingsScreen
-import me.lakko.app.ui.chat.ConversationKind
 import me.lakko.app.ui.chat.NewChatScreen
 import me.lakko.app.ui.chat.NewGroupScreen
 import me.lakko.app.ui.transport.AntiCensorshipSettingsScreen
@@ -1094,21 +1090,29 @@ private fun SessionRoot(
                     Modifier
                 },
             ) {
+                // docs/ux/navigation.md section 2 — ONE list: one-to-one
+                // chats, groups and channels, ordered by the shared rule in
+                // `crates/lakko-ui-rules`. A tap is routed by the ROW's kind,
+                // which is the only thing that kind is carried for.
                 composable(Routes.CHATS) {
                     ChatListScreen(
                         repository = chatRepository,
-                        kind = ConversationKind.Chat,
                         onOpenThread = { hex -> navController.navigate(Routes.chat(hex)) },
-                        onCompose = { navController.navigate(Routes.NEW_CHAT) },
-                        deviceGroupSync = deviceGroupSync,
-                    )
-                }
-                composable(Routes.GROUPS) {
-                    ChatListScreen(
-                        repository = chatRepository,
-                        kind = ConversationKind.Group,
-                        onOpenThread = { hex -> navController.navigate(Routes.chat(hex)) },
-                        onCompose = { navController.navigate(Routes.NEW_GROUP) },
+                        onOpenChannel = { id -> navController.navigate(Routes.channel(id)) },
+                        onNewChat = { navController.navigate(Routes.NEW_CHAT) },
+                        onCreateGroup = { navController.navigate(Routes.NEW_GROUP) },
+                        onCreateChannel = { navController.navigate(Routes.CHANNEL_NEW) },
+                        onSubscribeToChannel = { id, handle ->
+                            navController.navigate(Routes.channelSubscribe(id, handle))
+                        },
+                        // Section 4.3 — a found person goes to Contacts, which
+                        // owns the request flow because it asks for an
+                        // introduction the search field has no room for.
+                        onFoundPerson = { username ->
+                            me.lakko.app.contacts.PendingContactLookup.publish(username)
+                            navController.navigateToTab(Routes.CONTACTS)
+                        },
+                        channels = channelsState,
                         deviceGroupSync = deviceGroupSync,
                     )
                 }
@@ -1118,15 +1122,6 @@ private fun SessionRoot(
                 // co-publisher are pushed destinations of this host. The
                 // AccountIdentity (phrase) seed (ADR-0017) comes from the live
                 // IdentitySecrets so a publisher can rebuild its group.
-                composable(Routes.CHANNELS) {
-                    ChannelsListScreen(
-                        state = channelsState,
-                        onCreate = { navController.navigate(Routes.CHANNEL_NEW) },
-                        onOpen = { id -> navController.navigate(Routes.channel(id)) },
-                        onJoin = { navController.navigate(Routes.CHANNEL_JOIN) },
-                        onFindSubscribe = { id, handle -> navController.navigate(Routes.channelSubscribe(id, handle)) },
-                    )
-                }
                 composable(Routes.CHANNEL_NEW) {
                     val secrets = identitySecrets
                     if (secrets != null) {
@@ -1136,9 +1131,18 @@ private fun SessionRoot(
                             sessionToken = secrets.sessionToken,
                             onBack = { navController.popBackStack() },
                             onCreated = { id ->
+                                // The Channels tab is gone, so a created
+                                // channel pops back to the one list every
+                                // conversation now lives in.
                                 navController.navigate(Routes.channel(id)) {
-                                    popUpTo(Routes.CHANNELS)
+                                    popUpTo(Routes.CHANNEL_NEW) { inclusive = true }
                                 }
+                            },
+                            // ADR-0028 OQ3 — the co-publisher join is reached
+                            // from here because the create menu is fixed at
+                            // three items and this is the same moment.
+                            onJoinAsCoPublisher = {
+                                navController.navigate(Routes.CHANNEL_JOIN)
                             },
                         )
                     } else {
@@ -1153,7 +1157,7 @@ private fun SessionRoot(
                             onBack = { navController.popBackStack() },
                             onJoined = { id ->
                                 navController.navigate(Routes.channel(id)) {
-                                    popUpTo(Routes.CHANNELS)
+                                    popUpTo(Routes.CHANNEL_JOIN) { inclusive = true }
                                 }
                             },
                         )
@@ -1214,14 +1218,61 @@ private fun SessionRoot(
                             )
                         },
                     )
+                    // docs/ux/navigation.md section 4.3 — a username the
+                    // conversation list's one lookup row resolved. The add
+                    // sheet opens with it filled in, and the slot is consumed
+                    // so a later visit does not re-open it.
+                    val foundUsername by me.lakko.app.contacts.PendingContactLookup
+                        .pendingUsername.collectAsStateWithLifecycle()
                     ContactsScreen(
                         viewModel = contactsVm,
                         onOpenContact = { key -> navController.navigate(Routes.contact(key)) },
                         onOpenChat = { hex -> navController.navigate(Routes.chat(hex)) },
-                        // ADR-0032 — "Start call" on a created call link opens the
-                        // same `/c/` landing a tapped link does; AppRoot presents it
-                        // over the session.
-                        onStartCallLink = { slug -> inviteIntake.publishCallJoin(slug) },
+                        prefillUsername = foundUsername,
+                        onPrefillConsumed = {
+                            me.lakko.app.contacts.PendingContactLookup.consume()
+                        },
+                    )
+                }
+                // docs/ux/navigation.md section 5 — Calls: recent calls across
+                // every conversation, newest first, read off the index written
+                // when each call row is. "Create call link" lives here rather
+                // than in the Contacts menu, which is where the redesign put it
+                // only because this destination had been removed.
+                composable(Routes.CALLS) {
+                    val contactsVm: ContactsViewModel = viewModel(
+                        factory = singletonViewModelFactory {
+                            ContactsViewModel(
+                                repo = contactsRepository,
+                                chatRepo = chatRepository,
+                            )
+                        },
+                    )
+                    val callPermissions = me.lakko.app.ui.call.rememberCallPermissionGate()
+                    val callContext = LocalContext.current
+                    me.lakko.app.ui.calls.CallsHost(
+                        repository = chatRepository,
+                        viewModel = contactsVm,
+                        onOpenConversation = { hex ->
+                            navController.navigate(Routes.chat(hex))
+                        },
+                        onCallBack = { hex, video ->
+                            // The same just-in-time permission gate every call
+                            // entry point uses; a call back re-dials the mode
+                            // the row records.
+                            callPermissions.request(video = video) { granted ->
+                                callHost.startOutgoing(
+                                    groupIdHex = hex,
+                                    kind = me.lakko.app.calls.requestedCallKind(granted),
+                                    hasCamera = me.lakko.app.calls.CameraVideoCapture
+                                        .hasUsableCamera(callContext),
+                                )
+                            }
+                        },
+                        // ADR-0032 — "Start call" on a created call link, and a
+                        // pasted one, both open the same `/c/` landing a tapped
+                        // link does; AppRoot presents it over the session.
+                        onOpenCallLink = { slug -> inviteIntake.publishCallJoin(slug) },
                     )
                 }
                 composable(Routes.CONTACT_DETAIL) { entry ->
@@ -1483,11 +1534,10 @@ private const val APP_POLL_MIN_ITERATION_MS: Long = 1_000L
 /** Navigation routes of the session shell. */
 private object Routes {
     const val CHATS = "chats"
-    const val GROUPS = "groups"
-    const val CHANNELS = "channels"
     const val CONTACTS = "contacts"
+    const val CALLS = "calls"
     const val SETTINGS = "settings"
-    val TOP_LEVEL: Set<String> = setOf(CHATS, GROUPS, CHANNELS, CONTACTS, SETTINGS)
+    val TOP_LEVEL: Set<String> = setOf(CHATS, CONTACTS, CALLS, SETTINGS)
 
     const val CHAT = "chat/{groupIdHex}"
     fun chat(groupIdHex: String): String = "chat/$groupIdHex"
@@ -1527,12 +1577,24 @@ private data class TabSpec(
     val selectedIcon: ImageVector,
 )
 
-/** The five primary destinations, in the order every client shows them. */
+/**
+ * The four primary destinations, in the order every client shows them
+ * (`docs/ux/navigation.md` section 1).
+ *
+ * Groups and Channels are gone as destinations: both are KINDS of conversation
+ * inside Chats now, because a person does not think "I will go to the Groups
+ * place" — they think of a conversation and look for it, and a list sorted by
+ * WHEN cannot be three lists. Their creation flows and their screens are all
+ * still here, reached from the merged list and the create menu.
+ *
+ * Calls is back. It was removed on the recorded ground that it "has no history,
+ * only a create-link panel", which was true of what existed and was never an
+ * argument that call history should not exist.
+ */
 private val Tabs: List<TabSpec> = listOf(
     TabSpec(Routes.CHATS, "Chats", Icons.Outlined.ChatBubbleOutline, Icons.Filled.ChatBubble),
-    TabSpec(Routes.GROUPS, "Groups", Icons.Outlined.Groups, Icons.Filled.Groups),
-    TabSpec(Routes.CHANNELS, "Channels", Icons.Outlined.Campaign, Icons.Filled.Campaign),
     TabSpec(Routes.CONTACTS, "Contacts", Icons.Outlined.People, Icons.Filled.People),
+    TabSpec(Routes.CALLS, "Calls", Icons.Outlined.Call, Icons.Filled.Call),
     TabSpec(Routes.SETTINGS, "Settings", Icons.Outlined.Settings, Icons.Filled.Settings),
 )
 

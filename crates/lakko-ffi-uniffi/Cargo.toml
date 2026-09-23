@@ -39,6 +39,10 @@ lakko-discovery-client.workspace = true
 # for the X25519 / Ed25519 primitive types compose / open_envelope
 # need at the boundary.
 lakko-contacts.workspace = true
+# Presentation rules the three clients share — the order of the one
+# conversation list and the gate in front of the discovery lookup
+# (docs/ux/navigation.md). One copy, reached from two FFI surfaces.
+lakko-ui-rules.workspace = true
 lakko-crypto.workspace = true
 # G-4 (ADR-0007 §6) — identity supersession proof surface for the
 # rotation-on-recover (sign) + peer-side verify paths.

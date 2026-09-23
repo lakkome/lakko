@@ -4,6 +4,37 @@
 import { describe, expect, it } from "vitest";
 
 import { sortConversations, type ConversationRow } from "./conversation-list";
+import type { UiRules } from "./ui-rules";
+
+/**
+ * The ORDER is not tested here - it is `order_conversations` in
+ * `crates/lakko-ui-rules`, shared with iOS and Android and tested there, so a
+ * copy of those assertions in TypeScript would only pin the web's guess about
+ * a rule it no longer owns.
+ *
+ * What the web owns, and what these test, is the wiring: which of its rich
+ * row's fields reach the rule, how they are converted, and that the indices
+ * coming back are applied to the rows going in.
+ */
+
+/** Records what the rule was handed, and answers a permutation the test picks. */
+function fakeRules(order: number[]): {
+  rules: UiRules;
+  seen: () => readonly unknown[][];
+} {
+  const seen: unknown[][] = [];
+  class Row {
+    constructor(...args: unknown[]) {
+      seen.push(args);
+    }
+  }
+  const rules = {
+    ConversationKind: { Chat: 0, Group: 1, Channel: 2 },
+    ConversationRow: Row,
+    orderConversations: () => Uint32Array.from(order),
+  } as unknown as UiRules;
+  return { rules, seen: () => seen };
+}
 
 function row(over: Partial<ConversationRow> = {}): ConversationRow {
   return {
@@ -21,65 +52,62 @@ function row(over: Partial<ConversationRow> = {}): ConversationRow {
 }
 
 describe("sortConversations", () => {
-  it("puts the newest conversation on top, whatever kind it is", () => {
-    // The whole point of merging: a list sorted by WHEN cannot be three
-    // lists, and the newest thing that happened does not care which
-    // container it arrived in.
-    const ordered = sortConversations([
-      row({ id: "1", kind: "chat", title: "Anna", lastActivityMs: 10 }),
-      row({ id: "2", kind: "channel", title: "Lakko news", lastActivityMs: 30 }),
-      row({ id: "3", kind: "group", title: "Climbing", lastActivityMs: 20 }),
-    ]);
-    expect(ordered.map((r) => r.id)).toEqual(["2", "3", "1"]);
+  it("returns the rich rows the shared order picked, in that order", () => {
+    const { rules } = fakeRules([2, 0, 1]);
+    const ordered = sortConversations(
+      [row({ id: "1" }), row({ id: "2" }), row({ id: "3" })],
+      rules,
+    );
+    expect(ordered.map((r) => r.id)).toEqual(["3", "1", "2"]);
   });
 
-  it("pins above everything, including something newer", () => {
-    const ordered = sortConversations([
-      row({ id: "new", lastActivityMs: 999 }),
-      row({ id: "pinned", lastActivityMs: 1, pinned: true }),
-    ]);
-    expect(ordered[0]?.id).toBe("pinned");
+  it("hands the rule the six fields it reads, and nothing else", () => {
+    // The avatar, the preview and the unread count never cross the boundary:
+    // the rule answers with indices so the caller reorders what it holds.
+    const { rules, seen } = fakeRules([0]);
+    sortConversations(
+      [
+        row({
+          id: "x",
+          kind: "channel",
+          title: "Lakko news",
+          preview: "not read by the rule",
+          lastActivityMs: 42,
+          unread: 7,
+          pinned: true,
+          archived: false,
+        }),
+      ],
+      rules,
+    );
+    expect(seen()).toEqual([["x", 2, "Lakko news", 42n, true, false]]);
   });
 
-  it("sinks archived below everything, including something newer", () => {
-    const ordered = sortConversations([
-      row({ id: "archived", lastActivityMs: 999, archived: true }),
-      row({ id: "live", lastActivityMs: 1 }),
-    ]);
-    expect(ordered.map((r) => r.id)).toEqual(["live", "archived"]);
+  it("maps every kind onto the rule's own, so a tap still routes", () => {
+    const { rules, seen } = fakeRules([0, 1, 2]);
+    sortConversations(
+      [row({ kind: "chat" }), row({ kind: "group" }), row({ kind: "channel" })],
+      rules,
+    );
+    expect(seen().map((args) => args[1])).toEqual([0, 1, 2]);
   });
 
-  it("keeps a pinned archived conversation with the pinned ones", () => {
-    // Pinning is an explicit act and archiving is a tidy-up; the explicit
-    // one wins, or pinning something then archiving it would look like the
-    // pin was ignored.
-    const ordered = sortConversations([
-      row({ id: "live", lastActivityMs: 500 }),
-      row({ id: "both", lastActivityMs: 1, pinned: true, archived: true }),
-    ]);
-    expect(ordered[0]?.id).toBe("both");
-  });
-
-  it("treats a conversation nothing has happened in as the oldest", () => {
-    const ordered = sortConversations([
-      row({ id: "empty", lastActivityMs: null, title: "Zoe" }),
-      row({ id: "old", lastActivityMs: 1, title: "Anna" }),
-    ]);
-    expect(ordered.map((r) => r.id)).toEqual(["old", "empty"]);
-  });
-
-  it("orders two empty conversations by title, so the list does not reshuffle", () => {
-    // Both are `null`, so without a tiebreak they would sit in whatever
-    // order the stores happened to yield and a refresh would look like a bug.
-    const a = row({ id: "1", title: "Zoe", lastActivityMs: null });
-    const b = row({ id: "2", title: "Anna", lastActivityMs: null });
-    expect(sortConversations([a, b]).map((r) => r.id)).toEqual(["2", "1"]);
-    expect(sortConversations([b, a]).map((r) => r.id)).toEqual(["2", "1"]);
+  it("passes 'nothing has happened yet' as absent rather than as a zero time", () => {
+    // Zero is a real instant - the epoch - and the rule distinguishes the two.
+    const { rules, seen } = fakeRules([0]);
+    sortConversations([row({ lastActivityMs: null })], rules);
+    expect(seen()[0]?.[3]).toBeUndefined();
   });
 
   it("does not mutate what it was given", () => {
-    const input = [row({ id: "1", lastActivityMs: 1 }), row({ id: "2", lastActivityMs: 2 })];
-    sortConversations(input);
+    const { rules } = fakeRules([1, 0]);
+    const input = [row({ id: "1" }), row({ id: "2" })];
+    sortConversations(input, rules);
     expect(input.map((r) => r.id)).toEqual(["1", "2"]);
+  });
+
+  it("drops an index the rule could not have meant, rather than a hole in the list", () => {
+    const { rules } = fakeRules([0, 9]);
+    expect(sortConversations([row({ id: "1" })], rules).map((r) => r.id)).toEqual(["1"]);
   });
 });

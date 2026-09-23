@@ -102,7 +102,10 @@ final class GroupCallHost: ObservableObject {
         /// `docs/ux/calls.md` §6 — file the finished call's row in the
         /// conversation it happened in. Defaulted so hosts that never record
         /// (tests of other paths) keep their shorter initialiser.
-        var recordCall: @MainActor (_ groupIdHex: String, _ row: CallTranscriptRow) -> Void = { _, _ in }
+        /// `docs/ux/navigation.md` section 6.2 — a finished call, with the
+        /// parts the flat Calls index needs beside the row the conversation
+        /// shows.
+        var recordCall: @MainActor (_ call: FinishedCall) -> Void = { _ in }
         var nowMs: () -> Int64
         /// Whether a call is still there, as the SFU sees it (`SfuCallState.swift`).
         /// Injectable so the probe is tested without a network.
@@ -123,6 +126,12 @@ final class GroupCallHost: ObservableObject {
         var joinPublished: Bool
         /// The MLS epoch the session's current seed was derived at.
         var keyedEpoch: UInt64?
+        /// Started or joined with the camera on, so calling back from the
+        /// Calls list re-dials in the same mode.
+        let video: Bool
+        /// When this device started or joined the call. Distinct from
+        /// ``connectedAtMs``, which is when its own media first flowed.
+        let startedAtMs: Int64
         /// When this device's own media first flowed, or `nil` if it never did
         /// (``GroupCallHostRules/transcriptRow(initiator:connectedAtMs:endedAtMs:)``).
         var connectedAtMs: Int64?
@@ -336,7 +345,9 @@ final class GroupCallHost: ObservableObject {
             ownLeaf: key.localLeaf,
             initiator: initiator,
             joinPublished: false,
-            keyedEpoch: keyedEpoch
+            keyedEpoch: keyedEpoch,
+            video: video,
+            startedAtMs: ports.nowMs()
         )
         let ui = CallUiState()
         // Title the screen by the GROUP, not by the literal words "Group call"
@@ -472,7 +483,11 @@ final class GroupCallHost: ObservableObject {
         let endedAtMs = SfuKeepalive.callEndedAtMs(nowMs: ports.nowMs(), lastInboundMs: lastInbound)
         if let row = GroupCallHostRules.transcriptRow(
             initiator: call.initiator, connectedAtMs: call.connectedAtMs, endedAtMs: endedAtMs) {
-            ports.recordCall(call.groupIdHex, row)
+            ports.recordCall(FinishedCall(
+                groupIdHex: call.groupIdHex,
+                row: row,
+                video: call.video,
+                startedAtMs: call.startedAtMs))
         }
         // A device that neither joined nor announced the call has nothing to
         // say about it (see `planLeave`), so it need not read the journal.
@@ -858,8 +873,8 @@ extension GroupCallHost {
             conversationTitle: { [weak repository] in repository?.conversationTitle(groupIdHex: $0) },
             safetyNumber: { try? callSafetyNumber(seed: $0) },
             mintCallId: { CallSession.mintCallId() },
-            recordCall: { [weak repository] groupIdHex, row in
-                repository?.appendCallRow(groupIdHex: groupIdHex, row: row)
+            recordCall: { [weak repository] call in
+                repository?.recordFinishedCall(call)
             },
             nowMs: { ChatRepository.nowMs() }
         ))

@@ -22,9 +22,16 @@
  * search is the server learning the prefix. The caller must offer this as
  * "look up the whole name", never as a list of partial matches.
  *
- * Pure of the UI: the two lookups arrive as functions, so this can be run by
- * a test - vitest has no jsdom and no Solid transform here.
+ * **The gate in front of it is not here.** Whether a typed string could be a
+ * name at all is `looks_like_a_name` in `crates/lakko-ui-rules`, shared with
+ * iOS and Android; what this module owns is asking the two namespaces and
+ * telling the difference between "no such name" and "no answer".
+ *
+ * Pure of the UI: the two lookups and the shared rules arrive as arguments,
+ * so this can be run by a test - vitest has no jsdom, no Solid transform and
+ * no wasm here.
  */
+import type { UiRules } from "./ui-rules";
 
 /** What a lookup turned up. */
 export type FoundByName =
@@ -42,23 +49,6 @@ export interface NameLookups {
   readonly person: (username: string) => Promise<string | null>;
 }
 
-/** Strip a leading `@`, which people type and no namespace stores. */
-export function bareName(typed: string): string {
-  return typed.trim().replace(/^@+/, "");
-}
-
-/**
- * Whether this is worth spending a lookup on.
- *
- * The canonical username rule (`[a-z0-9_]`, 3-32 after normalisation) is the
- * same rule the blinder enforces, so anything it would refuse is refused
- * here first rather than costing a proof of work to be told no.
- */
-export function looksLikeAName(typed: string): boolean {
-  const name = bareName(typed).toLocaleLowerCase();
-  return name.length >= 3 && name.length <= 32 && /^[a-z0-9_]+$/.test(name);
-}
-
 /**
  * Ask both namespaces for one name.
  *
@@ -74,9 +64,10 @@ export function looksLikeAName(typed: string): boolean {
 export async function findByName(
   typed: string,
   lookups: NameLookups,
+  rules: UiRules,
 ): Promise<FoundByName> {
-  const name = bareName(typed);
-  if (!looksLikeAName(name)) return { kind: "nothing" };
+  const name = rules.bareName(typed);
+  if (!rules.looksLikeAName(name)) return { kind: "nothing" };
   let reachedTheServer = false;
   try {
     const channelIdHex = await lookups.channel(name);
@@ -98,8 +89,12 @@ export async function findByName(
 }
 
 /** What to say about a result. One sentence, and never a protocol word. */
-export function findByNameMessage(result: FoundByName, typed: string): string {
-  const at = `@${bareName(typed)}`;
+export function findByNameMessage(
+  result: FoundByName,
+  typed: string,
+  rules: UiRules,
+): string {
+  const at = `@${rules.bareName(typed)}`;
   switch (result.kind) {
     case "nothing":
       return `Nothing found for ${at}.`;

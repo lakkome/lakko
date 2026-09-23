@@ -35,12 +35,13 @@ import { restoredKind } from "../auth/restore-marker";
 import { ownPersonKeyB64, peopleCountOf, personKeysOf } from "./person-key";
 import { decideConversationKind, type ConversationKind } from "./conversation-kind";
 import { conversationTitle } from "./conversation-title";
-import { bareName, findByName, findByNameMessage, looksLikeAName } from "./find-by-name";
+import { findByName, findByNameMessage } from "./find-by-name";
 import { DiscoveryClient } from "../discovery/client";
 import { bytesToHex } from "../channels/composer";
 import { channelRowModel } from "../channels/channel-row";
 import { channelsState } from "../state/channels-state";
 import { sortConversations, type ConversationRow } from "./conversation-list";
+import { uiRules } from "./ui-rules";
 import {
   observeConversationKind,
   persistedConversationKind,
@@ -388,7 +389,13 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
 
   const orderedRows = createMemo((): readonly ConversationRow[] => {
     const flagsMap = sync.flags();
-    return sortConversations([
+    // The order is the shared rule, so the list waits for it rather than
+    // falling back to a second, drifting copy. In the running app the rules
+    // have resolved long before a session exists.
+    const rules = uiRules();
+    if (rules === null) return [];
+    return sortConversations(
+      [
       ...channelRows(),
       ...chats.groups().map((g) => {
         const f = flagsMap[syncGroupIdHex(g.group.groupId)];
@@ -404,7 +411,9 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           archived: f?.archived === true,
         };
       }),
-    ]);
+      ],
+      rules,
+    );
   });
 
 
@@ -440,18 +449,27 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
     setLookupBusy(true);
     setLookupNote(null);
     const typed = query();
+    const rules = uiRules();
+    if (rules === null) {
+      setLookupBusy(false);
+      return;
+    }
     try {
       const client = new DiscoveryClient();
-      const found = await findByName(typed, {
-        channel: async (handle) => {
-          const found = await client.lookupChannel(handle);
-          return found.channel === null ? null : bytesToHex(found.channel);
+      const found = await findByName(
+        typed,
+        {
+          channel: async (handle) => {
+            const found = await client.lookupChannel(handle);
+            return found.channel === null ? null : bytesToHex(found.channel);
+          },
+          person: async (username) => {
+            const found = await client.lookup(username);
+            return found.account === null ? null : found.normalisedUsername;
+          },
         },
-        person: async (username) => {
-          const found = await client.lookup(username);
-          return found.account === null ? null : found.normalisedUsername;
-        },
-      });
+        rules,
+      );
       if (found.kind === "channel") {
         setQuery("");
         navigate(paths.channelSubscribe(found.channelIdHex), {
@@ -464,7 +482,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
         navigate(paths.contacts, { state: { username: found.username } });
         return;
       }
-      setLookupNote(findByNameMessage(found, typed));
+      setLookupNote(findByNameMessage(found, typed, rules));
     } finally {
       setLookupBusy(false);
     }
@@ -589,7 +607,12 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
               as ONE row for the whole name, never as partial matches: the
               server answers the blinded name it was given and cannot answer
               a prefix. */}
-          <Show when={visibleRows().length === 0 && looksLikeAName(query())}>
+          <Show
+            when={
+              visibleRows().length === 0 &&
+              uiRules()?.looksLikeAName(query()) === true
+            }
+          >
             <button
               type="button"
               class="lk-pane-lookup"
@@ -597,7 +620,9 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
               onClick={() => void lookUp()}
             >
               <Icon name="search" size={16} />
-              {lookupBusy() ? "Looking up..." : `Look up @${bareName(query())}`}
+              {lookupBusy()
+                ? "Looking up..."
+                : `Look up @${uiRules()?.bareName(query()) ?? query()}`}
             </button>
           </Show>
           <Show when={lookupNote()}>

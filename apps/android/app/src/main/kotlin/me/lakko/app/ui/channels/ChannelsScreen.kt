@@ -154,293 +154,6 @@ public fun rememberChannelsUiState(): ChannelsUiState {
 // Channels list
 // ============================================================================
 
-/**
- * The Channels tab: the same list vocabulary as Chats — a search field, rows
- * with an avatar, the name, the handle, the subscriber count when this device
- * knows it and the newest post's time; a compose menu with New channel, Join
- * as co-publisher and Find a channel.
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-public fun ChannelsListScreen(
-    state: ChannelsUiState,
-    onCreate: () -> Unit,
-    onOpen: (channelId: String) -> Unit,
-    onJoin: () -> Unit,
-    /** A resolved channel id (from a handle or a pasted id) lands on its subscribe
-     *  route; the handle it was found by, when there was one, names it in the list. */
-    onFindSubscribe: (channelId: String, handle: String?) -> Unit,
-) {
-    val channels by state.channels.collectAsState()
-    val postsByChannel by state.postsByChannel.collectAsState()
-    val keysByChannel by state.keysByChannel.collectAsState()
-    val context = LocalContext.current
-    var query by rememberSaveable { mutableStateOf("") }
-    var menuOpen by remember { mutableStateOf(false) }
-    var findOpen by remember { mutableStateOf(false) }
-    val zone = remember { ZoneId.systemDefault() }
-    val locale = remember { Locale.getDefault() }
-    val use24h = remember(context) { DateFormat.is24HourFormat(context) }
-    val counts = SubscriberFanoutRegistry.subscriberCounts()
-
-    val rows = remember(channels, postsByChannel, keysByChannel, counts) {
-        val now = System.currentTimeMillis()
-        channels.map { channel ->
-            channelRowModel(
-                channel = channel,
-                posts = postsByChannel[channel.id],
-                subscriberCount = counts[channel.id],
-                isOwner = keysByChannel.containsKey(channel.id),
-                nowMs = now,
-                zone = zone,
-                use24h = use24h,
-                locale = locale,
-            )
-        }
-    }
-    val visible = remember(rows, query) { filterChannelRows(rows, query) }
-
-    if (findOpen) {
-        FindChannelDialog(
-            onDismiss = { findOpen = false },
-            onFound = { id, handle ->
-                findOpen = false
-                onFindSubscribe(id, handle)
-            },
-        )
-    }
-
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("Channels") },
-                actions = {
-                    Box {
-                        IconButton(onClick = { menuOpen = true }) {
-                            Icon(Icons.Filled.Add, contentDescription = "Add channel")
-                        }
-                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                            DropdownMenuItem(
-                                text = { Text("New channel") },
-                                onClick = {
-                                    menuOpen = false
-                                    onCreate()
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Find a channel") },
-                                onClick = {
-                                    menuOpen = false
-                                    findOpen = true
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Join as co-publisher") },
-                                onClick = {
-                                    menuOpen = false
-                                    onJoin()
-                                },
-                            )
-                        }
-                    }
-                },
-            )
-        },
-    ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding),
-        ) {
-            ChannelSearchField(query = query, onQueryChange = { query = it })
-            when {
-                rows.isEmpty() -> ChannelsEmptyPanel(onCreate = onCreate, onFind = { findOpen = true })
-                visible.isEmpty() -> Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(24.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            "No matches",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Spacer(Modifier.height(12.dp))
-                        TextButton(onClick = { findOpen = true }) { Text("Find a channel") }
-                    }
-                }
-                else -> LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(vertical = 4.dp),
-                ) {
-                    items(items = visible, key = { it.id }) { row ->
-                        ChannelRow(row = row, onClick = { onOpen(row.id) })
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ChannelSearchField(query: String, onQueryChange: (String) -> Unit) {
-    OutlinedTextField(
-        value = query,
-        onValueChange = onQueryChange,
-        placeholder = { Text("Search channels") },
-        singleLine = true,
-        leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-        trailingIcon = if (query.isNotEmpty()) {
-            {
-                IconButton(onClick = { onQueryChange("") }) {
-                    Icon(Icons.Filled.Clear, contentDescription = "Clear search")
-                }
-            }
-        } else {
-            null
-        },
-        shape = RoundedCornerShape(12.dp),
-        colors = OutlinedTextFieldDefaults.colors(
-            focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-            unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-            focusedBorderColor = Color.Transparent,
-            unfocusedBorderColor = Color.Transparent,
-        ),
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 4.dp),
-    )
-}
-
-@Composable
-private fun ChannelRow(row: ChannelRowModel, onClick: () -> Unit) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-    ) {
-        LakkoAvatar(name = row.title, seed = row.id, size = 40.dp)
-        Spacer(Modifier.width(12.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = row.title,
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
-                if (row.time != null) {
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = row.time,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            Text(
-                text = row.subtitle,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-    }
-}
-
-@Composable
-private fun ChannelsEmptyPanel(onCreate: () -> Unit, onFind: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(24.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("No channels yet", style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(12.dp))
-            Button(onClick = onCreate) { Text("Create a channel") }
-            Spacer(Modifier.height(4.dp))
-            TextButton(onClick = onFind) { Text("Find a channel") }
-        }
-    }
-}
-
-/**
- * Find a channel by its public handle (or a pasted channel id): resolves it
- * and hands the channel id to the subscribe route.
- */
-@Composable
-private fun FindChannelDialog(onDismiss: () -> Unit, onFound: (channelId: String, handle: String?) -> Unit) {
-    var input by remember { mutableStateOf("") }
-    var busy by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
-    val scope = rememberCoroutineScope()
-
-    fun run() {
-        val raw = input.trim()
-        if (busy || raw.isEmpty()) return
-        busy = true
-        error = null
-        scope.launch {
-            try {
-                val idHex = ChannelDiscovery.resolveChannelIdOrHandle(raw)
-                if (idHex == null) {
-                    val shown = if (raw.startsWith("@")) raw else "@$raw"
-                    error = "No channel found for $shown."
-                } else {
-                    // A 32-char hex id was pasted verbatim: no handle to show.
-                    val handle = raw.removePrefix("@").takeIf { !it.equals(idHex, ignoreCase = true) }
-                    onFound(idHex, handle)
-                }
-            } catch (e: Throwable) {
-                Log.w(TAG, "channel lookup failed", e)
-                error = "Could not look up the channel. Try again."
-            } finally {
-                busy = false
-            }
-        }
-    }
-
-    AlertDialog(
-        onDismissRequest = { if (!busy) onDismiss() },
-        title = { Text("Find a channel") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = input,
-                    onValueChange = {
-                        input = it
-                        error = null
-                    },
-                    label = { Text("Handle") },
-                    placeholder = { Text("@handle") },
-                    singleLine = true,
-                    enabled = !busy,
-                    isError = error != null,
-                    supportingText = error?.let { msg -> { Text(msg) } },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = { run() }, enabled = !busy && input.trim().isNotEmpty()) {
-                Text(if (busy) "Finding..." else "Find")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss, enabled = !busy) { Text("Cancel") }
-        },
-    )
-}
-
 // ============================================================================
 // Screen chrome shared by the pushed destinations
 // ============================================================================
@@ -505,6 +218,15 @@ public fun NewChannelScreen(
     sessionToken: String,
     onBack: () -> Unit,
     onCreated: (channelId: String) -> Unit,
+    /**
+     * Join somebody else's channel as a co-publisher (ADR-0028 OQ3).
+     *
+     * It lives here rather than in the create menu because
+     * `docs/ux/navigation.md` section 3 fixes that menu at exactly three items,
+     * and because this is the same moment — setting a channel up — reached by
+     * the same route. `null` hides it.
+     */
+    onJoinAsCoPublisher: (() -> Unit)? = null,
 ) {
     var name by remember { mutableStateOf("") }
     var description by remember { mutableStateOf("") }
@@ -636,6 +358,15 @@ public fun NewChannelScreen(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(if (busy) "Creating..." else "Create")
+            }
+            if (onJoinAsCoPublisher != null) {
+                TextButton(
+                    onClick = onJoinAsCoPublisher,
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Join a channel as co-publisher")
+                }
             }
         }
     }

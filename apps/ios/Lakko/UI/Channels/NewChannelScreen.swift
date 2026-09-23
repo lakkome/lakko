@@ -19,6 +19,15 @@ struct NewChannelScreen: View {
     /// handle (an empty handle skips discovery entirely, so create still
     /// works).
     var sessionTokenProvider: () -> String? = { nil }
+    /// ADR-0028 OQ3 — open the co-publisher join flow.
+    ///
+    /// It lives here because `docs/ux/navigation.md` section 3 fixes the
+    /// create menu at exactly three items and Channels is no longer a
+    /// destination with an add menu of its own. "I was sent a link to publish
+    /// to someone else's channel" is the same intent as "I want a channel", so
+    /// the one screen that already answers that intent is where it goes.
+    /// `nil` hides it.
+    var onJoinAsCoPublisher: (() -> Void)?
     @Environment(\.dismiss) private var dismiss
 
     @State private var name: String = ""
@@ -49,6 +58,14 @@ struct NewChannelScreen: View {
                 Section {
                     Text(errorMessage)
                         .foregroundStyle(Color.lakkoDanger)
+                }
+            }
+            if let onJoinAsCoPublisher {
+                Section {
+                    Button("Join as co-publisher", action: onJoinAsCoPublisher)
+                        .disabled(busy)
+                } footer: {
+                    Text("Someone sent you a link to publish to their channel.")
                 }
             }
         }

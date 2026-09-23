@@ -35,7 +35,6 @@ import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -59,7 +58,6 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -109,14 +107,17 @@ public fun ContactsScreen(
     /** Open the 1x1 chat for an accepted contact (fallback when
      *  [onOpenContact] is not wired). */
     onOpenChat: ((groupIdHex: String) -> Unit)? = null,
-    /** "Start call" on a call link this device created: hands the link's `/c/`
-     *  slug to the JoinCall landing, where this account is the owner and hosts
-     *  the call. `null` hides the button (tests). */
-    onStartCallLink: ((slug: String) -> Unit)? = null,
+    /** docs/ux/navigation.md section 4.3 — a username the conversation list's
+     *  one lookup row resolved. The add sheet opens with it already filled in,
+     *  because the person has typed it once and the request flow is the only
+     *  thing here they have not done yet. */
+    prefillUsername: String? = null,
+    /** Called once [prefillUsername] has been taken, so the slot can be
+     *  emptied and a later visit does not re-open the sheet. */
+    onPrefillConsumed: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
-    val callLinks by viewModel.callLinks.collectAsStateWithLifecycle()
     // ADR-0048 — every name on this screen comes from the one resolver; the
     // version flow recomposes a row in place when a profile arrives or a
     // username verifies.
@@ -139,27 +140,16 @@ public fun ContactsScreen(
     var menuOpen by remember { mutableStateOf(false) }
     var addSheetOpen by remember { mutableStateOf(false) }
     var inviteSheetOpen by remember { mutableStateOf(false) }
-    var callLinksSheetOpen by remember { mutableStateOf(false) }
     var sentExpanded by remember { mutableStateOf(false) }
 
-    // A created call link opens the "Call links" sheet so the result is shown
-    // in the link-row style right away.
-    var seenCallLinks by remember { mutableIntStateOf(callLinks.created.size) }
-    LaunchedEffect(callLinks.created.size) {
-        if (callLinks.created.size > seenCallLinks) callLinksSheetOpen = true
-        seenCallLinks = callLinks.created.size
-    }
-
-    if (callLinks.formOpen) {
-        CreateCallLinkDialog(
-            state = callLinks,
-            onMediaChange = viewModel::onCallLinkMediaChange,
-            onExpiryChange = viewModel::onCallLinkExpiryChange,
-            onMaxUsesChange = viewModel::onCallLinkMaxUsesChange,
-            onLabelChange = viewModel::onCallLinkLabelChange,
-            onCreate = viewModel::onCreateCallLink,
-            onDismiss = viewModel::onDismissCallLinkForm,
-        )
+    // docs/ux/navigation.md section 4.3 — a name found by the conversation
+    // list's lookup row opens the add sheet already filled in. Consumed as soon
+    // as it is taken, so returning to this tab later does not re-open it.
+    LaunchedEffect(prefillUsername) {
+        val username = prefillUsername ?: return@LaunchedEffect
+        viewModel.onUsernameChange(username)
+        addSheetOpen = true
+        onPrefillConsumed?.invoke()
     }
 
     if (addSheetOpen) {
@@ -196,17 +186,6 @@ public fun ContactsScreen(
                 }
             },
             onDismiss = { inviteSheetOpen = false },
-        )
-    }
-
-    if (callLinksSheetOpen) {
-        CallLinksSheet(
-            links = callLinks.created,
-            onCreate = viewModel::onOpenCallLinkForm,
-            onCopy = { url -> copyToClipboard(context, url) },
-            onShare = { url -> launchShareIntent(context, url) },
-            onStartCall = onStartCallLink,
-            onDismiss = { callLinksSheetOpen = false },
         )
     }
 
@@ -249,11 +228,6 @@ public fun ContactsScreen(
                                 text = { Text("Share invite link") },
                                 leadingIcon = { Icon(Icons.Filled.Link, contentDescription = null) },
                                 onClick = { menuOpen = false; inviteSheetOpen = true },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Create call link") },
-                                leadingIcon = { Icon(Icons.Filled.Videocam, contentDescription = null) },
-                                onClick = { menuOpen = false; viewModel.onOpenCallLinkForm() },
                             )
                         }
                     }
@@ -843,7 +817,7 @@ private fun LinkRow(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun CallLinksSheet(
+internal fun CallLinksSheet(
     links: List<CreatedCallLink>,
     onCreate: () -> Unit,
     onCopy: (String) -> Unit,
@@ -903,7 +877,7 @@ private fun CallLinksSheet(
 }
 
 @Composable
-private fun CreateCallLinkDialog(
+internal fun CreateCallLinkDialog(
     state: CallLinkUiState,
     onMediaChange: (me.lakko.app.calls.CallMediaPreset) -> Unit,
     onExpiryChange: (me.lakko.app.calls.CallInviteExpiryPreset) -> Unit,

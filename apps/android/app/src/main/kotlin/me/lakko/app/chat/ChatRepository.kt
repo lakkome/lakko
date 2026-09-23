@@ -5025,6 +5025,10 @@ public class ChatRepository(
                 readWatermarkStore.deleteAccount(accountIdB64)
                 // And the persisted group-call records.
                 groupCallStore.deleteAccount(accountIdB64)
+                // docs/ux/navigation.md section 5 — and the cross-conversation
+                // call index. Who this device called and when goes with the
+                // device, exactly as the transcripts holding the same calls do.
+                me.lakko.app.calls.CallHistoryStore.clear(applicationContext, accountIdB64)
             }
         } catch (_: Throwable) {
             // best-effort
@@ -6704,9 +6708,51 @@ public class ChatRepository(
      */
     public fun recordCallRow(groupIdHex: String, entry: me.lakko.app.calls.CallTranscriptEntry) {
         val record = groups[groupIdHex] ?: return
-        record.appendCallRow(entry, createdAt = java.time.Instant.now().toString())
+        val now = java.time.Instant.now()
+        record.appendCallRow(entry, createdAt = now.toString())
         publishThreadList()
-        callRowScope.launch { persistMessageLogBestEffort() }
+        // docs/ux/navigation.md section 6.2 — the Calls screen reads an index
+        // written when the row is, never a walk of every transcript. Written on
+        // the same dispatcher as the transcript persist and after it, so a
+        // failure here can never cost the conversation its row.
+        callRowScope.launch {
+            persistMessageLogBestEffort()
+            recordCallHistoryEntry(groupIdHex, entry, now.toEpochMilli())
+        }
+    }
+
+    /**
+     * File one finished call in the cross-conversation index.
+     *
+     * The kind comes from the same persisted decision the conversation list
+     * routes on ([me.lakko.app.chat.ConversationKindStore]), so a Calls row
+     * opens the screen its conversation opens and never a different one.
+     */
+    private fun recordCallHistoryEntry(
+        groupIdHex: String,
+        entry: me.lakko.app.calls.CallTranscriptEntry,
+        startedAtMs: Long,
+    ) {
+        try {
+            me.lakko.app.calls.CallHistoryStore.record(
+                context = applicationContext,
+                accountIdB64 = currentAccountIdB64.get(),
+                entry = me.lakko.app.calls.CallHistoryEntry(
+                    conversationIdHex = groupIdHex.lowercase(),
+                    kind = ConversationKindStore.resolve(
+                        applicationContext,
+                        groupIdHex,
+                        memberCount(groupIdHex),
+                    ),
+                    outcome = entry.outcome,
+                    video = entry.video,
+                    startedAtMs = startedAtMs,
+                    durationSecs = entry.durationSecs,
+                ),
+            )
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "filing the call history entry failed", cause)
+        }
     }
 
     /** Capture `(cursor, messages)` per known group + write

@@ -989,6 +989,60 @@ public final class ChatRepository: ObservableObject {
         state = state.with(threads: buildThreadList())
     }
 
+    /// `docs/ux/navigation.md` section 6.2 — file a finished call BOTH ways at
+    /// once: the row the conversation shows, and the entry the flat Calls list
+    /// reads.
+    ///
+    /// The two writes live together because the spec's requirement is an
+    /// ordering one — the Calls list must be an index written when the row is,
+    /// never a scan of every transcript — and splitting them across two call
+    /// sites is how an index stops being written for one of the two call kinds
+    /// without anything failing.
+    public func recordFinishedCall(_ call: FinishedCall) {
+        appendCallRow(groupIdHex: call.groupIdHex, row: call.row)
+        guard let accountIdB64 = currentAccountIdB64 else { return }
+        let (outcome, durationMs) = CallHistoryEntry.outcome(of: call.row)
+        CallHistoryStore.shared.bind(accountIdB64: accountIdB64)
+        CallHistoryStore.shared.record(CallHistoryEntry(
+            // The conversation and the start are not unique on their own (two
+            // calls can start in one millisecond), so the direction and the
+            // outcome join them: the pair of rows a 1x1 leaves on two devices
+            // is one row each here, and a re-record of the same call replaces
+            // rather than duplicates.
+            id: "\(call.groupIdHex).\(call.startedAtMs).\(call.row.direction.rawValue)",
+            conversationId: call.groupIdHex,
+            kind: conversationKind(groupIdHex: call.groupIdHex) == .group ? .group : .chat,
+            direction: call.row.direction,
+            outcome: outcome,
+            video: call.video,
+            startedAtMs: call.startedAtMs,
+            durationMs: durationMs))
+    }
+
+    /// The conversation's kind, the persisted answer winning over the roster.
+    ///
+    /// The persisted kind wins; the people count is the first-sight fallback
+    /// and the one observation that can promote a chat to a group
+    /// (``ConversationKindDecision``). Whatever the decision says to persist is
+    /// written here, so a conversation first seen through a Welcome or a
+    /// restore is decided once and then stays put.
+    ///
+    /// On the repository rather than on a list model because two surfaces now
+    /// ask it — the conversation list and the Calls index — and two copies of
+    /// a decision that also WRITES would race each other.
+    public func conversationKind(groupIdHex: String) -> ConversationKind {
+        let stored = currentAccountIdB64.flatMap {
+            conversationKindStore.load(accountIdB64: $0, groupIdHex: groupIdHex)
+        }
+        let verdict = ConversationKindDecision.resolve(
+            stored: stored, peopleCount: memberCount(groupIdHex: groupIdHex))
+        if let persist = verdict.persist, let accountIdB64 = currentAccountIdB64 {
+            conversationKindStore.record(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex, kind: persist)
+        }
+        return verdict.kind
+    }
+
     /// An ISO-8601 stamp in the shape ``parseDsTimestampMs`` reads, for the
     /// rows this device writes itself.
     nonisolated static func isoTimestamp(ms: Int64) -> String {

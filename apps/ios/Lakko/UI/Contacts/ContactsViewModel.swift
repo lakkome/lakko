@@ -46,6 +46,16 @@ public final class ContactsViewModel: ObservableObject {
     /// sheet dismisses on it (UX spec section 5.3).
     @Published public private(set) var sendSucceededCount: Int = 0
 
+    /// `docs/ux/navigation.md` section 4.3 — bumped when the conversation
+    /// list's ONE network lookup found a person and handed their name here.
+    /// The Contacts screen watches it and opens the add-contact sheet with the
+    /// name already filled.
+    ///
+    /// A counter rather than a flag, because the same name looked up twice has
+    /// to reopen the sheet the second time, and a flag that is already `true`
+    /// changes nothing.
+    @Published public private(set) var addByUsernameRequests: Int = 0
+
     // MARK: - Mirror of the repository's state
 
     /// Mirrored from ``ContactsRepository/state``. SwiftUI's
@@ -150,6 +160,20 @@ public final class ContactsViewModel: ObservableObject {
     /// ADR-0048 §4 — the inline reason under the add-contact field, or `nil`.
     public var usernameHint: String? {
         checkUsername(usernameInput).inlineMessage
+    }
+
+    /// Fill the add-contact form with a name the lookup resolved and ask the
+    /// Contacts screen to open it.
+    ///
+    /// The lookup only ever hands over a name the discovery service confirmed
+    /// exists, so the form opens ready to send rather than ready to be
+    /// re-typed — but it stays a form, because the contact request asks for an
+    /// introduction and sending one silently on the person's behalf is not
+    /// what they asked for by typing a name into a search field.
+    public func prefillAddByUsername(_ username: String) {
+        usernameInput = username
+        sendError = nil
+        addByUsernameRequests += 1
     }
 
     /// Pull-to-refresh: one immediate inbox fetch plus the live-invites

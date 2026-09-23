@@ -21,10 +21,6 @@ public struct ContactsScreen: View {
 
     @ObservedObject public var viewModel: ContactsViewModel
 
-    /// ADR-0032 call links — the session the owner signs the capability with,
-    /// and the intake that routes "Start call" into the `/c/` owner host flow.
-    @EnvironmentObject private var authRepository: AuthRepository
-    @EnvironmentObject private var inviteIntake: InviteIntake
     /// ADR-0048 — names resolve through the directory; observing it here
     /// regroups the list in place when a profile or a verdict arrives.
     @ObservedObject private var profiles = ProfileDirectory.shared
@@ -32,7 +28,6 @@ public struct ContactsScreen: View {
     @State private var query = ""
     @State private var addContactPresented = false
     @State private var inviteLinksPresented = false
-    @State private var createCallLinkPresented = false
     @State private var sentExpanded = false
 
     public init(viewModel: ContactsViewModel) {
@@ -137,26 +132,18 @@ public struct ContactsScreen: View {
                 addMenu
             }
         }
+        // `docs/ux/navigation.md` section 4.3 — the conversation list's one
+        // network lookup found a person and handed the name here, because the
+        // contact request asks for an introduction a search field has no room
+        // for.
+        .onChange(of: viewModel.addByUsernameRequests) { _, _ in
+            addContactPresented = true
+        }
         .sheet(isPresented: $addContactPresented) {
             AddContactSheet(viewModel: viewModel, onDismiss: { addContactPresented = false })
         }
         .sheet(isPresented: $inviteLinksPresented) {
             InviteLinksSheet(viewModel: viewModel, onDismiss: { inviteLinksPresented = false })
-        }
-        .sheet(isPresented: $createCallLinkPresented) {
-            CreateCallLinkSheet(
-                authRepository: authRepository,
-                onDismiss: { createCallLinkPresented = false },
-                onStartCall: { url in
-                    createCallLinkPresented = false
-                    // Park the link exactly as a tapped `/c/<slug>` would:
-                    // the landing recognises this device as the owner and
-                    // offers "Start call" (the owner host flow).
-                    if let parsed = URL(string: url) {
-                        inviteIntake.handle(parsed)
-                    }
-                }
-            )
         }
         // The inbox long-poll runs for the whole session in `SessionRoot`,
         // so a chat or group created elsewhere lands whether or not this
@@ -175,6 +162,11 @@ public struct ContactsScreen: View {
     /// Show / scan a contact QR code are not offered: no contact-QR flow
     /// exists in the repository (the QR renderer and scanner serve device
     /// pairing only).
+    ///
+    /// "Create call link" is NOT here (`docs/ux/navigation.md` section 3). It
+    /// was put in this menu by the redesign only because Calls had been
+    /// removed as a destination; with Calls back, it belongs on the screen a
+    /// person goes to when they are thinking about calling.
     private var addMenu: some View {
         Menu {
             Button { addContactPresented = true } label: {
@@ -182,9 +174,6 @@ public struct ContactsScreen: View {
             }
             Button { inviteLinksPresented = true } label: {
                 Label("Share invite link", systemImage: "link")
-            }
-            Button { createCallLinkPresented = true } label: {
-                Label("Create call link", systemImage: "phone.badge.plus")
             }
         } label: {
             Image(systemName: "person.badge.plus")

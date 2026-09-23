@@ -547,12 +547,17 @@ struct AppRoot: View, Equatable {
     }
 }
 
-/// The five primary destinations (UX spec section 3), in tab order.
+/// The four primary destinations (`docs/ux/navigation.md` section 1), in tab
+/// order.
+///
+/// Groups and Channels are gone as DESTINATIONS. Both remain as kinds of
+/// conversation inside Chats, and both keep their creation flows, reached from
+/// the create menu; the channel screens are pushed destinations of the Chats
+/// stack. Calls is back, with the recent-call history it never had.
 enum SessionTab: Hashable {
     case chats
-    case groups
-    case channels
     case contacts
+    case calls
     case settings
 }
 
@@ -561,10 +566,19 @@ enum SessionTab: Hashable {
 /// Groups or Contacts, and back always returns to where it was opened from.
 enum TabRoute: Hashable {
     case chat(groupIdHex: String)
-    /// The contact picker behind Chats > New chat.
+    /// The contact picker behind the create menu's New chat.
     case newChat
-    /// The contact picker behind Groups > New group (see ``ContactPickerScreen``).
+    /// The create menu's Create group (see ``NewGroupScreen``).
     case newGroup
+    /// A channel this device holds, opened from the merged conversation list.
+    case channel(channelId: String)
+    /// A channel the network lookup found by `@handle`, which this device may
+    /// not hold yet — the reader screen offers Subscribe.
+    case channelFound(channelId: String, handle: String)
+    /// The create menu's Create channel.
+    case newChannel
+    /// ADR-0028 OQ3 — the joiner side of a co-publisher link.
+    case joinCoPublisher
     /// A contact's detail (UX spec section 5.3), keyed on the accepted
     /// request's mailbox id — the same key the contacts list uses.
     case contactDetail(messageId: Int64)
@@ -622,14 +636,22 @@ enum TabRoute: Hashable {
 private final class SessionModels: ObservableObject {
     let contactsVM: ContactsViewModel
     let chatListVM: ChatListViewModel
+    /// ADR-0010 channels. Hoisted out of the Channels tab's root screen, which
+    /// used to own it as a `@StateObject`: with Channels gone as a destination
+    /// the merged conversation list and the pushed channel screens have to read
+    /// ONE store, and a `@StateObject` on a screen belongs to that screen.
+    let channelsState: ChannelsUiState
     private var chatModels: [String: ChatViewModel] = [:]
 
-    init(services: AppServices) {
+    init(services: AppServices, accountIdB64: String) {
         contactsVM = ContactsViewModel(
             repository: services.contactsRepository,
             chatRepository: services.chatRepository
         )
         chatListVM = ChatListViewModel(repository: services.chatRepository)
+        // Bound at construction, so the persisted channel list and publisher
+        // keys are loaded before the first body evaluation.
+        channelsState = ChannelsUiState(accountIdB64: accountIdB64)
     }
 
     func chatViewModel(for groupIdHex: String, make: () -> ChatViewModel) -> ChatViewModel {
@@ -673,19 +695,21 @@ private struct SessionRoot: View, Equatable {
     @StateObject private var models: SessionModels
     private var contactsVM: ContactsViewModel { models.contactsVM }
     private var chatListVM: ChatListViewModel { models.chatListVM }
+    private var channelsState: ChannelsUiState { models.channelsState }
 
     @State private var selectedTab: SessionTab = .chats
     @State private var chatsPath: [TabRoute] = []
-    @State private var groupsPath: [TabRoute] = []
-    @State private var channelsPath: [TabRoute] = []
     @State private var contactsPath: [TabRoute] = []
+    @State private var callsPath: [TabRoute] = []
     @State private var settingsPath: [TabRoute] = []
 
     init(account: SessionAccount, services: AppServices) {
         self.account = account
         self.services = services
         self._inviteIntake = ObservedObject(wrappedValue: services.inviteIntake)
-        self._models = StateObject(wrappedValue: SessionModels(services: services))
+        self._models = StateObject(
+            wrappedValue: SessionModels(
+                services: services, accountIdB64: account.accountIdB64))
     }
 
     nonisolated static func == (lhs: SessionRoot, rhs: SessionRoot) -> Bool {
@@ -700,33 +724,18 @@ private struct SessionRoot: View, Equatable {
             NavigationStack(path: $chatsPath) {
                 ChatListScreen(
                     viewModel: chatListVM,
-                    kind: .chat,
-                    onOpenChat: { chatsPath.append(.chat(groupIdHex: $0)) },
-                    onCompose: { chatsPath.append(.newChat) }
+                    channels: channelsState,
+                    onOpen: { openConversation($0) },
+                    onCreate: { create($0) },
+                    onFoundChannel: { channelId, handle in
+                        push(.channelFound(channelId: channelId, handle: handle), on: .chats)
+                    },
+                    onFoundPerson: { handOffToContacts(username: $0) }
                 )
                 .navigationDestination(for: TabRoute.self) { routeView($0, tab: .chats) }
             }
             .tabItem { Label("Chats", systemImage: "bubble.left") }
             .tag(SessionTab.chats)
-
-            NavigationStack(path: $groupsPath) {
-                ChatListScreen(
-                    viewModel: chatListVM,
-                    kind: .group,
-                    onOpenChat: { groupsPath.append(.chat(groupIdHex: $0)) },
-                    onCompose: { groupsPath.append(.newGroup) }
-                )
-                .navigationDestination(for: TabRoute.self) { routeView($0, tab: .groups) }
-            }
-            .tabItem { Label("Groups", systemImage: "person.3") }
-            .tag(SessionTab.groups)
-
-            NavigationStack(path: $channelsPath) {
-                channelsRoot
-                    .navigationDestination(for: TabRoute.self) { routeView($0, tab: .channels) }
-            }
-            .tabItem { Label("Channels", systemImage: "megaphone") }
-            .tag(SessionTab.channels)
 
             NavigationStack(path: $contactsPath) {
                 ContactsScreen(viewModel: contactsVM)
@@ -734,6 +743,24 @@ private struct SessionRoot: View, Equatable {
             }
             .tabItem { Label("Contacts", systemImage: "person.crop.circle") }
             .tag(SessionTab.contacts)
+
+            NavigationStack(path: $callsPath) {
+                CallsScreen(
+                    history: CallHistoryStore.shared,
+                    conversations: chatListVM,
+                    authRepository: authRepository,
+                    onOpenConversation: { groupIdHex, _ in
+                        push(.chat(groupIdHex: groupIdHex), on: .calls)
+                    },
+                    onCallBack: { groupIdHex, kind, video in
+                        callBack(groupIdHex: groupIdHex, kind: kind, video: video)
+                    },
+                    onOpenLink: { inviteIntake.handle($0) }
+                )
+                .navigationDestination(for: TabRoute.self) { routeView($0, tab: .calls) }
+            }
+            .tabItem { Label("Calls", systemImage: "phone") }
+            .tag(SessionTab.calls)
 
             NavigationStack(path: $settingsPath) {
                 SettingsScreen(
@@ -821,6 +848,12 @@ private struct SessionRoot: View, Equatable {
                     accountIdB64: base64Encode(secrets.accountId),
                     username: account.username
                 )
+                // `docs/ux/navigation.md` section 6.2 — the flat Calls index.
+                // Bound here for the same reason the profile directory is: the
+                // writer is the call hosts' record port, built once at the
+                // composition root, and it has to know whose calls it is
+                // filing before the first one ends.
+                CallHistoryStore.shared.bind(accountIdB64: account.accountIdB64)
                 chatRepository.bootstrap(secrets: secrets)
                 // `docs/ux/calls.md` section 2.1 — the names a background
                 // process may have to show on a ringing lock screen.
@@ -841,34 +874,65 @@ private struct SessionRoot: View, Equatable {
         }
     }
 
-    // MARK: - Tabs
+    // MARK: - The conversation list's four actions
 
-    /// ADR-0010 — broadcast channels. `ChannelsRootScreen` needs the
-    /// canonical AccountIdentity (phrase) seed to build the MLS
-    /// PublisherGroup (same seed the chat + devices surfaces read from
-    /// `identitySecrets`). A session always carries the seed now (the
-    /// relaunch restore lands it too); the fallback is defensive rather than
-    /// presenting a screen that cannot publish.
-    @ViewBuilder private var channelsRoot: some View {
-        if let seed = authRepository.identitySecrets?.accountIdentitySeed {
-            ChannelsRootScreen(
-                // The per-account channel log (list + subscribed seeds) is
-                // keyed on the session account; `account` is an input of this
-                // shell, so it is current on every evaluation.
-                accountIdB64: account.accountIdB64,
-                accountIdentitySeed: seed,
-                sessionTokenProvider: {
-                    authRepository.identitySecrets?.sessionToken
-                }
-            )
-        } else {
-            VStack(spacing: 16) {
-                Text("Sign in again to use Channels.")
-                    .foregroundStyle(.secondary)
-            }
-            .padding()
-            .navigationTitle("Channels")
+    /// Open a row, routed by the ROW's own kind rather than by which list it
+    /// came from: one list holds all three, so there is no list kind left to
+    /// ask.
+    private func openConversation(_ row: ConversationListRow) {
+        switch row.kind {
+        case .channel:
+            push(.channel(channelId: row.id), on: .chats)
+        case .chat, .group:
+            push(.chat(groupIdHex: row.id), on: .chats)
         }
+    }
+
+    /// The three create-menu items (`docs/ux/navigation.md` section 3).
+    private func create(_ choice: ChatListScreen.CreateChoice) {
+        switch choice {
+        case .chat: push(.newChat, on: .chats)
+        case .group: push(.newGroup, on: .chats)
+        case .channel: push(.newChannel, on: .chats)
+        }
+    }
+
+    /// Section 4.3 — a person the lookup found hands their name to Contacts,
+    /// which is where the contact request lives, because that flow asks for an
+    /// introduction the search field has no room for.
+    private func handOffToContacts(username: String) {
+        contactsVM.prefillAddByUsername(username)
+        selectedTab = .contacts
+    }
+
+    /// Section 5.1 — call back in the SAME mode the row records, through the
+    /// host that owns that kind of call.
+    private func callBack(groupIdHex: String, kind: CallHistoryKind, video: Bool) {
+        switch kind {
+        case .group:
+            services.groupCallHost.start(groupIdHex: groupIdHex, video: video, joinCallId: nil)
+        case .chat:
+            services.callHost.startOutgoingCall(
+                groupIdHex: groupIdHex, button: CallMediaChoice.button(video: video))
+        }
+    }
+
+    /// ADR-0017: the canonical AccountIdentity (phrase) seed a channel screen
+    /// needs to build the MLS PublisherGroup. A session always carries it (the
+    /// relaunch restore lands it too); an absent seed presents one line rather
+    /// than a screen that cannot publish.
+    private var accountIdentitySeed: Data? {
+        authRepository.identitySecrets?.accountIdentitySeed
+    }
+
+    @ViewBuilder
+    private func channelSeedMissing(_ title: String) -> some View {
+        VStack(spacing: 16) {
+            Text("Sign in again to use channels.")
+                .foregroundStyle(.secondary)
+        }
+        .padding()
+        .navigationTitle(title)
     }
 
     // MARK: - Routes
@@ -909,6 +973,53 @@ private struct SessionRoot: View, Equatable {
                     replaceTop(route, with: .chat(groupIdHex: groupIdHex), in: tab)
                 }
             )
+        case .channel(let channelId):
+            // ADR-0010 — a channel opened from the merged conversation list.
+            // Pushed on the Chats stack: Channels is no longer a destination,
+            // so the screens it used to root now live under the list that holds
+            // the row.
+            if let seed = accountIdentitySeed {
+                ChannelDetailScreen(
+                    channelId: channelId,
+                    state: channelsState,
+                    client: ChannelsClient(),
+                    accountIdentitySeed: seed)
+            } else {
+                channelSeedMissing("Channel")
+            }
+        case .channelFound(let channelId, let handle):
+            // A channel the ONE network lookup resolved by `@handle`. This
+            // device may hold no seed for it yet, so the reader screen offers
+            // Subscribe.
+            if let seed = accountIdentitySeed {
+                ChannelDetailScreen(
+                    channelId: channelId,
+                    state: channelsState,
+                    client: ChannelsClient(),
+                    accountIdentitySeed: seed,
+                    foundHandle: handle)
+            } else {
+                channelSeedMissing("Channel")
+            }
+        case .newChannel:
+            if let seed = accountIdentitySeed {
+                NewChannelScreen(
+                    state: channelsState,
+                    client: ChannelsClient(),
+                    accountIdentitySeed: seed,
+                    sessionTokenProvider: {
+                        authRepository.identitySecrets?.sessionToken
+                    },
+                    onJoinAsCoPublisher: { push(.joinCoPublisher, on: tab) })
+            } else {
+                channelSeedMissing("New channel")
+            }
+        case .joinCoPublisher:
+            if let seed = accountIdentitySeed {
+                JoinCoPublisherScreen(state: channelsState, accountIdentitySeed: seed)
+            } else {
+                channelSeedMissing("Join as co-publisher")
+            }
         case .contactDetail(let messageId):
             ContactDetailScreen(
                 viewModel: contactsVM,
@@ -1038,6 +1149,9 @@ private struct SessionRoot: View, Equatable {
     /// account's other devices retire this device's leaves when their
     /// scheduled check sees the row gone.
     private func forgetDevice() {
+        // This device's calls go with the device. The transcript rows in each
+        // conversation are the message log's to wipe, not this index's.
+        CallHistoryStore.shared.clear()
         Task { @MainActor in
             if let own = chatRepository.ownDeviceLeafKey {
                 await chatRepository.deleteDirectoryKeyPackage(deviceKey: own)
@@ -1049,15 +1163,14 @@ private struct SessionRoot: View, Equatable {
     // MARK: - Path plumbing
 
     private var allPaths: [[TabRoute]] {
-        [chatsPath, groupsPath, channelsPath, contactsPath, settingsPath]
+        [chatsPath, contactsPath, callsPath, settingsPath]
     }
 
     private func path(for tab: SessionTab) -> Binding<[TabRoute]> {
         switch tab {
         case .chats: return $chatsPath
-        case .groups: return $groupsPath
-        case .channels: return $channelsPath
         case .contacts: return $contactsPath
+        case .calls: return $callsPath
         case .settings: return $settingsPath
         }
     }

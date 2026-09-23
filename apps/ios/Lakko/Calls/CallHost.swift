@@ -68,7 +68,11 @@ final class CallHost: ObservableObject {
         var mintCallId: () -> Data
         /// `docs/ux/calls.md` section 6 — write the finished call's row into
         /// the conversation. Local to this device; no wire format.
-        var recordCall: @MainActor (_ groupIdHex: String, _ row: CallTranscriptRow) -> Void = { _, _ in }
+        /// `docs/ux/navigation.md` section 6.2 — a finished call, with the
+        /// parts the flat Calls index needs beside the row the conversation
+        /// shows. One value, because the whole point is that neither surface
+        /// stores the finished sentence.
+        var recordCall: @MainActor (_ call: FinishedCall) -> Void = { _ in }
         /// Does this device have a camera at all? Decides whether the video
         /// button opens the camera check or places a voice call
         /// (`docs/ux/calls.md` section 3.2).
@@ -162,6 +166,10 @@ final class CallHost: ObservableObject {
     /// attempt).
     private var activeCallDirection: CallTranscriptRow.Direction = .outgoing
     private var connectedAtMs: Int64?
+    /// When the call started: the moment it began ringing here or dialling
+    /// out, NOT the moment media connected. The Calls list files a missed call
+    /// at the time it happened, and a missed call has no connect time.
+    private var callStartedAtMs: Int64?
     /// The call actually happened: it rang here, or it was dialed. A pre-join
     /// the user cancelled was never a call and leaves no row.
     private var callWasPlaced = false
@@ -429,6 +437,7 @@ final class CallHost: ObservableObject {
         activeGroupIdHex = groupIdHex
         sessionWasPresented = false
         connectedAtMs = nil
+        callStartedAtMs = nil
         callWasPlaced = false
         callRecorded = false
         stateSubscription = session.$state.sink { [weak self, weak session] next in
@@ -453,6 +462,7 @@ final class CallHost: ObservableObject {
         outgoingNotice = nil
         sessionWasPresented = false
         connectedAtMs = nil
+        callStartedAtMs = nil
         callWasPlaced = false
         callRecorded = false
     }
@@ -469,7 +479,16 @@ final class CallHost: ObservableObject {
                 connectedAtMs: connectedAtMs,
                 endedAtMs: ports.nowMs(),
                 cause: Self.cause(session.endReason)))
-        ports.recordCall(groupIdHex, row)
+        // The mode the call was STARTED in, which is what calling back should
+        // repeat: the button this device pressed for a call it placed, and the
+        // media the offer asked for on one it received. Read here rather than
+        // off the session, whose camera flag is torn down before this runs.
+        let video = activeCallDirection == .outgoing ? outgoingButton == .video : incomingVideo
+        ports.recordCall(FinishedCall(
+            groupIdHex: groupIdHex,
+            row: row,
+            video: video,
+            startedAtMs: callStartedAtMs ?? ports.nowMs()))
     }
 
     /// The session's end reason as the transcript's own vocabulary. `error`
@@ -505,11 +524,13 @@ final class CallHost: ObservableObject {
             break
         case .ringing:
             callWasPlaced = true
+            if callStartedAtMs == nil { callStartedAtMs = ports.nowMs() }
             ringDeadlineMs = ports.nowMs() + timing.ringTimeoutMs
             armTimer(.ring, for: session)
         case .outgoing:
             sessionWasPresented = true
             callWasPlaced = true
+            if callStartedAtMs == nil { callStartedAtMs = ports.nowMs() }
             armTimer(.establish, for: session)
         case .connecting:
             sessionWasPresented = true
@@ -646,8 +667,8 @@ extension CallHost {
                     chatTitle: repository.conversationTitle(groupIdHex: groupIdHex))
             },
             mintCallId: { CallSession.mintCallId() },
-            recordCall: { [weak repository] groupIdHex, row in
-                repository?.appendCallRow(groupIdHex: groupIdHex, row: row)
+            recordCall: { [weak repository] call in
+                repository?.recordFinishedCall(call)
             },
             turnClient: {
                 guard let token = sessionTokenProvider(), !token.isEmpty else { return nil }

@@ -6,6 +6,7 @@ package me.lakko.app.ui.chat
 import android.text.format.DateFormat
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -24,18 +25,20 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.GroupAdd
+import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.NotificationsOff
+import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -67,39 +70,68 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
+import me.lakko.app.channels.ChannelsUiState
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.chat.ChatThread
+import me.lakko.app.chat.ConversationListRow
+import me.lakko.app.chat.ConversationRowKind
 import me.lakko.app.chat.Direction
+import me.lakko.app.chat.FoundByName
+import me.lakko.app.chat.NameLookups
+import me.lakko.app.chat.conversationRowMatchesQuery
+import me.lakko.app.chat.findByName
+import me.lakko.app.chat.findByNameMessage
+import me.lakko.app.chat.findByNameRowLabel
+import me.lakko.app.chat.orderConversationRows
+import me.lakko.app.chat.toRowKind
 import me.lakko.app.devices.sync.DeviceGroupSyncRepository
 import me.lakko.app.devices.sync.FlagsState
 import me.lakko.app.devices.sync.ReadCursorState
+import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.profile.ProfileDirectory
+import me.lakko.app.ui.channels.channelRowModel
 import me.lakko.app.ui.components.LakkoAvatar
 import java.time.ZoneId
 import java.util.Locale
 
 /**
- * The conversation list — used twice, as the Chats tab and the Groups tab
- * (docs/ux/client-redesign.md section 5.1), filtered by the persisted
- * [ConversationKind].
+ * Every conversation in one list: one-to-one chats, groups and channels.
+ *
+ * `docs/ux/navigation.md` section 2. It used to be one screen per container,
+ * rendered twice with a `kind` prop and a third time as Channels, and the
+ * newest thing that happened to you was in one of them and you had to remember
+ * which. The prop is GONE rather than defaulted: a list sorted by WHEN cannot
+ * be filtered by kind and still be that list.
+ *
+ * The order is the shared rule in `crates/lakko-ui-rules`, reached through
+ * [orderConversationRows] — one copy behind three clients, because three
+ * hand-written translations of one paragraph drift and the drift is only found
+ * when someone notices the clients disagreeing.
  *
  * Receiving is automatic (the app-level long poll in `MainActivity`), so there
  * is no Refresh button; pull-to-refresh runs the same poll once. Row actions
  * live behind a swipe (pin to the right, archive to the left) and a long-press
- * menu (pin / mute / archive), never as permanent buttons in the row. The last
- * message and its time are read off the repository's persisted message log —
- * the thread already carries its messages; nothing about storage changes.
+ * menu, never as permanent buttons in the row.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 public fun ChatListScreen(
     repository: ChatRepository,
-    kind: ConversationKind,
     onOpenThread: (groupIdHex: String) -> Unit,
-    /** New chat (Chats) or New group (Groups). */
-    onCompose: () -> Unit,
+    /** A channel row opens the channel, not a chat — the one thing the row's
+     *  kind is carried for. */
+    onOpenChannel: (channelId: String) -> Unit,
+    /** The three items of the create menu, `docs/ux/navigation.md` section 3. */
+    onNewChat: () -> Unit,
+    onCreateGroup: () -> Unit,
+    onCreateChannel: () -> Unit,
+    /** A looked-up channel handle: its subscribe page. */
+    onSubscribeToChannel: (channelId: String, handle: String) -> Unit,
+    /** A looked-up username: Contacts, which owns the request flow. */
+    onFoundPerson: (username: String) -> Unit,
     modifier: Modifier = Modifier,
+    channels: ChannelsUiState? = null,
     deviceGroupSync: DeviceGroupSyncRepository? = null,
 ) {
     val state by repository.state.collectAsStateWithLifecycle()
@@ -114,10 +146,13 @@ public fun ChatListScreen(
     val flagsState = deviceGroupSync?.flags?.collectAsStateWithLifecycle()
     val flagsMap: Map<String, FlagsState> = flagsState?.value ?: emptyMap()
     val readCursorState = deviceGroupSync?.readCursors?.collectAsStateWithLifecycle()
-    val readCursorMap: Map<String, ReadCursorState> =
-        readCursorState?.value ?: emptyMap()
+    val readCursorMap: Map<String, ReadCursorState> = readCursorState?.value ?: emptyMap()
+    val channelHandles = channels?.channels?.collectAsStateWithLifecycle()?.value ?: emptyList()
+    val channelPosts = channels?.postsByChannel?.collectAsStateWithLifecycle()?.value ?: emptyMap()
+    val channelKeys = channels?.keysByChannel?.collectAsStateWithLifecycle()?.value ?: emptyMap()
     var refreshing by remember { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
+    var createMenuOpen by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         // One immediate poll so the list is fresh on arrival; the continuous
@@ -125,61 +160,116 @@ public fun ChatListScreen(
         repository.pollAllGroups()
     }
 
-    val isChats = kind == ConversationKind.Chat
     val zone = remember { ZoneId.systemDefault() }
     val locale = remember { Locale.getDefault() }
     val use24h = remember(context) { DateFormat.is24HourFormat(context) }
 
-    // Every row's presentation, derived once per state / name change: the
-    // kind filter, the title, the preview line and the last-message time.
-    val rows = remember(state, kind, nameVersion, groupNameVersion, flagsMap) {
+    // Chats and groups. They were already one store split by a filter, so they
+    // merge by dropping it.
+    val threadRows = remember(state, nameVersion, groupNameVersion, flagsMap, readCursorMap) {
         val now = System.currentTimeMillis()
-        state.threads
-            .filter { conversationKind(context, repository, it.groupIdHex) == kind }
-            .map { thread ->
-                val last = thread.messages.lastOrNull { it.direction != Direction.System }
-                    ?: thread.messages.lastOrNull()
-                val lastMs = last?.let { parseMessageTimeMs(it.createdAt) }
-                val senderName = last?.takeIf { it.direction == Direction.Incoming }
-                    ?.authorKey?.let { directory.resolve(it).primary }
-                ThreadRowModel(
-                    thread = thread,
-                    title = conversationTitle(context, repository, directory, thread.groupIdHex),
-                    preview = rowPreview(thread, last, isGroup = !isChats, senderName = senderName),
-                    time = lastMs?.let { formatListTime(it, now, zone, use24h, locale) },
-                    lastMs = lastMs ?: 0L,
-                    flags = flagsMap[thread.groupIdHex],
-                    unread = unreadCount(thread = thread, cursor = readCursorMap[thread.groupIdHex]),
-                )
-            }
+        state.threads.map { thread ->
+            val kind = conversationKind(context, repository, thread.groupIdHex)
+            val last = thread.messages.lastOrNull { it.direction != Direction.System }
+                ?: thread.messages.lastOrNull()
+            val lastMs = last?.let { parseMessageTimeMs(it.createdAt) }
+            val senderName = last?.takeIf { it.direction == Direction.Incoming }
+                ?.authorKey?.let { directory.resolve(it).primary }
+            val flags = flagsMap[thread.groupIdHex]
+            ConversationListRow(
+                id = thread.groupIdHex,
+                kind = kind.toRowKind(),
+                title = conversationTitle(context, repository, directory, thread.groupIdHex),
+                preview = rowPreview(
+                    thread,
+                    last,
+                    isGroup = kind == ConversationKind.Group,
+                    senderName = senderName,
+                ),
+                time = lastMs?.let { formatListTime(it, now, zone, use24h, locale) },
+                // A conversation nothing has happened in yet has no activity
+                // at all, and the shared rule puts "never" at the bottom and
+                // breaks the tie on the title — so an unrelated refresh never
+                // reshuffles the empty ones.
+                lastActivityMs = lastMs,
+                // ADR-0045 UX §6.2.4 / §6.2.11 — no badge once the membership
+                // has ended; the count would be frozen for good.
+                unread = if (thread.membershipEnded) {
+                    0
+                } else {
+                    unreadCount(thread = thread, cursor = readCursorMap[thread.groupIdHex])
+                },
+                pinned = flags?.pinned == true,
+                muted = flags?.muted == true,
+                archived = flags?.archived == true,
+            )
+        }
+    }
+
+    // Channels are their own store, so they have to be mapped in. Their last
+    // POST time becomes the same field as a chat's last MESSAGE time, or the
+    // one ordering has nothing to order by.
+    val channelRows = remember(channelHandles, channelPosts, channelKeys) {
+        val now = System.currentTimeMillis()
+        channelHandles.map { channel ->
+            val model = channelRowModel(
+                channel = channel,
+                posts = channelPosts[channel.id],
+                subscriberCount = null,
+                isOwner = channelKeys.containsKey(channel.id),
+                nowMs = now,
+                zone = zone,
+                use24h = use24h,
+                locale = locale,
+            )
+            ConversationListRow(
+                id = channel.id,
+                kind = ConversationRowKind.CHANNEL,
+                title = model.title,
+                preview = model.subtitle,
+                time = model.time,
+                lastActivityMs = model.sortMs,
+                // Unread, pinned, muted and archived are keyed on a
+                // conversation id a channel does not carry, so a channel row
+                // shows none of them (section 6.1).
+            )
+        }
+    }
+
+    val rows = remember(threadRows, channelRows) {
+        orderConversationRows(threadRows + channelRows)
     }
     val visible = remember(rows, query) {
-        val q = query.trim()
-        val matched = if (q.isEmpty()) {
-            rows
-        } else {
-            rows.filter { it.title.contains(q, ignoreCase = true) || it.preview.contains(q, ignoreCase = true) }
-        }
-        // Pinned rows first, archived rows last, the newest message first within
-        // each band.
-        matched.sortedWith(
-            compareByDescending<ThreadRowModel> { it.flags?.pinned == true }
-                .thenBy { it.flags?.archived == true }
-                .thenByDescending { it.lastMs },
-        )
+        rows.filter { conversationRowMatchesQuery(query, it.title, it.preview) }
     }
     val synchronizing = remember(state) { repository.isSynchronizing() }
+
+    // `docs/ux/navigation.md` section 4.3 — ONE network lookup row, offered
+    // when nothing local matched and the text could be a name. It asks both
+    // namespaces because the person typing does not know which one holds the
+    // name they were given.
+    var lookupBusy by remember { mutableStateOf(false) }
+    var lookupNote by remember { mutableStateOf<String?>(null) }
+    val lookupOffered = remember(visible, query) {
+        visible.isEmpty() && query.isNotBlank() && looksLikeANameSafely(query)
+    }
 
     Scaffold(
         modifier = modifier,
         topBar = {
             TopAppBar(
-                title = { Text(if (isChats) "Chats" else "Groups") },
+                title = { Text("Chats") },
                 actions = {
-                    IconButton(onClick = onCompose) {
-                        Icon(
-                            imageVector = if (isChats) Icons.Filled.Edit else Icons.Filled.GroupAdd,
-                            contentDescription = if (isChats) "New chat" else "New group",
+                    Box {
+                        IconButton(onClick = { createMenuOpen = true }) {
+                            Icon(Icons.Filled.Edit, contentDescription = "New")
+                        }
+                        CreateMenu(
+                            expanded = createMenuOpen,
+                            onDismiss = { createMenuOpen = false },
+                            onNewChat = onNewChat,
+                            onCreateGroup = onCreateGroup,
+                            onCreateChannel = onCreateChannel,
                         )
                     }
                 },
@@ -207,8 +297,10 @@ public fun ChatListScreen(
             Column(modifier = Modifier.fillMaxSize()) {
                 SearchField(
                     query = query,
-                    onQueryChange = { query = it },
-                    placeholder = if (isChats) "Search chats" else "Search groups",
+                    onQueryChange = {
+                        query = it
+                        lookupNote = null
+                    },
                 )
                 // ADR-0050 / docs/ux/second-device.md section 2: one label while
                 // this device is still being admitted to the account's chats.
@@ -230,48 +322,81 @@ public fun ChatListScreen(
                     ) {
                         CircularProgressIndicator()
                     }
-                    rows.isEmpty() -> EmptyPanel(isChats = isChats, onCompose = onCompose)
-                    visible.isEmpty() -> NoMatchPanel()
-                    else -> LazyColumn(
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(vertical = 4.dp),
-                    ) {
-                        items(items = visible, key = { it.thread.groupIdHex }) { row ->
-                            val toggle: (FlagField) -> Unit = { field ->
-                                val sync = deviceGroupSync
-                                val groupId = hexToBytes(row.thread.groupIdHex)
-                                if (sync != null && groupId != null) {
-                                    val cur = row.flags
-                                    var pinned = cur?.pinned ?: false
-                                    var muted = cur?.muted ?: false
-                                    var archived = cur?.archived ?: false
-                                    val unreadOverride = cur?.unreadOverride ?: false
-                                    when (field) {
-                                        FlagField.Pin -> pinned = !pinned
-                                        FlagField.Mute -> muted = !muted
-                                        FlagField.Archive -> archived = !archived
-                                    }
-                                    scope.launch {
-                                        try {
-                                            sync.setFlags(
-                                                groupId = groupId,
-                                                pinned = pinned,
-                                                muted = muted,
-                                                archived = archived,
-                                                unreadOverride = unreadOverride,
-                                            )
-                                        } catch (cause: Throwable) {
-                                            android.util.Log.w("ChatListScreen", "setFlags failed", cause)
+                    // The empty state's button opens the SAME menu the compose
+                    // button does, not a different set of choices in a
+                    // different place.
+                    rows.isEmpty() -> EmptyPanel(onStart = { createMenuOpen = true })
+                    else -> Column(modifier = Modifier.fillMaxSize()) {
+                        if (visible.isEmpty()) {
+                            NoMatchPanel(
+                                offerLookup = lookupOffered,
+                                label = findByNameRowLabelSafely(query),
+                                busy = lookupBusy,
+                                note = lookupNote,
+                                onLookUp = {
+                                    if (!lookupBusy) {
+                                        lookupBusy = true
+                                        lookupNote = null
+                                        val typed = query
+                                        scope.launch {
+                                            val found = lookUpName(typed)
+                                            lookupBusy = false
+                                            when (found) {
+                                                is FoundByName.Channel -> {
+                                                    query = ""
+                                                    onSubscribeToChannel(
+                                                        found.channelIdHex,
+                                                        found.handle,
+                                                    )
+                                                }
+                                                is FoundByName.Person -> {
+                                                    query = ""
+                                                    onFoundPerson(found.username)
+                                                }
+                                                else -> lookupNote =
+                                                    findByNameMessageSafely(found, typed)
+                                            }
                                         }
+                                    }
+                                },
+                            )
+                        } else {
+                            LazyColumn(
+                                modifier = Modifier.fillMaxSize(),
+                                contentPadding = PaddingValues(vertical = 4.dp),
+                            ) {
+                                items(items = visible, key = { "${it.kind}:${it.id}" }) { row ->
+                                    if (row.kind == ConversationRowKind.CHANNEL) {
+                                        // Same avatar, same title, same second
+                                        // line as every other row. What it does
+                                        // NOT have is the badge, the glyphs and
+                                        // the row menu — all keyed on a
+                                        // conversation id a channel does not
+                                        // carry.
+                                        ConversationRowBody(
+                                            row = row,
+                                            modifier = Modifier.clickable {
+                                                onOpenChannel(row.id)
+                                            },
+                                        )
+                                    } else {
+                                        val toggle: (FlagField) -> Unit = { field ->
+                                            toggleFlag(
+                                                sync = deviceGroupSync,
+                                                groupIdHex = row.id,
+                                                current = flagsMap[row.id],
+                                                field = field,
+                                                scope = scope,
+                                            )
+                                        }
+                                        SwipeableThreadRow(
+                                            row = row,
+                                            onClick = { onOpenThread(row.id) },
+                                            onToggleFlag = toggle,
+                                        )
                                     }
                                 }
                             }
-                            SwipeableThreadRow(
-                                row = row,
-                                isGroup = !isChats,
-                                onClick = { onOpenThread(row.thread.groupIdHex) },
-                                onToggleFlag = toggle,
-                            )
                         }
                     }
                 }
@@ -280,20 +405,132 @@ public fun ChatListScreen(
     }
 }
 
+/**
+ * The three ways to start something, `docs/ux/navigation.md` section 3.
+ *
+ * A row with a leading icon and a label and nothing else: an item that needs a
+ * sentence to explain it has the wrong label. Reached from the compose button
+ * and from the empty state, so a person never meets two different sets of
+ * choices for the same intent.
+ */
+@Composable
+private fun CreateMenu(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    onNewChat: () -> Unit,
+    onCreateGroup: () -> Unit,
+    onCreateChannel: () -> Unit,
+) {
+    DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        DropdownMenuItem(
+            text = { Text("New chat") },
+            leadingIcon = { Icon(Icons.Filled.PersonAdd, contentDescription = null) },
+            onClick = { onDismiss(); onNewChat() },
+        )
+        DropdownMenuItem(
+            text = { Text("Create group") },
+            leadingIcon = { Icon(Icons.Filled.Groups, contentDescription = null) },
+            onClick = { onDismiss(); onCreateGroup() },
+        )
+        DropdownMenuItem(
+            text = { Text("Create channel") },
+            leadingIcon = { Icon(Icons.Filled.Campaign, contentDescription = null) },
+            onClick = { onDismiss(); onCreateChannel() },
+        )
+    }
+}
+
 internal enum class FlagField { Pin, Mute, Archive }
 
-/** Everything one list row renders, computed off the composition's hot path. */
-internal data class ThreadRowModel(
-    val thread: ChatThread,
-    val title: String,
-    val preview: String,
-    /** The formatted last-message time, or `null` for no time. */
-    val time: String?,
-    /** Sort key: the last message's epoch millis, `0` when unknown. */
-    val lastMs: Long,
-    val flags: FlagsState?,
-    val unread: Int,
-)
+private fun toggleFlag(
+    sync: DeviceGroupSyncRepository?,
+    groupIdHex: String,
+    current: FlagsState?,
+    field: FlagField,
+    scope: kotlinx.coroutines.CoroutineScope,
+) {
+    val groupId = hexToBytes(groupIdHex)
+    if (sync == null || groupId == null) return
+    var pinned = current?.pinned ?: false
+    var muted = current?.muted ?: false
+    var archived = current?.archived ?: false
+    val unreadOverride = current?.unreadOverride ?: false
+    when (field) {
+        FlagField.Pin -> pinned = !pinned
+        FlagField.Mute -> muted = !muted
+        FlagField.Archive -> archived = !archived
+    }
+    scope.launch {
+        try {
+            sync.setFlags(
+                groupId = groupId,
+                pinned = pinned,
+                muted = muted,
+                archived = archived,
+                unreadOverride = unreadOverride,
+            )
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatListScreen", "setFlags failed", cause)
+        }
+    }
+}
+
+/**
+ * Ask both discovery namespaces for one typed name.
+ *
+ * The client is built and closed per lookup because a lookup is a rare,
+ * user-initiated act, not a hot path. The decision itself is
+ * [me.lakko.app.chat.findByName], which is pure and tested; this only supplies
+ * the two network calls it takes as an argument.
+ */
+private suspend fun lookUpName(typed: String): FoundByName = try {
+    DiscoveryClient().use { client ->
+        findByName(
+            typed = typed,
+            lookups = object : NameLookups {
+                override suspend fun channel(handle: String): String? =
+                    client.lookupChannel(handle)
+
+                override suspend fun person(username: String): String? {
+                    val found = client.lookup(username)
+                    return if (found.account == null) null else found.normalisedUsername
+                }
+            },
+        )
+    }
+} catch (cancelled: kotlinx.coroutines.CancellationException) {
+    throw cancelled
+} catch (cause: Throwable) {
+    android.util.Log.w("ChatListScreen", "the name lookup could not be started", cause)
+    FoundByName.Unreachable
+}
+
+/**
+ * The shared name gate, degrading to "not a name" when the native library is
+ * not there.
+ *
+ * Failing shut is the honest direction: the gate exists so a name the blinder
+ * would refuse never costs a proof of work, and offering a lookup we cannot
+ * even check the shape of would spend one to be told no.
+ */
+private fun looksLikeANameSafely(typed: String): Boolean = try {
+    uniffi.lakko_ffi_uniffi.looksLikeAName(typed)
+} catch (cause: Throwable) {
+    android.util.Log.w("ChatListScreen", "the name rule could not be read", cause)
+    false
+}
+
+private fun findByNameRowLabelSafely(typed: String): String = try {
+    findByNameRowLabel(typed)
+} catch (_: Throwable) {
+    "Look up this name"
+}
+
+private fun findByNameMessageSafely(found: FoundByName, typed: String): String? = try {
+    findByNameMessage(found, typed)
+} catch (_: Throwable) {
+    "Could not look that up. Check your connection and try again."
+}
 
 /**
  * The second line of a row: the membership-ended line when this device's
@@ -371,13 +608,19 @@ private fun hexToBytes(hex: String): ByteArray? {
     return out
 }
 
-/** The search field under the app bar, filtering rows by name and preview. */
+/**
+ * The search field under the app bar.
+ *
+ * "Search" rather than "Search chats": the list holds every kind of
+ * conversation now, and naming one of them would say the other two are not
+ * here.
+ */
 @Composable
-private fun SearchField(query: String, onQueryChange: (String) -> Unit, placeholder: String) {
+private fun SearchField(query: String, onQueryChange: (String) -> Unit) {
     OutlinedTextField(
         value = query,
         onValueChange = onQueryChange,
-        placeholder = { Text(placeholder) },
+        placeholder = { Text("Search") },
         singleLine = true,
         leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
         trailingIcon = if (query.isNotEmpty()) {
@@ -410,13 +653,10 @@ private fun SearchField(query: String, onQueryChange: (String) -> Unit, placehol
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SwipeableThreadRow(
-    row: ThreadRowModel,
-    isGroup: Boolean,
+    row: ConversationListRow,
     onClick: () -> Unit,
     onToggleFlag: (FlagField) -> Unit,
 ) {
-    val pinned = row.flags?.pinned == true
-    val archived = row.flags?.archived == true
     val dismissState = rememberSwipeToDismissBoxState(
         confirmValueChange = { value ->
             when (value) {
@@ -434,15 +674,15 @@ private fun SwipeableThreadRow(
             val towardsEnd = dismissState.dismissDirection == SwipeToDismissBoxValue.StartToEnd
             val icon = if (towardsEnd) {
                 Icons.Filled.PushPin
-            } else if (archived) {
+            } else if (row.archived) {
                 Icons.Filled.Unarchive
             } else {
                 Icons.Filled.Archive
             }
             val label = if (towardsEnd) {
-                if (pinned) "Unpin" else "Pin"
+                if (row.pinned) "Unpin" else "Pin"
             } else {
-                if (archived) "Unarchive" else "Archive"
+                if (row.archived) "Unarchive" else "Archive"
             }
             Box(
                 modifier = Modifier
@@ -468,7 +708,7 @@ private fun SwipeableThreadRow(
         },
     ) {
         Box(modifier = Modifier.background(MaterialTheme.colorScheme.background)) {
-            ThreadRow(row = row, isGroup = isGroup, onClick = onClick, onToggleFlag = onToggleFlag)
+            ThreadRow(row = row, onClick = onClick, onToggleFlag = onToggleFlag)
         }
     }
 }
@@ -476,110 +716,123 @@ private fun SwipeableThreadRow(
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ThreadRow(
-    row: ThreadRowModel,
-    isGroup: Boolean,
+    row: ConversationListRow,
     onClick: () -> Unit,
     onToggleFlag: (FlagField) -> Unit,
 ) {
-    val thread = row.thread
-    val archived = row.flags?.archived == true
-    val pinned = row.flags?.pinned == true
-    val muted = row.flags?.muted == true
-    // ADR-0045 UX §6.2.4 / §6.2.11 — no badge once the membership has ended;
-    // the count would be frozen for good.
-    val unread = if (thread.membershipEnded) 0 else row.unread
     var menuOpen by remember { mutableStateOf(false) }
     Box {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier
-                .fillMaxWidth()
-                .alpha(if (archived) 0.6f else 1f)
-                .combinedClickable(onClick = onClick, onLongClick = { menuOpen = true })
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-        ) {
-            LakkoAvatar(name = row.title, seed = thread.groupIdHex, size = 40.dp, group = isGroup)
-            Spacer(Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = row.title,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = if (unread > 0) FontWeight.Bold else FontWeight.Medium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
-                    )
-                    if (row.time != null) {
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            text = row.time,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (unread > 0) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            },
-                            maxLines = 1,
-                        )
-                    }
-                }
-                Spacer(Modifier.height(2.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = row.preview,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    if (muted) {
-                        Spacer(Modifier.width(6.dp))
-                        Icon(
-                            Icons.Filled.NotificationsOff,
-                            contentDescription = "Muted",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(16.dp),
-                        )
-                    }
-                    if (pinned) {
-                        Spacer(Modifier.width(6.dp))
-                        Icon(
-                            Icons.Filled.PushPin,
-                            contentDescription = "Pinned",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(16.dp),
-                        )
-                    }
-                    if (unread > 0) {
-                        Spacer(Modifier.width(6.dp))
-                        UnreadBadge(count = unread, muted = muted)
-                    }
-                }
-            }
-        }
+        ConversationRowBody(
+            row = row,
+            modifier = Modifier.combinedClickable(
+                onClick = onClick,
+                onLongClick = { menuOpen = true },
+            ),
+        )
         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
             DropdownMenuItem(
-                text = { Text(if (pinned) "Unpin" else "Pin") },
+                text = { Text(if (row.pinned) "Unpin" else "Pin") },
                 leadingIcon = { Icon(Icons.Filled.PushPin, contentDescription = null) },
                 onClick = { menuOpen = false; onToggleFlag(FlagField.Pin) },
             )
             DropdownMenuItem(
-                text = { Text(if (muted) "Unmute" else "Mute") },
+                text = { Text(if (row.muted) "Unmute" else "Mute") },
                 leadingIcon = { Icon(Icons.Filled.NotificationsOff, contentDescription = null) },
                 onClick = { menuOpen = false; onToggleFlag(FlagField.Mute) },
             )
             DropdownMenuItem(
-                text = { Text(if (archived) "Unarchive" else "Archive") },
+                text = { Text(if (row.archived) "Unarchive" else "Archive") },
                 leadingIcon = {
                     Icon(
-                        if (archived) Icons.Filled.Unarchive else Icons.Filled.Archive,
+                        if (row.archived) Icons.Filled.Unarchive else Icons.Filled.Archive,
                         contentDescription = null,
                     )
                 },
                 onClick = { menuOpen = false; onToggleFlag(FlagField.Archive) },
             )
+        }
+    }
+}
+
+/**
+ * The one row shape, drawn identically for all three kinds
+ * (`docs/ux/navigation.md` section 2.1): same avatar treatment, same title,
+ * same second line, same trailing column. Nothing here says which kind a row
+ * is — a channel simply has no flags and no badge to draw.
+ */
+@Composable
+private fun ConversationRowBody(row: ConversationListRow, modifier: Modifier = Modifier) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier
+            .fillMaxWidth()
+            .alpha(if (row.archived) 0.6f else 1f)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+    ) {
+        LakkoAvatar(
+            name = row.title,
+            seed = row.id,
+            size = 40.dp,
+            group = row.kind != ConversationRowKind.CHAT,
+        )
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = row.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = if (row.unread > 0) FontWeight.Bold else FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (row.time != null) {
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = row.time,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (row.unread > 0) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        maxLines = 1,
+                    )
+                }
+            }
+            Spacer(Modifier.height(2.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = row.preview,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                if (row.muted) {
+                    Spacer(Modifier.width(6.dp))
+                    Icon(
+                        Icons.Filled.NotificationsOff,
+                        contentDescription = "Muted",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+                if (row.pinned) {
+                    Spacer(Modifier.width(6.dp))
+                    Icon(
+                        Icons.Filled.PushPin,
+                        contentDescription = "Pinned",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+                if (row.unread > 0) {
+                    Spacer(Modifier.width(6.dp))
+                    UnreadBadge(count = row.unread, muted = row.muted)
+                }
+            }
         }
     }
 }
@@ -592,22 +845,28 @@ private fun UnreadBadge(count: Int, muted: Boolean) {
         modifier = Modifier
             .clip(RoundedCornerShape(percent = 50))
             .background(
-                if (muted) MaterialTheme.colorScheme.surfaceVariant
-                else MaterialTheme.colorScheme.primary,
+                if (muted) {
+                    MaterialTheme.colorScheme.surfaceVariant
+                } else {
+                    MaterialTheme.colorScheme.primary
+                },
             )
             .padding(horizontal = 7.dp, vertical = 2.dp),
     ) {
         Text(
             text = label,
             style = MaterialTheme.typography.labelSmall,
-            color = if (muted) MaterialTheme.colorScheme.onSurfaceVariant
-            else MaterialTheme.colorScheme.onPrimary,
+            color = if (muted) {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            } else {
+                MaterialTheme.colorScheme.onPrimary
+            },
         )
     }
 }
 
 @Composable
-private fun EmptyPanel(isChats: Boolean, onCompose: () -> Unit) {
+private fun EmptyPanel(onStart: () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -616,29 +875,58 @@ private fun EmptyPanel(isChats: Boolean, onCompose: () -> Unit) {
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(
-                text = if (isChats) "No chats yet" else "No groups yet",
+                text = "No conversations yet",
                 style = MaterialTheme.typography.titleMedium,
             )
             Spacer(Modifier.height(12.dp))
-            Button(onClick = onCompose) {
-                Text(if (isChats) "Start a chat" else "Create a group")
-            }
+            Button(onClick = onStart) { Text("Start one") }
         }
     }
 }
 
+/**
+ * Nothing on this device matched, plus the ONE network lookup row when the text
+ * could be a name.
+ *
+ * One row for the whole name, never a list of partial matches: discovery
+ * evaluates a blinded name and answers only "does this exact name exist", so a
+ * prefix search would be the server learning the prefix.
+ */
 @Composable
-private fun NoMatchPanel() {
+private fun NoMatchPanel(
+    offerLookup: Boolean,
+    label: String,
+    busy: Boolean,
+    note: String?,
+    onLookUp: () -> Unit,
+) {
     Box(
         modifier = Modifier
             .fillMaxSize()
             .padding(24.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = "No matches",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "No results",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (offerLookup) {
+                Button(onClick = onLookUp, enabled = !busy) {
+                    Text(if (busy) "Looking..." else label)
+                }
+            }
+            if (note != null) {
+                Text(
+                    text = note,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
 }
