@@ -12,13 +12,24 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!--
-      Phase 1.20d — runtime permission for posting notifications.
-      Required on Android 13+ (API 33); on lower API levels the
-      OS auto-grants and the explicit `requestPermissions`
-      gesture is a no-op. The actual prompt is fired from
-      `PushSubscriber.subscribe` when the auth flow first
-      surfaces a session — we don't pop a permission prompt at
-      app launch.
+      Runtime permission for posting notifications. Required on
+      Android 13+ (API 33); on lower API levels the OS
+      auto-grants and the explicit request is a no-op.
+
+      The prompt is raised from `SessionRoot` in MainActivity,
+      the moment a session lands — the same moment the app
+      subscribes to push, and in context: the person has just
+      signed in and this is how they will hear from anyone. Not
+      at app launch, where there is nothing to notify about yet.
+
+      This comment used to name `PushSubscriber.subscribe` as
+      the place the prompt came from, which was never true of
+      any code: nothing in this app requested the permission at
+      all until 2026-09-23, so on every Android 13+ phone it
+      stayed denied and a backgrounded call never rang. The
+      subscriber cannot be that place — it runs on an
+      application scope with no Activity to show a dialog from,
+      which is why the step its iOS twin has was missing here.
     -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!--

@@ -3,6 +3,11 @@
 
 package me.lakko.app.ui.settings
 
+import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -21,6 +26,7 @@ import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Gavel
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Person
@@ -48,8 +54,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.app.NotificationManagerCompat
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import me.lakko.app.push.NOTIFICATIONS_OFF_NOTICE
+import me.lakko.app.push.NOTIFICATIONS_OFF_TITLE
 import me.lakko.app.ui.chat.AutoplayVideoNotesSetting
 import me.lakko.app.ui.components.LakkoAvatar
 import me.lakko.app.ui.theme.ThemeMode
@@ -79,6 +90,17 @@ public fun SettingsScreen(
     modifier: Modifier = Modifier,
 ) {
     val mode by ThemePreference.mode.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    // docs/ux/calls.md section 2.1 — whether a wake can reach this phone at
+    // all. Read every time Settings is resumed, never cached at process start:
+    // the row below sends the person to system settings, so the state they
+    // come back to is precisely the one a cached read would still be wrong
+    // about. Starts `true` so the notice does not flash before the first read.
+    var notificationsEnabled by remember { mutableStateOf(true) }
+    LifecycleResumeEffect(Unit) {
+        notificationsEnabled = NotificationManagerCompat.from(context).areNotificationsEnabled()
+        onPauseOrDispose { }
+    }
     var confirmingLogout by remember { mutableStateOf(false) }
     var confirmingForget by remember { mutableStateOf(false) }
     val headerName = displayName?.takeIf { it.isNotBlank() }
@@ -116,6 +138,21 @@ public fun SettingsScreen(
                 }
             }
             HorizontalDivider()
+
+            // First, not filed under device behaviour lower down: this only
+            // appears when it is broken, and the person reading it is the one
+            // asking why their phone did not ring. Nothing is shown when
+            // notifications are on — a row confirming that things work is a row
+            // nobody needs.
+            if (!notificationsEnabled) {
+                SectionLabel("Notifications")
+                SettingsRow(
+                    title = NOTIFICATIONS_OFF_TITLE,
+                    icon = Icons.Filled.NotificationsOff,
+                    onClick = { openAppNotificationSettings(context) },
+                    supporting = NOTIFICATIONS_OFF_NOTICE,
+                )
+            }
 
             SectionLabel("Account")
             SettingsRow("Profile", Icons.Filled.Person, onOpenProfile)
@@ -286,4 +323,32 @@ private fun SettingsRow(
         colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background),
         modifier = Modifier.clickable(onClick = onClick),
     )
+}
+
+/**
+ * Open this app's notification settings — the only place a refused
+ * `POST_NOTIFICATIONS` can be changed, since Android stops showing the prompt
+ * after two dismissals.
+ *
+ * Falls back to the app details page if an OEM build has no per-app
+ * notification screen, so the row can never be a dead end.
+ */
+private fun openAppNotificationSettings(context: Context) {
+    val perApp = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+        .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+    try {
+        context.startActivity(perApp)
+        return
+    } catch (_: ActivityNotFoundException) {
+        // Fall through to the app details page.
+    }
+    val details = Intent(
+        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+        Uri.fromParts("package", context.packageName, null),
+    )
+    try {
+        context.startActivity(details)
+    } catch (_: ActivityNotFoundException) {
+        // Nothing further to offer; the notice still says what is wrong.
+    }
 }

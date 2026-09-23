@@ -3,11 +3,16 @@
 
 package me.lakko.app
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
@@ -52,6 +57,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -767,6 +773,58 @@ private fun SessionRoot(
         // usable. Idempotent for the same account id.
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
             deviceGroupSync.bootstrap(secrets)
+        }
+    }
+
+    // docs/ux/calls.md section 2.1 — the phone must ring with the app closed,
+    // and on Android 13+ that needs POST_NOTIFICATIONS, a runtime permission
+    // the manifest declaration grants nothing towards. It was never requested,
+    // so the permission stayed denied and IncomingCallRinger's post was
+    // refused: the phone silently never rang.
+    //
+    // The ask is here, not in PushSubscriber, for a structural reason: the
+    // subscribe runs on an application-scoped coroutine holding only an
+    // application context, and a permission dialog needs an Activity. This is
+    // also the in-context moment — the session has just landed, the app is
+    // about to subscribe to push, and being reachable is what the person just
+    // signed in for. It is deliberately not at app launch, where there is
+    // nothing yet to be notified about.
+    val notificationAskContext = LocalContext.current
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) {
+        // Nothing to do with the answer here. Every surface that cares reads
+        // the live permission state when it is shown (Settings), and the
+        // ringer already fails soft on a refusal; storing a copy of the answer
+        // would only be a second, staler truth. Recording that we ASKED is a
+        // different fact, and it is written before the prompt is raised.
+    }
+    LaunchedEffect(identitySecrets) {
+        if (identitySecrets == null) return@LaunchedEffect
+        val granted = Build.VERSION.SDK_INT < me.lakko.app.push.NOTIFICATION_PERMISSION_SDK ||
+            ContextCompat.checkSelfPermission(
+                notificationAskContext,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) == PackageManager.PERMISSION_GRANTED
+        // Read the durable "already asked" flag and, when we are going to ask,
+        // write it BEFORE the dialog exists — a prompt can take the process
+        // down, and the answer callback of a dead process never runs, so
+        // writing afterwards would re-prompt on every launch and spend the
+        // platform's two-dismissal budget without the user choosing anything.
+        val ask = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val decision = me.lakko.app.push.notificationPermissionAsk(
+                sdkInt = Build.VERSION.SDK_INT,
+                granted = granted,
+                askedBefore = me.lakko.app.push.NotificationPermissionStore
+                    .askedBefore(notificationAskContext),
+            )
+            if (decision == me.lakko.app.push.NotificationPermissionAsk.Ask) {
+                me.lakko.app.push.NotificationPermissionStore.markAsked(notificationAskContext)
+            }
+            decision
+        }
+        if (ask == me.lakko.app.push.NotificationPermissionAsk.Ask) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
