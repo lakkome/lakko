@@ -91,6 +91,23 @@ import {
 import { A } from "@solidjs/router";
 
 import { cameraStartFailure } from "./capture-fallback";
+import { composeAndUploadCallInvite } from "./composer";
+import {
+  CALL_INVITE_LABEL,
+  callInviteMaxUses,
+  CALL_INVITE_MEDIA_VIDEO,
+  callInviteExpiryMs,
+} from "./call-invite-values";
+import {
+  INVITE_IDLE,
+  deliverCallLink,
+  inviteBusy as inviteIsBusy,
+  inviteStatusHoldMs,
+  inviteStatusLine,
+  nextInvitePress,
+  type InCallInvite,
+} from "./in-call-invite";
+import { DiscoveryClient } from "../discovery/client";
 import { TurnCredentialClient } from "./turn-credential-client";
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
@@ -161,6 +178,7 @@ import {
   decideLinkCallStart,
   linkCallNotice,
   linkCallOccupiesSlot,
+  linkCallOverlayShown,
   reduceLinkCallPhase,
   type LinkCallEvent,
   type LinkCallPhase,
@@ -247,6 +265,22 @@ export interface CallHostApi {
   startLinkCall(opts: StartLinkCallOptions): Promise<LinkCallStartOutcome>;
   /** Leave the link call (or stop waiting to be admitted). */
   leaveLinkCall(): void;
+  /**
+   * Offer a link to the link call in the slot
+   * (`docs/ux/call-links.md` section 3).
+   *
+   * The first call in a given call mints the capability — a round trip and a
+   * proof-of-work solve — and hands the link to the platform's share
+   * mechanism or the clipboard; a second re-offers the same link. Never
+   * rejects, and never ends the call: a failure becomes a sentence in
+   * {@link CallHostApi.linkCallInvite}.
+   */
+  inviteToLinkCall(): Promise<void>;
+  /** What `Invite` is doing for the call in the link slot. */
+  readonly linkCallInvite: Accessor<InCallInvite>;
+  /** The one line the call screen shows about it, or `null` once it has been
+   *  up long enough to read. */
+  readonly linkCallInviteStatus: Accessor<string | null>;
   /** Forget a link call's outcome once it has been shown. */
   dismissLinkCallOutcome(): void;
   /** The `/c/` route is showing the link call; the host does not repeat its
@@ -373,6 +407,24 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   );
   /** The call-link slot. */
   const [linkSlot, setLinkSlot] = createSignal<LinkCallSlot | null>(null);
+  /** The link call's raw 16-byte `call_id`. Kept beside the slot (which holds
+   *  only the hex form, for comparison) because a link minted mid-call has to
+   *  carry the exact bytes the call is running under — `docs/ux/call-links.md`
+   *  section 3: "the same `call_id` the people already in the call are using,
+   *  so the person who follows it arrives in THIS call and not a new one". */
+  const [linkCallId, setLinkCallId] = createSignal<Uint8Array | null>(null);
+  /** What `Invite` is doing for the call in the link slot. Reset per call:
+   *  a link belongs to one `call_id` and must never outlive it. */
+  const [linkInvite, setLinkInvite] = createSignal<InCallInvite>(INVITE_IDLE);
+  /**
+   * Whether the call screen is currently showing a line about it.
+   *
+   * The line and the link are two different lifetimes, and conflating them is
+   * what would make a second `Invite` pay for a second round trip: the line
+   * goes quiet after its hold, while the minted link stays in `linkInvite`
+   * until the call ends.
+   */
+  const [inviteLineShown, setInviteLineShown] = createSignal(false);
   /** The link call's orchestrator, while it holds a session. */
   const [linkHandle, setLinkHandle] = createSignal<MultiJoinerCall | null>(null);
   /** How many `/c/` route views are showing the link call. */
@@ -1725,6 +1777,18 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     const attempt = {};
     linkAttempt = attempt;
     setLinkHandle(null);
+    setLinkCallId(opts.callId);
+    setLinkInvite(INVITE_IDLE);
+    setInviteLineShown(false);
+    if (opts.isOwner) {
+      // `docs/ux/call-links.md` section 5: pressing the button shows "the call
+      // screen, connecting" — never a form, and not a strip at the bottom of
+      // whatever screen the person was on. The founder's overlay is mounted
+      // from `starting`, so the store needs a phase it can draw. A joiner is
+      // left alone: it is waiting to be admitted, which its own notice says
+      // better than a connecting screen would.
+      callActions.setPhase({ kind: "calling" });
+    }
     setLinkSlot({
       callIdHex: hex,
       routePath: opts.routePath,
@@ -1778,6 +1842,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     const h = linkHandle();
     setLinkHandle(null);
     setLinkSlot(null);
+    setLinkCallId(null);
+    setLinkInvite(INVITE_IDLE);
+    setInviteLineShown(false);
     h?.hangUp();
   }
 
@@ -1786,13 +1853,119 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     if (slot !== null && !linkCallOccupiesSlot(slot.phase)) setLinkSlot(null);
   }
 
+  // ----- Invite: a link to the call already running --------------------------
+
+  let inviteStatusTimer: ReturnType<typeof setTimeout> | null = null;
+  function showInvite(state: InCallInvite): void {
+    if (inviteStatusTimer !== null) clearTimeout(inviteStatusTimer);
+    inviteStatusTimer = null;
+    setLinkInvite(state);
+    setInviteLineShown(inviteStatusLine(state) !== null);
+    const hold = inviteStatusHoldMs(state);
+    if (hold === null) return;
+    inviteStatusTimer = setTimeout(() => {
+      inviteStatusTimer = null;
+      setInviteLineShown(false);
+    }, hold);
+  }
+  onCleanup(() => {
+    if (inviteStatusTimer !== null) clearTimeout(inviteStatusTimer);
+  });
+
+  /** What the call screen shows under its status row, or `null`. */
+  const linkInviteStatus = (): string | null =>
+    inviteLineShown() ? inviteStatusLine(linkInvite()) : null;
+
+  /** Hand the link to the platform, and say where it went. */
+  async function offerLink(url: string): Promise<void> {
+    const nav: Navigator | undefined = globalThis.navigator;
+    const clipboard = nav?.clipboard;
+    const delivery = await deliverCallLink(url, {
+      share:
+        nav !== undefined && typeof nav.share === "function"
+          ? async (u: string): Promise<void> => {
+              await nav.share({ url: u });
+            }
+          : undefined,
+      copy:
+        clipboard !== undefined && typeof clipboard.writeText === "function"
+          ? async (text: string): Promise<void> => {
+              await clipboard.writeText(text);
+            }
+          : undefined,
+    });
+    showInvite({ kind: "ready", url, delivery });
+  }
+
+  async function inviteToLinkCall(): Promise<void> {
+    const state = untrack(linkInvite);
+    const press = nextInvitePress(state);
+    if (press === "ignore") return;
+    if (press === "reoffer" && state.kind === "ready") {
+      await offerLink(state.url);
+      return;
+    }
+    const callId = untrack(linkCallId);
+    const slot = untrack(linkSlot);
+    if (callId === null || slot === null || !linkCallOccupiesSlot(slot.phase)) return;
+    // The canonical identity, not a throwaway: the capability's owner key is
+    // derived from this seed, and `MultiJoinerCall` refuses a group whose
+    // roster does not contain the owner named by the link.
+    const identity = chats.identity();
+    const secrets = auth.identitySecrets();
+    if (identity === null || secrets === null) {
+      showInvite({ kind: "failed", failure: "signed-out" });
+      return;
+    }
+    showInvite({ kind: "minting" });
+    let url: string;
+    try {
+      const discovery = new DiscoveryClient();
+      discovery.setSessionToken(secrets.sessionToken);
+      const minted = await composeAndUploadCallInvite({
+        ownerSigningSeed: identity.ed25519Seed,
+        ownerAccountId: secrets.accountId,
+        identity,
+        discoveryClient: discovery,
+        callId,
+        mediaVideo: CALL_INVITE_MEDIA_VIDEO,
+        expiryMs: callInviteExpiryMs(Date.now()),
+        maxUses: callInviteMaxUses(),
+        label: CALL_INVITE_LABEL,
+      });
+      url = minted.url;
+    } catch (err) {
+      // The call runs over the SFU and owes the ledger nothing, so a failed
+      // mint is a sentence and an unchanged call.
+      // eslint-disable-next-line no-console
+      console.warn("call host: could not prepare a link for this call", err);
+      showInvite({ kind: "failed", failure: "unavailable" });
+      return;
+    }
+    // The call may have ended while the mint was in flight; the link is still
+    // worth handing over if the person is still in it.
+    const after = untrack(linkSlot);
+    if (after === null || !linkCallOccupiesSlot(after.phase)) {
+      showInvite(INVITE_IDLE);
+      return;
+    }
+    await offerLink(url);
+  }
+
   // The embedded in-call UI's End button moves the store to `ended`. A session
   // that is still up means the user is ending it; one already closed ended on
   // its own, and `onEnded` keeps that outcome for the user to see.
   createEffect(() => {
     if (callUi.phase().kind !== "ended") return;
     const h = linkHandle();
-    if (h === null) return;
+    if (h === null) {
+      // No session yet: End was pressed on a founder's screen while the call
+      // was still coming up. Leaving drops the attempt, so the session the
+      // start is still building is hung up the moment it arrives.
+      const slot = untrack(linkSlot);
+      if (slot !== null && linkCallOccupiesSlot(slot.phase)) untrack(() => leaveLinkCall());
+      return;
+    }
     const s = h.sessionState();
     if (s !== "closed" && s !== "failed") untrack(() => leaveLinkCall());
   });
@@ -1948,6 +2121,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     linkCall: linkSlot,
     startLinkCall,
     leaveLinkCall,
+    inviteToLinkCall,
+    linkCallInvite: linkInvite,
+    linkCallInviteStatus: linkInviteStatus,
     dismissLinkCallOutcome,
     claimLinkCallView() {
       setLinkViewClaims((n) => n + 1);
@@ -2176,11 +2352,24 @@ export function CallHostView(): JSX.Element {
 
       {/* The call-link call's in-call UI, once this device is in the call's
           group (owner: from founding; joiner: from its Welcome). */}
-      <Show when={host.linkCall()?.phase === "live"}>
+      {/* Live for either role; and from the first second for the founder, who
+          pressed a button that promised a call screen (`docs/ux/call-links.md`
+          section 5). A joiner keeps its notice until it is admitted: it has
+          not published anything and is not in a call yet. */}
+      <Show
+        when={linkCallOverlayShown(host.linkCall()?.phase ?? null, host.linkCall()?.role ?? null)}
+      >
         <Call
           embedded={true}
           group={true}
           onExit={() => host.leaveLinkCall()}
+          /* `docs/ux/call-links.md` section 3: the one control the call screen
+             gains. Only this kind of call has it — a link names a `call_id`,
+             and a call placed inside a conversation is reached through that
+             conversation instead. */
+          onInvite={() => void host.inviteToLinkCall()}
+          inviteBusy={inviteIsBusy(host.linkCallInvite())}
+          inviteStatus={host.linkCallInviteStatus()}
           remoteStreamFor={(participantId): MediaStream | undefined =>
             internals.linkHandle()?.remoteStreamFor(participantId)
           }
@@ -2295,7 +2484,12 @@ function LinkCallNoticeView(): JSX.Element {
 
   const notice = createMemo(() => {
     const slot = host.linkCall();
-    return linkCallNotice(slot?.phase ?? null, internals.linkViewShown(), slot?.errorMessage ?? null);
+    return linkCallNotice(
+      slot?.phase ?? null,
+      slot?.role ?? null,
+      internals.linkViewShown(),
+      slot?.errorMessage ?? null,
+    );
   });
 
   return (

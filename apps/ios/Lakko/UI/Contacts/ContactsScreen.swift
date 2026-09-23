@@ -7,7 +7,7 @@ import SwiftUI
 /// list with the incoming requests on top (Accept / Decline on the row), the
 /// sent requests under a collapsed "Sent" header, then the contacts in
 /// alphabetical sections with an index on the right. The add menu holds
-/// "Add by username", "Share invite link" and "Create call link"; a row pushes
+/// "Add by username" and "Share invite link"; a row pushes
 /// ``ContactDetailScreen``.
 ///
 /// Mirror of `apps/web/src/contacts/ContactsRoute.tsx` and
@@ -163,10 +163,11 @@ public struct ContactsScreen: View {
     /// exists in the repository (the QR renderer and scanner serve device
     /// pairing only).
     ///
-    /// "Create call link" is NOT here (`docs/ux/navigation.md` section 3). It
-    /// was put in this menu by the redesign only because Calls had been
-    /// removed as a destination; with Calls back, it belongs on the screen a
-    /// person goes to when they are thinking about calling.
+    /// There is no call-link entry here (`docs/ux/navigation.md` section 3).
+    /// It was put in this menu by the redesign only because Calls had been
+    /// removed as a destination; with Calls back, starting a call belongs
+    /// there — and the LINK belongs inside the call it leads into
+    /// (`docs/ux/call-links.md` section 3), not in a menu about contacts.
     private var addMenu: some View {
         Menu {
             Button { addContactPresented = true } label: {

@@ -1019,6 +1019,54 @@ public final class ChatRepository: ObservableObject {
             durationMs: durationMs))
     }
 
+    /// Fill the cross-conversation call index from calls that happened before
+    /// it existed. Once per account.
+    ///
+    /// Found live rather than by a test: the index only ever received calls
+    /// placed after it shipped, so on a device that had been calling for
+    /// months the Calls screen opened empty while those same calls were
+    /// visibly sitting in the conversation list. A screen that contradicts the
+    /// one next to it reads as broken, whatever the honest reason.
+    ///
+    /// It walks the transcripts this device already holds in memory, which is
+    /// the per-open cost section 6.2 refuses — but at most ONCE per account,
+    /// ever, and what it produces is the index the screen then reads. The row
+    /// it reads is a machine marker (``CallTranscriptRow/parse(_:)``), never
+    /// the sentence a reader sees, so nothing is recovered out of words.
+    ///
+    /// One thing is genuinely lost and is not guessed at: the marker never
+    /// carried whether the call had video, so a backfilled row calls back by
+    /// voice. Inventing a camera the record does not mention would be worse
+    /// than the row being modest about what it knows.
+    public func backfillCallHistory() {
+        guard let accountIdB64 = currentAccountIdB64 else { return }
+        CallHistoryStore.shared.bind(accountIdB64: accountIdB64)
+        CallHistoryStore.shared.backfillOnce {
+            var found: [CallHistoryEntry] = []
+            for (hex, record) in groups {
+                let kind: CallHistoryKind =
+                    conversationKind(groupIdHex: hex) == .group ? .group : .chat
+                for message in record.messages {
+                    guard let row = CallTranscriptRow.parse(message.text) else { continue }
+                    // A row whose time cannot be read has no place in a list
+                    // whose whole order is time, so it stays where it is.
+                    guard let at = Self.parseDsTimestampMs(message.createdAt) else { continue }
+                    let (outcome, durationMs) = CallHistoryEntry.outcome(of: row)
+                    found.append(CallHistoryEntry(
+                        id: "\(hex).\(at).\(row.direction.rawValue)",
+                        conversationId: hex,
+                        kind: kind,
+                        direction: row.direction,
+                        outcome: outcome,
+                        video: false,
+                        startedAtMs: at,
+                        durationMs: durationMs))
+                }
+            }
+            return found.sorted { $0.startedAtMs < $1.startedAtMs }
+        }
+    }
+
     /// The conversation's kind, the persisted answer winning over the roster.
     ///
     /// The persisted kind wins; the people count is the first-sight fallback

@@ -59,8 +59,10 @@ struct CallHostOverlay: ViewModifier {
                 if let notice = link.notice {
                     LinkCallNoticeBanner(
                         notice: notice,
-                        onOpen: {
-                            if let slug = link.slot?.slug { inviteIntake.parkCallJoin(slug: slug) }
+                        // A call started here has no link and so no landing to
+                        // go back to; Open is hidden rather than dead.
+                        onOpen: link.slot?.slug.map { slug in
+                            { inviteIntake.parkCallJoin(slug: slug) }
                         },
                         onCancel: { link.leave() },
                         onDismiss: { link.dismissOutcome() }
@@ -103,7 +105,12 @@ struct CallHostOverlay: ViewModifier {
                     }
                     .id("group-\(id)")
                 case .link(let ui, let id)?:
-                    CallScreen(externalState: ui) {
+                    // `Invite` (`docs/ux/call-links.md` section 3) is offered
+                    // only by the device that founded the call, which is the
+                    // only one whose signature a joiner's committer election
+                    // would follow. `LinkCallHost` holds the offer for exactly
+                    // that case, so passing it through is the whole gate.
+                    CallScreen(externalState: ui, invite: link.invite) {
                         let slug = link.presentationSlug
                         link.dismissPresentation()
                         // Back to where the user was before the link, as the
@@ -169,7 +176,8 @@ extension View {
 /// ringing banner above.
 private struct LinkCallNoticeBanner: View {
     let notice: LinkCallHostRules.Notice
-    let onOpen: () -> Void
+    /// `nil` when there is no landing to return to.
+    let onOpen: (() -> Void)?
     let onCancel: () -> Void
     let onDismiss: () -> Void
 
@@ -185,7 +193,7 @@ private struct LinkCallNoticeBanner: View {
                     .lineLimit(3)
             }
             HStack(spacing: 8) {
-                if notice.actions.contains(.open) {
+                if notice.actions.contains(.open), let onOpen {
                     Button("Open", action: onOpen)
                         .buttonStyle(.borderedProminent)
                         .tint(Color.lakkoAccent)

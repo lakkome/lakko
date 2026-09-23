@@ -13,19 +13,17 @@ import Foundation
 /// universal-link dispatcher in `LakkoApp` can branch on the
 /// path segment without parsing the slug.
 ///
-/// Two surfaces:
+/// URL plumbing — ``composePointerCallInviteUrl(blobId:)``
+/// for the production short form (`/c/<blob_id_b64url>`),
+/// ``composeInlineCallInviteUrl(capabilityBytes:)`` for the
+/// censored-region fallback (the bytes are encoded into the URL
+/// itself, no `/discovery/call-invite` round-trip needed), and
+/// ``parseCallInviteSlug(_:)`` for the joiner-side dispatcher.
 ///
-///   - URL plumbing — ``composePointerCallInviteUrl(blobId:)``
-///     for the production short form (`/c/<blob_id_b64url>`),
-///     ``composeInlineCallInviteUrl(capabilityBytes:)`` for
-///     the censored-region fallback (the bytes are encoded
-///     into the URL itself, no `/discovery/call-invite`
-///     round-trip needed), and ``parseCallInviteSlug(_:)`` for
-///     the joiner-side dispatcher.
-///   - Form-side enums — ``CallInviteExpiryPreset``,
-///     ``CallInviteMaxUsesPreset``, ``CallMediaPreset`` —
-///     translate UI dropdown choices into the wire-level
-///     `composeCallInviteCapability` arguments.
+/// The form-side enums that used to live here are gone with the
+/// form (`docs/ux/call-links.md` section 6): a link carries one
+/// fixed set of values now, and they are stated once in
+/// ``CallInviteValues``.
 public enum CallInviteUrl {
     // MARK: - Constants
 
@@ -38,12 +36,6 @@ public enum CallInviteUrl {
     /// (`ApiEndpoints.webOrigin`), so a link made against the
     /// test stack opens on the test stack.
     public static var defaultOrigin: String { ApiEndpoints.webOrigin }
-
-    /// Hard cap on the human-visible label, in bytes (UTF-8).
-    /// Mirrors `lakko_contacts::invite::MAX_LABEL_LEN` (64) —
-    /// the call-invite codec re-uses the contact-invite
-    /// ceiling.
-    public static let labelMaxLen: Int = 64
 
     /// Length of a content-addressed `blob_id` from
     /// `services/discovery/src/call_invite.rs` — SHA-256,
@@ -171,109 +163,6 @@ public enum CallInviteUrlError: Error, Equatable, LocalizedError {
             return "call-invite slug decoded to \(got) bytes — neither a \(blobIdLen)-byte pointer nor a ≥ \(inlineMinLen)-byte inline capability"
         }
     }
-}
-
-// MARK: - Form-side enums
-
-/// Discrete UI choices the "Create call link" form exposes
-/// for the `expiry_ms` field. Same recipes as the contact-
-/// invite form — keeps the UX consistent across the two
-/// invite kinds.
-public enum CallInviteExpiryPreset: CaseIterable {
-    /// A call starting now — the shortest window the create form offers.
-    case oneHour
-    case oneDay
-    case sevenDays
-    case thirtyDays
-    case never
-
-    /// Translate into the UNIX-millis argument
-    /// `composeCallInviteCapability` expects. `.never`
-    /// resolves to `0` — the `CALL_NEVER_EXPIRES` sentinel —
-    /// and the UI MUST surface a warning before allowing it.
-    public func toMs(nowMs: UInt64) -> UInt64 {
-        switch self {
-        case .oneHour:
-            return nowMs + 3_600_000
-        case .oneDay:
-            return nowMs + 1 * 86_400_000
-        case .sevenDays:
-            return nowMs + 7 * 86_400_000
-        case .thirtyDays:
-            return nowMs + 30 * 86_400_000
-        case .never:
-            return 0
-        }
-    }
-}
-
-/// Discrete UI choices for `max_uses`.
-public enum CallInviteMaxUsesPreset: CaseIterable {
-    case single
-    case ten
-    case unlimited
-
-    /// Translate into the `max_uses` u32 the wire format
-    /// carries. `.single` resolves to `0` — the
-    /// `CALL_SINGLE_USE` sentinel. `.unlimited` saturates at
-    /// `u32::MAX`.
-    public func toValue() -> UInt32 {
-        switch self {
-        case .single:
-            return 0
-        case .ten:
-            return 10
-        case .unlimited:
-            return UInt32.max
-        }
-    }
-}
-
-/// Discrete UI choices the "Create call link" form exposes
-/// for the media kind — surfaces the same `audio-only` vs
-/// `audio-video` toggle the `CallInviteMedia` wire flags
-/// carry.
-public enum CallMediaPreset: CaseIterable {
-    case audio
-    case audioVideo
-}
-
-// MARK: - Human-visible renderers
-
-/// Convert a wire `max_uses` u32 back into a human-visible
-/// rendering for the landing page.
-public func describeCallInviteMaxUses(_ maxUses: UInt32) -> String {
-    if maxUses == 0 { return "single-use" }
-    if maxUses == UInt32.max { return "unlimited" }
-    return "up to \(maxUses) uses"
-}
-
-/// Render an `expiry_ms` (UNIX millis) for the landing page —
-/// `"never expires"` for the `CALL_NEVER_EXPIRES` sentinel,
-/// otherwise a relative "in 6 days" / "expired 3 hours ago"
-/// string.
-public func describeCallInviteExpiry(expiryMs: UInt64, nowMs: UInt64) -> String {
-    if expiryMs == 0 { return "never expires" }
-    // Signed delta so we can render "ago" for past expiries.
-    let exp = Int64(bitPattern: expiryMs)
-    let now = Int64(bitPattern: nowMs)
-    let deltaMs = exp - now
-    let futureLabel = deltaMs >= 0 ? "in" : "expired"
-    let suffix = deltaMs >= 0 ? "" : " ago"
-    let absMs = abs(deltaMs)
-    let day: Int64 = 86_400_000
-    let hour: Int64 = 3_600_000
-    let minute: Int64 = 60_000
-    if absMs >= day {
-        let days = (absMs + day / 2) / day
-        return "\(futureLabel) \(days) day\(days == 1 ? "" : "s")\(suffix)"
-    }
-    if absMs >= hour {
-        let hours = (absMs + hour / 2) / hour
-        return "\(futureLabel) \(hours) hour\(hours == 1 ? "" : "s")\(suffix)"
-    }
-    let mins = max(1, (absMs + minute / 2) / minute)
-    return "\(futureLabel) \(mins) minute\(mins == 1 ? "" : "s")\(suffix)"
 }
 
 // Base64URL helpers (`base64UrlEncodeNoPad` /

@@ -16,13 +16,16 @@
  *     the returned `blob_id` into `/c/<slug>`. Inline form
  *     is reserved as the censored-region fallback (no
  *     `/discovery/call-invite` round-trip needed).
- *   * Form-side enums — `ExpiryPreset`, `MaxUsesPreset`,
- *     `CallMediaPreset` — translate UI dropdown choices into
- *     the wire-level `composeCallInviteCapability` arguments.
- *     Sharing the same `ExpiryPreset` / `MaxUsesPreset` types
- *     as `contacts/invite.ts` would couple the two surfaces;
- *     keeping them duplicated lets each evolve independently
- *     (e.g. call invites might want a `"1h"` preset later).
+ *   * Landing-page rendering — `describeMaxUses(...)` and
+ *     `describeExpiry(...)` put a decoded capability's fields
+ *     into words.
+ *
+ * The form-side enums that used to live here (`ExpiryPreset`,
+ * `MaxUsesPreset`, `CallMediaPreset` and their translators) are
+ * gone with the form that asked those four questions
+ * (`docs/ux/call-links.md` sections 1 and 6). The values a link
+ * carries are now fixed in `call-invite-values.ts`, and the
+ * composer takes wire-level values directly.
  *
  * URL prefix is `/c/` (mirrors contact invite's `/i/`), so the
  * server-side route table and the joiner-side landing-page
@@ -37,6 +40,11 @@ import { base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
  *  `/i/` so the joiner-side landing-page dispatcher can branch
  *  on the path segment without parsing the slug. */
 export const CALL_INVITE_URL_PREFIX = "/c/";
+
+/** Length of a `call_id`, in bytes — the width
+ *  `CallInviteCapability`, the call-admission JWT and the MLS
+ *  exporter context all carry. */
+export const CALL_ID_LEN = 16;
 
 /** Hard cap on the human-visible label, in bytes (UTF-8).
  *  Mirrors `lakko_contacts::invite::MAX_LABEL_LEN` — the
@@ -144,56 +152,6 @@ export function parseCallInviteSlug(slug: string): ParsedCallInvite {
       `nor a ≥ ${CALL_INVITE_INLINE_MIN_LEN}-byte inline capability`,
   );
 }
-
-/** Discrete UI choices the "Create call link" form exposes
- *  for the `expiry_ms` field. The contact-invite recipes plus
- *  `"1h"`: a call link is usually for a call happening now, so
- *  the shortest useful window is hours, not days. */
-export type ExpiryPreset = "1h" | "1d" | "7d" | "30d" | "never";
-
-/** Translate an [`ExpiryPreset`] into the wire-level UNIX-
- *  millis argument `composeCallInviteCapability` expects.
- *  `"never"` resolves to `0n` — the `CALL_NEVER_EXPIRES`
- *  sentinel — and the UI MUST surface a warning before
- *  allowing it (parallel to contact-invite ADR-0005 §13.3). */
-export function expiryPresetToMs(preset: ExpiryPreset, nowMs: number): bigint {
-  switch (preset) {
-    case "1h":
-      return BigInt(nowMs + 3_600_000);
-    case "1d":
-      return BigInt(nowMs + 1 * 86_400_000);
-    case "7d":
-      return BigInt(nowMs + 7 * 86_400_000);
-    case "30d":
-      return BigInt(nowMs + 30 * 86_400_000);
-    case "never":
-      return 0n;
-  }
-}
-
-/** Discrete UI choices for `max_uses`. */
-export type MaxUsesPreset = "single" | "ten" | "unlimited";
-
-/** Translate a [`MaxUsesPreset`] into the `max_uses` u32 the
- *  wire format carries. `"single"` resolves to `0` — the
- *  `CALL_SINGLE_USE` sentinel. `"unlimited"` saturates at
- *  `u32::MAX`. */
-export function maxUsesPresetToValue(preset: MaxUsesPreset): number {
-  switch (preset) {
-    case "single":
-      return 0;
-    case "ten":
-      return 10;
-    case "unlimited":
-      return 0xff_ff_ff_ff;
-  }
-}
-
-/** Discrete UI choices the "Create call link" form exposes
- *  for the media kind — surfaces the same `audio-only` vs
- *  `audio-video` toggle the `CallInviteMedia` wire flags
- *  carry. */
-export type CallMediaPreset = "audio" | "audio-video";
 
 /** Convert a wire `max_uses` u32 back into a human-visible
  *  rendering for the landing page. Same recipe as the

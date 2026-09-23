@@ -114,21 +114,46 @@ export interface LinkCallNotice {
   readonly actions: readonly ("open" | "cancel" | "dismiss")[];
 }
 
+/** Who this device is in the call. */
+export type LinkCallRole = "owner" | "joiner";
+
+/**
+ * Whether the in-call overlay is up, which is the one rule deciding both what
+ * `CallHostView` mounts and when the notice below must stay silent. Two copies
+ * of it would drift into a banner under a call screen saying the same thing.
+ *
+ * Live for either role. Also from `starting` for a founder: `New call` is a
+ * button that promised a call screen (`docs/ux/call-links.md` section 5), and
+ * a founder has nothing to wait for but its own session. A joiner keeps its
+ * notice until it is admitted — it is not in a call yet, and the notice says
+ * that better than a connecting screen would.
+ */
+export function linkCallOverlayShown(
+  phase: LinkCallPhase | null,
+  role: LinkCallRole | null,
+): boolean {
+  if (phase === null) return false;
+  if (phase === "live") return true;
+  return phase === "starting" && role === "owner";
+}
+
 /**
  * What to show about a link call away from its route, or `null`.
  *
  * Nothing while the `/c/` route is showing the call itself, and nothing while
- * the call is live — the in-call overlay covers every screen then. Before it is
- * live the user can move around (the admission wait can take a while), so they
- * are told it is still going and can cancel it; after it ends they are told why
- * once, since the route that would have said so is gone.
+ * the in-call overlay is up. Before the call is live the user can move around
+ * (the admission wait can take a while), so they are told it is still going and
+ * can cancel it; after it ends they are told why once, since the route that
+ * would have said so is gone.
  */
 export function linkCallNotice(
   phase: LinkCallPhase | null,
+  role: LinkCallRole | null,
   routeShowingIt: boolean,
   errorMessage: string | null,
 ): LinkCallNotice | null {
   if (phase === null || routeShowingIt) return null;
+  if (linkCallOverlayShown(phase, role)) return null;
   switch (phase) {
     case "live":
       return null;

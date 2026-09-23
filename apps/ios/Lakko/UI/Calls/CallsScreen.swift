@@ -3,10 +3,25 @@
 
 import SwiftUI
 
-/// The Calls destination (`docs/ux/navigation.md` section 5): recent calls,
-/// newest first, flat — not grouped by conversation — with day separators, and
-/// the two link actions the design system's information architecture has
-/// always given this screen.
+/// The Calls destination (`docs/ux/navigation.md` section 5, and
+/// `docs/ux/call-links.md` section 2): recent calls, newest first, flat — not
+/// grouped by conversation — with day separators, and ONE action.
+///
+/// ## What `New call` replaced
+///
+/// `Create call link`, a form that asked four questions — audio or video, when
+/// the link expires, how many uses, what to label it — and produced a string of
+/// text. **You could not place a call from the screen named after calling.**
+///
+/// `New call` starts a group video call and shows the call screen. Nothing is
+/// asked first: no media choice, no participants, no name. A person who wanted
+/// to call one specific contact has a faster route from the conversation or the
+/// contact, which is why this button does not try to be that route. The link
+/// comes later, from inside the call, for someone who is in neither place —
+/// see `Invite` on ``CallScreen``.
+///
+/// `Join by link` stays, for a link someone has sent that did not open by
+/// itself. It is not the main action and is not given the weight of one.
 ///
 /// The destination was removed by the redesign on the ground that "Calls has
 /// no history, only a create-link panel". That was true of what existed; it
@@ -26,8 +41,10 @@ struct CallsScreen: View {
     /// Titles come from the conversation list's own resolver, so a call and
     /// its chat are never named two ways.
     @ObservedObject var conversations: ChatListViewModel
-    /// ADR-0032 call links — the session the owner signs the capability with.
-    let authRepository: AuthRepository
+    /// Start a group video call and land in it. Returns the one sentence to
+    /// show when it could not start (another call holds the slot, or there is
+    /// no session), `nil` when it did.
+    let onNewCall: () async -> String?
     /// Open the conversation a row belongs to.
     let onOpenConversation: (_ groupIdHex: String, _ kind: CallHistoryKind) -> Void
     /// Call that conversation back, in the mode the row records.
@@ -36,10 +53,13 @@ struct CallsScreen: View {
     /// uses, so joining by link and tapping a link are one path.
     let onOpenLink: (URL) -> Void
 
-    @State private var createLinkPresented = false
     @State private var joinByLinkPresented = false
     @State private var pastedLink = ""
     @State private var joinError: String?
+    /// A call is being started. Brief — the press founds the call locally —
+    /// but long enough that a second press must not found a second one.
+    @State private var starting = false
+    @State private var startError: String?
 
     private let calendar = Calendar.current
     private let locale = Locale.current
@@ -49,30 +69,42 @@ struct CallsScreen: View {
             .navigationTitle("Calls")
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    // Demoted, not removed: a pasted link is a real case and a
+                    // rare one, so it sits behind the one menu this screen has
+                    // rather than beside the action it is not.
                     Menu {
-                        Button { createLinkPresented = true } label: {
-                            Label("Create call link", systemImage: "phone.badge.plus")
-                        }
                         Button { joinByLinkPresented = true } label: {
                             Label("Join by link", systemImage: "link")
                         }
                     } label: {
-                        Image(systemName: "phone.badge.plus")
+                        Image(systemName: "ellipsis.circle")
                     }
-                    .accessibilityLabel("Call link")
+                    .accessibilityLabel("More")
+
+                    Button(action: startCall) {
+                        if starting {
+                            ProgressView()
+                        } else {
+                            Text("New call")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(starting)
+                    .accessibilityLabel("New call")
                 }
             }
-            .sheet(isPresented: $createLinkPresented) {
-                CreateCallLinkSheet(
-                    authRepository: authRepository,
-                    onDismiss: { createLinkPresented = false },
-                    onStartCall: { url in
-                        createLinkPresented = false
-                        if let parsed = URL(string: url) { onOpenLink(parsed) }
-                    })
-            }
             .sheet(isPresented: $joinByLinkPresented) { joinByLinkSheet }
+            .alert(
+                "Call",
+                isPresented: Binding(
+                    get: { startError != nil }, set: { if !$0 { startError = nil } }),
+                presenting: startError
+            ) { _ in
+                Button("OK", role: .cancel) { startError = nil }
+            } message: { message in
+                Text(message)
+            }
     }
 
     @ViewBuilder
@@ -167,9 +199,24 @@ struct CallsScreen: View {
         } description: {
             Text("Calls you make and receive appear here.")
         } actions: {
-            Button("Create call link") { createLinkPresented = true }
+            Button("New call", action: startCall)
                 .buttonStyle(.borderedProminent)
-            Button("Join by link") { joinByLinkPresented = true }
+                .disabled(starting)
+        }
+    }
+
+    // MARK: - New call
+
+    /// One press, one kind of call, and the person lands in it. The busy latch
+    /// is set synchronously, before any await, so a double tap cannot found
+    /// two calls.
+    private func startCall() {
+        guard !starting else { return }
+        starting = true
+        Task { @MainActor in
+            let failure = await onNewCall()
+            starting = false
+            startError = failure
         }
     }
 

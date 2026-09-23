@@ -12,88 +12,54 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.launch
+import me.lakko.app.auth.IdentitySecrets
+import me.lakko.app.calls.AppCallHost
+import me.lakko.app.calls.NEW_CALL_SIGNED_OUT_MESSAGE
 import me.lakko.app.calls.callInviteSlugFromInput
+import me.lakko.app.calls.newCallStartMessage
 import me.lakko.app.chat.ChatRepository
-import me.lakko.app.ui.contacts.CallLinksSheet
-import me.lakko.app.ui.contacts.ContactsViewModel
-import me.lakko.app.ui.contacts.CreateCallLinkDialog
-import me.lakko.app.ui.contacts.copyToClipboard
-import me.lakko.app.ui.contacts.launchShareIntent
+import me.lakko.app.ui.call.rememberCallPermissionGate
 
 /**
- * The Calls destination: the history, plus the two actions section 5.2 puts
- * beside it.
+ * The Calls destination: the history, plus the one action beside it.
  *
- * `docs/ux/navigation.md` sections 3 and 5. "Create call link" was in the
- * Contacts "+" menu only because Calls had been removed; with Calls back it
- * comes home, which is why this reuses [ContactsViewModel]'s call-link surface
- * rather than growing a second copy of the mint-and-share flow. The view model
- * is the same singleton instance Contacts holds, so a link created here is the
- * same link listed there.
+ * `docs/ux/call-links.md` sections 1 and 2. The destination used to hold a
+ * create-a-link form, reached through [me.lakko.app.ui.contacts.ContactsViewModel]'s
+ * call-link surface; the form asked four questions and produced a string of
+ * text the person then carried somewhere themselves. All of that is gone.
+ * `New call` founds a group video call through the process-wide
+ * [AppCallHost.startNewCall] and the person lands in it; a link to that call is
+ * offered from inside it, by the `Invite` control, and only if they want one.
  *
- * [CallsScreen] itself knows nothing about links; it draws the history and
- * reports the two taps. That keeps the screen testable against a store and
- * leaves the link machinery in one place.
+ * [CallsScreen] itself knows nothing about calls or links; it draws the history
+ * and reports the taps. That keeps the screen testable against a store and
+ * leaves the call machinery in one place.
  */
 @Composable
 public fun CallsHost(
     repository: ChatRepository,
-    viewModel: ContactsViewModel,
     onOpenConversation: (groupIdHex: String) -> Unit,
     onCallBack: (groupIdHex: String, video: Boolean) -> Unit,
-    /** Open a `/c/` call link's landing — a created one, or a pasted one. */
+    /** Open a pasted `/c/` call link's landing. */
     onOpenCallLink: (slug: String) -> Unit,
+    /** The signed-in session, read at the moment a call is started. */
+    identitySecrets: () -> IdentitySecrets?,
     modifier: Modifier = Modifier,
 ) {
-    val context = LocalContext.current
-    val callLinks by viewModel.callLinks.collectAsStateWithLifecycle()
-    var linksSheetOpen by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    // The same just-in-time gate every call entry point uses. A video call
+    // whose camera was refused proceeds with audio only; the gate reports
+    // which, and the call is started either way.
+    val permissions = rememberCallPermissionGate()
     var joinOpen by remember { mutableStateOf(false) }
-
-    // A created link opens the sheet so the result is shown in the link-row
-    // style right away, the way it already did from Contacts.
-    var seenCallLinks by remember { mutableIntStateOf(callLinks.created.size) }
-    LaunchedEffect(callLinks.created.size) {
-        if (callLinks.created.size > seenCallLinks) linksSheetOpen = true
-        seenCallLinks = callLinks.created.size
-    }
-
-    if (callLinks.formOpen) {
-        CreateCallLinkDialog(
-            state = callLinks,
-            onMediaChange = viewModel::onCallLinkMediaChange,
-            onExpiryChange = viewModel::onCallLinkExpiryChange,
-            onMaxUsesChange = viewModel::onCallLinkMaxUsesChange,
-            onLabelChange = viewModel::onCallLinkLabelChange,
-            onCreate = viewModel::onCreateCallLink,
-            onDismiss = viewModel::onDismissCallLinkForm,
-        )
-    }
-
-    if (linksSheetOpen) {
-        CallLinksSheet(
-            links = callLinks.created,
-            onCreate = {
-                linksSheetOpen = false
-                viewModel.onOpenCallLinkForm()
-            },
-            onCopy = { url -> copyToClipboard(context, url) },
-            onShare = { url -> launchShareIntent(context, url) },
-            onStartCall = { slug ->
-                linksSheetOpen = false
-                onOpenCallLink(slug)
-            },
-            onDismiss = { linksSheetOpen = false },
-        )
-    }
+    var starting by remember { mutableStateOf(false) }
+    var startMessage by remember { mutableStateOf<String?>(null) }
 
     if (joinOpen) {
         JoinByLinkDialog(
@@ -105,18 +71,44 @@ public fun CallsHost(
         )
     }
 
+    startMessage?.let { message ->
+        AlertDialog(
+            onDismissRequest = { startMessage = null },
+            text = { Text(message) },
+            confirmButton = {
+                TextButton(onClick = { startMessage = null }) { Text("OK") }
+            },
+        )
+    }
+
     CallsScreen(
         repository = repository,
         onOpenConversation = onOpenConversation,
         onCallBack = onCallBack,
-        onCreateCallLink = {
-            // The sheet when there is something to list, the form when there
-            // is not: a person with no links wants to make one, not to read an
-            // empty list first.
-            if (callLinks.created.isEmpty()) {
-                viewModel.onOpenCallLinkForm()
-            } else {
-                linksSheetOpen = true
+        onNewCall = {
+            val secrets = identitySecrets()
+            when {
+                // Section 5's "signed out mid-flow": one sentence, no form.
+                secrets == null -> startMessage = NEW_CALL_SIGNED_OUT_MESSAGE
+                // A second tap while the first start is in flight would race the
+                // host's own slot check for the same call; drop it instead.
+                starting -> Unit
+                else -> permissions.request(video = true) { video ->
+                    starting = true
+                    scope.launch {
+                        try {
+                            val outcome = AppCallHost.startNewCall(
+                                accountIdentitySeed = secrets.accountIdentitySeed,
+                                accountId = secrets.accountId,
+                                sessionToken = secrets.sessionToken,
+                                video = video,
+                            )
+                            startMessage = newCallStartMessage(outcome)
+                        } finally {
+                            starting = false
+                        }
+                    }
+                }
             }
         },
         onJoinByLink = { joinOpen = true },

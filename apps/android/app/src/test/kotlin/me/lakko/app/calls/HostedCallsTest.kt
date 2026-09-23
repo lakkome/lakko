@@ -11,6 +11,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -531,6 +532,10 @@ class HostedCallsTest {
         var events: LinkCallEvents? = null
         val handles = mutableListOf<FakeLinkHandle>()
 
+        /** Every call id an invite link was minted for, in order. */
+        val minted = mutableListOf<String>()
+        var mintError: Throwable? = null
+
         override fun sfuBaseUrl(): String = "wss://sfu.test"
         override fun callingAvailable(): Boolean = calling
         override suspend fun start(
@@ -545,7 +550,20 @@ class HostedCallsTest {
             if (request.isOwner) events.onJoined()
             return FakeLinkHandle().also { handles += it }
         }
+
+        override suspend fun mintInviteLink(callId: ByteArray, identity: CallInviteIdentity): String {
+            mintError?.let { throw it }
+            val hex = callIdHexOf(callId)
+            minted += hex
+            return "https://lakko.me/c/$hex"
+        }
     }
+
+    private fun inviteIdentity() = CallInviteIdentity(
+        accountIdentitySeed = ByteArray(64),
+        accountId = ByteArray(16),
+        sessionToken = "token",
+    )
 
     private class LinkHarness(
         val host: LinkCallHost,
@@ -583,6 +601,99 @@ class HostedCallsTest {
     )
 
     // ---- Link call ------------------------------------------------------------------
+
+    // ---- The invite link (docs/ux/call-links.md section 3) --------------------
+
+    @Test
+    fun `the host's first invite mints a link for the call it is in`() = runTest {
+        val h = linkHarness()
+        h.host.start(request(owner = true))
+        assertEquals(CallInviteLinkState.Idle, h.host.inviteLink.value)
+
+        val url = h.host.inviteLinkUrl(inviteIdentity())
+
+        // The LIVE call's id, which is what makes the link lead HERE.
+        assertEquals(listOf(callIdHexOf(ByteArray(16) { 0x11 })), h.port.minted)
+        assertEquals(CallInviteLinkState.Ready(url!!), h.host.inviteLink.value)
+    }
+
+    @Test
+    fun `a second invite re-offers the link instead of minting another`() = runTest {
+        val h = linkHarness()
+        h.host.start(request(owner = true))
+        val first = h.host.inviteLinkUrl(inviteIdentity())
+        val second = h.host.inviteLinkUrl(inviteIdentity())
+        assertEquals(first, second)
+        // One capability on the ledger per call, not one per tap.
+        assertEquals(1, h.port.minted.size)
+    }
+
+    @Test
+    fun `a failed mint leaves the call running and the control ready to try again`() = runTest {
+        val h = linkHarness()
+        h.host.start(request(owner = true))
+        h.port.mintError = java.io.IOException("no route")
+
+        assertNull(h.host.inviteLinkUrl(inviteIdentity()))
+
+        // Section 5: the call is unaffected and does not end.
+        assertEquals(LinkCallPhase.LIVE, h.host.slot.value?.phase)
+        assertTrue(h.host.occupiesSlot)
+        val failed = h.host.inviteLink.value as CallInviteLinkState.Failed
+        assertEquals(callInviteFailureMessage(CallInviteFailure.NETWORK), failed.message)
+
+        // And the next tap tries again.
+        h.port.mintError = null
+        assertNotNull(h.host.inviteLinkUrl(inviteIdentity()))
+        assertTrue(h.host.inviteLink.value is CallInviteLinkState.Ready)
+    }
+
+    @Test
+    fun `a session lost mid-call is said in one sentence, not a mint`() = runTest {
+        val h = linkHarness()
+        h.host.start(request(owner = true))
+
+        assertNull(h.host.inviteLinkUrl(null))
+
+        assertTrue(h.port.minted.isEmpty())
+        assertEquals(
+            CallInviteLinkState.Failed(callInviteFailureMessage(CallInviteFailure.NO_SESSION)),
+            h.host.inviteLink.value,
+        )
+    }
+
+    @Test
+    fun `a joiner has no link to offer`() = runTest {
+        val h = linkHarness()
+        h.host.start(request(owner = false))
+        h.port.events!!.onJoined()
+        assertEquals(LinkCallPhase.LIVE, h.host.slot.value?.phase)
+
+        assertFalse(h.host.canInvite())
+        assertNull(h.host.inviteLinkUrl(inviteIdentity()))
+        // Not reported as a failure: there is simply no control to press.
+        assertEquals(CallInviteLinkState.Idle, h.host.inviteLink.value)
+        assertTrue(h.port.minted.isEmpty())
+    }
+
+    @Test
+    fun `the next call never offers the previous call's link`() = runTest {
+        val h = linkHarness()
+        h.host.start(request(owner = true, callByte = 0x11))
+        val first = h.host.inviteLinkUrl(inviteIdentity())
+        h.host.leave()
+        assertEquals(CallInviteLinkState.Idle, h.host.inviteLink.value)
+
+        h.host.start(request(owner = true, callByte = 0x22))
+        val second = h.host.inviteLinkUrl(inviteIdentity())
+
+        assertNotNull(second)
+        assertNotEquals(first, second)
+        assertEquals(
+            listOf(callIdHexOf(ByteArray(16) { 0x11 }), callIdHexOf(ByteArray(16) { 0x22 })),
+            h.port.minted,
+        )
+    }
 
     @Test
     fun `an owner's link call is live from founding and holds the slot`() = runTest {

@@ -170,8 +170,15 @@ public fun ChatListScreen(
         val now = System.currentTimeMillis()
         state.threads.map { thread ->
             val kind = conversationKind(context, repository, thread.groupIdHex)
-            val last = thread.messages.lastOrNull { it.direction != Direction.System }
-                ?: thread.messages.lastOrNull()
+            // A call row IS the conversation's last event and belongs in the
+            // preview; the receive loop's bookkeeping rows are not and never
+            // did. Found live: a group whose only rows were commits showed the
+            // literal "[mls commit]" as its preview, which is a protocol name
+            // in a person's face and the one thing the copy rules forbid
+            // outright. A call row is a system row carrying its parts, so the
+            // two are told apart by what the row HOLDS, not by its text.
+            val last = thread.messages.lastOrNull { it.direction != Direction.System || it.call != null }
+                ?: thread.messages.lastOrNull { it.call != null }
             val lastMs = last?.let { parseMessageTimeMs(it.createdAt) }
             val senderName = last?.takeIf { it.direction == Direction.Incoming }
                 ?.authorKey?.let { directory.resolve(it).primary }
@@ -551,7 +558,11 @@ internal fun rowPreview(
     )
     if (endedLine != null) return endedLine
     if (last == null) return "No messages yet"
-    if (last.direction == Direction.System) return last.text
+    if (last.direction == Direction.System) {
+        // Only a row this build can render: an unreadable bookkeeping row is
+        // never shown raw.
+        return last.call?.let { me.lakko.app.calls.callRowText(it) } ?: "No messages yet"
+    }
     val line = previewLine(
         text = last.text,
         attachments = last.attachments.map { PreviewAttachment(it.kind, it.mime) },

@@ -227,9 +227,14 @@ and the hit areas must not overlap.
 ### 5.2 States
 
 - **Default** - the list.
-- **Empty**: "No calls yet" and the two actions below.
-- The screen carries **Create call link** and **Join by link**, as the design
-  system's IA has always said.
+- **Empty**: "No calls yet" and the action below.
+- The screen carries ONE action, **New call**, which starts a group video
+  call and lands the person in it, plus **Join by link** for a link that did
+  not open by itself. [`call-links.md`](call-links.md) owns that decision and
+  the reasoning; what matters here is that the destination named after the
+  act performs the act, which it did not when this section was first written
+  - it offered only two ways to handle a LINK, so placing a call meant
+  leaving for Contacts or a chat.
 
 ### 5.3 A missed call elsewhere
 

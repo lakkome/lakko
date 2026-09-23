@@ -153,6 +153,15 @@ class CallScreenLayoutTest {
     @Test
     fun `controls fade only on a connected video call`() {
         assertTrue(controlsMayAutoHide(CallStage.LOCAL_VIDEO, connected = true))
+        // A call started from the Calls screen begins with one person in it,
+        // and the only picture is this device's own camera. Hiding the row
+        // there reveals nothing and takes away the only way out - found live
+        // on 2026-09-23, where a freshly started call lost its End button five
+        // seconds in.
+        assertFalse(
+            controlsMayAutoHide(CallStage.LOCAL_VIDEO, connected = true, alone = true))
+        assertFalse(
+            controlsMayAutoHide(CallStage.REMOTE_VIDEO, connected = true, alone = true))
         assertFalse(controlsMayAutoHide(CallStage.LOCAL_VIDEO, connected = false))
         assertTrue(controlsMayAutoHide(CallStage.REMOTE_VIDEO, connected = true))
         assertFalse(

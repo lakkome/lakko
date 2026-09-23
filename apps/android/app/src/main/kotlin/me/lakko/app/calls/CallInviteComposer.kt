@@ -7,25 +7,26 @@ import me.lakko.app.discovery.DiscoveryClient
 import uniffi.lakko_ffi_uniffi.FfiCallInviteMedia
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.composeCallInviteCapability
-import java.security.SecureRandom
 
 /**
- * Owner-side composer orchestration for link-based call
- * invites (Phase 3c3-composer-helper).
+ * Owner-side composer for the invite link of a call that is already happening
+ * (ADR-0032, `docs/ux/call-links.md` sections 3 and 4).
  *
- * Wraps the five-step "create a call link" pipeline into a
- * single suspend function so the UI doesn't have to know
- * about the call_id RNG, the one-time KeyPackage mint, the
- * FFI boundary, the discovery HTTP round-trip, or the URL
- * builder convention.
+ * Wraps the four-step pipeline into a single suspend function so the UI does
+ * not have to know about the one-time KeyPackage mint, the FFI boundary, the
+ * discovery round trip or the URL convention.
+ *
+ * The `call_id` is an **argument**, not something minted here: the link must
+ * lead into the call the person is sitting in, and that call already has an id.
+ * The four fields the old form asked about are filled from the section-4 values
+ * in `CallInviteLink.kt` instead of being asked.
  *
  * Sibling of `apps/web/src/calls/composer.ts` +
- * `apps/ios/Lakko/Calls/CallInviteComposer.swift` — same
- * pipeline shape, platform-idiomatic surface.
+ * `apps/ios/Lakko/Calls/CallInviteComposer.swift` — same pipeline shape,
+ * platform-idiomatic surface.
  */
 public class CallInviteComposer(
     private val discoveryClient: DiscoveryClient,
-    private val secureRandom: SecureRandom = SecureRandom(),
 ) {
 
     public sealed class ComposeException(message: String) : Exception(message) {
@@ -35,36 +36,23 @@ public class CallInviteComposer(
         public data class WrongOwnerAccountIdLength(val expected: Int, val got: Int) :
             ComposeException("ownerAccountId must be $expected bytes, got $got")
 
-        public data class LabelTooLong(val maxBytes: Int, val got: Int) :
-            ComposeException("label is $got bytes (UTF-8), max is $maxBytes")
+        public data class WrongCallIdLength(val expected: Int, val got: Int) :
+            ComposeException("callId must be $expected bytes, got $got")
 
         public object KeyPackageEmpty :
             ComposeException("identity.createKeyPackage() returned 0 bytes")
     }
 
     /**
-     * Result of [composeAndUpload]. The three primary fields
-     * are independent — UI typically surfaces [url] in the
-     * share sheet, persists [blobId] for the future revoke
-     * flow, and keeps [callId] around for the in-call
-     * signaling layer.
+     * Result of [composeAndUpload]. The fields are independent — the UI hands
+     * [url] to the share sheet, and [blobId] is what a future revoke would name.
      */
     public data class Composed(
-        /** Raw 32-byte content-addressed `blob_id`. Pass to
-         *  [DiscoveryClient.revokeCallInvite] when the owner
-         *  cancels the link. */
+        /** Raw 32-byte content-addressed `blob_id`. */
         val blobId: ByteArray,
-        /** The full `<origin>/c/<slug>` URL the owner
-         *  shares — base64url-no-pad of [blobId]. */
+        /** The full `<origin>/c/<slug>` URL the owner shares. */
         val url: String,
-        /** Freshly-minted 16-byte `call_id` embedded in the
-         *  capability. Stored client-side so a subsequent
-         *  call-admission JWT mint binds to the same id. */
-        val callId: ByteArray,
-        /** Wire-format capability bytes the server now holds.
-         *  Returned for the rare case where the UI wants to
-         *  drive `CallInviteCapability.decodeAndVerify(...)`
-         *  against the same bytes. */
+        /** Wire-format capability bytes the server now holds. */
         val capabilityBytes: ByteArray,
     ) {
         override fun equals(other: Any?): Boolean {
@@ -72,47 +60,38 @@ public class CallInviteComposer(
             if (other !is Composed) return false
             return blobId.contentEquals(other.blobId) &&
                 url == other.url &&
-                callId.contentEquals(other.callId) &&
                 capabilityBytes.contentEquals(other.capabilityBytes)
         }
 
         override fun hashCode(): Int {
             var result = blobId.contentHashCode()
             result = 31 * result + url.hashCode()
-            result = 31 * result + callId.contentHashCode()
             result = 31 * result + capabilityBytes.contentHashCode()
             return result
         }
     }
 
     /**
-     * End-to-end "create call link" pipeline.
+     * Mint the invite link for the call [callId] names.
      *
-     * Five steps:
-     *   1. Generate a fresh 16-byte random `call_id` via
-     *      [SecureRandom].
-     *   2. Mint a one-time MLS `KeyPackage` via
-     *      `identity.createKeyPackage()` — the joiner
-     *      consumes it to bootstrap the call MLS group.
-     *   3. `composeCallInviteCapability(...)` via UniFFI —
-     *      wire bytes signed under the owner's Ed25519 key.
-     *   4. [DiscoveryClient.uploadCallInvite] — pushes the
-     *      bytes to the server-side ledger.
-     *   5. [composePointerCallInviteUrl] — builds the
-     *      `<origin>/c/<slug>` URL.
+     * Four steps:
+     *   1. Mint a one-time MLS `KeyPackage`. ADR-0032 makes the owner the sole
+     *      founder, so this one goes unused — the wire format still carries the
+     *      field, and a well-formed capability is what the joiner verifies.
+     *   2. `composeCallInviteCapability(...)` via UniFFI — wire bytes signed
+     *      under the owner's Ed25519 key, with the section-4 values.
+     *   3. [DiscoveryClient.uploadCallInvite] — pushes the bytes to the ledger.
+     *   4. [composePointerCallInviteUrl] — builds the `<origin>/c/<slug>` URL.
      *
-     * The call must be driven from a background coroutine
-     * because the upload step solves a server-issued PoW
-     * challenge that can take a few seconds on slow devices.
+     * Must be driven from a background coroutine: the upload solves a
+     * server-issued proof-of-work challenge that takes seconds on slow devices.
      */
     public suspend fun composeAndUpload(
         ownerSigningSeed: ByteArray,
         ownerAccountId: ByteArray,
         identity: Identity,
-        media: CallMediaPreset,
-        expiryPreset: CallInviteExpiryPreset,
-        maxUsesPreset: CallInviteMaxUsesPreset,
-        label: String,
+        callId: ByteArray,
+        nowMs: Long = System.currentTimeMillis(),
         origin: String = CALL_INVITE_DEFAULT_ORIGIN,
     ): Composed {
         // ---- 0. Local validation -------------------------------
@@ -122,52 +101,35 @@ public class CallInviteComposer(
         if (ownerAccountId.size != 16) {
             throw ComposeException.WrongOwnerAccountIdLength(16, ownerAccountId.size)
         }
-        val labelBytes = label.toByteArray(Charsets.UTF_8).size
-        if (labelBytes > CALL_INVITE_LABEL_MAX_LEN) {
-            throw ComposeException.LabelTooLong(CALL_INVITE_LABEL_MAX_LEN, labelBytes)
+        if (callId.size != CALL_ID_LEN) {
+            throw ComposeException.WrongCallIdLength(CALL_ID_LEN, callId.size)
         }
 
-        // ---- 1. call_id RNG ------------------------------------
-        val callId = ByteArray(16)
-        secureRandom.nextBytes(callId)
-
-        // ---- 2. One-time KeyPackage mint -----------------------
+        // ---- 1. One-time KeyPackage mint -----------------------
         val oneTimeKeyPackage = identity.createKeyPackage()
         if (oneTimeKeyPackage.isEmpty()) {
             throw ComposeException.KeyPackageEmpty
         }
 
-        // ---- 3. Resolve presets to wire-level values -----------
-        val nowMs = System.currentTimeMillis()
-        val expiryMs = expiryPreset.toMs(nowMs).toULong()
-        val maxUses = maxUsesPreset.toValue()
-        val mediaFlags = FfiCallInviteMedia(
-            audio = true, // every call carries audio
-            video = media == CallMediaPreset.AudioVideo,
-        )
-
-        // ---- 4. composeCallInviteCapability via UniFFI ---------
+        // ---- 2. composeCallInviteCapability via UniFFI ---------
         val capabilityBytes = composeCallInviteCapability(
             ownerSigningSeed = ownerSigningSeed,
             ownerAccountId = ownerAccountId,
             callId = callId,
-            expiryMs = expiryMs,
-            maxUses = maxUses,
-            media = mediaFlags,
+            expiryMs = callInviteLinkExpiryMs(nowMs).toULong(),
+            maxUses = callInviteLinkMaxUses(),
+            media = FfiCallInviteMedia(audio = true, video = CALL_INVITE_LINK_MEDIA_VIDEO),
             oneTimeKeyPackage = oneTimeKeyPackage,
-            label = label,
+            label = CALL_INVITE_LINK_LABEL,
         )
 
-        // ---- 5. uploadCallInvite via HTTP ----------------------
+        // ---- 3. uploadCallInvite via HTTP ----------------------
         val blobId = discoveryClient.uploadCallInvite(capabilityBytes)
 
-        // ---- 6. URL build --------------------------------------
-        val url = composePointerCallInviteUrl(blobId, origin)
-
+        // ---- 4. URL build --------------------------------------
         return Composed(
             blobId = blobId,
-            url = url,
-            callId = callId,
+            url = composePointerCallInviteUrl(blobId, origin),
             capabilityBytes = capabilityBytes,
         )
     }

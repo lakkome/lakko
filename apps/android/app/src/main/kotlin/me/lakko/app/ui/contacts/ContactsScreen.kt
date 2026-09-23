@@ -36,7 +36,6 @@ import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -86,16 +85,20 @@ import java.util.Date
  * The Contacts tab — docs/ux/client-redesign.md section 5.3.
  *
  * Top bar with the title, a search field and one add action whose menu holds
- * Add by username, Share invite link and Create call link (the QR entries of
- * the spec are omitted: this client has no contact-QR payload, only the
- * device-pairing one). Below: a Requests section (incoming rows with Accept and
- * Decline; sent requests collapsed under "Sent"), then the alphabetical
- * contact list with sticky letter headers. Pull-to-refresh runs the same inbox
- * poll the screen already runs continuously.
+ * Add by username and Share invite link (the QR entries of the spec are
+ * omitted: this client has no contact-QR payload, only the device-pairing one).
+ * Below: a Requests section (incoming rows with Accept and Decline; sent
+ * requests collapsed under "Sent"), then the alphabetical contact list with
+ * sticky letter headers. Pull-to-refresh runs the same inbox poll the screen
+ * already runs continuously.
  *
  * Add by username lives in a bottom sheet; invite links are managed in an
- * "Invite links" sheet (copy, share, revoke, create); a created call link shows
- * in a "Call links" sheet in the same row style.
+ * "Invite links" sheet (copy, share, revoke, create).
+ *
+ * Call links are not here at all. They were, briefly, and the create-a-link
+ * form that held them is gone from every screen: a link now belongs to a call
+ * that is already happening and is offered from inside it
+ * (`docs/ux/call-links.md` sections 1 and 6).
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -808,178 +811,6 @@ private fun LinkRow(
             Icon(Icons.Filled.Share, contentDescription = "Share link")
         }
         trailing()
-    }
-}
-
-// =============================================================================
-// Call links — bottom sheet (ADR-0032 `/c/<slug>`)
-// =============================================================================
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-internal fun CallLinksSheet(
-    links: List<CreatedCallLink>,
-    onCreate: () -> Unit,
-    onCopy: (String) -> Unit,
-    onShare: (String) -> Unit,
-    onStartCall: ((slug: String) -> Unit)?,
-    onDismiss: () -> Unit,
-) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(horizontal = 24.dp)
-                .padding(bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Text("Call links", style = MaterialTheme.typography.titleLarge)
-            Text(
-                "Anyone who opens a call link joins a call you host. The call is not tied to a chat.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f, fill = false),
-            ) {
-                items(links, key = { it.slug }) { link ->
-                    val kind = if (link.video) "Video call" else "Audio call"
-                    val expiry = when (link.expiry) {
-                        me.lakko.app.calls.CallInviteExpiryPreset.OneHour -> "Expires in 1h"
-                        me.lakko.app.calls.CallInviteExpiryPreset.OneDay -> "Expires in 24h"
-                        me.lakko.app.calls.CallInviteExpiryPreset.SevenDays -> "Expires in 7d"
-                        me.lakko.app.calls.CallInviteExpiryPreset.ThirtyDays -> "Expires in 30d"
-                        me.lakko.app.calls.CallInviteExpiryPreset.Never -> "Never expires"
-                    }
-                    LinkRow(
-                        title = link.label.ifBlank { kind },
-                        meta = if (link.label.isBlank()) expiry else "$kind · $expiry",
-                        onCopy = { onCopy(link.url) },
-                        onShare = { onShare(link.url) },
-                        trailing = {
-                            if (onStartCall != null) {
-                                TextButton(onClick = { onStartCall(link.slug) }) { Text("Start") }
-                            }
-                        },
-                    )
-                    HorizontalDivider()
-                }
-            }
-            OutlinedButton(onClick = onCreate, modifier = Modifier.fillMaxWidth()) {
-                Text("Create call link")
-            }
-        }
-    }
-}
-
-@Composable
-internal fun CreateCallLinkDialog(
-    state: CallLinkUiState,
-    onMediaChange: (me.lakko.app.calls.CallMediaPreset) -> Unit,
-    onExpiryChange: (me.lakko.app.calls.CallInviteExpiryPreset) -> Unit,
-    onMaxUsesChange: (me.lakko.app.calls.CallInviteMaxUsesPreset) -> Unit,
-    onLabelChange: (String) -> Unit,
-    onCreate: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Create call link") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Call", style = MaterialTheme.typography.labelLarge)
-                ChoiceRow(
-                    options = listOf(
-                        me.lakko.app.calls.CallMediaPreset.Audio to "Audio",
-                        me.lakko.app.calls.CallMediaPreset.AudioVideo to "Video",
-                    ),
-                    selected = state.media,
-                    enabled = !state.creating,
-                    onSelect = onMediaChange,
-                )
-                Text("Expires after", style = MaterialTheme.typography.labelLarge)
-                ChoiceRow(
-                    options = listOf(
-                        me.lakko.app.calls.CallInviteExpiryPreset.OneHour to "1 hour",
-                        me.lakko.app.calls.CallInviteExpiryPreset.OneDay to "24 hours",
-                        me.lakko.app.calls.CallInviteExpiryPreset.SevenDays to "7 days",
-                    ),
-                    selected = state.expiry,
-                    enabled = !state.creating,
-                    onSelect = onExpiryChange,
-                )
-                Text("Can be used", style = MaterialTheme.typography.labelLarge)
-                ChoiceRow(
-                    options = listOf(
-                        me.lakko.app.calls.CallInviteMaxUsesPreset.Single to "Once",
-                        me.lakko.app.calls.CallInviteMaxUsesPreset.Ten to "10 times",
-                        me.lakko.app.calls.CallInviteMaxUsesPreset.Unlimited to "Unlimited",
-                    ),
-                    selected = state.maxUses,
-                    enabled = !state.creating,
-                    onSelect = onMaxUsesChange,
-                )
-                OutlinedTextField(
-                    value = state.label,
-                    onValueChange = onLabelChange,
-                    label = { Text("Label (optional)") },
-                    singleLine = true,
-                    enabled = !state.creating,
-                    keyboardOptions = KeyboardOptions(
-                        capitalization = KeyboardCapitalization.Sentences,
-                    ),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                if (state.creating) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            "Creating the link. This can take a few seconds.",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                }
-                state.error?.let { error ->
-                    Text(
-                        text = error,
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-            }
-        },
-        confirmButton = {
-            Button(onClick = onCreate, enabled = !state.creating) {
-                Text(if (state.creating) "Creating..." else "Create")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss, enabled = !state.creating) { Text("Cancel") }
-        },
-    )
-}
-
-@Composable
-private fun <T> ChoiceRow(
-    options: List<Pair<T, String>>,
-    selected: T,
-    enabled: Boolean,
-    onSelect: (T) -> Unit,
-) {
-    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        for ((value, text) in options) {
-            androidx.compose.material3.FilterChip(
-                selected = value == selected,
-                onClick = { onSelect(value) },
-                label = { Text(text) },
-                enabled = enabled,
-            )
-        }
     }
 }
 

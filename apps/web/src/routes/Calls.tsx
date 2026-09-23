@@ -14,9 +14,18 @@
  * (`calls/call-log-store.ts`); what was missing was the cut across
  * conversations, which is `calls/call-history.ts` and is where the ordering
  * and the day grouping are tested. This file draws them.
+ *
+ * The destination's action is `New call` and nothing else
+ * (`docs/ux/call-links.md` section 2). It starts a group video call and shows
+ * the call screen; nothing is asked first. The create-link form that used to
+ * stand here — four questions and a string of text the person then carried
+ * somewhere themselves — is gone, and the link it produced is now a property
+ * of a call that is already happening (`Invite`, section 3). `Join by link`
+ * stays for a link that did not open by itself, without the weight of a main
+ * action.
  */
 
-import { createMemo, For, Show, type JSX } from "solid-js";
+import { createMemo, createSignal, For, Show, type JSX } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
@@ -28,7 +37,8 @@ import {
 } from "../calls/call-history";
 import { callRowLabel } from "../calls/call-log";
 import { useCallLog } from "../calls/CallLogContext";
-import CreateCallLinkPanel from "../calls/CreateCallLinkPanel";
+import { callLinkSlug } from "../calls/call-link-slug";
+import { newCallId, newCallStart } from "../calls/new-call";
 import { useCallHost } from "../calls/CallHostContext";
 import { useChats } from "../chat/ChatContext";
 import { conversationTitle } from "../chat/conversation-title";
@@ -77,6 +87,54 @@ export default function Calls(): JSX.Element {
     });
   };
 
+  /** The pasted link, while "Join by link" is open. */
+  const [joinOpen, setJoinOpen] = createSignal(false);
+  const [joinInput, setJoinInput] = createSignal("");
+  const [joinError, setJoinError] = createSignal<string | null>(null);
+  /** Why `New call` could not start, or `null`. */
+  const [startError, setStartError] = createSignal<string | null>(null);
+
+  /**
+   * Start a group video call and land in it. No form, no media choice, no
+   * participant picker — section 2.
+   *
+   * Nothing is minted here: the call is founded by its owner (ADR-0032), and
+   * the link is paid for later by whoever presses `Invite` inside the call.
+   */
+  async function newCall(): Promise<void> {
+    setStartError(null);
+    const busy = callHost.callBusyMessage("start");
+    if (busy !== null) {
+      setStartError(busy);
+      return;
+    }
+    const identity = chats.identity();
+    const secrets = auth.identitySecrets();
+    if (identity === null || secrets === null) {
+      setStartError("You are signed out. Sign in again to start a call.");
+      return;
+    }
+    const outcome = await callHost.startLinkCall(
+      newCallStart(
+        { accountId: secrets.accountId, signaturePublicKey: identity.signaturePublicKey },
+        newCallId(),
+      ),
+    );
+    if (outcome.kind === "busy" || outcome.kind === "failed") setStartError(outcome.message);
+  }
+
+  /** Open a link somebody sent that did not open by itself. */
+  function joinByLink(e: SubmitEvent): void {
+    e.preventDefault();
+    const slug = callLinkSlug(joinInput());
+    if (slug === null) {
+      setJoinError("That does not look like a call link. Paste the whole link and try again.");
+      return;
+    }
+    setJoinError(null);
+    navigate(paths.joinCall(slug));
+  }
+
   /** The row opens the conversation; the button places the call. Two
    *  targets, so their hit areas must not overlap. */
   const open = (groupIdB64: string): void => {
@@ -104,8 +162,66 @@ export default function Calls(): JSX.Element {
     <aside class="lk-pane" aria-label="Calls">
       <div class="lk-pane-head">
         <h1>Calls</h1>
+        <div class="lk-actions">
+          {/* Section 2: `Join by link` stays but is not given the weight of a
+              main action — a quiet button beside the accent one, not a second
+              primary and not a panel of its own. */}
+          <button
+            type="button"
+            class="ghost"
+            onClick={() => {
+              setJoinOpen(!joinOpen());
+              setJoinError(null);
+            }}
+            aria-expanded={joinOpen()}
+          >
+            <Icon name="link" size={16} />
+            Join by link
+          </button>
+          <button type="button" class="primary" onClick={() => void newCall()}>
+            <Icon name="video" size={16} />
+            New call
+          </button>
+        </div>
       </div>
       <div class="lk-pane-body">
+        <Show when={startError()}>
+          {(message) => <div class="form-error">{message()}</div>}
+        </Show>
+        <Show when={joinOpen()}>
+          <form onSubmit={joinByLink} style={{ padding: "4px 8px 12px" }}>
+            <label style={{ display: "block" }}>
+              <span>Paste a call link</span>
+              <input
+                type="text"
+                value={joinInput()}
+                onInput={(e) => {
+                  setJoinInput(e.currentTarget.value);
+                  setJoinError(null);
+                }}
+                placeholder="https://lakko.me/c/…"
+                style={{ width: "100%", "margin-top": "0.25rem" }}
+              />
+            </label>
+            <Show when={joinError()}>
+              {(message) => <div class="form-error">{message()}</div>}
+            </Show>
+            <div class="lk-actions" style={{ "margin-top": "8px" }}>
+              <button type="submit">Open</button>
+              <button
+                type="button"
+                class="ghost"
+                onClick={() => {
+                  setJoinOpen(false);
+                  setJoinInput("");
+                  setJoinError(null);
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
+        </Show>
         <Show
           when={auth.state().kind === "session" && days().length > 0}
           fallback={
@@ -164,7 +280,6 @@ export default function Calls(): JSX.Element {
             )}
           </For>
         </Show>
-        <CreateCallLinkPanel />
       </div>
     </aside>
   );

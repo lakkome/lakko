@@ -187,6 +187,67 @@ pub const MAX_KEY_PACKAGE_LEN: usize = 4 * 1024;
 /// means the link can be consumed exactly once.
 pub use crate::invite::{NEVER_EXPIRES as CALL_NEVER_EXPIRES, SINGLE_USE as CALL_SINGLE_USE};
 
+/// How long a link to a live call stays usable, in milliseconds.
+///
+/// `docs/ux/call-links.md` section 4. The person is no longer asked, so the
+/// value is decided once — here, rather than three times in three clients.
+/// It is here and not in `lakko-ui-rules` because it is not presentation: it
+/// is a field of a signed capability, and the wire is what it has to agree
+/// with.
+///
+/// **Twelve hours**, between two bounds the spec states rather than a number
+/// it picks. The floor is a call's own length, because a link handed out at
+/// the start must still work for someone arriving near the end of a meeting
+/// that overran. The ceiling is exposure: the link is a standing invitation
+/// to *ask* into a room, and one pasted this morning should be dead tonight
+/// rather than sitting in a chat history someone scrolls back to months
+/// later.
+///
+/// The ceiling is soft for the reason the spec gives itself — the host
+/// admits every arrival ([ADR-0032], [ADR-0027]), so the expiry bounds how
+/// long a stale link can be offered at a call that has almost certainly
+/// ended, and never who gets in. That is why a wider window would not be
+/// unsafe and a narrower one buys nothing.
+///
+/// [ADR-0032]: https://github.com/lakkome/lakko/blob/main/docs/adr/0032-multi-joiner-call-links.md
+/// [ADR-0027]: https://github.com/lakkome/lakko/blob/main/docs/adr/0027-external-join-approval.md
+pub const CALL_INVITE_LIFETIME_MS: u64 = 12 * 60 * 60 * 1000;
+
+// The two bounds the spec states, checked when this compiles rather than
+// when a test runs: a value outside them is not a failing assertion to read
+// later, it is a build that does not happen.
+//
+// The floor is a call's own length - a link handed out at the start must
+// still work for someone arriving near the end of a meeting that overran.
+// The ceiling is the next day - one pasted this morning should not still be
+// an invitation next week.
+const _: () = assert!(CALL_INVITE_LIFETIME_MS >= 8 * 60 * 60 * 1000);
+const _: () = assert!(CALL_INVITE_LIFETIME_MS <= 24 * 60 * 60 * 1000);
+
+/// The expiry stamp for a link minted at `now_ms`.
+///
+/// Saturating, and never `CALL_NEVER_EXPIRES`: a clock near the end of the
+/// epoch would otherwise wrap to a small number, and `0` in that field means
+/// *never expires* — the one value this must not produce by accident, since
+/// its own documentation names it a stalking risk. A saturated stamp is a
+/// link that outlives everyone, which is wrong but honest; a wrapped one
+/// would be a link that silently never dies.
+#[must_use]
+pub const fn call_invite_expiry_ms(now_ms: u64) -> u64 {
+    match now_ms.checked_add(CALL_INVITE_LIFETIME_MS) {
+        Some(at) if at != CALL_NEVER_EXPIRES => at,
+        _ => u64::MAX,
+    }
+}
+
+/// How many people a link to a live call admits: no limit.
+///
+/// `docs/ux/call-links.md` section 4. A count here would cap a meeting for
+/// no gain, because the host admits each arrival either way — the limit
+/// would stop the tenth guest at the door of a room the host was holding
+/// open.
+pub const CALL_INVITE_MAX_USES: u32 = u32::MAX;
+
 /// Media kinds the invited call supports. Wire bitmap:
 /// `bit 0 = audio`, `bit 1 = video`. Other bits are
 /// reserved.
@@ -1084,5 +1145,40 @@ mod tests {
         // tag for the same joiner. Per-blob salt isolation
         // across distinct call invites.
         assert_ne!(tag_cap_a_acct_a, tag_cap_other_acct_a);
+    }
+}
+
+#[cfg(test)]
+mod live_call_link_values {
+    use super::*;
+
+    #[test]
+    fn an_expiry_is_never_the_never_expires_value() {
+        // `0` in this field means "never", which the field's own docs call a
+        // stalking risk. No input may produce it.
+        for now in [0, 1, CALL_NEVER_EXPIRES, u64::MAX, u64::MAX - 1] {
+            assert_ne!(call_invite_expiry_ms(now), CALL_NEVER_EXPIRES);
+        }
+    }
+
+    #[test]
+    fn a_clock_at_the_end_of_time_saturates_rather_than_wrapping() {
+        // Wrapping would produce a small stamp - or `0` - and a link that
+        // silently never dies. Saturating is wrong in the safe direction.
+        assert_eq!(call_invite_expiry_ms(u64::MAX), u64::MAX);
+        assert_eq!(call_invite_expiry_ms(u64::MAX - 10), u64::MAX);
+    }
+
+    #[test]
+    fn an_ordinary_clock_just_adds_the_window() {
+        let now = 1_700_000_000_000;
+        assert_eq!(call_invite_expiry_ms(now), now + CALL_INVITE_LIFETIME_MS);
+    }
+
+    #[test]
+    fn the_link_admits_everyone_the_host_lets_in() {
+        // Not `CALL_SINGLE_USE`, which is `0` and means exactly one.
+        assert_ne!(CALL_INVITE_MAX_USES, CALL_SINGLE_USE);
+        assert_eq!(CALL_INVITE_MAX_USES, u32::MAX);
     }
 }

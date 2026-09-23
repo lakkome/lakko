@@ -36,9 +36,10 @@ export type AddMode = "username" | "invite";
  * finding a group: both are kinds of conversation, so both belong to Chats
  * (`docs/ux/navigation.md` section 4).
  *
- * "Create call link" left too - it belongs to Calls, which is where a person
- * thinking about calling looks. It was put here only because Calls had been
- * removed.
+ * "Create call link" left too - it was put here only because Calls had been
+ * removed. It did not move to Calls either: the form is gone entirely
+ * (`docs/ux/call-links.md` sections 1 and 6), and a link is now offered from
+ * inside a call that is already happening.
  */
 const ADD_ITEMS: ReadonlyArray<{ mode: AddMode; label: string; icon: IconName }> = [
   { mode: "username", label: "Add by username", icon: "user" },

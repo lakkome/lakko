@@ -50,6 +50,9 @@ public final class CallHistoryStore: ObservableObject {
 
     private let backing: CallHistoryBacking
     private var boundAccountIdB64: String?
+    /// Accounts whose one-time backfill has run, so it is not repeated within
+    /// a session. The durable half is a marker beside the index itself.
+    private var backfilled: Set<String> = []
 
     public init(backing: CallHistoryBacking = SealedCallHistoryBacking()) {
         self.backing = backing
@@ -67,6 +70,9 @@ public final class CallHistoryStore: ObservableObject {
         guard boundAccountIdB64 != accountIdB64 else { return }
         boundAccountIdB64 = accountIdB64
         entries = CallHistory.ordered(Self.load(backing: backing, accountIdB64: accountIdB64))
+        if Self.isBackfilled(backing: backing, accountIdB64: accountIdB64) {
+            backfilled.insert(accountIdB64)
+        }
     }
 
     /// File one finished call.
@@ -82,6 +88,46 @@ public final class CallHistoryStore: ObservableObject {
         Self.save(backing: backing, accountIdB64: accountIdB64, entries: entries)
     }
 
+    /// Fill the index from calls that happened before it existed. Once.
+    ///
+    /// ## Why this is not the scan the spec forbids
+    ///
+    /// `docs/ux/navigation.md` section 6.2 refuses a walk of every transcript
+    /// **on every open**, because that cost grows with every call ever made.
+    /// This walk happens at most once per account, ever, and what it produces
+    /// is the index the screen then reads. Without it the Calls screen opens
+    /// empty on a device that has been calling for months, while those same
+    /// calls are visibly sitting in the conversation list - which reads as a
+    /// broken screen, and is the exact thing a live pass found that the unit
+    /// tests could not.
+    ///
+    /// `entries` is asked for lazily, so an account that has already been
+    /// filled never pays for gathering them.
+    ///
+    /// Marked done even when it finds nothing: an account with no past calls
+    /// is filled correctly by writing nothing, and re-walking on every launch
+    /// to rediscover that would be the per-open cost in a slower disguise.
+    public func backfillOnce(_ entries: () -> [CallHistoryEntry]) {
+        guard let accountIdB64 = boundAccountIdB64, !backfilled.contains(accountIdB64) else {
+            return
+        }
+        backfilled.insert(accountIdB64)
+        Self.markBackfilled(backing: backing, accountIdB64: accountIdB64)
+        let found = entries()
+        guard !found.isEmpty else { return }
+        // Folded one at a time through the same ordering and cap the live path
+        // uses, so a backfilled index is indistinguishable from one written
+        // call by call - and an id that is already there replaces rather than
+        // duplicates, which is what makes a second pass harmless.
+        var next = self.entries
+        for entry in found {
+            next.removeAll { $0.id == entry.id }
+            next.append(entry)
+        }
+        self.entries = CallHistory.ordered(next)
+        Self.save(backing: backing, accountIdB64: accountIdB64, entries: self.entries)
+    }
+
     /// Forget this device's calls. The transcript rows in each conversation are
     /// untouched — they are the person's own history and the wipe that removes
     /// them is the message log's.
@@ -89,6 +135,10 @@ public final class CallHistoryStore: ObservableObject {
         entries = []
         guard let accountIdB64 = boundAccountIdB64 else { return }
         backing.remove(accountIdB64: accountIdB64)
+        // The marker goes with the index. Otherwise a cleared account would
+        // come back empty for good, the walk having been recorded as done.
+        backing.remove(accountIdB64: Self.backfillMarkerKey(accountIdB64))
+        backfilled.remove(accountIdB64)
     }
 
     /// Release the account without touching what is stored (logout).
@@ -107,6 +157,20 @@ public final class CallHistoryStore: ObservableObject {
               let decoded = try? JSONDecoder().decode([CallHistoryEntry].self, from: data)
         else { return [] }
         return decoded
+    }
+
+    /// The marker lives in the same backing under its own key, so it is
+    /// wiped by the same `forgetDevice` that wipes the index.
+    static func backfillMarkerKey(_ accountIdB64: String) -> String {
+        "backfilled." + accountIdB64
+    }
+
+    static func isBackfilled(backing: CallHistoryBacking, accountIdB64: String) -> Bool {
+        backing.load(accountIdB64: backfillMarkerKey(accountIdB64)) != nil
+    }
+
+    static func markBackfilled(backing: CallHistoryBacking, accountIdB64: String) {
+        backing.save(accountIdB64: backfillMarkerKey(accountIdB64), data: Data([1]))
     }
 
     static func save(

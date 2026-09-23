@@ -154,6 +154,49 @@ public object AppCallHost {
         }
     }
 
+    /**
+     * `New call` — `docs/ux/call-links.md` sections 1 and 2.
+     *
+     * One kind of call: a group video call, founded here and now, with the
+     * person who asked for it landing in it. Nothing is asked first and nothing
+     * is uploaded: a call needs only a fresh `call_id` and an owner, both of
+     * which this device already has, so the proof-of-work the invite link costs
+     * is paid later by whoever actually wants a link (section 3).
+     *
+     * The call runs through the same [link] host a `/c/` link's landing uses —
+     * the ADR-0032 owner-founds path, unchanged — so it holds the one call slot
+     * and keeps running when the screen that started it goes away. It has no
+     * slug, because there is no landing to go back to until a link is minted.
+     */
+    public suspend fun startNewCall(
+        accountIdentitySeed: ByteArray,
+        accountId: ByteArray,
+        sessionToken: String,
+        video: Boolean = CALL_INVITE_LINK_MEDIA_VIDEO,
+    ): LinkCallStartOutcome {
+        val ownSignatureKey = try {
+            Identity.fromSeed(accountIdentitySeed).use { it.signaturePublicKey() }
+        } catch (error: Throwable) {
+            android.util.Log.w("AppCallHost", "no live identity to start a call with", error)
+            return LinkCallStartOutcome.Failed("no live identity")
+        }
+        return link.start(
+            LinkCallRequest(
+                callId = newCallId(),
+                // This device IS the owner: it founds the call, and any link
+                // minted later names the same account as its host.
+                ownerAccountId = accountId,
+                ownerSignatureKey = ownSignatureKey,
+                mediaVideo = video,
+                isOwner = true,
+                slug = null,
+                accountIdentitySeed = accountIdentitySeed,
+                sessionToken = sessionToken,
+                accountId = accountId,
+            ),
+        )
+    }
+
     /** Logout / forget device: end every call locally and start clean. */
     public fun reset() {
         IncomingCallRinger.stopAll()
@@ -496,6 +539,28 @@ internal class MultiJoinerLinkCallPort(
         }
         return MultiJoinerLinkCallHandle(call, identity)
     }
+
+    /**
+     * `docs/ux/call-links.md` section 3 — the link to the call already running.
+     *
+     * The capability is signed under the account's own Ed25519 key and carries
+     * the LIVE `call_id`, so whoever follows it arrives in this call rather than
+     * founding a new one. The discovery upload solves a proof-of-work challenge,
+     * which is why this runs on the first `Invite` and not at the call's start.
+     */
+    override suspend fun mintInviteLink(callId: ByteArray, identity: CallInviteIdentity): String =
+        Identity.fromSeed(identity.accountIdentitySeed).use { own ->
+            val discovery = me.lakko.app.discovery.DiscoveryClient()
+            discovery.setSessionToken(identity.sessionToken)
+            discovery.use { client ->
+                CallInviteComposer(client).composeAndUpload(
+                    ownerSigningSeed = own.ed25519Seed(),
+                    ownerAccountId = identity.accountId,
+                    identity = own,
+                    callId = callId,
+                ).url
+            }
+        }
 }
 
 private class MultiJoinerLinkCallHandle(

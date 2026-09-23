@@ -7,11 +7,19 @@ import LakkoCore
 /// Owner-side composer orchestration for link-based call
 /// invites (Phase 3c3-composer-helper).
 ///
-/// Wraps the five-step "create a call link" pipeline into a
-/// single async function so the UI doesn't have to know about
-/// the call_id RNG, the one-time KeyPackage mint, the FFI
-/// boundary, the discovery HTTP round-trip, or the URL
-/// builder convention.
+/// Wraps the "make a link for this call" pipeline into a single
+/// async function so the UI doesn't have to know about the
+/// one-time KeyPackage mint, the FFI boundary, the discovery
+/// HTTP round-trip, or the URL builder convention.
+///
+/// ## What `docs/ux/call-links.md` changed here
+///
+/// The `call_id` is now an ARGUMENT, not something this mints.
+/// A link is made from inside a call that is already running,
+/// and it has to lead into THAT call rather than a new one, so
+/// the id comes from the live call. The four fields the form
+/// used to ask about are gone from the signature too: they are
+/// stated once, in ``CallInviteValues``.
 ///
 /// Sibling of `apps/web/src/calls/composer.ts` +
 /// `apps/android/.../calls/CallInviteComposer.kt` — same
@@ -23,7 +31,7 @@ public enum CallInviteComposer {
     public enum Error: Swift.Error, LocalizedError {
         case wrongOwnerSigningSeedLength(expected: Int, got: Int)
         case wrongOwnerAccountIdLength(expected: Int, got: Int)
-        case labelTooLong(maxBytes: Int, got: Int)
+        case wrongCallIdLength(expected: Int, got: Int)
         case keyPackageEmpty
 
         public var errorDescription: String? {
@@ -32,8 +40,8 @@ public enum CallInviteComposer {
                 return "ownerSigningSeed must be \(expected) bytes, got \(got)"
             case .wrongOwnerAccountIdLength(let expected, let got):
                 return "ownerAccountId must be \(expected) bytes, got \(got)"
-            case .labelTooLong(let maxBytes, let got):
-                return "label is \(got) bytes (UTF-8), max is \(maxBytes)"
+            case .wrongCallIdLength(let expected, let got):
+                return "callId must be \(expected) bytes, got \(got)"
             case .keyPackageEmpty:
                 return "identity.createKeyPackage() returned 0 bytes"
             }
@@ -55,10 +63,9 @@ public enum CallInviteComposer {
         /// The full `<origin>/c/<slug>` URL the owner
         /// shares — base64url-no-pad of ``blobId``.
         public let url: String
-        /// The freshly-minted 16-byte `call_id` embedded in
-        /// the capability. Stored client-side so a
-        /// subsequent call-admission JWT mint binds to the
-        /// same id.
+        /// The 16-byte `call_id` embedded in the capability —
+        /// the live call's, so a person who follows the link
+        /// arrives in THAT call.
         public let callId: Data
         /// Wire-format capability bytes the server now holds.
         /// Returned for the rare case where the UI wants to
@@ -70,48 +77,48 @@ public enum CallInviteComposer {
 
     // MARK: - Pipeline
 
-    /// End-to-end "create call link" pipeline.
+    /// End-to-end "make a link for this call" pipeline.
     ///
-    /// Five steps:
-    ///   1. Generate a fresh 16-byte random `call_id` via
-    ///      `SystemRandomNumberGenerator`.
+    /// Four steps:
+    ///   1. Validate the owner's keys and the live call's id.
     ///   2. Mint a one-time MLS `KeyPackage` via
-    ///      `identity.createKeyPackage()` — the joiner
-    ///      consumes it to bootstrap the call MLS group.
+    ///      `identity.createKeyPackage()`.
     ///   3. `composeCallInviteCapability(...)` via UniFFI —
-    ///      wire bytes signed under the owner's Ed25519 key.
+    ///      wire bytes signed under the owner's Ed25519 key,
+    ///      carrying the ``CallInviteValues`` every link does.
     ///   4. ``DiscoveryClient/uploadCallInvite(capabilityBytes:)``
-    ///      — pushes the bytes to the server-side ledger.
-    ///   5. ``CallInviteUrl/composePointerCallInviteUrl(blobId:origin:)``
-    ///      — builds the `<origin>/c/<slug>` URL.
+    ///      then ``CallInviteUrl/composePointerCallInviteUrl(blobId:origin:)``.
     ///
-    /// The call must be driven from a background `Task`
-    /// because the upload step solves a server-issued PoW
-    /// challenge that can take a few seconds on slow devices.
+    /// The call must be driven from a background `Task`: the
+    /// upload solves a server-issued anti-spam challenge that
+    /// can take a few seconds on slow devices. That cost is why
+    /// a link is made here, when someone asks for one, and not
+    /// when the call starts.
     ///
     /// - Parameters:
-    ///   - ownerSigningSeed: 32-byte Ed25519 signing seed.
+    ///   - callId:           16-byte id of the call the link
+    ///                       must lead into.
+    ///   - ownerSigningSeed: 32-byte Ed25519 signing seed of
+    ///                       the call's owner — the device that
+    ///                       founded it. ADR-0032 elects the
+    ///                       committer from the owner the
+    ///                       capability names, so a link signed
+    ///                       by anyone else points nowhere.
     ///   - ownerAccountId:   16-byte UUIDv7 `account_id`.
     ///   - identity:         The owner's MLS identity handle
     ///                       (yields one-time KPs).
     ///   - discoveryClient:  Session-token-bound discovery
     ///                       client.
-    ///   - media:            Audio-only vs. audio+video.
-    ///   - expiryPreset:     1d / 7d / 30d / never.
-    ///   - maxUsesPreset:    single / ten / unlimited.
-    ///   - label:            UTF-8 free-text label, ≤ 64
-    ///                       bytes.
+    ///   - nowMs:            Clock for the expiry window.
     ///   - origin:           URL origin override (defaults
-    ///                       to `https://lakko.me`).
+    ///                       to the build's web origin).
     public static func composeAndUpload(
+        callId: Data,
         ownerSigningSeed: Data,
         ownerAccountId: Data,
         identity: KeyPackageMinting,
         discoveryClient: DiscoveryClient,
-        media: CallMediaPreset,
-        expiryPreset: CallInviteExpiryPreset,
-        maxUsesPreset: CallInviteMaxUsesPreset,
-        label: String,
+        nowMs: UInt64 = UInt64(Date().timeIntervalSince1970 * 1000),
         origin: String = CallInviteUrl.defaultOrigin
     ) async throws -> Composed {
         // ---- 0. Local validation -----------------------------
@@ -121,57 +128,37 @@ public enum CallInviteComposer {
         guard ownerAccountId.count == 16 else {
             throw Error.wrongOwnerAccountIdLength(expected: 16, got: ownerAccountId.count)
         }
-        let labelBytes = label.utf8.count
-        guard labelBytes <= CallInviteUrl.labelMaxLen else {
-            throw Error.labelTooLong(maxBytes: CallInviteUrl.labelMaxLen, got: labelBytes)
+        guard callId.count == CallInviteValues.callIdLen else {
+            throw Error.wrongCallIdLength(
+                expected: CallInviteValues.callIdLen, got: callId.count)
         }
 
-        // ---- 1. call_id RNG ----------------------------------
-        var callId = Data(count: 16)
-        callId.withUnsafeMutableBytes { rawBuf in
-            guard let base = rawBuf.baseAddress else { return }
-            // SecRandomCopyBytes is the system CSPRNG; falling
-            // back to arc4random_buf is fine on the rare
-            // hardware where SecRandom is unavailable.
-            let rc = SecRandomCopyBytes(kSecRandomDefault, 16, base)
-            if rc != errSecSuccess {
-                arc4random_buf(base, 16)
-            }
-        }
-
-        // ---- 2. One-time KeyPackage mint ---------------------
+        // ---- 1. One-time KeyPackage mint ---------------------
         let oneTimeKeyPackage = try identity.createKeyPackage()
         guard !oneTimeKeyPackage.isEmpty else {
             throw Error.keyPackageEmpty
         }
 
-        // ---- 3. Resolve presets to wire-level values ---------
-        let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
-        let expiryMs = expiryPreset.toMs(nowMs: nowMs)
-        let maxUses = maxUsesPreset.toValue()
-        let mediaFlags = FfiCallInviteMedia(
-            audio: true, // every call carries audio
-            video: media == .audioVideo
-        )
-
-        // ---- 4. composeCallInviteCapability via UniFFI -------
+        // ---- 2. The values every link carries ----------------
+        // Fixed, not asked (`docs/ux/call-links.md` section 4).
         let capabilityBytes = try composeCallInviteCapability(
             ownerSigningSeed: ownerSigningSeed,
             ownerAccountId: ownerAccountId,
             callId: callId,
-            expiryMs: expiryMs,
-            maxUses: maxUses,
-            media: mediaFlags,
+            expiryMs: CallInviteValues.expiryMs(nowMs: nowMs),
+            maxUses: CallInviteValues.maxUses,
+            media: FfiCallInviteMedia(
+                audio: CallInviteValues.audio, video: CallInviteValues.video),
             oneTimeKeyPackage: oneTimeKeyPackage,
-            label: label
+            label: CallInviteValues.label
         )
 
-        // ---- 5. uploadCallInvite via HTTP --------------------
+        // ---- 3. uploadCallInvite via HTTP --------------------
         let blobId = try await discoveryClient.uploadCallInvite(
             capabilityBytes: capabilityBytes
         )
 
-        // ---- 6. URL build ------------------------------------
+        // ---- 4. URL build ------------------------------------
         let url = try CallInviteUrl.composePointerCallInviteUrl(
             blobId: blobId,
             origin: origin

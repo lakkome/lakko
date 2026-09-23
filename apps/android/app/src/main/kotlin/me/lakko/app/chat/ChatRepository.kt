@@ -6755,6 +6755,64 @@ public class ChatRepository(
         }
     }
 
+    /**
+     * Fill the cross-conversation call index from calls that happened before
+     * it existed. Once per account.
+     *
+     * Found live rather than by a test: the index only ever received calls
+     * placed after it shipped, so on a device that had been calling for
+     * months the Calls screen opened empty while those same calls were
+     * visibly sitting in the conversation list. A screen that contradicts the
+     * one next to it reads as broken, whatever the honest reason.
+     *
+     * It reads what is already in memory - every transcript row carries the
+     * call's PARTS, not just its sentence, so nothing is re-parsed out of
+     * words - and hands them to [me.lakko.app.calls.CallHistoryStore], which
+     * runs at most once per account and never again.
+     */
+    public fun backfillCallHistory() {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        callRowScope.launch {
+            me.lakko.app.calls.CallHistoryStore.backfillOnce(
+                context = applicationContext,
+                accountIdB64 = accountIdB64,
+            ) { pastCallEntries() }
+        }
+    }
+
+    /**
+     * Every finished call this device still holds a transcript row for,
+     * oldest first so the fold that files them keeps the newest.
+     */
+    private fun pastCallEntries(): List<me.lakko.app.calls.CallHistoryEntry> {
+        val snapshot: List<Pair<String, List<ChatMessage>>> = synchronized(groups) {
+            groups.map { (hex, record) -> hex to record.snapshot() }
+        }
+        val found = mutableListOf<me.lakko.app.calls.CallHistoryEntry>()
+        for ((hex, messages) in snapshot) {
+            val kind = try {
+                ConversationKindStore.resolve(applicationContext, hex, memberCount(hex))
+            } catch (_: Throwable) {
+                ConversationKind.Chat
+            }
+            for (message in messages) {
+                val call = message.call ?: continue
+                // A row whose time cannot be read has no place in a list whose
+                // whole order is time, so it is left where it already is.
+                val at = me.lakko.app.ui.chat.parseMessageTimeMs(message.createdAt) ?: continue
+                found += me.lakko.app.calls.CallHistoryEntry(
+                    conversationIdHex = hex.lowercase(),
+                    kind = kind,
+                    outcome = call.outcome,
+                    video = call.video,
+                    startedAtMs = at,
+                    durationSecs = call.durationSecs,
+                )
+            }
+        }
+        return found.sortedBy { it.startedAtMs }
+    }
+
     /** Capture `(cursor, messages)` per known group + write
      *  it to the encrypted message log (Phase 2a3f1).
      *  Best-effort — Keystore / FS failures swallowed; the

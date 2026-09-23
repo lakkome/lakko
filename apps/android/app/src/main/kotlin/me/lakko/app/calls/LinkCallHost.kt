@@ -14,6 +14,8 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * The app-level owner of the call-link (`/c/<slug>`, ADR-0032) call — the
@@ -32,6 +34,11 @@ import kotlinx.coroutines.launch
  * admission dedup, per-admission rekey, the post-join owner-membership check,
  * the admission timeout, media only after the Welcome (invariant #4).
  *
+ * The host also owns the call's INVITE LINK ([inviteLink], [inviteLinkUrl]) —
+ * `docs/ux/call-links.md` section 3. The link belongs to the call, not to a
+ * screen, so its one-per-call mint lives here beside the call; what the control
+ * reads and who is offered it are in `CallInviteLink.kt`.
+ *
  * Public entry points are called on the main thread; see [GroupCallHost].
  */
 
@@ -43,12 +50,33 @@ public class LinkCallRequest(
     public val mediaVideo: Boolean,
     /** The local identity IS the capability owner: found + host. */
     public val isOwner: Boolean,
-    /** The `/c/` slug the call was started from, to return to its landing. */
-    public val slug: String,
+    /**
+     * The `/c/` slug the call was started from, to return to its landing, or
+     * `null` for a call started from the Calls destination's `New call`
+     * (`docs/ux/call-links.md` section 2), which has no landing to return to
+     * and no link at all until somebody asks for one.
+     */
+    public val slug: String?,
     public val accountIdentitySeed: ByteArray,
     public val sessionToken: String,
     /** The raw account id, to read the own profile the call announces. */
     public val accountId: ByteArray,
+)
+
+/**
+ * What minting an invite link needs from the signed-in session
+ * (`docs/ux/call-links.md` section 3).
+ *
+ * Read at the moment `Invite` is pressed rather than kept by the host for the
+ * call's lifetime: the seed is the account's root secret, and the only reason
+ * to hold it would be to save a lookup. Reading it late also answers section
+ * 5's "signed out mid-flow" row for free — there is simply nothing to read.
+ */
+public class CallInviteIdentity(
+    /** ADR-0017 phrase seed; `Identity.fromSeed` derives the signing key. */
+    public val accountIdentitySeed: ByteArray,
+    public val accountId: ByteArray,
+    public val sessionToken: String,
 )
 
 /** The orchestrator's reports, as [MultiJoinerCall.Options] carries them. */
@@ -85,13 +113,24 @@ public interface LinkCallPort {
         ui: CallUiState,
         events: LinkCallEvents,
     ): LinkCallHandle
+
+    /**
+     * Sign and upload a `/c/` capability for the call [callId] names, and
+     * return its URL (`docs/ux/call-links.md` sections 3 and 4).
+     *
+     * Costs a network round trip and a proof-of-work solve, which is why it
+     * runs at the first `Invite` and not at the call's start. May throw; the
+     * host turns the cause into the one sentence the user reads.
+     */
+    public suspend fun mintInviteLink(callId: ByteArray, identity: CallInviteIdentity): String
 }
 
 /** The link call in the host's slot. */
 public data class LinkCallSlot(
     /** Lowercase hex of the capability's 16-byte `call_id`. */
     val callIdHex: String,
-    val slug: String,
+    /** The `/c/` landing this call came from, or `null` — see [LinkCallRequest.slug]. */
+    val slug: String?,
     val owner: Boolean,
     val phase: LinkCallPhase,
     /** The reason, for [LinkCallPhase.ERROR]. */
@@ -149,6 +188,23 @@ public class LinkCallHost(
     /** Identity of the current start; reports from an abandoned one are ignored. */
     private var attempt: Any? = null
 
+    private val mutableInvite = MutableStateFlow<CallInviteLinkState>(CallInviteLinkState.Idle)
+
+    /**
+     * The `Invite` control's state for the call in the slot
+     * (`docs/ux/call-links.md` section 3).
+     *
+     * Reset at every start, so a link minted for one call is never offered as
+     * the next call's.
+     */
+    public val inviteLink: StateFlow<CallInviteLinkState> = mutableInvite.asStateFlow()
+
+    /** The live call's raw `call_id`, which the link has to carry to lead here. */
+    private var liveCallId: ByteArray? = null
+
+    /** Serialises the mint, so a double tap cannot upload two capabilities. */
+    private val inviteMutex = Mutex()
+
     /** A link call is starting, waiting for admission or live. */
     public val occupiesSlot: Boolean
         get() = mutableSlot.value?.let { linkCallOccupiesSlot(it.phase) } == true
@@ -199,6 +255,25 @@ public class LinkCallHost(
         return (decision as? LinkCallStartDecision.Busy)?.message
     }
 
+    /** Whether this device may offer an invite link for the call it is in
+     *  ([showsCallInvite]). */
+    public fun canInvite(): Boolean =
+        mutableSlot.value?.let { showsCallInvite(it.owner, it.phase) } == true
+
+    /**
+     * The link to the live call: the one already minted, or a fresh mint
+     * (`docs/ux/call-links.md` section 3).
+     *
+     * `null` when there is nothing to offer; [inviteLink] then says why, in the
+     * one sentence the user reads. The call is never affected — a failed mint
+     * leaves it running and the control live for another try.
+     *
+     * Runs on the host's own scope, so leaving the screen mid-solve does not
+     * throw the proof-of-work away.
+     */
+    public suspend fun inviteLinkUrl(identity: CallInviteIdentity?): String? =
+        scope.async { runInvite(identity) }.await()
+
     /** Found (owner) or join the call a `/c/` link names. Never throws. */
     public suspend fun start(request: LinkCallRequest): LinkCallStartOutcome =
         scope.async { runStart(request) }.await()
@@ -208,6 +283,8 @@ public class LinkCallHost(
         attempt = null
         val h = handle
         handle = null
+        liveCallId = null
+        mutableInvite.value = CallInviteLinkState.Idle
         setSlot(null)
         h?.hangUp()
     }
@@ -258,6 +335,43 @@ public class LinkCallHost(
         )
     }
 
+    /**
+     * One mint per call, serialised.
+     *
+     * The already-minted link is re-offered without a second upload, which is
+     * both what section 3 asks for and what keeps a double tap from leaving two
+     * capabilities on the ledger for one call. A failure is recorded and
+     * swallowed: the call goes on, and the next tap tries again.
+     */
+    private suspend fun runInvite(identity: CallInviteIdentity?): String? = inviteMutex.withLock {
+        (mutableInvite.value as? CallInviteLinkState.Ready)?.let { return@withLock it.url }
+        val p = port
+        val callId = liveCallId
+        if (p == null || callId == null || !canInvite()) {
+            // Nothing to invite anyone to. Not a failure to report: the control
+            // is only drawn while there is a live call this device hosts.
+            return@withLock null
+        }
+        if (identity == null) {
+            mutableInvite.value =
+                CallInviteLinkState.Failed(callInviteFailureMessage(CallInviteFailure.NO_SESSION))
+            return@withLock null
+        }
+        mutableInvite.value = CallInviteLinkState.Preparing
+        try {
+            val url = p.mintInviteLink(callId, identity)
+            mutableInvite.value = CallInviteLinkState.Ready(url)
+            url
+        } catch (cancel: CancellationException) {
+            mutableInvite.value = CallInviteLinkState.Idle
+            throw cancel
+        } catch (error: Throwable) {
+            warn("link call: minting the invite link failed", error)
+            mutableInvite.value = CallInviteLinkState.Failed(callInviteFailureMessage(error))
+            null
+        }
+    }
+
     private suspend fun runStart(request: LinkCallRequest): LinkCallStartOutcome {
         val p = port ?: return LinkCallStartOutcome.Failed("Calls are not available right now.")
         val callIdHex = callIdHexOf(request.callId)
@@ -286,6 +400,8 @@ public class LinkCallHost(
         val thisAttempt = Any()
         attempt = thisAttempt
         handle = null
+        liveCallId = request.callId.copyOf()
+        mutableInvite.value = CallInviteLinkState.Idle
         ui.reset()
         setSlot(
             LinkCallSlot(

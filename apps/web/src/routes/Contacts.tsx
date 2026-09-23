@@ -282,7 +282,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
 
   // ---- layout: the list pane + the detail / add pane ----------------
   const [selectedKey, setSelectedKey] = createSignal<string | null>(null);
-  // The add menu's pick: add by username, the invite links, or a call link.
+  // The add menu's pick: add by username, or the invite links.
   // `null` = nothing open.
   const location = useLocation();
   const [adding, setAdding] = createSignal<AddMode | null>(null);

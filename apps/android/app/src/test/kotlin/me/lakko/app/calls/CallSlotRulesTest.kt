@@ -258,6 +258,25 @@ class CallSlotRulesTest {
         assertEquals("The call failed.", linkCallNotice(LinkCallPhase.ERROR, false, null)?.text)
     }
 
+    @Test
+    fun `a call started from New call is never offered a landing to open`() {
+        // docs/ux/call-links.md section 2 — `New call` founds the call here and
+        // now, so there is no `/c/` landing to return to and Open would go
+        // nowhere. Cancel stays: leaving is always possible.
+        for (phase in listOf(LinkCallPhase.STARTING, LinkCallPhase.WAITING)) {
+            assertEquals(
+                "$phase",
+                listOf(LinkCallNoticeAction.CANCEL),
+                linkCallNotice(phase, false, null, hasLanding = false)?.actions,
+            )
+            assertEquals(
+                "$phase",
+                listOf(LinkCallNoticeAction.OPEN, LinkCallNoticeAction.CANCEL),
+                linkCallNotice(phase, false, null, hasLanding = true)?.actions,
+            )
+        }
+    }
+
     // ---- The conversation row ------------------------------------------------
 
     @Test

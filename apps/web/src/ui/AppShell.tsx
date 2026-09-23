@@ -9,8 +9,10 @@
  * bar.
  *
  * Session actions (log out, forget this device, theme, media preferences)
- * live under Settings, not here: the rail is navigation only. Call links live
- * in the Contacts add menu and the chat header; there is no Calls destination.
+ * live under Settings, not here: the rail is navigation only. Calls is a
+ * destination again (`docs/ux/navigation.md` section 5), and a call link is
+ * offered from inside a call rather than built anywhere in the rail
+ * (`docs/ux/call-links.md` section 3).
  */
 import type { JSX } from "solid-js";
 import { A, useLocation, useNavigate } from "@solidjs/router";

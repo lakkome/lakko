@@ -5,7 +5,6 @@ package me.lakko.app.ui.calls
 
 import android.text.format.DateFormat
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -23,16 +22,17 @@ import androidx.compose.material.icons.automirrored.filled.CallMade
 import androidx.compose.material.icons.automirrored.filled.CallMissed
 import androidx.compose.material.icons.automirrored.filled.CallReceived
 import androidx.compose.material.icons.filled.Call
-import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -80,6 +80,19 @@ import java.util.Locale
  * Two targets per row, and their hit areas must not overlap: the row opens the
  * conversation, the trailing button places the call — back in the same mode the
  * row records, so a video call re-dials video.
+ *
+ * ## One action
+ *
+ * `docs/ux/call-links.md` section 2. The destination used to offer
+ * "Create call link" and "Join by link" — two buttons of equal weight, neither
+ * of which placed a call, so the place named after the act did not perform it.
+ * There is now one action, [onNewCall], and it starts a group video call: no
+ * media choice, no participants, no name, no form. Someone who wants to call
+ * one particular contact has a faster route from that conversation, which is
+ * why this button does not try to be it.
+ *
+ * [onJoinByLink] stays for a link that did not open by itself, in the top bar
+ * rather than as a second main action.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -89,8 +102,11 @@ public fun CallsScreen(
     onOpenConversation: (groupIdHex: String) -> Unit,
     /** Call back, in the mode the row records. */
     onCallBack: (groupIdHex: String, video: Boolean) -> Unit,
-    /** Open the "Create call link" form. */
-    onCreateCallLink: () -> Unit,
+    /**
+     * Start a group video call and show the call screen
+     * (`docs/ux/call-links.md` section 2). Nothing is asked first.
+     */
+    onNewCall: () -> Unit,
     /** Join the call a pasted `/c/` link names. */
     onJoinByLink: () -> Unit,
     modifier: Modifier = Modifier,
@@ -105,6 +121,11 @@ public fun CallsScreen(
     val locale = remember { Locale.getDefault() }
     val use24h = remember(context) { DateFormat.is24HourFormat(context) }
 
+    // Calls placed before the index existed live only in their conversations.
+    // Filled once per account, so this screen never opens empty while the
+    // conversation list next to it is visibly showing calls.
+    LaunchedEffect(repository) { repository.backfillCallHistory() }
+
     // The index, not a walk of every transcript — `docs/ux/navigation.md`
     // section 6.2. The thread COUNT is read so a conversation arriving after
     // this screen mounted re-titles the rows that name it; comparing the whole
@@ -117,7 +138,21 @@ public fun CallsScreen(
 
     Scaffold(
         modifier = modifier,
-        topBar = { TopAppBar(title = { Text("Calls") }) },
+        topBar = {
+            TopAppBar(
+                title = { Text("Calls") },
+                actions = {
+                    TextButton(onClick = onJoinByLink) { Text("Join by link") }
+                },
+            )
+        },
+        floatingActionButton = {
+            ExtendedFloatingActionButton(
+                onClick = onNewCall,
+                icon = { Icon(Icons.Filled.Videocam, contentDescription = null) },
+                text = { Text("New call") },
+            )
+        },
     ) { padding ->
         Column(
             modifier = Modifier
@@ -143,7 +178,9 @@ public fun CallsScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
-                    contentPadding = PaddingValues(vertical = 4.dp),
+                    // Room under the last row for the floating `New call`
+                    // button, which would otherwise sit on top of it.
+                    contentPadding = PaddingValues(top = 4.dp, bottom = 88.dp),
                 ) {
                     for (day in days) {
                         item(key = "day-${day.day}") {
@@ -176,25 +213,6 @@ public fun CallsScreen(
                             )
                         }
                     }
-                }
-            }
-            // Section 5.2 — the two actions the design system's information
-            // architecture has always put here.
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                OutlinedButton(onClick = onCreateCallLink, modifier = Modifier.fillMaxWidth()) {
-                    Icon(Icons.Filled.Videocam, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Create call link")
-                }
-                OutlinedButton(onClick = onJoinByLink, modifier = Modifier.fillMaxWidth()) {
-                    Icon(Icons.Filled.Link, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Join by link")
                 }
             }
         }

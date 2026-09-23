@@ -955,48 +955,6 @@ public class ContactsRepository(
         }
     }
 
-    /**
-     * ADR-0032 — mint a `/c/<slug>` call link owned by this account.
-     *
-     * Signs a `CallInviteCapability` under the account identity, uploads it to
-     * the discovery ledger (a PoW solve, so this can take seconds) and returns
-     * the pointer link. A call link is independent of any chat: whoever opens it
-     * lands on the JoinCall screen, where this account is recognised as the
-     * owner and founds + hosts the call.
-     *
-     * @throws ContactsError on missing identity secrets, a compose failure, or
-     *   a discovery upload failure.
-     */
-    public suspend fun createCallLink(
-        media: me.lakko.app.calls.CallMediaPreset,
-        expiry: me.lakko.app.calls.CallInviteExpiryPreset,
-        maxUses: me.lakko.app.calls.CallInviteMaxUsesPreset,
-        label: String,
-    ): me.lakko.app.calls.CallInviteComposer.Composed {
-        val secrets = authRepo.identitySecrets.value
-            ?: throw ContactsError.wrap(
-                IllegalStateException(
-                    "no identity secrets — please re-enter your password",
-                ),
-            )
-        return try {
-            Identity.fromSeed(secrets.accountIdentitySeed).use { identity ->
-                authenticatedDiscoveryClient().use { discovery ->
-                    me.lakko.app.calls.CallInviteComposer(discovery).composeAndUpload(
-                        ownerSigningSeed = identity.ed25519Seed(),
-                        ownerAccountId = secrets.accountId,
-                        identity = identity,
-                        media = media,
-                        expiryPreset = expiry,
-                        maxUsesPreset = maxUses,
-                        label = label,
-                    )
-                }
-            }
-        } catch (e: Throwable) {
-            throw ContactsError.wrap(e)
-        }
-    }
 
     /**
      * Revoke an outstanding invite link via the discovery

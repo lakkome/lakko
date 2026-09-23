@@ -53,8 +53,9 @@ export const paths = {
   },
   /** The viewer's own profile name (ADR-0048) — the first Settings section. */
   profile: "/settings/profile",
-  /** The former Calls destination. Redirects to Contacts, where "Create call
-   *  link" now lives in the add menu. */
+  /** Calls — the call history and one action, `New call`
+   *  (`docs/ux/call-links.md` section 2). Also where a call started from that
+   *  button returns to while it is still connecting. */
   calls: "/calls",
   /**
    * Developer probe — runs the "Hello core" round-trip from 1.16a.

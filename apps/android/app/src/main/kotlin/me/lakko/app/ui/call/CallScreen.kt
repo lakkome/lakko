@@ -146,7 +146,9 @@ import me.lakko.app.calls.CALL_ENCRYPTION_CHIP_LABEL
 import me.lakko.app.calls.CALL_ENCRYPTION_SHEET_HINT
 import me.lakko.app.calls.CALL_ENCRYPTION_SHEET_TITLE
 import me.lakko.app.calls.CallSoundController
+import me.lakko.app.calls.CallInviteLinkState
 import me.lakko.app.calls.CallUiState
+import me.lakko.app.calls.callInviteButton
 import me.lakko.app.calls.LocalVideoPreviewView
 import me.lakko.app.calls.callEncryptionSentence
 import me.lakko.app.calls.callStatusSpokenLabel
@@ -249,6 +251,19 @@ public fun CallScreen(
      * is never derived from a participant: see [callScreenTitle].
      */
     groupName: String? = null,
+    /**
+     * `docs/ux/call-links.md` section 3 — the `Invite` control's state, or
+     * `null` for a call that has no link to offer.
+     *
+     * A 1x1 call and a call in a chat group both pass `null`: their membership
+     * is the chat's, and a `/c/` capability minted over one would send whoever
+     * followed it into a different MLS group with a different key, hearing
+     * nothing. Only the link call started by `New call`, and only on the device
+     * that hosts it, has a link that leads back to the call on screen.
+     */
+    inviteState: CallInviteLinkState? = null,
+    /** Offer the invite link: mint it the first time, re-offer it after. */
+    onInvite: () -> Unit = {},
 ) {
     // Captured once: whether this composition created the state, and may
     // therefore reset it. Reading the parameter later would be wrong — the
@@ -371,6 +386,8 @@ public fun CallScreen(
             avatarSeed = avatarSeed,
             groupCall = groupCall,
             groupName = groupName,
+            inviteState = inviteState,
+            onInvite = onInvite,
             speakerOn = speakerOn,
             onToggleSpeaker = { audio.toggleSpeaker() },
             onSwitchCamera = onSwitchCamera,
@@ -440,6 +457,9 @@ private fun InCallView(
     avatarSeed: String? = null,
     groupCall: Boolean = false,
     groupName: String? = null,
+    /** See [CallScreen]'s parameter of the same name. */
+    inviteState: CallInviteLinkState? = null,
+    onInvite: () -> Unit = {},
     speakerOn: Boolean = false,
     onToggleSpeaker: () -> Unit = {},
     onSwitchCamera: (() -> Unit)? = null,
@@ -495,7 +515,9 @@ private fun InCallView(
     // Section 4: "The controls fade out after 5 seconds of a connected video
     // call and come back on a tap; on a voice call they never hide."
     var controlsVisible by remember { mutableStateOf(true) }
-    val mayHide = controlsMayAutoHide(stage, connected)
+    // Alone means nobody else's tile is on the screen, so hiding the row
+    // reveals nothing and only removes the way out.
+    val mayHide = controlsMayAutoHide(stage, connected, alone = participants.none { !it.isLocal })
     LaunchedEffect(mayHide, controlsVisible) {
         if (!mayHide) {
             controlsVisible = true
@@ -650,23 +672,35 @@ private fun InCallView(
                     vertical = if (stage == CallStage.PORTRAIT) 72.dp else 16.dp,
                 ),
         ) {
-            Box {
-                CallControlBar(
-                    controls = controls,
-                    onControl = { kind ->
-                        when (kind) {
-                            CallControlKind.SPEAKER -> onToggleSpeaker()
-                            CallControlKind.MICROPHONE -> onSetMic(local?.micOn != true)
-                            CallControlKind.CAMERA -> onSetCamera(local?.camOn != true)
-                            CallControlKind.MORE -> moreOpen = true
-                            CallControlKind.END -> onEndCall()
-                        }
-                    },
-                )
-                // Section 4.1 keeps participants and chat behind one overflow
-                // button — in a GROUP call only. A 1x1 call has no MORE
-                // control, so this menu is unreachable there.
-                CallMoreMenu(state = state, expanded = moreOpen, onDismiss = { moreOpen = false })
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                // docs/ux/call-links.md section 3 — above the circle row, not
+                // in it: see `CallInviteControl` for why the row is the wrong
+                // place and the overflow menu is a worse one.
+                if (inviteState != null) {
+                    CallInviteControl(
+                        button = callInviteButton(inviteState),
+                        onClick = onInvite,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                }
+                Box {
+                    CallControlBar(
+                        controls = controls,
+                        onControl = { kind ->
+                            when (kind) {
+                                CallControlKind.SPEAKER -> onToggleSpeaker()
+                                CallControlKind.MICROPHONE -> onSetMic(local?.micOn != true)
+                                CallControlKind.CAMERA -> onSetCamera(local?.camOn != true)
+                                CallControlKind.MORE -> moreOpen = true
+                                CallControlKind.END -> onEndCall()
+                            }
+                        },
+                    )
+                    // Section 4.1 keeps participants and chat behind one
+                    // overflow button — in a GROUP call only. A 1x1 call has no
+                    // MORE control, so this menu is unreachable there.
+                    CallMoreMenu(state = state, expanded = moreOpen, onDismiss = { moreOpen = false })
+                }
             }
         }
 

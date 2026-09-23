@@ -157,12 +157,26 @@ public const val CALL_CONTROLS_AUTO_HIDE_MS: Long = 5_000L
  *
  * A grid call is treated as a voice call here for the same reason: what is
  * underneath is a roster, not a picture of a person, and a group call is where
- * losing the mute button costs most. Both video stages fade, including the one
- * where the only picture is this device's own — there is still something to
- * look at, and a tap brings the controls back.
+ * losing the mute button costs most.
+ *
+ * `alone` extends that to the case the rule could not reach when it was
+ * written. A call used to be entered from a conversation, where somebody else
+ * was already there; a call started from the Calls screen begins with one
+ * person in it, and the only picture is this device's own. Found live on iOS
+ * on 2026-09-23 and fixed on both: five seconds after starting a call the row
+ * faded, leaving the person who had just created it looking at their own
+ * camera with no way to invite anyone and no way to hang up. A tap brings it
+ * back, but a screen whose only remaining affordance is an undiscoverable one
+ * is a screen with no exit.
  */
-public fun controlsMayAutoHide(stage: CallStage, connected: Boolean): Boolean =
-    connected && (stage == CallStage.REMOTE_VIDEO || stage == CallStage.LOCAL_VIDEO)
+public fun controlsMayAutoHide(
+    stage: CallStage,
+    connected: Boolean,
+    alone: Boolean = false,
+): Boolean =
+    connected &&
+        !alone &&
+        (stage == CallStage.REMOTE_VIDEO || stage == CallStage.LOCAL_VIDEO)
 
 /**
  * The tile a group call draws large, or `null` for an equal grid

@@ -17,18 +17,17 @@ import me.lakko.app.auth.base64UrlEncodeNoPad
  * manifest can branch on the path segment without parsing the
  * slug.
  *
- * Two surfaces:
+ * URL plumbing only: [composePointerCallInviteUrl] for the
+ * production short form (`/c/<blob_id_b64url>`),
+ * [composeInlineCallInviteUrl] for the censored-region fallback
+ * (the bytes are encoded into the URL itself, no
+ * `/discovery/call-invite` round-trip needed), and
+ * [parseCallInviteSlug] for the joiner-side dispatcher.
  *
- *   - URL plumbing — [composePointerCallInviteUrl] for the
- *     production short form (`/c/<blob_id_b64url>`),
- *     [composeInlineCallInviteUrl] for the censored-region
- *     fallback (the bytes are encoded into the URL itself, no
- *     `/discovery/call-invite` round-trip needed), and
- *     [parseCallInviteSlug] for the joiner-side dispatcher.
- *   - Form-side enums — [CallInviteExpiryPreset],
- *     [CallInviteMaxUsesPreset], [CallMediaPreset] —
- *     translate UI dropdown choices into the wire-level
- *     `composeCallInviteCapability` arguments.
+ * The form-side enums that used to live here — media, expiry and
+ * max-uses presets, and the label cap — are gone with the form
+ * itself (`docs/ux/call-links.md` section 6). The values the wire
+ * still carries are now decided once, in `CallInviteLink.kt`.
  */
 
 /** Path prefix every call-invite URL starts with. Mirror of
@@ -40,10 +39,6 @@ public const val CALL_INVITE_URL_PREFIX: String = "/c/"
  *  against the test stack opens on the test stack. */
 public val CALL_INVITE_DEFAULT_ORIGIN: String
     get() = me.lakko.app.config.ApiEndpoints.webOrigin
-
-/** Hard cap on the human-visible label, in bytes (UTF-8).
- *  Mirrors `lakko_contacts::invite::MAX_LABEL_LEN` (64). */
-public const val CALL_INVITE_LABEL_MAX_LEN: Int = 64
 
 /** Length of a content-addressed `blob_id` from
  *  `services/discovery/src/call_invite.rs` — SHA-256, 32 bytes. */
@@ -212,109 +207,4 @@ public sealed class CallInviteUrlException(message: String) : Exception(message)
     ) : CallInviteUrlException(
         "call-invite slug decoded to $got bytes — neither a $blobIdLen-byte pointer nor a >= $inlineMinLen-byte inline capability",
     )
-}
-
-// =============================================================
-// Form-side enums
-// =============================================================
-
-/**
- * Discrete UI choices the "Create call link" form exposes for
- * the `expiry_ms` field. Same recipes as the contact-invite
- * form — keeps the UX consistent across the two invite kinds.
- */
-public enum class CallInviteExpiryPreset {
-    /** A call a user is about to hold now — the "Create call link" form's
-     *  shortest choice. */
-    OneHour,
-    OneDay,
-    SevenDays,
-    ThirtyDays,
-    Never;
-
-    /**
-     * Translate into the UNIX-millis argument
-     * `composeCallInviteCapability` expects. [Never] resolves
-     * to `0` — the `CALL_NEVER_EXPIRES` sentinel — and the UI
-     * MUST surface a warning before allowing it.
-     */
-    public fun toMs(nowMs: Long): Long = when (this) {
-        OneHour -> nowMs + 3_600_000L
-        OneDay -> nowMs + 1L * 86_400_000
-        SevenDays -> nowMs + 7L * 86_400_000
-        ThirtyDays -> nowMs + 30L * 86_400_000
-        Never -> 0L
-    }
-}
-
-/** Discrete UI choices for `max_uses`. */
-public enum class CallInviteMaxUsesPreset {
-    Single,
-    Ten,
-    Unlimited;
-
-    /**
-     * Translate into the `max_uses` u32 the wire format
-     * carries. [Single] resolves to `0` — the
-     * `CALL_SINGLE_USE` sentinel. [Unlimited] saturates at
-     * `u32::MAX` (which Kotlin / JVM represents as `UInt.MAX_VALUE`).
-     */
-    public fun toValue(): UInt = when (this) {
-        Single -> 0u
-        Ten -> 10u
-        Unlimited -> UInt.MAX_VALUE
-    }
-}
-
-/**
- * Discrete UI choices the "Create call link" form exposes for
- * the media kind — surfaces the same `audio-only` vs
- * `audio-video` toggle the `CallInviteMedia` wire flags carry.
- */
-public enum class CallMediaPreset {
-    Audio,
-    AudioVideo,
-}
-
-// =============================================================
-// Human-visible renderers
-// =============================================================
-
-/** Convert a wire `max_uses` u32 back into a human-visible
- *  rendering for the landing page. */
-public fun describeCallInviteMaxUses(maxUses: UInt): String = when (maxUses) {
-    0u -> "single-use"
-    UInt.MAX_VALUE -> "unlimited"
-    else -> "up to $maxUses uses"
-}
-
-/**
- * Render an `expiry_ms` (UNIX millis) for the landing page —
- * `"never expires"` for the `CALL_NEVER_EXPIRES` sentinel,
- * otherwise a relative "in 6 days" / "expired 3 hours ago"
- * string.
- */
-public fun describeCallInviteExpiry(expiryMs: Long, nowMs: Long): String {
-    if (expiryMs == 0L) return "never expires"
-    val deltaMs = expiryMs - nowMs
-    val futureLabel = if (deltaMs >= 0) "in" else "expired"
-    val suffix = if (deltaMs >= 0) "" else " ago"
-    val absMs = kotlin.math.abs(deltaMs)
-    val day = 86_400_000L
-    val hour = 3_600_000L
-    val minute = 60_000L
-    return when {
-        absMs >= day -> {
-            val days = (absMs + day / 2) / day
-            "$futureLabel $days day${if (days == 1L) "" else "s"}$suffix"
-        }
-        absMs >= hour -> {
-            val hours = (absMs + hour / 2) / hour
-            "$futureLabel $hours hour${if (hours == 1L) "" else "s"}$suffix"
-        }
-        else -> {
-            val mins = maxOf(1L, (absMs + minute / 2) / minute)
-            "$futureLabel $mins minute${if (mins == 1L) "" else "s"}$suffix"
-        }
-    }
 }

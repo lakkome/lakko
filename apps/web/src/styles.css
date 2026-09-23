@@ -4050,7 +4050,13 @@ button.lk-call-chip:focus-visible {
   display: flex;
   align-items: flex-start;
   justify-content: center;
+  /* The widest row is a group call that can also hand out a link to itself
+     (docs/ux/call-links.md section 3): seven circles, which do not fit a phone
+     width even at the 44 pt touch-target floor. Wrapping is the floor under
+     that, and it never triggers for a row that fits. */
+  flex-wrap: wrap;
   gap: var(--call-ctl-gap);
+  row-gap: 10px;
   max-width: calc(100% - 24px);
   padding: 14px 20px 10px;
   border-radius: 28px;

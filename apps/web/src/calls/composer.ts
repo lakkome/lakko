@@ -11,8 +11,12 @@
  * boundary, the discovery HTTP round-trip, or the URL builder
  * convention:
  *
- *   1. Generate a fresh 16-byte random `call_id` via
- *      `crypto.getRandomValues`.
+ *   1. Take the live call's 16-byte `call_id` from the caller.
+ *      A link is a property of a call that is already
+ *      happening (`docs/ux/call-links.md` sections 1 and 3),
+ *      so it must lead into THAT call and never into a new
+ *      one — which is why the id is an argument and not
+ *      something this function draws.
  *   2. Mint a one-time MLS `KeyPackage` via
  *      `identity.createKeyPackage()` — the joiner consumes
  *      it to bootstrap the call MLS group.
@@ -28,23 +32,18 @@
  *
  * Sibling of `apps/web/src/contacts/composer.ts` (the
  * contact-invite composer); kept separate because the call-
- * invite path mints a fresh KP per link (call-invite is
- * one-time-KP-bound by design) and embeds the media kind
- * (`audio` / `audio-video`) — neither concern exists on the
- * contact-invite side.
+ * invite path mints a fresh KP per link and embeds the media
+ * flags — neither concern exists on the contact-invite side.
+ *
+ * The four fields a person used to be asked about — media,
+ * expiry, use count, label — are now filled from
+ * `call-invite-values.ts`, so this function takes wire-level
+ * values rather than the form presets that fed it.
  */
 
 import { loadWasm } from "../wasm";
 import { DiscoveryClient } from "../discovery/client";
-import {
-  composePointerCallInviteUrl,
-  type CallMediaPreset,
-  type ExpiryPreset,
-  type MaxUsesPreset,
-  expiryPresetToMs,
-  maxUsesPresetToValue,
-  CALL_INVITE_LABEL_MAX_LEN,
-} from "./invite";
+import { composePointerCallInviteUrl, CALL_ID_LEN, CALL_INVITE_LABEL_MAX_LEN } from "./invite";
 
 /** Options bag the UI hands to [`composeAndUploadCallInvite`]. */
 export interface ComposeCallInviteOptions {
@@ -70,21 +69,24 @@ export interface ComposeCallInviteOptions {
    *  limit; the cryptographic gate is the wire signature on
    *  the capability bytes. */
   readonly discoveryClient: DiscoveryClient;
-  /** Audio-only vs. audio+video toggle the wire format
-   *  carries via the `CallInviteMedia` flag pair. */
-  readonly media: CallMediaPreset;
-  /** Discrete UX choice for the expiry timestamp. `"never"`
-   *  resolves to `0n` — the `CALL_NEVER_EXPIRES` sentinel. */
-  readonly expiryPreset: ExpiryPreset;
-  /** Discrete UX choice for the consume ceiling.
-   *  `"single"` resolves to `0` — the `CALL_SINGLE_USE`
-   *  sentinel. */
-  readonly maxUsesPreset: MaxUsesPreset;
-  /** Free-text label the joiner sees on the landing page
-   *  (`"team standup"`, `"emergency huddle"`, …). UTF-8;
-   *  hard cap at [`CALL_INVITE_LABEL_MAX_LEN`] bytes — the
-   *  composer pre-validates so the UI sees a typed error
-   *  rather than a wasm `JsError` round-trip. */
+  /** The live call's 16-byte `call_id`, so the link leads into
+   *  the call the inviter is already in. */
+  readonly callId: Uint8Array;
+  /** Whether the call carries video as well as audio — the
+   *  `CallInviteMedia` flag pair. Audio is always set. */
+  readonly mediaVideo: boolean;
+  /** The wire `expiry_ms`, UNIX millis. `0n` is the
+   *  `CALL_NEVER_EXPIRES` sentinel and is never what this
+   *  client sends — see `call-invite-values.ts`. */
+  readonly expiryMs: bigint;
+  /** The wire `max_uses` u32. `0` is the `CALL_SINGLE_USE`
+   *  sentinel; `u32::MAX` is unbounded. */
+  readonly maxUses: number;
+  /** Free-text label the joiner sees on the landing page.
+   *  UTF-8; hard cap at [`CALL_INVITE_LABEL_MAX_LEN`] bytes —
+   *  the composer pre-validates so the UI sees a typed error
+   *  rather than a wasm `JsError` round-trip. Empty since
+   *  `docs/ux/call-links.md` section 4. */
   readonly label: string;
   /** Optional URL origin override. Defaults to
    *  `location.origin` (browser) or `https://lakko.me`
@@ -106,9 +108,9 @@ export interface ComposedCallInvite {
   /** The full `https://<origin>/c/<slug>` URL the owner
    *  shares — base64url-no-pad of `blobId`. */
   readonly url: string;
-  /** The freshly-minted 16-byte `call_id` embedded in the
-   *  capability. Stored client-side so a subsequent call-
-   *  admission JWT mint binds to the same id. */
+  /** The 16-byte `call_id` embedded in the capability — the
+   *  caller's live call. Returned so a caller that did not keep
+   *  it can bind a call-admission JWT to the same id. */
   readonly callId: Uint8Array;
   /** The wire-format capability bytes the server now holds.
    *  Returned for the rare case where the UI wants to drive
@@ -142,7 +144,9 @@ export class CallInviteComposerArgError extends Error {
  * The call MUST be driven from inside a user gesture (the
  * server-side PoW solve inside `uploadCallInvite` takes a
  * few seconds on slow devices and freezing it under a
- * synchronous click handler degrades UX).
+ * synchronous click handler degrades UX). That cost is the
+ * reason minting happens on the first `Invite` inside a call
+ * rather than when the call starts.
  */
 export async function composeAndUploadCallInvite(
   opts: ComposeCallInviteOptions,
@@ -165,14 +169,13 @@ export async function composeAndUploadCallInvite(
     );
   }
 
-  // ---- 1. call_id RNG --------------------------------------
-  if (typeof globalThis.crypto?.getRandomValues !== "function") {
+  // ---- 1. call_id: the live call's -------------------------
+  if (opts.callId.length !== CALL_ID_LEN) {
     throw new CallInviteComposerArgError(
-      "globalThis.crypto.getRandomValues is unavailable — composeAndUploadCallInvite requires a Web Crypto-capable environment",
+      `callId must be ${CALL_ID_LEN} bytes, got ${opts.callId.length}`,
     );
   }
-  const callId = new Uint8Array(16);
-  globalThis.crypto.getRandomValues(callId);
+  const callId = opts.callId;
 
   // ---- 2. One-time KeyPackage mint -------------------------
   const oneTimeKeyPackage = opts.identity.createKeyPackage();
@@ -182,12 +185,8 @@ export async function composeAndUploadCallInvite(
     );
   }
 
-  // ---- 3. Resolve presets to wire-level values -------------
-  const nowMs = Date.now();
-  const expiryMs = expiryPresetToMs(opts.expiryPreset, nowMs);
-  const maxUses = maxUsesPresetToValue(opts.maxUsesPreset);
+  // ---- 3. Wire-level values --------------------------------
   const mediaAudio = true; // every call carries audio
-  const mediaVideo = opts.media === "audio-video";
 
   // ---- 4. composeCallInviteCapability via wasm -------------
   const wasm = await loadWasm();
@@ -195,10 +194,10 @@ export async function composeAndUploadCallInvite(
     opts.ownerSigningSeed,
     opts.ownerAccountId,
     callId,
-    expiryMs,
-    maxUses,
+    opts.expiryMs,
+    opts.maxUses,
     mediaAudio,
-    mediaVideo,
+    opts.mediaVideo,
     oneTimeKeyPackage,
     opts.label,
   );

@@ -292,8 +292,23 @@ public enum CallScreenPresentation {
     /// announced video but whose picture never arrives stays a portrait and so
     /// keeps its controls — including, decisively, the End button. Fading a row
     /// out over a blank screen is how a user ends up unable to hang up.
-    public static func autoHides(layout: CallScreenLayout, phase: CallUiState.CallPhase) -> Bool {
+    ///
+    /// `alone` carries the same argument one step further, and it is a case the
+    /// original rule could not reach. A group call used to be entered from a
+    /// conversation, where somebody else was already there; a call started from
+    /// the Calls screen begins with one person in it, and the tiles above are
+    /// this device's own. Found live on 2026-09-23: five seconds after starting
+    /// a call the row faded, and the person who had just created it was left
+    /// looking at their own tile with no way to invite anyone and no way to
+    /// hang up. A tap brings the row back, but a screen whose only remaining
+    /// affordance is an undiscoverable one is a screen with no exit.
+    public static func autoHides(
+        layout: CallScreenLayout,
+        phase: CallUiState.CallPhase,
+        alone: Bool = false
+    ) -> Bool {
         guard case .connected = phase else { return false }
+        if alone { return false }
         return layout == .video || layout == .gallery
     }
 }

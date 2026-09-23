@@ -33,6 +33,14 @@
  * when it is the only way back. The row is therefore constant for a 1x1 call,
  * and the only thing that varies is the group overflow.
  *
+ * ## Invite is there only where it leads somewhere
+ *
+ * `docs/ux/call-links.md` section 3 gives the call screen one new control. It
+ * is not universal: it needs a call a `CallInviteCapability` can name, which
+ * is a call founded from `New call` or joined from a `/c/` link. Showing it on
+ * a conversation's call would offer a link into a call the arrival cannot be
+ * admitted to, which is the same fault as Speaker's dead button below.
+ *
  * ## Speaker is omitted, never dead
  *
  * §4.1 asks for Speaker "where the browser supports output selection; omit it
@@ -46,7 +54,14 @@
 import type { CallPhaseKind, CallSurfaceKind } from "./call-screen-model";
 
 /** The controls the row can carry, in the order §4.1's table lists them. */
-export type CallControlId = "speaker" | "mic" | "camera" | "participants" | "chat" | "end";
+export type CallControlId =
+  | "speaker"
+  | "mic"
+  | "camera"
+  | "participants"
+  | "chat"
+  | "invite"
+  | "end";
 
 /**
  * How a control is painted (§4.1.1).
@@ -66,6 +81,7 @@ export type CallControlIcon =
   | "videoOff"
   | "groups"
   | "chat"
+  | "link"
   | "phoneEnd";
 
 /** One circle in the row. */
@@ -96,6 +112,21 @@ export interface CallControlsInput {
   readonly participantsOpen?: boolean;
   /** Whether the chat panel is open (group only). */
   readonly chatOpen?: boolean;
+  /**
+   * This call can hand out a link to itself
+   * (`docs/ux/call-links.md` section 3).
+   *
+   * True for a call whose `call_id` a `CallInviteCapability` can name — the
+   * calls `New call` starts, and the ones joined from a `/c/` link. A call
+   * placed inside a conversation is reached through that conversation, and a
+   * link minted over its id would lead a stranger to look for a call group
+   * that does not exist, so the control is absent there rather than present
+   * and broken.
+   */
+  readonly canInvite?: boolean;
+  /** The link is being prepared: the button shows a spinner and refuses a
+   *  second press rather than paying for a second one. */
+  readonly inviteBusy?: boolean;
   readonly phase: CallPhaseKind;
   readonly micOn: boolean;
   readonly cameraOn: boolean;
@@ -180,6 +211,22 @@ export function callControls(input: CallControlsInput): CallControlSpec[] {
       tone: "outline",
       pressed: input.chatOpen === true,
       disabled: dead,
+    });
+  }
+
+  if (input.canInvite === true) {
+    // Section 3: one control, which offers the link to THIS call. It sits
+    // beside the other group entries and before End, so the destructive
+    // control keeps the far side of the row to itself.
+    out.push({
+      id: "invite",
+      label: "Invite",
+      accessibleName: "Invite someone to this call with a link",
+      icon: "link",
+      tone: "outline",
+      // Not a toggle: the link is offered, never left switched on.
+      pressed: null,
+      disabled: dead || input.inviteBusy === true,
     });
   }
 

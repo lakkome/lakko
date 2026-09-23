@@ -30,9 +30,13 @@ extension MultiJoinerCall: LinkCallHandle {}
 @MainActor
 final class LinkCallHost: ObservableObject {
 
-    /// What starting the call needs from the link.
+    /// What starting the call needs.
     struct Request: Equatable {
-        let slug: String
+        /// The `/c/` slug this call was opened from, or `nil` for a call this
+        /// device started itself (`docs/ux/call-links.md` section 2): `New
+        /// call` founds a call before any link exists, and one is minted later
+        /// only if somebody asks for it.
+        let slug: String?
         let callId: Data
         let ownerAccountId: Data
         let ownerSignatureKey: Data
@@ -57,12 +61,23 @@ final class LinkCallHost: ObservableObject {
             _ ui: CallUiState,
             _ callbacks: MultiJoinerCall.Callbacks
         ) async throws -> LinkCallHandle
+        /// This account as the owner of a call it founds: the 16-byte account
+        /// id and the Ed25519 signature key. `nil` without a session.
+        var ownIdentity: @MainActor () -> (accountId: Data, signatureKey: Data)? = { nil }
+        /// Make the shareable link for a call this device founded
+        /// (`docs/ux/call-links.md` section 3). Not called until somebody
+        /// presses `Invite`, because it costs a round trip and an anti-spam
+        /// solve that starting a call must not pay.
+        var mintInviteLink: @MainActor (_ callId: Data) async throws -> String = { _ in
+            throw LinkCallHostError.signedOut
+        }
     }
 
     /// The link call in the slot.
     struct Slot: Equatable {
         let callIdHex: String
-        let slug: String
+        /// `nil` for a call started here rather than opened from a link.
+        let slug: String?
         let isOwner: Bool
         var phase: LinkCallHostRules.Phase
         var errorMessage: String?
@@ -89,6 +104,14 @@ final class LinkCallHost: ObservableObject {
     private(set) var presentationSlug: String?
     /// A landing screen is on screen (it shows the call itself, so no notice).
     @Published private(set) var landingShowing: Bool = false
+    /// The link to the call in the slot, for the call screen's `Invite`.
+    ///
+    /// Only ever set for a call this device FOUNDED. A capability names its
+    /// signer as the call's owner and ADR-0032 elects the committer from that
+    /// owner, so a link minted by a joiner would send arrivals to a call
+    /// nobody is founding — the offer is therefore absent rather than failing
+    /// later, and the control is absent with it.
+    @Published private(set) var invite: CallInviteOffer?
 
     /// The call occupying the app's one call slot, across all three kinds.
     var slotOccupant: @MainActor () -> CallKind? = { nil }
@@ -149,6 +172,25 @@ final class LinkCallHost: ObservableObject {
 
     // MARK: - Start
 
+    /// `New call` (`docs/ux/call-links.md` section 2): found a group video
+    /// call here and now, and land in it. Nothing is asked first — no media
+    /// choice, no participants, no name, and no link.
+    func startNewCall() async -> StartOutcome {
+        guard let own = ports.ownIdentity() else {
+            return .failed(message: CallInviteOfferRules.signedOutMessage)
+        }
+        return await start(Request(
+            slug: nil,
+            callId: CallInviteValues.freshCallId(),
+            ownerAccountId: own.accountId,
+            ownerSignatureKey: own.signatureKey,
+            // One kind of call. A voice call is this with the camera off,
+            // which the in-call controls already do.
+            mediaVideo: CallInviteValues.video,
+            isOwner: true
+        ))
+    }
+
     func start(_ request: Request) async -> StartOutcome {
         let callIdHex = request.callId.map { String(format: "%02x", $0) }.joined()
         // No suspension between this decision and the slot write below, so a
@@ -179,6 +221,12 @@ final class LinkCallHost: ObservableObject {
         self.attempt = attempt
         controls.removeAll()
         handle = nil
+        // A new call starts with no link: the first `Invite` makes one, and
+        // every later one in the same call re-offers it.
+        invite = request.isOwner ? CallInviteOffer(mint: { [weak self] in
+            guard let self else { throw LinkCallHostError.identityUnavailable }
+            return try await self.ports.mintInviteLink(request.callId)
+        }) : nil
         let ui = CallUiState()
         self.ui = ui
         slot = Slot(
@@ -264,6 +312,7 @@ final class LinkCallHost: ObservableObject {
         let h = handle
         handle = nil
         slot = nil
+        invite = nil
         h?.hangUp()
     }
 
@@ -277,6 +326,7 @@ final class LinkCallHost: ObservableObject {
     /// up, and forgets an outcome the screen already showed.
     func dismissPresentation() {
         if occupiesSlot { leave() } else { dismissOutcome() }
+        invite = nil
         presentation = nil
         presentationId = nil
         presentationSlug = nil
@@ -285,6 +335,7 @@ final class LinkCallHost: ObservableObject {
     /// Logout / account switch.
     func reset() {
         leave()
+        invite = nil
         presentation = nil
         presentationId = nil
         presentationSlug = nil
@@ -411,6 +462,30 @@ extension LinkCallHost {
                 // Joiner connects signaling-only + relays its KeyPackage, then
                 // waits for the Welcome (`onJoined`).
                 return try await MultiJoinerCall.join(options: options, ui: ui, callbacks: callbacks)
+            },
+            ownIdentity: { [weak authRepository] in
+                guard let secrets = authRepository?.identitySecrets,
+                      let identity = try? Identity.fromSeed(seed: secrets.accountIdentitySeed)
+                else { return nil }
+                return (secrets.accountId, identity.signaturePublicKey())
+            },
+            mintInviteLink: { [weak authRepository] callId in
+                guard let secrets = authRepository?.identitySecrets else {
+                    throw LinkCallHostError.signedOut
+                }
+                let identity: Identity
+                do {
+                    identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
+                } catch {
+                    throw LinkCallHostError.identityUnavailable
+                }
+                return try await CallInviteComposer.composeAndUpload(
+                    callId: callId,
+                    ownerSigningSeed: identity.ed25519Seed(),
+                    ownerAccountId: secrets.accountId,
+                    identity: identity,
+                    discoveryClient: DiscoveryClient(sessionToken: secrets.sessionToken)
+                ).url
             }
         ))
     }
@@ -418,11 +493,14 @@ extension LinkCallHost {
 
 enum LinkCallHostError: Error, LocalizedError {
     case identityUnavailable
+    case signedOut
 
     var errorDescription: String? {
         switch self {
         case .identityUnavailable:
             return "Could not rebuild the identity for this call."
+        case .signedOut:
+            return CallInviteOfferRules.signedOutMessage
         }
     }
 }

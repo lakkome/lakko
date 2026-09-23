@@ -620,7 +620,20 @@ private fun AppRoot(
                 nameVersion.let { chatRepository.groupName(groupIdHex)?.name }
             },
         )
-        me.lakko.app.ui.call.LinkCallOverlay(host = me.lakko.app.calls.AppCallHost.link)
+        // docs/ux/call-links.md section 3 — the `Invite` control reads the
+        // session at the moment it is pressed; it is never held for the call.
+        me.lakko.app.ui.call.LinkCallOverlay(
+            host = me.lakko.app.calls.AppCallHost.link,
+            identity = {
+                authRepository.identitySecrets.value?.let { secrets ->
+                    me.lakko.app.calls.CallInviteIdentity(
+                        accountIdentitySeed = secrets.accountIdentitySeed,
+                        accountId = secrets.accountId,
+                        sessionToken = secrets.sessionToken,
+                    )
+                }
+            },
+        )
     }
 
     // ADR-0037 (G-11) — rollback-gate overlays, shown OVER any auth state (the
@@ -1236,23 +1249,14 @@ private fun SessionRoot(
                 }
                 // docs/ux/navigation.md section 5 — Calls: recent calls across
                 // every conversation, newest first, read off the index written
-                // when each call row is. "Create call link" lives here rather
-                // than in the Contacts menu, which is where the redesign put it
-                // only because this destination had been removed.
+                // when each call row is. docs/ux/call-links.md section 2 — its
+                // one action starts a group video call rather than opening a
+                // form; the create-a-link form it used to hold is gone.
                 composable(Routes.CALLS) {
-                    val contactsVm: ContactsViewModel = viewModel(
-                        factory = singletonViewModelFactory {
-                            ContactsViewModel(
-                                repo = contactsRepository,
-                                chatRepo = chatRepository,
-                            )
-                        },
-                    )
                     val callPermissions = me.lakko.app.ui.call.rememberCallPermissionGate()
                     val callContext = LocalContext.current
                     me.lakko.app.ui.calls.CallsHost(
                         repository = chatRepository,
-                        viewModel = contactsVm,
                         onOpenConversation = { hex ->
                             navController.navigate(Routes.chat(hex))
                         },
@@ -1269,10 +1273,11 @@ private fun SessionRoot(
                                 )
                             }
                         },
-                        // ADR-0032 — "Start call" on a created call link, and a
-                        // pasted one, both open the same `/c/` landing a tapped
-                        // link does; AppRoot presents it over the session.
+                        // ADR-0032 — a pasted call link opens the same `/c/`
+                        // landing a tapped link does; AppRoot presents it over
+                        // the session.
                         onOpenCallLink = { slug -> inviteIntake.publishCallJoin(slug) },
+                        identitySecrets = { authRepository.identitySecrets.value },
                     )
                 }
                 composable(Routes.CONTACT_DETAIL) { entry ->

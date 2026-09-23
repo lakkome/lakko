@@ -150,89 +150,6 @@ class CallInviteUrlTest {
     }
 
     // -----------------------------------------------------------
-    // Form-side enums — the wire-value mapping the composer relies on
-    // -----------------------------------------------------------
-
-    @Test
-    fun `expiry preset never resolves to zero sentinel`() {
-        assertEquals(0L, CallInviteExpiryPreset.Never.toMs(1_700_000_000_000L))
-    }
-
-    @Test
-    fun `expiry preset 1h resolves to now plus one hour`() {
-        val now = 1_700_000_000_000L
-        assertEquals(now + 3_600_000L, CallInviteExpiryPreset.OneHour.toMs(now))
-    }
-
-    @Test
-    fun `expiry preset 7d resolves to now plus seven days`() {
-        val now = 1_700_000_000_000L
-        val expected = now + 7L * 86_400_000
-        assertEquals(expected, CallInviteExpiryPreset.SevenDays.toMs(now))
-    }
-
-    @Test
-    fun `max uses preset single resolves to zero sentinel`() {
-        assertEquals(0u, CallInviteMaxUsesPreset.Single.toValue())
-    }
-
-    @Test
-    fun `max uses preset unlimited resolves to u32 max`() {
-        assertEquals(UInt.MAX_VALUE, CallInviteMaxUsesPreset.Unlimited.toValue())
-    }
-
-    @Test
-    fun `max uses preset ten resolves to ten`() {
-        assertEquals(10u, CallInviteMaxUsesPreset.Ten.toValue())
-    }
-
-    // -----------------------------------------------------------
-    // Human-visible renderers — sentinel cases
-    // -----------------------------------------------------------
-
-    @Test
-    fun `describe max uses surfaces single-use sentinel`() {
-        assertEquals("single-use", describeCallInviteMaxUses(0u))
-    }
-
-    @Test
-    fun `describe max uses surfaces unlimited sentinel`() {
-        assertEquals("unlimited", describeCallInviteMaxUses(UInt.MAX_VALUE))
-    }
-
-    @Test
-    fun `describe max uses surfaces N for finite ceiling`() {
-        assertEquals("up to 5 uses", describeCallInviteMaxUses(5u))
-    }
-
-    @Test
-    fun `describe expiry surfaces never sentinel`() {
-        assertEquals("never expires", describeCallInviteExpiry(expiryMs = 0L, nowMs = 100L))
-    }
-
-    @Test
-    fun `describe expiry surfaces future relative time`() {
-        val now = 1_700_000_000_000L
-        val sixDays = now + 6L * 86_400_000
-        val rendered = describeCallInviteExpiry(expiryMs = sixDays, nowMs = now)
-        assertTrue(
-            "expected `in 6 days` rendering, got: $rendered",
-            rendered.contains("in 6 days"),
-        )
-    }
-
-    @Test
-    fun `describe expiry surfaces past relative time`() {
-        val now = 1_700_000_000_000L
-        val threeHoursAgo = now - 3L * 3_600_000
-        val rendered = describeCallInviteExpiry(expiryMs = threeHoursAgo, nowMs = now)
-        assertTrue(
-            "expected `expired 3 hours ago` rendering, got: $rendered",
-            rendered.contains("expired 3 hours") && rendered.endsWith(" ago"),
-        )
-    }
-
-    // -----------------------------------------------------------
     // Constants pin — drift sentinel against the web side
     // -----------------------------------------------------------
 
@@ -250,12 +167,6 @@ class CallInviteUrlTest {
         // (`services/discovery/src/call_invite.rs::BLOB_ID_LEN`)
         // uses the same.
         assertEquals(32, CALL_INVITE_BLOB_ID_LEN)
-    }
-
-    @Test
-    fun `label max len matches the rust constant`() {
-        // Pinned to `lakko_contacts::invite::MAX_LABEL_LEN`.
-        assertEquals(64, CALL_INVITE_LABEL_MAX_LEN)
     }
 
     @Test

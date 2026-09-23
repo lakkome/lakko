@@ -721,31 +721,6 @@ final class MicrophonePermissionTests: XCTestCase {
     }
 }
 
-/// The "Create call link" form's offered choices and label rule.
-final class CallLinkFormTests: XCTestCase {
-
-    func testExpiryChoicesAreOneHourOneDayAndSevenDays() {
-        XCTAssertEqual(CallLinkForm.expiryChoices, [.oneHour, .oneDay, .sevenDays])
-        let now: UInt64 = 1_000_000
-        XCTAssertEqual(CallInviteExpiryPreset.oneHour.toMs(nowMs: now), now + 3_600_000)
-        XCTAssertEqual(CallInviteExpiryPreset.oneDay.toMs(nowMs: now), now + 86_400_000)
-        XCTAssertEqual(CallInviteExpiryPreset.sevenDays.toMs(nowMs: now), now + 7 * 86_400_000)
-        XCTAssertFalse(CallLinkForm.expiryChoices.contains(.never))
-    }
-
-    func testMaxUsesChoicesAreOneTenAndUnlimited() {
-        XCTAssertEqual(CallLinkForm.maxUsesChoices.map { $0.toValue() }, [0, 10, UInt32.max])
-    }
-
-    func testTheLabelBudgetIsCountedInBytes() {
-        XCTAssertNil(CallLinkForm.labelError(""))
-        XCTAssertNil(CallLinkForm.labelError(String(repeating: "a", count: CallInviteUrl.labelMaxLen)))
-        XCTAssertNotNil(CallLinkForm.labelError(String(repeating: "a", count: CallInviteUrl.labelMaxLen + 1)))
-        // 33 two-byte characters = 66 bytes: over the budget at 33 characters.
-        XCTAssertNotNil(CallLinkForm.labelError(String(repeating: "\u{00E9}", count: 33)))
-    }
-}
-
 /// The age a log line reports for a record, and the structural drops that
 /// decide whether a record exists at all.
 ///

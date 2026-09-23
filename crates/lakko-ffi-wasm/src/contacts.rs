@@ -6,6 +6,10 @@
 //! ("I know `@username`, add them"). Phase 1.9a only.
 
 use lakko_contacts::call_invite::{
+    call_invite_expiry_ms as rust_call_invite_expiry_ms,
+    CALL_INVITE_MAX_USES as RUST_CALL_INVITE_MAX_USES,
+};
+use lakko_contacts::call_invite::{
     call_sign_revocation as rust_call_sign_revocation, compose as rust_call_invite_compose,
     decode_and_verify as rust_call_invite_decode, CallInviteCapability as RustCallInviteCapability,
     CallInviteMedia as RustCallInviteMedia, CALL_ID_LEN, MAX_KEY_PACKAGE_LEN,
@@ -3104,4 +3108,33 @@ mod tests {
             2 * committer_beacon_interval_ms() + committer_beacon_worst_case_poll_ms(),
         );
     }
+}
+
+// ============================================================================
+// Live-call link values — docs/ux/call-links.md section 4
+// ============================================================================
+
+/// The expiry stamp for a link to a live call minted at `now_ms`.
+///
+/// The person is no longer asked how long their link should last, so the
+/// answer is decided once, in `lakko_contacts::call_invite`, and reached from
+/// here — three clients each carrying their own constant is how the window
+/// came to differ between them in the first place.
+///
+/// Saturating, and never the never-expires value, which that field's own
+/// documentation names a stalking risk. A `bigint` on the JS side.
+#[wasm_bindgen(js_name = callInviteExpiryMs)]
+#[must_use]
+pub fn call_invite_expiry_ms(now_ms: u64) -> u64 {
+    rust_call_invite_expiry_ms(now_ms)
+}
+
+/// How many people a link to a live call admits: no limit.
+///
+/// The host admits every arrival, so a count here would cap a meeting at the
+/// door of a room the host was holding open.
+#[wasm_bindgen(js_name = callInviteMaxUses)]
+#[must_use]
+pub fn call_invite_max_uses() -> u32 {
+    RUST_CALL_INVITE_MAX_USES
 }

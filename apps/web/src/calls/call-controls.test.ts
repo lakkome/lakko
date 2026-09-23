@@ -216,6 +216,45 @@ describe("callControls — disabled, never hidden (section 4, section 4.1.1)", (
   });
 });
 
+describe("callControls — Invite (docs/ux/call-links.md section 3)", () => {
+  const group: Partial<CallControlsInput> = { surface: "group", canInvite: true };
+
+  it("is absent unless this call can hand out a link to itself", () => {
+    expect(ids({ surface: "group" })).not.toContain("invite");
+    expect(ids({ surface: "voice" })).not.toContain("invite");
+    expect(ids(group)).toContain("invite");
+  });
+
+  it("sits before End, so the red control keeps the far side of the row", () => {
+    const row = ids(group);
+    expect(row.indexOf("invite")).toBe(row.length - 2);
+    expect(row[row.length - 1]).toBe("end");
+  });
+
+  it("is one control that offers a link, not a toggle that stays on", () => {
+    const invite = control(group, "invite");
+    expect(invite.label).toBe("Invite");
+    expect(invite.pressed).toBeNull();
+    expect(invite.tone).toBe("outline");
+    expect(invite.icon).toBe("link");
+  });
+
+  it("refuses a second press while the first is still being paid for", () => {
+    expect(control({ ...group, inviteBusy: true }, "invite").disabled).toBe(true);
+    expect(control({ ...group, inviteBusy: false }, "invite").disabled).toBe(false);
+  });
+
+  it("goes inert once the call is over, like every other control", () => {
+    for (const phase of ["ended", "idle"] as CallPhaseKind[]) {
+      expect(control({ ...group, phase }, "invite").disabled).toBe(true);
+    }
+    // Unlike Mute and Camera, a link can be handed out while the call is still
+    // ringing out: there is something to invite someone to from the first
+    // second.
+    expect(control({ ...group, phase: "calling" }, "invite").disabled).toBe(false);
+  });
+});
+
 describe("nextAudioOutput", () => {
   const a = { id: "a", label: "Built-in" };
   const b = { id: "b", label: "AirPods" };

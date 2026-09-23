@@ -748,7 +748,7 @@ private struct SessionRoot: View, Equatable {
                 CallsScreen(
                     history: CallHistoryStore.shared,
                     conversations: chatListVM,
-                    authRepository: authRepository,
+                    onNewCall: { await startNewCall() },
                     onOpenConversation: { groupIdHex, _ in
                         push(.chat(groupIdHex: groupIdHex), on: .calls)
                     },
@@ -757,6 +757,11 @@ private struct SessionRoot: View, Equatable {
                     },
                     onOpenLink: { inviteIntake.handle($0) }
                 )
+                // Calls placed before the index existed live only in their
+                // conversations. Filled once per account, so this screen never
+                // opens empty while the conversation list next to it is
+                // visibly showing calls.
+                .task { services.chatRepository.backfillCallHistory() }
                 .navigationDestination(for: TabRoute.self) { routeView($0, tab: .calls) }
             }
             .tabItem { Label("Calls", systemImage: "phone") }
@@ -914,6 +919,18 @@ private struct SessionRoot: View, Equatable {
         case .chat:
             services.callHost.startOutgoingCall(
                 groupIdHex: groupIdHex, button: CallMediaChoice.button(video: video))
+        }
+    }
+
+    /// `docs/ux/call-links.md` section 2 — `New call` founds a group video
+    /// call and lands the person in it. Nothing is asked first, and no link is
+    /// made: one is minted from inside the call if somebody presses `Invite`.
+    private func startNewCall() async -> String? {
+        switch await services.linkCallHost.startNewCall() {
+        case .started, .alreadyInThisCall:
+            return nil
+        case .busy(let message), .failed(let message):
+            return message
         }
     }
 

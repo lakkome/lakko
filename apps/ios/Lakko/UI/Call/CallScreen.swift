@@ -587,6 +587,10 @@ public struct CallScreen: View {
     private let peerName: String?
     /// One plain line about this call's media (today: the no-camera downgrade).
     private let notice: String?
+    /// The link to THIS call, for `Invite` (`docs/ux/call-links.md` section 3).
+    /// `nil` on every call that cannot offer one: a 1x1 call, a group call in a
+    /// chat, and a link call this device joined rather than founded.
+    private let invite: CallInviteOffer?
 
     /// Section 4 — the controls fade out on a connected video call and come
     /// back on a tap; on a voice call they never hide.
@@ -610,18 +614,24 @@ public struct CallScreen: View {
         self.externallyDriven = false
         self.peerName = peerName
         self.notice = notice
+        self.invite = nil
         self.onExit = onExit
     }
 
     /// SFU group-call init: render a `CallUiState` that an external owner
     /// (`SfuCallUi`) already drives. No session — the call is already
     /// connecting when presented.
-    public init(externalState: CallUiState, onExit: @escaping () -> Void) {
+    public init(
+        externalState: CallUiState,
+        invite: CallInviteOffer? = nil,
+        onExit: @escaping () -> Void
+    ) {
         _state = StateObject(wrappedValue: externalState)
         self.session = nil
         self.externallyDriven = true
         self.peerName = nil
         self.notice = nil
+        self.invite = invite
         self.onExit = onExit
     }
 
@@ -790,6 +800,8 @@ public struct CallScreen: View {
         } message: { message in
             Text(message)
         }
+        // `Invite`, when this call has a link to offer.
+        .modifier(CallInvitePanel(offer: invite))
         // Calls are dark by design on every platform (UX spec section 4).
         .preferredColorScheme(.dark)
     }
@@ -1095,10 +1107,14 @@ public struct CallScreen: View {
         }
     }
 
-    /// The one menu a call is allowed: a group call's participants, chat and
-    /// settings. A 1x1 call never reaches this — its whole set is in the row.
+    /// The one menu a call is allowed: a group call's participants, chat,
+    /// settings and — when this call has a link to offer — `Invite`. A 1x1
+    /// call never reaches this: its whole set is in the row.
     private func overflowButton(enabled: Bool) -> some View {
         Menu {
+            if let invite {
+                CallInviteMenuButton(offer: invite)
+            }
             Button {
                 state.setParticipantListOpen(!state.participantListOpen)
             } label: {
@@ -1193,7 +1209,13 @@ public struct CallScreen: View {
     /// it to look at and hiding it only makes the user tap.
     private func restartAutoHide() {
         hideTask?.cancel()
-        guard CallScreenPresentation.autoHides(layout: layout, phase: displayPhase) else {
+        // Alone means nobody else's tile is on the screen, so there is nothing
+        // underneath the row to reveal by hiding it - only a person left
+        // without a way out.
+        let alone = state.participants.filter { !$0.isLocal }.isEmpty
+        guard CallScreenPresentation.autoHides(
+            layout: layout, phase: displayPhase, alone: alone)
+        else {
             controlsVisible = true
             return
         }

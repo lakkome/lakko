@@ -138,22 +138,29 @@ public data class LinkCallNotice(val text: String, val actions: List<LinkCallNot
  * told it is still going and can cancel it; after it ends they are told why
  * once, since the landing that would have said so is gone. Same wording as the
  * web client.
+ *
+ * @param hasLanding this call came from a `/c/` link, so there is somewhere for
+ *   [LinkCallNoticeAction.OPEN] to go. A call started from the Calls
+ *   destination's `New call` (`docs/ux/call-links.md` section 2) has no
+ *   landing, and offering to open one would be a button that goes nowhere.
  */
 public fun linkCallNotice(
     phase: LinkCallPhase?,
     landingShowingIt: Boolean,
     errorMessage: String?,
+    hasLanding: Boolean = true,
 ): LinkCallNotice? {
     if (phase == null || landingShowingIt) return null
+    val waitingActions = buildList {
+        if (hasLanding) add(LinkCallNoticeAction.OPEN)
+        add(LinkCallNoticeAction.CANCEL)
+    }
     return when (phase) {
         LinkCallPhase.LIVE -> null
-        LinkCallPhase.STARTING -> LinkCallNotice(
-            "Connecting to the call…",
-            listOf(LinkCallNoticeAction.OPEN, LinkCallNoticeAction.CANCEL),
-        )
+        LinkCallPhase.STARTING -> LinkCallNotice("Connecting to the call…", waitingActions)
         LinkCallPhase.WAITING -> LinkCallNotice(
             "Waiting for the owner to admit you…",
-            listOf(LinkCallNoticeAction.OPEN, LinkCallNoticeAction.CANCEL),
+            waitingActions,
         )
         LinkCallPhase.ENDED -> LinkCallNotice("The call has ended.", listOf(LinkCallNoticeAction.DISMISS))
         LinkCallPhase.DEAD -> LinkCallNotice(

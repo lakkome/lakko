@@ -921,6 +921,12 @@ final class LinkCallHostTests: XCTestCase {
         var startError: Error?
         /// The owner reports `onJoined` from inside `host`, before it returns.
         var joinedDuringStart = false
+        /// `docs/ux/call-links.md` — the account that founds a `New call`.
+        var ownIdentity: (accountId: Data, signatureKey: Data)? = (
+            Data(repeating: 7, count: 16), Data(repeating: 8, count: 32))
+        /// The call ids somebody pressed `Invite` for.
+        var minted: [Data] = []
+        var mintUrl = "https://lakko.me/c/minted"
     }
 
     private func makeHost(_ h: Harness) -> LinkCallHost {
@@ -936,6 +942,11 @@ final class LinkCallHostTests: XCTestCase {
                 let handle = FakeLinkCallHandle()
                 h.handles.append(handle)
                 return handle
+            },
+            ownIdentity: { h.ownIdentity },
+            mintInviteLink: { callId in
+                h.minted.append(callId)
+                return h.mintUrl
             }
         ))
     }
@@ -949,6 +960,73 @@ final class LinkCallHostTests: XCTestCase {
             mediaVideo: false,
             isOwner: owner
         )
+    }
+
+    // MARK: - New call (`docs/ux/call-links.md` section 2)
+
+    /// One press, one kind of call, and the person lands in it: nothing is
+    /// asked, and the call is a group video call founded here.
+    func testNewCallFoundsAVideoCallAndLandsInIt() async {
+        let h = Harness()
+        let host = makeHost(h)
+        let outcome = await host.startNewCall()
+        XCTAssertEqual(outcome, .started)
+        XCTAssertEqual(host.slot?.phase, .live)
+        XCTAssertEqual(host.slot?.isOwner, true)
+        XCTAssertNil(host.slot?.slug, "a call started here was not opened from a link")
+        XCTAssertNotNil(host.presentation, "the person lands in the call")
+        XCTAssertEqual(host.slot?.callIdHex.count, 32, "a 16-byte call id")
+    }
+
+    /// Starting a call must stay instant, so no link is made until somebody
+    /// asks for one.
+    func testNewCallMakesNoLinkUntilInviteIsPressed() async {
+        let h = Harness()
+        let host = makeHost(h)
+        _ = await host.startNewCall()
+        XCTAssertEqual(h.minted, [], "no round trip, no anti-spam solve")
+        guard let invite = host.invite else { return XCTFail("the founder can offer a link") }
+        XCTAssertEqual(invite.state, .idle)
+
+        await invite.press()
+        XCTAssertEqual(h.minted.count, 1)
+        XCTAssertEqual(invite.url, h.mintUrl)
+        XCTAssertEqual(
+            h.minted.first?.map { String(format: "%02x", $0) }.joined(),
+            host.slot?.callIdHex,
+            "the link leads into THIS call")
+
+        // A second press re-offers the link the first one made.
+        await invite.press()
+        XCTAssertEqual(h.minted.count, 1)
+    }
+
+    /// A capability names its signer as the call's owner and ADR-0032 elects
+    /// the committer from that owner, so a joiner's link would send arrivals
+    /// to a call nobody is founding. It has no offer at all.
+    func testAJoinerIsNeverOfferedALinkToSomebodyElsesCall() async {
+        let h = Harness()
+        let host = makeHost(h)
+        _ = await host.start(request(0x0A, owner: false))
+        XCTAssertNil(host.invite)
+    }
+
+    func testTheOfferGoesWithTheCall() async {
+        let h = Harness()
+        let host = makeHost(h)
+        _ = await host.startNewCall()
+        XCTAssertNotNil(host.invite)
+        host.leave()
+        XCTAssertNil(host.invite, "a new call starts with no link of its own")
+    }
+
+    func testNewCallRefusesWithoutASession() async {
+        let h = Harness()
+        h.ownIdentity = nil
+        let host = makeHost(h)
+        let outcome = await host.startNewCall()
+        XCTAssertEqual(outcome, .failed(message: CallInviteOfferRules.signedOutMessage))
+        XCTAssertNil(host.slot)
     }
 
     func testTheOwnerIsLiveAndPresentedOnceItStarts() async {

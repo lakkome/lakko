@@ -428,6 +428,9 @@ const ControlBar: Component<{
   hidden: boolean;
   controls: CallControlSpec[];
   cameraBusy: boolean;
+  /** The link to this call is being prepared (`docs/ux/call-links.md`
+   *  section 5). */
+  inviteBusy: boolean;
   onPress: (spec: CallControlSpec) => void;
 }> = (props) => (
   <div
@@ -441,7 +444,10 @@ const ControlBar: Component<{
       {(spec) => (
         <ControlButton
           spec={spec}
-          busy={spec.id === "camera" && props.cameraBusy}
+          busy={
+            (spec.id === "camera" && props.cameraBusy) ||
+            (spec.id === "invite" && props.inviteBusy)
+          }
           onPress={(): void => props.onPress(spec)}
         />
       )}
@@ -470,6 +476,11 @@ const CallStatus: Component<{
    *  video fill and the group grid, where the status floats at the top over
    *  the picture. */
   avatar?: boolean;
+  /** What `Invite` is doing, or `null` (`docs/ux/call-links.md` section 5:
+   *  the wait "says what it is doing rather than only spinning"). Rendered as
+   *  a second plain line rather than a banner, so it reads like the rest of
+   *  the status block. */
+  inviteStatus?: string | null;
   onOpenEncryption: () => void;
 }> = (props) => (
   <div class="lk-call-status">
@@ -487,6 +498,13 @@ const CallStatus: Component<{
       <QualityIndicator />
     </div>
     <Show when={callState.notice()}>
+      {(text) => (
+        <p class="lk-call-notice" role="status" aria-live="polite">
+          {text()}
+        </p>
+      )}
+    </Show>
+    <Show when={props.inviteStatus}>
       {(text) => (
         <p class="lk-call-notice" role="status" aria-live="polite">
           {text()}
@@ -1039,6 +1057,14 @@ const Call: Component<{
   remoteStreamFor?: ((participantId: string) => MediaStream | undefined) | undefined;
   /** The local capture `MediaStream`, for the self-view. */
   localStream?: (() => MediaStream | undefined) | undefined;
+  /** Hand out a link to this call (`docs/ux/call-links.md` section 3). The
+   *  `Invite` control exists only where this is given: a call in a
+   *  conversation is reached through that conversation, not through a link. */
+  onInvite?: (() => void) | undefined;
+  /** The link is being prepared — a network round trip and a proof of work. */
+  inviteBusy?: boolean;
+  /** One line on what `Invite` is doing, or `null`. */
+  inviteStatus?: string | null;
 }> = (props) => {
   const navigate = useNavigate();
   const [encryptionSheetOpen, setEncryptionSheetOpen] = createSignal(false);
@@ -1214,6 +1240,8 @@ const Call: Component<{
       nextAudioOutputLabel: audioOutputName(nextOutput()),
       participantsOpen: callState.participantListOpen(),
       chatOpen: callState.chatOpen(),
+      canInvite: props.onInvite !== undefined,
+      inviteBusy: props.inviteBusy === true,
     }),
   );
 
@@ -1245,6 +1273,9 @@ const Call: Component<{
         return;
       case "chat":
         callActions.setChatOpen(!callState.chatOpen());
+        return;
+      case "invite":
+        props.onInvite?.();
         return;
       case "end":
         callActions.endCall();
@@ -1337,6 +1368,7 @@ const Call: Component<{
         detail={statusDetail()}
         spokenDetail={spokenDetail()}
         avatar={surface() === "voice"}
+        inviteStatus={props.inviteStatus ?? null}
         onOpenEncryption={(): void => {
           setEncryptionSheetOpen(true);
         }}
@@ -1362,6 +1394,7 @@ const Call: Component<{
         hidden={barHidden()}
         controls={controls()}
         cameraBusy={callState.videoPublishState() === "starting"}
+        inviteBusy={props.inviteBusy === true}
         onPress={press}
       />
 

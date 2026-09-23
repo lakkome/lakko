@@ -26,8 +26,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
@@ -35,11 +37,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.launch
+import me.lakko.app.calls.CallInviteIdentity
+import me.lakko.app.calls.CallInviteLinkState
 import me.lakko.app.calls.CallUiState
 import me.lakko.app.calls.GroupCallHost
 import me.lakko.app.calls.LinkCallHost
 import me.lakko.app.calls.LinkCallNoticeAction
 import me.lakko.app.calls.linkCallNotice
+import me.lakko.app.calls.showsCallInvite
+import me.lakko.app.ui.contacts.launchShareIntent
 
 /**
  * The in-call screens of the calls the app-level host drives through a
@@ -74,15 +81,43 @@ public fun GroupCallOverlay(
     )
 }
 
-/** See [GroupCallOverlay]. Up from the moment the link call is live. */
+/**
+ * See [GroupCallOverlay]. Up from the moment the link call is live.
+ *
+ * This is the only call screen that carries `Invite`
+ * (`docs/ux/call-links.md` section 3): a link names the call it was minted for,
+ * and only this kind of call is the one a `/c/` link leads into.
+ *
+ * @param identity read at the moment `Invite` is pressed, never held — see
+ *   [CallInviteIdentity]. `null` means the session is gone, which the control
+ *   reports in one sentence without touching the call.
+ */
 @Composable
-public fun LinkCallOverlay(host: LinkCallHost) {
+public fun LinkCallOverlay(
+    host: LinkCallHost,
+    identity: () -> CallInviteIdentity? = { null },
+) {
     val visible by host.overlayVisible.collectAsStateWithLifecycle()
     if (!visible) return
+    val slot by host.slot.collectAsStateWithLifecycle()
+    val inviteState by host.inviteLink.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    // Only the host of a live call has a link to offer; everyone else gets no
+    // control at all rather than one that cannot work.
+    val canInvite = slot?.let { showsCallInvite(it.owner, it.phase) } == true
     HostedCallDialog(
         state = host.ui,
         onEndCall = { host.leave() },
         onExit = { host.onOverlayExit() },
+        inviteState = inviteState.takeIf { canInvite },
+        onInvite = {
+            scope.launch {
+                // The mint runs on the host's scope, so it survives this
+                // composition; only the wait for it is scoped here.
+                host.inviteLinkUrl(identity())?.let { url -> launchShareIntent(context, url) }
+            }
+        },
     )
 }
 
@@ -92,6 +127,9 @@ private fun HostedCallDialog(
     onEndCall: () -> Unit,
     onExit: () -> Unit,
     groupName: String? = null,
+    /** `docs/ux/call-links.md` section 3; `null` draws no `Invite` control. */
+    inviteState: CallInviteLinkState? = null,
+    onInvite: () -> Unit = {},
 ) {
     Dialog(
         onDismissRequest = { /* exit only via the End button */ },
@@ -117,6 +155,8 @@ private fun HostedCallDialog(
                 onEndCall = onEndCall,
                 groupCall = true,
                 groupName = groupName,
+                inviteState = inviteState,
+                onInvite = onInvite,
             )
         }
     }
@@ -180,7 +220,13 @@ public fun BoxScope.LinkCallNoticeBar(host: LinkCallHost, onOpen: (slug: String)
     val slot by host.slot.collectAsStateWithLifecycle()
     val claims by host.landingClaims.collectAsStateWithLifecycle()
     val current = slot
-    val notice = linkCallNotice(current?.phase, claims > 0, current?.errorMessage) ?: return
+    val notice = linkCallNotice(
+        phase = current?.phase,
+        landingShowingIt = claims > 0,
+        errorMessage = current?.errorMessage,
+        // A call started from `New call` has no `/c/` landing to return to.
+        hasLanding = current?.slug != null,
+    ) ?: return
     Surface(
         modifier = Modifier
             .align(Alignment.BottomCenter)
@@ -219,7 +265,9 @@ public fun BoxScope.LinkCallNoticeBar(host: LinkCallHost, onOpen: (slug: String)
                 for (action in notice.actions) {
                     when (action) {
                         LinkCallNoticeAction.OPEN ->
-                            OutlinedButton(onClick = { current?.let { onOpen(it.slug) } }) { Text("Open") }
+                            OutlinedButton(
+                                onClick = { current?.slug?.let(onOpen) },
+                            ) { Text("Open") }
                         LinkCallNoticeAction.CANCEL ->
                             OutlinedButton(onClick = { host.leave() }) { Text("Cancel") }
                         LinkCallNoticeAction.DISMISS ->

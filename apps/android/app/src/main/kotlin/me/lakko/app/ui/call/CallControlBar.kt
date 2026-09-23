@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.MoreHoriz
+import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
@@ -211,3 +212,80 @@ private fun CallControlEmphasis.foreground(): Color = when (this) {
 
 /** Section 4.1.1: "Disabled is 40 percent opacity, never a hidden button." */
 private const val DISABLED_ALPHA = 0.4f
+
+/**
+ * `Invite` — `docs/ux/call-links.md` section 3.
+ *
+ * One control, and it sits ABOVE the circle row rather than in it. The row's
+ * width is already the thing `fitCallControlBar` exists to rescue (five
+ * controls at the spec sizes do not fit a 411 dp phone), so a sixth circle
+ * would shrink every control towards the minimum touch target on a narrow
+ * phone and push the End button — the one control that must never be missing —
+ * back over the edge. Putting it in the overflow menu instead was the other
+ * option, and `CallControls.kt` names that exact move as one of the four faults
+ * the control row was rebuilt to fix: this is a real action, reached in one
+ * tap, most wanted in the first seconds of a call the person is alone in.
+ *
+ * What it reads is decided in [me.lakko.app.calls.callInviteButton]; this draws
+ * the decision.
+ */
+@Composable
+internal fun CallInviteControl(
+    button: me.lakko.app.calls.CallInviteButton,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        button.note?.let { note ->
+            Text(
+                text = note,
+                color = LakkoDark.textMuted,
+                fontSize = 12.sp,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(LakkoDark.background.copy(alpha = 0.62f))
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+            )
+            Spacer(Modifier.height(8.dp))
+        }
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .clip(RoundedCornerShape(24.dp))
+                .background(LakkoDark.background.copy(alpha = 0.62f))
+                .alpha(if (button.enabled) 1f else 0.4f)
+                .clickable(enabled = button.enabled, onClick = onClick)
+                .padding(horizontal = 18.dp, vertical = 10.dp)
+                .semantics(mergeDescendants = true) {
+                    contentDescription = button.spokenLabel
+                    role = Role.Button
+                    if (!button.enabled) disabled()
+                },
+        ) {
+            if (button.busy) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    color = Color.White,
+                    strokeWidth = 2.dp,
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Filled.PersonAdd,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = button.label,
+                color = Color.White,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+            )
+        }
+    }
+}

@@ -99,12 +99,71 @@ public object CallHistoryStore {
         }
     }
 
+    /**
+     * Fill the index from calls that happened before it existed. Once.
+     *
+     * ## Why this is not the scan the spec forbids
+     *
+     * Section 6.2 refuses a walk of every transcript **on every open**, because
+     * that cost grows with every call ever made. This walk happens at most once
+     * per account, ever, and what it produces is the index the screen then
+     * reads. Without it the Calls screen opens empty on a device that has been
+     * calling for months, while those same calls are visibly sitting in the
+     * conversation list - which reads as a broken screen, and is the exact
+     * thing a live pass found that the unit tests could not.
+     *
+     * [entries] is what the caller already holds in memory. It is asked for
+     * lazily, so an account that has already been filled never pays for
+     * gathering it.
+     *
+     * Marked done even when it finds nothing: an account with no past calls is
+     * filled correctly by writing nothing, and re-walking on every launch to
+     * rediscover that would be the per-open cost in a slower disguise.
+     */
+    public fun backfillOnce(
+        context: Context,
+        accountIdB64: String?,
+        entries: () -> List<CallHistoryEntry>,
+    ) {
+        if (accountIdB64.isNullOrEmpty()) return
+        val store = prefs(context) ?: return
+        if (store.getBoolean(backfilledKey(accountIdB64), false)) return
+        try {
+            val found = entries()
+            if (found.isNotEmpty()) {
+                // Fold one at a time through the same ordering and cap the
+                // live path uses, so a backfilled index is indistinguishable
+                // from one that was written call by call.
+                var next = load(context, accountIdB64)
+                for (entry in found) next = callHistoryWith(next, entry)
+                store.edit()
+                    .putString(
+                        key(accountIdB64),
+                        next.joinToString("\n", transform = ::encodeCallHistoryEntry),
+                    )
+                    .putBoolean(backfilledKey(accountIdB64), true)
+                    .apply()
+                changed.value += 1
+                return
+            }
+            store.edit().putBoolean(backfilledKey(accountIdB64), true).apply()
+        } catch (cause: Throwable) {
+            android.util.Log.w(TAG, "backfilling the call history failed", cause)
+        }
+    }
+
     /** Drop one account's index (forget device, sign out of that account). */
     public fun clear(context: Context, accountIdB64: String?) {
         if (accountIdB64.isNullOrEmpty()) return
         val store = prefs(context) ?: return
         try {
-            store.edit().remove(key(accountIdB64)).apply()
+            // The backfill marker goes with the index. Otherwise a cleared
+            // account would come back empty for good, the walk having been
+            // recorded as already done.
+            store.edit()
+                .remove(key(accountIdB64))
+                .remove(backfilledKey(accountIdB64))
+                .apply()
             changed.value += 1
         } catch (cause: Throwable) {
             android.util.Log.w(TAG, "clearing the call history failed", cause)
@@ -112,6 +171,9 @@ public object CallHistoryStore {
     }
 
     private fun key(accountIdB64: String): String = KEY_PREFIX + accountIdB64
+
+    private fun backfilledKey(accountIdB64: String): String =
+        KEY_PREFIX + "backfilled." + accountIdB64
 
     @Volatile
     private var opened: SharedPreferences? = null

@@ -7,6 +7,7 @@ import {
   decideLinkCallStart,
   linkCallNotice,
   linkCallOccupiesSlot,
+  linkCallOverlayShown,
   reduceLinkCallPhase,
   type LinkCallEvent,
   type LinkCallPhase,
@@ -135,29 +136,60 @@ describe("decideLinkCallStart", () => {
   });
 });
 
+describe("linkCallOverlayShown", () => {
+  it("is up for a live call whoever this device is", () => {
+    expect(linkCallOverlayShown("live", "owner")).toBe(true);
+    expect(linkCallOverlayShown("live", "joiner")).toBe(true);
+  });
+
+  it("is up from the first second for a founder, who pressed New call", () => {
+    // docs/ux/call-links.md section 5: "The call screen, connecting. Never a
+    // form" — and never a strip at the bottom of the screen they were on.
+    expect(linkCallOverlayShown("starting", "owner")).toBe(true);
+  });
+
+  it("is not up for a joiner that has not been admitted yet", () => {
+    expect(linkCallOverlayShown("starting", "joiner")).toBe(false);
+    expect(linkCallOverlayShown("waiting", "joiner")).toBe(false);
+  });
+
+  it("is down once the call is over, and with no call at all", () => {
+    for (const phase of ["ended", "dead", "error"] as LinkCallPhase[]) {
+      expect(linkCallOverlayShown(phase, "owner")).toBe(false);
+    }
+    expect(linkCallOverlayShown(null, null)).toBe(false);
+  });
+});
+
 describe("linkCallNotice", () => {
   it("says nothing while the /c/ route shows the call, or while the overlay does", () => {
-    expect(linkCallNotice("waiting", true, null)).toBeNull();
-    expect(linkCallNotice("live", false, null)).toBeNull();
-    expect(linkCallNotice(null, false, null)).toBeNull();
+    expect(linkCallNotice("waiting", "joiner", true, null)).toBeNull();
+    expect(linkCallNotice("live", "owner", false, null)).toBeNull();
+    expect(linkCallNotice(null, null, false, null)).toBeNull();
+  });
+
+  it("never doubles the founder's own call screen with a banner under it", () => {
+    expect(linkCallNotice("starting", "owner", false, null)).toBeNull();
   });
 
   it("before the call is live: still going, with a way back and a way out", () => {
-    expect(linkCallNotice("starting", false, null)?.actions).toEqual(["open", "cancel"]);
-    const waiting = linkCallNotice("waiting", false, null);
+    expect(linkCallNotice("starting", "joiner", false, null)?.actions).toEqual(["open", "cancel"]);
+    const waiting = linkCallNotice("waiting", "joiner", false, null);
     expect(waiting?.text).toBe("Waiting for the owner to admit you…");
     expect(waiting?.actions).toEqual(["open", "cancel"]);
   });
 
   it("after it ends: why, once, dismissible", () => {
-    expect(linkCallNotice("ended", false, null)).toEqual({
+    expect(linkCallNotice("ended", "owner", false, null)).toEqual({
       text: "The call has ended.",
       actions: ["dismiss"],
     });
-    expect(linkCallNotice("dead", false, null)?.text).toBe("This call has ended or isn't active.");
-    expect(linkCallNotice("error", false, "Joined the wrong call")?.text).toBe(
+    expect(linkCallNotice("dead", "joiner", false, null)?.text).toBe(
+      "This call has ended or isn't active.",
+    );
+    expect(linkCallNotice("error", "joiner", false, "Joined the wrong call")?.text).toBe(
       "The call failed: Joined the wrong call",
     );
-    expect(linkCallNotice("error", false, null)?.text).toBe("The call failed.");
+    expect(linkCallNotice("error", "owner", false, null)?.text).toBe("The call failed.");
   });
 });
