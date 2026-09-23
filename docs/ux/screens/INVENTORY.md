@@ -3,6 +3,13 @@
 
 # Screen inventory — what exists, what is captured
 
+**Partly superseded on 2026-09-23.** The navigation was rebuilt that day
+(`docs/ux/navigation.md`): chats, groups and channels became one list and Calls
+came back as a destination, so the Groups and Channels rows below are no longer
+destinations and a Calls section is missing from this table. The first ten rows
+of the captured matrix were re-shot against the new navigation; this inventory
+still counts the old one.
+
 Built from the sources on 2026-09-22: web routes in `apps/web/src/routes/routes.tsx`,
 iOS screens under `apps/ios/Lakko/UI/`, Android screens, sheets and dialogs under
 `apps/android/.../ui/`. "Captured" means a screenshot of a running build exists

@@ -53,6 +53,37 @@ change that makes everything in this section possible (section 7).
 sides. A call the caller cancels first stops ringing immediately. A call answered on one
 of the callee's devices stops ringing on the others.
 
+Both of those numbers-and-rules are ONE copy, in `lakko_ui_rules::ring`, reached over
+the FFI by all three clients. The window in particular is a value two DIFFERENT devices
+have to agree on: if it drifts, one side files a missed call while the other is still
+ringing, which is the rule breaking silently rather than loudly. It had been written out
+four times before that.
+
+**What muting withholds, stated because the row above is short enough to be read two
+ways.** A muted conversation does not ring: no ringtone, no vibration, no screen that
+takes over the phone. It is **not** dropped. Somebody muted a conversation to stop being
+interrupted by it; they did not ask to stop being told who tried to reach them. So a
+muted call is recorded in the history exactly as an unmuted one, and a missed one still
+reads as missed. A client may leave a quiet, passive notice behind — that is a per-platform
+call — but it must not use the platform's call affordance, and it must never demand
+attention.
+
+**With the app open, a muted call shows nothing either — decided 2026-09-23.**
+The three clients first landed split on this: two showed nothing, one still threw
+the full-screen incoming call across whatever the person was reading, silently.
+A screen that takes over the phone IS an interruption, so that honoured half the
+rule. The cost is stated rather than hidden: **a muted call cannot be answered,
+only called back**, because the full-screen screen is every client's only Accept
+surface. Answering without interrupting needs a non-modal affordance no client
+has — and this section already specifies one, for the second-call case, which is
+where it would come from if the cost turns out to bite.
+
+**When mute cannot be read, ring.** Every ring path has to consult a flag that lives
+somewhere else — on iOS in another process, on web in the service worker — and a read can
+fail. The fallback is to RING. Failing the other way would swallow calls silently because
+a file was missing or a database did not open, and a swallowed call is a far worse defect
+than an unwanted one.
+
 **On web** a call arrives as a notification with Accept and Decline; clicking it focuses
 the tab and opens the call. A browser that refuses notification permission shows the
 in-app banner only, and Settings says so in one line.

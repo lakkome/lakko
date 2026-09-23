@@ -56,6 +56,7 @@ import { backgroundReceiveIsActive } from "../chat/receive-activity";
 import { ReceiveCoordinator } from "../chat/receive-coordinator";
 import type { PushWakeReach } from "../push/wake-reach";
 import { decideInboundSignaling, type OneToOneAction } from "./call-host-routing";
+import type { RingVerdict } from "./ring-rule";
 import { SerialOnceQueue, type InboundSignalingRow } from "./call-signaling-dispatch";
 
 const ONE_TO_ONE = "grp-1x1";
@@ -98,7 +99,7 @@ class CallHostStub {
   private readonly endedCallIds = new Set<string>();
   private readonly queue: SerialOnceQueue<{ groupIdB64: string; row: InboundSignalingRow }>;
 
-  constructor(private readonly nowMs: () => number = Date.now) {
+  constructor(private readonly ring: RingVerdict = "ring") {
     this.queue = new SerialOnceQueue(
       async (item) => {
         const body = JSON.parse(new TextDecoder().decode(item.row.payloadBytes)) as FakeBody;
@@ -107,15 +108,19 @@ class CallHostStub {
           kind: body.kind,
           callIdHex: body.callIdHex,
           groupIdB64: item.groupIdB64,
-          rowCreatedAt: item.row.createdAt,
-          nowMs: this.nowMs(),
+          // The shared rule's verdict, which this harness states directly:
+          // these cases are about delivery and the slot, not about the
+          // window (`ring-rule.test.ts` covers that).
+          ring: this.ring,
           active: this.active,
           endedCallIds: this.endedCallIds,
           groupCallBusy: false,
           groupRecordKnowsCall: false,
         });
         this.outcomes.push({ groupIdB64: item.groupIdB64, action: decision.oneToOne });
-        if (decision.oneToOne === "ring") {
+        // `silent` occupies the slot exactly as `ring` does — a muted call is
+        // still a call this device is in.
+        if (decision.oneToOne === "ring" || decision.oneToOne === "silent") {
           this.active = { callIdHex: body.callIdHex, groupIdB64: item.groupIdB64 };
         }
         if (decision.oneToOne === "busy") this.endedCallIds.add(body.callIdHex);
@@ -342,15 +347,26 @@ describe("the receive loop and an incoming call in a hidden tab", () => {
 });
 
 describe("what still refuses to ring", () => {
-  it("drops an offer older than the stale window instead of ringing", async () => {
+  it("drops an offer the shared rule calls over instead of ringing", async () => {
     // A tab that comes back after a long sleep must not open onto a call that
-    // ended long ago.
-    const host = new CallHostStub(() => Date.parse("2026-09-18T10:05:00.000Z"));
+    // ended long ago. Whether it IS over is the shared rule's call
+    // (`ring-rule.test.ts`); what this pins is that the delivery chain
+    // carries that verdict through to nothing ringing.
+    const host = new CallHostStub("tooLate");
     settle(host, ONE_TO_ONE, [offerRow({ createdAt: "2026-09-18T10:00:00.000Z" })]);
     await host.settled();
 
     expect(host.outcomes).toEqual([{ groupIdB64: ONE_TO_ONE, action: "drop" }]);
     expect(host.ringing()).toBeNull();
+  });
+
+  /** `docs/ux/calls.md` section 2.1 — "a muted chat never rings". */
+  it("takes a muted offer without ringing, and without dropping it", async () => {
+    const host = new CallHostStub("silent");
+    settle(host, ONE_TO_ONE, [offerRow({ callIdHex: "aaaa" })]);
+    await host.settled();
+
+    expect(host.outcomes).toEqual([{ groupIdB64: ONE_TO_ONE, action: "silent" }]);
   });
 
   it("answers a second caller busy rather than ringing twice", async () => {

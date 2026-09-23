@@ -73,6 +73,19 @@ final class CallHost: ObservableObject {
         /// shows. One value, because the whole point is that neither surface
         /// stores the finished sentence.
         var recordCall: @MainActor (_ call: FinishedCall) -> Void = { _ in }
+        /// `docs/ux/calls.md` section 2.1 — does this conversation carry the
+        /// mute flag? A muted conversation never rings; it is still recorded.
+        ///
+        /// Read from the App Group mirror rather than from
+        /// ``DeviceGroupSyncRepository`` directly, so that all three of this
+        /// device's ring paths — here, the CallKit report, and the
+        /// notification-service extension — answer the question from ONE
+        /// value. The extension is a separate process and can reach nothing
+        /// else; having the app consult a different source would be the
+        /// beginning of the two disagreeing. Absent → not muted → rings.
+        var isMuted: @MainActor (_ groupIdHex: String) -> Bool = {
+            ConversationMuteMirror.isMuted(groupIdHex: $0)
+        }
         /// Does this device have a camera at all? Decides whether the video
         /// button opens the camera check or places a voice call
         /// (`docs/ux/calls.md` section 3.2).
@@ -227,15 +240,17 @@ final class CallHost: ObservableObject {
             nowMs: ports.nowMs(),
             active: active,
             endedCallIds: endedCallIds,
-            otherCallBusy: otherCallBusy
+            otherCallBusy: otherCallBusy,
+            muted: ports.isMuted(row.groupIdHex)
         )
         // Every incoming OFFER is accounted for, whatever the verdict. A call
         // that does not ring is silent on both ends until the caller's own ring
-        // window writes `Missed call`, and the three silent verdicts are
-        // indistinguishable from the outside: `drop` (stale or unreadable row
-        // time), `busy` (a slot this device never released) and `apply` (a row
-        // for a call already in the slot). Nine calls in a row were lost to
-        // this on 2026-09-22, with only `drop` instrumented.
+        // window writes `Missed call`, and the quiet verdicts are
+        // indistinguishable from the outside: `drop` (past the window, or an
+        // unreadable row time), `silent` (a muted conversation), `busy` (a slot
+        // this device never released) and `apply` (a row for a call already in
+        // the slot). Nine calls in a row were lost to this on 2026-09-22, with
+        // only `drop` instrumented.
         if case .offer = row.body {
             let age = ChatRepository.parseDsTimestampMs(row.createdAt)
                 .map { String(ports.nowMs() - $0) } ?? "unreadable"
@@ -256,6 +271,24 @@ final class CallHost: ObservableObject {
             if let bytes = try? composeCallSignaling(body: .end(callId: callId, reason: .busy)) {
                 enqueuePublish(groupIdHex: row.groupIdHex, bytes: bytes)
             }
+        case .silent:
+            // `docs/ux/calls.md` section 2.1. No session, no screen, no sound —
+            // and a history row all the same, so the person can see who called
+            // while the conversation was silenced. Filed as `missed` because
+            // that is what it is and what an unanswered unmuted call becomes,
+            // so the two are indistinguishable afterwards, which is the point.
+            //
+            // Recorded once: the call id joins `endedCallIds`, so a re-delivered
+            // offer row for the same call does not file a second row.
+            guard case .offer(let callId, _, _, let media) = row.body else { return }
+            endedCallIds.insert(CallHostRouting.hex(callId))
+            ports.recordCall(FinishedCall(
+                groupIdHex: row.groupIdHex,
+                row: CallTranscriptRow(direction: .incoming, outcome: .missed),
+                video: media.video,
+                // When it happened, by the server's stamp — not now, which is
+                // whenever this device got round to reading the row.
+                startedAtMs: ChatRepository.parseDsTimestampMs(row.createdAt) ?? ports.nowMs()))
         case .ring:
             guard case .offer(let callId, _, _, let media) = row.body else { return }
             let session = install(callId: callId, groupIdHex: row.groupIdHex, direction: .incoming)

@@ -186,6 +186,18 @@ internal fun buildBackgroundDecryptDeps(
             } catch (_: Throwable) {
                 null
             }
+
+        // `docs/ux/calls.md` section 2.1 — the conversation's mute flag, from
+        // the cross-device sync state the app already persists it in. A READ,
+        // like everything else here (C-59), and the one store on this
+        // interface that is NOT about decrypting: a wake decides whether to
+        // interrupt, and a muted chat never rings.
+        override fun isMuted(accountIdB64: String, groupHex: String): Boolean =
+            me.lakko.app.devices.sync.ConversationMute.isMuted(
+                context = appContext,
+                accountIdB64 = accountIdB64,
+                groupIdHex = groupHex,
+            )
     }
 }
 

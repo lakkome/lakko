@@ -138,6 +138,73 @@ export function callRingNotification(call) {
 }
 
 /**
+ * The shape of a notification for a call in a MUTED conversation.
+ *
+ * `docs/ux/calls.md` section 2.1 — "a muted chat never rings". The rule
+ * (`crates/lakko-ui-rules/src/ring.rs`) is explicit that this is NOT the same
+ * as dropping the call: a person who muted a conversation asked not to be
+ * interrupted by it, they did not ask to be lied to about who tried to reach
+ * them. So the call is still announced, and everything that constitutes the
+ * INTERRUPTION is taken away:
+ *
+ *   - **silent, and no vibration.** The two things a person is actually
+ *     asking to be rid of when they mute a conversation.
+ *   - **`requireInteraction: false`.** A ring stays on screen until it is
+ *     answered because it is asking for an answer. This is not asking for
+ *     anything, so it behaves like any other notification and goes away.
+ *   - **no Accept / Decline.** Buttons are a demand to decide, and a muted
+ *     conversation does not get to put a decision in front of anybody. Note
+ *     what this costs, since it is worth being plain about: the app's only
+ *     Accept is on the full-screen incoming call, which a muted call also
+ *     withholds, so in practice a muted call is not answered — it becomes a
+ *     missed-call row the person can tap to call back.
+ *   - **`renotify: false`.** A repeat wake for the same call replaces this
+ *     quietly; re-alerting is exactly what mute forbids.
+ *
+ * Kept on the SAME tag as a ring, so the `end` wake takes it down through the
+ * one code path, and so a call cannot show both shapes at once.
+ *
+ * A body click carries the `open` intent and nothing else. Opening the app is
+ * never an answer (`intentForAction` / `decideCallAction` both refuse to act
+ * on `open`), so the worst a click can do is show the person their own app.
+ *
+ * ## The judgement this embodies
+ *
+ * Showing something rather than nothing, for one reason: on the web the call
+ * log is written by the PAGE, and a call that arrives with no tab open is
+ * never recorded anywhere — the service worker is read-only by construction
+ * (C-59 / ADR-0041) and cannot write one. So for a closed tab this quiet
+ * notification is the only trace a muted call leaves at all, and withholding
+ * it would turn "do not interrupt me" into "do not tell me", which is the one
+ * reading the rule rules out.
+ *
+ * @param {{ callIdHex: string, groupHex: string, video: boolean, callerName?: string | null }} call
+ */
+export function callSilentNotification(call) {
+  const { title, options } = callRingNotification(call);
+  const { actions, vibrate, ...rest } = options;
+  return {
+    title,
+    options: {
+      ...rest,
+      renotify: false,
+      requireInteraction: false,
+      silent: true,
+      data: {
+        call: {
+          callIdHex: call.callIdHex,
+          groupHex: call.groupHex,
+          video: call.video,
+          // Only the body intent: there are no buttons to press, and `open`
+          // is the one intent that can never answer or refuse a call.
+          intents: { [CALL_ACTION_BODY]: callNotificationIntents(call)[CALL_ACTION_BODY] },
+        },
+      },
+    },
+  };
+}
+
+/**
  * What each button on a ringing notification means, keyed by the `event.action`
  * the browser will report — including {@link CALL_ACTION_BODY} for a click on
  * the notification itself.

@@ -487,6 +487,20 @@ targets:
       - path: Lakko/Calls/CallPeerNameMirror.swift
         type: file
         buildPhase: sources
+      # `docs/ux/calls.md` section 2.1 — the App Group muted-conversation
+      # mirror the app writes and this extension READS, so a muted chat does
+      # not ring a closed phone. The thread flags themselves live in the
+      # account's encrypted sync blob, which C-59 forbids this process from
+      # opening. Foundation only; read-only here.
+      - path: Lakko/Calls/ConversationMuteMirror.swift
+        type: file
+        buildPhase: sources
+      # The DS row `created_at` parser, shared with the app so both processes
+      # measure a call's age against the same clock the same way. Foundation
+      # only.
+      - path: Lakko/Shared/DsTimestamp.swift
+        type: file
+        buildPhase: sources
     info:
       path: LakkoNotificationService/Info.plist
       properties:
@@ -569,6 +583,12 @@ targets:
       # target memberships. The FFI + Keychain wiring (`NseDecryptDeps.swift`,
       # `NotificationService.swift`) is NOT compiled here.
       - path: LakkoNotificationService/NsePushDecrypt.swift
+        type: file
+        buildPhase: sources
+      # …and the one app file that core now reads a row's age through, for the
+      # same reason: the pure core compiles into this target without the
+      # `Lakko` module, so the file has to travel with it.
+      - path: Lakko/Shared/DsTimestamp.swift
         type: file
         buildPhase: sources
     settings:

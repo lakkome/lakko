@@ -9,6 +9,8 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import me.lakko.app.calls.CallSession
 import me.lakko.app.calls.OneToOneCallHost
+import me.lakko.app.calls.OneToOneCallTiming
+import me.lakko.app.calls.TEST_RING_WINDOW_MS
 import me.lakko.app.calls.OneToOneCallHostTest
 import me.lakko.app.calls.callIdHexOf
 import me.lakko.app.ui.chat.InMemoryContext
@@ -150,6 +152,7 @@ class OneToOneCallInboundRoutingTest {
             val host = OneToOneCallHost<OneToOneCallHostTest.FakeSession>(
                 scope = backgroundScope,
                 clock = { now },
+                timing = OneToOneCallTiming(ringTimeoutMs = TEST_RING_WINDOW_MS),
                 warn = { _, _ -> },
             )
             host.attach(port)

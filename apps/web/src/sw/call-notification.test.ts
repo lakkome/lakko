@@ -29,6 +29,7 @@ import {
   callNotificationIntents,
   callNotificationTag,
   callRingNotification,
+  callSilentNotification,
   intentForAction,
   isCallNotificationTag,
   // @ts-expect-error — plain JS ESM in public/, no .d.ts; typed via JSDoc.
@@ -208,5 +209,46 @@ describe("what a click should actually do", () => {
     const videoIntents = callNotificationIntents({ ...CALL, video: true });
     expect(callIntentUrl(videoIntents[CALL_ACTION_ACCEPT])).toContain("callVideo=1");
     expect(callIntentUrl(intents[CALL_ACTION_ACCEPT])).not.toContain("callVideo");
+  });
+});
+
+/** `docs/ux/calls.md` section 2.1 — "a muted chat never rings". */
+describe("the muted conversation's notification", () => {
+  const silent = callSilentNotification({ ...CALL, callerName: "Anna" });
+  const ring = callRingNotification({ ...CALL, callerName: "Anna" });
+
+  it("says the same thing a ring says", () => {
+    // Mute withholds the interruption, not the fact. The person still learns
+    // who called and what kind of call it was.
+    expect(silent.title).toBe(ring.title);
+    expect(silent.options.body).toBe(ring.options.body);
+  });
+
+  it("withholds every part of the interruption", () => {
+    expect(silent.options.silent).toBe(true);
+    expect(silent.options.vibrate).toBeUndefined();
+    expect(silent.options.requireInteraction).toBe(false);
+    expect(silent.options.actions).toBeUndefined();
+    // A repeat wake for the same call must not re-alert, which is exactly
+    // what a ring DOES do.
+    expect(silent.options.renotify).toBe(false);
+    expect(ring.options.renotify).toBe(true);
+  });
+
+  it("shares the ring's tag, so one end wake takes either shape down", () => {
+    expect(silent.options.tag).toBe(callNotificationTag(CALL.callIdHex));
+  });
+
+  it("offers no way to answer or refuse from the notification", () => {
+    // There are no buttons, and the one intent it carries can never act on a
+    // call: `open` raises the app and nothing more.
+    expect(intentForAction(CALL_ACTION_BODY, silent.options.data).kind).toBe("open");
+    expect(intentForAction(CALL_ACTION_ACCEPT, silent.options.data)).toBeNull();
+    expect(intentForAction(CALL_ACTION_DECLINE, silent.options.data)).toBeNull();
+  });
+
+  it("names the call it belongs to, so the app can find it", () => {
+    expect(silent.options.data.call.callIdHex).toBe(CALL.callIdHex);
+    expect(silent.options.data.call.groupHex).toBe(CALL.groupHex);
   });
 });

@@ -220,7 +220,15 @@ function fakeOffer(mediaVideo: boolean): ParsedCallSignaling {
   } as unknown as ParsedCallSignaling;
 }
 
-function makeSession(timing: Partial<CallSessionTiming> = {}): {
+// The ring window has no default: it is the one timing number the OTHER
+// device also has to be using, so the session must be told it
+// (`lakko_ui_rules::ring::CALL_RING_WINDOW_MS`). The value here is a test
+// fixture, not the product's window — every test that cares sets its own.
+const TEST_RING_WINDOW_MS = 45_000;
+
+function makeSession(
+  timing: Partial<CallSessionTiming> = {},
+): {
   session: CallSession;
   states: WebCallState[];
   videoStates: VideoPublishState[];
@@ -249,11 +257,16 @@ function makeSession(timing: Partial<CallSessionTiming> = {}): {
   // working transform, so a test has to supply both — which is the point: an
   // unarmed 1x1 call is not a call this build will place.
   const sealed: string[] = [];
-  const session = new CallSession(new Uint8Array(16), callbacks, timing, {
-    supported: () => true,
-    attachSender: (sender) => sealed.push(`sender:${sender.track?.kind ?? "?"}`),
-    attachReceiver: () => sealed.push("receiver"),
-  });
+  const session = new CallSession(
+    new Uint8Array(16),
+    callbacks,
+    { ringTimeoutMs: TEST_RING_WINDOW_MS, ...timing },
+    {
+      supported: () => true,
+      attachSender: (sender) => sealed.push(`sender:${sender.track?.kind ?? "?"}`),
+      attachReceiver: () => sealed.push("receiver"),
+    },
+  );
   session.setCallKey(new Uint8Array(32), 3);
   return { session, states, videoStates, published, reasons, sealed };
 }
@@ -423,7 +436,7 @@ describe("1×1 answerer: ringing, repeats and accept", () => {
         onOutboundSignaling: (bytes) => published.push(new TextDecoder().decode(bytes)),
         onStateChange: (st) => states.push(st),
       },
-      {},
+      { ringTimeoutMs: TEST_RING_WINDOW_MS },
       {
         supported: () => true,
         attachSender: () => {},
@@ -447,7 +460,7 @@ describe("1×1 answerer: ringing, repeats and accept", () => {
         onOutboundSignaling: (bytes) => published.push(new TextDecoder().decode(bytes)),
         onStateChange: () => {},
       },
-      {},
+      { ringTimeoutMs: TEST_RING_WINDOW_MS },
       {
         supported: () => false,
         attachSender: () => {},

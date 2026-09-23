@@ -22,7 +22,7 @@ package me.lakko.app.chat
  * concurrency)`. At the previous fixed 30 s that is 60 s for four chats, 90 s
  * for seven, five minutes for thirty. An offer published just after a group's
  * wave finished is therefore not read for a whole sweep — long past the
- * caller's 45 s ring window ([me.lakko.app.calls.CALL_RING_WINDOW_MS]), and
+ * caller's 45 s ring window ([uniffi.lakko_ffi_uniffi.callRingWindowMs]), and
  * often past the host's 60 s stale-offer cut-off, at which point it is
  * deliberately never rung at all.
  *

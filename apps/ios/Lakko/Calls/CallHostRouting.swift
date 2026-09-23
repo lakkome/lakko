@@ -49,16 +49,29 @@ struct InboundCallRow: Equatable {
 ///     ringing, being prepared, live, or while a group (SFU) or call-link call
 ///     holds the app's one call slot (``CallSlot``) is answered `End{busy}` so
 ///     the caller stops ringing, never silently dropped.
-///   * **Stale offers do not ring.** An offer whose DS row is older than
-///     ``staleOfferMs`` does not ring and is not answered busy either: the
-///     caller gave up long ago and nobody is waiting on a reply.
+///   * **Stale offers do not ring.** An offer older than the ring window by its
+///     DS row time does not ring and is not answered busy either: the caller
+///     gave up already and nobody is waiting on a reply.
+///   * **A muted conversation never rings** (`docs/ux/calls.md` section 2.1).
+///     It is still recorded — only the interruption is withheld.
 ///   * **An ended call never rings again**, whatever the journal still holds.
+///
+/// The last two are one question, answered once for all three clients by
+/// `LakkoCore.ringDecision(muted:offerAgeMs:)`, so this file states neither
+/// the window nor the mute rule itself.
 ///
 /// Same contract as `apps/web/src/calls/call-host-routing.ts`.
 enum CallHostRouting {
 
-    /// An offer older than this, by its DS row timestamp, does not ring.
-    static let staleOfferMs: Int64 = 60_000
+    /// How long an offer may ring for, by its DS row timestamp.
+    ///
+    /// Read from ``LakkoCore/callRingWindowMs()`` rather than written here: it
+    /// is a number the CALLER'S device has to agree with, and two copies means
+    /// one side files a missed call while the other is still ringing. This used
+    /// to be a local 60 s grace that outlived the 45 s the caller waits, so an
+    /// offer between the two rang here for a call nobody was on the other end
+    /// of.
+    static var ringWindowMs: UInt64 { LakkoCore.callRingWindowMs() }
 
     /// The 1x1 call currently occupying the slot, as routing needs to see it.
     struct ActiveCall: Equatable {
@@ -72,20 +85,31 @@ enum CallHostRouting {
         case drop
         /// Open a ringing answerer session for this offer.
         case ring
+        /// Record the call; interrupt nobody. The conversation is muted.
+        ///
+        /// Deliberately NOT ``drop``. A person who muted a conversation asked
+        /// not to be interrupted by it; they did not ask to be kept from
+        /// finding out who tried to reach them, so the call still lands in the
+        /// history and the Calls list exactly as an unanswered unmuted one
+        /// does. Only the ringtone, the vibration and the screen that takes
+        /// over the phone are withheld.
+        case silent
         /// Publish `End{busy}` to the offering group; do not ring.
         case busy
         /// Hand the body to the session in the slot.
         case apply
     }
 
-    /// Is an offer too old to ring for?
+    /// How old an offer is, in milliseconds, or `nil` when its row time cannot
+    /// be read.
     ///
     /// Judged on the DS row's server timestamp, never on anything the caller
-    /// stamped into the payload. An unreadable timestamp is treated as stale: a
-    /// call whose age cannot be established does not ring.
-    static func isStaleOffer(createdAt: String, nowMs: Int64, maxAgeMs: Int64 = staleOfferMs) -> Bool {
-        guard let rowMs = ChatRepository.parseDsTimestampMs(createdAt) else { return true }
-        return nowMs - rowMs > maxAgeMs
+    /// stamped into the payload — the two devices share no clock, and a caller
+    /// that stamped its own offer could keep it ringing forever. A `nil` means
+    /// the call does not ring: an age that cannot be established is not an age
+    /// the window can be measured against.
+    static func offerAgeMs(createdAt: String, nowMs: Int64) -> UInt64? {
+        DsTimestamp.ageMs(createdAt: createdAt, nowMs: nowMs)
     }
 
     /// Decide one inbound row. Pure.
@@ -97,13 +121,19 @@ enum CallHostRouting {
     ///     this session.
     ///   - otherCallBusy: a group (SFU) or call-link call is starting, waiting or
     ///     live on this device.
+    ///   - muted: the conversation carries the mute flag. Defaulted `false` so
+    ///     a caller that cannot answer the question rings rather than goes
+    ///     quiet — the direction a missing answer has to fail in, since an
+    ///     unwanted ring is an annoyance and a swallowed call is a call the
+    ///     person never learns about.
     @MainActor
     static func decide(
         row: InboundCallRow,
         nowMs: Int64,
         active: ActiveCall?,
         endedCallIds: Set<String>,
-        otherCallBusy: Bool
+        otherCallBusy: Bool,
+        muted: Bool = false
     ) -> Action {
         let callIdHex = hex(CallSession.callId(of: row.body))
         let forActive = active.map {
@@ -119,9 +149,18 @@ enum CallHostRouting {
             // The call in the slot: a renegotiation offer (camera turned on).
             if forActive { return .apply }
             if endedCallIds.contains(callIdHex) { return .drop }
-            if isStaleOffer(createdAt: row.createdAt, nowMs: nowMs) { return .drop }
+            guard let ageMs = offerAgeMs(createdAt: row.createdAt, nowMs: nowMs) else {
+                return .drop
+            }
+            let verdict = LakkoCore.ringDecision(muted: muted, offerAgeMs: ageMs)
+            if verdict == .tooLate { return .drop }
+            // Busy is decided ABOVE mute, and the order matters. `End{busy}` is
+            // a message to the CALLER, not an interruption of the person here:
+            // it stops a phone ringing in someone else's hand. Withholding it
+            // because this conversation is muted would make the caller wait out
+            // the whole window for no reason.
             if active != nil || otherCallBusy { return .busy }
-            return .ring
+            return verdict == .silent ? .silent : .ring
         }
     }
 
@@ -135,11 +174,12 @@ enum CallHostRouting {
 /// Without them a call nobody answers never ends: the caller shows "Calling"
 /// forever and the callee rings until the app is killed. Each expiry ends the
 /// session locally, which publishes `End{timedOut}` so the other side stops too.
-/// Chosen, not measured — the same values as the web client's
-/// `DEFAULT_CALL_SESSION_TIMING`.
+/// The ring half is the shared window; only ``establishTimeoutMs`` is a local
+/// choice (the same value as the web client's `DEFAULT_CALL_SESSION_TIMING`).
 struct CallHostTiming: Equatable {
-    /// An incoming call rings for this long.
-    var ringTimeoutMs: Int64 = 45_000
+    /// An incoming call rings for this long. The shared window
+    /// (``CallHostRouting/ringWindowMs``), never a second copy of the number.
+    var ringTimeoutMs: Int64 = Int64(CallHostRouting.ringWindowMs)
     /// From dial (or accept) until the transport connects.
     var establishTimeoutMs: Int64 = 45_000
 }

@@ -28,6 +28,7 @@ import me.lakko.app.contacts.AcceptedContactsStore
 import uniffi.lakko_ffi_uniffi.FfiCallEndReason
 import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
 import uniffi.lakko_ffi_uniffi.Identity
+import uniffi.lakko_ffi_uniffi.callRingWindowMs
 import uniffi.lakko_ffi_uniffi.composeCallSignaling
 import uniffi.lakko_ffi_uniffi.sfuPeerTag
 
@@ -55,7 +56,14 @@ public object AppCallHost {
     private const val LINK_SLOT_KEY = "link"
 
     public val instance: OneToOneCallHost<CallSession> by lazy {
-        OneToOneCallHost(scope = scope)
+        OneToOneCallHost(
+            scope = scope,
+            // The ring window from its one home
+            // (`crates/lakko-ui-rules/src/ring.rs`), not a literal restated
+            // here: the caller's phone and this one have to give up at the
+            // same moment, or one files a missed call while the other rings.
+            timing = OneToOneCallTiming(ringTimeoutMs = callRingWindowMs().toLong()),
+        )
     }
 
     public val group: GroupCallHost by lazy {
@@ -286,6 +294,23 @@ public class ChatRepositoryCallPort(
             android.util.Log.w("ChatRepositoryCallPort", "recording the call row failed", error)
         }
     }
+
+    /**
+     * `docs/ux/calls.md` section 2.1 — is this conversation muted?
+     *
+     * The same mute the chat list draws and the DeviceGroup journal syncs
+     * between a person's devices, read from the state it is already persisted
+     * in ([me.lakko.app.devices.sync.ConversationMute]). On the I/O dispatcher
+     * because it opens a file, and this host runs on the main one.
+     */
+    override suspend fun isMuted(groupIdHex: String): Boolean =
+        kotlinx.coroutines.withContext(Dispatchers.IO) {
+            me.lakko.app.devices.sync.ConversationMute.isMuted(
+                context = applicationContext,
+                accountIdB64 = repository.activeAccountIdB64,
+                groupIdHex = groupIdHex,
+            )
+        }
 
     override fun peerName(groupIdHex: String): String? = try {
         repository.oneToOnePeerKey(groupIdHex)?.let { key ->

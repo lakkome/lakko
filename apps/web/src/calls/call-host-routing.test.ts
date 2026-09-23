@@ -4,19 +4,19 @@
 import { describe, expect, it } from "vitest";
 
 import { decideInboundSignaling, type InboundSignalingInput } from "./call-host-routing";
-import { routeSignalingKind, STALE_OFFER_MS } from "./call-signaling-dispatch";
+import { routeSignalingKind } from "./call-signaling-dispatch";
 
-const NOW = Date.parse("2026-09-13T12:00:00.000Z");
-const FRESH = new Date(NOW - 2_000).toISOString();
-const OLD = new Date(NOW - STALE_OFFER_MS - 1_000).toISOString();
-
+// Whether an offer is fresh, and whether a muted conversation may interrupt,
+// are the shared rule's to decide (`crates/lakko-ui-rules/src/ring.rs`, and
+// `ring-rule.test.ts` for the seam onto it). This module is handed the
+// verdict, so the tests here state it directly rather than asserting the rule
+// a second time through a timestamp.
 function input(over: Partial<InboundSignalingInput> & { kind: string }): InboundSignalingInput {
   return {
     route: routeSignalingKind(over.kind),
     callIdHex: "aa",
     groupIdB64: "group-a",
-    rowCreatedAt: FRESH,
-    nowMs: NOW,
+    ring: "ring",
     active: null,
     endedCallIds: new Set(),
     groupCallBusy: false,
@@ -47,17 +47,47 @@ describe("call host routing", () => {
     expect(d.oneToOne).toBe("busy");
   });
 
-  it("does not ring, and does not answer busy, for a stale offer", () => {
-    expect(decideInboundSignaling(input({ kind: "offer", rowCreatedAt: OLD })).oneToOne).toBe(
+  it("does not ring, and does not answer busy, for an offer the rule calls over", () => {
+    expect(decideInboundSignaling(input({ kind: "offer", ring: "tooLate" })).oneToOne).toBe(
       "drop",
     );
     const active = { callIdHex: "cc", groupIdB64: "group-a" };
     expect(
-      decideInboundSignaling(input({ kind: "offer", rowCreatedAt: OLD, active })).oneToOne,
+      decideInboundSignaling(input({ kind: "offer", ring: "tooLate", active })).oneToOne,
     ).toBe("drop");
-    // An unreadable timestamp is stale too.
+  });
+
+  /** `docs/ux/calls.md` section 2.1 — "a muted chat never rings". */
+  it("takes a muted offer silently rather than dropping it", () => {
+    // Not `drop`: the call still happens, is still answerable, and still
+    // reaches the call log. Only the interruption is withheld.
+    expect(decideInboundSignaling(input({ kind: "offer", ring: "silent" })).oneToOne).toBe(
+      "silent",
+    );
+  });
+
+  it("keeps silent and over as different answers", () => {
+    const silent = decideInboundSignaling(input({ kind: "offer", ring: "silent" })).oneToOne;
+    const over = decideInboundSignaling(input({ kind: "offer", ring: "tooLate" })).oneToOne;
+    expect(silent).not.toBe(over);
+  });
+
+  it("answers busy to a muted offer rather than taking it silently", () => {
+    // The offering side is waiting on an answer either way, and this device
+    // cannot take a second call whether or not it would have rung.
+    const active = { callIdHex: "aa", groupIdB64: "group-a" };
     expect(
-      decideInboundSignaling(input({ kind: "offer", rowCreatedAt: "not a date" })).oneToOne,
+      decideInboundSignaling(
+        input({ kind: "offer", callIdHex: "bb", groupIdB64: "group-b", ring: "silent", active }),
+      ).oneToOne,
+    ).toBe("busy");
+  });
+
+  it("never takes a muted offer for a call that already ended here", () => {
+    expect(
+      decideInboundSignaling(
+        input({ kind: "offer", ring: "silent", endedCallIds: new Set(["aa"]) }),
+      ).oneToOne,
     ).toBe("drop");
   });
 

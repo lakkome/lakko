@@ -6,6 +6,7 @@ import XCTest
 // core below is compiled straight into THIS target, so nothing else here comes
 // from the app module.
 @testable import Lakko
+import LakkoCore
 
 /// The notification-service extension's call arm (`docs/ux/calls.md` sections
 /// 2.1, 2.2 and 6): a call offer becomes a call-style alert naming the caller
@@ -46,17 +47,20 @@ final class NseCallAlertTests: XCTestCase {
         let group: FakeGroup
         let rows: [NseFetchedRow]
         let mirroredName: String?
+        let muted: Bool
 
         init(
             account: NseResolvedAccount,
             group: FakeGroup,
             rows: [NseFetchedRow],
-            mirroredName: String? = nil
+            mirroredName: String? = nil,
+            muted: Bool = false
         ) {
             self.account = account
             self.group = group
             self.rows = rows
             self.mirroredName = mirroredName
+            self.muted = muted
         }
 
         func lookupRoute(pushGidHex: String) -> (accountIdB64: String, groupIdHex: String)? { nil }
@@ -72,6 +76,7 @@ final class NseCallAlertTests: XCTestCase {
         func startCursor(accountIdB64: String, groupHex: String) -> Int64? { nil }
         func isAntiCensorshipArmed() -> Bool { false }
         func callerName(groupIdHex: String) -> String? { mirroredName }
+        func isMuted(groupIdHex: String) -> Bool { muted }
     }
 
     /// A parser that answers from a canned table keyed on the row's first byte.
@@ -84,8 +89,22 @@ final class NseCallAlertTests: XCTestCase {
         }
     }
 
-    private func row(_ id: Int64, _ tag: UInt8) -> NseFetchedRow {
-        NseFetchedRow(id: id, payload: Data([tag]))
+    /// The clock these tests place offers against. A fixed value rather than
+    /// `Date()`, so "fresh" and "past the window" are stated by the fixture
+    /// and not by how long the suite took to run.
+    private let nowMs: Int64 = 1_800_000_000_000
+
+    /// A row stamped `ageMs` old by the DS, which is the only clock the ring
+    /// window is measured against (`docs/ux/calls.md` section 2.1). Fresh
+    /// unless a test says otherwise.
+    private func row(_ id: Int64, _ tag: UInt8, ageMs: Int64 = 1_000) -> NseFetchedRow {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return NseFetchedRow(
+            id: id,
+            payload: Data([tag]),
+            createdAt: f.string(from: Date(timeIntervalSince1970: TimeInterval(nowMs - ageMs) / 1000))
+        )
     }
 
     private func wake() -> NsePushWake {
@@ -95,16 +114,116 @@ final class NseCallAlertTests: XCTestCase {
     private func deps(
         rows: [NseFetchedRow],
         decode: @escaping (Data) -> NseProcessedRow?,
-        mirroredName: String? = nil
+        mirroredName: String? = nil,
+        muted: Bool = false
     ) -> (FakeDeps, FakeGroup) {
         let group = FakeGroup(decode: decode)
         let deps = FakeDeps(
             account: NseResolvedAccount(accountIdB64: accountId, groupIdBytes: groupIdBytes),
             group: group,
             rows: rows,
-            mirroredName: mirroredName
+            mirroredName: mirroredName,
+            muted: muted
         )
         return (deps, group)
+    }
+
+    // MARK: - A muted conversation does not ring the lock screen
+
+    private func offerDecode(video: Bool = false) -> (Data) -> NseProcessedRow? {
+        { _ in
+            NseProcessedRow(
+                kind: .callOffer(video: video),
+                text: "",
+                attachmentCount: 0,
+                callIdHex: self.callIdHex
+            )
+        }
+    }
+
+    /// `docs/ux/calls.md` section 2.1. Until this, the extension's only mention
+    /// of mute was a comment claiming a muted chat was never woken — which
+    /// nothing implemented, so a muted chat rang a closed phone at full volume.
+    func testAMutedConversationYieldsASilentAlertRatherThanARingingOne() async {
+        let (deps, _) = deps(
+            rows: [row(11, 0x01)],
+            decode: offerDecode(),
+            mirroredName: "Anna",
+            muted: true
+        )
+
+        let outcome = await decryptPushOutcome(wake(), deps, nowMs: nowMs)
+
+        guard case .callSilent(let alert) = outcome else {
+            return XCTFail("expected a silent call alert, got \(outcome)")
+        }
+        // Still says who called and what kind of call it was: only the
+        // interruption is withheld, never the record.
+        XCTAssertEqual(alert.title, "Anna")
+        XCTAssertEqual(alert.body, "Voice call")
+        XCTAssertEqual(alert.callIdHex, callIdHex)
+    }
+
+    /// The same conversation unmuted rings, so the silence above is the mute
+    /// flag and not something else about the fixture.
+    func testTheSameOfferRingsWhenTheConversationIsNotMuted() async {
+        let (deps, _) = deps(
+            rows: [row(11, 0x01)],
+            decode: offerDecode(),
+            mirroredName: "Anna",
+            muted: false
+        )
+        guard case .callOffer = await decryptPushOutcome(wake(), deps, nowMs: nowMs) else {
+            return XCTFail("an unmuted conversation must still ring")
+        }
+    }
+
+    /// A wake whose newest call row is an offer the caller has already given
+    /// up on. The fetch is a catch-up from the app's cursor, so this is
+    /// ordinary rather than exotic — and a phone that rings for it offers an
+    /// answer that connects to nobody.
+    func testAnOfferPastTheRingWindowIsAMissedCallRatherThanARing() async {
+        let past = Int64(LakkoCore.callRingWindowMs()) + 1_000
+        let (deps, _) = deps(
+            rows: [row(11, 0x01, ageMs: past)],
+            decode: offerDecode(),
+            mirroredName: "Anna"
+        )
+
+        let outcome = await decryptPushOutcome(wake(), deps, nowMs: nowMs)
+
+        guard case .callSilent(let alert) = outcome else {
+            return XCTFail("expected a silent missed call, got \(outcome)")
+        }
+        XCTAssertEqual(alert.title, "Anna")
+        XCTAssertEqual(alert.body, "Missed call")
+    }
+
+    /// An offer one millisecond inside the window still rings: the boundary
+    /// belongs to the caller giving up, not to this side giving up early.
+    func testAnOfferJustInsideTheWindowStillRings() async {
+        let (deps, _) = deps(
+            rows: [row(11, 0x01, ageMs: Int64(LakkoCore.callRingWindowMs()) - 1)],
+            decode: offerDecode()
+        )
+        guard case .callOffer = await decryptPushOutcome(wake(), deps, nowMs: nowMs) else {
+            return XCTFail("an offer inside the window must ring")
+        }
+    }
+
+    /// A muted call that is ALSO over says it was missed, not that it is
+    /// happening: the two quiet answers are different sentences.
+    func testAMutedCallThatIsAlsoOverSaysItWasMissed() async {
+        let past = Int64(LakkoCore.callRingWindowMs()) + 1_000
+        let (deps, _) = deps(
+            rows: [row(11, 0x01, ageMs: past)],
+            decode: offerDecode(),
+            muted: true
+        )
+        guard case .callSilent(let alert) = await decryptPushOutcome(wake(), deps, nowMs: nowMs) else {
+            return XCTFail("expected a silent missed call")
+        }
+        XCTAssertEqual(alert.body, "Missed call")
     }
 
     // MARK: - An offer rings
@@ -123,7 +242,7 @@ final class NseCallAlertTests: XCTestCase {
             mirroredName: "Anna"
         )
 
-        let outcome = await decryptPushOutcome(wake(), deps)
+        let outcome = await decryptPushOutcome(wake(), deps, nowMs: nowMs)
 
         guard case .callOffer(let alert) = outcome else {
             return XCTFail("expected a call alert, got \(outcome)")
@@ -151,7 +270,7 @@ final class NseCallAlertTests: XCTestCase {
             mirroredName: "Anna"
         )
 
-        guard case .callOffer(let alert) = await decryptPushOutcome(wake(), deps) else {
+        guard case .callOffer(let alert) = await decryptPushOutcome(wake(), deps, nowMs: nowMs) else {
             return XCTFail("expected a call alert")
         }
         XCTAssertEqual(alert.body, "Video call")
@@ -171,7 +290,7 @@ final class NseCallAlertTests: XCTestCase {
             mirroredName: nil
         )
 
-        guard case .callOffer(let alert) = await decryptPushOutcome(wake(), deps) else {
+        guard case .callOffer(let alert) = await decryptPushOutcome(wake(), deps, nowMs: nowMs) else {
             return XCTFail("expected a call alert")
         }
         XCTAssertEqual(alert.title, "Incoming call")
@@ -200,7 +319,7 @@ final class NseCallAlertTests: XCTestCase {
             }
         )
 
-        let outcome = await decryptPushOutcome(wake(), deps)
+        let outcome = await decryptPushOutcome(wake(), deps, nowMs: nowMs)
         XCTAssertEqual(outcome, .callEnded(callIdHex: callIdHex))
     }
 
@@ -217,7 +336,7 @@ final class NseCallAlertTests: XCTestCase {
             }
         )
 
-        let outcome = await decryptPushOutcome(wake(), deps)
+        let outcome = await decryptPushOutcome(wake(), deps, nowMs: nowMs)
         XCTAssertEqual(outcome, .callEnded(callIdHex: otherCallIdHex))
     }
 
@@ -238,7 +357,7 @@ final class NseCallAlertTests: XCTestCase {
             mirroredName: "Anna"
         )
 
-        guard case .callOffer = await decryptPushOutcome(wake(), deps) else {
+        guard case .callOffer = await decryptPushOutcome(wake(), deps, nowMs: nowMs) else {
             return XCTFail("a call expires in seconds; the message is still there afterwards")
         }
     }
@@ -249,7 +368,7 @@ final class NseCallAlertTests: XCTestCase {
             decode: { _ in NseProcessedRow(kind: .chat, text: "hi", attachmentCount: 0) }
         )
 
-        guard case .preview(let preview) = await decryptPushOutcome(wake(), deps) else {
+        guard case .preview(let preview) = await decryptPushOutcome(wake(), deps, nowMs: nowMs) else {
             return XCTFail("expected a message preview")
         }
         XCTAssertEqual(preview.body, "hi")

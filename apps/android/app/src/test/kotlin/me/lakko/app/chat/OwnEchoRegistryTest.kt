@@ -12,6 +12,8 @@ import me.lakko.app.calls.CallSession
 import me.lakko.app.calls.IncomingCallRing
 import me.lakko.app.calls.IncomingCallRingPort
 import me.lakko.app.calls.OneToOneCallHost
+import me.lakko.app.calls.OneToOneCallTiming
+import me.lakko.app.calls.TEST_RING_WINDOW_MS
 import me.lakko.app.calls.OneToOneCallKey
 import me.lakko.app.calls.OneToOneCallPort
 import me.lakko.app.calls.OneToOneCallSession
@@ -146,6 +148,7 @@ class OwnEchoRegistryTest {
             // A fixed clock, so the offer below is exactly as old as the test
             // says rather than as old as the wall clock happens to make it.
             clock = { NOW_MS },
+            timing = OneToOneCallTiming(ringTimeoutMs = TEST_RING_WINDOW_MS),
             warn = { _, _ -> },
         )
         host.attach(FakePort())

@@ -195,7 +195,10 @@ function makeSession(): CallSession {
     onStateChange: () => {},
     onVideoPublishState: () => {},
   };
-  const session = new CallSession(new Uint8Array(16), callbacks, {}, {
+  // The ring window has no default (it is the shared rule's, and both
+  // devices must use the same one), so it is supplied even where the test
+  // never reaches a timer.
+  const session = new CallSession(new Uint8Array(16), callbacks, { ringTimeoutMs: 45_000 }, {
     supported: () => true,
     attachSender: () => {},
     attachReceiver: () => {},

@@ -2,18 +2,18 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Inbound call-signaling delivery: exactly once, in order, one at a time; the
- * C-11 route table; the stale-offer gate.
+ * Inbound call-signaling delivery: exactly once, in order, one at a time, and
+ * the C-11 route table.
+ *
+ * The stale-offer gate used to be here too, against a 60 s constant this
+ * module owned. It is gone: how old is too old is one half of the shared ring
+ * rule (`crates/lakko-ui-rules/src/ring.rs`), whose window is the 45 s the
+ * call session arms its timers from. `ring-rule.test.ts` covers the seam onto
+ * it.
  */
 import { describe, expect, it } from "vitest";
 
-import {
-  callIdHex,
-  isStaleOffer,
-  routeSignalingKind,
-  SerialOnceQueue,
-  STALE_OFFER_MS,
-} from "./call-signaling-dispatch";
+import { callIdHex, routeSignalingKind, SerialOnceQueue } from "./call-signaling-dispatch";
 
 interface Row {
   readonly messageId: number;
@@ -146,27 +146,6 @@ describe("routeSignalingKind (C-11)", () => {
   it("an unknown kind is dropped, not guessed at", () => {
     expect(routeSignalingKind("groupMute")).toBe("drop");
     expect(routeSignalingKind("")).toBe("drop");
-  });
-});
-
-describe("isStaleOffer", () => {
-  const now = Date.parse("2026-09-13T12:00:00.000Z");
-
-  it("rings for a fresh offer", () => {
-    expect(isStaleOffer("2026-09-13T11:59:30.000Z", now)).toBe(false);
-  });
-
-  it("does not ring for an offer older than the window", () => {
-    expect(
-      isStaleOffer(new Date(now - STALE_OFFER_MS - 1).toISOString(), now),
-    ).toBe(true);
-    expect(isStaleOffer(new Date(now - STALE_OFFER_MS).toISOString(), now)).toBe(
-      false,
-    );
-  });
-
-  it("does not ring when the row's age cannot be read", () => {
-    expect(isStaleOffer("not a timestamp", now)).toBe(true);
   });
 });
 

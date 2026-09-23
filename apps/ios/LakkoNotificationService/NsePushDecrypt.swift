@@ -110,10 +110,16 @@ public struct NseResolvedAccount: Equatable {
 public struct NseFetchedRow: Equatable {
     public let id: Int64
     public let payload: Data
+    /// The DS row's server-assigned `created_at`, which is the only clock the
+    /// ring window may be measured against (`docs/ux/calls.md` section 2.1).
+    /// Empty when the fetch could not read one — an age that cannot be
+    /// established is treated as past the window.
+    public let createdAt: String
 
-    public init(id: Int64, payload: Data) {
+    public init(id: Int64, payload: Data, createdAt: String = "") {
         self.id = id
         self.payload = payload
+        self.createdAt = createdAt
     }
 }
 
@@ -234,6 +240,10 @@ public enum NsePushOutcome: Equatable {
     case preview(NsePushPreview)
     /// A call is ringing.
     case callOffer(NseCallAlert)
+    /// A call that must not interrupt: the conversation is muted, or the
+    /// caller has already given up. Recorded, passively — see
+    /// ``NseCallAlert/passive``.
+    case callSilent(NseCallAlert)
     /// A call this device may be showing an alert for is over.
     case callEnded(callIdHex: String)
     /// Nothing to say — the extension shows its generic fallback.
@@ -328,10 +338,22 @@ public protocol NsePushDecryptDeps {
     /// Defaulted so the decrypt core keeps compiling against a dependency
     /// object that predates calls; `nil` simply means the alert is unnamed.
     func callerName(groupIdHex: String) -> String?
+
+    /// `docs/ux/calls.md` section 2.1 — does this conversation carry the mute
+    /// flag? Read from the App Group mirror the APP writes
+    /// (``ConversationMuteMirror``); this process holds no thread flags and
+    /// writes none (C-59).
+    ///
+    /// Defaulted `false`, and the direction is the decision: a missing mirror,
+    /// an unprovisioned suite or a dependency object that predates mute all
+    /// answer "not muted", so the call rings. Failing the other way would
+    /// swallow calls because a file was not there.
+    func isMuted(groupIdHex: String) -> Bool
 }
 
 public extension NsePushDecryptDeps {
     func callerName(groupIdHex: String) -> String? { nil }
+    func isMuted(groupIdHex: String) -> Bool { false }
 }
 
 /// Produce a real decrypted notification preview for a GroupMessage wake, or
@@ -365,9 +387,14 @@ public func decryptPushPreview(
 /// A call that is already over never rings: within one batch an `end` for a
 /// call supersedes its own `offer`, which is the common case for a caller who
 /// gave up while this device was asleep.
+/// `nowMs` is the clock the ring window is measured against. Defaulted to this
+/// device's, and a parameter only so a test can place an offer on either side
+/// of the window; the AGE it is compared with still comes from the DS row's own
+/// server-assigned stamp, never from anything a caller wrote.
 public func decryptPushOutcome(
     _ wake: NsePushWake?,
-    _ deps: NsePushDecryptDeps
+    _ deps: NsePushDecryptDeps,
+    nowMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)
 ) async -> NsePushOutcome {
     // 0. Anti-censorship gate (ADR-0041 Finding-1). If the user has ARMED
     //    anti-censorship (to avoid direct connections to Lakko infra in a
@@ -477,26 +504,52 @@ public func decryptPushOutcome(
     //    (see this function's docs): the newest call event decides, and an
     //    `end` for a call cancels its own `offer` from the same batch.
     var latest: NsePushPreview?
-    var latestCall: NseProcessedRow?
+    var latestCall: (row: NseProcessedRow, createdAt: String)?
     for row in rows {
         guard let processed = group.process(row.payload) else { continue }
         switch processed.kind {
         case .callOffer, .callEnd:
-            latestCall = processed
+            latestCall = (row: processed, createdAt: row.createdAt)
         default:
             guard let body = previewBody(of: processed) else { continue }
             latest = NsePushPreview(title: "Lakko", body: body, tag: realGroupHex)
         }
     }
-    if let latestCall, let callIdHex = latestCall.callIdHex {
-        switch latestCall.kind {
+    if let latestCall, let callIdHex = latestCall.row.callIdHex {
+        switch latestCall.row.kind {
         case .callOffer(let video):
-            return .callOffer(NseCallAlert(
-                title: deps.callerName(groupIdHex: realGroupHex) ?? nseUnknownCallerTitle,
-                body: nseCallKindLabel(video: video),
-                callIdHex: callIdHex,
-                tag: realGroupHex
-            ))
+            let title = deps.callerName(groupIdHex: realGroupHex) ?? nseUnknownCallerTitle
+            // `docs/ux/calls.md` section 2.1, through the one rule every
+            // client runs. The age is the DS row's own stamp — this fetch is a
+            // catch-up from the app's cursor, so the newest call row here can
+            // easily be an offer from a call that is long over.
+            let verdict = nseRingVerdict(
+                muted: deps.isMuted(groupIdHex: realGroupHex),
+                createdAt: latestCall.createdAt,
+                nowMs: nowMs)
+            switch verdict {
+            case .ring:
+                return .callOffer(NseCallAlert(
+                    title: title,
+                    body: nseCallKindLabel(video: video),
+                    callIdHex: callIdHex,
+                    tag: realGroupHex
+                ))
+            case .silent:
+                return .callSilent(NseCallAlert(
+                    title: title,
+                    body: nseCallKindLabel(video: video),
+                    callIdHex: callIdHex,
+                    tag: realGroupHex
+                ))
+            case .tooLate:
+                return .callSilent(NseCallAlert(
+                    title: title,
+                    body: nseMissedCallBody,
+                    callIdHex: callIdHex,
+                    tag: realGroupHex
+                ))
+            }
         case .callEnd:
             return .callEnded(callIdHex: callIdHex)
         default:
@@ -506,6 +559,57 @@ public func decryptPushOutcome(
     if let latest { return .preview(latest) }
     return .none
 }
+
+// MARK: - Ringing
+
+/// What an arriving offer does in the extension. A mirror of
+/// `LakkoCore.RingDecision`, for the one process that cannot ask it.
+public enum NseRingVerdict: Equatable {
+    /// Ring: a call-shaped alert with a ringtone.
+    case ring
+    /// Record it, interrupt nobody. The conversation is muted.
+    case silent
+    /// The caller has already given up. A missed call, shown passively.
+    case tooLate
+}
+
+/// `docs/ux/calls.md` section 2.1, applied in the extension.
+///
+/// ## Why this is a second copy of a rule that has one home
+///
+/// It should be `LakkoCore.ringDecision(muted:offerAgeMs:)` and it is not,
+/// for a build-shape reason rather than a design one: the notification-service
+/// extension links `LakkoCoreExtension` — the slim decrypt-only FFI of
+/// ADR-0041 Phase 2, which exists because the full framework does not fit the
+/// extension's memory budget — and that surface does not carry the ring rule.
+/// The app and the CallKit path both call the Rust function directly; only
+/// this process cannot.
+///
+/// So the copy is kept honest from the outside instead: `NseRingRuleTests`
+/// runs this function and `LakkoCore.ringDecision` side by side over the
+/// window's boundary and both mute values, in the test target, which links the
+/// full framework. A change to the Rust rule that this does not follow fails
+/// that test rather than a phone. Exporting the rule on the slim surface would
+/// retire the copy and the test with it.
+///
+/// `createdAt` is the DS row's server stamp, never a local clock: an age that
+/// cannot be read is treated as past the window, because an age that cannot be
+/// established is not one the window can be measured against.
+public func nseRingVerdict(muted: Bool, createdAt: String, nowMs: Int64) -> NseRingVerdict {
+    guard let ageMs = DsTimestamp.ageMs(createdAt: createdAt, nowMs: nowMs) else {
+        return .tooLate
+    }
+    if ageMs >= nseCallRingWindowMs { return .tooLate }
+    return muted ? .silent : .ring
+}
+
+/// The ring window in milliseconds, as this process knows it. See
+/// ``nseRingVerdict(muted:createdAt:nowMs:)`` for why it is written here and
+/// not read from the core, and for the test that keeps it equal.
+public let nseCallRingWindowMs: UInt64 = 45_000
+
+/// What a passive call notification says when the call is already over.
+public let nseMissedCallBody = "Missed call"
 
 // MARK: - Call wording
 

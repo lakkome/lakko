@@ -65,6 +65,22 @@
  *     decrypt failure, an unhandled Wakeup / MailboxMessage kind)
  *     degrades to the generic "New message" notification. The push
  *     handler never throws (a thrown handler drops the notification).
+ *   * A decrypted CALL offer rings (`docs/ux/calls.md` §2.1, §7) — and
+ *     is announced WITHOUT ringing when the conversation is muted. The
+ *     mute flag is read from the app's encrypted `lakko-device-sync`
+ *     row, unwrapped under the same device key, and is the one read
+ *     here that FAILS OPEN: a miss rings rather than silences.
+ *
+ * ## Every store this worker touches, and in which direction
+ *
+ * All READS, in `readonly` transactions, opened without a version so
+ * the worker can never trigger a schema change (C-59 / ADR-0041):
+ * `lakko-push-routing`/`routes`, `lakko-mls`/`snapshots`,
+ * `lakko-auth`/`device_keys`, `lakko-account-identity-seed`/`seeds`,
+ * `lakko-message-log`/`logs`, `lakko-profiles`/`rows` and
+ * `lakko-device-sync`/`rows`. There is NO write path anywhere in this
+ * file, and the decrypt core is handed no capability that could
+ * introduce one.
  */
 
 // Replaced by `scripts/build-sw.mjs` after `vite build`.
@@ -364,7 +380,9 @@ async function handlePush(wake) {
  *     `requireInteraction`, vibration, the two buttons, and the precomputed
  *     per-button intents) comes from `callRingNotification`, so what a button
  *     means is decided in a pure, tested function rather than in the click
- *     handler.
+ *     handler. An offer the decrypt classified as SILENT — the conversation
+ *     is muted (`docs/ux/calls.md` section 2.1) — takes the same path through
+ *     `callSilentNotification` instead: announced, never interrupting.
  *   * **end** — the caller cancelled, the callee answered elsewhere, or the
  *     call was declined. Any ring showing for THAT call id is closed. Nothing
  *     new is shown: a notification saying a call is over is not something
@@ -393,7 +411,13 @@ async function handleCallNotice(call) {
       for (const n of showing) n.close();
       return;
     }
-    const { title, options } = core.callRingNotification(call);
+    // `docs/ux/calls.md` section 2.1 — a muted conversation is announced
+    // without being allowed to interrupt: silent, no vibration, no buttons,
+    // nothing that demands interaction. Still the same tag, so the end wake
+    // above takes it down either way.
+    const { title, options } = call.silent === true
+      ? core.callSilentNotification(call)
+      : core.callRingNotification(call);
     await self.registration.showNotification(title, options);
   } catch {
     // Best-effort, exactly as the message path is.
@@ -568,6 +592,28 @@ function buildDecryptDeps(wasm, core) {
         }
       }
       return null;
+    },
+    // `docs/ux/calls.md` section 2.1 — is this conversation muted? READ-ONLY:
+    // the encrypted cross-device sync row the app wrote
+    // (`src/devices/sync/sync-state-idb.ts`), unwrapped under the same device
+    // key the snapshot and the message log already use here. The SW never
+    // writes it and never publishes a flag (C-59).
+    //
+    // FAILS TOWARD RINGING — `null` on every miss, and the core treats a
+    // throw the same way. The muted set is the ONE read on this path whose
+    // failure must not be fail-closed: a call silenced because IndexedDB did
+    // not open is a call the person never learns about, which is far worse
+    // than a ring they did not want.
+    lookupMuted: async (accountId, deviceKey, groupHex) => {
+      const row = await idbGet("lakko-device-sync", "rows", accountId);
+      if (row === undefined || row.ciphertext === undefined) return null;
+      try {
+        const plain = await aesGcmUnwrap(deviceKey, row.ciphertext);
+        const payload = JSON.parse(new TextDecoder().decode(plain));
+        return core.mutedFromSyncStateRow(payload, groupHex);
+      } catch {
+        return null;
+      }
     },
     // Non-extractable AES-GCM device root key (usable for decrypt).
     getDeviceKey: async (accountId) => {

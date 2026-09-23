@@ -148,26 +148,15 @@ export function routeSignalingKind(kind: string): SignalingRoute {
   }
 }
 
-/** An offer older than this (by the DS row timestamp) does not ring. */
-export const STALE_OFFER_MS = 60_000;
-
-/**
- * Is an incoming offer too old to ring for?
- *
- * Judged on the DS row's server timestamp, never on anything the caller
- * stamped: a tab that was closed or hidden for ten minutes must not open onto
- * a call that ended long ago. An unreadable timestamp is treated as stale — a
- * call whose age cannot be established does not ring.
+/*
+ * The staleness rule used to live here, as `STALE_OFFER_MS = 60_000` and an
+ * `isStaleOffer` helper. It is gone: "how old is too old" is one half of the
+ * shared ring rule (`crates/lakko-ui-rules/src/ring.rs`, reached through
+ * `calls/ring-rule.ts`), whose window is 45 s — the same number
+ * `call-session.ts` arms its ring timer from. The two constants disagreed, so
+ * an offer between 45 s and 60 s old rang here for a call the caller had
+ * already given up on and recorded as missed.
  */
-export function isStaleOffer(
-  rowCreatedAt: string,
-  nowMs: number,
-  maxAgeMs: number = STALE_OFFER_MS,
-): boolean {
-  const createdMs = Date.parse(rowCreatedAt);
-  if (Number.isNaN(createdMs)) return true;
-  return nowMs - createdMs > maxAgeMs;
-}
 
 /** Lowercase hex of a byte string — the record / dedup key for a call id. */
 export function callIdHex(bytes: Uint8Array): string {

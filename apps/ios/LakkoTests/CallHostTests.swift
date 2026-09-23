@@ -48,6 +48,9 @@ final class CallHostTests: XCTestCase {
         /// `session.dial`, so no peer connection is ever built here.
         var placed: [(audio: Bool, video: Bool)] = []
         var hasCamera = true
+        /// `docs/ux/calls.md` section 2.1 — the conversations this device has
+        /// muted, as the host's ``CallHost/Ports/isMuted`` port answers.
+        var mutedGroups: Set<String> = []
         init(nowMs: Int64) { self.nowMs = nowMs }
 
         @MainActor
@@ -78,6 +81,7 @@ final class CallHostTests: XCTestCase {
             peerName: { _ in "Alice" },
             mintCallId: { Data(repeating: 0x0C, count: 16) },
             recordCall: { call in h.recorded.append(call) },
+            isMuted: { h.mutedGroups.contains($0) },
             hasCamera: { h.hasCamera },
             placeCall: { _, audio, video in h.placed.append((audio, video)) }
         ))
@@ -193,22 +197,103 @@ final class CallHostTests: XCTestCase {
     func testAStaleOfferDoesNotRingAndIsNotAnsweredBusy() async {
         let h = Harness(nowMs: t0)
         let host = makeHost(h)
-        host.receive(row(offer(callA), group: groupA, id: 1, atMs: t0 - 61_000))
-        XCTAssertNil(host.activeCall, "an offer older than 60 s by its DS row must not ring")
+        let window = Int64(CallHostRouting.ringWindowMs)
+        host.receive(row(offer(callA), group: groupA, id: 1, atMs: t0 - window))
+        XCTAssertNil(host.activeCall, "an offer at the ring window must not ring")
 
         host.receive(InboundCallRow(groupIdHex: groupA, messageId: 2, createdAt: "not a time", body: offer(callA)))
         XCTAssertNil(host.activeCall, "an offer whose age cannot be read must not ring")
 
-        host.receive(row(offer(callB), group: groupB, id: 3, atMs: t0 - 59_000))
-        XCTAssertEqual(host.activeCall?.state, .ringing, "a 59 s old offer still rings")
+        host.receive(row(offer(callB), group: groupB, id: 3, atMs: t0 - (window - 1_000)))
+        XCTAssertEqual(host.activeCall?.state, .ringing, "an offer inside the window still rings")
         await host.whenPublishesSettle()
         XCTAssertTrue(endReasons(h).isEmpty)
     }
 
+    /// The age is read off the DS row, and the boundary belongs to the caller
+    /// giving up — at exactly the window this side must not still be offering
+    /// an answer to a call nobody is on.
     func testTheStaleRuleReadsTheRowTimeNotTheLocalClockAlone() {
-        XCTAssertFalse(CallHostRouting.isStaleOffer(createdAt: dsTime(t0 - 60_000), nowMs: t0))
-        XCTAssertTrue(CallHostRouting.isStaleOffer(createdAt: dsTime(t0 - 60_001), nowMs: t0))
-        XCTAssertTrue(CallHostRouting.isStaleOffer(createdAt: "", nowMs: t0))
+        let window = Int64(CallHostRouting.ringWindowMs)
+        XCTAssertEqual(CallHostRouting.offerAgeMs(createdAt: dsTime(t0 - 5_000), nowMs: t0), 5_000)
+        XCTAssertNil(CallHostRouting.offerAgeMs(createdAt: "", nowMs: t0))
+        // A server clock reading ahead of this device yields zero, never a
+        // negative age that would ring past the window.
+        XCTAssertEqual(CallHostRouting.offerAgeMs(createdAt: dsTime(t0 + 9_000), nowMs: t0), 0)
+        XCTAssertEqual(
+            CallHostRouting.decide(
+                row: row(offer(callA), group: groupA, id: 1, atMs: t0 - (window - 1)),
+                nowMs: t0, active: nil, endedCallIds: [], otherCallBusy: false),
+            .ring)
+        XCTAssertEqual(
+            CallHostRouting.decide(
+                row: row(offer(callA), group: groupA, id: 1, atMs: t0 - window),
+                nowMs: t0, active: nil, endedCallIds: [], otherCallBusy: false),
+            .drop)
+    }
+
+    /// The window is the shared one, not a second copy of the number: it is a
+    /// value the CALLER'S device has to agree with, and a drift means one side
+    /// files a missed call while the other is still ringing.
+    func testTheRingWindowIsTheSharedOne() {
+        XCTAssertEqual(CallHostRouting.ringWindowMs, LakkoCore.callRingWindowMs())
+        XCTAssertEqual(CallHostTiming().ringTimeoutMs, Int64(LakkoCore.callRingWindowMs()))
+    }
+
+    // MARK: - A muted conversation
+
+    /// `docs/ux/calls.md` section 2.1. No session, no screen, no sound — and a
+    /// history row all the same, because the person still gets to find out who
+    /// tried to reach them.
+    func testAMutedConversationRecordsTheCallWithoutRinging() async {
+        let h = Harness(nowMs: t0)
+        h.mutedGroups = [groupA]
+        let host = makeHost(h)
+
+        host.receive(row(offer(callA, video: true), group: groupA, id: 1, atMs: t0 - 2_000))
+
+        XCTAssertNil(host.activeCall, "a muted conversation must not open a ringing session")
+        XCTAssertEqual(h.recorded.count, 1)
+        XCTAssertEqual(h.recorded.first?.groupIdHex, groupA)
+        XCTAssertEqual(h.recorded.first?.row.direction, .incoming)
+        XCTAssertEqual(h.recorded.first?.row.outcome, .missed)
+        // Calling back repeats the mode the caller asked for.
+        XCTAssertEqual(h.recorded.first?.video, true)
+        // Filed at the moment it happened, by the server's stamp, not whenever
+        // this device got round to reading the row.
+        XCTAssertEqual(h.recorded.first?.startedAtMs, t0 - 2_000)
+
+        await host.whenPublishesSettle()
+        XCTAssertTrue(endReasons(h).isEmpty, "a muted call is not answered busy or declined")
+    }
+
+    /// Recorded ONCE. A journal is re-read on every catch-up, so a second
+    /// delivery of the same offer must not file a second missed call.
+    func testAMutedCallIsRecordedOnlyOnce() async {
+        let h = Harness(nowMs: t0)
+        h.mutedGroups = [groupA]
+        let host = makeHost(h)
+
+        host.receive(row(offer(callA), group: groupA, id: 1, atMs: t0 - 2_000))
+        host.receive(row(offer(callA), group: groupA, id: 2, atMs: t0 - 1_000))
+
+        XCTAssertEqual(h.recorded.count, 1)
+        await host.whenPublishesSettle()
+    }
+
+    /// Muting one conversation silences that one. The next chat still rings,
+    /// which is the difference between a mute and a broken ring path.
+    func testAnUnmutedConversationStillRingsBesideAMutedOne() async {
+        let h = Harness(nowMs: t0)
+        h.mutedGroups = [groupA]
+        let host = makeHost(h)
+
+        host.receive(row(offer(callA), group: groupA, id: 1, atMs: t0 - 2_000))
+        XCTAssertNil(host.activeCall)
+
+        host.receive(row(offer(callB), group: groupB, id: 1, atMs: t0 - 2_000))
+        XCTAssertEqual(host.activeCall?.state, .ringing)
+        await host.whenPublishesSettle()
     }
 
     // MARK: - One call at a time

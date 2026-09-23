@@ -140,6 +140,15 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
         CallPeerNameMirror.name(groupIdHex: groupIdHex)
     }
 
+    /// `docs/ux/calls.md` section 2.1 — the App Group muted-conversation
+    /// mirror the app writes. READ-ONLY, like every other method here: this
+    /// process holds no thread flags and writes none (C-59). Absent → not
+    /// muted → the call rings, which is the only direction a missing mirror
+    /// may fail in.
+    func isMuted(groupIdHex: String) -> Bool {
+        ConversationMuteMirror.isMuted(groupIdHex: groupIdHex)
+    }
+
     /// Decode a lowercase-hex string into bytes. `nil` on any malformed input
     /// (odd length, non-hex char).
     static func hexToData(_ hex: String) -> Data? {
@@ -467,7 +476,16 @@ enum NseDsFetch {
         let decoded = try JSONDecoder().decode(FetchWireResponse.self, from: data)
         return decoded.messages.compactMap { message in
             guard let payload = Data(base64Encoded: message.payloadB64) else { return nil }
-            return NseFetchedRow(id: message.id, payload: payload)
+            // `created_at` is carried because a call's age is measured against
+            // the SERVER's stamp and nothing else — this is a catch-up fetch
+            // from the app's cursor, so the newest call row can easily be an
+            // offer from a call that is long over. A response without the
+            // field yields an empty string, which reads as an unestablishable
+            // age and so as past the ring window.
+            return NseFetchedRow(
+                id: message.id,
+                payload: payload,
+                createdAt: message.createdAt ?? "")
         }
     }
 
@@ -494,10 +512,15 @@ enum NseDsFetch {
     private struct FetchWireMessage: Decodable {
         let id: Int64
         let payloadB64: String
+        /// Optional so a response that omits it decodes rather than throwing
+        /// away the whole batch; an absent stamp becomes an unreadable age,
+        /// which the ring rule treats as past the window.
+        let createdAt: String?
 
         enum CodingKeys: String, CodingKey {
             case id
             case payloadB64 = "payload_b64"
+            case createdAt = "created_at"
         }
     }
 

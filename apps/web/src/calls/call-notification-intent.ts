@@ -85,11 +85,16 @@ export type CallActionDecision =
  * A cold open has to wait: the page boots, the session is restored, and the
  * background receive has to poll the offer off the DS journal before anything
  * is ringing to accept. But an intent is only worth holding for as long as
- * the call it names can still be ringing, and that is the 45 s ring timeout —
- * so this is a READ of `DEFAULT_CALL_SESSION_TIMING.ringTimeoutMs`, not a
- * second timeout beside it, plus a little slack for the boot itself. Nothing
- * here changes when the ring gives up; it only stops this module from holding
- * an intent that can no longer match anything.
+ * the call it names can still be ringing, and that is the shared ring window
+ * (`lakko_ui_rules::ring::CALL_RING_WINDOW_MS`, 45 s) plus a little slack for
+ * the boot itself.
+ *
+ * It is deliberately NOT the window itself, and so deliberately not read from
+ * the rule: it is an upper bound on how long to keep a scrap of untrusted
+ * input around, and it only has to be AT LEAST the window. Nothing here
+ * changes when the ring gives up — the call ends on its own timer either way;
+ * this only stops the module from holding an intent that can no longer match
+ * anything.
  */
 export const CALL_ACTION_MAX_WAIT_MS = 50_000;
 

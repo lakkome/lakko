@@ -124,6 +124,8 @@ public final class NotificationService: UNNotificationServiceExtension {
                 self.deliver(best)
             case .callOffer(let alert):
                 self.deliverCallAlert(alert, into: best)
+            case .callSilent(let alert):
+                self.deliverSilentCallAlert(alert, into: best)
             case .callEnded(let callIdHex):
                 await self.deliverCallEnded(callIdHex: callIdHex, into: best)
             case .none:
@@ -159,12 +161,57 @@ public final class NotificationService: UNNotificationServiceExtension {
         // A ringtone, not the message chime: this is a call.
         best.sound = .defaultRingtone
         // Breaks through Focus / Do Not Disturb when the user has allowed
-        // Lakko to. `docs/ux/calls.md` section 2.1 keeps a muted chat silent —
-        // and it stays silent, because a muted chat is not woken at all.
+        // Lakko to.
+        //
+        // A muted conversation never reaches this method. It used to — this
+        // comment claimed "a muted chat is not woken at all", which no code
+        // anywhere supported: the gateway wakes every device the same way, and
+        // nothing on this path had ever read the mute flag. A muted chat rang
+        // a closed phone at full volume for as long as that sentence stood.
+        // The flag is now read (``NsePushDecryptDeps/isMuted(groupIdHex:)``,
+        // through the App Group mirror) and a muted call lands in
+        // ``deliverSilentCallAlert(_:into:)`` instead.
         best.interruptionLevel = .timeSensitive
         var info = best.userInfo
         info[LakkoCallNotification.callIdUserInfoKey] = alert.callIdHex
         best.userInfo = info
+        deliver(best)
+    }
+
+    /// A call that must not interrupt: the conversation is muted, or the
+    /// caller gave up before this wake was decrypted
+    /// (`docs/ux/calls.md` section 2.1).
+    ///
+    /// ## Why anything is shown at all
+    ///
+    /// Because showing nothing is not available and would be wrong if it were.
+    /// The extension MUST call `contentHandler`, so some notification is going
+    /// to be delivered; and section 2.1 withholds the INTERRUPTION, not the
+    /// record. On this platform the record is the only thing this process can
+    /// leave behind at all — it may not write (C-59), so it cannot file the
+    /// call-history row the app files on its own receive path, and a call that
+    /// arrived while the app was closed could otherwise leave no trace
+    /// anywhere.
+    ///
+    /// ## What makes it passive rather than a call
+    ///
+    /// No sound, and `.passive` — it does not light the screen, does not push
+    /// past a Focus, and waits in the list. And deliberately NOT the call
+    /// category and NOT the call-id key: those two are how the app's
+    /// notification delegate recognises a RINGING call and how the "call
+    /// ended" arm takes its alert back down. Wearing them, this would either
+    /// offer to answer a call nobody is on, or erase itself the moment the
+    /// call ended — which is exactly the record it exists to keep.
+    private func deliverSilentCallAlert(
+        _ alert: NseCallAlert,
+        into best: UNMutableNotificationContent
+    ) {
+        best.title = alert.title
+        best.body = alert.body
+        best.threadIdentifier = alert.tag
+        best.categoryIdentifier = ""
+        best.sound = nil
+        best.interruptionLevel = .passive
         deliver(best)
     }
 

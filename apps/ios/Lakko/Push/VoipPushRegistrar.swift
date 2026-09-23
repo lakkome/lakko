@@ -3,6 +3,7 @@
 
 import CallKit
 import Foundation
+import LakkoCore
 import PushKit
 import os
 
@@ -37,10 +38,16 @@ final class VoipPushRegistrar: NSObject {
 
     private static let log = Logger(subsystem: "me.lakko", category: "voip-push")
 
-    /// How long a placeholder call may ring without the offer arriving. The
-    /// ring window of `docs/ux/calls.md` section 2.1, so a wake whose signaling
-    /// row never lands stops ringing at the same moment the caller gives up.
-    private static let placeholderRingWindow: TimeInterval = 45
+    /// How long a placeholder call may ring without the offer arriving.
+    ///
+    /// The ring window of `docs/ux/calls.md` section 2.1, read from
+    /// ``CallHostRouting/ringWindowMs`` — the one place the number lives — so a
+    /// wake whose signaling row never lands stops ringing at the same moment
+    /// the caller gives up. It used to be a second literal `45` here, which is
+    /// a number this device and the CALLER'S have to agree on.
+    private static var placeholderRingWindow: TimeInterval {
+        TimeInterval(CallHostRouting.ringWindowMs) / 1000
+    }
 
     /// Kick the receive path for a wake, so the offer behind it is fetched and
     /// decrypted. Set by the composition root; a registrar with no wake hook
@@ -143,8 +150,29 @@ final class VoipPushRegistrar: NSObject {
     /// `completion` is the PushKit handler's; it is called from inside the
     /// CallKit report's own completion so the platform rule holds by
     /// construction rather than by ordering luck.
+    ///
+    /// ## Why a muted call is reported and then ended, rather than not reported
+    ///
+    /// The obvious implementation of "a muted chat never rings" — look the
+    /// conversation up and return without reporting — is the one thing this
+    /// path may not do. iOS terminates an app that takes a VoIP push without
+    /// reporting a call, and after a few offences stops delivering VoIP pushes
+    /// to it at all, which would break ringing for every conversation including
+    /// the unmuted ones. Nor is there a report that does not ring: a
+    /// `CXProviderConfiguration` is set up once for the whole provider, so
+    /// there is no per-call silent variant to choose, and the system call
+    /// screen takes over the phone regardless — which is itself one of the
+    /// interruptions section 2.1 withholds.
+    ///
+    /// So the call is reported, exactly as the platform demands, and ended in
+    /// the SAME completion handler before the push handler returns. That is
+    /// Apple's own shape for a call the app decides not to present. The system
+    /// gets its report; the person gets no call screen and no ringtone; and the
+    /// call is still recorded, because the app's own receive path is running
+    /// and ``CallHost`` files the history row when the offer lands.
     private func handleIncoming(payload: [AnyHashable: Any], completion: @escaping () -> Void) {
         let wake = VoipWakePayload.parse(payload)
+        let silent = Self.wakeIsMuted(wake)
         let uuid = UUID()
         if let superseded = registry.placeholderReported(uuid) {
             // A previous wake's call never materialised. Ending it here keeps
@@ -155,21 +183,66 @@ final class VoipPushRegistrar: NSObject {
         provider.reportIncomingCall(uuid: uuid, update: IncomingCallReport.placeholder()) {
             [weak self] error in
             if let error {
+                // The report was refused. CallKit has no call under this UUID,
+                // so neither may we — and nothing needs ending.
                 Self.log.error("voip call report failed: \(error.localizedDescription)")
-                // A hop rather than `assumeIsolated`: this completion's queue
-                // is CallKit's to choose. Only `completion()` below is
+            }
+            if error != nil || silent {
+                // A hop rather than `assumeIsolated`: this completion runs on
+                // CallKit's own queue, and everything inside touches
+                // main-actor state. Only `completion()` below is
                 // timing-critical, and it does not wait for this.
                 Task { @MainActor in
-                    self?.registry.release(uuid: uuid)
-                    self?.placeholderTimeout?.cancel()
+                    guard let self else { return }
+                    if error == nil {
+                        // A muted conversation. The report has landed, so the
+                        // platform rule is satisfied; take the call straight
+                        // back down. `.unanswered` rather than
+                        // `.declinedElsewhere` — nobody refused this call, it
+                        // simply was not put in front of anyone here.
+                        self.provider.reportEnded(uuid: uuid, reason: .unanswered)
+                    }
+                    self.registry.release(uuid: uuid)
+                    self.placeholderTimeout?.cancel()
                 }
             }
             completion()
         }
         // The fetch is started AFTER the report, never before: nothing here may
         // delay the report, and this work continues perfectly well once the
-        // handler has returned.
+        // handler has returned. It runs for a muted conversation too — that is
+        // what records the call.
         onWake?(wake)
+    }
+
+    /// Is the conversation this wake points at muted?
+    ///
+    /// `docs/ux/calls.md` section 2.1, through the one rule
+    /// (`LakkoCore.ringDecision`). The age argument is `0` and that is not a
+    /// placeholder: a VoIP wake carries an opaque routing id and a journal
+    /// pointer and NO timestamp (invariants #2 and #5), so the only thing
+    /// knowable at report time is the mute flag. Whether the offer behind it is
+    /// already past the window is answered twice over by the code that does
+    /// know — ``CallHostRouting/decide(row:nowMs:active:endedCallIds:otherCallBusy:muted:)``
+    /// on the real row, and ``armPlaceholderTimeout(uuid:)`` if the row never
+    /// arrives.
+    ///
+    /// Every failure to resolve the conversation answers "not muted", so the
+    /// call rings: an unknown wake must ring rather than be swallowed.
+    /// `defaults` is the App Group suite the mute mirror lives in, a parameter
+    /// only so a test can supply its own.
+    static func wakeIsMuted(
+        _ wake: VoipWakePayload,
+        routes: PushRoutingStore = PushRoutingStore(),
+        defaults: UserDefaults? = SharedStorage.sharedDefaults()
+    ) -> Bool {
+        guard let wakeHex = wake.groupHex else { return false }
+        // ADR-0042 — `g` is an opaque `push_gid`; the reverse index turns it
+        // back into the real group. A miss falls back to reading it as a raw
+        // group id, which is what the pre-Sprint-3 wake carried.
+        let groupIdHex = routes.lookupRoute(pushGidHex: wakeHex)?.groupIdHex ?? wakeHex
+        let muted = ConversationMuteMirror.isMuted(groupIdHex: groupIdHex, defaults: defaults)
+        return LakkoCore.ringDecision(muted: muted, offerAgeMs: 0) == .silent
     }
 
     private func armPlaceholderTimeout(uuid: UUID) {

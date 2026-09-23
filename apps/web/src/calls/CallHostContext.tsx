@@ -111,6 +111,8 @@ import { DiscoveryClient } from "../discovery/client";
 import { TurnCredentialClient } from "./turn-credential-client";
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
+import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
+import { ringRulesOf, ringVerdictFor } from "./ring-rule";
 import { ChatClient } from "../chat/client";
 import { makeCallSignalingPublisher } from "../chat/call-signaling-publish";
 import { readIsActive } from "../chat/membership-ended";
@@ -430,6 +432,24 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   /** How many `/c/` route views are showing the link call. */
   const [linkViewClaims, setLinkViewClaims] = createSignal(0);
 
+  /**
+   * `docs/ux/calls.md` section 2.1 — "a muted chat never rings".
+   *
+   * The mute flag is per conversation, travels between a person's devices on
+   * the DeviceGroup journal, and is the same one the conversation list draws
+   * (`devices/sync/state.ts` `FlagsState`). Reading it here is the whole of
+   * what was missing: it was stored, synced and drawn, and no ring path
+   * consulted it.
+   */
+  const sync = useDeviceGroupSync();
+
+  /**
+   * The ringing 1x1 call is muted: it happens and it is recorded, but it does
+   * not interrupt (no ringtone, no vibration, no screen that takes over the
+   * tab). Read by {@link CallHostView}.
+   */
+  const [silentRing, setSilentRing] = createSignal(false);
+
   let activeCall: CallSession | null = null;
   /** The session that last occupied the slot. Unlike `activeCall` it is NOT
    *  cleared on `done`: `CallSession` reports `done` twice when it ends — once
@@ -514,6 +534,23 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     const s = auth.state();
     return s.kind === "session" ? s.account.accountId : null;
   };
+
+  /**
+   * Is this conversation muted?
+   *
+   * Reads the synced per-conversation flag the chat list draws. Unknown — no
+   * flags row for the group yet, a group id that does not decode — is NOT
+   * muted, and that direction is deliberate: failing the other way would
+   * silence a call because a local store had not filled in yet, which is a
+   * far worse defect than an unwanted ring.
+   */
+  function isMuted(groupIdB64: string): boolean {
+    try {
+      return sync.getFlags(base64Decode(groupIdB64))?.muted === true;
+    } catch {
+      return false;
+    }
+  }
 
   const inCall = (): boolean => LIVE_STATES.includes(state());
 
@@ -669,7 +706,20 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     }
   }
 
-  function buildCallSession(groupIdB64: string, callId: Uint8Array): CallSession {
+  /**
+   * Build the session for one 1x1 call.
+   *
+   * `ringWindowMs` is the shared rule's window (`ring-rule.ts`), read from
+   * wasm by the caller — which has already awaited it to parse the frame or
+   * to dial. It is passed rather than defaulted because it is the one timing
+   * number the OTHER device also has to be using: if the two sides disagree,
+   * one files a missed call while the other is still ringing.
+   */
+  function buildCallSession(
+    groupIdB64: string,
+    callId: Uint8Array,
+    ringWindowMs: number,
+  ): CallSession {
     const session: CallSession = new CallSession(callId, {
       onRemoteStream: (s) => {
         setRemoteStream(s);
@@ -693,6 +743,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
           if (callJournal?.session === session) recordOneToOneCall(reason);
           endedCallIds.add(callIdHex(callId));
           activeCall = null;
+          setSilentRing(false);
           if (reason !== undefined) setLastEnded({ groupIdB64, reason });
           setRemoteStream(null);
           setLocalStream(null);
@@ -713,7 +764,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         });
         callActions.setQuality("local", qualityTierForRtt(stats.rttMs));
       },
-    });
+    }, { ringTimeoutMs: ringWindowMs });
     // Armed before anything opens a device: an unarmed session refuses rather
     // than putting unsealed media on the wire.
     const key = oneToOneCallKey(groupIdB64, callId);
@@ -788,8 +839,13 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         kind: parsed.kind,
         callIdHex: hex,
         groupIdB64: item.groupIdB64,
-        rowCreatedAt: item.row.createdAt,
-        nowMs: Date.now(),
+        // One question, one answer, in Rust: is this offer still live, and
+        // may it interrupt? Read for every row, used only for an offer.
+        ring: ringVerdictFor(ringRulesOf(wasm), {
+          muted: isMuted(item.groupIdB64),
+          rowCreatedAt: item.row.createdAt,
+          nowMs: Date.now(),
+        }),
         active:
           activeCall === null
             ? null
@@ -813,10 +869,20 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
           endedCallIds.add(hex);
           await publisherFor(item.groupIdB64)(wasm.composeCallEndSignaling(parsed.callId, "busy"));
           return;
-        case "ring": {
-          const session = buildCallSession(item.groupIdB64, parsed.callId);
+        case "ring":
+        case "silent": {
+          // The two arms differ in exactly one thing: whether the call is
+          // allowed to interrupt. Everything else — the session, the slot,
+          // the journal that writes the call-log row when it ends — is the
+          // same, because a muted call is still a call.
+          const session = buildCallSession(
+            item.groupIdB64,
+            parsed.callId,
+            Number(wasm.callRingWindowMs()),
+          );
           openCallJournal(session, item.groupIdB64, hex, true, parsed.mediaVideo);
           occupy(item.groupIdB64, session);
+          setSilentRing(decision.oneToOne === "silent");
           setRemoteWantsVideo(parsed.mediaVideo);
           await session.applyIncomingSignaling(parsed);
           return;
@@ -894,8 +960,13 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     if (currentOccupant() !== null) return;
     if (groupEntry(groupIdB64) === undefined) return;
     setVideoCall(withVideo);
+    // The window the callee will ring for, so both sides give up together.
+    const wasm = await loadWasm();
     const callId = mintCallId();
-    const session = buildCallSession(groupIdB64, callId);
+    const session = buildCallSession(groupIdB64, callId, Number(wasm.callRingWindowMs()));
+    // A call this device placed is never silent: mute is about being
+    // interrupted, and nobody is interrupting anybody here.
+    setSilentRing(false);
     openCallJournal(session, groupIdB64, callIdHex(callId), false, withVideo);
     occupy(groupIdB64, session);
     try {
@@ -2140,6 +2211,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     remoteStream,
     localStream,
     remoteWantsVideo,
+    silentRing,
     connStats,
     nameFor,
     accept,
@@ -2171,6 +2243,9 @@ interface CallHostInternals {
   readonly remoteStream: Accessor<MediaStream | null>;
   readonly localStream: Accessor<MediaStream | null>;
   readonly remoteWantsVideo: Accessor<boolean>;
+  /** The ringing 1x1 call is muted (`docs/ux/calls.md` section 2.1): take the
+   *  call, withhold the interruption. */
+  readonly silentRing: Accessor<boolean>;
   readonly connStats: Accessor<WebConnectionStats | null>;
   nameFor(groupIdB64: string | null): string;
   accept(withVideo: boolean): Promise<void>;
@@ -2240,8 +2315,25 @@ export function CallHostView(): JSX.Element {
     }
     globalThis.navigator?.vibrate?.(0);
   };
+  /**
+   * `docs/ux/calls.md` section 2.1 — "a muted chat never rings", decided by
+   * the shared rule (`ring-rule.ts`) when the offer arrived.
+   *
+   * This is the whole of what `silent` withholds on this client: the
+   * ringtone, the vibration, and the screen that takes over the tab. The call
+   * itself is untouched — it holds the slot, it runs its own ring timer, and
+   * it writes the same call-log row an unmuted call writes when it ends.
+   *
+   * Because that screen is also the only place this client offers Accept,
+   * withholding it means a muted call goes unanswered and leaves a
+   * missed-call row the person can tap to call back. That is a consequence of
+   * having exactly one incoming-call surface, not a decision taken here; see
+   * the `silent` arm of `call-host-routing.ts`.
+   */
+  const ringingAudibly = (): boolean => host.state() === "ringing" && !internals.silentRing();
+
   createEffect(() => {
-    if (host.state() !== "ringing") {
+    if (!ringingAudibly()) {
       sounds.stopLoop("ringtone-incoming");
       stopVibration();
       return;
@@ -2294,8 +2386,9 @@ export function CallHostView(): JSX.Element {
       </Show>
 
       {/* `docs/ux/calls.md` §2.2 — a ringing call takes the whole screen, not
-          a strip at the top of whatever the user was reading. */}
-      <Show when={host.state() === "ringing"}>
+          a strip at the top of whatever the user was reading. §2.1 exempts a
+          muted conversation: taking over the tab IS the interruption. */}
+      <Show when={ringingAudibly()}>
         <IncomingCallScreen
           callerName={internals.nameFor(host.callGroupIdB64())}
           callerId={host.callGroupIdB64()}

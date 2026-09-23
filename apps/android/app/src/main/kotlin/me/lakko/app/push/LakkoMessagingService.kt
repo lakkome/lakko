@@ -129,6 +129,14 @@ public class LakkoMessagingService : FirebaseMessagingService() {
      * ([me.lakko.app.calls.foldCallRingSignals]) has already removed an offer
      * this batch also ended, so what is left is either a live call or nothing.
      *
+     * A MUTED conversation still comes through here, and still returns `true`
+     * so no message banner is stacked on it. Whether the phone actually
+     * interrupts is decided once for all three clients
+     * ([uniffi.lakko_ffi_uniffi.ringDecision]) and applied in
+     * [IncomingCallRinger], which withholds the ringtone, the vibration and
+     * the full-screen intent while still registering the call so it lands in
+     * the history. Deciding it here as well would be the same rule twice.
+     *
      * @return `true` when this wake was a call and no message notification
      *   should be shown for it.
      */
@@ -165,6 +173,10 @@ public class LakkoMessagingService : FirebaseMessagingService() {
                             PushWake(groupHex = wake.groupHex, pointer = wake.pointer),
                             deps,
                             nowMs = System.currentTimeMillis(),
+                            // The ring window from its one home
+                            // (`crates/lakko-ui-rules/src/ring.rs`): the two
+                            // devices in a call have to give up together.
+                            ringWindowMs = uniffi.lakko_ffi_uniffi.callRingWindowMs().toLong(),
                         )
                     }
                 }

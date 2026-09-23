@@ -225,6 +225,19 @@ public interface PushDecryptDeps {
      *  `null`. Used as the fetch start so intervening commits replay
      *  and the epoch stays correct. */
     public fun startCursor(accountIdB64: String, groupHex: String): Long?
+
+    /**
+     * Is the conversation muted (`docs/ux/calls.md` section 2.1)?
+     *
+     * The same flag the chat list draws and the DeviceGroup journal syncs
+     * between a person's devices, read from the state it is already persisted
+     * in. A READ — never a write, like everything else on this interface.
+     *
+     * Defaulted to `false`, the RINGING answer: a wake whose account cannot be
+     * resolved must lose no calls, and a store that fails to open must not
+     * silence a phone.
+     */
+    public fun isMuted(accountIdB64: String, groupHex: String): Boolean = false
 }
 
 /**
@@ -239,13 +252,23 @@ public interface PushDecryptDeps {
 public suspend fun decryptPushPreview(
     wake: PushWake?,
     deps: PushDecryptDeps,
-): PushPreview? = decryptPushWake(wake, deps, nowMs = System.currentTimeMillis()).preview
+): PushPreview? = decryptPushWake(
+    wake,
+    deps,
+    nowMs = System.currentTimeMillis(),
+    // A window of zero, not the real one. This wrapper keeps only the message
+    // preview and throws the ring away, and a zero window makes every offer
+    // read as already over — so the fold builds no ring at all, and this
+    // function cannot start depending on a number it has no business reading.
+    // (It also keeps it callable from the host JVM suite, which does not load
+    // the native library the real window comes from.)
+    ringWindowMs = 0L,
+).preview
 
 /**
  * Everything one wake means: a message preview, a call to ring for, and the
  * calls that have stopped.
  *
- * @param nowMs the caller's clock, injected so the ring window is testable.
  */
 public data class PushWakeOutcome(
     val preview: PushPreview?,
@@ -264,11 +287,19 @@ public data class PushWakeOutcome(
  *
  * [decryptPushPreview] is this function's message half, kept because the chat
  * preview is what most wakes are.
+ *
+ * @param nowMs the caller's clock, injected so the ring window is testable.
+ * @param ringWindowMs the shared ring window
+ *   (`crates/lakko-ui-rules/src/ring.rs`), injected rather than read from the
+ *   core here: this function is host-tested and a JVM unit test does not load
+ *   the native library. Production passes
+ *   [uniffi.lakko_ffi_uniffi.callRingWindowMs].
  */
 public suspend fun decryptPushWake(
     wake: PushWake?,
     deps: PushDecryptDeps,
     nowMs: Long,
+    ringWindowMs: Long,
 ): PushWakeOutcome {
     // 1. Only GroupMessage wakes carry a 64-hex group + a pointer. A
     //    Wakeup / MailboxMessage wake is not handled in this slice.
@@ -383,10 +414,27 @@ public suspend fun decryptPushWake(
             // known on this device; the generic title otherwise.
             latest = PushPreview(title = processed?.senderName ?: "Lakko", body = body, tag = realGroupHex)
         }
+        // `docs/ux/calls.md` section 2.1 — resolved only when this batch
+        // actually rings for something, so an ordinary message wake never pays
+        // for a store it does not need. What a muted offer DOES is decided
+        // once for all three clients, in `crates/lakko-ui-rules/src/ring.rs`,
+        // and applied in [me.lakko.app.calls.IncomingCallRinger]; this path
+        // only supplies the fact.
+        val muted = if (callSignals.isEmpty()) {
+            false
+        } else {
+            try {
+                deps.isMuted(account.accountIdB64, realGroupHex)
+            } catch (_: Throwable) {
+                false
+            }
+        }
         val calls = me.lakko.app.calls.foldCallRingSignals(
             groupIdHex = realGroupHex,
             signals = callSignals,
             nowMs = nowMs,
+            windowMs = ringWindowMs,
+            muted = muted,
         )
         return PushWakeOutcome(
             preview = latest,

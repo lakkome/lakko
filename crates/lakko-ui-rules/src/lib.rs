@@ -29,3 +29,4 @@
 pub mod conversation;
 pub mod info;
 pub mod lookup;
+pub mod ring;

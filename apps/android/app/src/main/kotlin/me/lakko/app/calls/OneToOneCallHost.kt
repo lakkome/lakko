@@ -124,6 +124,20 @@ public interface OneToOneCallPort<S : OneToOneCallSession> {
     public fun peerName(groupIdHex: String): String? = null
 
     /**
+     * Is the conversation in [groupIdHex] muted (`docs/ux/calls.md` section
+     * 2.1)?
+     *
+     * `suspend` because the answer is on disk — the cross-device sync state
+     * ([me.lakko.app.devices.sync.ConversationMute]) — and this host runs on
+     * the main dispatcher.
+     *
+     * Defaulted to `false` for the same reason as [peerName], and the default
+     * is the RINGING answer on purpose: a host driven by fake sessions, or a
+     * port that cannot resolve it, must lose no calls.
+     */
+    public suspend fun isMuted(groupIdHex: String): Boolean = false
+
+    /**
      * A call in [groupIdHex] finished: write its row into that conversation
      * (`docs/ux/calls.md` section 6, [CallTranscriptRow.kt]).
      *
@@ -149,6 +163,16 @@ public data class OneToOneCall<S : OneToOneCallSession>(
      *  `Ringing` while its peer connection is being built). */
     val accepted: Boolean = false,
     /**
+     * The conversation is muted (`docs/ux/calls.md` section 2.1).
+     *
+     * Carried on the call rather than read by the view because it decides
+     * whether the in-app ring SCREEN is drawn at all, and that is the same
+     * question the ringer asks about sound: one rule, one answer, two
+     * surfaces. Meaningless for an outgoing call, which nobody is being
+     * interrupted by.
+     */
+    val muted: Boolean = false,
+    /**
      * For an outgoing call, the kind the caller chose in the chat header
      * (`docs/ux/calls.md` section 3). It decides one thing: whether the pre-join
      * opens with the camera on. Meaningless for an incoming call, which skips
@@ -157,9 +181,28 @@ public data class OneToOneCall<S : OneToOneCallSession>(
     val requestedKind: RequestedCallKind = RequestedCallKind.VOICE,
 )
 
-/** Timeouts bounding a 1x1 call's non-terminal states. Web parity: chosen, not measured. */
+/**
+ * Timeouts bounding a 1x1 call's non-terminal states.
+ *
+ * [ringTimeoutMs] has NO default, and that is the point: it is the ring window
+ * of `docs/ux/calls.md` section 2.1, a number the two devices in a call have
+ * to agree on, so it has exactly one home —
+ * [uniffi.lakko_ffi_uniffi.callRingWindowMs], over
+ * `crates/lakko-ui-rules/src/ring.rs`. This client restated it here as a
+ * literal `45_000L`; if the two had ever drifted, one side would have filed a
+ * missed call while the other was still ringing. Production reads it from the
+ * core ([me.lakko.app.calls.AppCallHost]); a JVM unit test does not load the
+ * native library, so it states its own — which is why the parameter is passed
+ * in rather than read here.
+ *
+ * [establishTimeoutMs] keeps its own number deliberately. It happens to be the
+ * same 45 seconds, but it is a different rule: how long THIS device waits for
+ * a call it has already answered to connect. No second device has to agree
+ * with it, so folding it into the shared window would tie two unrelated
+ * numbers together. Web parity: chosen, not measured.
+ */
 public data class OneToOneCallTiming(
-    val ringTimeoutMs: Long = 45_000L,
+    val ringTimeoutMs: Long,
     val establishTimeoutMs: Long = 45_000L,
 )
 
@@ -239,12 +282,42 @@ public enum class OneToOneCallPresentation {
     /** The prejoin of an outgoing call, a call being set up or live, or the
      *  ended state awaiting dismissal: the full-screen in-call screen. */
     IN_CALL_SCREEN,
+
+    /**
+     * Nothing at all: the conversation is muted and this call is still
+     * ringing (`docs/ux/calls.md` section 2.1).
+     *
+     * A screen that takes over the phone IS an interruption, so withholding
+     * the ringtone while still throwing the call across whatever the person
+     * was reading would honour half the rule. The call is not dropped - it
+     * takes the slot, runs its window and lands in the history as a missed
+     * call exactly as an unmuted one does - and the moment it is accepted or
+     * connects it presents normally, because by then nobody is being
+     * interrupted.
+     *
+     * The cost is real and deliberate: a muted call cannot be answered, only
+     * called back. Answering without interrupting needs a non-modal
+     * affordance no client has; section 2.1 already specifies one for the
+     * second-call case, which is where it would come from.
+     */
+    NONE,
 }
 
-/** The presentation for a session in [state]; an accepted call leaves the ring screen at once. */
-public fun oneToOneCallPresentation(state: CallSession.WebCallState, accepted: Boolean): OneToOneCallPresentation =
+/**
+ * The presentation for a session in [state]; an accepted call leaves the ring
+ * screen at once, and a muted conversation never reaches it.
+ *
+ * `muted` is asked FIRST among the ringing conditions for the same reason the
+ * shared rule puts the interruption on one side of its own line: what mute
+ * withholds is the interruption, and this screen is one.
+ */
+public fun oneToOneCallPresentation(
+    state: CallSession.WebCallState,
+    accepted: Boolean,
+    muted: Boolean = false,
+): OneToOneCallPresentation =
     if (state == CallSession.WebCallState.Ringing && !accepted) {
-        OneToOneCallPresentation.RINGING_SCREEN
+        if (muted) OneToOneCallPresentation.NONE else OneToOneCallPresentation.RINGING_SCREEN
     } else {
         OneToOneCallPresentation.IN_CALL_SCREEN
     }
@@ -264,7 +337,7 @@ internal fun parseRowCreatedAtMs(value: String): Long? =
 public class OneToOneCallHost<S : OneToOneCallSession>(
     private val scope: CoroutineScope,
     private val clock: () -> Long = { System.currentTimeMillis() },
-    private val timing: OneToOneCallTiming = OneToOneCallTiming(),
+    private val timing: OneToOneCallTiming,
     private val warn: (String, Throwable?) -> Unit = ::logWarning,
 ) {
     @Volatile
@@ -612,14 +685,29 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
                 // in-app banner has never produced either; with the app open
                 // the platform renders it as a heads-up above that banner
                 // rather than as the full-screen ring screen.
-                startRinging(row)
-                if (foreground) ring(row) else holdOffer(row)
+                // Section 2.1 — read ONCE, here, and handed to both surfaces.
+                // The ringtone and the in-app ring screen are two faces of one
+                // interruption, so they must not be able to disagree, and a
+                // second read of the same flag for one offer is exactly how
+                // they would: the store is asynchronous and a mute toggled
+                // between the two reads would silence one and not the other.
+                // Fails toward NOT muted, because losing a call to a store
+                // that would not open is invisible while ringing a muted chat
+                // is merely annoying and legible.
+                val muted = try {
+                    port?.isMuted(row.groupIdHex) == true
+                } catch (error: Throwable) {
+                    warn("call host: reading the conversation's mute flag failed", error)
+                    false
+                }
+                startRinging(row, muted)
+                if (foreground) ring(row, muted) else holdOffer(row)
             }
         }
     }
 
     /** An offer arrived: ring for it. The other half of the pair is [stopRinging]. */
-    private fun startRinging(row: Event.Row) {
+    private suspend fun startRinging(row: Event.Row, muted: Boolean) {
         val ringer = ringPort ?: return
         val offer = row.body as? FfiCallSignalingBody.Offer ?: return
         ringer.startRinging(
@@ -637,6 +725,15 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
                 // took twenty seconds to arrive has twenty-five seconds of
                 // ringing left, not forty-five.
                 offeredAtMs = offer.createdAtMs.toLong(),
+                // `docs/ux/calls.md` section 2.1. Carried in rather than read
+                // here, and carried rather than decided: what a muted offer
+                // DOES is one rule for all three clients
+                // ([uniffi.lakko_ffi_uniffi.ringDecision]), applied once, in
+                // [IncomingCallRinger]. This host deliberately keeps routing
+                // the offer exactly as it always did — a muted call still
+                // takes the slot, still runs its window, and still lands in
+                // the history as a missed call. Only the interruption goes.
+                muted = muted,
             ),
         )
     }
@@ -748,7 +845,7 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         }
     }
 
-    private suspend fun ring(row: Event.Row) {
+    private suspend fun ring(row: Event.Row, muted: Boolean) {
         val offer = row.body as? FfiCallSignalingBody.Offer ?: return
         val p = port ?: run {
             warn("call host: an offer arrived with no port attached, dropped", null)
@@ -773,6 +870,11 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
                     session = session,
                     incoming = true,
                     remoteOffersVideo = offer.media.video,
+                    // Section 2.1 — the ring screen is an interruption, so a
+                    // muted conversation withholds it exactly as it withholds
+                    // the ringtone. The SAME read the ringer was given, not a
+                    // second one.
+                    muted = muted,
                 ),
                 callIdHex = callIdHexOf(offer.callId),
                 keyArmed = key != null,
@@ -865,7 +967,17 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
         )
         when (route) {
             OneToOneRoute.RING -> {
-                ring(held)
+                // A held offer reaching the foreground: read the flag at the
+                // moment it is about to be shown, not at the moment it was
+                // held, because a person can mute a conversation while the
+                // offer sits in the background.
+                val muted = try {
+                    port?.isMuted(held.groupIdHex) == true
+                } catch (error: Throwable) {
+                    warn("call host: reading the conversation's mute flag failed", error)
+                    false
+                }
+                ring(held, muted)
                 // Only into the call this offer just rang (C-12); the session
                 // keeps them until its PeerConnection exists.
                 val rang = liveSlot()?.takeIf { it.callIdHex == callIdHexOfBody(held.body) }

@@ -38,8 +38,20 @@ package me.lakko.app.calls
  * idempotent per call id.
  */
 
-/** The ring window shared by both sides of a call, `docs/ux/calls.md` section 2.1. */
-public const val CALL_RING_WINDOW_MS: Long = 45_000L
+// The 45-second ring window used to be restated here as a Kotlin constant,
+// and again in `OneToOneCallTiming`. It now has exactly one home —
+// `crates/lakko-ui-rules/src/ring.rs`, reached through
+// `uniffi.lakko_ffi_uniffi.callRingWindowMs()` — because it is a number two
+// DIFFERENT devices have to agree on: if they drift, one side files a missed
+// call while the other is still ringing.
+//
+// It is not read from the FFI *here*. This file is deliberately free of
+// Android and of the native library so the host JVM suite can run it, and a
+// unit test does not load `liblakko_ffi_uniffi.so`; calling into the core
+// from these functions would only prove the library is absent. So the window
+// arrives as an argument, and the two production callers
+// ([me.lakko.app.calls.IncomingCallRinger] and the push path) are what read
+// it from the core.
 
 /** An incoming call the phone should be ringing for. */
 public data class IncomingCallRing(
@@ -53,6 +65,18 @@ public data class IncomingCallRing(
     val video: Boolean,
     /** The offer's own `created_at`, or `null` when it could not be read. */
     val offeredAtMs: Long?,
+    /**
+     * The conversation is muted (`docs/ux/calls.md` section 2.1).
+     *
+     * Resolved by whichever path built this ring, because only they know the
+     * account whose flags to read; what it MEANS is decided once, in
+     * `crates/lakko-ui-rules/src/ring.rs`, and applied in
+     * [IncomingCallRinger.startRinging] so both paths cannot disagree.
+     *
+     * Defaulted to `false` — the ringing answer — so a construction site that
+     * has no way to resolve it still rings rather than silently going quiet.
+     */
+    val muted: Boolean = false,
 )
 
 /** The two verbs, so the host and the push path share one implementation. */
@@ -93,7 +117,7 @@ public fun callRingContent(callerName: String?, video: Boolean): CallRingContent
 public fun callRingRemainingMs(
     offeredAtMs: Long?,
     nowMs: Long,
-    windowMs: Long = CALL_RING_WINDOW_MS,
+    windowMs: Long,
 ): Long {
     if (offeredAtMs == null) return windowMs
     val age = nowMs - offeredAtMs
@@ -101,6 +125,24 @@ public fun callRingRemainingMs(
     if (age >= windowMs) return 0L
     return windowMs - age
 }
+
+/**
+ * How old the offer is, as the shared ring rule
+ * ([uniffi.lakko_ffi_uniffi.ringDecision]) wants it: milliseconds since it was
+ * published, clamped into `0 .. windowMs`.
+ *
+ * Takes what is LEFT of the window rather than the stamp and a clock, which
+ * is the whole point: the verdict and the ring's deadline are then the same
+ * reading seen from opposite ends, and cannot land on opposite sides of the
+ * window because the clock was read twice. It also means this client's two
+ * local corrections to the stamp — an unreadable one, and a caller whose clock
+ * runs ahead, both of which [callRingRemainingMs] rings for the whole window —
+ * reach the verdict as well as the deadline, for free.
+ *
+ * The core's rule takes an age and asks nothing about where it came from.
+ */
+public fun callRingOfferAgeMs(remainingMs: Long, windowMs: Long): Long =
+    (windowMs - remainingMs).coerceIn(0L, windowMs)
 
 /** Where an incoming call rings. */
 public enum class RingSurface {
@@ -197,12 +239,18 @@ public data class CallRingOutcome(
  *  - an offer past its ring window never rings — a catch-up fetch from an old
  *    cursor replays offers whose callers gave up long ago;
  *  - the newest surviving offer wins, so a caller who tried twice rings once.
+ *
+ * [muted] is carried onto the ring rather than acted on here: whether a muted
+ * offer rings, records silently, or is already over is one rule, and it lives
+ * in `crates/lakko-ui-rules/src/ring.rs`. Folding it in here would make this
+ * function answer half of it, and the two halves would then have to agree.
  */
 public fun foldCallRingSignals(
     groupIdHex: String,
     signals: List<CallRingSignal>,
     nowMs: Long,
-    windowMs: Long = CALL_RING_WINDOW_MS,
+    windowMs: Long,
+    muted: Boolean = false,
 ): CallRingOutcome {
     var pending: IncomingCallRing? = null
     val cancelled = ArrayList<String>()
@@ -217,6 +265,7 @@ public fun foldCallRingSignals(
                     callerName = signal.callerName,
                     video = signal.video,
                     offeredAtMs = signal.offeredAtMs,
+                    muted = muted,
                 )
             }
             is CallRingSignal.End -> {

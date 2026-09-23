@@ -70,6 +70,7 @@
  */
 export {
   callRingNotification,
+  callSilentNotification,
   callNotificationTag,
   isCallNotificationTag,
   callClickPlan,
@@ -82,16 +83,60 @@ export {
 const PREVIEW_MAX_CHARS = 140;
 
 /**
- * An offer whose DS row is older than this does not ring.
+ * How long a call rings before both sides give up, in milliseconds.
  *
- * Mirrors `STALE_OFFER_MS` in `src/calls/call-signaling-dispatch.ts`, which
- * this file cannot import (see the header on why it lives in `public/`), and
- * exists for the same reason: a wake can be delivered late, or replayed to a
- * device that was offline, and a phone must not start ringing for a call that
- * ended minutes ago. Judged on the DS row's SERVER timestamp, never on
- * anything the caller stamped.
+ * A DELIBERATE COPY, and the only one left on this client. Its one home is
+ * `lakko_ui_rules::ring::CALL_RING_WINDOW_MS`, and this file asks the real
+ * rule (`wasm.ringDecision`) whenever it can — see {@link ringVerdict}. The
+ * copy exists because this file is reached through a dynamic import in a
+ * service worker whose wasm bundle may predate the rule, and because the
+ * cached `sw-wasm/` output is versioned independently of this module. When
+ * the rule is there it is asked; this number is what "could not ask" falls
+ * back to, not a second opinion.
+ *
+ * It replaces a `STALE_OFFER_MS = 60_000` that mirrored a constant in
+ * `src/calls/call-signaling-dispatch.ts` — which itself disagreed with the
+ * 45 s the call session armed its timers from, so an offer in between rang
+ * here for a call the caller had already recorded as missed.
  */
-const STALE_OFFER_MS = 60_000;
+const CALL_RING_WINDOW_MS = 45_000;
+
+/** {@link ringVerdict} answers, mirroring `lakko_ui_rules::ring`. */
+const RING = /** @type {const} */ ({ ring: "ring", silent: "silent", tooLate: "tooLate" });
+
+/**
+ * What an arriving offer does on this device: the shared rule's answer.
+ *
+ * Asked of the wasm core when it exports the rule; otherwise decided from
+ * {@link CALL_RING_WINDOW_MS} by the same two clauses the rule states — age
+ * first, then mute — so an older cached bundle degrades to the same answers
+ * rather than to no mute rule at all.
+ *
+ * `offerAgeMs` comes from the DS row's own SERVER timestamp, never a local
+ * clock and never anything the caller stamped, and is clamped non-negative
+ * because the rule takes an unsigned duration.
+ *
+ * @param {DecryptWasm} wasm
+ * @param {boolean} muted
+ * @param {number} offerAgeMs
+ * @returns {"ring" | "silent" | "tooLate"}
+ */
+function ringVerdict(wasm, muted, offerAgeMs) {
+  const age = Math.max(0, Math.trunc(offerAgeMs));
+  const decisions = wasm?.RingDecision;
+  if (typeof wasm?.ringDecision === "function" && decisions !== undefined) {
+    try {
+      const d = wasm.ringDecision(muted === true, BigInt(age));
+      if (d === decisions.TooLate) return RING.tooLate;
+      if (d === decisions.Silent) return RING.silent;
+      return RING.ring;
+    } catch {
+      // Fall through to the mirror rather than dropping a live call.
+    }
+  }
+  if (age >= CALL_RING_WINDOW_MS) return RING.tooLate;
+  return muted === true ? RING.silent : RING.ring;
+}
 
 /**
  * @typedef {object} PushWake
@@ -208,6 +253,17 @@ const STALE_OFFER_MS = 60_000;
  *   (local rename, profile name, verified username), from the encrypted
  *   profile row the app wrote. `null` when nothing is known. Never fetches or
  *   verifies anything. Optional; any throw is treated as unknown.
+ * @property {(accountId: string, deviceKey: any, groupHex: string) => Promise<boolean | null>} [lookupMuted]
+ *   READ-ONLY: is this conversation muted? From the encrypted cross-device
+ *   sync row the app wrote (`src/devices/sync/sync-state-idb.ts`), the same
+ *   flag the conversation list draws and that travels between a person's
+ *   devices. `null` when unknown.
+ *
+ *   FAILS TOWARD RINGING, deliberately and in the opposite direction to
+ *   everything else on this path: a missing row, an unopenable blob, an
+ *   absent dep or a throw all mean "not muted", so a call is never silenced
+ *   because a database did not open. Silently swallowing calls is a far worse
+ *   defect than an unwanted ring.
  * @property {() => number} [nowMs]
  *   Wall clock, for the stale-offer gate. Defaults to `Date.now()`; injected
  *   only so the tests can place a row on either side of the window without
@@ -233,6 +289,14 @@ const STALE_OFFER_MS = 60_000;
  *   media flags. Meaningless for `"end"`.
  * @property {string | null} callerName  A name this device already resolves for
  *   the sender, or `null`. Never looked up, never verified here.
+ * @property {boolean} silent  The conversation is MUTED, so the call must not
+ *   interrupt (`docs/ux/calls.md` section 2.1): no ringtone, no vibration,
+ *   nothing that demands interaction. NOT the same as not ringing at all —
+ *   the person still gets to find out somebody tried to reach them.
+ *   Meaningless for `"end"`.
+ * @property {number} offerAgeMs  Age of the offer at classification, off the
+ *   DS row's own server timestamp. Carried so the mute verdict is taken from
+ *   the same reading the staleness gate used. Meaningless for `"end"`.
  */
 
 /**
@@ -452,9 +516,29 @@ export async function decryptPushPreview(wake, deps) {
           callerName = null;
         }
       }
+      // `docs/ux/calls.md` section 2.1 — "a muted chat never rings". Read
+      // ONCE per wake, for the one call the batch settled on, and only for a
+      // ring: an `end` takes a notification down, which mute has no say over.
+      //
+      // Every failure here reads as NOT muted. That is the opposite of the
+      // fail-closed default the rest of this file follows, and it is the
+      // right way round: the cost of getting it wrong in this direction is a
+      // ring the person did not want, and in the other it is a call they
+      // never learn about.
+      let muted = false;
+      if (latestCall.notice.kind === "ring" && typeof deps.lookupMuted === "function") {
+        try {
+          muted = (await deps.lookupMuted(accountId, deviceKey, groupHex)) === true;
+        } catch {
+          muted = false;
+        }
+      }
       const notice = {
         ...latestCall.notice,
         callerName: typeof callerName === "string" && callerName.length > 0 ? callerName : null,
+        silent:
+          latestCall.notice.kind === "ring" &&
+          ringVerdict(deps.wasm, muted, latestCall.notice.offerAgeMs) === RING.silent,
       };
       // `title` / `body` / `tag` are carried for a caller that ignores `call`
       // entirely; `public/sw.js` reads `call` and builds the real ring shape
@@ -630,7 +714,15 @@ function callNoticeFrom(wasm, processed, message, groupHex, nowMs) {
     if (!(callId instanceof Uint8Array) || callId.length === 0) return null;
     const callIdHex = bytesToHex(callId);
     if (kind === "end") {
-      return { kind: "end", callIdHex, groupHex, video: false, callerName: null };
+      return {
+        kind: "end",
+        callIdHex,
+        groupHex,
+        video: false,
+        callerName: null,
+        silent: false,
+        offerAgeMs: 0,
+      };
     }
     // The DS row's SERVER timestamp, never `parsed.createdAtMs`, which the
     // caller stamped and could be anything.
@@ -638,13 +730,19 @@ function callNoticeFrom(wasm, processed, message, groupHex, nowMs) {
     if (typeof createdAt !== "string") return null;
     const createdMs = Date.parse(createdAt);
     if (Number.isNaN(createdMs)) return null;
-    if (nowMs - createdMs > STALE_OFFER_MS) return null;
+    const offerAgeMs = Math.max(0, nowMs - createdMs);
+    // Asked with `muted: false`, because whether the call is OVER does not
+    // depend on mute and this runs per row, before the one mute read the
+    // batch makes. `silent` is settled once, after the loop.
+    if (ringVerdict(wasm, false, offerAgeMs) === RING.tooLate) return null;
     return {
       kind: "ring",
       callIdHex,
       groupHex,
       video: parsed.mediaVideo === true,
       callerName: null,
+      silent: false,
+      offerAgeMs,
     };
   } catch {
     return null;
@@ -877,6 +975,36 @@ export function senderNameFromProfileRow(payload, senderKeyB64) {
     }
   }
   return null;
+}
+
+/**
+ * `docs/ux/calls.md` section 2.1 — is this conversation muted, according to
+ * the decrypted cross-device sync row the app wrote
+ * (`src/devices/sync/sync-state-idb.ts` + `sync-state-store.ts`)?
+ *
+ * The wire shape is that module's: `{ v: 1, f: { <groupHex>: { m: boolean } } }`,
+ * where the key is the lowercase hex of the REAL DS `group_id` (the same
+ * `groupIdHex` the app uses everywhere) and `m` is the mute flag. Short keys
+ * because the app rewrites that row on every keystroke of a draft.
+ *
+ * Anything else — a schema this build does not know, no entry for the group,
+ * a flag that is not a boolean — is `false`, NOT muted. This is the one read
+ * on the push path that fails toward ringing; see `lookupMuted` on
+ * {@link DecryptPushDeps} for why that direction is the safe one here.
+ *
+ * Pure; exported for `sw.js` and the tests.
+ *
+ * @param {any} payload
+ * @param {string} groupHex
+ * @returns {boolean}
+ */
+export function mutedFromSyncStateRow(payload, groupHex) {
+  if (payload === null || typeof payload !== "object" || payload.v !== 1) return false;
+  const flags = payload.f;
+  if (flags === null || typeof flags !== "object") return false;
+  const entry = flags[groupHex];
+  if (entry === null || typeof entry !== "object") return false;
+  return entry.m === true;
 }
 
 /**

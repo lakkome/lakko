@@ -5050,23 +5050,13 @@ public final class ChatRepository: ObservableObject {
     /// Unix epoch. `nil` when it does not parse — the caller must DROP the row
     /// rather than substitute a local clock, which is the whole point of reading
     /// the server's stamp.
+    ///
+    /// The parse itself moved to ``DsTimestamp``, a Foundation-only file the
+    /// notification-service extension also compiles: the extension has to read
+    /// the same age for the same ring decision, and a second copy of this
+    /// could disagree with the app about how old a call is.
     nonisolated static func parseDsTimestampMs(_ raw: String) -> Int64? {
-        let iso = ISO8601DateFormatter()
-        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let d = iso.date(from: raw) { return Int64(d.timeIntervalSince1970 * 1000) }
-        iso.formatOptions = [.withInternetDateTime]
-        if let d = iso.date(from: raw) { return Int64(d.timeIntervalSince1970 * 1000) }
-        // The DS also serves `YYYY-MM-DD HH:MM:SS(.SSS)` (MariaDB TIMESTAMP(3)
-        // rendered without a `T` or a zone). Read it as UTC, which is what the
-        // column stores.
-        let sql = DateFormatter()
-        sql.locale = Locale(identifier: "en_US_POSIX")
-        sql.timeZone = TimeZone(secondsFromGMT: 0)
-        for format in ["yyyy-MM-dd HH:mm:ss.SSS", "yyyy-MM-dd HH:mm:ss"] {
-            sql.dateFormat = format
-            if let d = sql.date(from: raw) { return Int64(d.timeIntervalSince1970 * 1000) }
-        }
-        return nil
+        DsTimestamp.parseMs(raw)
     }
 
     // MARK: - ADR-0040 (G-35) per-group commit serialization

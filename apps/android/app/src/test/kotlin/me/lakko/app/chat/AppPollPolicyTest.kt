@@ -3,7 +3,7 @@
 
 package me.lakko.app.chat
 
-import me.lakko.app.calls.CALL_RING_WINDOW_MS
+import me.lakko.app.calls.TEST_RING_WINDOW_MS
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -45,7 +45,7 @@ class AppPollPolicyTest {
     fun `every group is reached inside the ring window`() {
         // The headline. Up to a genuinely large account, a full sweep finishes
         // with time left for the callee to answer.
-        val windowSecs = (CALL_RING_WINDOW_MS / 1000L).toInt()
+        val windowSecs = (TEST_RING_WINDOW_MS / 1000L).toInt()
         for (n in 1..18) {
             val sweep = appPollSweepSecs(n, lanes, maxWait)
             assertTrue(
@@ -117,6 +117,6 @@ class AppPollPolicyTest {
         assertEquals(300, legacySweepSecs(30))
         val sweep = appPollSweepSecs(30, lanes, maxWait)
         assertTrue("swept in ${sweep}s", sweep in 40..60)
-        assertTrue(sweep > (CALL_RING_WINDOW_MS / 1000L).toInt())
+        assertTrue(sweep > (TEST_RING_WINDOW_MS / 1000L).toInt())
     }
 }

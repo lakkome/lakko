@@ -40,6 +40,7 @@ class IncomingCallRingTest {
             group,
             listOf(CallRingSignal.Offer(callA, video = false, offeredAtMs = now - 1_000, callerName = "Anna")),
             now,
+            TEST_RING_WINDOW_MS,
         )
         assertEquals(
             IncomingCallRing(
@@ -63,6 +64,7 @@ class IncomingCallRingTest {
                 CallRingSignal.End(callA),
             ),
             now,
+            TEST_RING_WINDOW_MS,
         )
         assertNull("a call that is already over must not ring", outcome.ring)
         assertEquals(listOf(callA), outcome.cancelled)
@@ -70,7 +72,7 @@ class IncomingCallRingTest {
 
     @Test
     fun `an end with no offer still cancels — that is how an earlier ring stops`() {
-        val outcome = foldCallRingSignals(group, listOf(CallRingSignal.End(callA)), now)
+        val outcome = foldCallRingSignals(group, listOf(CallRingSignal.End(callA)), now, TEST_RING_WINDOW_MS)
         assertNull(outcome.ring)
         assertEquals(listOf(callA), outcome.cancelled)
     }
@@ -84,6 +86,7 @@ class IncomingCallRingTest {
                 CallRingSignal.Offer(callA, video = false, offeredAtMs = now),
             ),
             now,
+            TEST_RING_WINDOW_MS,
         )
         assertEquals(callA, outcome.ring?.callIdHex)
         assertEquals(listOf(callB), outcome.cancelled)
@@ -100,6 +103,7 @@ class IncomingCallRingTest {
                 CallRingSignal.Offer(callA, video = false, offeredAtMs = now),
             ),
             now,
+            TEST_RING_WINDOW_MS,
         )
         assertNull(outcome.ring)
     }
@@ -108,8 +112,9 @@ class IncomingCallRingTest {
     fun `an offer past its ring window never rings`() {
         val outcome = foldCallRingSignals(
             group,
-            listOf(CallRingSignal.Offer(callA, video = false, offeredAtMs = now - CALL_RING_WINDOW_MS - 1)),
+            listOf(CallRingSignal.Offer(callA, video = false, offeredAtMs = now - TEST_RING_WINDOW_MS - 1)),
             now,
+            TEST_RING_WINDOW_MS,
         )
         assertNull("the caller gave up long ago", outcome.ring)
     }
@@ -123,6 +128,7 @@ class IncomingCallRingTest {
                 CallRingSignal.Offer(callB, video = true, offeredAtMs = now - 100),
             ),
             now,
+            TEST_RING_WINDOW_MS,
         )
         assertEquals(callB, outcome.ring?.callIdHex)
         assertEquals(true, outcome.ring?.video)
@@ -130,7 +136,7 @@ class IncomingCallRingTest {
 
     @Test
     fun `an empty batch rings for nothing`() {
-        val outcome = foldCallRingSignals(group, emptyList(), now)
+        val outcome = foldCallRingSignals(group, emptyList(), now, TEST_RING_WINDOW_MS)
         assertNull(outcome.ring)
         assertTrue(outcome.cancelled.isEmpty())
     }
@@ -139,17 +145,17 @@ class IncomingCallRingTest {
 
     @Test
     fun `the window is measured from the offer, not from the wake`() {
-        assertEquals(CALL_RING_WINDOW_MS - 20_000, callRingRemainingMs(now - 20_000, now))
-        assertEquals(0L, callRingRemainingMs(now - CALL_RING_WINDOW_MS, now))
+        assertEquals(TEST_RING_WINDOW_MS - 20_000, callRingRemainingMs(now - 20_000, now, TEST_RING_WINDOW_MS))
+        assertEquals(0L, callRingRemainingMs(now - TEST_RING_WINDOW_MS, now, TEST_RING_WINDOW_MS))
     }
 
     @Test
     fun `an unreadable or future stamp rings for the whole window`() {
         // Nothing to measure against: dropping the call would be worse than
         // ringing for the full window.
-        assertEquals(CALL_RING_WINDOW_MS, callRingRemainingMs(null, now))
+        assertEquals(TEST_RING_WINDOW_MS, callRingRemainingMs(null, now, TEST_RING_WINDOW_MS))
         // The caller's clock runs ahead; it is not trusted to extend the ring.
-        assertEquals(CALL_RING_WINDOW_MS, callRingRemainingMs(now + 60_000, now))
+        assertEquals(TEST_RING_WINDOW_MS, callRingRemainingMs(now + 60_000, now, TEST_RING_WINDOW_MS))
     }
 
     // ---- what the notification says -----------------------------------------

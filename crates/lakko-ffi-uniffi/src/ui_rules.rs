@@ -29,6 +29,10 @@ use lakko_ui_rules::info::{
 use lakko_ui_rules::lookup::{
     bare_name as rust_bare_name, looks_like_a_name as rust_looks_like_a_name,
 };
+use lakko_ui_rules::ring::{
+    remaining_ring_ms as rust_remaining_ring_ms, ring_decision as rust_ring_decision,
+    RingDecision as RustRingDecision, CALL_RING_WINDOW_MS,
+};
 
 /// Which screen a conversation row opens.
 ///
@@ -366,6 +370,59 @@ pub fn channel_info_sections(caps: ChannelInfoCapabilities) -> Vec<InfoSection> 
         .collect()
 }
 
+/// What an arriving call offer does to this device —
+/// `docs/ux/calls.md` section 2.1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum RingDecision {
+    /// Ring: ringtone, vibration, and the call screen that takes over.
+    Ring,
+    /// Record the call, interrupt nobody. The conversation is muted.
+    Silent,
+    /// The caller has already given up. Record a missed call, show nothing.
+    TooLate,
+}
+
+impl From<RustRingDecision> for RingDecision {
+    fn from(d: RustRingDecision) -> Self {
+        match d {
+            RustRingDecision::Ring => Self::Ring,
+            RustRingDecision::Silent => Self::Silent,
+            RustRingDecision::TooLate => Self::TooLate,
+        }
+    }
+}
+
+/// Whether an arriving offer rings, given the conversation's mute flag and
+/// how old the offer is.
+///
+/// `offerAgeMs` is measured from the delivery service's timestamp on the row,
+/// never from a local clock: the two devices in a call share no clock, and
+/// the window only works if both read it the same way.
+#[uniffi::export]
+#[must_use]
+pub fn ring_decision(muted: bool, offer_age_ms: u64) -> RingDecision {
+    rust_ring_decision(muted, offer_age_ms).into()
+}
+
+/// How much of the ring window is left, in milliseconds, for a platform
+/// affordance that needs a deadline rather than a verdict. Saturates at zero.
+#[uniffi::export]
+#[must_use]
+pub fn remaining_ring_ms(offer_age_ms: u64) -> u64 {
+    rust_remaining_ring_ms(offer_age_ms)
+}
+
+/// How long a call rings before both sides give up, in milliseconds.
+///
+/// One copy, because it is a number two DIFFERENT devices must agree on: a
+/// client carrying its own would leave one side ringing while the other had
+/// already filed a missed call.
+#[uniffi::export]
+#[must_use]
+pub fn call_ring_window_ms() -> u64 {
+    CALL_RING_WINDOW_MS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,6 +465,17 @@ mod tests {
         })
         .contains(&InfoSection::Unsubscribe));
         assert_eq!(info_target(ConversationKind::Chat), InfoTarget::Person);
+    }
+
+    #[test]
+    fn the_ring_rule_crosses_the_boundary_intact() {
+        assert_eq!(ring_decision(false, 0), RingDecision::Ring);
+        assert_eq!(ring_decision(true, 0), RingDecision::Silent);
+        assert_eq!(
+            ring_decision(false, call_ring_window_ms()),
+            RingDecision::TooLate
+        );
+        assert_eq!(remaining_ring_ms(call_ring_window_ms()), 0);
     }
 
     #[test]

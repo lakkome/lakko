@@ -32,12 +32,26 @@
  *     this device busy for a 1x1 offer.
  *
  * Unchanged from the chat view, and pinned in the tests: C-11 (a group-control
- * body never reaches the 1x1 session), the stale-offer rule (an offer whose DS
- * row is older than `STALE_OFFER_MS` does not ring, and is not answered busy
- * either — nobody is waiting on it), and the rule that a call that ended here
+ * body never reaches the 1x1 session) and the rule that a call that ended here
  * never rings again.
+ *
+ * ## The two rules this module no longer decides for itself
+ *
+ * Whether an offer is too old to ring for, and whether the conversation is
+ * muted, are one question with one answer, and that answer lives in
+ * `crates/lakko-ui-rules/src/ring.rs` — reached here as a {@link RingVerdict}
+ * the caller computed through `ring-rule.ts`. It used to be a local
+ * `isStaleOffer` against a 60 s constant that disagreed with the 45 s ring
+ * window `call-session.ts` armed its timers from, so an offer between the two
+ * rang on a call the caller had already given up on. Mute was not consulted
+ * at all.
+ *
+ * The verdict is an INPUT rather than something computed here because this
+ * module is pure so that vitest (bare node, no wasm) can run it; the caller
+ * already holds the wasm namespace to parse the frame at all.
  */
-import { isStaleOffer, type SignalingRoute } from "./call-signaling-dispatch";
+import { type SignalingRoute } from "./call-signaling-dispatch";
+import type { RingVerdict } from "./ring-rule";
 
 /** The 1x1 call currently occupying the slot, as routing needs to see it. */
 export interface ActiveOneToOneCall {
@@ -53,9 +67,14 @@ export interface InboundSignalingInput {
   readonly callIdHex: string;
   /** The group whose journal carried the row. */
   readonly groupIdB64: string;
-  /** DS server timestamp of the row. */
-  readonly rowCreatedAt: string;
-  readonly nowMs: number;
+  /**
+   * What the shared rule says an OFFER does here, from the DS row's own
+   * timestamp and the conversation's mute flag (`ring-rule.ts`). Read only
+   * for a fresh offer; an answer, a candidate or an end names a call this
+   * device is already in, and neither staleness nor mute has anything to say
+   * about those.
+   */
+  readonly ring: RingVerdict;
   /** The 1x1 call in the slot, or `null` when the slot is free (idle / done). */
   readonly active: ActiveOneToOneCall | null;
   /** Call ids of 1x1 calls that ended on this device this session. */
@@ -78,6 +97,24 @@ export type OneToOneAction =
   | "ring"
   /** Publish `End{busy}` to the offering group; do not ring. */
   | "busy"
+  /**
+   * Take the call, withhold the interruption: the conversation is muted.
+   *
+   * Everything `ring` does EXCEPT the ringtone, the vibration and the screen
+   * that takes over the tab. The call still occupies the slot and still
+   * writes its row to the call log when it ends — a person who muted a
+   * conversation asked not to be interrupted by it, not to be kept from
+   * finding out who tried to reach them.
+   *
+   * Stated plainly: on this client that DOES mean a muted call cannot be
+   * answered, because the full-screen incoming call is the only surface the
+   * web client offers for answering one, and it is the surface being
+   * withheld. What the person gets instead is the missed-call row, which they
+   * can tap to call back. A non-modal in-app affordance — a call that can be
+   * taken without having been thrust in front of you — is the thing that
+   * would close that gap, and it does not exist yet on any platform.
+   */
+  | "silent"
   /** Hand the body to the session in the slot. */
   | "apply";
 
@@ -120,8 +157,11 @@ function decideOneToOne(input: InboundSignalingInput): OneToOneAction {
   // A call that already ended here never rings again, and is not answered busy
   // either: it is over, whatever the journal still holds.
   if (input.endedCallIds.has(input.callIdHex)) return "drop";
-  // An old offer: the caller gave up long ago. Nobody is waiting for a busy.
-  if (isStaleOffer(input.rowCreatedAt, input.nowMs)) return "drop";
+  // The caller gave up long ago, or the age could not be established. Nobody
+  // is waiting for a busy either.
+  if (input.ring === "tooLate") return "drop";
+  // Busy outranks mute: the offering side is waiting on an answer, and `End
+  // {busy}` is the answer whether or not this device would have rung.
   if (input.active !== null || input.groupCallBusy) return "busy";
-  return "ring";
+  return input.ring === "silent" ? "silent" : "ring";
 }

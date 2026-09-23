@@ -73,13 +73,20 @@ public fun BoxScope.OneToOneCallOverlay(
     val call = active ?: return
     val state by call.session.state.collectAsStateWithLifecycle()
     val name = nameForGroup(call.groupIdHex)
-    when (oneToOneCallPresentation(state, call.accepted)) {
+    when (oneToOneCallPresentation(state, call.accepted, call.muted)) {
         // docs/ux/calls.md section 2.1, first row: an app that is open shows
         // the full-screen incoming call, not a strip at the top. The ring
         // notification cannot deliver that on an unlocked phone -- the
         // platform downgrades its full-screen intent to a heads-up -- so this
         // is the only surface that can, and it is the SAME composable the
         // notification's full-screen intent shows when the phone is locked.
+        // Section 2.1 — a muted conversation is not interrupted, and a screen
+        // that takes over whatever the person is reading is an interruption.
+        // The call still takes the slot, still runs its window and still lands
+        // in the history as a missed call; only this surface goes. It comes
+        // back the moment the call is accepted or connects, because by then
+        // nobody is being interrupted.
+        OneToOneCallPresentation.NONE -> Unit
         OneToOneCallPresentation.RINGING_SCREEN -> Dialog(
             onDismissRequest = { /* a ring is accepted or declined, never dismissed */ },
             properties = DialogProperties(

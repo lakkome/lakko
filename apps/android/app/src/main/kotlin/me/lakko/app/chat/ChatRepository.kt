@@ -250,6 +250,16 @@ public class ChatRepository(
     private val currentAccountIdB64 = AtomicReference<String?>(null)
 
     /**
+     * The signed-in account, or `null` before bootstrap.
+     *
+     * Read-only, for the per-account stores that live outside this class and
+     * are keyed the same way — today the cross-device sync state, which is
+     * where a conversation's mute flag is (`docs/ux/calls.md` section 2.1).
+     */
+    public val activeAccountIdB64: String?
+        get() = currentAccountIdB64.get()
+
+    /**
      * Map of hex group id → live [Group] handle. Mutated under
      * [groupLock] for the same-group operations; reads can be
      * lock-free via the snapshot returned by `Collections.unmodifiableMap`.

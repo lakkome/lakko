@@ -260,7 +260,14 @@ export function audioTrackConstraint(
 export interface CallSessionTiming {
   /** How long a call waits for the ANSWER: the callee rings for this long,
    *  and the caller waits for this long from `dial()`, before either ends the
-   *  call as `timedOut` (`No answer`). */
+   *  call as `timedOut` (`No answer`).
+   *
+   *  It has no default and must be supplied, because it is the one number
+   *  here that two DIFFERENT devices have to agree on: if the two sides
+   *  disagree, one files a missed call while the other is still ringing.
+   *  Its one home is `lakko_ui_rules::ring::CALL_RING_WINDOW_MS`, reached
+   *  over wasm as `callRingWindowMs()`; see `calls/ring-rule.ts`. The other
+   *  three below are this device's own business and do default. */
   readonly ringTimeoutMs: number;
   /** From the answer (caller: the answer arriving; callee: the accept) until
    *  ICE connects. A separate window from the ring, counted from the answer:
@@ -279,19 +286,28 @@ export interface CallSessionTiming {
   readonly mediaSilenceTimeoutMs: number;
 }
 
-/** Default {@link CallSessionTiming}. Chosen, not measured: 45 s is the
- *  order of a phone's ring before voicemail; 30 s is several times what a
+/** What this session decides for itself, and what it must be told.
+ *
+ *  The three defaults are chosen, not measured: 30 s is several times what a
  *  direct connection needs, so a call that has not connected by then is not
  *  going to; 10 s is long enough to ride out a roam and short enough that a
  *  dead call does not look alive; 30 s of NOTHING arriving is several times
  *  any renegotiation gap and is how a call that outlived its peer by 45
- *  minutes would have been caught. */
-export const DEFAULT_CALL_SESSION_TIMING: CallSessionTiming = {
-  ringTimeoutMs: 45_000,
+ *  minutes would have been caught.
+ *
+ *  `ringTimeoutMs` is deliberately NOT among them — see its doc on
+ *  {@link CallSessionTiming}. It used to be a `45_000` literal here, one of
+ *  several across the three clients with nothing holding them equal. */
+export const DEFAULT_CALL_SESSION_TIMING: Omit<CallSessionTiming, "ringTimeoutMs"> = {
   connectTimeoutMs: 30_000,
   iceDisconnectedGraceMs: 10_000,
   mediaSilenceTimeoutMs: 30_000,
 };
+
+/** The timing a caller supplies: the shared ring window, and any override of
+ *  the three this session defaults. */
+export type CallSessionTimingInput = Partial<Omit<CallSessionTiming, "ringTimeoutMs">> &
+  Pick<CallSessionTiming, "ringTimeoutMs">;
 
 /** STUN-only base list. A TURN row from the auth service is appended to it
  *  per call when one can be minted; see `setTurnProvider`. */
@@ -387,7 +403,7 @@ export class CallSession {
   constructor(
     callId: Uint8Array,
     private readonly callbacks: CallSessionCallbacks,
-    timing: Partial<CallSessionTiming> = {},
+    timing: CallSessionTimingInput,
     private readonly sframe: SFrameAttachers = DEFAULT_SFRAME_ATTACHERS,
   ) {
     this.callId = callId;

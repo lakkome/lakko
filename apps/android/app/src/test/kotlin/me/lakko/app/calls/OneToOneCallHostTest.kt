@@ -98,6 +98,17 @@ class OneToOneCallHostTest {
         val created = mutableListOf<Pair<String, FakeSession>>()
         val published = mutableListOf<Pair<String, String>>()
 
+        /** docs/ux/calls.md section 2.1 — conversations the person muted. */
+        val mutedGroups = mutableSetOf<String>()
+        val mutedAsked = mutableListOf<String>()
+        var muteThrows = false
+
+        override suspend fun isMuted(groupIdHex: String): Boolean {
+            mutedAsked += groupIdHex
+            if (muteThrows) throw RuntimeException("mute store failure")
+            return groupIdHex in mutedGroups
+        }
+
         /** docs/ux/calls.md section 6 — the transcript rows the host wrote. */
         val recorded = mutableListOf<Pair<String, CallTranscriptEntry>>()
         var keyDelayMs = 0L
@@ -153,6 +164,9 @@ class OneToOneCallHostTest {
         val host = OneToOneCallHost<FakeSession>(
             scope = backgroundScope,
             clock = { h.now },
+            // Stated here rather than read from the core: a JVM unit test does
+            // not load the native library. See [TEST_RING_WINDOW_MS].
+            timing = OneToOneCallTiming(ringTimeoutMs = TEST_RING_WINDOW_MS),
             warn = { _, _ -> },
         )
         val ringer = FakeRinger()
@@ -381,7 +395,7 @@ class OneToOneCallHostTest {
         runCurrent()
         val session = h.session()!!
 
-        advanceTimeBy(OneToOneCallTiming().ringTimeoutMs - 1)
+        advanceTimeBy(TEST_RING_WINDOW_MS - 1)
         runCurrent()
         assertTrue(session.hangUps.isEmpty())
 
@@ -409,7 +423,7 @@ class OneToOneCallHostTest {
         runCurrent()
         assertTrue(session.hangUps.isEmpty())
 
-        advanceTimeBy(OneToOneCallTiming().establishTimeoutMs)
+        advanceTimeBy(OneToOneCallTiming(ringTimeoutMs = TEST_RING_WINDOW_MS).establishTimeoutMs)
         runCurrent()
         assertEquals(listOf(CallSession.WebCallEndReason.TimedOut), session.hangUps)
         runCurrent()
@@ -446,7 +460,7 @@ class OneToOneCallHostTest {
         assertNotNull(call.session.keySeed)
         assertEquals(true to false, call.session.dialed)
 
-        advanceTimeBy(OneToOneCallTiming().establishTimeoutMs + 1)
+        advanceTimeBy(OneToOneCallTiming(ringTimeoutMs = TEST_RING_WINDOW_MS).establishTimeoutMs + 1)
         runCurrent()
         assertEquals(listOf(CallSession.WebCallEndReason.TimedOut), call.session.hangUps)
         assertFalse(h.host.hasCall)
@@ -781,7 +795,7 @@ class OneToOneCallHostTest {
         val h = harness()
         h.host.deliver(groupA, 1, offer(call1, video = true), iso(t0))
         runCurrent()
-        advanceTimeBy(OneToOneCallTiming().ringTimeoutMs + 1)
+        advanceTimeBy(TEST_RING_WINDOW_MS + 1)
         runCurrent()
 
         assertEquals(
@@ -970,8 +984,8 @@ class OneToOneCallHostTest {
         // bound is the policy's own: a sweep never exceeds its budget, so what
         // is left is at least the window minus that budget. Derived rather than
         // picked, so widening the budget fails here.
-        val remaining = callRingRemainingMs(publishedAt, readAt)
-        val guaranteed = CALL_RING_WINDOW_MS - me.lakko.app.chat.APP_POLL_SWEEP_BUDGET_SECS * 1_000L
+        val remaining = callRingRemainingMs(publishedAt, readAt, TEST_RING_WINDOW_MS)
+        val guaranteed = TEST_RING_WINDOW_MS - me.lakko.app.chat.APP_POLL_SWEEP_BUDGET_SECS * 1_000L
         assertTrue("only ${remaining}ms of ring window left", remaining >= guaranteed)
         assertTrue("the guarantee is worth having", guaranteed >= 20_000L)
     }

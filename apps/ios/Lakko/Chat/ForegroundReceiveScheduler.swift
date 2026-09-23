@@ -50,8 +50,8 @@ import Foundation
 /// flight. A poll's tail may be running an ADR-0045 committer sweep, and
 /// cancelling one mid-publish would leave a verdict owed for no reason. On
 /// returning to the foreground the loop sweeps at once, so an offer that
-/// arrived while backgrounded rings if it is still fresh (under 60 s by its DS
-/// row time, ``CallHostRouting/staleOfferMs``).
+/// arrived while backgrounded rings if it is still fresh (inside the ring
+/// window by its DS row time, ``CallHostRouting/ringWindowMs``).
 ///
 /// ## What this does NOT own
 ///

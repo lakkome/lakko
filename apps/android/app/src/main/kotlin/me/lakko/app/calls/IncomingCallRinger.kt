@@ -28,6 +28,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import uniffi.lakko_ffi_uniffi.RingDecision
+import uniffi.lakko_ffi_uniffi.callRingWindowMs
+import uniffi.lakko_ffi_uniffi.ringDecision
 
 /**
  * The one thing that makes the phone ring, and the one thing that stops it.
@@ -64,12 +67,27 @@ import kotlinx.coroutines.launch
  *
  * ## The window
  *
- * A ring stops itself after what is left of [CALL_RING_WINDOW_MS], measured
- * from the OFFER rather than from the moment this device noticed it: a wake
- * that took twenty seconds to arrive has twenty-five seconds of ringing left,
- * not forty-five. When it runs out the host is told
- * ([OneToOneCallHost.dismissRingingOffer]) so that a held offer cannot ring
- * again the next time the app comes to the foreground.
+ * A ring stops itself after what is left of the shared ring window
+ * ([uniffi.lakko_ffi_uniffi.callRingWindowMs]), measured from the OFFER rather
+ * than from the moment this device noticed it: a wake that took twenty seconds
+ * to arrive has twenty-five seconds of ringing left, not forty-five. When it
+ * runs out the host is told ([OneToOneCallHost.dismissRingingOffer]) so that a
+ * held offer cannot ring again the next time the app comes to the foreground.
+ *
+ * ## Mute
+ *
+ * `docs/ux/calls.md` section 2.1 — a muted chat never rings. This is where
+ * that is applied, because it is where both paths meet: putting it in the FCM
+ * service and again in the poll host would be the same rule twice, and the
+ * two copies would drift.
+ *
+ * The verdict itself is not decided here either. [uniffi.lakko_ffi_uniffi.ringDecision]
+ * (`crates/lakko-ui-rules/src/ring.rs`) answers it for all three clients, and
+ * the three answers are deliberately distinct: `RING` interrupts, `SILENT`
+ * records the call and interrupts nobody, and `TOO_LATE` says the caller has
+ * already given up. `SILENT` is NOT `TOO_LATE` and is not a dropped call — a
+ * person who muted a conversation asked not to be interrupted by it, not to be
+ * kept from finding out who tried to reach them.
  */
 public object IncomingCallRinger : IncomingCallRingPort {
 
@@ -118,8 +136,15 @@ public object IncomingCallRinger : IncomingCallRingPort {
         appInForeground = foreground
         val ring = mutableRinging.value ?: return
         val context = appContext ?: return
-        applySurface(context, ring, callRingRemainingMs(ring.offeredAtMs, System.currentTimeMillis()))
+        applySurface(context, ring, remainingMs(ring))
     }
+
+    /** What is left of this ring's window, against the shared 45 s number. */
+    private fun remainingMs(ring: IncomingCallRing): Long =
+        callRingRemainingMs(ring.offeredAtMs, System.currentTimeMillis(), windowMs())
+
+    /** The ring window, from its one home (`crates/lakko-ui-rules/src/ring.rs`). */
+    private fun windowMs(): Long = callRingWindowMs().toLong()
 
     /**
      * Make exactly one surface ring, per [ringSurface], and stop the other.
@@ -129,7 +154,55 @@ public object IncomingCallRinger : IncomingCallRingPort {
      * run and can never both stop.
      */
     private fun applySurface(context: Context, ring: IncomingCallRing, remainingMs: Long) {
-        when (ringSurface(ringing = true, appInForeground = appInForeground, remainingMs = remainingMs)) {
+        // Two questions, asked in order, and they are not the same question.
+        // The core answers WHETHER this device may interrupt at all — the
+        // rule shared with the other two clients. `ringSurface` answers WHICH
+        // surface does the interrupting on Android, which no other client has
+        // and which the core therefore knows nothing about.
+        val decision = ringDecision(
+            ring.muted,
+            callRingOfferAgeMs(remainingMs, windowMs()).toULong(),
+        )
+        val surface = when (decision) {
+            RingDecision.RING ->
+                ringSurface(ringing = true, appInForeground = appInForeground, remainingMs = remainingMs)
+            // `docs/ux/calls.md` section 2.1 — a muted chat never rings. No
+            // ringtone, no vibration, no full-screen intent, no call-category
+            // heads-up over whatever the person is doing.
+            //
+            // And no quiet notification either. That is a judgement, so here
+            // is the reasoning. The call is ALREADY recorded, in the place a
+            // muted conversation's content belongs: the chat's own timeline
+            // and the call log, written by the host when the window runs out
+            // ([OneToOneCallHost.dismissRingingOffer]) exactly as it is for an
+            // unmuted call nobody answered. A notification would be a second
+            // record of the same event — one the person has to dismiss, for a
+            // conversation they asked to stop hearing from. And a call
+            // notification is worth having only while it can be answered: a
+            // silent, low-priority card is noticed minutes later, when the
+            // window is long gone, so it would offer an answer that connects
+            // to nobody, which is the very thing `TOO_LATE` exists to refuse.
+            //
+            // `SILENT` is NOT a dropped call and is NOT `TOO_LATE`:
+            // [startRinging] still registers the ring, the window still runs,
+            // and the missed-call record still lands. Only the interruption is
+            // withheld.
+            //
+            // The in-app screen goes too, and it is not this file that
+            // withholds it: [me.lakko.app.ui.call.OneToOneCallOverlay] asks
+            // the same shared rule through
+            // [me.lakko.app.calls.oneToOneCallPresentation]. This was briefly
+            // the other way — the sound withheld and the full-screen dialog
+            // still thrown across whatever the person was reading — which
+            // honours half of section 2.1: a screen that takes over the phone
+            // IS an interruption, and it was also the one point where this
+            // client disagreed with the other two.
+            RingDecision.SILENT,
+            // The caller has already given up.
+            RingDecision.TOO_LATE,
+            -> RingSurface.NONE
+        }
+        when (surface) {
             RingSurface.IN_APP -> {
                 cancel(context, ring.callIdHex)
                 startInAppRing(context)
@@ -154,9 +227,13 @@ public object IncomingCallRinger : IncomingCallRingPort {
     override fun startRinging(ring: IncomingCallRing) {
         val context = appContext ?: return
         if (mutableRinging.value?.callIdHex == ring.callIdHex) return
-        val remaining = callRingRemainingMs(ring.offeredAtMs, System.currentTimeMillis())
+        val remaining = remainingMs(ring)
         if (remaining <= 0L) {
-            // The caller gave up before this device heard about it.
+            // The caller gave up before this device heard about it — the
+            // core's `TooLate`, which is the one answer that stops here. A
+            // muted offer does NOT stop here: it is registered, timed and
+            // recorded like any other, and only [applySurface] withholds the
+            // interruption.
             return
         }
         mutableRinging.value = ring
@@ -308,7 +385,7 @@ public object IncomingCallRinger : IncomingCallRingPort {
                 .notify(notificationId(ring.callIdHex), builder.build())
         } catch (cause: SecurityException) {
             // API 33+ without POST_NOTIFICATIONS. The in-app presentation
-            // (OneToOneCallOverlay) still shows when the app is open.
+            // (OneToOneCallOverlay) asks the same rule and stays away too.
             Log.w(TAG, "could not post the incoming-call notification", cause)
         }
     }

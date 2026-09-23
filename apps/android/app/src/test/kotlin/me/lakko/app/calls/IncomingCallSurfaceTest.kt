@@ -77,4 +77,48 @@ class IncomingCallSurfaceTest {
             oneToOneCallPresentation(CallSession.WebCallState.Ringing, accepted = true),
         )
     }
+
+    /**
+     * `docs/ux/calls.md` section 2.1 — a screen that takes over the phone IS
+     * an interruption, so a muted conversation withholds it exactly as it
+     * withholds the ringtone. This client briefly did the other thing, which
+     * honoured half the rule and was also the one point where it disagreed
+     * with the other two clients.
+     */
+    @Test
+    fun `a muted conversation is not interrupted by the ring screen either`() {
+        assertEquals(
+            OneToOneCallPresentation.NONE,
+            oneToOneCallPresentation(
+                CallSession.WebCallState.Ringing,
+                accepted = false,
+                muted = true,
+            ),
+        )
+    }
+
+    /**
+     * And mute withholds only the interruption. Once the call is accepted
+     * nobody is being interrupted, so the call screen presents normally -
+     * otherwise a muted call answered from elsewhere would run invisibly.
+     */
+    @Test
+    fun `a muted call that was accepted presents like any other`() {
+        assertEquals(
+            OneToOneCallPresentation.IN_CALL_SCREEN,
+            oneToOneCallPresentation(
+                CallSession.WebCallState.Ringing,
+                accepted = true,
+                muted = true,
+            ),
+        )
+        assertEquals(
+            OneToOneCallPresentation.IN_CALL_SCREEN,
+            oneToOneCallPresentation(
+                CallSession.WebCallState.Connected,
+                accepted = false,
+                muted = true,
+            ),
+        )
+    }
 }

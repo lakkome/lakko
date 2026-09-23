@@ -84,12 +84,22 @@ function wasmStub() {
       }
     },
     parseCallSignaling: (bytes: Uint8Array) => realWasm.parseCallSignaling(bytes),
+    // The REAL shared ring rule (`crates/lakko-ui-rules/src/ring.rs`), not a
+    // stub of it: whether an offer is still live and whether a muted
+    // conversation may interrupt are its decisions, and a stub would let
+    // these tests pass while the rule said something else.
+    ringDecision: realWasm.ringDecision,
+    RingDecision: realWasm.RingDecision,
   };
 }
 
+/** The one home of the window, read rather than restated. A function because
+ *  wasm is only initialised in `beforeAll`. */
+const ringWindowMs = (): number => Number(realWasm.callRingWindowMs());
+
 function deps(
   messages: unknown[],
-  opts: { senderName?: string | null; wasm?: object } = {},
+  opts: { senderName?: string | null; wasm?: object; muted?: boolean | null | "throws" } = {},
 ) {
   const forbidden = { saveSnapshot: vi.fn(), saveMessageLog: vi.fn(), advanceCursor: vi.fn() };
   return {
@@ -104,6 +114,10 @@ function deps(
       lookupSenderName: async (_a: string, _k: unknown, key: string) =>
         key === SENDER_KEY_B64 ? (opts.senderName ?? null) : null,
       nowMs: () => NOW,
+      lookupMuted: async () => {
+        if (opts.muted === "throws") throw new Error("idb is having a day");
+        return opts.muted ?? null;
+      },
       ...forbidden,
     },
   };
@@ -121,6 +135,8 @@ describe("an offer becomes a ring", () => {
       groupHex: GROUP_HEX,
       video: false,
       callerName: "Anna",
+      silent: false,
+      offerAgeMs: 0,
     });
   });
 
@@ -138,12 +154,15 @@ describe("an offer becomes a ring", () => {
     expect(out?.title).toBe("Lakko");
   });
 
-  it("does not ring for a stale offer", async () => {
+  it("does not ring for an offer the shared rule calls over", async () => {
     // A wake can be delivered late or replayed to a device that was offline.
-    // A phone must not start ringing for a call that ended minutes ago.
-    const { deps: d } = deps([row(42, offer(), 61_000)]);
+    // A phone must not start ringing for a call that ended minutes ago. How
+    // long is too long is `lakko_ui_rules::ring`'s to say, and this window is
+    // read from it rather than restated: it is the same number the caller's
+    // own ring timer runs on, so the two sides give up together.
+    const { deps: d } = deps([row(42, offer(), ringWindowMs())]);
     expect(await decryptPushPreview(wake, d)).toBeNull();
-    const { deps: fresh } = deps([row(42, offer(), 59_000)]);
+    const { deps: fresh } = deps([row(42, offer(), ringWindowMs() - 1_000)]);
     expect((await decryptPushPreview(wake, fresh))?.call.kind).toBe("ring");
   });
 
@@ -156,6 +175,62 @@ describe("an offer becomes a ring", () => {
   });
 });
 
+/** `docs/ux/calls.md` section 2.1 — "a muted chat never rings". */
+describe("a muted conversation is announced without interrupting", () => {
+  it("marks a call in a muted conversation silent, and still announces it", async () => {
+    const { deps: d } = deps([row(42, offer())], { muted: true, senderName: "Anna" });
+    const out = await decryptPushPreview(wake, d);
+    // Not null: dropping it would be telling the person nothing happened.
+    expect(out?.call.kind).toBe("ring");
+    expect(out?.call.silent).toBe(true);
+    expect(out?.call.callerName).toBe("Anna");
+  });
+
+  it("leaves an unmuted conversation exactly as it was", async () => {
+    const { deps: d } = deps([row(42, offer())], { muted: false });
+    expect((await decryptPushPreview(wake, d))?.call.silent).toBe(false);
+  });
+
+  it("rings when the muted set cannot be read", async () => {
+    // The one read on this path that fails OPEN. Silencing a call because a
+    // database did not open is a defect nobody can see; an unwanted ring is
+    // one anybody can.
+    for (const muted of [null, "throws"] as const) {
+      const { deps: d } = deps([row(42, offer())], { muted });
+      expect((await decryptPushPreview(wake, d))?.call.silent).toBe(false);
+    }
+  });
+
+  it("rings when the worker has no way to ask at all", async () => {
+    const { deps: d } = deps([row(42, offer())]);
+    const { lookupMuted: _drop, ...noMuteDep } = d;
+    expect((await decryptPushPreview(wake, noMuteDep))?.call.silent).toBe(false);
+  });
+
+  it("does not consult mute for a call that is already over", async () => {
+    // `tooLate` outranks mute: the rule judges age first, and a call nobody
+    // is waiting on is not a call to be quiet about.
+    const { deps: d } = deps([row(42, offer(), ringWindowMs())], { muted: true });
+    expect(await decryptPushPreview(wake, d)).toBeNull();
+  });
+
+  it("never asks about mute to take a ring DOWN", async () => {
+    // An end closes whatever is showing. Mute has nothing to say about that,
+    // and asking would risk leaving a ring up on an IDB failure.
+    let asked = 0;
+    const { deps: d } = deps([row(42, end())], { muted: true });
+    const counted = {
+      ...d,
+      lookupMuted: async () => {
+        asked += 1;
+        return true;
+      },
+    };
+    expect((await decryptPushPreview(wake, counted))?.call.silent).toBe(false);
+    expect(asked).toBe(0);
+  });
+});
+
 describe("an end takes the ring down", () => {
   it("classifies an end as a cancel for that call", async () => {
     const { deps: d } = deps([row(42, end())]);
@@ -165,6 +240,8 @@ describe("an end takes the ring down", () => {
       groupHex: GROUP_HEX,
       video: false,
       callerName: null,
+      silent: false,
+      offerAgeMs: 0,
     });
   });
 

@@ -46,7 +46,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// Per-group UI flags snapshot (pin / mute / archive /
     /// unread-override).
     @Published public private(set) var flags: [String: FlagsState] = [:] {
-        didSet { scheduleSyncStatePersist() }
+        didSet {
+            scheduleSyncStatePersist()
+            mirrorMutedConversations()
+        }
     }
 
     /// Per-group read cursor snapshot.
@@ -163,6 +166,20 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         flags = [:]
         readCursors = [:]
         order = nil
+    }
+
+    /// Publish the muted set into the App Group container
+    /// (``ConversationMuteMirror``), so the three call paths that cannot reach
+    /// this repository still know not to ring.
+    ///
+    /// UNLIKE the snapshot write below, this is NOT debounced. The debounce
+    /// buys an AES seal and a file replace; a `UserDefaults` write costs
+    /// neither, and half a second is long enough for the call a person just
+    /// muted to ring anyway. Whole-set rather than per-row, because an unmute
+    /// on a sibling device has to REMOVE a row.
+    private func mirrorMutedConversations() {
+        ConversationMuteMirror.replaceAll(
+            mutedGroupIdsHex: Set(flags.filter { $0.value.muted }.keys))
     }
 
     /// Write the four maps to disk, shortly.

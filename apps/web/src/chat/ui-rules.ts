@@ -40,6 +40,15 @@ export type UiRules = Pick<
   | "personInfoSections"
   | "groupInfoSections"
   | "channelInfoSections"
+  // Whether an arriving call offer rings, and for how long
+  // (`docs/ux/calls.md` section 2.1). The ring window is here because it is a
+  // number two DIFFERENT devices have to agree on, and mute because no client
+  // was reading it at all; `calls/ring-rule.ts` is the adapter the call paths
+  // reach it through.
+  | "RingDecision"
+  | "ringDecision"
+  | "remainingRingMs"
+  | "callRingWindowMs"
 >;
 
 const [rules, setRules] = createSignal<UiRules | null>(null);
