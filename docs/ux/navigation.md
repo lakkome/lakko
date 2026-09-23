@@ -154,6 +154,27 @@ about how the name has to be typed.
 So the open question is not "fuzzy or exact" - that is answered. It is how
 one field presents two different kinds of reach without lying about either.
 
+### 4.3 There is ONE network lookup, not one per kind
+
+Worth stating because the code currently implies otherwise. Looking up
+`@username` and looking up a channel's `@handle` are the same mechanism over
+two namespaces - blind the name, ask, get an exact answer or nothing - and a
+group handle would be a third namespace and the same mechanism again. The
+person does not know or care which namespace a name they were given lives
+in.
+
+Today they are two entry points, "Add by username" and "Find a channel",
+sitting next to each other in the Contacts add menu. That is better than the
+two screens they were, and it is still the wrong shape: it should be one
+field that resolves whatever the name turns out to be and opens it -
+a person leads to a contact request, a channel leads to subscribing.
+
+It is not done here because the contact path asks for an introduction
+alongside the name, so merging the fields means splitting that flow into
+find-then-introduce, and that is a change to a working flow rather than a
+rename. It belongs with whatever section 4 decides, since it is the same
+question.
+
 ## 5. Calls
 
 ### 5.1 The list
@@ -265,11 +286,13 @@ TEXT would need an index no client has.
   against, so it carries no unread badge and no pin / mute / archive, which
   are keyed on a conversation group id it does not have. A badge that can
   never be non-zero would be a worse lie than none.
-- **The Channels destination stays anyway**, and this is the one place the
-  merge is blocked on something else: that screen holds the only way to find
-  a channel by `@handle`, which is a network lookup and therefore part of
-  the open question in section 4. Removing the destination first would
-  delete the entry point without replacing it.
+- **The Channels destination is gone.** The find-by-`@handle` field it used
+  to hold moved to Contacts, beside "Add by username", which is where it
+  belonged: a lookup is a function, and keeping a whole destination alive
+  because a field happened to sit on it is backwards. The `/channels`
+  screens stay at their URLs and count as Chats while open.
+- **"Create call link" left the Contacts menu** for Calls, where section 3
+  puts it.
 - **Search** is untouched and still the local filter it was: section 4 is
   open.
 - **iOS and Android have none of this yet.**

@@ -31,7 +31,7 @@ import { useNavigate } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
 import { base64Decode, base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
-import CreateCallLinkPanel from "../calls/CreateCallLinkPanel";
+import FindChannelPanel from "../channels/FindChannelPanel";
 import { useChats } from "../chat/ChatContext";
 import { recordConversationKind } from "../chat/conversation-kind-store";
 import { ContactsClient } from "../contacts/client";
@@ -416,12 +416,12 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
                   </div>
                   <InviteLinksPanel />
                 </Show>
-                <Show when={adding() === "call"}>
+                <Show when={adding() === "channel"}>
                   <div class="lk-page-head">
-                    <h1>Call link</h1>
-                    <p>A call anyone with the link can ask to join. You host it.</p>
+                    <h1>Find a channel</h1>
+                    <p>Type the whole handle. Partial names cannot be looked up.</p>
                   </div>
-                  <CreateCallLinkPanel />
+                  <FindChannelPanel />
                 </Show>
               </div>
             </article>
