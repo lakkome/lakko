@@ -67,6 +67,8 @@ import { pollForCoPublishWelcome, requestToCoPublish } from "../channels/copubli
 import { LegacyChannelError } from "../channels/legacy-v1";
 import { DiscoveryHttpError, registerChannelHandle } from "../channels/channel-discovery";
 import { channelTitle, displayHandle } from "../channels/channel-row";
+import { knownSubscriberCount } from "../channels/ui-cache";
+import { channelInfoSections, infoHeading, infoOpenLabel } from "../chat/conversation-info";
 import { foldChannelMeta, publishChannelMeta } from "../channels/channel-meta";
 import { ManagePanel } from "../channels/ManagePanel";
 import { isHiddenPostDecode, PostCard, toPostDecode, type PostDecode } from "../channels/PostCard";
@@ -83,6 +85,8 @@ import { loadWasm } from "../wasm";
 import { paths } from "./paths";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
+import { ModalLayer } from "../ui/ModalLayer";
+import { requestConfirm } from "../ui/confirm-dialog";
 
 // ============================================================================
 // Shared pieces
@@ -93,11 +97,16 @@ function oldestFirst(posts: ReadonlyArray<ChannelPostView>): ChannelPostView[] {
   return [...posts].sort((a, b) => a.cursor - b.cursor);
 }
 
-/** The channel header: avatar, name, one line under it. */
+/**
+ * The channel header: avatar, name, one line under it. The name opens the
+ * channel's info (`docs/ux/conversation-info.md` section 1), which is the
+ * same gesture the chat header carries and the only way in.
+ */
 function ChannelHead(props: {
   readonly id: string;
   readonly name: string;
   readonly sub: string;
+  readonly onOpenInfo: () => void;
   readonly actions?: JSX.Element;
 }): JSX.Element {
   const navigate = useNavigate();
@@ -112,7 +121,14 @@ function ChannelHead(props: {
       >
         <Icon name="back" size={20} />
       </button>
-      <div class="lk-chat-title lk-channel-title">
+      <button
+        type="button"
+        class="lk-chat-title lk-channel-title"
+        title={infoOpenLabel("channel")}
+        aria-label={infoOpenLabel("channel")}
+        aria-haspopup="dialog"
+        onClick={(): void => props.onOpenInfo()}
+      >
         <Avatar label={props.name} id={props.id} size="sm" />
         <div class="lk-chat-title-text">
           <h1>{props.name}</h1>
@@ -120,9 +136,107 @@ function ChannelHead(props: {
             <span class="lk-chat-sub">{props.sub}</span>
           </Show>
         </div>
-      </div>
+      </button>
       <div class="lk-chat-actions">{props.actions}</div>
     </header>
+  );
+}
+
+/**
+ * What a channel's header opens (`docs/ux/conversation-info.md` section
+ * 2.3): name, handle and description, how many subscribers where this device
+ * knows, and the one action that belongs to the viewer - the owner's manage
+ * screen for a publisher, stop following for a subscriber.
+ *
+ * Which of those appear is decided in `chat/conversation-info.ts`, where it
+ * can be tested; this renders what it is told.
+ */
+function ChannelInfoBody(props: {
+  readonly id: string;
+  readonly isPublisher: boolean;
+  readonly isSubscriber: boolean;
+  readonly onManage: () => void;
+  readonly onUnsubscribe: () => void;
+}): JSX.Element {
+  const meta = (): ReturnType<typeof channelMetaOf> => channelMetaOf(props.id);
+  const sections = createMemo(() =>
+    channelInfoSections({
+      isPublisher: props.isPublisher,
+      isSubscriber: props.isSubscriber,
+    }),
+  );
+  const subscribers = (): number | null => knownSubscriberCount(props.id);
+
+  return (
+    <>
+      <header class="lk-contact-head">
+        <Avatar label={meta().name} id={props.id} size="xl" />
+        <h1>{meta().name}</h1>
+        <Show when={meta().handle.length > 0}>
+          <div class="lk-contact-username">{meta().handle}</div>
+        </Show>
+        <Show when={meta().description.length > 0}>
+          <p class="lk-meta">{meta().description}</p>
+        </Show>
+        {/* Only where this device has actually counted them; an absent count
+            is left out rather than shown as zero. */}
+        <Show when={subscribers()}>
+          {(n) => (
+            <div class="lk-meta">
+              {n()} {n() === 1 ? "subscriber" : "subscribers"}
+            </div>
+          )}
+        </Show>
+      </header>
+
+      <Show when={sections().includes("manage-channel")}>
+        <section class="lk-card">
+          <div class="lk-card-row">
+            <span class="lk-card-row-icon">
+              <Icon name="settings" size={18} />
+            </span>
+            <div class="lk-card-row-body">
+              <span class="lk-card-row-title">Manage channel</span>
+              <span class="lk-card-row-sub">
+                Its name and description, who reads it, and who else may post.
+              </span>
+            </div>
+            <button
+              type="button"
+              class="lk-card-row-action"
+              style={{ color: "var(--accent)" }}
+              onClick={(): void => props.onManage()}
+            >
+              Open
+            </button>
+          </div>
+        </section>
+      </Show>
+
+      <Show when={sections().includes("unsubscribe")}>
+        <section class="lk-card danger">
+          <div class="lk-card-row">
+            <span class="lk-card-row-icon">
+              <Icon name="trash" size={18} />
+            </span>
+            <div class="lk-card-row-body">
+              <span class="lk-card-row-title">Stop following</span>
+              <span class="lk-card-row-sub">
+                Takes the channel off your list and stops this device reading
+                it. You can subscribe again later.
+              </span>
+            </div>
+            <button
+              type="button"
+              class="danger lk-card-row-action"
+              onClick={(): void => props.onUnsubscribe()}
+            >
+              Stop following
+            </button>
+          </div>
+        </section>
+      </Show>
+    </>
   );
 }
 
@@ -172,6 +286,31 @@ function PostList(props: {
       </Show>
     </div>
   );
+}
+
+/**
+ * Stop following a channel on this device: forget the reader keypair and the
+ * seeds it recovered, and drop the channel from the local list.
+ *
+ * Local by design AND by what exists - `services/channels` has no route that
+ * retires a subscriber, so nothing here can claim the publisher was told.
+ * The copy says what actually happens: the channel leaves the list and this
+ * device stops reading it.
+ */
+async function confirmStopFollowing(channelIdHex: string, name: string): Promise<boolean> {
+  const ok = await requestConfirm({
+    title: `Stop following ${name}?`,
+    body:
+      "It leaves your list and this device stops reading it. " +
+      "You can subscribe again later.",
+    confirmLabel: "Stop following",
+    cancelLabel: "Cancel",
+    tone: "danger",
+  });
+  if (!ok) return false;
+  channelsActions.clearSubscriberKeys(channelIdHex);
+  channelsActions.removeChannel(channelIdHex);
+  return true;
 }
 
 /** Metadata for a channel id (ADR-0051 §5): the shared record first, then
@@ -574,6 +713,7 @@ const ChannelView: Component = () => {
   const [publishError, setPublishError] = createSignal<string | null>(null);
   const [composeText, setComposeText] = createSignal("");
   const [manageOpen, setManageOpen] = createSignal(false);
+  const [infoOpen, setInfoOpen] = createSignal(false);
 
   const isOwner = (): boolean => channelsState.keysByChannel().get(params.id) !== undefined;
   const isSubscriber = (): boolean =>
@@ -674,6 +814,9 @@ const ChannelView: Component = () => {
             id={params.id}
             name={meta().name}
             sub={subLine()}
+            onOpenInfo={(): void => {
+              setInfoOpen(true);
+            }}
             actions={
               <Show when={isOwner()}>
                 <button
@@ -691,6 +834,36 @@ const ChannelView: Component = () => {
               </Show>
             }
           />
+          {/* `docs/ux/conversation-info.md` — the channel's info, over the
+              channel rather than beside it. The owner's manage screen is
+              REACHED from here rather than moved into here: it stays mounted
+              behind this view so the fan-out, the rotation heartbeat and the
+              request poll keep running, and a layer that unmounts on close
+              would stop them. */}
+          <ModalLayer
+            open={infoOpen()}
+            title={infoHeading("channel")}
+            onClose={(): void => {
+              setInfoOpen(false);
+            }}
+          >
+            <ChannelInfoBody
+              id={params.id}
+              isPublisher={isOwner()}
+              isSubscriber={isSubscriber()}
+              onManage={(): void => {
+                setInfoOpen(false);
+                setManageOpen(true);
+              }}
+              onUnsubscribe={(): void => {
+                void confirmStopFollowing(params.id, meta().name).then((done) => {
+                  if (!done) return;
+                  setInfoOpen(false);
+                  navigate(paths.channels);
+                });
+              }}
+            />
+          </ModalLayer>
           <Show
             when={isOwner()}
             fallback={
@@ -746,6 +919,8 @@ const ChannelView: Component = () => {
 const ChannelSubscribe: Component = () => {
   const params = useParams<{ id: string }>();
   const location = useLocation<{ handle?: string }>();
+  const navigate = useNavigate();
+  const [infoOpen, setInfoOpen] = createSignal(false);
   const [bootstrap, setBootstrap] = createSignal<
     "idle" | "registering" | "polling" | "active" | "error"
   >("idle");
@@ -957,7 +1132,36 @@ const ChannelSubscribe: Component = () => {
   return (
     <article class="lk-chat lk-channel">
       <div class="lk-chat-body">
-        <ChannelHead id={params.id} name={meta().name} sub={statusLine()} />
+        <ChannelHead
+          id={params.id}
+          name={meta().name}
+          sub={statusLine()}
+          onOpenInfo={(): void => {
+              setInfoOpen(true);
+            }}
+        />
+        {/* The reader's view of the same info the publisher's view opens. */}
+        <ModalLayer
+          open={infoOpen()}
+          title={infoHeading("channel")}
+          onClose={(): void => {
+              setInfoOpen(false);
+            }}
+        >
+          <ChannelInfoBody
+            id={params.id}
+            isPublisher={false}
+            isSubscriber={channelsState.subscriberKeysByChannel().get(params.id) !== undefined}
+            onManage={(): void => undefined}
+            onUnsubscribe={(): void => {
+              void confirmStopFollowing(params.id, meta().name).then((done) => {
+                if (!done) return;
+                setInfoOpen(false);
+                navigate(paths.channels);
+              });
+            }}
+          />
+        </ModalLayer>
         <Switch>
           <Match when={bootstrap() === "polling"}>
             <div class="lk-alert info lk-channel-notice" role="status">

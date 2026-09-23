@@ -89,8 +89,9 @@ public final class ChatViewModel: ObservableObject {
     /// Live MLS roster for this group at the current epoch — refreshed by
     /// ``refreshMembers()`` and after every add / remove.
     @Published public private(set) var members: [GroupMember] = []
-    /// `true` while the members sheet is presented.
-    @Published public var membersPanelOpen: Bool = false
+    /// `true` while the conversation's info is presented over the chat
+    /// (`docs/ux/conversation-info.md` sections 1 and 3).
+    @Published public var conversationInfoOpen: Bool = false
     /// `@username` typed into the add-member field.
     @Published public var addMemberInput: String = ""
     /// `true` while an add or remove commit is in flight (disables the form).
@@ -485,7 +486,7 @@ public final class ChatViewModel: ObservableObject {
             groupIdHex: groupIdHex, foreground: isForeground)
         // The quiet window matures with the clock, so re-fold on the same tick
         // rather than only when the user does something.
-        if membersPanelOpen { refreshPendingRequests() }
+        if conversationInfoOpen { refreshPendingRequests() }
         // ADR-0045 UX §7 — and LOOK at the queue on the same tick, panel open
         // or not.
         //
@@ -783,17 +784,30 @@ public final class ChatViewModel: ObservableObject {
 
     // MARK: - Group membership actions (A4)
 
-    /// Open / close the members sheet. Refreshes the roster on open.
-    func toggleMembersPanel() {
-        membersPanelOpen.toggle()
-        if membersPanelOpen {
-            membershipError = nil
-            // A notice describes one action's outcome, so it must not outlive
-            // the panel that produced it: the pending row annotation is the
-            // durable signal, not this.
-            membershipNotice = nil
-            refreshMembers()
-        }
+    /// Open this conversation's info (`docs/ux/conversation-info.md`
+    /// section 1). Refreshes the roster when what opens is the group's.
+    func openConversationInfo() {
+        conversationInfoOpen = true
+        membershipError = nil
+        // A notice describes one action's outcome, so it must not outlive
+        // the panel that produced it: the pending row annotation is the
+        // durable signal, not this.
+        membershipNotice = nil
+        // A conversation between two people opens the other person, which has
+        // no roster to read.
+        if presentsAsGroup { refreshMembers() }
+    }
+
+    /// Close the info layer. The conversation is still behind it (section 3).
+    func closeConversationInfo() {
+        conversationInfoOpen = false
+    }
+
+    /// The person on the other side of a conversation between two people, as
+    /// the key their messages are signed with. `nil` in a group, or while the
+    /// roster cannot be read.
+    var oneToOnePeerSignatureKey: Data? {
+        repository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex)
     }
 
     /// Re-read the live MLS roster + the local member's role from the repository.
@@ -2060,7 +2074,7 @@ public final class ChatViewModel: ObservableObject {
         // ADR-0027 (G-3) — a poll may have retained a fresh external-join
         // request; refresh the pending list live while the members sheet is
         // open (cheap in-memory read of the group's retained set).
-        if membersPanelOpen {
+        if conversationInfoOpen {
             pendingJoins = refreshedPendingJoins()
             unkeptJoinRequest =
                 !membershipHasEnded && repository.sawUnkeptExternalJoin(groupIdHex: groupIdHex)
@@ -2774,7 +2788,7 @@ public final class ChatViewModel: ObservableObject {
         // ADR-0045 — the poll's tail ran a sweep, which may have landed a
         // membership change, and the batch may have carried a peer's proposal.
         // Either way the sheet's roster + pending set are stale.
-        if membersPanelOpen { refreshMembers() }
+        if conversationInfoOpen { refreshMembers() }
     }
 
     /// DS long-poll budget — same value as

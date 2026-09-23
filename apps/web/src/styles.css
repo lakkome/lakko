@@ -1492,6 +1492,16 @@ a.ghost.small.lk-wide-only {
   padding: 4px 8px 4px 4px;
   border-radius: 10px;
   cursor: pointer;
+  /* The header title is a real <button> (it opens the conversation info),
+     so the UA button styling is reset back to the header's own. */
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  min-height: 0;
+  justify-content: flex-start;
+  white-space: normal;
 }
 .lk-chat-title:hover {
   background: var(--surface-hover);
@@ -1671,6 +1681,54 @@ a.ghost.small.lk-wide-only {
   letter-spacing: 0.08em;
   color: var(--accent);
   margin: 4px 0 8px;
+}
+/* The conversation-info layer (docs/ux/conversation-info.md section 3): a
+   centred card over the conversation, which stays where it is behind it.
+   A native <dialog> for the focus trap, the inert background and Esc. */
+.lk-layer {
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-elevated);
+  color: var(--surface-fg);
+  box-shadow: var(--shadow-1);
+  padding: 0;
+  width: min(34rem, calc(100vw - 2rem));
+  max-height: min(42rem, calc(100vh - 3rem));
+  overflow: hidden;
+}
+.lk-layer::backdrop {
+  background: rgba(15, 18, 32, 0.45);
+}
+.lk-layer-card {
+  display: flex;
+  flex-direction: column;
+  max-height: inherit;
+}
+.lk-layer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 12px 12px 18px;
+  border-bottom: 1px solid var(--surface-border);
+}
+.lk-layer-head h2 {
+  margin: 0;
+  font-size: 16px;
+  line-height: 22px;
+}
+.lk-layer-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px 20px;
+  overflow-y: auto;
+}
+/* The person screen is reused verbatim inside the layer, so its own page
+   padding and column width step out of the way. */
+.lk-layer-body > article > .lk-page {
+  padding: 0;
+  max-width: none;
 }
 .lk-modal-backdrop {
   position: fixed;
@@ -3190,12 +3248,6 @@ button.lk-reaction {
   min-height: 0;
   display: flex;
   flex-direction: column;
-}
-.lk-chat-title.lk-channel-title {
-  cursor: default;
-}
-.lk-chat-title.lk-channel-title:hover {
-  background: transparent;
 }
 .lk-pane-note {
   margin: 0 12px 8px;

@@ -7,7 +7,11 @@ import SwiftUI
 /// Message, Call and Video; "Verify safety number" and Rename. No key
 /// fingerprint anywhere on it — the safety number is the verification surface.
 ///
-/// Pushed from the Contacts list through ``TabRoute/contactDetail(messageId:)``.
+/// Pushed from the Contacts list through ``TabRoute/contactDetail(messageId:)``,
+/// and presented as a sheet from a conversation's header
+/// (`docs/ux/conversation-info.md` section 1): one person screen, two ways of
+/// showing it, because a second one would be the same drift the conversation
+/// header's two routes to one panel already produced.
 /// "Message" opens the 1x1 chat through the same path the list used to; Call
 /// and Video are the chat header's entry points and are disabled, with the
 /// reason shown, when no chat exists yet.
@@ -15,17 +19,59 @@ import SwiftUI
 /// "Remove contact" is not offered: no client has a remove-contact operation
 /// (the accepted list only ever grows), so there is nothing existing to call.
 struct ContactDetailScreen: View {
+    /// How this screen is being shown (`docs/ux/conversation-info.md`
+    /// section 3). Pushed, it sits in the stack that pushed it and that stack
+    /// resolves ``TabRoute/safetyNumber(messageId:)``; as a sheet it is a
+    /// layer over the conversation and carries its own stack and its own way
+    /// out, because neither is there to inherit.
+    enum Presentation {
+        case pushed
+        case sheet
+    }
+
     @ObservedObject var viewModel: ContactsViewModel
     let messageId: Int64
     /// Open the 1x1 chat.
     let onOpenChat: (String) -> Void
     /// Start a call in the 1x1 chat; `video` asks for the camera.
     let onCall: (_ groupIdHex: String, _ video: Bool) -> Void
+    var presentation: Presentation = .pushed
+    /// Section 2.1 — "Message, when the info was opened from somewhere other
+    /// than the chat". Opened from the chat itself it would lead back to the
+    /// screen behind the sheet.
+    var offersMessage: Bool = true
+    /// Close the layer. Only reached in ``Presentation/sheet``.
+    var onDone: () -> Void = {}
 
     @State private var renaming = false
     @State private var draftName = ""
 
     var body: some View {
+        switch presentation {
+        case .pushed:
+            content
+        case .sheet:
+            NavigationStack {
+                content
+                    // The safety number is a `NavigationLink(value:)`, so in a
+                    // sheet it needs a stack that answers for it. Pushed, the
+                    // tab's stack does.
+                    .navigationDestination(for: TabRoute.self) { route in
+                        if case .safetyNumber(let id) = route {
+                            SafetyNumberScreen(viewModel: viewModel, messageId: id)
+                        }
+                    }
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("Done", action: onDone)
+                        }
+                    }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
         if let contact = viewModel.contact(messageId: messageId) {
             ResolvedName(signatureKey: contact.request.fromPubkey) { resolved in
                 detail(contact: contact, resolved: resolved)
@@ -86,8 +132,12 @@ struct ContactDetailScreen: View {
 
             Section {
                 HStack(spacing: 12) {
-                    ContactActionButton(title: "Message", systemImage: "bubble.left.fill", enabled: chat != nil) {
-                        if let chat { onOpenChat(chat) }
+                    if offersMessage {
+                        ContactActionButton(
+                            title: "Message", systemImage: "bubble.left.fill", enabled: chat != nil
+                        ) {
+                            if let chat { onOpenChat(chat) }
+                        }
                     }
                     ContactActionButton(title: "Call", systemImage: "phone.fill", enabled: callable) {
                         if let chat { onCall(chat, false) }

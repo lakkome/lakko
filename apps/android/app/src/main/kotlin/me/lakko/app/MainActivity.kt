@@ -1414,10 +1414,26 @@ private fun SessionRoot(
                             appContext, chatRepository, profileDirectory, groupIdHex,
                         )
                     }
+                    // docs/ux/conversation-info.md — a one-to-one header opens
+                    // the person, which is the contact screen. Built the same
+                    // way the contact-detail route builds it, so a rename or a
+                    // removal made in the layer is the same one either way.
+                    val chatContactsVm: ContactsViewModel = viewModel(
+                        factory = singletonViewModelFactory {
+                            ContactsViewModel(repo = contactsRepository, chatRepo = chatRepository)
+                        },
+                    )
                     ChatScreen(
                         viewModel = chatVm,
                         // Back returns to wherever the chat was opened from.
                         onNavigateBack = { navController.popBackStack() },
+                        contactsRepository = contactsRepository,
+                        contactsViewModel = chatContactsVm,
+                        // The layer closes itself first, so Back from the
+                        // number lands on the conversation.
+                        onOpenSafetyNumber = { key ->
+                            navController.navigate(Routes.safetyNumber(key))
+                        },
                         groupTitle = groupTitle,
                     )
                 }

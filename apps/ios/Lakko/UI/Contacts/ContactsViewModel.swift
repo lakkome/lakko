@@ -295,6 +295,22 @@ public final class ContactsViewModel: ObservableObject {
         }
     }
 
+    /// The accepted contact on the other side of a conversation between two
+    /// people, or `nil` when this device holds none for them.
+    ///
+    /// The inverse of ``chatGroupIdHex(for:)`` and reads the same two facts:
+    /// the id the accept flow recorded, else the other member's key. A read
+    /// over the live roster, no state change.
+    public func contact(forOneToOneChat groupIdHex: String) -> AcceptedContact? {
+        if let recorded = repositoryState.accepted.first(where: { $0.groupIdHex == groupIdHex }) {
+            return recorded
+        }
+        guard let chatRepository,
+              let peer = chatRepository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex)
+        else { return nil }
+        return repositoryState.accepted.first { $0.request.fromPubkey == peer }
+    }
+
     /// Whether the call buttons on a contact detail can act: a chat exists and
     /// this device's membership in it has not ended (the same gate the chat
     /// header applies to its own call buttons).

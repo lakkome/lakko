@@ -960,6 +960,7 @@ private struct SessionRoot: View, Equatable {
         case .chat(let groupIdHex):
             ChatScreen(
                 viewModel: chatViewModel(for: groupIdHex),
+                contacts: contactsVM,
                 onBack: { pop(route, from: tab) }
             )
             // UX spec section 5.2 — a pushed chat fills the screen; the tab

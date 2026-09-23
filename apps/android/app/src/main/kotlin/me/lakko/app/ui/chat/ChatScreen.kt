@@ -46,9 +46,7 @@ import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DoneAll
-import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Mood
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.AlertDialog
@@ -121,6 +119,7 @@ import kotlinx.coroutines.withContext
 import me.lakko.app.chat.AttachmentBridge
 import androidx.compose.ui.text.style.TextDecoration
 import me.lakko.app.chat.Ack
+import me.lakko.app.chat.ConversationInfo
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.Direction
 import me.lakko.app.chat.GroupPollOutcome
@@ -154,6 +153,12 @@ import uniffi.lakko_ffi_uniffi.AttachmentRef
 public fun ChatScreen(
     viewModel: ChatViewModel,
     onNavigateBack: () -> Unit,
+    /** docs/ux/conversation-info.md — a one-to-one header opens the person,
+     *  which is the contact screen, which needs these two. */
+    contactsRepository: me.lakko.app.contacts.ContactsRepository,
+    contactsViewModel: me.lakko.app.ui.contacts.ContactsViewModel,
+    /** Open the safety number for a contact, after the layer has closed. */
+    onOpenSafetyNumber: (contactKey: String) -> Unit,
     modifier: Modifier = Modifier,
     /** The group's title (local name or member-derived) for a group chat;
      *  a 1x1 chat names the other person itself. Never a hex id. */
@@ -206,6 +211,36 @@ public fun ChatScreen(
     val peerUsername = remember(state.groupIdHex, nameVersion, otherMembers) {
         viewModel.oneToOnePeerUsername()
     }
+    // docs/ux/conversation-info.md section 1 — WHICH info this conversation's
+    // header opens, decided by what the conversation is. The rule is in
+    // `me.lakko.app.chat` where the host suite runs it; this reads its answer
+    // and never re-derives it from a flag.
+    val contactsState by contactsRepository.state.collectAsStateWithLifecycle()
+    val contactLinks = remember(contactsState.accepted) {
+        contactsState.accepted.map {
+            me.lakko.app.chat.ContactLink(
+                routeKey = me.lakko.app.ui.contacts.contactRouteKey(it.request.fromPubkey),
+                groupIdHex = it.groupIdHex,
+            )
+        }
+    }
+    val peerRouteKey = remember(state.groupIdHex, otherMembers) {
+        viewModel.oneToOnePeerRouteKey()
+    }
+    val conversationInfo = remember(
+        conversationKind, otherMembers, state.groupIdHex, peerRouteKey, contactLinks,
+    ) {
+        me.lakko.app.chat.conversationInfo(
+            kind = conversationKind,
+            otherMemberCount = otherMembers.size,
+            groupIdHex = state.groupIdHex,
+            peerRouteKey = peerRouteKey,
+            contacts = contactLinks,
+        )
+    }
+    // The person layer's own open state. The group's lives in the view model
+    // (it refreshes the roster on open); a person's has nothing to refresh.
+    var personInfoOpen by remember(state.groupIdHex) { mutableStateOf(false) }
     // UX 5.2 — the timeline's clock: DS `created_at` rendered in the device's
     // 12/24-hour format; date separators relative to now.
     val zone = remember { ZoneId.systemDefault() }
@@ -450,7 +485,15 @@ public fun ChatScreen(
             onStartVideoCall = {
                 callPermissions.request(video = true) { v -> viewModel.onCallButton(video = v) }
             },
-            onShowMembers = viewModel::toggleMembersPanel,
+            // Section 1 — the ONE way into this conversation's info. Which
+            // one opens is `conversationInfo`'s answer, never this screen's.
+            onShowInfo = {
+                when (conversationInfo) {
+                    ConversationInfo.Group ->
+                        if (!viewModel.membersPanelOpen.value) viewModel.toggleMembersPanel()
+                    else -> personInfoOpen = true
+                }
+            },
         )
         },
     ) { scaffoldPadding ->
@@ -497,11 +540,56 @@ public fun ChatScreen(
             )
         }
 
-        // A4 — the group-membership sheet (roster + add / remove),
-        // presented as a Dialog while `membersPanelOpen` is true.
+        // The GROUP's info: the roster, the name, the invite link, the roles
+        // and the exit, as a Dialog over the conversation while
+        // `membersPanelOpen` is true.
+        //
+        // The second half of that condition is the guard, not a nicety: this
+        // sheet is about a group, and a conversation between two people has
+        // none. Gating the render on the conversation's kind rather than on
+        // the flag alone means no future caller of `toggleMembersPanel` can
+        // put `Group name`, `Create invite link`, `Make admin` and `Transfer
+        // ownership` in front of somebody chatting with one other person,
+        // which is the defect docs/ux/conversation-info.md section 0 records.
         val membersPanelOpen by viewModel.membersPanelOpen.collectAsStateWithLifecycle()
-        if (membersPanelOpen) {
+        if (membersPanelOpen && conversationInfo == ConversationInfo.Group) {
             MembersSheet(viewModel = viewModel, onChatDeleted = onNavigateBack)
+        }
+
+        // The PERSON's info: the contact screen, as a layer over the chat.
+        if (personInfoOpen && conversationInfo != ConversationInfo.Group) {
+            ConversationPersonSheet(
+                info = conversationInfo,
+                contactsRepository = contactsRepository,
+                contactsViewModel = contactsViewModel,
+                peerName = headerTitle,
+                peerUsername = peerUsername,
+                avatarSeed = state.groupIdHex,
+                // The same gate and the same routing the header's own call
+                // buttons use. A call already holding the slot hides it here;
+                // an ended membership is the RULE's to decide, so it is passed
+                // on rather than pre-judged.
+                onStartCall = if (callOccupant != null) {
+                    null
+                } else {
+                    { video ->
+                        callPermissions.request(video = video) { granted ->
+                            viewModel.onCallButton(video = granted)
+                        }
+                    }
+                },
+                onVerifySafetyNumber = onOpenSafetyNumber,
+                // ADR-0045 UX 6.2.4 — this lived in the group panel, which a
+                // one-to-one no longer opens, so without it a finished chat
+                // could never be removed from the list.
+                onDeleteChat = {
+                    viewModel.onDeleteChat()
+                    personInfoOpen = false
+                    onNavigateBack()
+                },
+                membershipEnded = membershipEnded,
+                onDismiss = { personInfoOpen = false },
+            )
         }
 
         // No call is drawn here: the 1x1, group and call-link in-call screens
@@ -780,9 +868,12 @@ private fun Header(
     onNavigateBack: () -> Unit,
     onStartCall: () -> Unit,
     onStartVideoCall: () -> Unit,
-    onShowMembers: () -> Unit,
+    /** docs/ux/conversation-info.md section 1 — open this conversation's info.
+     *  The only way in: the overflow menu's duplicate entry is gone, because
+     *  two routes to one screen means two things to keep in step and the one
+     *  in the menu is the one that drifts. */
+    onShowInfo: () -> Unit,
 ) {
-    var menuOpen by remember { mutableStateOf(false) }
     TopAppBar(
         navigationIcon = {
             IconButton(onClick = onNavigateBack) {
@@ -790,10 +881,12 @@ private fun Header(
             }
         },
         title = {
-            // UX 5.2 — tapping the title opens Members (group) / Details (1x1).
+            // The name and the avatar together are the entry point: tapping
+            // them opens info about this conversation, and which info that is
+            // depends on what the conversation is.
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.clickable(onClick = onShowMembers),
+                modifier = Modifier.clickable(onClick = onShowInfo),
             ) {
                 LakkoAvatar(name = title, seed = avatarSeed, size = 32.dp, group = isGroup)
                 Spacer(Modifier.width(10.dp))
@@ -827,18 +920,11 @@ private fun Header(
                     Icon(Icons.Filled.Videocam, contentDescription = "Video call")
                 }
             }
-            IconButton(onClick = { menuOpen = true }) {
-                Icon(Icons.Filled.MoreVert, contentDescription = "More")
-            }
-            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                // A4 — members sheet: roster + add / remove (+ Leave / Delete
-                // inside it).
-                DropdownMenuItem(
-                    text = { Text(if (isGroup) "Members" else "Details") },
-                    leadingIcon = { Icon(Icons.Filled.Group, contentDescription = null) },
-                    onClick = { menuOpen = false; onShowMembers() },
-                )
-            }
+            // The overflow menu held one item, `Members` / `Details`, and it
+            // was a second route to what the title above already opens. It is
+            // gone rather than repointed. Nothing else lived in it; when
+            // search, mute or wallpaper arrive, they come back here and the
+            // button with them.
         },
     )
 }
@@ -2214,8 +2300,9 @@ private fun LeaveGroupDialog(
  * [me.lakko.app.chat.DELETE_CHAT_BODY] rather than inline, so the three clients
  * cannot drift on the one string that describes an irreversible deletion.
  */
+/** ADR-0045 UX 6.2.4 — `internal` so the person layer raises the same one. */
 @Composable
-private fun DeleteChatDialog(
+internal fun DeleteChatDialog(
     onCancel: () -> Unit,
     onDelete: () -> Unit,
 ) {

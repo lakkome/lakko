@@ -437,7 +437,8 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
         >
           {(c) => (
             <ContactDetailView
-              contact={c()}
+              personKeyB64={c().signaturePubkeyB64}
+              localName={c().displayName}
               chatHref={chatWith(c())}
               canStartChat={c().accountIdHex !== undefined}
               busy={detailBusy}

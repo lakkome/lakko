@@ -1,0 +1,141 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- SPDX-FileCopyrightText: 2026 Lakko Contributors -->
+
+# Conversation info
+
+What opens when a person taps the name at the top of a conversation.
+
+Everything below is a requirement for all three clients. Where a platform
+genuinely has to differ, the difference is stated inline and marked
+**Per platform**.
+
+## 0. What was wrong
+
+Checked on all three clients on 2026-09-23, signed in, against a deployed
+stack.
+
+**A one-to-one chat opened a group panel.** Tapping Anna Weber's name showed
+`Members (2)`, a `Group name` field, `Create invite link`, `Make admin`,
+`Transfer ownership`, and `Leave group` with the explanation *"Transfer
+ownership first - a group cannot be left without an owner."* Every one of
+those is meaningless for a conversation between two people: there is no
+group to name, no owner to transfer, no admin to make, and nothing to leave
+that is not simply the other person.
+
+The cause is one panel doing three jobs. `MembersSheet` on iOS, the members
+`Show` block on web and its Android twin are the same surface whatever the
+conversation is, with the group-only parts hidden by a flag - so a one-to-one
+chat gets the group panel minus some rows, which is not the same thing as a
+screen about a person.
+
+**On web it read as nothing happening.** The header is clickable and does
+call `toggleMembers`, but what opens is a section that pushes the
+conversation aside rather than a layer over it, and in a one-to-one chat
+almost all of its content is behind `isGroupChat()`. A panel that shoves the
+messages sideways to show two rows is indistinguishable from a glitch.
+
+**The screens that should have opened already exist.** `ContactDetailScreen`
+and `ChannelDetailScreen` are built on all three clients. The header simply
+never pointed at them.
+
+## 1. One way in, three things behind it
+
+Tapping the conversation's name and avatar opens **info about that
+conversation**, and which info is decided by what the conversation IS:
+
+| Conversation | What opens |
+|---|---|
+| One-to-one | the person |
+| Group | the group |
+| Channel | the channel |
+
+It is the ONLY way in. The `Members` item in the header's overflow menu goes:
+two routes to one screen means two things to keep in step, and the one in the
+menu is the one that drifts. Anything the menu offered that is not info -
+search, mute, wallpaper - stays where it is.
+
+## 2. What each one holds
+
+Common shape, so the three read as one product: an identifying header
+(avatar, name, and the one line that says what this is), then the actions,
+then the detail. What differs is what belongs in each.
+
+### 2.1 A person
+
+Reuses the contact screen that already exists.
+
+- Name and `@username`.
+- Call. Message, when the info was opened from somewhere other than the chat.
+- **Safety number** - the out-of-band check, which is the one security thing
+  a person acts on and so is the one that belongs in front of them
+  ([`design-system.md`](design-system.md)).
+- Remove contact, with a confirmation.
+
+Never: a group name, an invite link, roles, ownership, or `Leave group`.
+
+**And never a way to add a third person.** A one-to-one does not become a
+group by growing; adding somebody starts a new group. Decided on 2026-09-23,
+after the first implementation pass left web able to do it and both natives
+not — which is the divergence this document exists to remove, and the
+question of which behaviour to keep is the maintainer's rather than whichever
+client happened to keep it.
+
+### 2.2 A group
+
+- Name, and the members' names when it has none.
+- How many people.
+- Members, each with their role shown where they have one, and add or remove
+  for whoever may ([ADR-0022](../adr/0022-group-admin-roles.md)).
+- Rename, for the owner and admins; read-only for everyone else
+  ([ADR-0051](../adr/0051-group-and-channel-names.md)).
+- Invite link, for whoever may mint one
+  ([ADR-0028](../adr/0028-group-join-ticket.md)).
+- Transfer ownership, for the owner.
+- Leave group.
+
+This is what exists today, minus its habit of appearing where there is no
+group.
+
+### 2.3 A channel
+
+- Name, `@handle`, description.
+- Subscriber count where the client has it.
+- Unsubscribe.
+- For a publisher: the owner's screen it already has.
+
+## 3. It is a layer, not a panel
+
+The info opens **over** the conversation, which stays where it is behind it.
+
+The web panel pushed the messages sideways, which reads as the screen
+breaking rather than as something opening, and it is the reason a click felt
+like nothing. A layer also matches what the natives already do, so the three
+stop diverging on something a person notices immediately.
+
+**Per platform** - the layer's idiom: web a centred modal with a maximum
+width, dimmed behind, dismissed by the backdrop or `Esc`; iOS a sheet;
+Android a `ModalBottomSheet` or a full-screen dialog. What is the same
+everywhere: the conversation is still there behind it, and there is one
+obvious way out.
+
+## 4. States
+
+| State | What it shows |
+|---|---|
+| Default | The header, the actions, the detail. |
+| A group still loading its roster | The header and what is known; never an empty list presented as "no members". |
+| Membership ended | The info opens and is read-only: the conversation is over, and the record of who was in it is not ([ADR-0045](../adr/0045-remote-commit-epoch-fork.md) UX 6.2). |
+| An action refused | One sentence on what happened and one on what to do, in place, and the layer stays open. |
+
+## 5. What the data has to provide
+
+Nothing new. Every client already knows a conversation's kind - it is what
+routes a tap in the merged list ([`navigation.md`](navigation.md) section
+2.1) - and already has all three screens. What changes is which one the
+header opens and how it is presented.
+
+## 6. One model, three implementations
+
+One entry point, three destinations chosen by the conversation's kind, one
+common shape, and a layer over the conversation rather than beside it. The
+**Per platform** notes are the only differences.

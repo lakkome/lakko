@@ -48,6 +48,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -55,6 +56,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -74,6 +76,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
@@ -164,11 +167,20 @@ private fun ChannelTopBar(
     title: String,
     subtitle: String? = null,
     onBack: () -> Unit,
+    /** docs/ux/conversation-info.md section 1 — open this channel's info.
+     *  `null` on the bars that title a form rather than a conversation. */
+    onShowInfo: (() -> Unit)? = null,
     actions: @Composable () -> Unit = {},
 ) {
     TopAppBar(
         title = {
-            Column {
+            Column(
+                modifier = if (onShowInfo != null) {
+                    Modifier.clickable(onClick = onShowInfo)
+                } else {
+                    Modifier
+                },
+            ) {
                 Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (subtitle != null) {
                     Text(
@@ -430,12 +442,33 @@ public fun ChannelDetailScreen(
     // The header card below carries the name, the handle, the description and
     // the status; the top bar shows the title once and nothing else.
     val header = channel?.let { channelHeaderModel(it, isOwner = keys != null) }
+    // docs/ux/conversation-info.md section 1 — the third destination. Tapping
+    // the name opens the channel, the way a chat's name opens the person and a
+    // group's opens the group.
+    var infoOpen by remember { mutableStateOf(false) }
+    // Only a publisher ever lists subscribers, so only a publisher has a count
+    // (section 2.3: "where the client has it").
+    val subscriberCount = SubscriberFanoutRegistry.subscriberCounts()[channelId]
+
+    if (infoOpen && channel != null) {
+        ChannelInfoSheet(
+            channel = channel,
+            isPublisher = keys != null,
+            subscriberCount = subscriberCount,
+            onManage = {
+                infoOpen = false
+                onManage()
+            },
+            onDismiss = { infoOpen = false },
+        )
+    }
 
     Scaffold(
         topBar = {
             ChannelTopBar(
                 title = title,
                 onBack = onBack,
+                onShowInfo = channel?.let { { infoOpen = true } },
                 actions = {
                     if (keys != null) {
                         IconButton(onClick = onManage) {
@@ -791,6 +824,92 @@ private fun PostList(
         }
         if (header != null) {
             item("header") { ChannelHeaderCard(header) }
+        }
+    }
+}
+
+/**
+ * The channel a conversation's header opens — docs/ux/conversation-info.md
+ * sections 2.3 and 3.
+ *
+ * A layer over the channel, which stays where it is behind it: the sheet's
+ * handle and its scrim are the one obvious way out. The common shape the three
+ * info surfaces share — the identity, then the actions, then the detail.
+ *
+ * `Unsubscribe` is absent, and it is the one thing section 2.3 asks for that
+ * is not here. This client has no unsubscribe: nothing in `ChannelsClient`
+ * deletes a subscriber registration, so a control here would either do nothing
+ * or silently mean something narrower than it says.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChannelInfoSheet(
+    channel: ChannelHandle,
+    isPublisher: Boolean,
+    subscriberCount: Int?,
+    onManage: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sections = me.lakko.app.chat.channelInfoSections(
+        isPublisher = isPublisher,
+        subscriberCountKnown = subscriberCount != null,
+    )
+    val header = channelHeaderModel(channel, isOwner = isPublisher)
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            LakkoAvatar(name = header.title, seed = channel.id, size = 72.dp)
+            Spacer(Modifier.height(12.dp))
+            Text(
+                header.title,
+                style = MaterialTheme.typography.headlineSmall,
+                textAlign = TextAlign.Center,
+            )
+            if (me.lakko.app.chat.InfoSection.ChannelHandle in sections) {
+                header.handleLine?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Text(
+                header.statusLine,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (me.lakko.app.chat.InfoSection.SubscriberCount in sections) {
+                subscriberCountLine(subscriberCount)?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            if (me.lakko.app.chat.InfoSection.ManageChannel in sections) {
+                Spacer(Modifier.height(16.dp))
+                OutlinedButton(
+                    onClick = onManage,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Manage channel") }
+            }
+            if (me.lakko.app.chat.InfoSection.ChannelDescription in sections) {
+                header.description?.let {
+                    Spacer(Modifier.height(16.dp))
+                    HorizontalDivider()
+                    Spacer(Modifier.height(16.dp))
+                    Text(it, style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+            Spacer(Modifier.height(24.dp))
         }
     }
 }

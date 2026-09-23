@@ -21,6 +21,11 @@ import UniformTypeIdentifiers
 public struct ChatScreen: View {
 
     @ObservedObject public var viewModel: ChatViewModel
+    /// The contacts the signed-in shell holds. Read only to answer one
+    /// question — who is on the other side of a conversation between two
+    /// people — so tapping the name opens THAT person
+    /// (`docs/ux/conversation-info.md` section 1).
+    @ObservedObject public var contacts: ContactsViewModel
     /// Leave this screen (pop it). Navigation back is the system back button
     /// and edge swipe; this is only for the case the chat was deleted from
     /// the members sheet, when there is nothing left to show.
@@ -60,11 +65,26 @@ public struct ChatScreen: View {
 
     public init(
         viewModel: ChatViewModel,
+        contacts: ContactsViewModel,
         onBack: @escaping () -> Void
     ) {
         self.viewModel = viewModel
+        self.contacts = contacts
         self.onBack = onBack
         _media = StateObject(wrappedValue: ChatMediaController(port: viewModel.mediaPort()))
+    }
+
+    /// `docs/ux/conversation-info.md` section 1 — which info the name opens,
+    /// decided by what this conversation is. The rule is
+    /// ``ConversationInfoDestination``; this only feeds it the two facts the
+    /// client already holds.
+    private var infoDestination: ConversationInfoDestination {
+        ConversationInfoDestination.of(
+            kind: viewModel.conversationKind,
+            contactMessageId: viewModel.presentsAsGroup
+                ? nil
+                : contacts.contact(forOneToOneChat: viewModel.groupIdHex)?.request.messageId
+        )
     }
 
     /// ADR-0047 §6 — the call owns the audio session and the camera.
@@ -172,18 +192,21 @@ public struct ChatScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             // UX spec section 5.2: system back, avatar + name in the middle,
-            // then call, video call and an overflow menu. At most two trailing
-            // items plus the menu (section 4).
+            // then call and video call. The overflow menu is gone with the
+            // duplicate route it held (`docs/ux/conversation-info.md`
+            // section 1).
             ToolbarItem(placement: .principal) {
-                // Tapping the title opens the members / group info sheet.
+                // `docs/ux/conversation-info.md` section 1 — the name is the
+                // ONLY way into this conversation's info, and what opens
+                // follows from what the conversation is.
                 Button {
-                    viewModel.toggleMembersPanel()
+                    viewModel.openConversationInfo()
                 } label: {
                     ChatTitleView(title: headline, subtitle: subtitle, identity: viewModel.groupIdHex,
                                   isGroup: viewModel.presentsAsGroup)
                 }
                 .buttonStyle(.plain)
-                .accessibilityHint(viewModel.presentsAsGroup ? "Opens group info" : "Opens members")
+                .accessibilityHint(infoDestination.accessibilityHint)
             }
             // Phase 3a9 — audio Call button. Hidden when a call
             // overlay is up (the overlay carries the
@@ -218,27 +241,32 @@ public struct ChatScreen: View {
                 callButton(video: true)
             }
             }
-            // A4 — the Members sheet (roster + add / remove) lives in the
-            // overflow. Available on any chat (a 1×1 becomes a group by adding
-            // the first member).
-            ToolbarItem(placement: .navigationBarTrailing) {
-                Menu {
-                    Button {
-                        viewModel.toggleMembersPanel()
-                    } label: {
-                        Label(viewModel.presentsAsGroup ? "Group info" : "Members", systemImage: "person.2")
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                }
-                .accessibilityLabel("More")
-            }
+            // `docs/ux/conversation-info.md` section 1 — the overflow menu's
+            // `Members` / `Group info` item is GONE. It was a second route to
+            // the same screen, and the whole menu was that one item, so the
+            // menu goes with it. Anything the menu later carries that is not
+            // info belongs back here.
         }
-        .sheet(isPresented: $viewModel.membersPanelOpen) {
-            // ADR-0045 UX §6.2.4 — a deleted chat's row is gone from the
-            // registry, so the screen it was opened from has nothing left to
-            // show. Route back the same way the Back button does.
-            MembersSheet(viewModel: viewModel, onDeleted: onBack)
+        .sheet(isPresented: $viewModel.conversationInfoOpen) {
+            // Section 3 — a layer over the conversation, which stays where it
+            // is behind it. On iOS that is a sheet, which is what this already
+            // was.
+            ConversationInfoSheet(
+                destination: infoDestination,
+                chat: viewModel,
+                contacts: contacts,
+                // The person screen's Call and Video open a call in the chat
+                // this layer sits over, so they drive the header's own entry
+                // point rather than a second one.
+                onCall: { _, video in
+                    viewModel.closeConversationInfo()
+                    viewModel.onCallButton(video: video)
+                },
+                // ADR-0045 UX §6.2.4 — a deleted chat's row is gone from the
+                // registry, so the screen it was opened from has nothing left
+                // to show. Route back the same way the Back button does.
+                onDeleted: onBack
+            )
         }
         .task {
             // Continuous foreground polling. SwiftUI's `.task`
@@ -1869,7 +1897,15 @@ private struct GroupNameSection: View {
     }
 }
 
-private struct MembersSheet: View {
+/// The group's info (`docs/ux/conversation-info.md` section 2.2): the shared
+/// name, the roster with roles and add / remove, the invite link, transfer
+/// ownership and `Leave group`.
+///
+/// Reached only through ``ConversationInfoSheet``, and only for a group —
+/// which is the fix: this panel used to open on any conversation, so a chat
+/// between two people was shown a group with the group-only parts hidden,
+/// which is not the same thing as a screen about a person.
+struct MembersSheet: View {
     @ObservedObject var viewModel: ChatViewModel
 
     /// ADR-0045 (UX §6) — the `Leave group` confirmation. Local to the sheet:
@@ -2387,7 +2423,7 @@ private struct MembersSheet: View {
                     // error slot filled, rather than dropping the user out of a
                     // chat that is still there.
                     if viewModel.onDeleteChat() {
-                        viewModel.membersPanelOpen = false
+                        viewModel.closeConversationInfo()
                         onDeleted()
                     }
                 }
@@ -2395,7 +2431,9 @@ private struct MembersSheet: View {
             } message: {
                 Text(deleteChatBody)
             }
-            .navigationTitle("Members")
+            // Section 2.2 — the panel is the group's info, not only its
+            // roster, and it is now only ever opened for a group.
+            .navigationTitle("Group info")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -2404,7 +2442,7 @@ private struct MembersSheet: View {
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { viewModel.membersPanelOpen = false }
+                    Button("Done") { viewModel.closeConversationInfo() }
                 }
             }
             .onAppear { viewModel.refreshMembers() }

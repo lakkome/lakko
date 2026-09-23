@@ -1447,6 +1447,18 @@ public class ChatViewModel(
         repo.oneToOnePeerKey(groupIdHex)?.let { profileNames.resolve(it).verifiedUsername }
 
     /**
+     * docs/ux/conversation-info.md section 1 — the other person's signature
+     * key in a two-member chat, base64url, in the encoding the contact screen
+     * is keyed on. `null` for a group, or before the roster reads.
+     *
+     * A leaf key names one of that person's DEVICES (ADR-0050), so this is the
+     * weaker of the two ways to find their contact record and
+     * `conversationInfo` tries the chat first.
+     */
+    public fun oneToOnePeerRouteKey(): String? =
+        repo.oneToOnePeerKey(groupIdHex)?.let { me.lakko.app.auth.base64UrlEncodeNoPad(it) }
+
+    /**
      * UX section 3 — the persisted conversation kind, derived once from the
      * people count when this conversation has none yet.
      */
