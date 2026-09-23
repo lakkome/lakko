@@ -23,11 +23,23 @@ import { loadWasm, type Wasm } from "../wasm";
 /** What the client is allowed to ask the shared rules. */
 export type UiRules = Pick<
   Wasm,
+  // The one conversation list (`docs/ux/navigation.md` section 2).
   | "ConversationKind"
   | "ConversationRow"
   | "orderConversations"
   | "bareName"
   | "looksLikeAName"
+  // What a conversation's name opens, and what is on it
+  // (`docs/ux/conversation-info.md`).
+  | "InfoTarget"
+  | "InfoOrigin"
+  | "PersonInfoCapabilities"
+  | "GroupInfoCapabilities"
+  | "ChannelInfoCapabilities"
+  | "infoTarget"
+  | "personInfoSections"
+  | "groupInfoSections"
+  | "channelInfoSections"
 >;
 
 const [rules, setRules] = createSignal<UiRules | null>(null);

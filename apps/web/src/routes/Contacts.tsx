@@ -452,6 +452,15 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
                 onRemoveAccepted(c());
                 setSelectedKey(null);
               }}
+              // This screen is about the PERSON, not about a conversation:
+              // reached from the contact list, it is `elsewhere` and there is
+              // no conversation of its own whose membership could have ended,
+              // so `Call` stays and `Delete this chat` never appears. The
+              // route does not track the membership of whatever 1x1 chat
+              // `chatHref` points at; the conversation's OWN header is where
+              // that state is known and rendered.
+              membershipEnded={false}
+              onDeleteChat={null}
             />
           )}
         </Show>

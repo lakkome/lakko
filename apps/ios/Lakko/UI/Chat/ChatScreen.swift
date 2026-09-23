@@ -1818,6 +1818,15 @@ private struct AttachmentChip: View {
 private struct GroupNameSection: View {
     @ObservedObject var viewModel: ChatViewModel
 
+    /// Whether the row is editable rather than read-only — `InfoSection.renameGroup`,
+    /// passed in rather than re-read here.
+    ///
+    /// The row used to ask `viewModel.canRenameGroup` itself, which made this
+    /// view the second place deciding who may rename a group. It is handed the
+    /// shared rule's answer now, for the same reason every other block in the
+    /// panel is: one copy of a rule cannot diverge from itself.
+    let canRename: Bool
+
     @State private var draft: String = ""
     @State private var seededFrom: String? = nil
     @State private var busy = false
@@ -1833,7 +1842,7 @@ private struct GroupNameSection: View {
 
     var body: some View {
         Section("Group name") {
-            if viewModel.canRenameGroup {
+            if canRename {
                 HStack {
                     TextField("Group name", text: $draft)
                         .focused($focused)
@@ -1931,8 +1940,43 @@ struct MembersSheet: View {
     /// thread the registry has forgotten. Supplied by the presenting screen.
     var onDeleted: () -> Void = {}
 
+    /// Which blocks this panel holds — `docs/ux/conversation-info.md` section
+    /// 2.2, answered by the shared rule in `crates/lakko-ui-rules` rather than
+    /// by this view.
+    ///
+    /// Every field is a capability this client already computed; none is
+    /// re-derived here, and the rule never re-derives one either. The panel
+    /// used to branch on those capabilities directly at each block, which is
+    /// how the same paragraph of the same spec came to be answered three
+    /// different ways on three clients.
+    ///
+    /// `canRename` and `canMintInvite` are fed the reads this client already
+    /// made for exactly those two questions — `canRenameGroup` is a live
+    /// `ownRole` read and `canManageMembers` a published one, and handing each
+    /// block its own existing read is what keeps this a routing change rather
+    /// than a behaviour change.
+    ///
+    /// `canLeave` is the same pair of conditions ``ChatViewModel/exitBlockState``
+    /// hides the whole exit block on: ADR-0045's member exit is a `Leave`
+    /// PROPOSAL, so a group carrying no ADR-0022 role table has nothing for the
+    /// control to do, and a torn own-leaf read is not a licence to offer an
+    /// exit either.
+    private var groupSections: [InfoSection] {
+        groupInfoSections(
+            caps: GroupInfoCapabilities(
+                canManageMembers: viewModel.canManageMembers,
+                canRename: viewModel.canRenameGroup,
+                canMintInvite: viewModel.canManageMembers,
+                isOwner: viewModel.isOwner,
+                canLeave: viewModel.usesProposalPath && viewModel.ownLeafIndex != nil,
+                membershipEnded: viewModel.membershipHasEnded))
+    }
+
     var body: some View {
-        NavigationStack {
+        // Once per render, never per row: this crosses the FFI, and the
+        // roster below is a `ForEach` that asks about `.roles` on every member.
+        let sections = groupSections
+        return NavigationStack {
             List {
                 // ADR-0045 UX §6.1.9 — tell the new owner, best-effort and
                 // fail-open. Nothing on the wire announces a transfer, so this
@@ -1968,18 +2012,25 @@ struct MembersSheet: View {
                     // here claims a mechanism the platform does not have.
                     .accessibilityElement(children: .contain)
                 }
-                // ADR-0051 §3 — the shared group name: read-only for a plain
-                // member, editable with Save for the owner and admins (read
-                // from the live group). For a group, and for any conversation
-                // that already carries a shared name (a two-person one renamed
-                // from another client is still keyed as a chat here); a plain
-                // 1x1 chat is titled by the other person.
-                if viewModel.presentsAsGroup || viewModel.groupName != nil {
-                    GroupNameSection(viewModel: viewModel)
+                // ADR-0051 §3 — the shared group name: `.groupName` decides the
+                // row, `.renameGroup` decides whether it is editable with Save
+                // or read-only.
+                //
+                // The gate used to be `presentsAsGroup || groupName != nil`,
+                // which is unconditionally true HERE: this panel is reached
+                // only through ``ConversationInfoSheet``'s `.group` arm, and
+                // that arm is `infoTarget(.group)`. So `.groupName` is the
+                // same answer, asked of the rule that owns it — and it also
+                // stays true once the membership has ended, which is right:
+                // the name is still what the group was called.
+                if sections.contains(.groupName) {
+                    GroupNameSection(
+                        viewModel: viewModel,
+                        canRename: sections.contains(.renameGroup))
                 }
                 // ADR-0022 — only owner/admin (or an open/legacy group) sees
                 // the add affordance; a plain member's add would be refused.
-                if viewModel.canManageMembers {
+                if sections.contains(.addMember) {
                     Section("Add member") {
                         HStack {
                             TextField("@username", text: $viewModel.addMemberInput)
@@ -2020,7 +2071,7 @@ struct MembersSheet: View {
                 // ADR-0028 (G-3) — owner/admin "create invite link" affordance.
                 // Mints a /g/<slug> link conveying this group's id; a non-member
                 // opens it to request to join, approved via the pending list.
-                if viewModel.canManageMembers {
+                if sections.contains(.inviteLink) {
                     Section("Invite link") {
                         Button("Create invite link") { viewModel.onCreateInviteLink() }
                             .disabled(viewModel.membershipBusy)
@@ -2198,53 +2249,78 @@ struct MembersSheet: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                Section(memberCountLabel) {
-                    ForEach(viewModel.members, id: \.leafIndex) { member in
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(viewModel.memberLabel(member))
-                                // ADR-0045 S4a — NO optimistic update: a member
-                                // with a pending removal stays in the roster and
-                                // is annotated. Dropping the row would assert
-                                // they are gone while they are still in the
-                                // group and still decrypting every message.
-                                if let annotation = viewModel.pendingAnnotation(member) {
-                                    Text(annotation)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
+                // `docs/ux/conversation-info.md` §2.2 — the roster. On a group
+                // the rule always returns it, ended membership included (the
+                // read-only line above says so); asking anyway is what keeps
+                // this panel's blocks one list rather than one list and an
+                // exception.
+                if sections.contains(.memberList) {
+                    Section(memberCountLabel) {
+                        ForEach(viewModel.members, id: \.leafIndex) { member in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(viewModel.memberLabel(member))
+                                    // ADR-0045 S4a — NO optimistic update: a member
+                                    // with a pending removal stays in the roster and
+                                    // is annotated. Dropping the row would assert
+                                    // they are gone while they are still in the
+                                    // group and still decrypting every message.
+                                    if let annotation = viewModel.pendingAnnotation(member) {
+                                        Text(annotation)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
                                 }
-                            }
-                            Spacer()
-                            // Owner-only promote / demote toggle; never the
-                            // owner's own row (ADR-0022).
-                            if viewModel.isOwner, !viewModel.memberIsOwner(member) {
-                                let isAdmin = viewModel.memberIsAdmin(member)
-                                Button {
-                                    viewModel.onToggleAdmin(
-                                        member: member,
-                                        makeAdmin: !isAdmin
-                                    )
-                                } label: {
-                                    Text(isAdmin ? "Remove admin" : "Make admin")
+                                Spacer()
+                                // ADR-0022 — the promote / demote toggle. The rule
+                                // makes `.roles` OWNER-only, not owner-or-admin:
+                                // a role-table change is owner-only and every peer
+                                // refuses an admin's, so an admin offered this
+                                // would be offered a button whose every press is
+                                // rejected.
+                                //
+                                // `memberIsOwner` stays a separate, per-ROW test.
+                                // The rule answers whether this reader gets the
+                                // control at all; which rows carry one is about a
+                                // member, which the rule says nothing about.
+                                if sections.contains(.roles), !viewModel.memberIsOwner(member) {
+                                    let isAdmin = viewModel.memberIsAdmin(member)
+                                    Button {
+                                        viewModel.onToggleAdmin(
+                                            member: member,
+                                            makeAdmin: !isAdmin
+                                        )
+                                    } label: {
+                                        Text(isAdmin ? "Remove admin" : "Make admin")
+                                    }
+                                    .buttonStyle(.borderless)
+                                    .disabled(viewModel.membershipBusy)
                                 }
-                                .buttonStyle(.borderless)
-                                .disabled(viewModel.membershipBusy)
-                            }
-                            // Remove only when we may manage members (owner /
-                            // admin / open group) and it is not our own leaf.
-                            if viewModel.canManageMembers,
-                                viewModel.ownLeafIndex != member.leafIndex {
-                                Button(role: .destructive) {
-                                    // ADR-0045 UX §6 — the confirmation is the
-                                    // LAST exit: a published request cannot be
-                                    // withdrawn, and a direct commit lands at
-                                    // once. Never remove on a single tap.
-                                    removeConfirmLeaf = member.leafIndex
-                                } label: {
-                                    Text("Remove")
+                                // Remove only when we may manage members (owner /
+                                // admin / open group) and it is not our own leaf.
+                                //
+                                // NOT routed through `sections`: the shared rule
+                                // has no section for removing a member. `.addMember`
+                                // names adding somebody and nothing else, and
+                                // borrowing it here would assert an equivalence
+                                // the rule does not make. The capability is the
+                                // same one `.addMember` was computed from, read
+                                // directly, which is what the rule expects of a
+                                // control it does not name.
+                                if viewModel.canManageMembers,
+                                    viewModel.ownLeafIndex != member.leafIndex {
+                                    Button(role: .destructive) {
+                                        // ADR-0045 UX §6 — the confirmation is the
+                                        // LAST exit: a published request cannot be
+                                        // withdrawn, and a direct commit lands at
+                                        // once. Never remove on a single tap.
+                                        removeConfirmLeaf = member.leafIndex
+                                    } label: {
+                                        Text("Remove")
+                                    }
+                                    .buttonStyle(.borderless)
+                                    .disabled(viewModel.membershipBusy)
                                 }
-                                .buttonStyle(.borderless)
-                                .disabled(viewModel.membershipBusy)
                             }
                         }
                     }
@@ -2265,6 +2341,32 @@ struct MembersSheet: View {
                 //
                 // `.hidden` only on the proposal path: a legacy group's core has
                 // no self-remove route and no owner to transfer from.
+                //
+                // ## Why `sections` is NOT the gate here, alone in this panel
+                //
+                // Every other block above asks `groupInfoSections` whether it
+                // belongs. This one does not, and the reason is arithmetic
+                // rather than taste: `group_info_sections` returns `.deleteChat`
+                // on every ended membership and `.leaveGroup` on every live path
+                // where `canLeave` holds — and `canLeave` is fed the SAME pair of
+                // conditions `exitBlock` hides on. So wrapping this `switch` in
+                // a test of those sections would be a condition true on exactly
+                // the inputs that already reach a non-`.hidden` arm: a gate in
+                // shape only, reading as protection it does not provide.
+                //
+                // Per-arm gating adds nothing either, because the two agree arm
+                // for arm. `.ended` fires on the `membershipEnded` that produces
+                // `.deleteChat`. `.owner` fires on the `isOwner` that produces
+                // `.transferOwnership` — and cannot fire without a role table,
+                // since `ownRole` and `usesProposalPath` are the same
+                // `groupRoles()` read, so `isOwner && !usesProposalPath` cannot
+                // hold. `.hidden` fires on exactly `!canLeave`, where the rule
+                // returns neither control.
+                //
+                // What the machine decides ON TOP of that — which of the two
+                // role-disjoint controls is live, and the sentence explaining
+                // why the other is not — the section list says nothing about,
+                // and that is the whole of ADR-0045 UX §6.1. It stays here.
                 switch viewModel.exitBlockState {
                 case .hidden:
                     EmptyView()

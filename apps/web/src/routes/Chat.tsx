@@ -109,6 +109,7 @@ import {
   infoOpenLabel,
   infoTargetForKind,
 } from "../chat/conversation-info";
+import { uiRules } from "../chat/ui-rules";
 import type { IncomingChatEvent } from "../chat/client";
 import {
   attachmentRefFromPersisted,
@@ -1131,8 +1132,29 @@ function ChatView(props: {
   // to one screen means two things to keep in step and the one in the menu is
   // the one that drifts.
   const [headerMenuOpen, setHeaderMenuOpen] = createSignal(false);
-  /** Which info this conversation's header opens - the person or the group. */
-  const infoTarget = createMemo(() => infoTargetForKind(conversationKind()));
+  /**
+   * Which info this conversation's header opens - the person or the group.
+   *
+   * `null` until the shared rules have loaded. Every reader below waits for
+   * it rather than guessing a destination, which is the same discipline the
+   * conversation list follows: a fallback here would be a second copy of the
+   * rule, and a second copy is what this whole move exists to end.
+   */
+  const infoTarget = createMemo(() => infoTargetForKind(uiRules(), conversationKind()));
+  /** The header button's accessible name, once the destination is known.
+   *  `undefined` before that, so the button falls back to its own text - the
+   *  conversation's name - rather than to an invented label. */
+  const infoTargetLabel = (): string | undefined => {
+    const target = infoTarget();
+    return target === null ? undefined : infoOpenLabel(target);
+  };
+  /** The heading of the opened layer. The empty string is never rendered:
+   *  the layer stays CLOSED while the destination is unknown, so there is no
+   *  heading to invent and no risk of showing the wrong panel. */
+  const infoTargetHeading = (): string => {
+    const target = infoTarget();
+    return target === null ? "" : infoHeading(target);
+  };
   /**
    * Which blocks the group's info holds (`chat/conversation-info.ts`), read
    * from the same capabilities the panel already computed. Defined as a
@@ -1140,11 +1162,17 @@ function ChatView(props: {
    * and `membershipEnded` resolve at CALL time, which is a render.
    */
   const groupSections = (): ReturnType<typeof groupInfoSections> =>
-    groupInfoSections({
+    groupInfoSections(uiRules(), {
       canManageMembers: canManageMembers(),
       canRename: canRenameGroup(),
       canMintInvite: canManageMembers(),
       isOwner: isOwner(),
+      // The same two conditions `exitBlockState` hides the whole exit block
+      // on: a group with no ADR-0022 role table has no ADR-0045 proposal
+      // path, so a member has nothing to leave WITH, and a torn own-leaf read
+      // is not a licence to offer an exit. Passing it means the rule now
+      // agrees with that machine instead of being overridden by it.
+      canLeave: usesProposalPath() && ownLeaf() !== undefined,
       membershipEnded: membershipEnded(),
     });
   /** The version of the accepted-contacts list the person info was built
@@ -5326,6 +5354,15 @@ function ChatView(props: {
                   setAcceptedVersion(acceptedVersion() + 1);
                 }
           }
+          // ADR-0045 UX §6.2 — the same two consequences the group panel has
+          // had all along, now reaching a one-to-one as well: no `Call` (the
+          // per-call seed comes from a group this device is no longer in) and
+          // `Delete this chat` in its place. Before the header started routing
+          // by what the conversation IS, an ended one-to-one still opened the
+          // group panel and got the control from there; afterwards it got
+          // nothing, and there was no way to close the conversation at all.
+          membershipEnded={membershipEnded()}
+          onDeleteChat={() => void onDeleteChat()}
         />
       )}
     </Show>
@@ -5413,8 +5450,8 @@ function ChatView(props: {
         <button
           type="button"
           class="lk-chat-title"
-          title={infoOpenLabel(infoTarget())}
-          aria-label={infoOpenLabel(infoTarget())}
+          title={infoTargetLabel()}
+          aria-label={infoTargetLabel()}
           aria-haspopup="dialog"
           aria-expanded={infoOpen()}
           onClick={openInfo}
@@ -5653,10 +5690,15 @@ function ChatView(props: {
           group to name, no owner to transfer and nothing to leave that is not
           simply the other person. */}
       <ModalLayer
-        open={infoOpen()}
-        title={infoHeading(infoTarget())}
+        open={infoOpen() && infoTarget() !== null}
+        title={infoTargetHeading()}
         onClose={closeInfo}
       >
+        {/* The layer is closed while `infoTarget()` is null, so this branch
+            never has to choose a panel for an unknown destination: a
+            one-to-one showing the group panel is precisely the defect the
+            routing was changed to fix, and a fallback here would reopen it
+            for the first render. */}
         <Show when={infoTarget() === "group"} fallback={<PersonInfo />}>
           {/* `docs/ux/conversation-info.md` section 4 — an action refused
               says so IN PLACE and the layer stays open. These two used to sit

@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import LakkoCore
 import SwiftUI
 
 /// A contact's detail (UX spec section 5.3): 72 pt avatar, name, `@username`;
-/// Message, Call and Video; "Verify safety number" and Rename. No key
+/// Message, Call and Video; "Verify safety number", Rename and Remove. No key
 /// fingerprint anywhere on it — the safety number is the verification surface.
 ///
 /// Pushed from the Contacts list through ``TabRoute/contactDetail(messageId:)``,
@@ -16,8 +17,15 @@ import SwiftUI
 /// and Video are the chat header's entry points and are disabled, with the
 /// reason shown, when no chat exists yet.
 ///
-/// "Remove contact" is not offered: no client has a remove-contact operation
-/// (the accepted list only ever grows), so there is nothing existing to call.
+/// **Which rows this holds is `personInfoSections`, not a flag read here.**
+/// The rule is shared with the web and Android clients
+/// (`crates/lakko-ui-rules`); a panel reading its own flags is exactly the
+/// defect that replaced. Two of its answers were never built on iOS until
+/// now: "Remove contact" — the file used to claim no client had one, while
+/// Android's `removeContact` and web's `removeAccepted` had both shipped —
+/// and "Delete this chat" on a conversation this device's membership has
+/// ended, which lived only in the group panel a one-to-one had stopped
+/// opening, leaving an ended one-to-one with no way out at all.
 struct ContactDetailScreen: View {
     /// How this screen is being shown (`docs/ux/conversation-info.md`
     /// section 3). Pushed, it sits in the stack that pushed it and that stack
@@ -36,15 +44,21 @@ struct ContactDetailScreen: View {
     /// Start a call in the 1x1 chat; `video` asks for the camera.
     let onCall: (_ groupIdHex: String, _ video: Bool) -> Void
     var presentation: Presentation = .pushed
-    /// Section 2.1 — "Message, when the info was opened from somewhere other
-    /// than the chat". Opened from the chat itself it would lead back to the
-    /// screen behind the sheet.
-    var offersMessage: Bool = true
+    /// Where the info was opened from. It decides one thing — whether
+    /// `Message` is offered — and the shared rule decides it, not this file:
+    /// opened from the chat itself, `Message` would lead back to the screen
+    /// behind the sheet.
+    var origin: InfoOrigin = .elsewhere
     /// Close the layer. Only reached in ``Presentation/sheet``.
     var onDone: () -> Void = {}
+    /// The chat is gone and whatever is behind this has nothing left to show
+    /// (ADR-0045 UX 6.2.4). Called only after a delete actually landed.
+    var onChatDeleted: () -> Void = {}
 
     @State private var renaming = false
     @State private var draftName = ""
+    @State private var confirmingRemove = false
+    @State private var confirmingDeleteChat = false
 
     var body: some View {
         switch presentation {
@@ -91,6 +105,15 @@ struct ContactDetailScreen: View {
     private func detail(contact: AcceptedContact, resolved: ResolvedDisplayName) -> some View {
         let chat = viewModel.chatGroupIdHex(for: contact)
         let callable = chat.map { viewModel.canCall(groupIdHex: $0) } ?? false
+        // Section 2.1, decided once in `crates/lakko-ui-rules` where the host
+        // test suite can run it, never by a flag read down in the layout. The
+        // contact is in the list by construction — this branch only draws when
+        // `viewModel.contact(messageId:)` found one.
+        let sections = personInfoSections(
+            origin: origin,
+            caps: PersonInfoCapabilities(
+                isContact: true,
+                membershipEnded: chat.map { viewModel.membershipEnded(groupIdHex: $0) } ?? false))
         List {
             Section {
                 VStack(spacing: 8) {
@@ -130,40 +153,83 @@ struct ContactDetailScreen: View {
                 .listRowBackground(Color.clear)
             }
 
-            Section {
-                HStack(spacing: 12) {
-                    if offersMessage {
-                        ContactActionButton(
-                            title: "Message", systemImage: "bubble.left.fill", enabled: chat != nil
-                        ) {
-                            if let chat { onOpenChat(chat) }
+            // The tiles go entirely when the rule offers neither, rather than
+            // leaving an empty row where the actions used to be. An ended
+            // membership takes `Call` away for the reason ADR-0045 UX 6.2.8
+            // gives: the per-call key comes from a group this device is no
+            // longer in, so the control would assert a live session there is
+            // not.
+            if sections.contains(.call) || sections.contains(.message) {
+                Section {
+                    HStack(spacing: 12) {
+                        if sections.contains(.message) {
+                            ContactActionButton(
+                                title: "Message", systemImage: "bubble.left.fill",
+                                enabled: chat != nil
+                            ) {
+                                if let chat { onOpenChat(chat) }
+                            }
+                        }
+                        if sections.contains(.call) {
+                            ContactActionButton(
+                                title: "Call", systemImage: "phone.fill", enabled: callable
+                            ) {
+                                if let chat { onCall(chat, false) }
+                            }
+                            ContactActionButton(
+                                title: "Video", systemImage: "video.fill", enabled: callable
+                            ) {
+                                if let chat { onCall(chat, true) }
+                            }
                         }
                     }
-                    ContactActionButton(title: "Call", systemImage: "phone.fill", enabled: callable) {
-                        if let chat { onCall(chat, false) }
-                    }
-                    ContactActionButton(title: "Video", systemImage: "video.fill", enabled: callable) {
-                        if let chat { onCall(chat, true) }
-                    }
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets())
                 }
-                .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets())
             }
 
             Section {
-                NavigationLink(value: TabRoute.safetyNumber(messageId: messageId)) {
-                    Label("Verify safety number", systemImage: "checkmark.shield")
-                        .foregroundStyle(Color.lakkoText)
+                if sections.contains(.safetyNumber) {
+                    NavigationLink(value: TabRoute.safetyNumber(messageId: messageId)) {
+                        Label("Verify safety number", systemImage: "checkmark.shield")
+                            .foregroundStyle(Color.lakkoText)
+                    }
                 }
-                Button {
-                    draftName = contact.displayName ?? ""
-                    renaming = true
-                } label: {
-                    Label("Rename", systemImage: "pencil")
-                        .foregroundStyle(Color.lakkoText)
+                if sections.contains(.renameContact) {
+                    Button {
+                        draftName = contact.displayName ?? ""
+                        renaming = true
+                    } label: {
+                        Label("Rename", systemImage: "pencil")
+                            .foregroundStyle(Color.lakkoText)
+                    }
                 }
             } footer: {
-                Text("Compare safety numbers in person or on a call to be sure nobody is between you.")
+                if sections.contains(.safetyNumber) {
+                    Text(
+                        "Compare safety numbers in person or on a call to be sure "
+                            + "nobody is between you.")
+                }
+            }
+
+            // The two destructive controls, in their own block at the bottom
+            // where iOS puts what cannot be undone. They are different acts on
+            // different things — one forgets the PERSON, the other forgets the
+            // CONVERSATION — and the rule can return both at once, so neither
+            // is worded as if it did the other's job.
+            if sections.contains(.removeContact) || sections.contains(.deleteChat) {
+                Section {
+                    if sections.contains(.removeContact) {
+                        Button(role: .destructive) { confirmingRemove = true } label: {
+                            Label("Remove contact", systemImage: "person.badge.minus")
+                        }
+                    }
+                    if sections.contains(.deleteChat), chat != nil {
+                        Button(role: .destructive) { confirmingDeleteChat = true } label: {
+                            Text(deleteChatControl)
+                        }
+                    }
+                }
             }
         }
         .listStyle(.insetGrouped)
@@ -180,6 +246,44 @@ struct ContactDetailScreen: View {
                 "Only you see this name, in chats and call rosters. "
                     + "Leave blank to use the name they set."
             )
+        }
+        // Local only, and the body says exactly that: the peer is not told,
+        // and an existing chat is deliberately left behind, because leaving a
+        // conversation is the conversation's own action.
+        .confirmationDialog(
+            "Remove \(resolved.name)?",
+            isPresented: $confirmingRemove,
+            titleVisibility: .visible
+        ) {
+            Button("Remove", role: .destructive) {
+                viewModel.onRemoveContactClicked(messageId: contact.request.messageId)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "They are removed from your contacts on this device. "
+                    + "An existing chat stays until you leave it."
+            )
+        }
+        // ADR-0045 UX 6.2.4 — the same control, the same words and the same
+        // repository call as the group panel's. A second set of words for one
+        // act is how the three clients drifted in the first place.
+        .confirmationDialog(
+            deleteChatTitle,
+            isPresented: $confirmingDeleteChat,
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                // Route away only when the delete actually landed; a refusal
+                // leaves the screen where it is rather than dropping the user
+                // out of a chat that is still there.
+                if let chat, viewModel.onDeleteChatClicked(groupIdHex: chat) {
+                    onChatDeleted()
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(deleteChatBody)
         }
     }
 }

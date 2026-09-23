@@ -4,16 +4,36 @@
 package me.lakko.app.chat
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * docs/ux/conversation-info.md — one entry point, three destinations.
+ * docs/ux/conversation-info.md — which of the three destinations a
+ * conversation's header opens, and whose contact record it belongs to.
  *
  * Section 0 records what a live emulator showed on 2026-09-23: a chat with one
- * other person opened the group panel. The first group of tests below is that
- * defect, stated as a rule.
+ * other person opened the group panel. The tests below are that defect, stated
+ * as a rule.
+ *
+ * ## What is no longer asserted here, and why it is not a loss
+ *
+ * This file used to also assert WHAT each destination holds — the sections of
+ * a person's info and of a channel's, the `Never` list of section 2.1, the
+ * subscriber count, the ended-membership turnover. That rule now lives once,
+ * in `crates/lakko-ui-rules/src/info.rs`, where it is asserted exhaustively
+ * across every combination rather than at the examples a hand-written Kotlin
+ * copy happened to pick — which is stronger than anything this file had, and
+ * is what stops the drift that gave the same paragraph three different
+ * answers on three clients.
+ *
+ * It cannot be re-asserted from here. `personInfoSections` and
+ * `channelInfoSections` are now UniFFI wrappers over that crate, and a JVM
+ * unit test does not load the native library, so calling one would only prove
+ * the library is absent — which it is. (`CallInviteLinkTest` makes the same
+ * argument about the call-invite wrappers, for the same reason.)
+ *
+ * What stays is the matching rule, which is genuinely this client's: it reads
+ * this device's own contact list and the chat it recorded, and the core holds
+ * neither.
  */
 class ConversationInfoTest {
 
@@ -152,173 +172,5 @@ class ConversationInfoTest {
             contacts = listOf(anna),
         )
         assertEquals(ConversationInfo.Person("anna-key"), info)
-    }
-
-    // ---------------------------------------------------------------------
-    // What a person's info holds — section 2.1
-    // ---------------------------------------------------------------------
-
-    @Test
-    fun `a person never shows anything that belongs to a group`() {
-        // "Never: a group name, an invite link, roles, ownership, or Leave
-        // group." Asserted against the classification on the enum, so a group
-        // section added later is covered without editing this test.
-        for (origin in InfoOrigin.entries) {
-            for (isContact in listOf(true, false)) {
-                for (ended in listOf(true, false)) {
-                    val sections = personInfoSections(origin, isContact, ended)
-                    val offending = sections.filter { it.groupOnly }
-                    assertTrue(
-                        "$origin isContact=$isContact ended=$ended leaked $offending",
-                        offending.isEmpty(),
-                    )
-                }
-            }
-        }
-    }
-
-    @Test
-    fun `at least one section is classified group-only`() {
-        // Guards the test above from passing because the classification is
-        // empty rather than because the rule holds.
-        assertTrue(InfoSection.entries.any { it.groupOnly })
-    }
-
-    @Test
-    fun `a contact shows the safety number wherever it was opened from`() {
-        for (origin in InfoOrigin.entries) {
-            assertTrue(
-                origin.toString(),
-                InfoSection.SafetyNumber in personInfoSections(origin, isContact = true),
-            )
-        }
-    }
-
-    @Test
-    fun `opened from the conversation, there is no Message button`() {
-        val sections = personInfoSections(InfoOrigin.Conversation, isContact = true)
-        assertFalse(InfoSection.Message in sections)
-        assertTrue(InfoSection.Call in sections)
-    }
-
-    @Test
-    fun `opened from anywhere else, Message is offered`() {
-        assertTrue(
-            InfoSection.Message in personInfoSections(InfoOrigin.Elsewhere, isContact = true),
-        )
-    }
-
-    @Test
-    fun `a person who is not a contact offers no rename and no removal`() {
-        val sections = personInfoSections(InfoOrigin.Conversation, isContact = false)
-        assertFalse(InfoSection.RenameContact in sections)
-        assertFalse(InfoSection.RemoveContact in sections)
-        assertFalse(InfoSection.SafetyNumber in sections)
-        assertTrue(InfoSection.Call in sections)
-    }
-
-    // ---------------------------------------------------------------------
-    // Membership ended — section 4
-    // ---------------------------------------------------------------------
-
-    @Test
-    fun `an ended conversation offers no call`() {
-        // The per-call key comes from a group this device is no longer in, so
-        // a call control would assert a live session there is not.
-        val sections = personInfoSections(
-            InfoOrigin.Conversation,
-            isContact = true,
-            membershipEnded = true,
-        )
-        assertFalse(InfoSection.Call in sections)
-    }
-
-    @Test
-    fun `an ended conversation can still be deleted`() {
-        // ADR-0045 UX 6.2.4 — the one thing still open. It used to live in the
-        // group panel, which a one-to-one no longer opens.
-        val sections = personInfoSections(
-            InfoOrigin.Conversation,
-            isContact = true,
-            membershipEnded = true,
-        )
-        assertTrue(InfoSection.DeleteChat in sections)
-    }
-
-    @Test
-    fun `a live conversation offers no delete`() {
-        assertFalse(
-            InfoSection.DeleteChat in
-                personInfoSections(InfoOrigin.Conversation, isContact = true),
-        )
-    }
-
-    @Test
-    fun `an ended conversation still holds everything about the person`() {
-        // The conversation ended; they did not.
-        val sections = personInfoSections(
-            InfoOrigin.Conversation,
-            isContact = true,
-            membershipEnded = true,
-        )
-        assertTrue(InfoSection.SafetyNumber in sections)
-        assertTrue(InfoSection.RenameContact in sections)
-        assertTrue(InfoSection.RemoveContact in sections)
-    }
-
-    @Test
-    fun `an ended conversation with no contact record still offers the delete`() {
-        val sections = personInfoSections(
-            InfoOrigin.Conversation,
-            isContact = false,
-            membershipEnded = true,
-        )
-        assertTrue(InfoSection.DeleteChat in sections)
-        assertFalse(InfoSection.Call in sections)
-    }
-
-    // ---------------------------------------------------------------------
-    // What a channel's info holds — section 2.3
-    // ---------------------------------------------------------------------
-
-    @Test
-    fun `a channel never shows anything that belongs to a group`() {
-        for (isPublisher in listOf(true, false)) {
-            for (known in listOf(true, false)) {
-                val sections = channelInfoSections(isPublisher, known)
-                assertTrue(
-                    "publisher=$isPublisher known=$known",
-                    sections.none { it.groupOnly },
-                )
-            }
-        }
-    }
-
-    @Test
-    fun `a reader gets the handle and the description and no manage action`() {
-        val sections = channelInfoSections(isPublisher = false, subscriberCountKnown = false)
-        assertTrue(InfoSection.ChannelHandle in sections)
-        assertTrue(InfoSection.ChannelDescription in sections)
-        assertFalse(InfoSection.ManageChannel in sections)
-    }
-
-    @Test
-    fun `the subscriber count shows only where the client has one`() {
-        assertFalse(
-            InfoSection.SubscriberCount in
-                channelInfoSections(isPublisher = false, subscriberCountKnown = false),
-        )
-        assertTrue(
-            InfoSection.SubscriberCount in
-                channelInfoSections(isPublisher = true, subscriberCountKnown = true),
-        )
-    }
-
-    @Test
-    fun `a publisher gets the manage action`() {
-        assertTrue(
-            InfoSection.ManageChannel in
-                channelInfoSections(isPublisher = true, subscriberCountKnown = true),
-        )
     }
 }

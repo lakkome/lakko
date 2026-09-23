@@ -519,6 +519,25 @@ public final class ContactsRepository: ObservableObject {
         state = state.with(accepted: updated)
     }
 
+    /// Remove an accepted contact from this device's contact list
+    /// (`docs/ux/conversation-info.md` section 2.1, "Remove contact"). Local
+    /// only, the mirror of ``declineContactRequest(messageId:)`` for the
+    /// accepted list: the peer is not told and no message is sent.
+    ///
+    /// An existing 1x1 chat is left exactly as it is — leaving a conversation
+    /// is the conversation's own action — which is what produces the "person
+    /// who is not a contact" state the info layer already handles: the
+    /// conversation stays, and what it can say about them shrinks to what it
+    /// can still read from the roster.
+    ///
+    /// The mutation flows through `state`'s `didSet`, so the persisted
+    /// accepted list and the name directory's renames follow.
+    public func removeContact(messageId: Int64) {
+        let remaining = state.accepted.filter { $0.request.messageId != messageId }
+        guard remaining.count != state.accepted.count else { return }
+        state = state.with(accepted: remaining)
+    }
+
     /// Send a `ContactAck` back to the original sender's stranger
     /// inbox so their UI flips from "pending" to "accepted"
     /// without waiting on the Welcome arrival (Phase 1.9b1).

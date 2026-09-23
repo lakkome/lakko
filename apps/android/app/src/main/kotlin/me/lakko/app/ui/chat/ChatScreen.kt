@@ -125,6 +125,9 @@ import me.lakko.app.chat.Direction
 import me.lakko.app.chat.GroupPollOutcome
 import me.lakko.app.chat.UploadStage
 import uniffi.lakko_ffi_uniffi.AttachmentRef
+import uniffi.lakko_ffi_uniffi.GroupInfoCapabilities
+import uniffi.lakko_ffi_uniffi.InfoSection
+import uniffi.lakko_ffi_uniffi.groupInfoSections
 
 /**
  * 1×1 chat screen — `LazyColumn` of messages + composer.
@@ -2659,6 +2662,45 @@ private fun MembersSheet(
     // confirmation ends up removing somebody the user did not look at.
     var confirmingRemove by remember { mutableStateOf<UInt?>(null) }
 
+    // docs/ux/conversation-info.md section 2.2 — WHAT this panel holds is
+    // asked, never decided here. The one copy of the rule is
+    // `crates/lakko-ui-rules/src/info.rs`, reached over UniFFI; this panel used
+    // to branch on `canManage` and `isOwner` inline and consumed no section
+    // list at all, which is the same class of divergence that put a group's
+    // panel in front of a person.
+    //
+    // The three owner-or-admin fields are fed from ONE role read because on
+    // this client they are one question: `refreshMembers` reads the live role
+    // table once (`role != Role.MEMBER && !ended`), and renaming, adding and
+    // minting a link all turn on exactly that. They stay three fields across
+    // the boundary because they are three different ADRs (0051 / 0022 / 0028)
+    // and a client that later learns to tell them apart must not have to widen
+    // the rule to say so.
+    //
+    // Remembered because asking now crosses the FFI: this is a native call,
+    // and its answer changes only when one of its inputs does.
+    //
+    // `canLeave` is the same pair of conditions `exitBlock` hides the whole
+    // block on: a group carrying no ADR-0022 role table has no ADR-0045
+    // proposal path, so a member has nothing to leave WITH, and a torn
+    // own-leaf read is not a licence to offer an exit. It is a field of the
+    // shared rule because the rule used to offer `Leave group` regardless and
+    // this client and web both overrode it in their own view - which is a
+    // rule nobody was following.
+    val canLeave = roleTable != null && ownLeaf != null
+    val sections = remember(canManage, isOwner, canLeave, membershipEnded) {
+        groupInfoSections(
+            GroupInfoCapabilities(
+                canManageMembers = canManage,
+                canRename = canManage,
+                canMintInvite = canManage,
+                isOwner = isOwner,
+                canLeave = canLeave,
+                membershipEnded = membershipEnded,
+            ),
+        )
+    }
+
     // ADR-0045 UX §6.1 — the exit block's inputs, read as Compose state so the
     // block recomposes when any of them moves.
     val rosterViews = remember(members) { viewModel.rosterViews() }
@@ -2785,11 +2827,21 @@ private fun MembersSheet(
                 // ADR-0051 — the shared group name: visible to everyone,
                 // editable by the owner and admins (the LIVE role, read by
                 // `refreshMembers`), read-only for a plain member.
-                GroupNameRow(viewModel = viewModel, canRename = canManage)
-                Spacer(Modifier.height(12.dp))
+                //
+                // Two sections, not one: `GROUP_NAME` is whether the name is
+                // here at all and `RENAME_GROUP` is whether it is editable, so
+                // an ended membership leaves the name READABLE and takes the
+                // editing away rather than removing both.
+                if (InfoSection.GROUP_NAME in sections) {
+                    GroupNameRow(
+                        viewModel = viewModel,
+                        canRename = InfoSection.RENAME_GROUP in sections,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                }
                 // ADR-0022 — only owner/admin (or an open/legacy group) sees the
                 // add affordance; a plain member's add would be refused by peers.
-                if (canManage) {
+                if (InfoSection.ADD_MEMBER in sections) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         OutlinedTextField(
                             value = input,
@@ -2812,7 +2864,7 @@ private fun MembersSheet(
                 // ADR-0028 (G-3) — owner/admin "create invite link" affordance.
                 // Mints a /g/<slug> link conveying this group's id; a non-member
                 // opens it to request to join, approved via the pending list.
-                if (canManage) {
+                if (InfoSection.INVITE_LINK in sections) {
                     Spacer(Modifier.height(8.dp))
                     TextButton(
                         onClick = viewModel::onCreateInviteLink,
@@ -3074,70 +3126,90 @@ private fun MembersSheet(
                     )
                     Spacer(Modifier.height(6.dp))
                 }
-                // The roster gives up height while the transfer step is open, so
-                // the step's action button cannot be pushed off a small screen.
-                // The alternative — a second `Dialog` with its own scroll — is
-                // the stacking [TransferOwnershipStep]'s doc rejects.
-                LazyColumn(
-                    modifier = Modifier.heightIn(max = if (transferOpen) 140.dp else 360.dp),
-                ) {
-                    items(members) { member ->
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 4.dp),
-                        ) {
-                            // ADR-0045 — NO optimistic update: a member with a
-                            // pending removal STAYS in the roster, annotated.
-                            // Dropping the row would assert they are gone while
-                            // they are still cryptographically in the group —
-                            // still receiving every message, still able to
-                            // decrypt — until a committer sweeps. That is the
-                            // membership equivalent of a green E2EE pill over an
-                            // unencrypted call.
-                            val annotation = me.lakko.app.chat.rowAnnotation(
-                                pendingRequests,
-                                member.leafIndex,
-                                ownLeaf,
-                            )
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(text = viewModel.memberLabel(member))
-                                annotation?.let {
-                                    Text(
-                                        text = it,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
+                // docs/ux/conversation-info.md 2.2 — the roster is a SECTION,
+                // and it is the one action-bearing block an ended membership
+                // KEEPS: `members()` is a plain read of the public group with
+                // no state gate, and the last thing you knew about who you were
+                // in a group with is worth keeping next to a frozen transcript.
+                // The per-row `Remove` below stays on `canManage` rather than on
+                // a section, because the rule names the LIST and says nothing
+                // about what a row carries.
+                if (InfoSection.MEMBER_LIST in sections) {
+                    // The roster gives up height while the transfer step is open, so
+                    // the step's action button cannot be pushed off a small screen.
+                    // The alternative — a second `Dialog` with its own scroll — is
+                    // the stacking [TransferOwnershipStep]'s doc rejects.
+                    LazyColumn(
+                        modifier = Modifier.heightIn(max = if (transferOpen) 140.dp else 360.dp),
+                    ) {
+                        items(members) { member ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                            ) {
+                                // ADR-0045 — NO optimistic update: a member with a
+                                // pending removal STAYS in the roster, annotated.
+                                // Dropping the row would assert they are gone while
+                                // they are still cryptographically in the group —
+                                // still receiving every message, still able to
+                                // decrypt — until a committer sweeps. That is the
+                                // membership equivalent of a green E2EE pill over an
+                                // unencrypted call.
+                                val annotation = me.lakko.app.chat.rowAnnotation(
+                                    pendingRequests,
+                                    member.leafIndex,
+                                    ownLeaf,
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(text = viewModel.memberLabel(member))
+                                    annotation?.let {
+                                        Text(
+                                            text = it,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
                                 }
-                            }
-                            // ADR-0022 — owner-only promote / demote toggle;
-                            // never the owner's own row.
-                            val isMemberOwner = roleTable?.owner
-                                ?.contentEquals(member.signaturePublicKey) ?: false
-                            if (isOwner && !isMemberOwner) {
-                                val isAdmin = roleTable?.admins
-                                    ?.any { it.contentEquals(member.signaturePublicKey) } ?: false
-                                TextButton(
-                                    onClick = { viewModel.onToggleAdmin(member, !isAdmin) },
-                                    enabled = !busy,
-                                ) { Text(if (isAdmin) "Remove admin" else "Make admin") }
-                            }
-                            // ADR-0022 — Remove only when we may manage members
-                            // (owner / admin / open group) and not our own leaf.
-                            if (canManage && ownLeaf != member.leafIndex) {
-                                TextButton(
-                                    // ADR-0045 UX §6 — the confirmation is the
-                                    // LAST exit: a published request cannot be
-                                    // withdrawn, and a direct commit lands at
-                                    // once. Never remove on a single tap.
-                                    onClick = { confirmingRemove = member.leafIndex },
-                                    // UX §5.3 — a member with a pending removal keeps
-                                    // Remove VISIBLE but DISABLED. Hiding it would read
-                                    // as the permission having vanished; the annotation
-                                    // above explains the disabled state.
-                                    enabled = !busy && annotation == null,
-                                ) { Text("Remove") }
+                                // ADR-0022 — owner-only promote / demote toggle;
+                                // never the owner's own row.
+                                //
+                                // `ROLES` is OWNER-only in the shared rule and must
+                                // never widen to admins: a role-table change is
+                                // owner-only and every peer refuses an admin's, so
+                                // an admin offered this would be offered a button
+                                // whose every press is rejected. Which ROW it may
+                                // not appear on is this client's, because the rule
+                                // is about the block and knows nothing of rows.
+                                val isMemberOwner = roleTable?.owner
+                                    ?.contentEquals(member.signaturePublicKey) ?: false
+                                if (InfoSection.ROLES in sections && !isMemberOwner) {
+                                    val isAdmin = roleTable?.admins
+                                        ?.any {
+                                            it.contentEquals(member.signaturePublicKey)
+                                        } ?: false
+                                    TextButton(
+                                        onClick = { viewModel.onToggleAdmin(member, !isAdmin) },
+                                        enabled = !busy,
+                                    ) { Text(if (isAdmin) "Remove admin" else "Make admin") }
+                                }
+                                // ADR-0022 — Remove only when we may manage members
+                                // (owner / admin / open group) and not our own leaf.
+                                if (canManage && ownLeaf != member.leafIndex) {
+                                    TextButton(
+                                        // ADR-0045 UX §6 — the confirmation is the
+                                        // LAST exit: a published request cannot be
+                                        // withdrawn, and a direct commit lands at
+                                        // once. Never remove on a single tap.
+                                        onClick = { confirmingRemove = member.leafIndex },
+                                        // UX §5.3 — a member with a pending removal keeps
+                                        // Remove VISIBLE but DISABLED. Hiding it would read
+                                        // as the permission having vanished; the annotation
+                                        // above explains the disabled state.
+                                        enabled = !busy && annotation == null,
+                                    ) { Text("Remove") }
+                                }
                             }
                         }
                     }
@@ -3168,6 +3240,41 @@ private fun MembersSheet(
                 // The block is computed above from Compose state reads so it
                 // recomposes; the rule itself lives in `me.lakko.app.chat` where
                 // the host suite can run it.
+                //
+                // ## Why `sections` is NOT the gate here, alone in this panel
+                //
+                // Every other block above asks `groupInfoSections` whether it
+                // belongs. This one does not, and the reason is arithmetic
+                // rather than preference: `group_info_sections` pushes
+                // `LEAVE_GROUP` on every live path where `canLeave` holds and
+                // `DELETE_CHAT` on every ended one, so on every input that
+                // reaches a non-`Hidden` arm the list holds at least one of
+                // this block's three sections.
+                // Wrapping the `when` in a test of them would be a condition
+                // that is true on every input — a gate in shape only, and one
+                // that would read as protection it does not provide.
+                //
+                // Per-arm gating adds nothing either, because on every arm the
+                // machine is already at least as narrow as the rule: `Ended`
+                // fires on exactly the `membershipEnded` that produces
+                // `DELETE_CHAT`, and `Owner` on exactly the `isOwner` that
+                // produces `TRANSFER_OWNERSHIP`.
+                //
+                // `Hidden` used to be a real difference: a group with no role
+                // table, or a torn own-leaf read, where the rule said
+                // `LEAVE_GROUP` and this machine showed nothing. It was
+                // reported rather than absorbed, and the report is why the
+                // rule gained `canLeave` — fed a few lines above from exactly
+                // these two reads. A rule both clients had to override in
+                // their own view was a rule nobody was following; now the two
+                // agree, and `Hidden` is precisely where the rule returns
+                // neither section.
+                //
+                // What the machine decides on top — which of the two controls
+                // is live, and the sentence explaining the dead one — the
+                // section rule says nothing about and never will: a section
+                // list answers "is this block here", not "is this control
+                // enabled and why not".
                 when (exit) {
                     me.lakko.app.chat.ExitBlock.Hidden -> Unit
                     // ADR-0045 UX §6.2.4 / §6.2.7 — once the membership has

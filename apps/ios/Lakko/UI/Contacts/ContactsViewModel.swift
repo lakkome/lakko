@@ -334,6 +334,33 @@ public final class ContactsViewModel: ObservableObject {
         repository.renameContact(messageId: messageId, to: name)
     }
 
+    /// `docs/ux/conversation-info.md` section 2.1 — drop the contact from this
+    /// device's list. Local only, and it deliberately leaves any existing chat
+    /// behind; see ``ContactsRepository/removeContact(messageId:)``.
+    public func onRemoveContactClicked(messageId: Int64) {
+        repository.removeContact(messageId: messageId)
+    }
+
+    /// Whether this device's membership in the contact's 1x1 chat has ended
+    /// (ADR-0045 UX 6.2). No chat at all is not an ended one: it is a chat
+    /// that was never set up, which the screen says in its own words.
+    public func membershipEnded(groupIdHex: String) -> Bool {
+        guard let chatRepository else { return false }
+        return chatRepository.state.threads
+            .first { $0.groupIdHex == groupIdHex }?.membershipEnded ?? false
+    }
+
+    /// ADR-0045 UX 6.2.4 — forget a conversation this device is out of.
+    ///
+    /// The repository re-checks the ended membership itself rather than
+    /// trusting the control this was drawn behind, and the caller is expected
+    /// to have confirmed first: this destroys a transcript that exists nowhere
+    /// else, with no undo.
+    @discardableResult
+    public func onDeleteChatClicked(groupIdHex: String) -> Bool {
+        chatRepository?.deleteChat(groupIdHex: groupIdHex) ?? false
+    }
+
     // MARK: - Invite link actions (1.14e7)
 
     /// Generate a fresh single-use 7-day invite link. Surfaces the

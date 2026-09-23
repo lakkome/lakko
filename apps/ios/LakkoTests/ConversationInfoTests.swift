@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import LakkoCore
 import XCTest
 @testable import Lakko
 
@@ -8,12 +9,23 @@ import XCTest
 /// things behind it, and a conversation between two people showing none of a
 /// group's machinery.
 ///
-/// The defect these pin is section 0: one panel did three jobs, so tapping a
-/// person's name showed `Members (2)`, a group name, an invite link,
-/// `Make admin`, `Transfer ownership` and `Leave group`.
+/// These run the SHARED rule (`crates/lakko-ui-rules`, over the FFI) rather
+/// than an iOS copy of it. iOS is the one client whose unit tests link
+/// `LakkoCore`, so it is the one place the rule the three clients agreed on
+/// can be asserted across the boundary it actually crosses at runtime.
+///
+/// The defects they pin are the ones the split copies produced: one panel did
+/// three jobs, so tapping a person's name showed `Members (2)`, a group name,
+/// an invite link, `Make admin`, `Transfer ownership` and `Leave group`; an
+/// ended one-to-one carried no way to close it; and a channel offered no way
+/// to stop following it.
 final class ConversationInfoTests: XCTestCase {
 
-    // MARK: - Section 1: which info opens
+    private func person(_ isContact: Bool, ended: Bool) -> PersonInfoCapabilities {
+        PersonInfoCapabilities(isContact: isContact, membershipEnded: ended)
+    }
+
+    // MARK: - Section 1: which info opens, and what iOS routes on
 
     func testAConversationBetweenTwoPeopleOpensThePerson() {
         XCTAssertEqual(
@@ -43,6 +55,20 @@ final class ConversationInfoTests: XCTestCase {
             .person(contactMessageId: nil))
     }
 
+    func testAChannelOpensTheChannelAndCarriesItsId() {
+        XCTAssertEqual(
+            ConversationInfoDestination.ofChannel(channelId: "c0ffee"),
+            .channel(channelId: "c0ffee"))
+    }
+
+    /// The destination iOS routes on must be the one the shared rule chose,
+    /// not a second opinion about the same conversation.
+    func testTheDestinationAgreesWithTheSharedRule() {
+        XCTAssertEqual(infoTarget(kind: ConversationKind.chat.sharedKind), .person)
+        XCTAssertEqual(infoTarget(kind: ConversationKind.group.sharedKind), .group)
+        XCTAssertEqual(infoTarget(kind: .channel), .channel)
+    }
+
     func testEachDestinationSaysWhatItOpens() {
         XCTAssertEqual(
             ConversationInfoDestination.person(contactMessageId: 1).accessibilityHint,
@@ -55,88 +81,232 @@ final class ConversationInfoTests: XCTestCase {
 
     // MARK: - Section 2.1: what a person never shows
 
-    /// The requirement, stated as one assertion: no group name, no invite
-    /// link, no roles, no ownership, no `Leave group`.
-    func testAPersonCarriesNothingSectionTwoOneForbids() {
-        for destination in [
-            ConversationInfoDestination.person(contactMessageId: 7),
-            ConversationInfoDestination.person(contactMessageId: nil),
-        ] {
-            let content = ConversationInfoContent.of(destination)
-            XCTAssertFalse(
-                content.carriesAnythingForbiddenForOneToOne,
-                "a conversation between two people showed group machinery")
+    /// Section 2.1's `Never` list, under EVERY combination rather than for one
+    /// example. This is the defect the whole shared module exists to close, so
+    /// it is checked exhaustively, and through the FFI, because that is the
+    /// path the app itself takes.
+    func testAPersonNeverCarriesAnythingGroupShaped() {
+        let groupShaped: [InfoSection] = [
+            .groupName, .renameGroup, .memberList, .addMember,
+            .inviteLink, .roles, .transferOwnership, .leaveGroup,
+        ]
+        for origin in [InfoOrigin.conversation, .elsewhere] {
+            for isContact in [false, true] {
+                for ended in [false, true] {
+                    let sections = personInfoSections(
+                        origin: origin, caps: person(isContact, ended: ended))
+                    for forbidden in groupShaped {
+                        XCTAssertFalse(
+                            sections.contains(forbidden),
+                            "\(origin) contact=\(isContact) ended=\(ended) showed \(forbidden)")
+                    }
+                }
+            }
         }
     }
 
-    /// The same list again, one flag at a time, so a failure names which one
-    /// came back.
-    func testAPersonShowsNoGroupNameLinkRolesOwnershipOrLeave() {
-        let content = ConversationInfoContent.of(.person(contactMessageId: 7))
-        XCTAssertFalse(content.sharedName)
-        XCTAssertFalse(content.inviteLink)
-        XCTAssertFalse(content.roles)
-        XCTAssertFalse(content.ownership)
-        XCTAssertFalse(content.leaveGroup)
-        XCTAssertFalse(content.memberRoster, "a roster of two is not a person")
+    func testAContactGetsTheNumberTheNameAndTheWayOutOfTheList() {
+        let sections = personInfoSections(
+            origin: .conversation, caps: person(true, ended: false))
+        XCTAssertTrue(sections.contains(.safetyNumber))
+        XCTAssertTrue(sections.contains(.renameContact))
+        XCTAssertTrue(sections.contains(.removeContact))
     }
 
-    /// The one security thing a person acts on belongs in front of them.
-    func testAPersonShowsTheSafetyNumber() {
-        XCTAssertTrue(ConversationInfoContent.of(.person(contactMessageId: 7)).safetyNumber)
-        XCTAssertTrue(ConversationInfoContent.of(.person(contactMessageId: nil)).safetyNumber)
+    /// A conversation that outlived its contact record is still a person, and
+    /// offers nothing that would act on a record it does not have.
+    func testAPersonWhoIsNotAContactOffersNothingToActOnARecordWith() {
+        let sections = personInfoSections(
+            origin: .conversation, caps: person(false, ended: false))
+        XCTAssertFalse(sections.contains(.safetyNumber))
+        XCTAssertFalse(sections.contains(.renameContact))
+        XCTAssertFalse(sections.contains(.removeContact))
+        XCTAssertTrue(sections.contains(.call))
+    }
+
+    func testMessageIsOfferedFromAnywhereButTheConversationItself() {
+        XCTAssertFalse(
+            personInfoSections(origin: .conversation, caps: person(true, ended: false))
+                .contains(.message))
+        XCTAssertTrue(
+            personInfoSections(origin: .elsewhere, caps: person(true, ended: false))
+                .contains(.message))
+    }
+
+    // MARK: - The first defect this closes: an ended one-to-one had no exit
+
+    /// `Delete this chat` reached an ended one-to-one on Android only. Here it
+    /// stayed in the group panel — which a one-to-one had just stopped opening
+    /// — so ending a one-to-one left a conversation that could never be
+    /// closed.
+    func testAnEndedOneToOneCanBeClosed() {
+        for isContact in [false, true] {
+            for origin in [InfoOrigin.conversation, .elsewhere] {
+                XCTAssertTrue(
+                    personInfoSections(origin: origin, caps: person(isContact, ended: true))
+                        .contains(.deleteChat),
+                    "an ended one-to-one (contact=\(isContact), \(origin)) had no way out")
+            }
+        }
+    }
+
+    /// The other half of the same state: the per-call key comes from a group
+    /// this device is no longer in, so a call control would assert a live
+    /// session there is not.
+    func testAnEndedOneToOneOffersNoCall() {
+        for isContact in [false, true] {
+            XCTAssertFalse(
+                personInfoSections(origin: .conversation, caps: person(isContact, ended: true))
+                    .contains(.call),
+                "an ended one-to-one (contact=\(isContact)) still offered a call")
+        }
+    }
+
+    /// The person is still the person: what ended is the conversation.
+    func testAnEndedOneToOneStillShowsEverythingAboutThePerson() {
+        let sections = personInfoSections(
+            origin: .conversation, caps: person(true, ended: true))
+        XCTAssertTrue(sections.contains(.safetyNumber))
+        XCTAssertTrue(sections.contains(.renameContact))
+        XCTAssertTrue(sections.contains(.removeContact))
     }
 
     // MARK: - Section 2.2: what a group keeps
 
-    func testAGroupKeepsEveryCapabilityItHadBefore() {
-        let content = ConversationInfoContent.of(.group)
-        XCTAssertTrue(content.sharedName)
-        XCTAssertTrue(content.memberRoster)
-        XCTAssertTrue(content.inviteLink)
-        XCTAssertTrue(content.roles)
-        XCTAssertTrue(content.ownership)
-        XCTAssertTrue(content.leaveGroup)
+    func testAnOwnerKeepsEveryGroupCapability() {
+        let sections = groupInfoSections(
+            caps: GroupInfoCapabilities(
+                canManageMembers: true, canRename: true, canMintInvite: true,
+                isOwner: true, canLeave: true, membershipEnded: false))
+        for expected: InfoSection in [
+            .groupName, .memberList, .renameGroup, .addMember,
+            .roles, .inviteLink, .transferOwnership, .leaveGroup,
+        ] {
+            XCTAssertTrue(sections.contains(expected), "an owner lost \(expected)")
+        }
     }
 
-    /// The safety number is between two people, so it sits on each of them
-    /// rather than on the group they share.
-    func testAGroupDoesNotShowASafetyNumber() {
-        XCTAssertFalse(ConversationInfoContent.of(.group).safetyNumber)
+    func testAPlainMemberGetsTheRosterAndTheExitAndNothingElse() {
+        let sections = groupInfoSections(
+            caps: GroupInfoCapabilities(
+                canManageMembers: false, canRename: false, canMintInvite: false,
+                isOwner: false, canLeave: true, membershipEnded: false))
+        XCTAssertTrue(sections.contains(.groupName))
+        XCTAssertTrue(sections.contains(.memberList))
+        XCTAssertTrue(sections.contains(.leaveGroup))
+        for absent: InfoSection in [
+            .renameGroup, .addMember, .roles, .inviteLink, .transferOwnership,
+        ] {
+            XCTAssertFalse(sections.contains(absent), "a plain member was offered \(absent)")
+        }
     }
 
-    // MARK: - Section 2.3: a channel
-
-    func testAChannelShowsItsNameAndUnsubscribeAndNoGroupMachinery() {
-        let content = ConversationInfoContent.of(.channel(channelId: "c"))
-        XCTAssertTrue(content.sharedName)
-        XCTAssertTrue(content.unsubscribe)
-        XCTAssertFalse(content.memberRoster)
-        XCTAssertFalse(content.roles)
-        XCTAssertFalse(content.ownership)
-        XCTAssertFalse(content.leaveGroup)
+    /// An ended group leaves the name and the roster readable and takes every
+    /// action away — and gives back the same exit an ended one-to-one gets,
+    /// in the same state, for the same reason.
+    func testAnEndedGroupIsReadOnlyExceptForTheWayOut() {
+        let sections = groupInfoSections(
+            caps: GroupInfoCapabilities(
+                canManageMembers: true, canRename: true, canMintInvite: true,
+                isOwner: true, canLeave: true, membershipEnded: true))
+        XCTAssertTrue(sections.contains(.groupName))
+        XCTAssertTrue(sections.contains(.memberList))
+        XCTAssertTrue(sections.contains(.deleteChat))
+        for gone: InfoSection in [
+            .addMember, .renameGroup, .inviteLink, .transferOwnership, .leaveGroup, .roles,
+        ] {
+            XCTAssertFalse(sections.contains(gone), "\(gone) survived an ended membership")
+        }
     }
 
-    func testOnlyAChannelOffersUnsubscribe() {
-        XCTAssertFalse(ConversationInfoContent.of(.group).unsubscribe)
-        XCTAssertFalse(ConversationInfoContent.of(.person(contactMessageId: 1)).unsubscribe)
+    /// A group carrying no ADR-0022 role table has no ADR-0045 proposal path,
+    /// so a member cannot commit their own removal and there is nothing for
+    /// `Leave group` to do. Web and Android both already refused to draw it
+    /// there, against a rule that offered it — a rule nobody was following,
+    /// which is how `canLeave` came to exist.
+    func testAGroupNobodyCanLeaveIsNotOfferedAWayOut() {
+        let sections = groupInfoSections(
+            caps: GroupInfoCapabilities(
+                canManageMembers: false, canRename: false, canMintInvite: false,
+                isOwner: false, canLeave: false, membershipEnded: false))
+        XCTAssertFalse(sections.contains(.leaveGroup))
+        // Still a group: everything readable about it stays readable.
+        XCTAssertTrue(sections.contains(.groupName))
+        XCTAssertTrue(sections.contains(.memberList))
+    }
+
+    // MARK: - The second defect this closes: a channel could not be unfollowed
+
+    /// `Unsubscribe` was built on web and on neither native, while both
+    /// natives already held the two functions it is made of.
+    func testASubscriberCanStopFollowingAChannel() {
+        let sections = channelInfoSections(
+            caps: ChannelInfoCapabilities(
+                isPublisher: false, isSubscriber: true, subscriberCountKnown: false))
+        XCTAssertTrue(sections.contains(.unsubscribe))
+        XCTAssertFalse(sections.contains(.manageChannel))
+        XCTAssertFalse(
+            sections.contains(.subscriberCount),
+            "a reader cannot know a subscriber count, so it must not show one")
+    }
+
+    /// A publisher reads its own channel from its own keys, so there is no
+    /// subscription to end and a control offering to end one would end
+    /// nothing.
+    func testAPublisherIsNotOfferedAWayToStopFollowing() {
+        let sections = channelInfoSections(
+            caps: ChannelInfoCapabilities(
+                isPublisher: true, isSubscriber: true, subscriberCountKnown: true))
+        XCTAssertFalse(sections.contains(.unsubscribe))
+        XCTAssertTrue(sections.contains(.manageChannel))
+        XCTAssertTrue(sections.contains(.subscriberCount))
+    }
+
+    /// A channel found by handle and not yet subscribed to: what it is, and
+    /// nothing to act on.
+    func testAChannelNobodyHereReadsYetShowsWhatItIsAndNoActions() {
+        let sections = channelInfoSections(
+            caps: ChannelInfoCapabilities(
+                isPublisher: false, isSubscriber: false, subscriberCountKnown: false))
+        XCTAssertEqual(sections, [.channelHandle, .channelDescription])
+    }
+
+    /// Every channel says what it is, whoever is reading.
+    func testEveryChannelShowsItsHandleAndDescription() {
+        for isPublisher in [false, true] {
+            for isSubscriber in [false, true] {
+                let sections = channelInfoSections(
+                    caps: ChannelInfoCapabilities(
+                        isPublisher: isPublisher,
+                        isSubscriber: isSubscriber,
+                        subscriberCountKnown: isPublisher))
+                XCTAssertTrue(sections.contains(.channelHandle))
+                XCTAssertTrue(sections.contains(.channelDescription))
+            }
+        }
     }
 
     // MARK: - The three read as one product
 
-    /// Section 2 asks for a common shape, not three overlapping ones: no two
-    /// destinations hold the same set of sections, and none is empty.
+    /// Section 2 asks for a common shape, not three overlapping ones: no
+    /// destination's sections are empty, and a person's and a group's never
+    /// coincide.
     func testTheThreeDestinationsAreDistinctAndNoneIsEmpty() {
-        let person = ConversationInfoContent.of(.person(contactMessageId: 1))
-        let group = ConversationInfoContent.of(.group)
-        let channel = ConversationInfoContent.of(.channel(channelId: "c"))
-        XCTAssertNotEqual(person, group)
-        XCTAssertNotEqual(person, channel)
-        XCTAssertNotEqual(group, channel)
-        for content in [person, group, channel] {
-            XCTAssertTrue(
-                content.sharedName || content.memberRoster || content.safetyNumber
-                    || content.unsubscribe,
+        let personSections = personInfoSections(
+            origin: .elsewhere, caps: person(true, ended: false))
+        let groupSections = groupInfoSections(
+            caps: GroupInfoCapabilities(
+                canManageMembers: false, canRename: false, canMintInvite: false,
+                isOwner: false, canLeave: true, membershipEnded: false))
+        let channelSections = channelInfoSections(
+            caps: ChannelInfoCapabilities(
+                isPublisher: false, isSubscriber: true, subscriberCountKnown: false))
+        XCTAssertNotEqual(personSections, groupSections)
+        XCTAssertNotEqual(personSections, channelSections)
+        XCTAssertNotEqual(groupSections, channelSections)
+        for sections in [personSections, groupSections, channelSections] {
+            XCTAssertFalse(
+                sections.isEmpty,
                 "a destination with nothing on it is a tap that reads as nothing happening")
         }
     }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import LakkoCore
 import SwiftUI
 
 /// The layer that opens over a conversation when its name is tapped
@@ -27,23 +28,35 @@ struct ConversationInfoSheet: View {
                     viewModel: contacts,
                     messageId: contactMessageId,
                     // Opened from the chat, so "Message" would lead back to
-                    // the screen this layer sits over (section 2.1).
+                    // the screen this layer sits over (section 2.1). Which
+                    // rows that removes is the shared rule's answer, not a
+                    // flag passed down.
                     onOpenChat: { _ in },
                     onCall: onCall,
                     presentation: .sheet,
-                    offersMessage: false,
-                    onDone: { chat.closeConversationInfo() }
+                    origin: .conversation,
+                    onDone: { chat.closeConversationInfo() },
+                    // ADR-0045 UX 6.2.4 — an ended one-to-one used to have no
+                    // exit at all: `Delete this chat` lived in the group panel,
+                    // which a one-to-one stopped opening when this layer split
+                    // by destination. The person layer carries it now, and the
+                    // screen behind it has nothing left to show.
+                    onChatDeleted: {
+                        chat.closeConversationInfo()
+                        onDeleted()
+                    }
                 )
             } else {
-                UnknownPersonInfo(chat: chat)
+                UnknownPersonInfo(chat: chat, onCall: onCall, onDeleted: onDeleted)
             }
         case .group:
             MembersSheet(viewModel: chat, onDeleted: onDeleted)
         case .channel:
             // Unreachable from here: a channel is not a chat screen, so
             // `ConversationInfoDestination.of(kind:contactMessageId:)` never
-            // returns this. A channel opens `ChannelDetailScreen`, which is
-            // both its conversation and its info.
+            // returns this. A channel has its own info layer, opened by its
+            // own name — ``ChannelInfoSheet`` — reached from
+            // ``ChannelDetailScreen`` rather than from a chat.
             EmptyView()
         }
     }
@@ -59,6 +72,31 @@ struct ConversationInfoSheet: View {
 /// which would be false.
 private struct UnknownPersonInfo: View {
     @ObservedObject var chat: ChatViewModel
+    /// Start a call on this conversation. Not being a contact does not stop
+    /// one: the per-call key comes from the GROUP, which exists, and the
+    /// Android twin has always offered it here.
+    let onCall: (_ groupIdHex: String, _ video: Bool) -> Void
+    /// The chat is gone and the screen behind this has nothing left to show.
+    let onDeleted: () -> Void
+
+    @State private var confirmingDeleteChat = false
+
+    /// The same shared rule the contact screen asks, with the one capability
+    /// that differs: there is no contact record here, so nothing that acts on
+    /// one is offered. What survives is `Call` on a live membership and
+    /// `Delete this chat` on an ended one — this person is the narrower half
+    /// of the defect where an ended one-to-one had no exit, and it would
+    /// still have none if only the contact screen carried the control.
+    ///
+    /// Asking the rule caught a second thing on the way: this view offered no
+    /// call at all while the Android twin did, for no reason either client
+    /// could name. The rule says `.call`, so it is here now.
+    private var sections: [InfoSection] {
+        personInfoSections(
+            origin: .conversation,
+            caps: PersonInfoCapabilities(
+                isContact: false, membershipEnded: chat.membershipHasEnded))
+    }
 
     var body: some View {
         NavigationStack {
@@ -100,6 +138,27 @@ private struct UnknownPersonInfo: View {
                     .listRowBackground(Color.clear)
                 }
 
+                if sections.contains(.call) {
+                    Section {
+                        HStack(spacing: 12) {
+                            Button {
+                                onCall(chat.groupIdHex, false)
+                            } label: {
+                                Label("Call", systemImage: "phone.fill")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            Button {
+                                onCall(chat.groupIdHex, true)
+                            } label: {
+                                Label("Video", systemImage: "video.fill")
+                                    .frame(maxWidth: .infinity)
+                            }
+                        }
+                        .buttonStyle(.borderless)
+                        .listRowBackground(Color.clear)
+                    }
+                }
+
                 Section {
                     Text("Not one of your contacts.")
                         .font(.footnote)
@@ -110,6 +169,29 @@ private struct UnknownPersonInfo: View {
                             + "give them a name only you see."
                     )
                 }
+
+                if sections.contains(.deleteChat) {
+                    Section {
+                        Button(role: .destructive) { confirmingDeleteChat = true } label: {
+                            Text(deleteChatControl)
+                        }
+                    }
+                }
+            }
+            .confirmationDialog(
+                deleteChatTitle,
+                isPresented: $confirmingDeleteChat,
+                titleVisibility: .visible
+            ) {
+                Button("Delete", role: .destructive) {
+                    if chat.onDeleteChat() {
+                        chat.closeConversationInfo()
+                        onDeleted()
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(deleteChatBody)
             }
             .listStyle(.insetGrouped)
             .navigationTitle("Contact")

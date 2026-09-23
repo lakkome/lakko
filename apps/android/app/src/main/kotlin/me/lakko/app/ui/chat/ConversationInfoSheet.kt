@@ -30,14 +30,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import me.lakko.app.chat.ConversationInfo
-import me.lakko.app.chat.InfoOrigin
-import me.lakko.app.chat.InfoSection
-import me.lakko.app.chat.personInfoSections
 import me.lakko.app.contacts.ContactsRepository
 import me.lakko.app.ui.components.LakkoAvatar
 import me.lakko.app.ui.contacts.ActionButton
 import me.lakko.app.ui.contacts.ContactDetailScreen
 import me.lakko.app.ui.contacts.ContactsViewModel
+import uniffi.lakko_ffi_uniffi.InfoOrigin
+import uniffi.lakko_ffi_uniffi.InfoSection
+import uniffi.lakko_ffi_uniffi.PersonInfoCapabilities
+import uniffi.lakko_ffi_uniffi.personInfoSections
 
 /**
  * The person a one-to-one conversation opens — docs/ux/conversation-info.md.
@@ -47,7 +48,7 @@ import me.lakko.app.ui.contacts.ContactsViewModel
  * `ModalBottomSheet` is the idiom the spec names for Android.
  *
  * What it holds is [ContactDetailScreen], the screen that already exists, in
- * its [InfoOrigin.Conversation] presentation. It is deliberately not a second
+ * its [InfoOrigin.CONVERSATION] presentation. It is deliberately not a second
  * person screen: two screens about a person are two things to keep in step,
  * and the safety number is the one that must never be the stale copy.
  */
@@ -71,14 +72,20 @@ internal fun ConversationPersonSheet(
     membershipEnded: Boolean,
     onDismiss: () -> Unit,
 ) {
-    // Section 2.1 / section 4 — what this holds, decided in `me.lakko.app.chat`
-    // where the host suite runs it.
-    val sections = personInfoSections(
-        origin = InfoOrigin.Conversation,
-        isContact = info is ConversationInfo.Person,
-        membershipEnded = membershipEnded,
-    )
-    val callAction = onStartCall?.takeIf { InfoSection.Call in sections }
+    // Section 2.1 / section 4 — what this holds is asked, never decided here:
+    // `crates/lakko-ui-rules/src/info.rs` is the one copy of that rule, and
+    // the three clients having each answered it themselves is what put a
+    // group's panel in front of a person.
+    // Remembered because asking now crosses the FFI: the rule is a native
+    // call, and its answer changes only when one of its inputs does.
+    val isContact = info is ConversationInfo.Person
+    val sections = remember(isContact, membershipEnded) {
+        personInfoSections(
+            InfoOrigin.CONVERSATION,
+            PersonInfoCapabilities(isContact = isContact, membershipEnded = membershipEnded),
+        )
+    }
+    val callAction = onStartCall?.takeIf { InfoSection.CALL in sections }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var confirmingDelete by remember { mutableStateOf(false) }
     if (confirmingDelete) {
@@ -110,7 +117,7 @@ internal fun ConversationPersonSheet(
                     onDismiss()
                     onVerifySafetyNumber(key)
                 },
-                origin = InfoOrigin.Conversation,
+                origin = InfoOrigin.CONVERSATION,
                 membershipEnded = membershipEnded,
             )
 
@@ -124,7 +131,7 @@ internal fun ConversationPersonSheet(
             // The group has its own layer; the header never routes a group here.
             ConversationInfo.Group -> Unit
         }
-        if (InfoSection.DeleteChat in sections) {
+        if (InfoSection.DELETE_CHAT in sections) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()

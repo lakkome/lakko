@@ -41,6 +41,12 @@ struct ChannelDetailScreen: View {
     /// (a channel not yet in the local list). Empty otherwise.
     var foundHandle: String = ""
 
+    /// Popping out of the channel once this device stops following it: the
+    /// row it was opened from is gone, so there is nothing behind this screen
+    /// to come back to.
+    @Environment(\.dismiss) private var dismiss
+    @State private var infoOpen = false
+
     var body: some View {
         Group {
             if state.keysByChannel[channelId] != nil {
@@ -59,8 +65,41 @@ struct ChannelDetailScreen: View {
                 )
             }
         }
-        .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            // `docs/ux/conversation-info.md` section 1 — the name is the ONE
+            // way into this channel's info, the same way a chat's name is the
+            // one way into its own. A plain `navigationTitle` cannot be
+            // tapped, so the title is a button in the principal slot, which is
+            // what `ChatScreen` already does.
+            ToolbarItem(placement: .principal) {
+                Button { infoOpen = true } label: {
+                    Text(title)
+                        .font(.headline)
+                        .foregroundStyle(Color.lakkoText)
+                        .lineLimit(1)
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint(ConversationInfoDestination.ofChannel(channelId: channelId)
+                    .accessibilityHint)
+            }
+        }
+        .sheet(isPresented: $infoOpen) {
+            // Section 3 — a layer over the channel, which stays where it is
+            // behind it.
+            ChannelInfoSheet(
+                channelId: channelId,
+                state: state,
+                client: client,
+                accountIdentitySeed: accountIdentitySeed,
+                foundHandle: foundHandle,
+                onUnsubscribed: {
+                    infoOpen = false
+                    dismiss()
+                },
+                onDone: { infoOpen = false }
+            )
+        }
     }
 
     /// ADR-0051 §5 — the shared name, else the local name, else the handle.

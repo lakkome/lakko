@@ -69,6 +69,7 @@ import { DiscoveryHttpError, registerChannelHandle } from "../channels/channel-d
 import { channelTitle, displayHandle } from "../channels/channel-row";
 import { knownSubscriberCount } from "../channels/ui-cache";
 import { channelInfoSections, infoHeading, infoOpenLabel } from "../chat/conversation-info";
+import { uiRules } from "../chat/ui-rules";
 import { foldChannelMeta, publishChannelMeta } from "../channels/channel-meta";
 import { ManagePanel } from "../channels/ManagePanel";
 import { isHiddenPostDecode, PostCard, toPostDecode, type PostDecode } from "../channels/PostCard";
@@ -159,13 +160,17 @@ function ChannelInfoBody(props: {
   readonly onUnsubscribe: () => void;
 }): JSX.Element {
   const meta = (): ReturnType<typeof channelMetaOf> => channelMetaOf(props.id);
+  const subscribers = (): number | null => knownSubscriberCount(props.id);
   const sections = createMemo(() =>
-    channelInfoSections({
+    channelInfoSections(uiRules(), {
       isPublisher: props.isPublisher,
       isSubscriber: props.isSubscriber,
+      // Only where this device has actually counted them. A reader inventing
+      // a number it cannot know would be worse than showing none, so the
+      // count this device holds is the capability, not the role.
+      subscriberCountKnown: subscribers() !== null,
     }),
   );
-  const subscribers = (): number | null => knownSubscriberCount(props.id);
 
   return (
     <>
@@ -180,7 +185,7 @@ function ChannelInfoBody(props: {
         </Show>
         {/* Only where this device has actually counted them; an absent count
             is left out rather than shown as zero. */}
-        <Show when={subscribers()}>
+        <Show when={sections().includes("subscriber-count") && subscribers()}>
           {(n) => (
             <div class="lk-meta">
               {n()} {n() === 1 ? "subscriber" : "subscribers"}

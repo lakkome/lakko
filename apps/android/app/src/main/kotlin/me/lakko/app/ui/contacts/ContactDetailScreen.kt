@@ -56,13 +56,14 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import me.lakko.app.chat.InfoOrigin
-import me.lakko.app.chat.InfoSection
-import me.lakko.app.chat.personInfoSections
 import me.lakko.app.contacts.AcceptedContact
 import me.lakko.app.contacts.ContactsRepository
 import me.lakko.app.profile.ProfileDirectory
 import me.lakko.app.ui.components.LakkoAvatar
+import uniffi.lakko_ffi_uniffi.InfoOrigin
+import uniffi.lakko_ffi_uniffi.InfoSection
+import uniffi.lakko_ffi_uniffi.PersonInfoCapabilities
+import uniffi.lakko_ffi_uniffi.personInfoSections
 
 /**
  * Contact detail — docs/ux/client-redesign.md section 5.3, and the person a
@@ -75,9 +76,9 @@ import me.lakko.app.ui.components.LakkoAvatar
  * a rename and removal. No key fingerprint anywhere: the safety number is the
  * verification surface.
  *
- * One screen, two presentations. [InfoOrigin.Elsewhere] is the destination the
+ * One screen, two presentations. [InfoOrigin.ELSEWHERE] is the destination the
  * contacts list opens: its own top bar, its own back arrow, and `Message`,
- * because from there the conversation is somewhere to go. [InfoOrigin.Conversation]
+ * because from there the conversation is somewhere to go. [InfoOrigin.CONVERSATION]
  * is the layer a chat's header opens over the conversation: the host supplies
  * the chrome, and `Message` is gone because the conversation is already behind
  * it. Which rows those are is [personInfoSections], not a flag read here — the
@@ -97,7 +98,7 @@ public fun ContactDetailScreen(
     onStartCall: ((groupIdHex: String, video: Boolean) -> Unit)?,
     onVerifySafetyNumber: (contactKey: String) -> Unit,
     /** Where this was opened from; see the KDoc above. */
-    origin: InfoOrigin = InfoOrigin.Elsewhere,
+    origin: InfoOrigin = InfoOrigin.ELSEWHERE,
     /** Has this device's membership in the conversation ended? Only a layer
      *  over a conversation can know; a contact opened from the list cannot,
      *  and has no conversation in question. */
@@ -123,9 +124,17 @@ public fun ContactDetailScreen(
     var draftName by remember { mutableStateOf("") }
     var confirmingRemove by remember { mutableStateOf(false) }
 
-    // Section 2.1 — which rows this holds, decided once in `me.lakko.app.chat`
-    // where the host suite can run it, never by a flag read down in the layout.
-    val sections = personInfoSections(origin, isContact = true, membershipEnded = membershipEnded)
+    // Section 2.1 — which rows this holds is asked, never decided here. The
+    // one copy of the rule is `crates/lakko-ui-rules/src/info.rs`; this screen
+    // renders whichever blocks it is handed.
+    // Remembered because asking now crosses the FFI: the rule is a native
+    // call, and its answer changes only when one of its inputs does.
+    val sections = remember(origin, membershipEnded) {
+        personInfoSections(
+            origin,
+            PersonInfoCapabilities(isContact = true, membershipEnded = membershipEnded),
+        )
+    }
     // Read through `nameVersion` so a profile or a username arriving later
     // renames in place.
     val resolvedName = contact?.let { c -> nameVersion.let { directory.resolve(c.request.fromPubkey) } }
@@ -155,13 +164,13 @@ public fun ContactDetailScreen(
         // The layer over a conversation: the sheet that hosts this draws the
         // handle and the way out, so a second top bar inside it would be a
         // second way out of one thing.
-        InfoOrigin.Conversation -> body(
+        InfoOrigin.CONVERSATION -> body(
             Modifier
                 .fillMaxWidth()
                 .verticalScroll(rememberScrollState()),
         )
 
-        InfoOrigin.Elsewhere -> Scaffold(
+        InfoOrigin.ELSEWHERE -> Scaffold(
             modifier = modifier,
             topBar = {
                 TopAppBar(
@@ -219,7 +228,7 @@ private fun ContactDetailBody(
     contactKey: String,
     name: me.lakko.app.profile.ResolvedName,
     groupIdHex: String?,
-    sections: Set<InfoSection>,
+    sections: List<InfoSection>,
     onOpenChat: ((String) -> Unit)?,
     onStartCall: ((groupIdHex: String, video: Boolean) -> Unit)?,
     onVerifySafetyNumber: (contactKey: String) -> Unit,
@@ -269,7 +278,7 @@ private fun ContactDetailBody(
                 // Opened from the conversation itself, a button that opens the
                 // conversation is noise; opened from the contacts list it is
                 // the point. Section 2.1.
-                if (InfoSection.Message in sections) {
+                if (InfoSection.MESSAGE in sections) {
                     ActionButton(
                         label = "Message",
                         icon = Icons.AutoMirrored.Filled.Chat,
@@ -281,7 +290,7 @@ private fun ContactDetailBody(
                 // Section 4 — a conversation this device's membership has
                 // ended in has no call to place, so the tiles are gone rather
                 // than dimmed: the key comes from a group we are not in.
-                if (InfoSection.Call in sections) {
+                if (InfoSection.CALL in sections) {
                     ActionButton(
                         label = "Call",
                         icon = Icons.Filled.Call,
@@ -301,7 +310,7 @@ private fun ContactDetailBody(
             // The line exists to explain a dimmed tile, so it goes when there
             // is no tile to explain.
             val hasConversationActions =
-                InfoSection.Call in sections || InfoSection.Message in sections
+                InfoSection.CALL in sections || InfoSection.MESSAGE in sections
             if (groupIdHex == null && hasConversationActions) {
                 Spacer(Modifier.height(8.dp))
                 Text(
@@ -313,7 +322,7 @@ private fun ContactDetailBody(
             Spacer(Modifier.height(24.dp))
             HorizontalDivider()
 
-            if (InfoSection.SafetyNumber in sections) {
+            if (InfoSection.SAFETY_NUMBER in sections) {
                 DetailRow(
                     title = "Verify safety number",
                     supporting = "Compare a number in person to confirm this is really them.",
@@ -321,7 +330,7 @@ private fun ContactDetailBody(
                     onClick = { onVerifySafetyNumber(contactKey) },
                 )
             }
-            if (InfoSection.RenameContact in sections) {
+            if (InfoSection.RENAME_CONTACT in sections) {
                 DetailRow(
                     title = "Rename",
                     supporting = "Your name for this contact. Only you see it.",
@@ -329,7 +338,7 @@ private fun ContactDetailBody(
                     onClick = onRename,
                 )
             }
-            if (InfoSection.RemoveContact in sections) {
+            if (InfoSection.REMOVE_CONTACT in sections) {
                 HorizontalDivider()
                 DetailRow(
                     title = "Remove contact",

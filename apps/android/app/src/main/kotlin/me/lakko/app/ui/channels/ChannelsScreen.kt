@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -108,8 +109,11 @@ import me.lakko.app.ds.DsClient
 import me.lakko.app.ui.components.LakkoAvatar
 import me.lakko.app.ui.contacts.copyToClipboard
 import me.lakko.app.ui.contacts.launchShareIntent
+import uniffi.lakko_ffi_uniffi.ChannelInfoCapabilities
 import uniffi.lakko_ffi_uniffi.ChannelRotationState
+import uniffi.lakko_ffi_uniffi.InfoSection
 import uniffi.lakko_ffi_uniffi.PublisherGroup
+import uniffi.lakko_ffi_uniffi.channelInfoSections
 import uniffi.lakko_ffi_uniffi.channelRotationPolicyDefault
 import uniffi.lakko_ffi_uniffi.channelRotationStateAfterRotation
 import java.time.ZoneId
@@ -454,10 +458,25 @@ public fun ChannelDetailScreen(
         ChannelInfoSheet(
             channel = channel,
             isPublisher = keys != null,
+            isSubscriber = isSubscriber,
             subscriberCount = subscriberCount,
             onManage = {
                 infoOpen = false
                 onManage()
+            },
+            onStopFollowing = {
+                // Local by design AND by what exists: forget the reader
+                // keypair and the seeds it recovered, then drop the channel
+                // from this device's list. Nothing here tells the server —
+                // no channels route retires a subscriber — which is why the
+                // copy only ever speaks for this device.
+                infoOpen = false
+                state.clearSubscriberKeys(channelId)
+                state.removeChannel(channelId)
+                // The channel this screen is about is gone from the list, so
+                // staying on it would show an empty reader for something no
+                // longer followed.
+                onBack()
             },
             onDismiss = { infoOpen = false },
         )
@@ -836,26 +855,64 @@ private fun PostList(
  * handle and its scrim are the one obvious way out. The common shape the three
  * info surfaces share — the identity, then the actions, then the detail.
  *
- * `Unsubscribe` is absent, and it is the one thing section 2.3 asks for that
- * is not here. This client has no unsubscribe: nothing in `ChannelsClient`
- * deletes a subscriber registration, so a control here would either do nothing
- * or silently mean something narrower than it says.
+ * Which blocks those are is asked, never decided here: the one copy of the
+ * rule is `crates/lakko-ui-rules/src/info.rs`, and `Unsubscribe` arrives from
+ * it for a subscriber and not for a publisher, because a publisher reads its
+ * own channel from its own keys and has no subscription to end.
+ *
+ * This comment used to say the client had no unsubscribe at all. That was
+ * wrong for as long as it stood: `ChannelsUiState.clearSubscriberKeys` and
+ * `removeChannel` both existed and were simply never called from anywhere, so
+ * a person who followed a channel could not stop.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ChannelInfoSheet(
     channel: ChannelHandle,
     isPublisher: Boolean,
+    isSubscriber: Boolean,
     subscriberCount: Int?,
     onManage: () -> Unit,
+    /** Stop following on this device. See [STOP_FOLLOWING_SUPPORTING]. */
+    onStopFollowing: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val sections = me.lakko.app.chat.channelInfoSections(
-        isPublisher = isPublisher,
-        subscriberCountKnown = subscriberCount != null,
-    )
+    // Remembered because asking now crosses the FFI: the rule is a native
+    // call, and its answer changes only when one of its inputs does.
+    val countKnown = subscriberCount != null
+    val sections = remember(isPublisher, isSubscriber, countKnown) {
+        channelInfoSections(
+            ChannelInfoCapabilities(
+                isPublisher = isPublisher,
+                isSubscriber = isSubscriber,
+                subscriberCountKnown = countKnown,
+            ),
+        )
+    }
     val header = channelHeaderModel(channel, isOwner = isPublisher)
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var confirmingStopFollowing by remember { mutableStateOf(false) }
+    if (confirmingStopFollowing) {
+        AlertDialog(
+            onDismissRequest = { confirmingStopFollowing = false },
+            title = { Text(stopFollowingTitle(header.title)) },
+            text = { Text(STOP_FOLLOWING_BODY) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmingStopFollowing = false
+                        onStopFollowing()
+                    },
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error,
+                    ),
+                ) { Text(STOP_FOLLOWING_CONTROL) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmingStopFollowing = false }) { Text("Cancel") }
+            },
+        )
+    }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(
             modifier = Modifier
@@ -871,7 +928,7 @@ private fun ChannelInfoSheet(
                 style = MaterialTheme.typography.headlineSmall,
                 textAlign = TextAlign.Center,
             )
-            if (me.lakko.app.chat.InfoSection.ChannelHandle in sections) {
+            if (InfoSection.CHANNEL_HANDLE in sections) {
                 header.handleLine?.let {
                     Text(
                         it,
@@ -885,7 +942,7 @@ private fun ChannelInfoSheet(
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            if (me.lakko.app.chat.InfoSection.SubscriberCount in sections) {
+            if (InfoSection.SUBSCRIBER_COUNT in sections) {
                 subscriberCountLine(subscriberCount)?.let {
                     Text(
                         it,
@@ -894,14 +951,14 @@ private fun ChannelInfoSheet(
                     )
                 }
             }
-            if (me.lakko.app.chat.InfoSection.ManageChannel in sections) {
+            if (InfoSection.MANAGE_CHANNEL in sections) {
                 Spacer(Modifier.height(16.dp))
                 OutlinedButton(
                     onClick = onManage,
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("Manage channel") }
             }
-            if (me.lakko.app.chat.InfoSection.ChannelDescription in sections) {
+            if (InfoSection.CHANNEL_DESCRIPTION in sections) {
                 header.description?.let {
                     Spacer(Modifier.height(16.dp))
                     HorizontalDivider()
@@ -909,10 +966,53 @@ private fun ChannelInfoSheet(
                     Text(it, style = MaterialTheme.typography.bodyMedium)
                 }
             }
+            if (InfoSection.UNSUBSCRIBE in sections) {
+                Spacer(Modifier.height(16.dp))
+                HorizontalDivider()
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { confirmingStopFollowing = true }
+                        .padding(vertical = 14.dp),
+                ) {
+                    Text(
+                        STOP_FOLLOWING_CONTROL,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        STOP_FOLLOWING_SUPPORTING,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
             Spacer(Modifier.height(24.dp))
         }
     }
 }
+
+// docs/ux/conversation-info.md section 2.3 — the copy is deliberately about
+// THIS DEVICE. No channels route retires a subscriber, so the registration on
+// the server outlives the act; wording that claimed the channel had been told
+// would be false. The web client says the same words for the same reason.
+
+/** The control, and the confirming button of its dialog. */
+private const val STOP_FOLLOWING_CONTROL: String = "Stop following"
+
+/** The line under the control. */
+private const val STOP_FOLLOWING_SUPPORTING: String =
+    "Takes the channel off your list and stops this device reading it. " +
+        "You can subscribe again later."
+
+/** The dialog body. */
+private const val STOP_FOLLOWING_BODY: String =
+    "It leaves your list and this device stops reading it. " +
+        "You can subscribe again later."
+
+/** The dialog title, which names the channel being left. */
+private fun stopFollowingTitle(name: String): String = "Stop following $name?"
 
 /** The card at the top of the reader: who this channel is. */
 @Composable

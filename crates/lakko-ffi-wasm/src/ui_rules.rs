@@ -16,6 +16,14 @@ use lakko_ui_rules::conversation::{
     order_conversations as rust_order_conversations, ConversationKind as RustConversationKind,
     ConversationRow as RustConversationRow,
 };
+use lakko_ui_rules::info::{
+    channel_info_sections as rust_channel_info_sections,
+    group_info_sections as rust_group_info_sections, info_target as rust_info_target,
+    person_info_sections as rust_person_info_sections,
+    ChannelInfoCapabilities as RustChannelInfoCapabilities,
+    GroupInfoCapabilities as RustGroupInfoCapabilities, InfoOrigin as RustInfoOrigin,
+    InfoTarget as RustInfoTarget, PersonInfoCapabilities as RustPersonInfoCapabilities,
+};
 use lakko_ui_rules::lookup::{
     bare_name as rust_bare_name, looks_like_a_name as rust_looks_like_a_name,
 };
@@ -200,6 +208,283 @@ pub fn looks_like_a_name(typed: &str) -> bool {
     rust_looks_like_a_name(typed)
 }
 
+/// Which info a conversation's name opens — `docs/ux/conversation-info.md`
+/// section 1.
+#[wasm_bindgen(js_name = InfoTarget)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InfoTarget {
+    /// A conversation between two people opens the other person.
+    Person = 0,
+    /// A group opens the group.
+    Group = 1,
+    /// A channel opens the channel.
+    Channel = 2,
+}
+
+impl From<RustInfoTarget> for InfoTarget {
+    fn from(t: RustInfoTarget) -> Self {
+        match t {
+            RustInfoTarget::Person => Self::Person,
+            RustInfoTarget::Group => Self::Group,
+            RustInfoTarget::Channel => Self::Channel,
+        }
+    }
+}
+
+/// Where the info was opened from. It decides one thing — whether `Message`
+/// is offered.
+#[wasm_bindgen(js_name = InfoOrigin)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InfoOrigin {
+    /// From the conversation's own header.
+    Conversation = 0,
+    /// From the contact list, a search result, a call record.
+    Elsewhere = 1,
+}
+
+impl From<InfoOrigin> for RustInfoOrigin {
+    fn from(o: InfoOrigin) -> Self {
+        match o {
+            InfoOrigin::Conversation => Self::Conversation,
+            InfoOrigin::Elsewhere => Self::Elsewhere,
+        }
+    }
+}
+
+/// What the viewer is to a one-to-one conversation.
+///
+/// A constructible class rather than two positional booleans on the call, so
+/// the reading of each flag is written down at the call site rather than
+/// inferred from its position.
+#[wasm_bindgen]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PersonInfoCapabilities {
+    is_contact: bool,
+    membership_ended: bool,
+}
+
+#[wasm_bindgen]
+impl PersonInfoCapabilities {
+    /// `isContact`: the other person is in this device's contact list.
+    /// `membershipEnded`: this device's membership in the conversation is
+    /// over (ADR-0045 UX 6.2).
+    #[wasm_bindgen(constructor)]
+    #[must_use]
+    pub fn new(is_contact: bool, membership_ended: bool) -> Self {
+        Self {
+            is_contact,
+            membership_ended,
+        }
+    }
+
+    /// The other person is in this device's contact list.
+    #[wasm_bindgen(getter, js_name = isContact)]
+    #[must_use]
+    pub fn is_contact(&self) -> bool {
+        self.is_contact
+    }
+
+    /// This device's membership in the conversation is over.
+    #[wasm_bindgen(getter, js_name = membershipEnded)]
+    #[must_use]
+    pub fn membership_ended(&self) -> bool {
+        self.membership_ended
+    }
+}
+
+/// What the viewer may do in a group. Every field is a decision the client
+/// already made from the live role table; none is re-derived here.
+#[wasm_bindgen]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct GroupInfoCapabilities {
+    can_manage_members: bool,
+    can_rename: bool,
+    can_mint_invite: bool,
+    is_owner: bool,
+    can_leave: bool,
+    membership_ended: bool,
+}
+
+#[wasm_bindgen]
+impl GroupInfoCapabilities {
+    /// In order: owner-or-admin and still a member (ADR-0022), the same for
+    /// renaming (ADR-0051) and for minting an invite (ADR-0028), the owner
+    /// (ADR-0045), whether this device can actually leave (ADR-0045's member
+    /// exit is a `Leave` proposal, so a group with no role table has no
+    /// proposal path and nothing for the control to do), and whether this
+    /// device's membership is over.
+    #[wasm_bindgen(constructor)]
+    #[must_use]
+    #[allow(clippy::fn_params_excessive_bools)]
+    pub fn new(
+        can_manage_members: bool,
+        can_rename: bool,
+        can_mint_invite: bool,
+        is_owner: bool,
+        can_leave: bool,
+        membership_ended: bool,
+    ) -> Self {
+        Self {
+            can_manage_members,
+            can_rename,
+            can_mint_invite,
+            is_owner,
+            can_leave,
+            membership_ended,
+        }
+    }
+
+    /// Owner or admin, and still a member.
+    #[wasm_bindgen(getter, js_name = canManageMembers)]
+    #[must_use]
+    pub fn can_manage_members(&self) -> bool {
+        self.can_manage_members
+    }
+
+    /// May change the shared name.
+    #[wasm_bindgen(getter, js_name = canRename)]
+    #[must_use]
+    pub fn can_rename(&self) -> bool {
+        self.can_rename
+    }
+
+    /// May mint an invite link.
+    #[wasm_bindgen(getter, js_name = canMintInvite)]
+    #[must_use]
+    pub fn can_mint_invite(&self) -> bool {
+        self.can_mint_invite
+    }
+
+    /// The owner.
+    #[wasm_bindgen(getter, js_name = isOwner)]
+    #[must_use]
+    pub fn is_owner(&self) -> bool {
+        self.is_owner
+    }
+
+    /// Whether this device can actually leave.
+    #[wasm_bindgen(getter, js_name = canLeave)]
+    #[must_use]
+    pub fn can_leave(&self) -> bool {
+        self.can_leave
+    }
+
+    /// This device's membership is over: read-only.
+    #[wasm_bindgen(getter, js_name = membershipEnded)]
+    #[must_use]
+    pub fn membership_ended(&self) -> bool {
+        self.membership_ended
+    }
+}
+
+/// What the viewer is to a channel.
+#[wasm_bindgen]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChannelInfoCapabilities {
+    is_publisher: bool,
+    is_subscriber: bool,
+    subscriber_count_known: bool,
+}
+
+#[wasm_bindgen]
+impl ChannelInfoCapabilities {
+    /// In order: this device holds the publisher keys, this device reads the
+    /// channel as a subscriber, and this device has a subscriber count —
+    /// which only a publisher ever does.
+    #[wasm_bindgen(constructor)]
+    #[must_use]
+    pub fn new(is_publisher: bool, is_subscriber: bool, subscriber_count_known: bool) -> Self {
+        Self {
+            is_publisher,
+            is_subscriber,
+            subscriber_count_known,
+        }
+    }
+
+    /// This device holds the publisher keys.
+    #[wasm_bindgen(getter, js_name = isPublisher)]
+    #[must_use]
+    pub fn is_publisher(&self) -> bool {
+        self.is_publisher
+    }
+
+    /// This device reads the channel as a subscriber.
+    #[wasm_bindgen(getter, js_name = isSubscriber)]
+    #[must_use]
+    pub fn is_subscriber(&self) -> bool {
+        self.is_subscriber
+    }
+
+    /// This device has a subscriber count.
+    #[wasm_bindgen(getter, js_name = subscriberCountKnown)]
+    #[must_use]
+    pub fn subscriber_count_known(&self) -> bool {
+        self.subscriber_count_known
+    }
+}
+
+/// Which info the header opens for a conversation of this kind.
+#[wasm_bindgen(js_name = infoTarget)]
+#[must_use]
+pub fn info_target(kind: ConversationKind) -> InfoTarget {
+    rust_info_target(kind.into()).into()
+}
+
+/// What a person's info holds — section 2.1.
+///
+/// The blocks come back as their kebab-case names, which is the vocabulary
+/// the web client's own section type has always been written in — so the
+/// names are handed over rather than translated, and a client re-spelling
+/// one is no longer possible.
+///
+/// Nothing in the result is ever group-shaped, whatever the capabilities.
+#[wasm_bindgen(js_name = personInfoSections)]
+#[must_use]
+pub fn person_info_sections(origin: InfoOrigin, caps: PersonInfoCapabilities) -> Vec<String> {
+    rust_person_info_sections(
+        origin.into(),
+        RustPersonInfoCapabilities {
+            is_contact: caps.is_contact,
+            membership_ended: caps.membership_ended,
+        },
+    )
+    .into_iter()
+    .map(|s| s.name().to_string())
+    .collect()
+}
+
+/// What a group's info holds — section 2.2.
+#[wasm_bindgen(js_name = groupInfoSections)]
+#[must_use]
+pub fn group_info_sections(caps: GroupInfoCapabilities) -> Vec<String> {
+    rust_group_info_sections(RustGroupInfoCapabilities {
+        can_manage_members: caps.can_manage_members,
+        can_rename: caps.can_rename,
+        can_mint_invite: caps.can_mint_invite,
+        is_owner: caps.is_owner,
+        can_leave: caps.can_leave,
+        membership_ended: caps.membership_ended,
+    })
+    .into_iter()
+    .map(|s| s.name().to_string())
+    .collect()
+}
+
+/// What a channel's info holds — section 2.3.
+#[wasm_bindgen(js_name = channelInfoSections)]
+#[must_use]
+pub fn channel_info_sections(caps: ChannelInfoCapabilities) -> Vec<String> {
+    rust_channel_info_sections(RustChannelInfoCapabilities {
+        is_publisher: caps.is_publisher,
+        is_subscriber: caps.is_subscriber,
+        subscriber_count_known: caps.subscriber_count_known,
+    })
+    .into_iter()
+    .map(|s| s.name().to_string())
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +500,21 @@ mod tests {
             row("new", ConversationKind::Channel, Some(9)),
         ];
         assert_eq!(order_conversations(rows), vec![1, 0]);
+    }
+
+    #[test]
+    fn the_sections_cross_the_boundary_as_the_names_web_already_uses() {
+        let ended = person_info_sections(
+            InfoOrigin::Conversation,
+            PersonInfoCapabilities::new(true, true),
+        );
+        assert!(ended.contains(&"delete-chat".to_string()));
+        assert!(!ended.contains(&"call".to_string()));
+        assert!(
+            channel_info_sections(ChannelInfoCapabilities::new(false, true, false))
+                .contains(&"unsubscribe".to_string())
+        );
+        assert_eq!(info_target(ConversationKind::Group), InfoTarget::Group);
     }
 
     #[test]

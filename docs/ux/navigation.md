@@ -317,7 +317,11 @@ lives was the maintainer's call, and it followed the project's own precedent -
 the Rust core behind both FFI surfaces, which is why `should_request_profiles`
 and `acting_committer_verdict` are written once. So they live in
 `crates/lakko-ui-rules`: `order_conversations` and `looks_like_a_name`, reached
-over wasm on web and over UniFFI on iOS and Android.
+over wasm on web and over UniFFI on iOS and Android - and, since the info
+layer went the same way, `person_info_sections`, `group_info_sections` and
+`channel_info_sections` beside them
+([`conversation-info.md`](conversation-info.md) section 6, which records the
+three divergences the three hand-written copies had already produced).
 
 Two consequences worth stating, because they are what make it a shared rule
 rather than a shared file.

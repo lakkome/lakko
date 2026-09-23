@@ -69,7 +69,9 @@ Reuses the contact screen that already exists.
 - **Safety number** - the out-of-band check, which is the one security thing
   a person acts on and so is the one that belongs in front of them
   ([`design-system.md`](design-system.md)).
-- Remove contact, with a confirmation.
+- Remove contact, with a confirmation. Local: it takes the person out of
+  this device's list, tells them nothing, and leaves the conversation where
+  it is - leaving a conversation is the conversation's own action.
 
 Never: a group name, an invite link, roles, ownership, or `Leave group`.
 
@@ -100,8 +102,17 @@ group.
 
 - Name, `@handle`, description.
 - Subscriber count where the client has it.
-- Unsubscribe.
+- Unsubscribe, for a subscriber and not for a publisher: a publisher reads
+  its own channel from its own keys, so there is no subscription to end and
+  a control offering to end one would end nothing.
 - For a publisher: the owner's screen it already has.
+
+**What `Unsubscribe` actually does, said plainly because the copy has to be
+true.** It takes the channel off this device's list and drops the subscriber
+keys, so the device stops reading it and can subscribe again later. It does
+not delete the registration on the server - no channels route retires a
+subscriber - so the copy says what happens to *this device* and never claims
+the channel has been told.
 
 ## 3. It is a layer, not a panel
 
@@ -124,7 +135,7 @@ obvious way out.
 |---|---|
 | Default | The header, the actions, the detail. |
 | A group still loading its roster | The header and what is known; never an empty list presented as "no members". |
-| Membership ended | The info opens and is read-only: the conversation is over, and the record of who was in it is not ([ADR-0045](../adr/0045-remote-commit-epoch-fork.md) UX 6.2). |
+| Membership ended | The info opens and is read-only: the conversation is over, and the record of who was in it is not ([ADR-0045](../adr/0045-remote-commit-epoch-fork.md) UX 6.2). `Call` goes, because the per-call key comes from a group this device is no longer in. `Delete this chat` arrives in its place - **on a one-to-one exactly as on a group**, because it is the one thing the reader still can do, and because the control used to live in the group panel that a one-to-one has just stopped opening. Everything about the PERSON is unaffected: the conversation ended, they did not. |
 | An action refused | One sentence on what happened and one on what to do, in place, and the layer stays open. |
 
 ## 5. What the data has to provide
@@ -139,3 +150,24 @@ header opens and how it is presented.
 One entry point, three destinations chosen by the conversation's kind, one
 common shape, and a layer over the conversation rather than beside it. The
 **Per platform** notes are the only differences.
+
+**And the model is one copy, in Rust.** `lakko_ui_rules::info` decides the
+destination and the blocks; every client asks it over its FFI and renders
+what it is handed ([`navigation.md`](navigation.md) section 8 says where the
+shared rules live and why).
+
+That is not tidiness. The first implementation pass wrote this section three
+times - Android as enum cases, iOS as a struct of booleans, web as an array
+of strings - and the three disagreed on three separate points, every one of
+them a sentence of this document rather than a platform difference:
+
+- `Remove contact` existed on web and Android, and iOS carried a comment
+  asserting no client had one.
+- `Unsubscribe` existed on web and on neither native, whose comments
+  asserted the operation did not exist - while both already held the two
+  functions it is made of.
+- `Delete this chat` reached an ended one-to-one only on Android, so on the
+  other two a one-to-one that ended could never be closed.
+
+All three were found by a person opening two phones side by side, which is
+the cost this spec exists to stop paying.

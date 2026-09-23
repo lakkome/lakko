@@ -4,8 +4,8 @@
 package me.lakko.app.chat
 
 /**
- * What opens when a person taps the name at the top of a conversation —
- * `docs/ux/conversation-info.md`.
+ * Which of the three info destinations a conversation's header opens —
+ * `docs/ux/conversation-info.md` section 1.
  *
  * One entry point, three destinations chosen by what the conversation IS: a
  * one-to-one opens the person, a group opens the group, a channel opens the
@@ -15,22 +15,25 @@ package me.lakko.app.chat
  * and a `Leave group` explaining that ownership must be transferred first —
  * every one of them about a group that does not exist.
  *
- * A flag that hides rows is not the same thing as a screen about a person, and
- * that is why the decision lives here as a value rather than as a boolean the
- * layout reads: the answer to "which info is this" is made once, in one place,
- * and the Compose side renders whichever one it is handed.
+ * ## What this file decides, and what it no longer decides
+ *
+ * It decides **which conversation this is, and whose contact record it
+ * belongs to** — the matching rule below. It no longer decides **what the
+ * resulting screen holds**: [uniffi.lakko_ffi_uniffi.personInfoSections],
+ * [uniffi.lakko_ffi_uniffi.groupInfoSections] and
+ * [uniffi.lakko_ffi_uniffi.channelInfoSections] answer that now, from
+ * `crates/lakko-ui-rules/src/info.rs`, because the same paragraph of the same
+ * spec had been read three times by three clients and answered three
+ * different ways.
+ *
+ * The matching rule stays here because it is not that rule: it reads this
+ * device's own contact list and the chat it recorded, neither of which the
+ * core holds. It is a candidate for the same treatment later — the shape is
+ * the same, a pure function over values a client already has — and moving it
+ * would need the contact link modelled across the FFI first.
  *
  * Pure of Compose and of Android, so the host JVM suite can run it.
  */
-
-/**
- * Where the info was opened from.
- *
- * It decides one thing — whether `Message` is offered. Opened from the
- * conversation, a button that opens the conversation you are already looking at
- * is noise; opened from anywhere else it is the point.
- */
-public enum class InfoOrigin { Conversation, Elsewhere }
 
 /** Which info a conversation's header opens. */
 public sealed interface ConversationInfo {
@@ -90,93 +93,4 @@ public fun conversationInfo(
             ?.let { return ConversationInfo.Person(it.routeKey) }
     }
     return ConversationInfo.PersonUnknown
-}
-
-/**
- * A section of an info layer.
- *
- * [groupOnly] is the classification requirement 2.1 of the spec turns on:
- * "Never: a group name, an invite link, roles, ownership, or `Leave group`."
- * Marking it on the section itself, rather than restating the list wherever it
- * is needed, is what lets a new group section inherit the rule instead of
- * having to be remembered into it.
- */
-public enum class InfoSection(public val groupOnly: Boolean = false) {
-    // A person.
-    Message,
-    Call,
-    SafetyNumber,
-    RenameContact,
-    RemoveContact,
-    DeleteChat,
-
-    // A group.
-    GroupName(groupOnly = true),
-    MemberList(groupOnly = true),
-    AddMember(groupOnly = true),
-    InviteLink(groupOnly = true),
-    Roles(groupOnly = true),
-    TransferOwnership(groupOnly = true),
-    LeaveGroup(groupOnly = true),
-
-    // A channel.
-    ChannelHandle,
-    ChannelDescription,
-    SubscriberCount,
-    ManageChannel,
-}
-
-/**
- * What a person's info holds — spec section 2.1.
- *
- * The safety number is always there for a contact: it is the one security
- * thing a person acts on, so it belongs in front of them. `Message` depends on
- * where this was opened from. Rename and remove need a contact record to act
- * on, so a chat that outlived its contact offers neither.
- *
- * [membershipEnded] is the state spec section 4 calls read-only, and it turns
- * the set over rather than dimming it: `Call` goes, because the per-call key
- * comes from a group this device is no longer in and a call control asserts a
- * live session there is not; and `DeleteChat` arrives, because closing the
- * door is the one thing still open (ADR-0045 UX 6.2.4), and it used to live in
- * the group panel that a one-to-one no longer opens. Everything about the
- * PERSON — their name, their number, your name for them — is unaffected: the
- * conversation ended, they did not.
- */
-public fun personInfoSections(
-    origin: InfoOrigin,
-    isContact: Boolean,
-    membershipEnded: Boolean = false,
-): Set<InfoSection> {
-    val sections = mutableSetOf<InfoSection>()
-    if (membershipEnded) sections += InfoSection.DeleteChat else sections += InfoSection.Call
-    if (origin == InfoOrigin.Elsewhere) sections += InfoSection.Message
-    if (isContact) {
-        sections += InfoSection.SafetyNumber
-        sections += InfoSection.RenameContact
-        sections += InfoSection.RemoveContact
-    }
-    return sections
-}
-
-/**
- * What a channel's info holds — spec section 2.3.
- *
- * The subscriber count is offered only when this device has one: only a
- * publisher ever lists subscribers, and a reader inventing a number it cannot
- * know would be worse than showing none.
- *
- * `Unsubscribe` is NOT here, and its absence is a statement rather than an
- * oversight: this client has no unsubscribe at all — nothing in the channels
- * client deletes a subscriber registration — so a control here would either do
- * nothing or quietly mean something else.
- */
-public fun channelInfoSections(
-    isPublisher: Boolean,
-    subscriberCountKnown: Boolean,
-): Set<InfoSection> {
-    val sections = mutableSetOf(InfoSection.ChannelHandle, InfoSection.ChannelDescription)
-    if (subscriberCountKnown) sections += InfoSection.SubscriberCount
-    if (isPublisher) sections += InfoSection.ManageChannel
-    return sections
 }

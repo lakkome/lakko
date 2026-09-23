@@ -27,4 +27,5 @@
 //! crate.
 
 pub mod conversation;
+pub mod info;
 pub mod lookup;

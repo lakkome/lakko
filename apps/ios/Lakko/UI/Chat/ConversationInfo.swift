@@ -2,14 +2,25 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import LakkoCore
 
 /// What opens when the name at the top of a conversation is tapped
 /// (`docs/ux/conversation-info.md` sections 1 and 2).
 ///
-/// The rules live here, as plain values, rather than inside a SwiftUI body:
-/// no view in this target is reachable from a test, which is how one panel
-/// came to do three jobs and a two-person chat came to offer `Leave group`.
-/// Stating the destination and its contents as data makes both checkable.
+/// **The rules are not here.** `infoTarget`, `personInfoSections`,
+/// `groupInfoSections` and `channelInfoSections` live in
+/// `crates/lakko-ui-rules`, shared with the web and Android clients over the
+/// FFI. What this file owns is the ROUTING PAYLOAD that goes with a
+/// destination — a contact's message id, a channel id — which the shared
+/// `InfoTarget` deliberately says nothing about because no other client keys
+/// its screens the same way.
+///
+/// This file used to hold the rules too, as a struct of booleans, while
+/// Android held them as enum cases and web as an array of strings. The three
+/// disagreed, and each disagreement was a feature one client simply never
+/// built: `Remove contact` (missing here), `Unsubscribe` (missing here) and
+/// `Delete this chat` on an ended one-to-one (missing here). One copy of a
+/// rule cannot diverge from itself, so the copy moved and this asks it.
 
 /// Which info a conversation's name opens — section 1's table.
 ///
@@ -30,17 +41,42 @@ public enum ConversationInfoDestination: Equatable {
     case channel(channelId: String)
 
     /// The destination for a conversation the chat screen shows — a chat
-    /// between two people, or a group. A channel is never a chat screen; it
-    /// reaches its own info by being opened.
+    /// between two people, or a group.
+    ///
+    /// The kind is the app's own (``ConversationKind`` in
+    /// `ConversationTitle.swift`), which has no channel case: a channel is
+    /// never a chat screen, and reaches its own info through
+    /// ``ofChannel(channelId:)``.
     public static func of(
         kind: ConversationKind,
         contactMessageId: Int64?
     ) -> ConversationInfoDestination {
-        switch kind {
-        case .chat:
+        carrying(
+            infoTarget(kind: kind.sharedKind),
+            contactMessageId: contactMessageId,
+            channelId: "")
+    }
+
+    /// The destination a channel's name opens, from the channel's own screen.
+    public static func ofChannel(channelId: String) -> ConversationInfoDestination {
+        carrying(infoTarget(kind: .channel), contactMessageId: nil, channelId: channelId)
+    }
+
+    /// The one place a shared target is paired with the payload iOS routes
+    /// on. Total over the three targets, so a fourth added to the shared rule
+    /// fails to compile here rather than falling through to a default.
+    private static func carrying(
+        _ target: InfoTarget,
+        contactMessageId: Int64?,
+        channelId: String
+    ) -> ConversationInfoDestination {
+        switch target {
+        case .person:
             return .person(contactMessageId: contactMessageId)
         case .group:
             return .group
+        case .channel:
+            return .channel(channelId: channelId)
         }
     }
 
@@ -57,82 +93,19 @@ public enum ConversationInfoDestination: Equatable {
     }
 }
 
-/// What a conversation's info holds — section 2.
-///
-/// One flag per section the three destinations can carry between them. The
-/// point is section 2.1's `Never` list: a conversation between two people has
-/// no group to name, no owner to transfer, no admin to make, no link to mint
-/// and nothing to leave, and this makes that a fact a test can assert rather
-/// than a claim about a view body.
-public struct ConversationInfoContent: Equatable {
-    /// The shared name, editable by whoever may rename (ADR-0051).
-    public let sharedName: Bool
-    /// The roster, with add and remove for whoever may (ADR-0022).
-    public let memberRoster: Bool
-    /// Create, copy and revoke an invite link (ADR-0028).
-    public let inviteLink: Bool
-    /// Make admin and remove admin (ADR-0022).
-    public let roles: Bool
-    /// Transfer ownership (ADR-0045).
-    public let ownership: Bool
-    /// Leave the group (ADR-0045).
-    public let leaveGroup: Bool
-    /// The out-of-band check between two people.
-    public let safetyNumber: Bool
-    /// Stop following a channel.
-    public let unsubscribe: Bool
-
-    public static func of(_ destination: ConversationInfoDestination) -> ConversationInfoContent {
-        switch destination {
-        case .person:
-            // Section 2.1. Everything group-shaped is false, and that is the
-            // whole requirement rather than a consequence of one.
-            return ConversationInfoContent(
-                sharedName: false,
-                memberRoster: false,
-                inviteLink: false,
-                roles: false,
-                ownership: false,
-                leaveGroup: false,
-                safetyNumber: true,
-                unsubscribe: false
-            )
-        case .group:
-            // Section 2.2 — what exists today, minus its habit of appearing
-            // where there is no group. The safety number is between two
-            // people and belongs on each of them, not on the group.
-            return ConversationInfoContent(
-                sharedName: true,
-                memberRoster: true,
-                inviteLink: true,
-                roles: true,
-                ownership: true,
-                leaveGroup: true,
-                safetyNumber: false,
-                unsubscribe: false
-            )
-        case .channel:
-            // Section 2.3.
-            return ConversationInfoContent(
-                sharedName: true,
-                memberRoster: false,
-                inviteLink: false,
-                roles: false,
-                ownership: false,
-                leaveGroup: false,
-                safetyNumber: false,
-                unsubscribe: true
-            )
-        }
-    }
-
-    /// Section 2.1's `Never` list, read as one question: does this carry a
-    /// group name, an invite link, roles, ownership or `Leave group`?
+extension ConversationKind {
+    /// The shared kind this one names.
     ///
-    /// Only the person case is required to answer `false`. A channel answers
-    /// `true` on its own name, which is why this is named for the list it
-    /// checks and not for the shape of what it finds.
-    public var carriesAnythingForbiddenForOneToOne: Bool {
-        sharedName || inviteLink || roles || ownership || leaveGroup
+    /// The app's kind is chat-or-group because that is what a chat screen can
+    /// be; the shared one adds `channel`, which no chat screen ever is. The
+    /// mapping is one-way on purpose — nothing here turns a shared `.channel`
+    /// into a local kind, because there is no local kind for it.
+    var sharedKind: LakkoCore.ConversationKind {
+        switch self {
+        case .chat:
+            return .chat
+        case .group:
+            return .group
+        }
     }
 }

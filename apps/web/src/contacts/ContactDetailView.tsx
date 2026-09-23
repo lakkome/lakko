@@ -22,14 +22,25 @@
  * the conversation is already open behind this screen. The
  * other person in a one-to-one is not necessarily in the viewer's contact
  * list, and a chat with someone who is not still opens a PERSON - with the
- * two contact-list blocks simply absent - never the group panel. Which
- * blocks appear is decided in `chat/conversation-info.ts`, where it can be
- * tested; this file renders what it is handed.
+ * two contact-list blocks simply absent - never the group panel.
+ *
+ * Which blocks appear is NOT decided here and no longer decided on this
+ * client at all: it is `lakko_ui_rules::info`, reached through
+ * `chat/conversation-info.ts` and shared with iOS and Android. This file
+ * renders what it is handed.
+ *
+ * The one state worth naming, because it is what that move fixed: once this
+ * device's membership in the conversation has ended (ADR-0045 UX 6.2), Call
+ * and Video go and `Delete this chat` takes their place. It used to live in
+ * the GROUP panel only, which a one-to-one had just stopped opening - so an
+ * ended one-to-one had no way to be closed at all.
  */
 import { createEffect, createMemo, createSignal, For, on, Show, type JSX } from "solid-js";
 
 import { base64Decode } from "../auth/account-id";
+import { DELETE_CHAT_CONTROL } from "../chat/membership-ended";
 import { personInfoSections } from "../chat/conversation-info";
+import { uiRules } from "../chat/ui-rules";
 import { memberNameOf } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
 import { Avatar } from "../ui/Avatar";
@@ -62,15 +73,42 @@ export interface ContactDetailViewProps {
   /** Called after the user confirmed the removal. `null` when they are not
    *  in the contact list, so there is nothing to remove. */
   readonly onRemove: (() => void) | null;
+  /**
+   * Whether this device's membership in the conversation behind this screen
+   * has ended (ADR-0045 UX 6.2).
+   *
+   * Required rather than defaulted, so both callers have to answer it. When
+   * it is true, `Call` and `Video` go - the per-call key comes from a group
+   * this device is no longer in, so the tiles would assert a live E2EE
+   * session there is not - and `Delete this chat` arrives in their place.
+   */
+  readonly membershipEnded: boolean;
+  /**
+   * Forget this conversation and its transcript (ADR-0045 UX 6.2.4). `null`
+   * where this screen is not about a conversation at all, in which case there
+   * is nothing to delete; the block is then absent whatever the rule says.
+   */
+  readonly onDeleteChat: (() => void) | null;
 }
 
 export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
   const profiles = useProfiles();
-  // Which blocks this screen holds (`chat/conversation-info.ts`). Being in
-  // the contact list is what the two editable blocks hang on, and the one
-  // signal for it is whether the caller handed over a way to remove them.
+  // Which blocks this screen holds - the shared rule
+  // (`chat/conversation-info.ts` -> `crates/lakko-ui-rules`), not this file.
+  //
+  // Being in the contact list is what the two editable blocks hang on, and the
+  // one signal for it is whether the caller handed over a way to remove them.
+  // The origin is read the same way: `Message` is the way INTO the
+  // conversation, so a caller that handed over no way in IS the conversation.
   const sections = createMemo(() =>
-    personInfoSections({ isContact: props.onRemove !== null }),
+    personInfoSections(
+      uiRules(),
+      props.onMessage === null ? "conversation" : "elsewhere",
+      {
+        isContact: props.onRemove !== null,
+        membershipEnded: props.membershipEnded,
+      },
+    ),
   );
   const resolved = (): ReturnType<typeof profiles.resolve> =>
     profiles.resolve(props.personKeyB64);
@@ -153,10 +191,12 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
     const noChat = props.chatHref === null;
     const callTitle = noChat ? "Send a message first to start a call." : undefined;
     // Message is the way INTO the conversation, so it is absent when the
-    // conversation is already open behind this screen.
+    // conversation is already open behind this screen. The rule says so
+    // (`message` is offered from anywhere but the conversation itself); the
+    // null check below is what the handler needs, not a second decision.
     const open = props.onMessage;
     const message =
-      open === null
+      !sections().includes("message") || open === null
         ? []
         : [
             {
@@ -170,23 +210,30 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
               run: open,
             },
           ];
-    return [
-      ...message,
-      {
-        label: "Call",
-        icon: "phone",
-        disabled: props.busy() || noChat,
-        title: callTitle,
-        run: () => props.onCall(false),
-      },
-      {
-        label: "Video",
-        icon: "video",
-        disabled: props.busy() || noChat,
-        title: callTitle,
-        run: () => props.onCall(true),
-      },
-    ];
+    // ADR-0045 UX 6.2.8 item 4 - gone once this device's membership has
+    // ended, which is what the rule's `call` block records. `exportSecret`
+    // is gated on `is_active()` and raises, so the tiles would fail closed
+    // anyway; a control that always errors is the shape 6.1.1 rejects, and a
+    // call control asserts a live E2EE session there is not.
+    const calls = !sections().includes("call")
+      ? []
+      : [
+          {
+            label: "Call",
+            icon: "phone" as IconName,
+            disabled: props.busy() || noChat,
+            title: callTitle,
+            run: () => props.onCall(false),
+          },
+          {
+            label: "Video",
+            icon: "video" as IconName,
+            disabled: props.busy() || noChat,
+            title: callTitle,
+            run: () => props.onCall(true),
+          },
+        ];
+    return [...message, ...calls];
   };
 
   return (
@@ -220,22 +267,27 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
           </Show>
         </header>
 
-        <div class="lk-detail-actions" role="group" aria-label="Contact actions">
-          <For each={actions()}>
-            {(a) => (
-              <button
-                type="button"
-                class="lk-action-tile"
-                disabled={a.disabled}
-                title={a.title}
-                onClick={a.run}
-              >
-                <Icon name={a.icon} size={22} />
-                <span>{a.label}</span>
-              </button>
-            )}
-          </For>
-        </div>
+        {/* An empty row is not a row: once a membership has ended and this
+            screen is the conversation's own, there is nothing left to put in
+            it. */}
+        <Show when={actions().length > 0}>
+          <div class="lk-detail-actions" role="group" aria-label="Contact actions">
+            <For each={actions()}>
+              {(a) => (
+                <button
+                  type="button"
+                  class="lk-action-tile"
+                  disabled={a.disabled}
+                  title={a.title}
+                  onClick={a.run}
+                >
+                  <Icon name={a.icon} size={22} />
+                  <span>{a.label}</span>
+                </button>
+              )}
+            </For>
+          </div>
+        </Show>
         <Show when={props.error()}>{(message) => <div class="form-error">{message()}</div>}</Show>
 
         <Show when={sections().includes("safety-number")}>
@@ -289,7 +341,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
 
         {/* Only for someone already in the contact list: there is no
             local name to set for a person the viewer has not added. */}
-        <Show when={sections().includes("contact-name")}>
+        <Show when={sections().includes("rename-contact")}>
           <section class="lk-card">
             <div class="lk-card-row">
               <span class="lk-card-row-icon">
@@ -353,6 +405,46 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
                 onClick={() => void confirmRemove()}
               >
                 Remove
+              </button>
+            </div>
+          </section>
+        </Show>
+
+        {/* ADR-0045 UX 6.2.4 - once this device's membership has ended, the
+            one thing still open is closing the door behind you.
+
+            This block used to exist only in the GROUP panel, and a one-to-one
+            stopped opening that panel the moment the header started routing by
+            what the conversation IS - so an ended one-to-one had no way to be
+            closed at all. The shared rule now answers `delete-chat` for BOTH
+            kinds in that state, and this is web's half of it.
+
+            It is the ONE control in this design that destroys user data on
+            request: not a claim the UI should stop making, but a transcript
+            that exists nowhere else, on one confirmation, with no undo and no
+            export. The confirmation is the caller's - the same
+            `deleteChatConfirmation` the group panel uses - so there is one
+            wording rather than two. */}
+        <Show when={sections().includes("delete-chat") && props.onDeleteChat !== null}>
+          <section class="lk-card danger">
+            <div class="lk-card-row">
+              <span class="lk-card-row-icon">
+                <Icon name="trash" size={18} />
+              </span>
+              <div class="lk-card-row-body">
+                <span class="lk-card-row-title">{DELETE_CHAT_CONTROL}</span>
+                <span class="lk-card-row-sub">
+                  Removes this conversation and everything in it from this
+                  device. It cannot be undone.
+                </span>
+              </div>
+              <button
+                type="button"
+                class="danger lk-card-row-action"
+                disabled={props.busy()}
+                onClick={() => props.onDeleteChat?.()}
+              >
+                Delete
               </button>
             </div>
           </section>

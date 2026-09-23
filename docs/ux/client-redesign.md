@@ -59,7 +59,8 @@ list with a Requests section, a collapsed Sent group and letter sections,
 an add menu (username, invite link, call link; no contact QR flow exists on
 any client), invite links as rows with Copy / Share / Revoke, a contact
 detail with Message / Call / Video, Verify safety number, Rename and Remove
-(Remove is Android and web only; iOS has no remove-contact operation), a
+(Remove was Android and web only until 2026-09-23, when iOS built the
+operation it had been carrying a comment denying the existence of), a
 Recovery screen and an About section in Settings, a device list with one
 Add-a-device flow, and a neutral "Member" / "Someone" label instead of a key
 fingerprint. The live pass through the new screens exposed three contact

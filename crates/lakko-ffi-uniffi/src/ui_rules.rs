@@ -17,6 +17,15 @@ use lakko_ui_rules::conversation::{
     order_conversations as rust_order_conversations, ConversationKind as RustConversationKind,
     ConversationRow as RustConversationRow,
 };
+use lakko_ui_rules::info::{
+    channel_info_sections as rust_channel_info_sections,
+    group_info_sections as rust_group_info_sections, info_target as rust_info_target,
+    person_info_sections as rust_person_info_sections,
+    ChannelInfoCapabilities as RustChannelInfoCapabilities,
+    GroupInfoCapabilities as RustGroupInfoCapabilities, InfoOrigin as RustInfoOrigin,
+    InfoSection as RustInfoSection, InfoTarget as RustInfoTarget,
+    PersonInfoCapabilities as RustPersonInfoCapabilities,
+};
 use lakko_ui_rules::lookup::{
     bare_name as rust_bare_name, looks_like_a_name as rust_looks_like_a_name,
 };
@@ -127,6 +136,236 @@ pub fn looks_like_a_name(typed: String) -> bool {
     rust_looks_like_a_name(&typed)
 }
 
+/// Which info a conversation's name opens — `docs/ux/conversation-info.md`
+/// section 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum InfoTarget {
+    /// A conversation between two people opens the other person.
+    Person,
+    /// A group opens the group.
+    Group,
+    /// A channel opens the channel.
+    Channel,
+}
+
+impl From<RustInfoTarget> for InfoTarget {
+    fn from(t: RustInfoTarget) -> Self {
+        match t {
+            RustInfoTarget::Person => Self::Person,
+            RustInfoTarget::Group => Self::Group,
+            RustInfoTarget::Channel => Self::Channel,
+        }
+    }
+}
+
+/// One block of an info layer — section 2.
+///
+/// The three targets share a shape and differ only in which blocks belong to
+/// them. A client renders the blocks it is handed; it never decides which
+/// ones those are, which is how the same paragraph came to be answered three
+/// different ways.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum InfoSection {
+    /// Open the conversation. Never offered from inside it.
+    Message,
+    /// Start a call on this conversation.
+    Call,
+    /// The out-of-band check between two people.
+    SafetyNumber,
+    /// The viewer's own name for a contact, which nobody else sees.
+    RenameContact,
+    /// Drop the contact from this device's list.
+    RemoveContact,
+    /// Forget a conversation this device is out of (ADR-0045 UX 6.2.4).
+    DeleteChat,
+    /// The shared name, shown to everyone (ADR-0051).
+    GroupName,
+    /// Change the shared name, for whoever may.
+    RenameGroup,
+    /// The roster, with each member's role where they have one.
+    MemberList,
+    /// Add somebody, for whoever may (ADR-0022).
+    AddMember,
+    /// Mint, copy and revoke an invite link (ADR-0028).
+    InviteLink,
+    /// Make admin and remove admin (ADR-0022).
+    Roles,
+    /// Hand the group to somebody else (ADR-0045).
+    TransferOwnership,
+    /// Leave the group.
+    LeaveGroup,
+    /// The `@handle` a channel is found by.
+    ChannelHandle,
+    /// What the channel says it is.
+    ChannelDescription,
+    /// How many devices read it. Only a publisher can know.
+    SubscriberCount,
+    /// The publisher's own screen.
+    ManageChannel,
+    /// Stop following a channel.
+    Unsubscribe,
+}
+
+impl From<RustInfoSection> for InfoSection {
+    fn from(s: RustInfoSection) -> Self {
+        match s {
+            RustInfoSection::Message => Self::Message,
+            RustInfoSection::Call => Self::Call,
+            RustInfoSection::SafetyNumber => Self::SafetyNumber,
+            RustInfoSection::RenameContact => Self::RenameContact,
+            RustInfoSection::RemoveContact => Self::RemoveContact,
+            RustInfoSection::DeleteChat => Self::DeleteChat,
+            RustInfoSection::GroupName => Self::GroupName,
+            RustInfoSection::RenameGroup => Self::RenameGroup,
+            RustInfoSection::MemberList => Self::MemberList,
+            RustInfoSection::AddMember => Self::AddMember,
+            RustInfoSection::InviteLink => Self::InviteLink,
+            RustInfoSection::Roles => Self::Roles,
+            RustInfoSection::TransferOwnership => Self::TransferOwnership,
+            RustInfoSection::LeaveGroup => Self::LeaveGroup,
+            RustInfoSection::ChannelHandle => Self::ChannelHandle,
+            RustInfoSection::ChannelDescription => Self::ChannelDescription,
+            RustInfoSection::SubscriberCount => Self::SubscriberCount,
+            RustInfoSection::ManageChannel => Self::ManageChannel,
+            RustInfoSection::Unsubscribe => Self::Unsubscribe,
+        }
+    }
+}
+
+/// Where the info was opened from. It decides one thing — whether `Message`
+/// is offered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum InfoOrigin {
+    /// From the conversation's own header.
+    Conversation,
+    /// From the contact list, a search result, a call record.
+    Elsewhere,
+}
+
+impl From<InfoOrigin> for RustInfoOrigin {
+    fn from(o: InfoOrigin) -> Self {
+        match o {
+            InfoOrigin::Conversation => Self::Conversation,
+            InfoOrigin::Elsewhere => Self::Elsewhere,
+        }
+    }
+}
+
+/// What the viewer is to a one-to-one conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct PersonInfoCapabilities {
+    /// The other person is in this device's contact list.
+    pub is_contact: bool,
+    /// This device's membership in the conversation is over (ADR-0045 UX 6.2).
+    pub membership_ended: bool,
+}
+
+impl From<PersonInfoCapabilities> for RustPersonInfoCapabilities {
+    fn from(c: PersonInfoCapabilities) -> Self {
+        Self {
+            is_contact: c.is_contact,
+            membership_ended: c.membership_ended,
+        }
+    }
+}
+
+/// What the viewer may do in a group. Every field is a decision the client
+/// already made from the live role table; none is re-derived here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct GroupInfoCapabilities {
+    /// Owner or admin, and still a member (ADR-0022).
+    pub can_manage_members: bool,
+    /// Owner or admin, and still a member (ADR-0051).
+    pub can_rename: bool,
+    /// Owner or admin, and still a member (ADR-0028).
+    pub can_mint_invite: bool,
+    /// The owner, and still a member (ADR-0045).
+    pub is_owner: bool,
+    /// Whether this device can actually leave: ADR-0045's member exit is a
+    /// `Leave` proposal, and a group with no ADR-0022 role table has no
+    /// proposal path, so there is nothing for the control to do. Also `false`
+    /// when this device cannot tell which leaf is its own.
+    pub can_leave: bool,
+    /// This device's membership is over: read-only (ADR-0045 UX 6.2).
+    pub membership_ended: bool,
+}
+
+impl From<GroupInfoCapabilities> for RustGroupInfoCapabilities {
+    fn from(c: GroupInfoCapabilities) -> Self {
+        Self {
+            can_manage_members: c.can_manage_members,
+            can_rename: c.can_rename,
+            can_mint_invite: c.can_mint_invite,
+            is_owner: c.is_owner,
+            can_leave: c.can_leave,
+            membership_ended: c.membership_ended,
+        }
+    }
+}
+
+/// What the viewer is to a channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct ChannelInfoCapabilities {
+    /// This device holds the publisher keys.
+    pub is_publisher: bool,
+    /// This device reads the channel as a subscriber.
+    pub is_subscriber: bool,
+    /// This device has a subscriber count. Only a publisher ever does.
+    pub subscriber_count_known: bool,
+}
+
+impl From<ChannelInfoCapabilities> for RustChannelInfoCapabilities {
+    fn from(c: ChannelInfoCapabilities) -> Self {
+        Self {
+            is_publisher: c.is_publisher,
+            is_subscriber: c.is_subscriber,
+            subscriber_count_known: c.subscriber_count_known,
+        }
+    }
+}
+
+/// Which info the header opens for a conversation of this kind.
+#[uniffi::export]
+#[must_use]
+pub fn info_target(kind: ConversationKind) -> InfoTarget {
+    rust_info_target(kind.into()).into()
+}
+
+/// What a person's info holds — section 2.1.
+///
+/// Nothing in the result is ever group-shaped, whatever the capabilities:
+/// there is no group to name, no owner to transfer, no admin to make, no
+/// link to mint and nothing to leave but the person.
+#[uniffi::export]
+#[must_use]
+pub fn person_info_sections(origin: InfoOrigin, caps: PersonInfoCapabilities) -> Vec<InfoSection> {
+    rust_person_info_sections(origin.into(), caps.into())
+        .into_iter()
+        .map(Into::into)
+        .collect()
+}
+
+/// What a group's info holds — section 2.2.
+#[uniffi::export]
+#[must_use]
+pub fn group_info_sections(caps: GroupInfoCapabilities) -> Vec<InfoSection> {
+    rust_group_info_sections(caps.into())
+        .into_iter()
+        .map(Into::into)
+        .collect()
+}
+
+/// What a channel's info holds — section 2.3.
+#[uniffi::export]
+#[must_use]
+pub fn channel_info_sections(caps: ChannelInfoCapabilities) -> Vec<InfoSection> {
+    rust_channel_info_sections(caps.into())
+        .into_iter()
+        .map(Into::into)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,6 +388,26 @@ mod tests {
             row("new", ConversationKind::Channel, Some(9)),
         ];
         assert_eq!(order_conversations(rows), vec![1, 0]);
+    }
+
+    #[test]
+    fn the_sections_cross_the_boundary_as_the_core_decided_them() {
+        let ended = person_info_sections(
+            InfoOrigin::Conversation,
+            PersonInfoCapabilities {
+                is_contact: true,
+                membership_ended: true,
+            },
+        );
+        assert!(ended.contains(&InfoSection::DeleteChat));
+        assert!(!ended.contains(&InfoSection::Call));
+        assert!(channel_info_sections(ChannelInfoCapabilities {
+            is_publisher: false,
+            is_subscriber: true,
+            subscriber_count_known: false,
+        })
+        .contains(&InfoSection::Unsubscribe));
+        assert_eq!(info_target(ConversationKind::Chat), InfoTarget::Person);
     }
 
     #[test]
