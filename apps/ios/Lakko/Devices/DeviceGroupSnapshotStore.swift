@@ -46,8 +46,13 @@ public final class DeviceGroupSnapshotStore {
 
     private let envelopeDir: URL?
 
-    public init() {
-        self.envelopeDir = Self.envelopeDir()
+    /// - Parameter directoryName: which folder under Application Support this
+    ///   instance owns. A second kind of envelope gets its own folder and
+    ///   shares the wrap key, which is correct because isolation here comes
+    ///   from the path: the key is one per installation, not per account or
+    ///   per kind, and the comment on ``wrapKeyAccount`` has always said so.
+    public init(directoryName: String = "lakko-device-group-snapshots") {
+        self.envelopeDir = Self.envelopeDir(named: directoryName)
     }
 
     // MARK: - Public API
@@ -186,7 +191,7 @@ public final class DeviceGroupSnapshotStore {
             .appendingPathComponent("\(safe).bin")
     }
 
-    private static func envelopeDir() -> URL? {
+    private static func envelopeDir(named directoryName: String) -> URL? {
         guard let appSupport = try? FileManager.default.url(
             for: .applicationSupportDirectory,
             in: .userDomainMask,
@@ -195,7 +200,7 @@ public final class DeviceGroupSnapshotStore {
         ) else {
             return nil
         }
-        return appSupport.appendingPathComponent("lakko-device-group-snapshots")
+        return appSupport.appendingPathComponent(directoryName)
     }
 
     private static func excludeFromBackup(_ url: URL) throws {

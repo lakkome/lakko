@@ -106,6 +106,14 @@ public object DeviceGroupSnapshotStore {
     private const val ENVELOPE_DIR = "lakko-device-group-snapshots"
 
     /**
+     * A second kind of envelope, in its own folder and under the same wrap
+     * key. Correct because isolation here comes from the PATH: the key is one
+     * per installation, not per account and not per kind, which is what the
+     * comment on [WRAP_KEY_ALIAS] has always said.
+     */
+    public const val SYNC_STATE_DIR: String = "lakko-device-sync-state"
+
+    /**
      * Persist [snapshotBytes] for [accountIdB64].
      *
      * Existing record (if any) is overwritten — same posture as
@@ -121,6 +129,7 @@ public object DeviceGroupSnapshotStore {
         context: Context,
         accountIdB64: String,
         snapshotBytes: ByteArray,
+        dir: String = ENVELOPE_DIR,
     ) {
         if (snapshotBytes.isEmpty()) {
             throw IllegalArgumentException("snapshotBytes must be non-empty")
@@ -138,7 +147,7 @@ public object DeviceGroupSnapshotStore {
         System.arraycopy(iv, 0, out, 0, GCM_IV_LEN)
         System.arraycopy(ciphertext, 0, out, GCM_IV_LEN, ciphertext.size)
 
-        envelopeFile(context, accountIdB64).writeBytes(out)
+        envelopeFile(context, accountIdB64, dir).writeBytes(out)
     }
 
     /**
@@ -153,8 +162,12 @@ public object DeviceGroupSnapshotStore {
      * DeviceGroup on this device yet" and bootstrap a fresh
      * founder leaf.
      */
-    public fun getSnapshot(context: Context, accountIdB64: String): ByteArray? {
-        val file = envelopeFile(context, accountIdB64)
+    public fun getSnapshot(
+        context: Context,
+        accountIdB64: String,
+        dir: String = ENVELOPE_DIR,
+    ): ByteArray? {
+        val file = envelopeFile(context, accountIdB64, dir)
         if (!file.exists()) return null
         val blob = file.readBytes()
         if (blob.size <= GCM_IV_LEN) return null
@@ -183,8 +196,12 @@ public object DeviceGroupSnapshotStore {
      * so a forget-device cycle leaves nothing per-account on
      * disk.
      */
-    public fun deleteSnapshot(context: Context, accountIdB64: String) {
-        envelopeFile(context, accountIdB64).delete()
+    public fun deleteSnapshot(
+        context: Context,
+        accountIdB64: String,
+        dir: String = ENVELOPE_DIR,
+    ) {
+        envelopeFile(context, accountIdB64, dir).delete()
     }
 
     // -----------------------------------------------------------------
@@ -230,8 +247,12 @@ public object DeviceGroupSnapshotStore {
      * [me.lakko.app.chat.IdentitySnapshotStore]'s `envelopeFile`
      * shape under a different directory.
      */
-    private fun envelopeFile(context: Context, accountIdB64: String): File {
-        val dir = File(context.noBackupFilesDir, ENVELOPE_DIR)
+    private fun envelopeFile(
+        context: Context,
+        accountIdB64: String,
+        dirName: String = ENVELOPE_DIR,
+    ): File {
+        val dir = File(context.noBackupFilesDir, dirName)
         if (!dir.exists() && !dir.mkdirs()) {
             // Don't throw here — the eventual writeBytes call
             // will surface the real I/O error with a useful

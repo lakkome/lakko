@@ -39,26 +39,41 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// Per-group draft (composer text) snapshot. Key is the
     /// `groupIdHex(groupId)` value the receiver-side helper
     /// produces.
-    @Published public private(set) var drafts: [String: DraftState] = [:]
+    @Published public private(set) var drafts: [String: DraftState] = [:] {
+        didSet { scheduleSyncStatePersist() }
+    }
 
     /// Per-group UI flags snapshot (pin / mute / archive /
     /// unread-override).
-    @Published public private(set) var flags: [String: FlagsState] = [:]
+    @Published public private(set) var flags: [String: FlagsState] = [:] {
+        didSet { scheduleSyncStatePersist() }
+    }
 
     /// Per-group read cursor snapshot.
     @Published public private(set) var readCursors: [String: ReadCursorState] =
-        [:]
+        [:] {
+        didSet { scheduleSyncStatePersist() }
+    }
 
     /// Whole-account explicit conversation order. `nil` when no
     /// `Order` payload has arrived yet.
-    @Published public private(set) var order: OrderState?
+    @Published public private(set) var order: OrderState? {
+        didSet { scheduleSyncStatePersist() }
+    }
 
     // MARK: - Internals
 
     private var identity: Identity?
     private var group: DeviceGroup?
     private var pollTask: Task<Void, Never>?
+    /// The pending debounced snapshot write, cancelled by the next change.
+    private var persistTask: Task<Void, Never>?
     private var activeAccountIdB64: String?
+    /// Where the four maps live between launches. Its own folder under
+    /// Application Support, sealed with the same Keychain wrap key the
+    /// DeviceGroup snapshot uses - isolation there comes from the path.
+    private let syncStateStore = DeviceGroupSnapshotStore(
+        directoryName: "lakko-device-sync-state")
 
     public init() {}
 
@@ -99,6 +114,21 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         }
         identity = ensured.identity
         group = ensured.group
+
+        // Seed the four maps from this device's own disk BEFORE the poll
+        // starts. They used to begin empty on every launch, and the journal
+        // cannot refill them: the poll runs from cursor 0, but the MLS
+        // snapshot was restored above, so every row it re-fetches is one this
+        // state has already consumed. The snapshot is a head start, not an
+        // authority - the poll folds newer rows on top through the same HLC
+        // comparison, so a sibling device's later write still wins.
+        if let blob = syncStateStore.getSnapshot(accountIdB64: accountIdB64),
+           let restored = DeviceGroupSyncStateCodec.decode(blob) {
+            drafts = restored.drafts
+            flags = restored.flags
+            readCursors = restored.readCursors
+            order = restored.order
+        }
         ready = true
 
         let groupId: Data
@@ -120,6 +150,13 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// handles, clear every reactive map.
     public func clear() {
         cancelPollAndDropHandles()
+        // Forget the snapshot too. Logout and forget-this-device both come
+        // through here, and a draft left behind for the next account to sign
+        // in on this device is the one piece of this state that reads as a
+        // message.
+        if let closing = activeAccountIdB64 {
+            syncStateStore.deleteSnapshot(accountIdB64: closing)
+        }
         activeAccountIdB64 = nil
         ready = false
         drafts = [:]
@@ -128,9 +165,40 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         order = nil
     }
 
+    /// Write the four maps to disk, shortly.
+    ///
+    /// Debounced because a draft moves on a keystroke and each write is an
+    /// AES seal plus a file replace. Restoring the maps at bootstrap trips
+    /// this too, writing back what was just read; harmless, and cheaper than
+    /// a flag that has to be cleared correctly on every path out of
+    /// ``bootstrap(secrets:)``.
+    private func scheduleSyncStatePersist() {
+        persistTask?.cancel()
+        persistTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard !Task.isCancelled else { return }
+            self?.persistSyncState()
+        }
+    }
+
+    /// Write the four maps to disk.
+    ///
+    /// Called after anything that moves them - a local set or a sibling's row
+    /// folded by the poll. Best-effort: the in-memory state stays good and
+    /// the next change rewrites the envelope.
+    private func persistSyncState() {
+        guard let accountIdB64 = activeAccountIdB64 else { return }
+        let snapshot = DeviceGroupSyncStateCodec.Snapshot(
+            drafts: drafts, flags: flags, readCursors: readCursors, order: order)
+        guard let blob = DeviceGroupSyncStateCodec.encode(snapshot) else { return }
+        syncStateStore.putSnapshot(accountIdB64: accountIdB64, blob: blob)
+    }
+
     private func cancelPollAndDropHandles() {
         pollTask?.cancel()
         pollTask = nil
+        persistTask?.cancel()
+        persistTask = nil
         identity = nil
         group = nil
     }

@@ -14,6 +14,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
@@ -23,6 +25,7 @@ import me.lakko.app.auth.base64Encode
 import me.lakko.app.devices.DeviceAttestKey
 import me.lakko.app.devices.DeviceGroupJournalEnvelope
 import me.lakko.app.devices.DeviceGroupLifecycle
+import me.lakko.app.devices.DeviceGroupSnapshotStore
 import me.lakko.app.ds.DsClient
 import me.lakko.app.ds.DsHttpError
 import me.lakko.app.ds.DsNetworkError
@@ -100,6 +103,12 @@ public class DeviceGroupSyncRepository(
     private val activeAccountIdB64 = AtomicReference<String?>(null)
     @Volatile private var pollJob: Job? = null
 
+    /** The debounced snapshot writer, cancelled with the poll loop. */
+    @Volatile private var persistJob: Job? = null
+
+    /** How long a change waits before the snapshot is rewritten. */
+    private val SYNC_STATE_PERSIST_DEBOUNCE_MS: Long = 500
+
     // ------------------------------------------------------------
     // Public API
     // ------------------------------------------------------------
@@ -146,6 +155,27 @@ public class DeviceGroupSyncRepository(
 
         identity.set(ensured.identity)
         group.set(ensured.group)
+
+        // Seed the four maps from this device's own disk BEFORE the poll
+        // starts. They used to begin empty on every launch, and the journal
+        // cannot refill them: the poll runs from cursor 0, but the MLS
+        // snapshot was restored above, so every row it re-fetches is one this
+        // state has already consumed. The snapshot is a head start, not an
+        // authority - the poll folds newer rows on top through the same HLC
+        // comparison, so a sibling device's later write still wins.
+        runCatching {
+            DeviceGroupSnapshotStore.getSnapshot(
+                context = applicationContext,
+                accountIdB64 = accountIdB64,
+                dir = DeviceGroupSnapshotStore.SYNC_STATE_DIR,
+            )?.let(DeviceGroupSyncStateCodec::decode)
+        }.getOrNull()?.let { restored ->
+            mutableDrafts.value = restored.drafts
+            mutableFlags.value = restored.flags
+            mutableReadCursors.value = restored.readCursors
+            mutableOrder.value = restored.order
+        }
+        startSyncStatePersistence(accountIdB64)
         mutableReady.value = true
 
         val groupId = try {
@@ -168,12 +198,61 @@ public class DeviceGroupSyncRepository(
      */
     public fun clear() {
         cancelPollAndDropHandles()
+        // Forget the snapshot too. Logout and forget-this-device both come
+        // through here, and a draft left behind for the next account to sign
+        // in on this device is the one piece of this state that reads as a
+        // message.
+        activeAccountIdB64.get()?.let { closing ->
+            runCatching {
+                DeviceGroupSnapshotStore.deleteSnapshot(
+                    context = applicationContext,
+                    accountIdB64 = closing,
+                    dir = DeviceGroupSnapshotStore.SYNC_STATE_DIR,
+                )
+            }
+        }
         activeAccountIdB64.set(null)
         mutableReady.value = false
         mutableDrafts.value = emptyMap()
         mutableFlags.value = emptyMap()
         mutableReadCursors.value = emptyMap()
         mutableOrder.value = null
+    }
+
+    /**
+     * Write the four maps to disk whenever any of them moves - a local set or
+     * a sibling's row folded by the poll, since both land in these flows.
+     *
+     * Debounced because a draft moves on a keystroke and each write is an AES
+     * seal plus a file replace. Best-effort: the in-memory state stays good
+     * and the next change rewrites the envelope. The initial emission writes
+     * back what bootstrap just read; harmless, and cheaper than a flag that
+     * has to be cleared correctly on every path out of [bootstrap].
+     */
+    private fun startSyncStatePersistence(accountIdB64: String) {
+        persistJob?.cancel()
+        persistJob = scope.launch {
+            combine(
+                mutableDrafts,
+                mutableFlags,
+                mutableReadCursors,
+                mutableOrder,
+            ) { drafts, flags, cursors, order ->
+                DeviceGroupSyncStateCodec.Snapshot(drafts, flags, cursors, order)
+            }
+                .debounce(SYNC_STATE_PERSIST_DEBOUNCE_MS)
+                .collect { snapshot ->
+                    val blob = DeviceGroupSyncStateCodec.encode(snapshot) ?: return@collect
+                    runCatching {
+                        DeviceGroupSnapshotStore.putSnapshot(
+                            context = applicationContext,
+                            accountIdB64 = accountIdB64,
+                            snapshotBytes = blob,
+                            dir = DeviceGroupSnapshotStore.SYNC_STATE_DIR,
+                        )
+                    }.onFailure { Log.w(LOG_TAG, "device-sync snapshot persist failed", it) }
+                }
+        }
     }
 
     /** Permanently destroy the repository — cancels the
@@ -463,6 +542,8 @@ public class DeviceGroupSyncRepository(
     }
 
     private fun cancelPollAndDropHandles() {
+        persistJob?.cancel()
+        persistJob = null
         pollJob?.cancel()
         pollJob = null
         // Drop wasm handle references. We don't `.close()` them
