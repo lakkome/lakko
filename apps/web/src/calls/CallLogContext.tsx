@@ -29,7 +29,7 @@ import { useAuth } from "../auth/AuthContext";
 import { getDeviceKey } from "../auth/key-store";
 import type { CallLogEntry } from "./call-log";
 import { IdbCallLogBackend } from "./call-log-idb";
-import { CallLogStore } from "./call-log-store";
+import { CallLogStore, type CallLogRows } from "./call-log-store";
 
 export interface CallLogApi {
   /** Bumped on any change. `of` reads it, so a reactive caller re-renders. */
@@ -37,6 +37,8 @@ export interface CallLogApi {
   /** A conversation's call rows, oldest first (empty when none). Reactive.
    *  Never mutate them. */
   of(groupIdB64: string): readonly CallLogEntry[];
+  /** Every conversation's rows, for the Calls screen. Reactive like `of`. */
+  all(): CallLogRows;
   /** Record one finished call. Idempotent on the call id; never throws. */
   record(groupIdB64: string, entry: CallLogEntry): void;
   /** Drop a conversation's rows (the chat was deleted or left). */
@@ -75,6 +77,10 @@ export function CallLogProvider(props: { children: JSX.Element }): JSX.Element {
 
   const api: CallLogApi = {
     version,
+    all() {
+      version();
+      return store.all();
+    },
     of(groupIdB64) {
       version();
       return store.of(groupIdB64);
@@ -107,6 +113,7 @@ export function useCallLog(): CallLogApi {
     useContext(CallLogContext) ?? {
       version: () => 0,
       of: () => [],
+      all: () => new Map(),
       record: () => undefined,
       forgetGroup: () => undefined,
     }

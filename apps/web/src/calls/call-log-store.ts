@@ -264,6 +264,16 @@ export class CallLogStore {
   }
 
   /**
+   * Every conversation's rows, for the Calls screen
+   * (`docs/ux/navigation.md` section 5), which wants the cut across
+   * conversations that ``of`` deliberately does not give. Read-only: the
+   * caller flattens and orders (`call-history.ts`) and never writes here.
+   */
+  all(): CallLogRows {
+    return this.rows;
+  }
+
+  /**
    * Record one finished call. Returns `true` when something changed (and a
    * save was scheduled). A call for an account the store is not bound to is
    * dropped — it must never land in another account's row.

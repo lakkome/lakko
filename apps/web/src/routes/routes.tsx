@@ -36,6 +36,7 @@ import NewGroup from "./NewGroup";
 import Contacts from "./Contacts";
 import Settings from "./Settings";
 import Call from "./Call";
+import Calls from "./Calls";
 import { ChannelSubscribe, ChannelView, JoinCoPublisher, NewChannel } from "./Channels";
 import ChannelsLayout, { ChannelsIndex } from "./ChannelsLayout";
 import Chat from "./Chat";
@@ -135,8 +136,9 @@ export const routes: RouteDefinition[] = [
         ],
       },
       { path: paths.contacts, component: Contacts },
-      // The former Calls destination: call links live in the Contacts add menu.
-      { path: paths.calls, component: () => <Navigate href={paths.contacts} /> },
+      // `docs/ux/navigation.md` section 5 - Calls is a destination again, and
+      // this time it has the history the redesign removed it for lacking.
+      { path: paths.calls, component: Calls },
       { path: "/settings/:section?", component: Settings },
       // The old profile URL lands on its Settings section.
       { path: "/profile", component: () => <Navigate href={paths.settingsSection("profile")} /> },

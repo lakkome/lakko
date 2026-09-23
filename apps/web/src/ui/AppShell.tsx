@@ -20,11 +20,29 @@ import { DeviceRequestPrompt } from "../devices/DeviceRequestPrompt";
 import { Avatar } from "./Avatar";
 import { Icon, type IconName } from "./icons";
 
+/**
+ * `docs/ux/navigation.md` section 1 - four destinations, not five.
+ *
+ * Groups and Channels are gone as destinations: they were three places for
+ * one activity, and a list sorted by when cannot be three lists. Both remain
+ * as kinds of conversation inside Chats, so their screens stay reachable and
+ * count as Chats while open - which is what the `prefix` list is for.
+ *
+ * Calls is back. It was removed on the recorded ground that it held no
+ * history, only a create-link panel; that was true of what existed and was
+ * never an argument against call history, and the design system's own
+ * information architecture kept it as destination 4 throughout.
+ */
 const ITEMS: ReadonlyArray<{ href: string; label: string; icon: IconName; prefix: string[] }> = [
   { href: paths.home, label: "Chats", icon: "chat", prefix: ["/chat/"] },
+  // Groups and Channels leave when the merged conversation list lands
+  // (`docs/ux/navigation.md` section 2). They stay until then because
+  // removing them first would make a person's groups and channels reachable
+  // only by typing a URL.
   { href: paths.groups, label: "Groups", icon: "groups", prefix: [] },
   { href: paths.channels, label: "Channels", icon: "channels", prefix: [] },
   { href: paths.contacts, label: "Contacts", icon: "contacts", prefix: [] },
+  { href: paths.calls, label: "Calls", icon: "calls", prefix: [] },
   { href: paths.settings, label: "Settings", icon: "settings", prefix: ["/devices"] },
 ];
 

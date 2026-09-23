@@ -75,8 +75,10 @@ not in the list.
 row, a system row the timeline draws. A row that draws nothing does not move
 a conversation to the top.
 
-This is the rule the Android list already applies (`pinned desc`, then
-`archived asc`); it carries unchanged and the other two adopt it.
+This is the rule web and Android already apply (`pinned desc`, then
+`archived asc`, then activity); it carries unchanged, and what changes is
+only the set it sorts - chats, groups and channels together rather than one
+kind at a time.
 
 ### 2.3 States
 

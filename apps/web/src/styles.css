@@ -518,6 +518,27 @@ a.lk-row:hover {
   background: var(--surface-hover);
   text-decoration: none;
 }
+/* A row that carries its own trailing action (the Calls list: the row opens
+   the conversation, the button places the call). The chat list's row is one
+   link with nothing beside it, so it needs no such wrapper. */
+.lk-row-open {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.lk-row:has(.lk-row-open):hover {
+  background: var(--surface-hover);
+}
 .lk-row.selected,
 a.lk-row.active {
   background: var(--surface-selected);

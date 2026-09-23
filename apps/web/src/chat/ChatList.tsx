@@ -34,6 +34,7 @@ import { getDeviceKey } from "../auth/key-store";
 import { restoredKind } from "../auth/restore-marker";
 import { ownPersonKeyB64, peopleCountOf, personKeysOf } from "./person-key";
 import { decideConversationKind, type ConversationKind } from "./conversation-kind";
+import { conversationTitle } from "./conversation-title";
 import {
   observeConversationKind,
   persistedConversationKind,
@@ -149,34 +150,18 @@ export function ChatList(props: {
     const ownB64 = ownPersonKeyB64(chats.identity());
     // ADR-0050 — people, not leaves.
     const memberB64s = personKeysOf(g.group);
-    const peers = memberB64s.filter((k) => k !== ownB64);
-    if (
-      kindOf(g) === "chat" &&
-      memberB64s.length === 2 &&
-      peers.length === 1 &&
-      peers[0] !== undefined
-    ) {
-      return profiles.resolve(peers[0]).name;
-    }
-    const byId = accepted().find((c) => c.groupIdB64 === g.groupIdB64);
-    if (byId !== undefined && byId.displayName.length > 0 && kindOf(g) === "chat") {
-      return byId.displayName;
-    }
-    const byMember = peerContactByMemberPubkeys(memberB64s, ownB64, accepted());
-    if (
-      byMember !== undefined &&
-      byMember.displayName.length > 0 &&
-      memberB64s.length <= 2 &&
-      kindOf(g) === "chat"
-    ) {
-      return byMember.displayName;
-    }
-    // ADR-0051 §5 — the shared name first; an unnamed group is titled from
-    // its members, never from an id.
-    return groupTitle(
-      groupNames.nameOf(g.groupIdB64) ?? g.label,
-      peers.map((k) => memberNameOf(profiles.resolve(k))),
-    );
+    return conversationTitle({
+      kind: kindOf(g),
+      memberKeysB64: memberB64s,
+      ownKeyB64: ownB64,
+      fallbackLabel: g.label,
+      sharedName: groupNames.nameOf(g.groupIdB64),
+      contactNameById: accepted().find((c) => c.groupIdB64 === g.groupIdB64)?.displayName,
+      contactNameByMember: peerContactByMemberPubkeys(memberB64s, ownB64, accepted())
+        ?.displayName,
+      nameOf: (k) => profiles.resolve(k).name,
+      groupTitle,
+    });
   };
 
   // Unread badge + last-message preview + time, from the persisted message
