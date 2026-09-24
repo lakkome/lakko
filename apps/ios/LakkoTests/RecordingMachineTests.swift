@@ -258,6 +258,74 @@ final class RecordingMachineTests: XCTestCase {
         XCTAssertEqual(e, [.finish(.discard), .hint(.cancelled)])
     }
 
+    // MARK: - §3.1 — the touch the system takes away
+
+    /// A press interrupted by the system — a Control Centre pull, an incoming
+    /// call, the app backgrounded under a thumb — must not become a recording
+    /// no finger remains to release.
+    ///
+    /// This is what SwiftUI's `DragGesture` could not report: it has an
+    /// `onEnded` and nothing for a cancelled touch, so an interrupted press sat
+    /// in `.pressing` with the hold clock still armed and promoted itself.
+    /// `RecordTouchSurface` takes the button's touches from UIKit for this one
+    /// callback, and it lands here.
+    @MainActor
+    func testASystemCancelledPressIsDroppedAndNeverBecomesARecording() {
+        let media = Self.controller()
+        let modeBefore = media.recordMode
+        media.dispatch(.press(kind: modeBefore, at: 0, permission: .granted))
+        XCTAssertTrue(media.recState.isPressed)
+
+        media.gestureLost()
+        XCTAssertEqual(media.recState, .idle)
+        XCTAssertFalse(media.recState.isCapturing)
+        // Not a tap: a button losing its touch is not a person asking for the
+        // other mode. `recordMode` catches the switch on a host with a camera,
+        // `hint` on one without (`toggleMode` refuses there and says so), so
+        // the pair holds wherever this runs.
+        XCTAssertEqual(media.recordMode, modeBefore)
+        XCTAssertNil(media.hint)
+
+        // And the hold clock is gone with it: the defect was the promotion
+        // arriving `holdToRecordMs` after the touch had already been taken.
+        let settled = expectation(description: "past the hold threshold")
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Double(RecordingMachine.holdToRecordMs) / 1000 + 0.15
+        ) { settled.fulfill() }
+        wait(for: [settled], timeout: 3)
+        XCTAssertEqual(media.recState, .idle)
+        XCTAssertFalse(media.recState.isCapturing)
+    }
+
+    /// The other half of the same routing: a take already running is RELEASED
+    /// by a lost gesture, exactly as a lifted finger would release it, because
+    /// `gestureLost()` reads `RecState.isPressed` — true only while the tap /
+    /// hold verdict is still open.
+    func testALostGestureReleasesARunningTakeRatherThanDroppingIt() {
+        XCTAssertTrue(
+            RecState.pressing(kind: .voice, at: 0, permission: .granted, moved: false).isPressed)
+        XCTAssertFalse(RecState.recording(kind: .voice, startedAt: 0, dx: 0, dy: 0).isPressed)
+        XCTAssertFalse(RecState.locked(kind: .voice, startedAt: 0).isPressed)
+
+        let (idle, effects) = run(
+            [.release(at: RecordingMachine.minTakeMs)],
+            from: .recording(kind: .voice, startedAt: 0, dx: 0, dy: 0)
+        )
+        XCTAssertEqual(idle, .idle)
+        XCTAssertEqual(effects, [.finish(.send)])
+    }
+
+    /// A controller on a throwaway preferences suite, so a test can never move
+    /// the device's remembered record mode.
+    @MainActor
+    private static func controller() -> ChatMediaController {
+        let suite = UserDefaults(suiteName: "lakko.tests.recording.\(UUID().uuidString)")
+        return ChatMediaController(
+            port: ChatMediaController.Port(sendAttachment: { _ in }, sessionToken: { nil }),
+            prefs: MediaPrefs(defaults: suite ?? .standard)
+        )
+    }
+
     func testTotalClockRoundsUpSubSecondDurations() {
         XCTAssertEqual(RecordingMachine.formatTotalClock(ms: 0), "0:00")
         XCTAssertEqual(RecordingMachine.formatTotalClock(ms: -5), "0:00")

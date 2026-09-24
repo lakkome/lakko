@@ -1931,6 +1931,61 @@ a.ghost.small.lk-wide-only {
   color: var(--danger-fg);
   border-color: transparent;
 }
+/*
+ * UX spec section 2.5 / 3.1 — the lock target a held take slides up onto, the
+ * same capsule iOS and Android draw above their record buttons.
+ *
+ * `bottom` is arithmetic, not taste: the take locks at `LOCK_SLIDE_PX` (60) of
+ * upward travel from the press point, so the capsule is placed for a pointer
+ * that has covered exactly that to be standing inside it — its lower edge sits
+ * ~44px above the 40px button's centre, and 60px of climb lands in its lower
+ * half.
+ *
+ * It must never take pointer events: the pointer climbing towards it is
+ * captured by the record button below, and swallowing a `pointermove` here
+ * would break the gesture this exists to invite.
+ *
+ * z-index clears the video-note overlay (z-index 40): a video note is held on
+ * this same button, so the target has to stay legible over that backdrop.
+ */
+.lakko-lock-target {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 24px);
+  transform: translateX(-50%);
+  z-index: 41;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--surface-border);
+  background: var(--surface-elevated);
+  box-shadow: var(--shadow-2);
+  color: var(--surface-muted);
+  pointer-events: none;
+  transition: background 0.12s ease, color 0.12s ease, transform 0.12s ease;
+}
+/*
+ * Half the way up and climbing. Deliberately NOT "past the threshold": the
+ * machine locks the take the instant the travel reaches `LOCK_SLIDE_PX`, so a
+ * pointer standing on the target is a state that never renders. Arriving here
+ * IS the lock, and this is the target noticing the approach.
+ */
+.lakko-lock-target[data-near="true"] {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--accent-fg);
+  transform: translateX(-50%) scale(1.1);
+}
+.lakko-lock-target .lakko-lock-up {
+  transform: rotate(-90deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .lakko-lock-target { transition: none; }
+  .lakko-lock-target[data-near="true"] { transform: translateX(-50%); }
+}
 .lakko-rec-bar {
   flex: 1;
   display: flex;

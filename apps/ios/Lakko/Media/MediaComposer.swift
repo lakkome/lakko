@@ -23,9 +23,18 @@ import UIKit
 /// Its identity must not change while a finger is down — SwiftUI drops a
 /// gesture whose view leaves the hierarchy — so the composer keeps this view
 /// mounted through `.idle` / `.pressing` / `.requesting` / `.recording`.
+///
+/// Its touches come from UIKit (``RecordTouchSurface``) rather than from a
+/// SwiftUI `DragGesture`, for the reason written there: only UIKit reports a
+/// touch the system TOOK AWAY.
 struct RecordButton: View {
     @ObservedObject var media: ChatMediaController
     @State private var pressed = false
+    /// Nothing disables this button today — during a call it stays live and
+    /// answers with the in-call hint — but a `UIViewRepresentable` does not
+    /// inherit `.disabled()` the way a SwiftUI gesture does, so the touch
+    /// surface is told, rather than left live behind a disabled face.
+    @Environment(\.isEnabled) private var isEnabled
 
     private var isVideo: Bool { media.recordMode == .videoNote }
 
@@ -63,21 +72,28 @@ struct RecordButton: View {
             }
         }
         .contentShape(Circle())
-        .gesture(
-            DragGesture(minimumDistance: 0, coordinateSpace: .global)
-                .onChanged { value in
-                    if !pressed {
-                        pressed = true
-                        media.press()
-                    } else {
-                        media.move(dx: value.translation.width, dy: value.translation.height)
-                    }
-                }
-                .onEnded { _ in
+        .overlay {
+            RecordTouchSurface(
+                isEnabled: isEnabled,
+                onBegan: {
+                    pressed = true
+                    media.press()
+                },
+                onMoved: { dx, dy in
+                    media.move(dx: dx, dy: dy)
+                },
+                onEnded: {
                     pressed = false
                     media.release()
+                },
+                // The fourth state SwiftUI never reported.
+                onCancelled: {
+                    pressed = false
+                    media.gestureLost()
                 }
-        )
+            )
+            .accessibilityHidden(true)
+        }
         .onDisappear {
             if pressed {
                 pressed = false
@@ -96,6 +112,118 @@ struct RecordButton: View {
         .accessibilityAction(named: isVideo ? "Switch to voice message" : "Switch to video message") {
             media.toggleMode()
         }
+    }
+}
+
+/// UX spec §3.1 — the record button's touch source, taken from UIKit.
+///
+/// A touch has FOUR outcomes and SwiftUI's `DragGesture` reports three: it
+/// calls `onChanged` and `onEnded`, and it has nowhere to say that the system
+/// TOOK the touch away — a Control Centre pull, an incoming call, the app
+/// going to the background under a thumb. `onEnded` then never arrives, the
+/// press is left in ``RecState/pressing``, the `holdToRecordMs` clock fires
+/// anyway, and the press is promoted to a recording that no finger remains to
+/// release. UIKit has always had the fourth state, so this one control leaves
+/// SwiftUI for it and routes it to ``ChatMediaController/gestureLost()``.
+///
+/// Touches are taken RAW rather than through a `UIGestureRecognizer`: a
+/// recognizer reports `.cancelled` too, but it adds a state machine of its own
+/// (`.possible` / `.failed`, `allowableMovement`) between the finger and the
+/// one this control already has.
+struct RecordTouchSurface: UIViewRepresentable {
+    let isEnabled: Bool
+    let onBegan: () -> Void
+    /// Travel from the press point, in points, on the same axes and with the
+    /// same sign as the `DragGesture`'s `translation` this replaced — the
+    /// machine's `tapSlopPoints` / `cancelSlidePoints` / `lockSlidePoints` all
+    /// read it, so the measurement may not change meaning.
+    let onMoved: (Double, Double) -> Void
+    let onEnded: () -> Void
+    let onCancelled: () -> Void
+
+    final class TouchView: UIView {
+        var isTouchEnabled = true
+        var onBegan: (() -> Void)?
+        var onMoved: ((Double, Double) -> Void)?
+        var onEnded: (() -> Void)?
+        var onCancelled: (() -> Void)?
+
+        /// The one touch this control is following, and where it landed. In
+        /// WINDOW coordinates, not this view's: the press point has to stay
+        /// fixed while the button's own circle grows from 40 to 56 pt under
+        /// the finger, which is also why the gesture this replaced measured in
+        /// `.global`.
+        private var tracked: UITouch?
+        private var origin: CGPoint = .zero
+
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            backgroundColor = .clear
+            isMultipleTouchEnabled = false
+            // The SwiftUI view above owns the accessibility element and both
+            // of its actions; this layer must not become a second one.
+            isAccessibilityElement = false
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { nil }
+
+        /// Mirrors the `.contentShape(Circle())` the button carried while the
+        /// gesture was SwiftUI's: the corners of the 44 pt frame keep falling
+        /// through to the composer underneath, and a disabled button takes no
+        /// touch at all.
+        override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+            guard isTouchEnabled else { return false }
+            let radius = min(bounds.width, bounds.height) / 2
+            guard radius > 0 else { return false }
+            let dx = point.x - bounds.midX
+            let dy = point.y - bounds.midY
+            return dx * dx + dy * dy <= radius * radius
+        }
+
+        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+            guard tracked == nil, let touch = touches.first else { return }
+            tracked = touch
+            origin = touch.location(in: nil)
+            onBegan?()
+        }
+
+        override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+            guard let touch = tracked, touches.contains(touch) else { return }
+            let point = touch.location(in: nil)
+            onMoved?(point.x - origin.x, point.y - origin.y)
+        }
+
+        override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+            guard let touch = tracked, touches.contains(touch) else { return }
+            tracked = nil
+            onEnded?()
+        }
+
+        /// The whole point of this view.
+        override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+            guard let touch = tracked, touches.contains(touch) else { return }
+            tracked = nil
+            onCancelled?()
+        }
+    }
+
+    func makeUIView(context: Context) -> TouchView {
+        let view = TouchView(frame: .zero)
+        apply(to: view)
+        return view
+    }
+
+    func updateUIView(_ view: TouchView, context: Context) {
+        apply(to: view)
+    }
+
+    private func apply(to view: TouchView) {
+        view.isTouchEnabled = isEnabled
+        view.onBegan = onBegan
+        view.onMoved = onMoved
+        view.onEnded = onEnded
+        view.onCancelled = onCancelled
     }
 }
 

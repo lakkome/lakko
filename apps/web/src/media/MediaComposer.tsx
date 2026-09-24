@@ -13,7 +13,14 @@
 import { createEffect, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 import { Icon } from "../ui/icons";
 
-import { formatClock, formatTotalClock, capFor, spokenDuration, type RecState } from "./recording-machine";
+import {
+  formatClock,
+  formatTotalClock,
+  capFor,
+  spokenDuration,
+  LOCK_SLIDE_PX,
+  type RecState,
+} from "./recording-machine";
 import { DENIED_COPY, NOTICE_COPY, type Recorder } from "./recording-controller";
 import { waveformBars } from "./waveform";
 
@@ -42,6 +49,8 @@ export function RecordButton(props: { recorder: Recorder }): JSX.Element {
       style={{
         display: "inline-flex",
         "align-items": "stretch",
+        // The anchor the lock target is positioned against (§2.5).
+        position: "relative",
         // Hidden, never unmounted, once the take no longer needs it: the
         // button may still hold the pointer capture of the gesture that
         // locked the take.
@@ -95,7 +104,54 @@ export function RecordButton(props: { recorder: Recorder }): JSX.Element {
       >
         {switchLabel()}
       </button>
+      <LockTarget recorder={r} />
     </span>
+  );
+}
+
+/**
+ * §2.5 / §3.1 — the target a held take slides UP onto to lock, drawn above the
+ * record button exactly as iOS and Android draw it, and for the same reason: a
+ * pointer slides onto something it can see, and a sentence naming a direction
+ * is not a destination. It is the mouse pointer's affordance as much as the
+ * thumb's, which is why the spec asks for it on this client too.
+ *
+ * Shown only while a take is being HELD (`recording`): `pressing` has not
+ * decided whether it is a tap yet — drawing a lock target over a tap is the
+ * flicker §3.1 was written against — and by `locked` the thing it invited has
+ * happened, with the button itself already hidden.
+ *
+ * It never takes pointer events. The gesture it describes runs UNDER it: the
+ * pointer that is climbing towards it is captured by the record button, and a
+ * target that swallowed a `pointermove` would break the very slide it exists to
+ * invite.
+ *
+ * Placement is not decoration. `LOCK_SLIDE_PX` is what locks the take, so the
+ * capsule sits just far enough up that a pointer travelling that distance lands
+ * inside it — the natives' ~64-70 px for the same arithmetic.
+ */
+function LockTarget(props: { recorder: Recorder }): JSX.Element {
+  const s = (): RecState => props.recorder.state();
+  // How far up the pointer has climbed. The machine locks the instant this
+  // reaches `-LOCK_SLIDE_PX`, so a `recording` state NEVER carries a `dy` at or
+  // past the threshold: "the pointer is standing on the target" is not a state
+  // that exists. What can be shown is the approach, and it is the honest
+  // signal — arriving at the capsule IS the lock.
+  const climb = (): number => {
+    const st = s();
+    return st.phase === "recording" ? Math.min(0, st.dy) : 0;
+  };
+  return (
+    <Show when={s().phase === "recording"}>
+      <span
+        class="lakko-lock-target"
+        data-near={climb() <= -LOCK_SLIDE_PX / 2}
+        aria-hidden="true"
+      >
+        <Icon name="lock" size={16} />
+        <Icon name="chevron" size={16} class="lakko-lock-up" />
+      </span>
+    </Show>
   );
 }
 
@@ -155,6 +211,11 @@ function LiveBar(props: { recorder: Recorder }): JSX.Element {
         <span style={{ color: "var(--surface-muted)", "font-size": "0.85rem" }}>Starting…</span>
       </Show>
       <Show when={s().phase === "recording"}>
+        {/* Cancel only, since the lock target landed (`LockTarget`). Cancel is
+            the half with no destination drawn anywhere — the gesture is a slide
+            left into nothing — so the words are all the person has. Naming the
+            lock too would caption a thing they can already see, which is noise
+            in the one line they read while holding a take. */}
         <span
           style={{
             flex: 1,
@@ -166,7 +227,7 @@ function LiveBar(props: { recorder: Recorder }): JSX.Element {
             overflow: "hidden",
           }}
         >
-          ‹ Slide to cancel · ↑ lock
+          ‹ Slide to cancel
         </span>
       </Show>
       <Show when={s().phase === "locked"}>
@@ -311,8 +372,12 @@ function LiveCircle(props: { recorder: Recorder }): JSX.Element {
         <span class="lakko-rec-dot" aria-hidden="true" />
         <span>{formatClock(r.elapsedMs())}</span>
         <Show when={r.state().phase === "recording"}>
+          {/* Cancel only, for the reason `LiveBar` gives: a video note is held
+              with the same gesture on the same button, so the same lock target
+              is drawn over this overlay — and the finger is down there, not up
+              here beside the circle. */}
           <span style={{ color: "var(--surface-muted)", "font-size": "0.85rem" }}>
-            ‹ Slide to cancel · ↑ lock
+            ‹ Slide to cancel
           </span>
         </Show>
         <Show when={r.state().phase === "locked"}>
