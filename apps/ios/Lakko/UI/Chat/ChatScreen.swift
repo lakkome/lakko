@@ -876,7 +876,10 @@ public struct ChatScreen: View {
     /// running, locked, finishing or in preview.
     private var showsRecordingBar: Bool {
         switch media.recState {
-        case .idle, .requesting: return false
+        // UX spec §3.1 — a press whose tap-or-hold verdict has not arrived
+        // yet has started nothing, so the composer stays put: a tap must not
+        // make the text field flicker out and back.
+        case .idle, .pressing, .requesting: return false
         case .recording, .locked, .finalizing, .preview: return true
         }
     }
@@ -908,7 +911,10 @@ public struct ChatScreen: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Send recording")
-        case .idle, .requesting, .recording:
+        // `.pressing` belongs here and nowhere else: SwiftUI drops a gesture
+        // whose view leaves the hierarchy, so the button deciding tap from
+        // hold has to be the same button throughout the press.
+        case .idle, .pressing, .requesting, .recording:
             if composerHasContent, !media.recState.isCapturing {
                 Button(action: viewModel.onSendClicked) {
                     sendFace {

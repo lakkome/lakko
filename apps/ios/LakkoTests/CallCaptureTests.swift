@@ -24,18 +24,18 @@ final class CallCaptureTests: XCTestCase {
     // MARK: - The state that owns nothing
 
     func testARingingIncomingCallLeavesTheRecorderUsable() {
-        // The offer took the call slot, so `callInSlot` is true - which is why
+        // The offer took the call slot, so `callIsLive` is true - which is why
         // asking the slot alone got this wrong. Nothing is captured: the peer
         // connection and the local audio track are built by `acceptCall`.
         XCTAssertFalse(
             CallCapture.ownsCapture(
-                callInSlot: true, oneToOneState: .ringing, otherKindInSlot: false))
+                callIsLive: true, oneToOneState: .ringing, otherKindInSlot: false))
     }
 
     func testALiveCallHoldsCapture() {
         XCTAssertTrue(
             CallCapture.ownsCapture(
-                callInSlot: true, oneToOneState: .connected, otherKindInSlot: false))
+                callIsLive: true, oneToOneState: .connected, otherKindInSlot: false))
     }
 
     func testAnOutgoingCallHoldsCaptureWhileItIsStillDialing() {
@@ -47,7 +47,7 @@ final class CallCaptureTests: XCTestCase {
                 oneToOneState: .outgoing, otherKindInSlot: false))
         XCTAssertTrue(
             CallCapture.ownsCapture(
-                callInSlot: true, oneToOneState: .outgoing, otherKindInSlot: false))
+                callIsLive: true, oneToOneState: .outgoing, otherKindInSlot: false))
     }
 
     func testRingingIsTheOnlyStateThatFreesTheRecorder() {
@@ -58,12 +58,40 @@ final class CallCaptureTests: XCTestCase {
         ] {
             XCTAssertTrue(
                 CallCapture.ownsCapture(
-                    callInSlot: true, oneToOneState: state, otherKindInSlot: false),
+                    callIsLive: true, oneToOneState: state, otherKindInSlot: false),
                 "\(state) is not an unanswered incoming ring")
         }
         XCTAssertFalse(
             CallCapture.ownsCapture(
-                callInSlot: true, oneToOneState: .ringing, otherKindInSlot: false))
+                callIsLive: true, oneToOneState: .ringing, otherKindInSlot: false))
+    }
+
+    // MARK: - The fact is app-wide, not per-chat
+
+    func testALiveCallInAnotherChatStillBlocksThisChatsRecorder() {
+        // `docs/ux/calls.md` section 4.5 — a call collapses into a bar, so the
+        // person can walk into another conversation while it runs. The
+        // microphone does not walk with them. The fact the rule takes is
+        // therefore "a call is live", never "a call is live in the chat I am
+        // looking at": the only read that reaches it is the app-wide call slot,
+        // which is still occupied here even though this chat placed no call.
+        //
+        // Named after the argument rather than the mechanism, because the
+        // mechanism is what changed: the flag used to be `callInThisChat`, and
+        // the reading it invited is exactly the one that would free the
+        // recorder in the wrong chat.
+        XCTAssertTrue(
+            CallCapture.ownsCapture(
+                callIsLive: true, oneToOneState: .connected, otherKindInSlot: false))
+        // Same for a group or call-link call running from elsewhere.
+        XCTAssertTrue(
+            CallCapture.ownsCapture(
+                callIsLive: true, oneToOneState: nil, otherKindInSlot: true))
+        // And a ringing offer is still the one exception wherever it rings:
+        // nothing is capturing, whichever chat is on screen.
+        XCTAssertFalse(
+            CallCapture.ownsCapture(
+                callIsLive: true, oneToOneState: .ringing, otherKindInSlot: false))
     }
 
     // MARK: - The slot read reaches the rule untouched
@@ -71,7 +99,7 @@ final class CallCaptureTests: XCTestCase {
     func testNoCallLeavesTheRecorderUsable() {
         XCTAssertFalse(
             CallCapture.ownsCapture(
-                callInSlot: false, oneToOneState: nil, otherKindInSlot: false))
+                callIsLive: false, oneToOneState: nil, otherKindInSlot: false))
     }
 
     func testAStaleRingingReadNeverFreesAGroupOrLinkCall() {
@@ -83,6 +111,6 @@ final class CallCaptureTests: XCTestCase {
                 oneToOneState: .ringing, otherKindInSlot: true))
         XCTAssertTrue(
             CallCapture.ownsCapture(
-                callInSlot: true, oneToOneState: .ringing, otherKindInSlot: true))
+                callIsLive: true, oneToOneState: .ringing, otherKindInSlot: true))
     }
 }

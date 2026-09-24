@@ -4,8 +4,15 @@
 import XCTest
 @testable import Lakko
 
-/// ADR-0047 / UX spec §2-§3, §6 — the hold-to-record rules, driven through the
-/// pure machine with no microphone, camera or gesture.
+/// ADR-0047 / UX spec §2-§3, §3.1, §6 — the tap / hold rules, driven through
+/// the pure machine with no microphone, camera or gesture.
+///
+/// §3.1 is why the verdict is worth testing at all: the shipped iOS button
+/// started a voice recording the instant it was touched, so the camera mode
+/// could not be reached. The rule these pin is that the two gestures are told
+/// apart BEFORE anything is captured — never by how long the take turned out
+/// to be — so the numbers (`holdToRecordMs`, `tapSlopPoints`) are read from
+/// the machine rather than written down here, and web's copy uses the same two.
 final class RecordingMachineTests: XCTestCase {
 
     private func run(_ events: [RecEvent], from state: RecState = .idle) -> (RecState, [RecEffect]) {
@@ -19,28 +26,146 @@ final class RecordingMachineTests: XCTestCase {
         return (state, effects)
     }
 
-    func testGrantedPressStartsImmediatelyAndReleaseSends() {
-        let (s1, e1) = run([.press(kind: .voice, at: 1000, permission: .granted)])
+    /// A press that has passed the hold threshold — the state every
+    /// recording rule below starts from, now that a bare press is not yet a take.
+    private func heldDown(
+        kind: CaptureKind = .voice,
+        at: Int64 = 0,
+        permission: PermissionHint = .granted
+    ) -> [RecEvent] {
+        [.press(kind: kind, at: at, permission: permission), .holdElapsed(at: at)]
+    }
+
+    // MARK: - §3.1 — one button, two gestures, decided on the gesture
+
+    func testAPressAloneRecordsNothingUntilTheHoldThresholdPasses() {
+        // The defect this closes: the press used to start the microphone
+        // outright, so the tap that switches to the camera could not be made.
+        let (pressing, effects) = run([.press(kind: .voice, at: 1000, permission: .granted)])
+        XCTAssertEqual(
+            pressing, .pressing(kind: .voice, at: 1000, permission: .granted, moved: false))
+        XCTAssertEqual(effects, [.armHold])
+        XCTAssertFalse(pressing.isCapturing)
+
+        let (recording, held) = run([.holdElapsed(at: 1000 + RecordingMachine.holdToRecordMs)],
+                                    from: pressing)
+        XCTAssertEqual(
+            recording,
+            .recording(kind: .voice, startedAt: 1000 + RecordingMachine.holdToRecordMs, dx: 0, dy: 0))
+        XCTAssertEqual(held, [.startCapture(.voice)])
+    }
+
+    func testATapSwitchesTheModeAndRecordsNothing() {
+        let (state, effects) = run([
+            .press(kind: .voice, at: 0, permission: .granted),
+            .release(at: RecordingMachine.holdToRecordMs - 1),
+        ])
+        XCTAssertEqual(state, .idle)
+        // No capture was ever started, so there is nothing to finish and no
+        // `Hold to record` hint to show: this was not a failed recording.
+        XCTAssertEqual(effects, [.armHold, .toggleMode])
+    }
+
+    func testATapNeverOpensTheMicrophoneEvenWhenPermissionIsUnknownOrDenied() {
+        // A tap must not raise a permission prompt and must not show the denied
+        // card: it is asking for the other glyph, not for the microphone.
+        for permission in [PermissionHint.prompt, .denied] {
+            let (state, effects) = run([
+                .press(kind: .videoNote, at: 0, permission: permission),
+                .release(at: RecordingMachine.holdToRecordMs - 1),
+            ])
+            XCTAssertEqual(state, .idle, "\(permission)")
+            XCTAssertEqual(effects, [.armHold, .toggleMode], "\(permission)")
+        }
+    }
+
+    func testATouchThatTravelledIsNotATapAndSwitchesNothing() {
+        let (moved, _) = run([
+            .press(kind: .voice, at: 0, permission: .granted),
+            .move(dx: -(RecordingMachine.tapSlopPoints + 1), dy: 0),
+        ])
+        XCTAssertEqual(moved, .pressing(kind: .voice, at: 0, permission: .granted, moved: true))
+        let (state, effects) = run([.release(at: RecordingMachine.holdToRecordMs - 1)], from: moved)
+        XCTAssertEqual(state, .idle)
+        XCTAssertTrue(effects.isEmpty)
+
+        // Drift inside the slop is still a tap — a thumb is not a stylus.
+        let (steady, _) = run([
+            .press(kind: .voice, at: 0, permission: .granted),
+            .move(dx: -(RecordingMachine.tapSlopPoints - 1), dy: 1),
+        ])
+        XCTAssertEqual(steady, .pressing(kind: .voice, at: 0, permission: .granted, moved: false))
+        XCTAssertEqual(run([.release(at: 1)], from: steady).1, [.toggleMode])
+    }
+
+    func testAPressCancelledBeforeTheHoldThresholdSwitchesNothing() {
+        // A call arriving, or the chat leaving the screen, is not a tap.
+        let (state, effects) = run([
+            .press(kind: .voice, at: 0, permission: .granted),
+            .cancel,
+        ])
+        XCTAssertEqual(state, .idle)
+        XCTAssertEqual(effects, [.armHold])
+    }
+
+    func testAHoldElapsedAfterTheFingerLiftedIsIgnored() {
+        // A stale hold timer must not open the microphone behind the tap that
+        // has already been answered. The host invalidates it; the machine
+        // refuses it as well, so neither alone is load-bearing.
+        let (state, effects) = run([
+            .press(kind: .voice, at: 0, permission: .granted),
+            .release(at: 10),
+            .holdElapsed(at: RecordingMachine.holdToRecordMs),
+        ])
+        XCTAssertEqual(state, .idle)
+        XCTAssertEqual(effects, [.armHold, .toggleMode])
+    }
+
+    // MARK: - §2-§3 — the hold itself
+
+    func testHeldPressStartsAndReleaseSends() {
+        let (s1, e1) = run(heldDown(at: 1000))
         XCTAssertEqual(s1, .recording(kind: .voice, startedAt: 1000, dx: 0, dy: 0))
-        XCTAssertEqual(e1, [.startCapture(.voice)])
+        XCTAssertEqual(e1, [.armHold, .startCapture(.voice)])
 
         let (s2, e2) = run([.release(at: 1000 + RecordingMachine.minTakeMs)], from: s1)
         XCTAssertEqual(s2, .idle)
         XCTAssertEqual(e2, [.finish(.send)])
     }
 
-    func testShortTapDiscardsHintsAndTogglesMode() {
-        let (state, effects) = run([
-            .press(kind: .voice, at: 0, permission: .granted),
-            .release(at: RecordingMachine.minTakeMs - 1),
-        ])
+    func testAnAccidentalPressDiscardsWithTheHintAndIsNotAModeSwitch() {
+        // §3.1 — the hold threshold had already passed, so the microphone was
+        // open. That is the accidental-press case, not the tap: it must not
+        // move the glyph out from under the person's next attempt.
+        let (state, effects) = run(heldDown() + [.release(at: RecordingMachine.minTakeMs - 1)])
         XCTAssertEqual(state, .idle)
-        XCTAssertEqual(effects, [.startCapture(.voice), .finish(.discard), .hint(.holdToRecord), .toggleMode])
+        XCTAssertEqual(effects, [.armHold, .startCapture(.voice), .finish(.discard), .hint(.holdToRecord)])
+        XCTAssertFalse(effects.contains(.toggleMode))
+    }
+
+    func testTheModeIsSwitchedByTheTapAndByNothingElse() {
+        // One production path emits `.toggleMode`, and it is the tap. Anything
+        // else reaching it would be the shipped defect coming back.
+        let gestures: [[RecEvent]] = [
+            heldDown() + [.release(at: RecordingMachine.minTakeMs - 1)],
+            heldDown() + [.release(at: 5_000)],
+            heldDown() + [.move(dx: -RecordingMachine.cancelSlidePoints, dy: 0)],
+            heldDown() + [.move(dx: 0, dy: -RecordingMachine.lockSlidePoints), .stop(at: 5_000)],
+            heldDown() + [.cancel],
+            heldDown(permission: .prompt) + [.permissionResult(granted: true)],
+            heldDown(permission: .denied),
+            [.activate(kind: .voice, at: 0, permission: .granted)],
+        ]
+        for events in gestures {
+            XCTAssertFalse(run(events).1.contains(.toggleMode), "\(events)")
+        }
+        XCTAssertTrue(
+            run([.press(kind: .voice, at: 0, permission: .granted), .release(at: 1)])
+                .1.contains(.toggleMode))
     }
 
     func testSlideLeftPastThresholdCancels() {
-        let (s1, _) = run([
-            .press(kind: .voice, at: 0, permission: .granted),
+        let (s1, _) = run(heldDown() + [
             .move(dx: -(RecordingMachine.cancelSlidePoints - 1), dy: 0),
         ])
         XCTAssertEqual(s1, .recording(kind: .voice, startedAt: 0, dx: -(RecordingMachine.cancelSlidePoints - 1), dy: 0))
@@ -50,8 +175,7 @@ final class RecordingMachineTests: XCTestCase {
     }
 
     func testSlideUpLocksAndReleaseNoLongerSends() {
-        let (locked, _) = run([
-            .press(kind: .videoNote, at: 0, permission: .granted),
+        let (locked, _) = run(heldDown(kind: .videoNote) + [
             .move(dx: 0, dy: -RecordingMachine.lockSlidePoints),
         ])
         XCTAssertEqual(locked, .locked(kind: .videoNote, startedAt: 0))
@@ -97,19 +221,19 @@ final class RecordingMachineTests: XCTestCase {
         XCTAssertEqual(RecordingMachine.voiceCapMs, 15 * 60 * 1000)
     }
 
-    func testPressThatRaisesPromptNeverRecordsEvenWhenGranted() {
-        let (requesting, e1) = run([.press(kind: .voice, at: 0, permission: .prompt)])
+    func testHoldThatRaisesPromptNeverRecordsEvenWhenGranted() {
+        let (requesting, e1) = run(heldDown(permission: .prompt))
         XCTAssertEqual(requesting, .requesting(kind: .voice))
-        XCTAssertEqual(e1, [.requestPermission(.voice)])
+        XCTAssertEqual(e1, [.armHold, .requestPermission(.voice)])
         let (afterGrant, e2) = run([.release(at: 3000), .permissionResult(granted: true)], from: requesting)
         XCTAssertEqual(afterGrant, .idle)
         XCTAssertFalse(e2.contains(.startCapture(.voice)))
     }
 
     func testDeniedShowsCardWithoutCapture() {
-        let (s1, e1) = run([.press(kind: .videoNote, at: 0, permission: .denied)])
+        let (s1, e1) = run(heldDown(kind: .videoNote, permission: .denied))
         XCTAssertEqual(s1, .idle)
-        XCTAssertEqual(e1, [.showDenied(.videoNote)])
+        XCTAssertEqual(e1, [.armHold, .showDenied(.videoNote)])
 
         let (s2, e2) = run([.permissionResult(granted: false)], from: .requesting(kind: .voice))
         XCTAssertEqual(s2, .idle)

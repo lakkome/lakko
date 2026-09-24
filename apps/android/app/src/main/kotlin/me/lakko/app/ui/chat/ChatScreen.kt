@@ -438,12 +438,17 @@ public fun ChatScreen(
     val pendingMedia by viewModel.pendingMedia.collectAsStateWithLifecycle()
     val recorder = rememberRecordController(mediaHub) { take -> viewModel.sendRecordedTake(take) }
     // `docs/ux/media-messages.md` — the recorder stands aside while a call
-    // HOLDS the microphone and camera. This used to be `callOccupant != null`,
-    // which answers a different question: an offer merely being rung takes the
-    // slot and takes no microphone, so a voice message was refused at exactly
-    // the moment it was the only reply that fitted. The rule that tells the two
-    // apart is `crates/lakko-ui-rules/src/capture.rs`; both facts are the reads
-    // this screen already has.
+    // HOLDS the microphone and camera. This used to be `callOccupant != null`
+    // alone, which answers a different question: an offer merely being rung
+    // takes the slot and takes no microphone, so a voice message was refused at
+    // exactly the moment it was the only reply that fitted. The rule that tells
+    // the two apart is `crates/lakko-ui-rules/src/capture.rs`; both facts are
+    // the reads this screen already has.
+    //
+    // `callOccupant` is the ONE app-wide slot, not this chat's call, and that is
+    // deliberate: `docs/ux/calls.md` section 4.5 collapses a call into a bar, so
+    // a person can stand in this chat with a call running from another one — and
+    // the microphone is just as busy here.
     val callOwnsMedia = callOwnsCapture(
         occupant = callOccupant,
         call = oneToOneCall,
@@ -1893,8 +1898,15 @@ private fun Composer(
     }
 
     val recState = recorder.state
-    val recording = recState !is me.lakko.app.media.RecState.Idle &&
-        recState !is me.lakko.app.media.RecState.Requesting
+    // ADR-0047 §3.1 — the recording UI replaces the composer only once
+    // something is actually being captured. A press still being judged as
+    // tap-or-hold, and a permission being asked for, both leave the composer
+    // exactly as it was: swapping it for either made a plain tap flash the
+    // whole screen (the recording bar in, the tray out, the hint line shifting
+    // the layout, and in camera mode the full-screen round preview) for the few
+    // tens of milliseconds a tap lasts. The rule is
+    // `me.lakko.app.media.showsRecordingUi`.
+    val recording = me.lakko.app.media.showsRecordingUi(recState)
     val showSend = draft.isNotBlank() || pendingAttachments.isNotEmpty() || uploading
 
     Column {

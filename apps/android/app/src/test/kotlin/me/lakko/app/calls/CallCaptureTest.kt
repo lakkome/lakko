@@ -36,14 +36,14 @@ class CallCaptureTest {
      * class docs.
      */
     private companion object {
-        val STAND_IN_RULE: (Boolean, Boolean) -> Boolean = { inChat, ring -> inChat && !ring }
+        val STAND_IN_RULE: (Boolean, Boolean) -> Boolean = { callIsLive, ring -> callIsLive && !ring }
     }
 
     /** Records what the rule was asked, and answers whatever it is told to. */
     private class SpyRule(private val answer: Boolean) : (Boolean, Boolean) -> Boolean {
         val asked = mutableListOf<Pair<Boolean, Boolean>>()
-        override fun invoke(inChat: Boolean, ring: Boolean): Boolean {
-            asked += inChat to ring
+        override fun invoke(callIsLive: Boolean, ring: Boolean): Boolean {
+            asked += callIsLive to ring
             return answer
         }
     }
@@ -100,6 +100,31 @@ class CallCaptureTest {
             holdsCapture = rule,
         )
         assertEquals(listOf(true to false), rule.asked)
+    }
+
+    @Test
+    fun `a live call in ANOTHER chat still blocks this chat's recorder`() {
+        // `docs/ux/calls.md` section 4.5 — a call collapsed into the bar keeps
+        // running while the person walks into a different conversation, and the
+        // microphone is just as busy there. The screen's own 1x1 read answers
+        // for THIS conversation only, so it is null here; the fact handed over
+        // is the app-wide slot, which is why the first argument is
+        // `callIsLive` and not "a call in this chat".
+        for (occupant in CallKind.entries) {
+            val rule = SpyRule(true)
+            val blocked = callOwnsCapture(
+                occupant = occupant,
+                call = null,
+                state = CallSession.WebCallState.Done,
+                holdsCapture = rule,
+            )
+            assertEquals("$occupant elsewhere is still a live call", listOf(true to false), rule.asked)
+            assertTrue("$occupant elsewhere holds the microphone", blocked)
+            assertTrue(
+                "$occupant elsewhere blocks under the shared rule too",
+                callOwnsCapture(occupant, null, CallSession.WebCallState.Done, STAND_IN_RULE),
+            )
+        }
     }
 
     @Test

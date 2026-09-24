@@ -21,34 +21,37 @@ function holding(s: RecState): boolean {
   return s.phase === "recording" || s.phase === "requesting";
 }
 
-/** The right-hand composer button when the field and tray are empty. */
+/**
+ * The right-hand composer button when the field and tray are empty.
+ *
+ * UX spec §3.1 — ONE visible button, carrying the current mode's glyph. A tap
+ * switches the mode, a hold records; both are the machine's rules, reached
+ * through the pointer handlers. What sits beside it is not a second button but
+ * the mode switch a keyboard or a screen reader needs, which carries no ink:
+ * hold and slide are gestures those users do not have, so without it the
+ * camera would be unreachable for them.
+ */
 export function RecordButton(props: { recorder: Recorder }): JSX.Element {
   const r = props.recorder;
   const isVideo = (): boolean => r.mode() === "video_note";
   const label = (): string => (isVideo() ? "Record video message" : "Record voice message");
+  const switchLabel = (): string =>
+    isVideo() ? "Switch to voice message" : "Switch to video message";
   return (
     <span
       style={{
         display: "inline-flex",
         "align-items": "stretch",
-        gap: "2px",
         // Hidden, never unmounted, once the take no longer needs it: the
         // button may still hold the pointer capture of the gesture that
         // locked the take.
         visibility: ["locked", "finalizing", "preview"].includes(r.state().phase) ? "hidden" : "visible",
       }}
-      title={r.disabledReason() ?? `${label()}: hold to record, click to record hands-free`}
+      title={
+        r.disabledReason() ??
+        `${label()}: hold to record, tap to switch to ${isVideo() ? "voice" : "video"}`
+      }
     >
-      <button
-        type="button"
-        class="lk-icon-button"
-        aria-label={isVideo() ? "Switch to voice message" : "Switch to video message"}
-        title={isVideo() ? "Switch to voice message" : "Switch to video message"}
-        disabled={r.state().phase !== "idle"}
-        onClick={() => r.toggleMode()}
-      >
-        <Icon name={isVideo() ? "mic" : "video"} size={18} />
-      </button>
       <button
         type="button"
         class="lk-icon-button lakko-record-btn"
@@ -62,7 +65,8 @@ export function RecordButton(props: { recorder: Recorder }): JSX.Element {
         onPointerCancel={() => r.onPointerCancel()}
         onContextMenu={(e) => e.preventDefault()}
         onClick={(e) => {
-          // A pointer press is handled by the pointer events above; only a
+          // A pointer press is handled by the pointer events above, where a
+          // short one switches the mode instead of recording (§3.1); only a
           // keyboard / assistive-technology activation (detail 0) lands here,
           // and it starts a locked recording (UX spec §7).
           if (e.detail === 0) r.onKeyboardActivate();
@@ -70,14 +74,42 @@ export function RecordButton(props: { recorder: Recorder }): JSX.Element {
       >
         <Icon name={isVideo() ? "video" : "mic"} size={20} />
       </button>
+      {/* §3.1 — the second action on the same control, for the people who
+          have no hold gesture. Visually hidden so the composer reads as one
+          button, but in the tab order and the accessibility tree, and it does
+          become visible while it holds keyboard focus: a focus stop nobody can
+          see is worse than the extra glyph the spec was avoiding. */}
+      <button
+        type="button"
+        class="lakko-visually-hidden lakko-mode-switch-a11y"
+        aria-label={switchLabel()}
+        // Its own tooltip, or the wrapper's would describe the recorder while
+        // this is the control being pointed at once focus reveals it.
+        title={switchLabel()}
+        // One button, one disabled state: whatever takes the visible glyph out
+        // of use - a take in progress, a call holding the microphone, a browser
+        // that cannot record - takes this with it, because a mode to record in
+        // is worth nothing while there is nothing to record with.
+        disabled={recorderBusy(r) || r.disabledReason() !== null}
+        onClick={() => r.toggleMode()}
+      >
+        {switchLabel()}
+      </button>
     </span>
   );
 }
 
-/** `true` while the recording bar replaces the text field. */
+/**
+ * `true` while the recording bar replaces the text field.
+ *
+ * `pressing` is deliberately NOT busy (UX spec §3.1): a press that has not yet
+ * lasted the hold threshold may still turn out to be a tap on the mode switch,
+ * and swapping the composer for a recording bar on every tap is the flicker the
+ * spec was written against.
+ */
 export function recorderBusy(r: Recorder): boolean {
   const s = r.state();
-  return s.phase !== "idle";
+  return s.phase !== "idle" && s.phase !== "pressing";
 }
 
 /** Replaces the attach button and text field while a take is in progress. */

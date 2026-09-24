@@ -50,7 +50,7 @@ import { groupIdHex as hexOf } from "../devices/sync/state";
 import { useCallHost } from "../calls/CallHostContext";
 import { QuietIncomingCallPanel } from "../calls/QuietIncomingCallPanel";
 import { quietCallOfferFor, type QuietCallOffer } from "../calls/quiet-call-offer";
-import { callOwnsCaptureIn } from "../calls/capture-rule";
+import { callOwnsCaptureNow } from "../calls/capture-rule";
 import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
 import { eventToPersistedMessage, mergeForegroundSlot } from "../chat/background-log";
 import { opsFromPersisted, persistedWithOps } from "../chat/message-ops-store";
@@ -3433,9 +3433,13 @@ function ChatView(props: {
    * the same offer holds no microphone. The rule that tells the two apart is
    * `crates/lakko-ui-rules/src/capture.rs`, reached through
    * `calls/capture-rule.ts`; both facts are the client's existing reads.
+   *
+   * It is also not scoped to THIS chat, where `callInProgress` is: since
+   * `docs/ux/calls.md` section 4.5 a live call collapses into a bar and
+   * survives every navigation, so a call placed from another conversation is
+   * holding this device's one microphone while the person stands here.
    */
-  const callOwnsCapture = (): boolean =>
-    callOwnsCaptureIn(uiRules(), callHost, props.entry.groupIdB64);
+  const callOwnsCapture = (): boolean => callOwnsCaptureNow(uiRules(), callHost);
   function receiveLoopPaused(): boolean {
     return mayParkReceive({
       documentHidden: globalThis.document?.visibilityState === "hidden",

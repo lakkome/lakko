@@ -29,8 +29,8 @@ after a tap toggles the mode). The chosen mode is remembered per device.
 
 ### Flow
 
-1. **Press and hold** mic → recording starts immediately (after permission, §6). Haptic
-   tick on native.
+1. **Press and hold** mic → recording starts as soon as the press is a hold rather than
+   a tap (the threshold of section 3.1), after permission (§6). Haptic tick on native.
 2. While holding, the composer is replaced by the **recording bar**: a pulsing red dot,
    the elapsed time `0:07`, a live level meter, and the hint `Slide to cancel`.
 3. **Release** → the message is sent.
@@ -122,10 +122,32 @@ toggled but flashed the whole screen doing it; iOS had one that ignored the tap 
 started recording a voice message the instant it was touched, so the camera mode
 could not be reached at all.
 
-A tap therefore never records, on any client. A take that begins and ends under the
-0.5 s floor is the accidental-press case of section 2 and is discarded with the same
-hint; it is not a mode switch either, because the press had already opened the
-microphone.
+A tap therefore never records, on any client. **The two are told apart by the gesture,
+before anything is captured**, and not by how long the take turned out to be: a press
+is a hold once it has lasted **200 ms** without travelling more than **10 px / pt / dp**,
+and only then does the microphone open. Deciding it on the outcome instead would mean
+opening the microphone on every tap and throwing the take away, which is the one thing
+a person can hear.
+
+A take that begins and ends under the 0.5 s floor is therefore a hold that was let go
+at once - the accidental-press case of section 2, discarded with the same hint. It is
+not a mode switch, because by then the microphone had already been opened; a tap that
+never reached the threshold is the mode switch, and the two cannot be confused.
+
+A press that travels past the slop is neither: a finger on its way to the cancel target
+must not flip the mode on release.
+
+**No press ever ends in a locked recording.** An older desktop note let a short mouse
+press continue recording hands-free, which was a second meaning for the one gesture
+that now switches the mode, and the only pointer route to the camera before the second
+button went away. Locking is reached the way it is on a phone - hold, then slide up
+onto the lock target, which a mouse reaches as readily as a thumb - and by the single
+activation a keyboard or screen reader makes.
+
+**On native, switching the mode gives a light haptic tick.** Recording start has one
+already; a tap that only changes a glyph and is otherwise silent reads as a dead
+button. Web has no equivalent and needs none: the glyph changes under a pointer that
+is already there.
 
 **The keyboard and the screen reader get both gestures without either one.** Hold and
 slide are not reachable that way, so the single button carries two actions in the

@@ -13,9 +13,16 @@ import UIKit
 
 /// The composer's right-hand button while the field is empty: mic or camera.
 ///
+/// UX spec §3.1 — ONE button answering TWO gestures. A tap switches mic /
+/// camera and records nothing; a press and hold records in the mode the glyph
+/// is showing. This view does not decide which one happened: it reports the
+/// touch down, the travel and the lift, and ``RecordingMachine`` takes the
+/// verdict on the gesture — which is the whole point, because no SwiftUI body
+/// in this target is reachable from a test.
+///
 /// Its identity must not change while a finger is down — SwiftUI drops a
 /// gesture whose view leaves the hierarchy — so the composer keeps this view
-/// mounted through `.idle` / `.requesting` / `.recording`.
+/// mounted through `.idle` / `.pressing` / `.requesting` / `.recording`.
 struct RecordButton: View {
     @ObservedObject var media: ChatMediaController
     @State private var pressed = false
@@ -35,6 +42,11 @@ struct RecordButton: View {
                 .foregroundStyle(Color.lakkoAccentForeground)
         }
         .frame(width: 44, height: 44)
+        // The tap / hold verdict takes `holdToRecordMs` to arrive, so the
+        // button acknowledges the touch itself rather than leaving the first
+        // moment of a hold looking like nothing happened.
+        .scaleEffect(pressed && !recording ? 0.9 : 1)
+        .animation(.easeOut(duration: 0.1), value: pressed)
         .overlay(alignment: .top) {
             if recording {
                 // §2.5 — the lock target: slide up onto it.
@@ -69,13 +81,17 @@ struct RecordButton: View {
         .onDisappear {
             if pressed {
                 pressed = false
-                media.release()
+                media.gestureLost()
             }
         }
         .accessibilityElement()
         .accessibilityLabel(isVideo ? "Record video message" : "Record voice message")
         .accessibilityHint(media.callActive ? ChatMediaController.inCallCopy : "Starts a locked recording")
         .accessibilityAddTraits(.isButton)
+        // §3.1 — hold and slide are not reachable with VoiceOver or Switch
+        // Control, so the two gestures become two actions on the one button:
+        // activating it starts a LOCKED take, and the named action below is
+        // the only way such a user can reach the other mode at all.
         .accessibilityAction { media.activate() }
         .accessibilityAction(named: isVideo ? "Switch to voice message" : "Switch to video message") {
             media.toggleMode()
@@ -147,7 +163,7 @@ struct RecordingBar: View {
                     Spacer()
                 }
             }
-        case .idle, .requesting:
+        case .idle, .pressing, .requesting:
             EmptyView()
         }
     }

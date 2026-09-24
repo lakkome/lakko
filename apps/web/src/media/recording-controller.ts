@@ -29,6 +29,7 @@ import {
 } from "./media-capture";
 import { recordMode, setRecordMode } from "./media-prefs";
 import {
+  HOLD_TO_RECORD_MS,
   IDLE,
   isCapturing,
   reduce,
@@ -129,6 +130,8 @@ export function createRecorder(opts: RecorderOptions): Recorder {
    *  it arrived for a take that no longer exists. */
   let generation = 0;
   let ticker: ReturnType<typeof setInterval> | null = null;
+  /** The one timer that tells a press it has become a hold (UX spec §3.1). */
+  let holdTimer: ReturnType<typeof setTimeout> | null = null;
   let noticeTimer: ReturnType<typeof setTimeout> | null = null;
   let disposed = false;
 
@@ -184,12 +187,41 @@ export function createRecorder(opts: RecorderOptions): Recorder {
     setLevel(0);
   }
 
+  /**
+   * Arms (or disarms) the hold threshold, UX spec §3.1.
+   *
+   * A press starts nothing; the microphone opens only when this fires, so the
+   * whole difference between a tap that switches the mode and a hold that
+   * records is one timeout. It is armed ONCE per press - a `move` produces a
+   * fresh `pressing` state, and re-arming there would let a drifting finger
+   * push the moment away indefinitely.
+   *
+   * The machine re-checks the elapsed time itself, so a late timer (a
+   * throttled tab) cannot open a microphone on a press that is already over.
+   */
+  function armHold(next: RecState): void {
+    if (next.phase === "pressing") {
+      if (holdTimer !== null) return;
+      const remaining = Math.max(0, HOLD_TO_RECORD_MS - (Date.now() - next.pressedAt));
+      holdTimer = setTimeout(() => {
+        holdTimer = null;
+        dispatch({ type: "tick", at: Date.now() });
+      }, remaining);
+      return;
+    }
+    if (holdTimer !== null) {
+      clearTimeout(holdTimer);
+      holdTimer = null;
+    }
+  }
+
   function dispatch(event: RecEvent): void {
     if (disposed) return;
     const next = reduce(state(), event);
     setState(next.state);
     for (const effect of next.effects) perform(effect);
     if (isCapturing(next.state)) startTicker();
+    armHold(next.state);
     // Whatever the machine did with it, a stream nobody claimed is released.
     if (pendingStream !== null && !isCapturing(next.state) && next.state.phase !== "requesting") {
       stopStream(pendingStream);
@@ -380,13 +412,21 @@ export function createRecorder(opts: RecorderOptions): Recorder {
       });
     },
     onPointerMove(e) {
-      if (state().phase === "recording") dispatch({ type: "move", x: e.clientX, y: e.clientY });
+      // `pressing` too: the drift it collects decides whether the release is
+      // still a tap, and it is the offset a promoted take inherits.
+      const phase = state().phase;
+      if (phase === "recording" || phase === "pressing") {
+        dispatch({ type: "move", x: e.clientX, y: e.clientY });
+      }
     },
     onPointerUp() {
       dispatch({ type: "release", at: Date.now() });
     },
     onPointerCancel() {
-      if (state().phase === "recording" || state().phase === "requesting") dispatch({ type: "cancel" });
+      const phase = state().phase;
+      if (phase === "recording" || phase === "requesting" || phase === "pressing") {
+        dispatch({ type: "cancel" });
+      }
     },
     onKeyboardActivate() {
       if (disabledReason() !== null || state().phase !== "idle") return;
@@ -420,6 +460,7 @@ export function createRecorder(opts: RecorderOptions): Recorder {
       disposed = true;
       generation += 1;
       stopTicker();
+      if (holdTimer !== null) clearTimeout(holdTimer);
       take?.discard();
       take = null;
       stopStream(pendingStream);

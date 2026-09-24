@@ -19,6 +19,15 @@
  * surfaces landed: before them a ringing call took the screen, so a recorder
  * disabled behind it could not be noticed.
  *
+ * The first fact has since WIDENED, and this module is where the widening is
+ * paid for. "A call in THIS chat" was the same question as "a call at all" for
+ * as long as a live call owned the whole screen: there was no other chat to be
+ * standing in. `docs/ux/calls.md` section 4.5 collapses a call into a bar that
+ * survives every navigation, so a person can now be reading chat B while a
+ * call placed from chat A runs — and the microphone is exactly as busy in chat
+ * B. A recorder gated on this chat's lane would have handed the one microphone
+ * to a second taker there.
+ *
  * The rule itself lives in `crates/lakko-ui-rules/src/capture.rs` and is
  * reached over wasm; iOS and Android reach the same code over UniFFI. Nothing
  * here decides anything — it converts the two facts this client already holds
@@ -36,7 +45,7 @@ import type { Wasm } from "../wasm";
  */
 export interface CaptureRules {
   readonly callHoldsCapture: (
-    callInThisChat: boolean,
+    callIsLive: boolean,
     unansweredIncomingRing: boolean,
   ) => boolean;
 }
@@ -59,7 +68,13 @@ void _wasmSatisfiesCaptureRules;
  * question about the microphone in the first place.
  */
 export interface CaptureCallLane {
-  /** The group whose journal carries the call in progress, or `null`. */
+  /**
+   * The group whose journal carries the call in progress, or `null`.
+   *
+   * Read here only for whether it is `null`: the app holds ONE call slot, so a
+   * non-null lane is a call live somewhere — which, since
+   * `docs/ux/calls.md` section 4.5, is a call live everywhere.
+   */
   callLaneGroupIdB64: () => string | null;
   /** The call id of the 1x1 call RINGING on this device, or `null`. */
   ringingCallIdHex: () => string | null;
@@ -67,8 +82,14 @@ export interface CaptureCallLane {
 
 /** The two facts this client holds, as the rule takes them. */
 export interface CaptureFacts {
-  /** This chat's own call-lane read: a call of any kind occupies it. */
-  readonly callInThisChat: boolean;
+  /**
+   * A call of any kind occupies this device's one app-wide call slot.
+   *
+   * Not scoped to a conversation, deliberately: a call collapsed into the bar
+   * of `docs/ux/calls.md` section 4.5 is live in every chat, not only in the
+   * one it was placed from.
+   */
+  readonly callIsLive: boolean;
   /**
    * That call is an incoming offer still being rung, which the person has not
    * accepted — the one state that owns no capture.
@@ -84,7 +105,7 @@ export interface CaptureFacts {
 /**
  * Whether the composer's voice and video-note recorder must stand aside.
  *
- * `rules` is `null` until wasm has loaded, and that answers `callInThisChat` —
+ * `rules` is `null` until wasm has loaded, and that answers `callIsLive` —
  * byte-for-byte what this client did before the rule existed, and the
  * conservative side: a recorder that refuses is a message not sent, where one
  * that records over a live call is a take with a call inside it. The window is
@@ -96,29 +117,30 @@ export function callHoldsCapture(
   rules: CaptureRules | null,
   facts: CaptureFacts,
 ): boolean {
-  if (rules === null) return facts.callInThisChat;
-  return rules.callHoldsCapture(facts.callInThisChat, facts.unansweredIncomingRing);
+  if (rules === null) return facts.callIsLive;
+  return rules.callHoldsCapture(facts.callIsLive, facts.unansweredIncomingRing);
 }
 
 /**
- * {@link callHoldsCapture} for the chat `groupIdB64`, reading the two facts off
+ * {@link callHoldsCapture} for this device right now, reading the two facts off
  * the call host.
+ *
+ * It takes no conversation, and that absence is the point: the microphone is
+ * one device-wide resource and the call slot is one too, so a call running in
+ * another chat holds capture in THIS chat just as firmly. Passing a group here
+ * would be passing something the answer must not depend on.
  *
  * The ring is read from the host's own `ringingCallIdHex`, which is non-null
  * exactly while a 1x1 call is in `ringing` — a state `call-session.ts` reaches
  * only for a fresh INBOUND offer, never for an outgoing dial, which is what
  * makes it the rule's `unansweredIncomingRing` rather than merely "is ringing".
- * It is not scoped to this chat and does not need to be: the app holds one call
- * at a time, so a ring anywhere else leaves this chat's lane empty and the rule
- * answers from the first fact alone.
  */
-export function callOwnsCaptureIn(
+export function callOwnsCaptureNow(
   rules: CaptureRules | null,
   host: CaptureCallLane,
-  groupIdB64: string,
 ): boolean {
   return callHoldsCapture(rules, {
-    callInThisChat: host.callLaneGroupIdB64() === groupIdB64,
+    callIsLive: host.callLaneGroupIdB64() !== null,
     unansweredIncomingRing: host.ringingCallIdHex() !== null,
   });
 }

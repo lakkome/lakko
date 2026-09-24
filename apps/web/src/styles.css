@@ -1931,14 +1931,6 @@ a.ghost.small.lk-wide-only {
   color: var(--danger-fg);
   border-color: transparent;
 }
-.lakko-mode-switch {
-  padding: 0 0.25rem;
-  min-width: 1.4rem;
-  font-size: 0.75rem;
-  border: none;
-  background: transparent;
-  color: var(--surface-muted);
-}
 .lakko-rec-bar {
   flex: 1;
   display: flex;
@@ -2357,6 +2349,24 @@ a.ghost.small.lk-wide-only {
   overflow: hidden;
   clip: rect(0 0 0 0);
   white-space: nowrap;
+}
+
+/* docs/ux/media-messages.md 3.1 - the composer's mode switch carries no ink,
+   so the visible composer is ONE button. It comes back while it holds keyboard
+   focus: a focusable control with no focus indicator is a stop a sighted
+   keyboard user cannot see, and only they ever reach this one. */
+.lakko-mode-switch-a11y:focus-visible {
+  position: static;
+  width: auto;
+  height: auto;
+  overflow: visible;
+  clip: auto;
+  padding: 0 0.4rem;
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  color: var(--surface-fg);
+  font-size: 0.75rem;
 }
 
 /* ADR-0050 — the chat list's one synchronizing label (docs/ux/second-device.md). */

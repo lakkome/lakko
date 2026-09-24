@@ -11,11 +11,21 @@ package me.lakko.app.calls
  *
  * `docs/ux/media-messages.md` blocks recording while a call owns capture, which
  * is right: two things cannot have the microphone. What this screen asked was a
- * different question — "is there a call in the slot" ([callSlotOccupant]) — and
- * the two part company for exactly one state: an incoming call that is ringing
- * and has not been answered. Nothing is capturing then. The callee's microphone
- * is not opened until they accept, which is why
- * [OneToOneCallHost] builds no peer connection for a ringing offer.
+ * different question — "is there a call in THIS chat" — and the two part
+ * company for exactly one state: an incoming call that is ringing and has not
+ * been answered. Nothing is capturing then. The callee's microphone is not
+ * opened until they accept, which is why [OneToOneCallHost] builds no peer
+ * connection for a ringing offer.
+ *
+ * ## Why the question is app-wide, not per-chat
+ *
+ * "A call in this chat" was the same question as "a call is live" for as long
+ * as a live call owned the whole screen: there was no other chat to be standing
+ * in. `docs/ux/calls.md` section 4.5 collapses a call to a bar, so a person can
+ * be reading chat B with a call running from chat A — and the microphone is
+ * just as busy there. So the fact this file supplies is the app-wide call slot
+ * ([callSlotOccupant] over [AppCallHost.occupant]), never a comparison of the
+ * call's group id against the open chat's.
  *
  * With a call ringing quietly in a MUTED conversation (`docs/ux/calls.md`
  * section 2.1.1) the composer therefore refused the one reply that fits the
@@ -79,6 +89,11 @@ public fun unansweredIncomingRing(
  * names the rule it is asking, and an empty slot ([occupant] `null`) is handed
  * over unchanged rather than short-circuited: the rule is what decides, and one
  * fewer branch here is one fewer place for this client to answer on its own.
+ *
+ * [occupant] is the ONE app-wide call slot, so `callIsLive` below means "a call
+ * is live at all" and not "a call is live in the chat on screen" — a call
+ * collapsed into the bar of `docs/ux/calls.md` section 4.5 holds the microphone
+ * in every chat.
  */
 public fun callOwnsCapture(
     occupant: CallKind?,
@@ -86,6 +101,7 @@ public fun callOwnsCapture(
     state: CallSession.WebCallState,
     holdsCapture: (Boolean, Boolean) -> Boolean,
 ): Boolean = holdsCapture(
+    // callIsLive
     occupant != null,
     unansweredIncomingRing(
         occupant = occupant,

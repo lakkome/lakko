@@ -13,18 +13,26 @@
  *
  * The rules, and where they come from:
  *
- *   * Press and hold starts recording immediately — once permission is
- *     known to be granted (§2 flow 1, §6).
+ *   * A press does not record at once. It opens a `pressing` phase in which
+ *     NOTHING is captured, and the microphone opens only once the pointer has
+ *     been down for `HOLD_TO_RECORD_MS` — with permission known to be granted
+ *     (§2 flow 1, §6).
+ *   * A press released before that, without drifting past `TAP_SLOP_PX`, is a
+ *     TAP: it switches mic / camera mode and records nothing (§3.1). The
+ *     composer is ONE button, so the tap is the only way a pointer reaches the
+ *     other mode, and it must not leave a take behind.
  *   * Release sends (§2.3). Slide left past `CANCEL_SLIDE_PX` cancels
  *     (§2.4). Slide up past `LOCK_SLIDE_PX` locks (§2.5).
  *   * A take shorter than `MIN_TAKE_MS` is discarded with the
- *     `Hold to record` hint (§2.8) — for a TOUCH or PEN press. A MOUSE press
- *     that short is a click, and a click starts a LOCKED recording (§2 web
- *     note), so the same capture simply continues, locked.
- *   * A short touch tap also toggles mic / camera mode (§1: "after a tap
- *     toggles the mode").
+ *     `Hold to record` hint (§2.8), for every pointer kind alike, and is NOT
+ *     read as a mode switch: the press had already opened the microphone, so
+ *     it is the accidental-press case and nothing else (§3.1). The tap and the
+ *     too-short take are told apart by the gesture — how long the pointer was
+ *     down — and never by what the recorder later produced.
  *   * Keyboard activation (no pointer gesture) starts a locked recording —
- *     the accessible single-activation path (§7).
+ *     the accessible single-activation path (§7). Switching mode without a
+ *     pointer is a separate control the view carries (§3.1), not an event
+ *     here.
  *   * The cap (`VOICE_CAP_MS` 15 min, `VIDEO_NOTE_CAP_MS` 60 s) stops the
  *     take into preview (§2.7, §3.3).
  *   * The hold that triggered a permission PROMPT does not record (§6). When
@@ -45,8 +53,29 @@ export type PermissionHint = "granted" | "prompt" | "denied" | "unknown";
 export const VOICE_CAP_MS = 15 * 60 * 1000;
 /** §3.3 — the video-note cap. */
 export const VIDEO_NOTE_CAP_MS = 60 * 1000;
-/** §2.8 — shorter takes are discarded (touch) or read as a click (mouse). */
+/** §2.8 — shorter takes are discarded with the `Hold to record` hint. */
 export const MIN_TAKE_MS = 500;
+/**
+ * §3.1 — how long a pointer stays down before the microphone opens.
+ *
+ * Under it the press is a TAP, which switches the mode; at it the press is a
+ * HOLD, which records. The two rules of §3.1 — "a tap never records" and "a
+ * take under the floor is an accidental press, not a mode switch" — can only
+ * both hold if the decision is made BEFORE any capture starts, which is what
+ * this threshold is. Kept well under `MIN_TAKE_MS` so the accidental press it
+ * describes stays reachable: a hold released between the two is a real take,
+ * too short to send.
+ */
+export const HOLD_TO_RECORD_MS = 200;
+/**
+ * How far a pointer may drift while still being a tap.
+ *
+ * A press that travels further is a drag — the beginning of a cancel or a lock
+ * — and releasing it switches nothing, because flipping the composer's mode
+ * under a finger that was reaching for the cancel target would be the last
+ * thing it meant.
+ */
+export const TAP_SLOP_PX = 10;
 /** §2.4 — how far left a held pointer travels before the take is cancelled. */
 export const CANCEL_SLIDE_PX = 80;
 /** §2.5 — how far up a held pointer travels before the take locks. */
@@ -60,6 +89,28 @@ export function capFor(kind: CaptureKind): number {
 
 export type RecState =
   | { readonly phase: "idle" }
+  /**
+   * The pointer is down and NOTHING is captured yet (§3.1).
+   *
+   * The composer must not change while this lasts: from the person's side a
+   * tap that switches the mode and a hold that starts a take begin
+   * identically, and swapping the text field for a recording bar on every tap
+   * is the flicker §3.1 was written against. `recorderBusy` therefore reads
+   * this phase as not busy, and the button does not light up.
+   */
+  | {
+      readonly phase: "pressing";
+      readonly kind: CaptureKind;
+      readonly pointer: PointerKind;
+      readonly pressedAt: number;
+      /** What the browser said about permission when the press landed; spent
+       *  only if the press becomes a hold, so a tap prompts for nothing. */
+      readonly permission: PermissionHint;
+      readonly originX: number;
+      readonly originY: number;
+      readonly dx: number;
+      readonly dy: number;
+    }
   | {
       readonly phase: "requesting";
       readonly kind: CaptureKind;
@@ -75,7 +126,12 @@ export type RecState =
   | {
       readonly phase: "recording";
       readonly kind: CaptureKind;
-      readonly pointer: PointerKind;
+      /**
+       * No `pointer` here, and its absence is a rule: since §3.1 a mouse and
+       * a finger answer a release identically, and a field nothing reads is
+       * an invitation to re-branch on the pointer kind - which is exactly the
+       * divergence §3.1 was written to end.
+       */
       readonly startedAt: number;
       readonly originX: number;
       readonly originY: number;
@@ -154,6 +210,8 @@ export function reduce(state: RecState, event: RecEvent): RecStep {
   switch (state.phase) {
     case "idle":
       return fromIdle(event);
+    case "pressing":
+      return fromPressing(state, event);
     case "requesting":
       return fromRequesting(state, event);
     case "recording":
@@ -169,37 +227,22 @@ export function reduce(state: RecState, event: RecEvent): RecStep {
 
 function fromIdle(event: RecEvent): RecStep {
   if (event.type === "press") {
-    if (event.permission === "denied") {
-      return step(IDLE, { type: "show-denied", kind: event.kind });
-    }
-    if (event.permission === "granted") {
-      return step(
-        {
-          phase: "recording",
-          kind: event.kind,
-          pointer: event.pointer,
-          startedAt: event.at,
-          originX: event.x,
-          originY: event.y,
-          dx: 0,
-          dy: 0,
-        },
-        { type: "start-capture", kind: event.kind },
-      );
-    }
-    return step(
-      {
-        phase: "requesting",
-        kind: event.kind,
-        pointer: event.pointer,
-        pressedAt: event.at,
-        held: true,
-        knownPrompt: event.permission === "prompt",
-        originX: event.x,
-        originY: event.y,
-      },
-      { type: "request-permission", kind: event.kind },
-    );
+    // No effect at all, deliberately: a press might still turn out to be a
+    // tap, and a tap neither records nor asks for permission. Everything the
+    // decision needs is carried until `HOLD_TO_RECORD_MS` has passed - the
+    // denied card included, which would otherwise appear over a gesture that
+    // was only reaching for the other mode.
+    return step({
+      phase: "pressing",
+      kind: event.kind,
+      pointer: event.pointer,
+      pressedAt: event.at,
+      permission: event.permission,
+      originX: event.x,
+      originY: event.y,
+      dx: 0,
+      dy: 0,
+    });
   }
   if (event.type === "activate") {
     if (event.permission === "denied") {
@@ -226,6 +269,86 @@ function fromIdle(event: RecEvent): RecStep {
     );
   }
   return step(IDLE);
+}
+
+/** Did the pointer stay close enough to the press point to still be a tap? */
+function withinTapSlop(state: Extract<RecState, { phase: "pressing" }>): boolean {
+  return Math.abs(state.dx) <= TAP_SLOP_PX && Math.abs(state.dy) <= TAP_SLOP_PX;
+}
+
+/**
+ * The window in which a press has not yet decided what it is (§3.1).
+ *
+ * `tick` is the hold threshold arriving, and it is the only door out of here
+ * that opens the microphone.
+ */
+function fromPressing(
+  state: Extract<RecState, { phase: "pressing" }>,
+  event: RecEvent,
+): RecStep {
+  switch (event.type) {
+    case "move":
+      return step({ ...state, dx: event.x - state.originX, dy: event.y - state.originY });
+    case "release": {
+      if (!withinTapSlop(state)) return step(IDLE);
+      if (event.at - state.pressedAt < HOLD_TO_RECORD_MS) {
+        // §3.1 — a tap, and the only gesture that switches the mode. No hint:
+        // nothing went wrong and nothing was thrown away.
+        return step(IDLE, { type: "toggle-mode" });
+      }
+      // Past the threshold with no capture to show for it - the timer was
+      // late (a throttled tab), so the press was a hold that never got going.
+      // The honest answer is the hint, never a mode switch the person did not
+      // ask for.
+      return step(IDLE, { type: "hint", hint: "hold-to-record" });
+    }
+    case "tick": {
+      if (event.at - state.pressedAt < HOLD_TO_RECORD_MS) return step(state);
+      if (state.dx <= -CANCEL_SLIDE_PX) {
+        // Already sitting in the cancel target. Opening the microphone here
+        // would only be to shut it on the next move event.
+        return step(IDLE);
+      }
+      if (state.permission === "denied") {
+        return step(IDLE, { type: "show-denied", kind: state.kind });
+      }
+      if (state.permission === "granted") {
+        return step(
+          {
+            phase: "recording",
+            kind: state.kind,
+            startedAt: event.at,
+            originX: state.originX,
+            originY: state.originY,
+            dx: state.dx,
+            dy: state.dy,
+          },
+          { type: "start-capture", kind: state.kind },
+        );
+      }
+      return step(
+        {
+          phase: "requesting",
+          kind: state.kind,
+          pointer: state.pointer,
+          // The moment the request goes out, not the moment of the press:
+          // `PROMPT_INFERENCE_MS` measures how long the GRANT took, and
+          // charging the hold threshold against that budget would read a
+          // prompt-less grant as a prompt.
+          pressedAt: event.at,
+          held: true,
+          knownPrompt: state.permission === "prompt",
+          originX: state.originX,
+          originY: state.originY,
+        },
+        { type: "request-permission", kind: state.kind },
+      );
+    }
+    case "cancel":
+      return step(IDLE);
+    default:
+      return step(state);
+  }
 }
 
 function fromRequesting(
@@ -260,7 +383,6 @@ function fromRequesting(
           {
             phase: "recording",
             kind: state.kind,
-            pointer: state.pointer,
             startedAt: event.at,
             originX: state.originX,
             originY: state.originY,
@@ -270,18 +392,14 @@ function fromRequesting(
           { type: "start-capture", kind: state.kind },
         );
       }
-      // Released before the (prompt-less) grant arrived: a quick press.
-      if (state.pointer === "mouse") {
-        return step(
-          { phase: "locked", kind: state.kind, startedAt: event.at },
-          { type: "start-capture", kind: state.kind },
-        );
-      }
+      // Released before the (prompt-less) grant arrived. The hold threshold
+      // is already behind it - nothing reaches this state without crossing it
+      // - so this was a hold that ended before anything could record, not a
+      // tap, and it does not switch the mode.
       return step(
         IDLE,
         { type: "release-stream" },
         { type: "hint", hint: "hold-to-record" },
-        { type: "toggle-mode" },
       );
     }
     default:
@@ -311,15 +429,14 @@ function fromRecording(
     }
     case "release": {
       if (event.at - state.startedAt < MIN_TAKE_MS) {
-        if (state.pointer === "mouse") {
-          // A click: the take already running becomes a locked recording.
-          return step({ phase: "locked", kind: state.kind, startedAt: state.startedAt });
-        }
+        // §3.1 - the accidental press, and nothing else. The microphone is
+        // already open by the time a take exists, so this is never read back
+        // as a tap on the mode switch; every pointer kind is treated alike,
+        // because a mouse reaches the mode through the same tap a finger does.
         return step(
           IDLE,
           { type: "finish", disposition: "discard" },
           { type: "hint", hint: "hold-to-record" },
-          { type: "toggle-mode" },
         );
       }
       return step(IDLE, { type: "finish", disposition: "send" });

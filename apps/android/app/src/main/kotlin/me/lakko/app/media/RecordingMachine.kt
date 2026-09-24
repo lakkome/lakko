@@ -17,18 +17,38 @@ package me.lakko.app.media
  *
  * The rules, and where they come from:
  *
- *   * Press and hold starts recording immediately, once permission is known
- *     to be granted (§2 flow 1, §6).
+ *   * §3.1 — the button answers TWO gestures, and the difference is decided ON
+ *     THE GESTURE, BEFORE anything is captured, never on how long the take
+ *     turned out to be. A press becomes a hold once it has lasted [TAP_MAX_MS]
+ *     without travelling past [TAP_SLOP_PX], and only then is a permission
+ *     asked for and a capture started ([RecState.Pressing]). Let go sooner, it
+ *     is a tap and switches the mode; travel further, it is neither.
+ *
+ *     This is what the spec means by "a tap therefore never records". It also
+ *     used to be the visible defect on this client: a tap went straight into
+ *     [RecState.Recording], which swaps the composer for the recording bar and
+ *     — in camera mode — mounts the full-screen round preview, so the whole
+ *     screen flashed for the few tens of milliseconds a tap lasts.
+ *   * Press and hold starts recording immediately once the press has armed
+ *     and permission is known to be granted (§2 flow 1, §6).
  *   * Release sends (§2.3). Slide left past [CANCEL_SLIDE_PX] cancels (§2.4).
  *     Slide up past [LOCK_SLIDE_PX] locks (§2.5).
  *   * A take shorter than [MIN_TAKE_MS] is discarded with the `Hold to record`
- *     hint (§2.8) for a touch or pen press. A mouse press that short is a
- *     click, and a click starts a LOCKED recording (the §2 desktop note; a
- *     mouse on ChromeOS or a tablet takes the same path).
- *   * A short touch tap also toggles mic / camera mode (§1).
+ *     hint (§2.8), and is NOT a mode switch: §3.1 is explicit that the press
+ *     had already opened the microphone, so it is the accidental-press case
+ *     rather than the tap.
+ *   * §3.1 — **no press ever ends in a locked recording**, whatever the
+ *     pointer. An older desktop note let a short mouse press carry on
+ *     hands-free; that gave the one gesture a second meaning, and it was the
+ *     only pointer route to the camera before the mode switch existed. A mouse
+ *     now takes exactly the paths a thumb does — too short to arm is a tap and
+ *     switches the mode, armed-then-let-go-early is the accidental press — and
+ *     reaches [RecState.Locked] by holding and sliding up onto the lock target,
+ *     which a pointer reaches as readily as a thumb.
  *   * Accessibility activation (TalkBack double-tap, a switch, a keyboard)
  *     starts a locked recording — the single-activation path §7 requires,
- *     since hold-and-slide is not accessible.
+ *     since hold-and-slide is not accessible. It is the ONE route to
+ *     [RecState.Locked] that is not a hold, because it is not a press at all.
  *   * The cap ([VOICE_CAP_MS] 15 min, [VIDEO_NOTE_CAP_MS] 60 s) stops the take
  *     into preview (§2.7, §3.3).
  *   * The hold that triggered a permission PROMPT does not record (§6). On
@@ -56,6 +76,36 @@ public const val VIDEO_NOTE_CAP_MS: Long = 60L * 1000L
 /** §2.8 — shorter takes are discarded (touch) or read as a click (mouse). */
 public const val MIN_TAKE_MS: Long = 500L
 
+/**
+ * §3.1 — how long a press must last before it stops being a tap.
+ *
+ * A tap switches the mode; a hold records. Nothing is captured and no
+ * permission is asked for until this has elapsed with the pointer still down,
+ * which is what makes "a tap records nothing" true rather than "a tap records
+ * and throws it away".
+ *
+ * The number is a choice, not a measurement, and it sits between the two the
+ * platform offers: `ViewConfiguration`'s tap timeout (100 ms) is inside the
+ * jitter of a deliberate press, and its long-press timeout (500 ms) is
+ * [MIN_TAKE_MS], so arming there would make the shortest sendable take a
+ * full second of holding. It is deliberately well under [MIN_TAKE_MS] so the
+ * two thresholds stay independent: arming decides tap-or-hold, and
+ * [MIN_TAKE_MS] decides whether an armed take is worth sending.
+ */
+public const val TAP_MAX_MS: Long = 200L
+
+/**
+ * §3.1 — how far a press may travel and still be judged tap-or-hold.
+ *
+ * A press that wanders past this is **neither**: not the mode switch, because a
+ * finger on its way to the cancel target must not flip the mode when it is let
+ * go, and not a take either, because nothing was ever opened. It simply ends.
+ *
+ * Far below [CANCEL_SLIDE_PX] and [LOCK_SLIDE_PX], which act on a running take;
+ * this one only says the press was a drag rather than a press.
+ */
+public const val TAP_SLOP_PX: Float = 10f
+
 /** §2.4 — how far left (in px) a held pointer travels before the take cancels. */
 public const val CANCEL_SLIDE_PX: Float = 80f
 
@@ -73,6 +123,23 @@ public enum class RequestSource { MOUSE, TOUCH, PEN, ACCESSIBILITY }
 
 public sealed interface RecState {
     public data object Idle : RecState
+
+    /**
+     * §3.1 — the pointer is down and NOTHING has been captured: no microphone,
+     * no camera, no permission prompt. The press is still a tap, and becomes a
+     * hold at [TAP_MAX_MS] via [RecEvent.HoldElapsed].
+     *
+     * No UI state belongs to it. The composer must look exactly as it does in
+     * [Idle] while a press is being judged, or a tap flashes the recording UI
+     * — see [showsRecordingUi].
+     */
+    public data class Pressing(
+        val kind: CaptureKind,
+        val pointer: PointerKind,
+        val pressedAt: Long,
+        val originX: Float,
+        val originY: Float,
+    ) : RecState
 
     public data class Requesting(
         val kind: CaptureKind,
@@ -107,14 +174,24 @@ public sealed interface RecState {
 }
 
 public sealed interface RecEvent {
+    /**
+     * The pointer went down. It carries no permission hint: a press on its own
+     * asks for nothing and captures nothing, so there is nothing to decide
+     * yet. The hint arrives with [HoldElapsed], read at the moment it matters.
+     */
     public data class Press(
         val kind: CaptureKind,
         val pointer: PointerKind,
         val x: Float,
         val y: Float,
         val at: Long,
-        val permission: PermissionHint,
     ) : RecEvent
+
+    /**
+     * §3.1 — the arming timer fired with the pointer still down, so the press
+     * is a hold. This is the first moment anything may be asked for or opened.
+     */
+    public data class HoldElapsed(val at: Long, val permission: PermissionHint) : RecEvent
 
     public data class Move(val x: Float, val y: Float) : RecEvent
 
@@ -184,8 +261,21 @@ private fun step(state: RecState, vararg effects: RecEffect): RecStep =
 public fun isCapturing(state: RecState): Boolean =
     state is RecState.Recording || state is RecState.Locked
 
+/**
+ * Does the recording UI replace the composer in this state?
+ *
+ * Written down here rather than as a condition at the composer, because the
+ * states where it must NOT is the whole of §3.1's "a tap records nothing": a
+ * press being judged ([RecState.Pressing]) and a permission being asked for
+ * ([RecState.Requesting]) both look exactly like [RecState.Idle], and a screen
+ * that swaps its composer for either of them flashes on every tap.
+ */
+public fun showsRecordingUi(state: RecState): Boolean =
+    state !is RecState.Idle && state !is RecState.Pressing && state !is RecState.Requesting
+
 public fun reduce(state: RecState, event: RecEvent): RecStep = when (state) {
     RecState.Idle -> fromIdle(event)
+    is RecState.Pressing -> fromPressing(state, event)
     is RecState.Requesting -> fromRequesting(state, event)
     is RecState.Recording -> fromRecording(state, event)
     is RecState.Locked -> fromLocked(state, event)
@@ -207,33 +297,17 @@ private fun RequestSource.asPointer(): PointerKind? = when (this) {
 }
 
 private fun fromIdle(event: RecEvent): RecStep = when (event) {
-    is RecEvent.Press -> when (event.permission) {
-        PermissionHint.DENIED -> step(RecState.Idle, RecEffect.ShowDenied(event.kind))
-        PermissionHint.GRANTED -> step(
-            RecState.Recording(
-                kind = event.kind,
-                pointer = event.pointer,
-                startedAt = event.at,
-                originX = event.x,
-                originY = event.y,
-                dx = 0f,
-                dy = 0f,
-            ),
-            RecEffect.StartCapture(event.kind),
-        )
-        else -> step(
-            RecState.Requesting(
-                kind = event.kind,
-                source = event.pointer.asSource(),
-                pressedAt = event.at,
-                held = true,
-                knownPrompt = event.permission == PermissionHint.PROMPT,
-                originX = event.x,
-                originY = event.y,
-            ),
-            RecEffect.RequestPermission(event.kind),
-        )
-    }
+    // §3.1 — a press decides nothing yet. No permission is read, no card is
+    // shown, no capture starts: it is a tap until it has been held.
+    is RecEvent.Press -> step(
+        RecState.Pressing(
+            kind = event.kind,
+            pointer = event.pointer,
+            pressedAt = event.at,
+            originX = event.x,
+            originY = event.y,
+        ),
+    )
 
     is RecEvent.Activate -> when (event.permission) {
         PermissionHint.DENIED -> step(RecState.Idle, RecEffect.ShowDenied(event.kind))
@@ -257,6 +331,76 @@ private fun fromIdle(event: RecEvent): RecStep = when (event) {
 
     else -> step(RecState.Idle)
 }
+
+/**
+ * §3.1 — the press is being judged, and the judgement is made ON THE GESTURE,
+ * before anything is captured. Three ways out: it is let go, which makes it a
+ * tap; it outlives [TAP_MAX_MS] in place, which makes it a hold; or it travels
+ * past [TAP_SLOP_PX], which makes it neither.
+ *
+ * Judging it on the outcome instead — start recording and decide afterwards
+ * whether the take was long enough — is what opened the microphone on every tap
+ * and flashed the recording UI while doing it.
+ */
+private fun fromPressing(state: RecState.Pressing, event: RecEvent): RecStep = when (event) {
+    // The tap. Nothing was captured, so there is nothing to discard and no
+    // `Hold to record` hint either: the person did not fail to hold a
+    // recording, they asked for the other mode.
+    is RecEvent.Release -> step(RecState.Idle, RecEffect.ToggleMode)
+
+    // Past the slop the press is neither gesture, and it ends here rather than
+    // waiting: going idle is also what stops a later [RecEvent.HoldElapsed]
+    // from arming a take the finger has already walked away from.
+    is RecEvent.Move ->
+        if (travelledPastSlop(state, event)) step(RecState.Idle) else step(state)
+
+    RecEvent.Cancel, RecEvent.Revoked -> step(RecState.Idle)
+    is RecEvent.HoldElapsed -> armedHold(state, event)
+    else -> step(state)
+}
+
+/** Straight-line distance from the press point, against [TAP_SLOP_PX]. */
+private fun travelledPastSlop(state: RecState.Pressing, event: RecEvent.Move): Boolean {
+    val dx = event.x - state.originX
+    val dy = event.y - state.originY
+    return dx * dx + dy * dy > TAP_SLOP_PX * TAP_SLOP_PX
+}
+
+/**
+ * The press outlived [TAP_MAX_MS]: it is a hold, and this is the first moment
+ * a permission may be asked for or a microphone opened.
+ *
+ * The take is timed from [RecEvent.HoldElapsed.at] rather than from the press,
+ * so [MIN_TAKE_MS] keeps measuring recorded audio rather than finger time.
+ */
+private fun armedHold(state: RecState.Pressing, event: RecEvent.HoldElapsed): RecStep =
+    when (event.permission) {
+        PermissionHint.DENIED -> step(RecState.Idle, RecEffect.ShowDenied(state.kind))
+        PermissionHint.GRANTED -> step(
+            RecState.Recording(
+                kind = state.kind,
+                pointer = state.pointer,
+                startedAt = event.at,
+                originX = state.originX,
+                originY = state.originY,
+                dx = 0f,
+                dy = 0f,
+            ),
+            RecEffect.StartCapture(state.kind),
+        )
+        else -> step(
+            RecState.Requesting(
+                kind = state.kind,
+                source = state.pointer.asSource(),
+                pressedAt = event.at,
+                held = true,
+                knownPrompt = event.permission == PermissionHint.PROMPT,
+                originX = state.originX,
+                originY = state.originY,
+            ),
+            RecEffect.RequestPermission(state.kind),
+        )
+    }
 
 private fun fromRequesting(state: RecState.Requesting, event: RecEvent): RecStep = when (event) {
     is RecEvent.Release -> step(state.copy(held = false))
@@ -294,15 +438,15 @@ private fun requestingResolved(
             RecEffect.StartCapture(state.kind),
         )
     }
-    // Released before the (prompt-less) grant arrived: a quick press.
-    if (pointer == PointerKind.MOUSE) {
-        return step(RecState.Locked(state.kind, event.at), RecEffect.StartCapture(state.kind))
-    }
+    // Released before the (prompt-less) grant arrived: a quick press. Not a
+    // mode switch — §3.1 — because the press had already armed and asked for
+    // the microphone, so it is the accidental-press case of §2.8. A mouse takes
+    // the same exit as a thumb: §3.1's "no press ever ends in a locked
+    // recording".
     return step(
         RecState.Idle,
         RecEffect.ReleaseStream,
         RecEffect.Hint(RecHint.HOLD_TO_RECORD),
-        RecEffect.ToggleMode,
     )
 }
 
@@ -324,13 +468,14 @@ private fun fromRecording(state: RecState.Recording, event: RecEvent): RecStep =
     is RecEvent.Release -> when {
         event.at - state.startedAt >= MIN_TAKE_MS ->
             step(RecState.Idle, RecEffect.Finish(FinishDisposition.SEND))
-        // A click: the take already running becomes a locked recording.
-        state.pointer == PointerKind.MOUSE -> step(RecState.Locked(state.kind, state.startedAt))
+        // §3.1 — the accidental press, and NOT a mode switch: the microphone
+        // was already open, so the tap that switches the mode is the one that
+        // never reached [RecState.Recording] at all. Every pointer takes this
+        // exit — see §3.1's "no press ever ends in a locked recording".
         else -> step(
             RecState.Idle,
             RecEffect.Finish(FinishDisposition.DISCARD),
             RecEffect.Hint(RecHint.HOLD_TO_RECORD),
-            RecEffect.ToggleMode,
         )
     }
 

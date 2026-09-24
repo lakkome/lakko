@@ -618,9 +618,14 @@ public final class ChatViewModel: ObservableObject {
     /// buttons rightly stand down — while taking no microphone, so a voice
     /// message must still be recordable. ``CallCapture`` is the seam onto the
     /// shared rule; this only reads the facts.
+    ///
+    /// Every fact is read from the app-level call hosts, so a call collapsed
+    /// into the bar of `docs/ux/calls.md` section 4.5 holds the microphone in
+    /// THIS chat too, not only in the one it was placed from. Nothing here is
+    /// compared against ``groupIdHex``.
     var callOwnsCapture: Bool {
         CallCapture.ownsCapture(
-            callInSlot: activeCall != nil || anyCallInProgress,
+            callIsLive: activeCall != nil || anyCallInProgress,
             oneToOneState: callHost.activeCallState,
             otherKindInSlot: callHost.otherCallBusy || groupCallHost.occupiesSlot)
     }

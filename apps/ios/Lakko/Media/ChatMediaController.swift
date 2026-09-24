@@ -90,6 +90,10 @@ public final class ChatMediaController: ObservableObject {
     private var voiceRecorder: VoiceRecorder?
     private var videoRecorder: VideoNoteRecorder?
     private var ticker: Timer?
+    /// UX spec §3.1 — the clock that turns a press into a hold. One per press,
+    /// invalidated the moment the press ends however it ends, so a lifted
+    /// finger can never open the microphone behind the tap it just performed.
+    private var holdTimer: Timer?
     private var hintClear: Task<Void, Never>?
 
     // MARK: - Send queue
@@ -192,6 +196,18 @@ public final class ChatMediaController: ObservableObject {
         dispatch(.release(at: now))
     }
 
+    /// The record button left the view hierarchy with a finger still on it, so
+    /// SwiftUI will send no further gesture events.
+    ///
+    /// A take already running is released exactly as a lifted finger would
+    /// release it. A press that had not yet become a take is DROPPED rather
+    /// than released: UX spec §3.1 makes a release inside the hold window the
+    /// tap that switches mic / camera, and a button vanishing under a thumb is
+    /// not a person asking for the other mode.
+    public func gestureLost() {
+        dispatch(recState.isPressed ? .cancel : .release(at: now))
+    }
+
     /// VoiceOver / Switch Control: a single activation starts a locked take.
     public func activate() {
         guard !callActive else {
@@ -228,11 +244,16 @@ public final class ChatMediaController: ObservableObject {
         recState = step.state
         if step.state.isCapturing, !wasCapturing { startTicker() }
         if !step.state.isCapturing { stopTicker() }
+        // The press is over — whichever way it went. Dropping the clock here
+        // rather than at each exit means no new exit can forget to.
+        if !step.state.isPressed { stopHoldTimer() }
         for effect in step.effects { perform(effect) }
     }
 
     private func perform(_ effect: RecEffect) {
         switch effect {
+        case .armHold:
+            armHoldTimer()
         case .requestPermission(let kind):
             Task {
                 let cameraOK = kind == .videoNote ? await CameraPermission.ensureGranted() : true
@@ -389,6 +410,29 @@ public final class ChatMediaController: ObservableObject {
     private func stopTicker() {
         ticker?.invalidate()
         ticker = nil
+    }
+
+    /// UX spec §3.1 — arm the tap / hold clock for the press just registered.
+    private func armHoldTimer() {
+        stopHoldTimer()
+        holdTimer = Timer.scheduledTimer(
+            withTimeInterval: Double(RecordingMachine.holdToRecordMs) / 1000,
+            repeats: false
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.holdTimer = nil
+                // Belt and braces: the timer is invalidated on every exit from
+                // `pressing`, so this can only be a press still held down.
+                guard self.recState.isPressed else { return }
+                self.dispatch(.holdElapsed(at: self.now))
+            }
+        }
+    }
+
+    private func stopHoldTimer() {
+        holdTimer?.invalidate()
+        holdTimer = nil
     }
 
     private func flashHint(_ text: String) {

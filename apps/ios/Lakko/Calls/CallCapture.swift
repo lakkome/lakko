@@ -17,6 +17,14 @@ import LakkoCore
 /// is what builds the peer connection and adds the local audio track; a ringing
 /// offer has neither.
 ///
+/// The question is whether a call is live AT ALL, not whether it is live in the
+/// chat being looked at. It used to be the same question, because a live call
+/// owned the whole screen and there was no other chat to be standing in;
+/// `docs/ux/calls.md` section 4.5 collapses a call to a bar, so a person can be
+/// in chat B with a call running from chat A — and the microphone is just as
+/// busy there. Every fact below is read from the app-level ``CallHost`` /
+/// ``GroupCallHost`` slot, never compared against the open chat's group id.
+///
 /// So with a call ringing quietly in a MUTED conversation (`docs/ux/calls.md`
 /// section 2.1.1) the composer refused the one reply that fitted the moment — a
 /// voice message saying they cannot talk. It was invisible until those quiet
@@ -64,17 +72,18 @@ enum CallCapture {
 
     /// Whether the composer's recorder must stand aside, by the shared rule.
     ///
-    /// `callInSlot` is this client's own read of the call slot, handed over
-    /// unchanged rather than short-circuited on: the rule is what decides, and
-    /// one fewer branch here is one fewer place for this client to answer on its
-    /// own.
+    /// `callIsLive` is this client's own read of its one app-wide call slot,
+    /// handed over unchanged rather than short-circuited on: the rule is what
+    /// decides, and one fewer branch here is one fewer place for this client to
+    /// answer on its own. It is app-wide and not per-chat on purpose — see the
+    /// type's note on `docs/ux/calls.md` section 4.5.
     static func ownsCapture(
-        callInSlot: Bool,
+        callIsLive: Bool,
         oneToOneState: CallSession.WebCallState?,
         otherKindInSlot: Bool
     ) -> Bool {
         LakkoCore.callHoldsCapture(
-            callInThisChat: callInSlot,
+            callIsLive: callIsLive,
             unansweredIncomingRing: unansweredIncomingRing(
                 oneToOneState: oneToOneState, otherKindInSlot: otherKindInSlot))
     }

@@ -14,12 +14,20 @@ import Foundation
 ///
 /// The rules, and where they come from:
 ///
-///   * Press and hold starts recording immediately, once permission is known
-///     to be granted (§2 flow 1, §6).
+///   * §3.1 — the composer's right-hand button is ONE button answering TWO
+///     gestures, and which one it was is decided on the GESTURE, not on what
+///     the take turned out to be. A touch that goes down and comes up within
+///     ``holdToRecordMs`` without travelling past ``tapSlopPoints`` is a TAP:
+///     it switches mic / camera and records nothing — it never opens the
+///     microphone, never raises a permission prompt and never shows the
+///     denied card. A touch still down at ``holdToRecordMs`` is a HOLD, and
+///     only then does the permission decision run and a take begin.
 ///   * Release sends (§2.3). Slide left past ``cancelSlidePoints`` cancels
 ///     (§2.4). Slide up past ``lockSlidePoints`` locks (§2.5).
 ///   * A take shorter than ``minTakeMs`` is discarded with the `Hold to
-///     record` hint (§2.8), and that short tap toggles mic / camera (§1).
+///     record` hint (§2.8). It is NOT a mode switch: by then the press had
+///     already passed the hold threshold and opened the microphone, so it is
+///     the accidental-press case, not the tap.
 ///   * An accessibility activation (VoiceOver double-tap, no hold) starts a
 ///     LOCKED recording — the single-activation path §7 requires.
 ///   * The cap (``voiceCapMs`` 15 min, ``videoNoteCapMs`` 60 s) stops the take
@@ -36,6 +44,15 @@ public enum RecordingMachine {
     public static let videoNoteCapMs: Int64 = 60 * 1000
     /// §2.8 — shorter takes are discarded.
     public static let minTakeMs: Int64 = 500
+    /// §3.1 — how long a finger must stay down before the press is a HOLD
+    /// rather than a tap. Short enough that a real hold does not feel
+    /// delayed, long enough that a deliberate tap never opens the microphone;
+    /// the take's own clock starts here, so it does not eat into
+    /// ``minTakeMs``.
+    public static let holdToRecordMs: Int64 = 200
+    /// §3.1 — how far a finger may drift and still be a tap. Anything further
+    /// is a gesture, not a tap, so releasing it switches nothing.
+    public static let tapSlopPoints: Double = 10
     /// §2.4 — how far left a held finger travels before the take is cancelled.
     public static let cancelSlidePoints: Double = 80
     /// §2.5 — how far up a held finger travels before the take locks.
@@ -49,6 +66,8 @@ public enum RecordingMachine {
         switch state {
         case .idle:
             return fromIdle(event)
+        case .pressing(let kind, let at, let permission, let moved):
+            return fromPressing(kind: kind, at: at, permission: permission, moved: moved, event)
         case .requesting(let kind):
             return fromRequesting(kind: kind, event)
         case .recording(let kind, let startedAt, _, _):
@@ -65,17 +84,14 @@ public enum RecordingMachine {
     private static func fromIdle(_ event: RecEvent) -> RecStep {
         switch event {
         case .press(let kind, let at, let permission):
-            switch permission {
-            case .denied:
-                return RecStep(.idle, [.showDenied(kind)])
-            case .granted:
-                return RecStep(
-                    .recording(kind: kind, startedAt: at, dx: 0, dy: 0),
-                    [.startCapture(kind)]
-                )
-            case .prompt:
-                return RecStep(.requesting(kind: kind), [.requestPermission(kind)])
-            }
+            // §3.1 — a press is not yet a take. Nothing is decided here: not
+            // permission, not capture, not the denied card. The finger has to
+            // stay down for ``holdToRecordMs`` first, and a tap that lifts
+            // before then only switches the mode.
+            return RecStep(
+                .pressing(kind: kind, at: at, permission: permission, moved: false),
+                [.armHold]
+            )
         case .activate(let kind, let at, let permission):
             switch permission {
             case .denied:
@@ -87,6 +103,54 @@ public enum RecordingMachine {
             }
         default:
             return RecStep(.idle)
+        }
+    }
+
+    /// §3.1 — the window in which the one button is still both gestures.
+    ///
+    /// The tap / hold verdict is taken here, on the GESTURE, and never on what
+    /// the take turned out to be: a release inside the window is a tap and a
+    /// mode switch, and everything that would have opened the microphone
+    /// waits for ``RecEvent/holdElapsed(at:)``.
+    private static func fromPressing(
+        kind: CaptureKind,
+        at: Int64,
+        permission: PermissionHint,
+        moved: Bool,
+        _ event: RecEvent
+    ) -> RecStep {
+        switch event {
+        case .move(let dx, let dy):
+            // A finger that has travelled is no longer a tap, however soon it
+            // lifts. The take still waits for the hold threshold, so a flick
+            // that both starts and ends inside the window records nothing and
+            // switches nothing.
+            // Per axis, not by distance, because that is how the web machine
+            // reads its identical `TAP_SLOP_PX` and a diagonal drift must not
+            // be a tap on one client and a gesture on another.
+            let travelled = moved || abs(dx) > tapSlopPoints || abs(dy) > tapSlopPoints
+            return RecStep(.pressing(kind: kind, at: at, permission: permission, moved: travelled))
+        case .release:
+            // The tap, and the ONLY thing that switches the mode.
+            return RecStep(.idle, moved ? [] : [.toggleMode])
+        case .holdElapsed(let now):
+            // A hold: now the permission decision runs, exactly as the press
+            // used to do it, and the take's clock starts from here.
+            switch permission {
+            case .denied:
+                return RecStep(.idle, [.showDenied(kind)])
+            case .granted:
+                return RecStep(
+                    .recording(kind: kind, startedAt: now, dx: 0, dy: 0),
+                    [.startCapture(kind)]
+                )
+            case .prompt:
+                return RecStep(.requesting(kind: kind), [.requestPermission(kind)])
+            }
+        case .cancel, .captureFailed, .revoked:
+            return RecStep(.idle)
+        default:
+            return RecStep(.pressing(kind: kind, at: at, permission: permission, moved: moved))
         }
     }
 
@@ -123,7 +187,10 @@ public enum RecordingMachine {
             return RecStep(.recording(kind: kind, startedAt: startedAt, dx: dx, dy: dy))
         case .release(let at):
             if at - startedAt < minTakeMs {
-                return RecStep(.idle, [.finish(.discard), .hint(.holdToRecord), .toggleMode])
+                // §3.1 — the accidental press, NOT a tap: the hold threshold
+                // had already been passed and the microphone opened, so this
+                // discards with the hint and switches nothing.
+                return RecStep(.idle, [.finish(.discard), .hint(.holdToRecord)])
             }
             return RecStep(.idle, [.finish(.send)])
         case .tick(let at):
@@ -268,6 +335,13 @@ public enum FinishDisposition: Equatable {
 
 public enum RecState: Equatable {
     case idle
+    /// §3.1 — a finger is down and it is not yet known whether this is a tap
+    /// (switch the mode) or a hold (record). `permission` is what the platform
+    /// said when the finger landed, carried so the hold can act on it without
+    /// the press having asked anything; `moved` records that the finger has
+    /// travelled past ``RecordingMachine/tapSlopPoints``, which disqualifies
+    /// the tap. NOTHING is captured in this state.
+    case pressing(kind: CaptureKind, at: Int64, permission: PermissionHint, moved: Bool)
     /// Waiting for the system permission prompt the press raised.
     case requesting(kind: CaptureKind)
     /// A finger is down and the take is running. `dx` / `dy` are the offset
@@ -281,10 +355,18 @@ public enum RecState: Equatable {
     public var kind: CaptureKind? {
         switch self {
         case .idle: return nil
-        case .requesting(let k), .recording(let k, _, _, _), .locked(let k, _),
-             .finalizing(let k), .preview(let k, _):
+        case .pressing(let k, _, _, _), .requesting(let k), .recording(let k, _, _, _),
+             .locked(let k, _), .finalizing(let k), .preview(let k, _):
             return k
         }
+    }
+
+    /// A finger is down on the record button, whether or not a take has begun.
+    /// The composer keeps the button mounted through this, or SwiftUI would
+    /// drop the gesture that is deciding tap from hold.
+    public var isPressed: Bool {
+        if case .pressing = self { return true }
+        return false
     }
 
     /// Is a capture running in this state?
@@ -308,6 +390,11 @@ public enum RecEvent: Equatable {
     case press(kind: CaptureKind, at: Int64, permission: PermissionHint)
     /// Offset of the held finger from the press point, in points.
     case move(dx: Double, dy: Double)
+    /// §3.1 — the finger has been down for ``RecordingMachine/holdToRecordMs``,
+    /// so the press is a hold and the take may begin. `at` becomes the take's
+    /// start, so the ``RecordingMachine/minTakeMs`` floor measures the
+    /// recording rather than the finger.
+    case holdElapsed(at: Int64)
     case release(at: Int64)
     /// VoiceOver / Switch Control activation of the record button.
     case activate(kind: CaptureKind, at: Int64, permission: PermissionHint)
@@ -325,6 +412,10 @@ public enum RecEvent: Equatable {
 }
 
 public enum RecEffect: Equatable {
+    /// §3.1 — start the clock that turns this press into a hold. The host
+    /// arms it once per press and must let it fire only while the press is
+    /// still down.
+    case armHold
     case requestPermission(CaptureKind)
     case startCapture(CaptureKind)
     case finish(FinishDisposition)

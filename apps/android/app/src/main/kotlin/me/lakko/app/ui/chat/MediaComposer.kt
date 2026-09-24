@@ -78,7 +78,9 @@ import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
@@ -111,6 +113,7 @@ import me.lakko.app.media.RecState
 import me.lakko.app.media.RecordedTake
 import me.lakko.app.media.RecorderThread
 import me.lakko.app.media.SentTakeOutcome
+import me.lakko.app.media.TAP_MAX_MS
 import me.lakko.app.media.sentTakeOutcome
 import me.lakko.app.media.CameraLens
 import me.lakko.app.media.VideoNoteOutcome
@@ -147,6 +150,10 @@ internal object RecordCopy {
     const val SLIDE_TO_CANCEL = "Slide to cancel"
     const val DENIED_MIC = "Lakko needs microphone access to record voice messages"
     const val DENIED_CAMERA = "Lakko needs camera access to record video messages"
+
+    /** §3.1 — the mode-switch accessibility action, named for where it goes. */
+    const val SWITCH_TO_VIDEO = "Switch to video message"
+    const val SWITCH_TO_VOICE = "Switch to voice message"
 }
 
 /**
@@ -225,6 +232,14 @@ internal class RecordController(
     private var previewView: PreviewView? = null
     private var tickJob: Job? = null
     private var noticeJob: Job? = null
+
+    /**
+     * §3.1 — the arming timer. Started by [press]; if it fires with the pointer
+     * still down the press was a hold and the reducer may open the microphone.
+     * Cancelled by [dispatch] the moment the state leaves [RecState.Pressing],
+     * which is the one place that cannot be forgotten.
+     */
+    private var holdJob: Job? = null
     private var startJob: Job? = null
     private var captureStartedAt: Long = 0L
     /** When the video-note start began, for [videoNoteFinishOutcome]. */
@@ -261,10 +276,39 @@ internal class RecordController(
     /** Why the record button is disabled, or `null` when it is usable. */
     val disabledReason: String? get() = if (inCall) RecordCopy.IN_CALL else null
 
+    /**
+     * §3.1 — the pointer went down. Nothing is captured and no permission is
+     * asked for yet: the press is a tap until the arming timer says otherwise.
+     */
     fun press(pointer: PointerKind, xDp: Float, yDp: Float) {
         if (disabledReason != null) return
         if (refuseVideoWithoutCamera()) return
-        dispatch(RecEvent.Press(mode, pointer, xDp, yDp, now(), permissionHint(mode)))
+        val kind = mode
+        dispatch(RecEvent.Press(kind, pointer, xDp, yDp, now()))
+        if (state !is RecState.Pressing) return
+        holdJob = scope.launch {
+            delay(TAP_MAX_MS)
+            dispatch(RecEvent.HoldElapsed(now(), permissionHint(kind)))
+        }
+    }
+
+    /** The label of the §3.1 mode-switch accessibility action. */
+    val modeSwitchLabel: String
+        get() = if (mode == CaptureKind.VOICE) {
+            RecordCopy.SWITCH_TO_VIDEO
+        } else {
+            RecordCopy.SWITCH_TO_VOICE
+        }
+
+    /**
+     * §3.1 — the mode switch a screen reader or a switch device reaches, since
+     * the tap that carries it for everyone else is a gesture they do not have.
+     * Refused while a take is live or a call holds capture, so it can never
+     * change the mode out from under a running recording.
+     */
+    fun switchMode() {
+        if (disabledReason != null || state !is RecState.Idle) return
+        toggleMode()
     }
 
     /** Camera mode on a device known to have no camera: say so, record nothing. */
@@ -280,9 +324,14 @@ internal class RecordController(
 
     fun release() = dispatch(RecEvent.Release(now()))
 
-    /** The system took the gesture away mid-hold. */
+    /** The system took the gesture away mid-press or mid-hold. */
     fun gestureCancelled() {
-        if (state is RecState.Recording || state is RecState.Requesting) dispatch(RecEvent.Cancel)
+        if (state is RecState.Pressing ||
+            state is RecState.Recording ||
+            state is RecState.Requesting
+        ) {
+            dispatch(RecEvent.Cancel)
+        }
     }
 
     /** TalkBack / switch access: a single activation starts a LOCKED take. */
@@ -320,6 +369,9 @@ internal class RecordController(
     }
 
     private fun currentKind(): CaptureKind? = when (val s = state) {
+        // A press still being judged has asked for nothing, so there is no kind
+        // in flight; the caller falls back to the current [mode].
+        is RecState.Pressing -> null
         is RecState.Requesting -> s.kind
         is RecState.Recording -> s.kind
         is RecState.Locked -> s.kind
@@ -350,6 +402,12 @@ internal class RecordController(
     fun dispatch(event: RecEvent) {
         val step = reduce(state, event)
         state = step.state
+        // §3.1 — the press has been judged (or never was one): the arming timer
+        // must not fire into a state that did not ask for it.
+        if (state !is RecState.Pressing) {
+            holdJob?.cancel()
+            holdJob = null
+        }
         for (effect in step.effects) perform(effect)
         if (!isCapturing(state)) {
             tickJob?.cancel()
@@ -653,6 +711,7 @@ internal class RecordController(
         tickJob?.cancel()
         startJob?.cancel()
         noticeJob?.cancel()
+        holdJob?.cancel()
         voice?.let { v ->
             val s = voiceStart
             RecorderThread.scope.launch {
@@ -698,10 +757,18 @@ internal fun rememberRecordController(
 }
 
 /**
- * The composer's right-hand record button: mic or camera. Hold to record,
- * slide left to cancel, slide up to lock; a single TalkBack activation starts a
- * locked take (§7). Coordinates are fed to the reducer in dp, so its slide
- * thresholds mean the same physical distance on every screen density.
+ * The composer's right-hand record button: ONE button (§3.1). A tap switches
+ * between mic and camera and records nothing; a hold records, with slide left
+ * to cancel and slide up to lock.
+ *
+ * Both gestures reach a screen reader as the two actions §3.1 requires: the
+ * default activation starts a LOCKED take (§7, since hold-and-slide is not
+ * reachable), and a custom action switches the mode — without it the camera
+ * would be unreachable, because the gesture that switches is the one a
+ * TalkBack user does not have.
+ *
+ * Coordinates are fed to the reducer in dp, so its slide thresholds mean the
+ * same physical distance on every screen density.
  */
 @Composable
 internal fun RecordButton(controller: RecordController, modifier: Modifier = Modifier) {
@@ -713,6 +780,24 @@ internal fun RecordButton(controller: RecordController, modifier: Modifier = Mod
     val holding = controller.state is RecState.Recording
     LaunchedEffect(holding) {
         if (holding) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+    }
+    // §3.1 — a light tick when the mode switches. A tap that only changes a
+    // glyph and is otherwise silent reads as a dead button; recording start
+    // already has its own, heavier [HapticFeedbackType.LongPress] above.
+    // `TextHandleMove` is the lighter of the exactly two types this Compose
+    // version offers, so it is the distinct tick the spec asks for rather than
+    // a preference among many.
+    //
+    // Seeded from the current mode and compared rather than keyed on `kind`
+    // alone, so entering the chat — or a configuration change, which rebuilds
+    // the composable over a `remember`ed controller that kept its mode — is
+    // not mistaken for a switch.
+    var tickedMode by remember { mutableStateOf(kind) }
+    LaunchedEffect(kind) {
+        if (kind != tickedMode) {
+            tickedMode = kind
+            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+        }
     }
     Box(contentAlignment = Alignment.Center, modifier = modifier.size(48.dp)) {
     if (holding) {
@@ -744,6 +829,14 @@ internal fun RecordButton(controller: RecordController, modifier: Modifier = Mod
                         controller.activate()
                         true
                     }
+                    // §3.1 — the second action, so the mode is reachable
+                    // without the tap gesture.
+                    customActions = listOf(
+                        CustomAccessibilityAction(controller.modeSwitchLabel) {
+                            controller.switchMode()
+                            true
+                        },
+                    )
                 }
             }
             .pointerInput(controller, disabled) {
