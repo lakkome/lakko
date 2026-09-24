@@ -69,7 +69,19 @@ public final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
         }
         recorder.delegate = self
         recorder.isMeteringEnabled = true
-        guard recorder.record() else {
+        // Create the file and stand the encoder up here, so neither is in the
+        // path of the start below.
+        guard recorder.prepareToRecord() else {
+            releaseSession()
+            throw MediaCaptureError.startFailed
+        }
+        // Schedule the start on the audio device's own clock rather than
+        // beginning now: the session was activated a moment ago and the input
+        // route is still settling, and anything written during that window is
+        // silence the sender never spoke — counted in the duration too, since
+        // the take's length is the recorder's clock. See
+        // ``VoiceCapture/inputSettleSeconds``.
+        guard recorder.record(atTime: recorder.deviceCurrentTime + VoiceCapture.inputSettleSeconds) else {
             releaseSession()
             throw MediaCaptureError.startFailed
         }
@@ -92,6 +104,10 @@ public final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
 
     private func sampleLevel() {
         guard let recorder, recorder.isRecording else { return }
+        // The timer runs from the moment the recorder was armed, which is
+        // before the scheduled start; a tick taken then would prepend bars no
+        // sample in the file corresponds to.
+        guard VoiceCapture.recordsLevel(recordedSeconds: recorder.currentTime) else { return }
         recorder.updateMeters()
         let level = Waveform.linearLevel(decibels: recorder.averagePower(forChannel: 0))
         levels.append(level)

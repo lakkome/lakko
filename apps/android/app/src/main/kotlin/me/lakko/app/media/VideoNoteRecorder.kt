@@ -18,6 +18,7 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.DynamicRange
 import androidx.camera.core.MirrorMode
 import androidx.camera.core.Preview
+import androidx.camera.core.UseCase
 import androidx.camera.core.UseCaseGroup
 import androidx.camera.core.ViewPort
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -75,6 +76,13 @@ import kotlin.coroutines.resume
  * Every failure is reported as `false` / `null`; the controller discards the
  * take on a failure, it never sends a partial one.
  *
+ * **One take, one recorder, and it lets go of exactly what it took.** The
+ * provider is a process singleton, so this class never calls `unbindAll()`; it
+ * unbinds the use cases its own [CameraOwnership] ledger names, and a released
+ * recorder can never bind again. That is what keeps the teardown of a finished
+ * take — which does not happen instantly, see [finish] — from unbinding the
+ * camera out from under the NEXT take.
+ *
  * Threading: CameraX requires [bind], [flip] and [release] on the main thread,
  * and its `Recording.start` / `stop` are asynchronous (the encoder runs on
  * CameraX's own executors, completion arrives via the Finalize event), so
@@ -95,6 +103,15 @@ public class VideoNoteRecorder(
     private var finalized: CompletableDeferred<Boolean>? = null
     private var previewView: PreviewView? = null
     private var selectedQuality: Quality? = null
+
+    /**
+     * What THIS take bound, so [release] can let go of exactly that.
+     *
+     * Never `unbindAll()`: the provider is a process singleton, and this
+     * recorder's teardown runs late enough (see [finish]) that a blanket
+     * unbind reaches the NEXT take's camera. See [CameraOwnership].
+     */
+    private val ownership = CameraOwnership<UseCase>()
 
     /** The lens bound right now, or `null` before a successful bind. */
     public var lens: CameraLens? = null
@@ -121,6 +138,12 @@ public class VideoNoteRecorder(
      * that camera offers ([chooseVideoNoteProfile]).
      */
     public suspend fun bind(view: PreviewView): BindResult {
+        // A released take never touches the camera again: its use cases are
+        // gone and anything it bound now would be owned by nobody.
+        if (!ownership.mayBind()) {
+            Log.w(TAG, "bind refused: this take has already released the camera")
+            return BindResult.FAILED
+        }
         previewView = view
         val p = obtainProvider(context) ?: return if (hasAnyCamera(context)) {
             BindResult.FAILED
@@ -174,13 +197,17 @@ public class VideoNoteRecorder(
                 .addUseCase(pv)
                 .addUseCase(vc)
                 .build()
-            p.unbindAll()
+            // Exactly this take's two use cases, never `unbindAll()`: a flip
+            // moves OUR preview and capture to the other lens and has no
+            // business unbinding whatever else the process has bound.
+            p.unbind(pv, vc)
             p.bindToLifecycle(lifecycleOwner, info.cameraSelector, group)
+            ownership.onBound(listOf(pv, vc))
             lens = target
             true
         } catch (e: Exception) {
             Log.w(TAG, "camera bind failed: ${e.javaClass.simpleName}")
-            runCatching { p.unbindAll() }
+            runCatching { p.unbind(pv, vc) }
             lens = null
             false
         }
@@ -239,6 +266,14 @@ public class VideoNoteRecorder(
         finalized = null
         runCatching { rec.stop() }
         val ok = done?.await() ?: false
+        // The recording is finalized, so the camera has nothing left to do:
+        // let it go HERE, before the file is read. Reading it is not quick —
+        // [measureTake] runs a `MediaExtractor` and a `MediaMetadataRetriever`
+        // and then DECODES the first video frame and JPEG-compresses it, in a
+        // loop, which on an emulator is seconds. Releasing after that left the
+        // camera bound to a take that had already been sent, and the next hold
+        // fell inside that window.
+        release()
         if (!ok || file == null || !file.exists() || file.length() == 0L) {
             file?.delete()
             return null
@@ -281,16 +316,37 @@ public class VideoNoteRecorder(
         recording = null
         output = null
         finalized = null
-        runCatching { rec?.stop() }
+        // `close()`, not `stop()`. They stop the same recording, but `close()`
+        // is `Recording`'s `AutoCloseable` contract — "release the resources" —
+        // and this recording is PERSISTENT, so the unbind that follows in
+        // [release] is by design ignored by it. Whatever it still holds is let
+        // go here or not at all.
+        runCatching { rec?.close() }
         file?.delete()
     }
 
-    /** Release the camera. Safe to call more than once. */
+    /**
+     * Let go of the camera. Safe to call more than once, and the second call
+     * is INERT rather than destructive: it unbinds nothing, so a teardown that
+     * lands late cannot take the camera away from a take that started since.
+     */
     public fun release() {
         discard()
-        runCatching { provider?.unbindAll() }
+        val p = provider
+        val ours = ownership.releaseBound()
+        if (p != null && ours.isNotEmpty()) {
+            runCatching { p.unbind(*ours.toTypedArray()) }
+        }
         preview?.setSurfaceProvider(null)
+        // Drop every handle: this recorder is done, and holding a `Preview` or
+        // a `VideoCapture` past the unbind keeps its encoder and its surface
+        // alive for as long as the instance is referenced.
+        preview = null
+        capture = null
+        selectedQuality = null
+        provider = null
         previewView = null
+        lens = null
     }
 
     public companion object {

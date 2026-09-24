@@ -27,6 +27,62 @@ package me.lakko.app.media
 public enum class CameraLens { FRONT, BACK, OTHER }
 
 /**
+ * What ONE video-note take bound to the camera, and the only thing allowed to
+ * say what it lets go of.
+ *
+ * `ProcessCameraProvider` is a **process singleton**, so `unbindAll()` is not
+ * a take's own teardown — it is everybody's. The recorder used to call it, and
+ * a take's teardown is not instantaneous: the SEND path only reached it after
+ * the finished file had been read for metadata and a poster frame decoded and
+ * JPEG-compressed. A second take begun inside that window bound the camera
+ * and was then unbound by the first take's teardown, from a `VideoNoteRecorder`
+ * that no longer owned anything. Nothing in the code said which use cases
+ * belonged to which take, so nothing could refuse.
+ *
+ * This says it. A take binds through [onBound], lets go through
+ * [releaseBound] — which names exactly what that take bound and nothing else —
+ * and afterwards owns nothing and may never bind again ([mayBind]). Releasing
+ * twice is therefore inert rather than destructive, which is what makes the
+ * recorder's `finally { release() }` safe to keep after [releaseBound] has
+ * already run on the finalize path.
+ *
+ * Generic in the use-case type only so it can be exercised on the host JVM;
+ * the recorder instantiates it over CameraX's `UseCase`.
+ */
+public class CameraOwnership<T : Any> {
+    private val bound = LinkedHashSet<T>()
+    private var released = false
+
+    /** This take has let go; it owns nothing and can never bind again. */
+    public val isReleased: Boolean get() = released
+
+    /** How many use cases this take is holding right now. */
+    public val boundCount: Int get() = bound.size
+
+    /** May this take bind? `false` once it has been released. */
+    public fun mayBind(): Boolean = !released
+
+    /** Record a successful bind. Ignored after a release, so a bind that
+     *  raced the teardown cannot re-enter the ledger. */
+    public fun onBound(useCases: Collection<T>) {
+        if (released) return
+        bound += useCases
+    }
+
+    /**
+     * Everything this take bound, in bind order, exactly once. The ledger is
+     * then empty and closed: a second call names nothing, so a late teardown
+     * cannot unbind a LATER take's camera.
+     */
+    public fun releaseBound(): List<T> {
+        released = true
+        val out = bound.toList()
+        bound.clear()
+        return out
+    }
+}
+
+/**
  * The lens a video note records with: [preferred] when present, then the
  * opposite built-in lens, then any other camera (external / unknown facing).
  * `null` only when [available] is empty.

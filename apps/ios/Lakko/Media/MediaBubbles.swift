@@ -90,6 +90,8 @@ struct VoiceBubble: View {
 
     @EnvironmentObject private var media: ChatMediaController
     @EnvironmentObject private var live: MediaLiveState
+    /// When the touch now on the waveform went down — see ``VoiceSeekGate``.
+    @State private var waveformPressStart: Date?
 
     private var tint: Color { incoming ? Color.lakkoText : Color.lakkoAccentForeground }
     private var isPending: Bool { upload != nil }
@@ -143,6 +145,14 @@ struct VoiceBubble: View {
                 CouldNotPlay { toggle() }
             }
         }
+        // The row is in a LazyVStack, so this runs as the bubble scrolls into
+        // view — the same moment a photo or a GIF warms itself. Without it the
+        // first press paid the download and the AEAD open before any sample
+        // could be decoded.
+        .task(id: mediaKey) {
+            guard VoicePrefetch.shouldWarm(pending: isPending) else { return }
+            await media.prefetchVoice(ref: ref, key: mediaKey)
+        }
     }
 
     private var playButton: some View {
@@ -174,10 +184,19 @@ struct VoiceBubble: View {
         WaveformBars(waveform: ref.waveform, progress: progress, tint: tint)
             .contentShape(Rectangle())
             .gesture(
-                DragGesture(minimumDistance: 0).onEnded { value in
-                    guard active != nil else { return }
-                    media.seekVoice(key: mediaKey, fraction: value.location.x / 170)
-                }
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in
+                        if waveformPressStart == nil { waveformPressStart = Date() }
+                    }
+                    .onEnded { value in
+                        let held = waveformPressStart.map { -$0.timeIntervalSinceNow } ?? 0
+                        waveformPressStart = nil
+                        // A press held long enough to open the message's
+                        // context menu was reaching for React or Delete, not
+                        // for a point in the audio.
+                        guard active != nil, VoiceSeekGate.acceptsSeek(pressSeconds: held) else { return }
+                        media.seekVoice(key: mediaKey, fraction: value.location.x / 170)
+                    }
             )
             .accessibilityElement()
             .accessibilityLabel("Seek voice message")

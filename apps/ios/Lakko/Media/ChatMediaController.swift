@@ -701,6 +701,24 @@ public final class ChatMediaController: ObservableObject {
     /// A local key (an outgoing take not yet uploaded) resolves to its file.
     public func localFile(for key: String) -> URL? { temp.url(for: key) }
 
+    /// Fetch and decrypt a received voice message's audio ahead of the press.
+    ///
+    /// Every other media bubble warms itself when it comes into view; the voice
+    /// bubble did not, so the first press paid the storage round trip and the
+    /// AEAD open before a sample could be decoded and the message seemed to
+    /// open on silence. The download is owned by ``single(_:_:)``, so a press
+    /// that lands while this is still running joins it instead of starting a
+    /// second one.
+    ///
+    /// Deliberately silent in both directions: it never touches `loadingKeys`
+    /// (a spinner over the play button of every visible bubble would say the
+    /// person is waiting when they are not) and never touches `failedKeys` (a
+    /// warm that failed has shown nobody anything, and the press retries).
+    public func prefetchVoice(ref: AttachmentRef, key: String) async {
+        guard temp.url(for: key) == nil else { return }
+        _ = try? await mediaFile(for: ref)
+    }
+
     private func single(_ key: String, _ work: @escaping @MainActor () async throws -> URL) async throws -> URL {
         if let task = inflight[key] { return try await task.value }
         let task = Task { @MainActor in try await work() }
@@ -784,6 +802,10 @@ public final class ChatMediaController: ObservableObject {
         let asset = AVURLAsset(url: url, options: [AVURLAssetOverrideMIMETypeKey: "audio/mp4"])
         let item = AVPlayerItem(asset: asset)
         let player = AVPlayer(playerItem: item)
+        // The source is always a decrypted file already on disk, so there is
+        // nothing to buffer ahead of; left on, AVPlayer delays the start to
+        // build a buffer it does not need.
+        player.automaticallyWaitsToMinimizeStalling = false
         voicePlayer = player
         let knownDuration = ref?.durationMs.map(Int64.init) ?? previewTake?.durationMs ?? 0
         voice = VoicePlayback(key: key, playing: true, positionMs: 0, durationMs: knownDuration)

@@ -26,6 +26,7 @@ import { Portal } from "solid-js/web";
 import { formatAttachmentSize } from "../chat/attachments";
 import type { MediaBubbleProps } from "./MediaBubbles";
 import { mediaKey } from "./media-hub";
+import { whenVisible } from "./near-viewport";
 import { bubbleBox, saveNameFor } from "./visual-media";
 
 type LoadStatus = "idle" | "loading" | "ready" | "error";
@@ -41,26 +42,6 @@ function boxStyle(props: MediaBubbleProps): JSX.CSSProperties {
     width: `${box.width}px`,
     "aspect-ratio": `${box.width} / ${box.height}`,
   };
-}
-
-/** Run `start` once the element is on screen (immediately without an
- *  `IntersectionObserver`). */
-function whenVisible(el: () => HTMLElement | undefined, start: () => void): void {
-  onMount(() => {
-    const node = el();
-    if (typeof IntersectionObserver === "undefined" || node === undefined) {
-      start();
-      return;
-    }
-    const observer = new IntersectionObserver((entries) => {
-      if (entries.some((e) => e.isIntersecting)) {
-        observer.disconnect();
-        start();
-      }
-    }, { rootMargin: "200px" });
-    observer.observe(node);
-    onCleanup(() => observer.disconnect());
-  });
 }
 
 function saveObjectUrl(url: string, filename: string): void {

@@ -115,6 +115,17 @@ internal fun VoiceBubble(ref: AttachmentRef, hub: ChatMediaHub, isOwn: Boolean, 
     val failed = voice.failedKey == key
     val unplayed = remember(playedVersion, key) { !isOwn && !hub.isPlayed(key) }
 
+    // The voice bubble was the ONE media bubble that fetched nothing until it
+    // was pressed: the photo, the GIF and the video note all start as soon as
+    // they compose, and the list only composes what is on screen. So the first
+    // press on a voice message paid a storage round trip and an AEAD open
+    // before a single sample could be decoded — which is most of what "it sits
+    // silent for a second and then plays" is. Fetch it like the others do; the
+    // file is cached, so pressing play then finds it there.
+    LaunchedEffect(key) {
+        if (hub.fileFor(key) == null) hub.load(ref)
+    }
+
     LaunchedEffect(requested) {
         if (requested == key) {
             hub.consumeRequest(key)

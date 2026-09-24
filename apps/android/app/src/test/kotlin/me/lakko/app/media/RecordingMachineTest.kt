@@ -392,6 +392,74 @@ class RecordingMachineTest {
         assertEquals("0:00", formatClock(999))
     }
 
+    /**
+     * **Every way out of a live capture hands the recorder back.**
+     *
+     * [RecEffect.Finish] is the ONLY effect that stops the microphone and lets
+     * go of the camera — the composer performs nothing else that does — so a
+     * transition that leaves [RecState.Recording] or [RecState.Locked] without
+     * one leaves the hardware running with nobody owning it. On a video note
+     * that is not a leak you can ignore: the camera stays bound, and the next
+     * hold flashes the recording overlay and fails, which is exactly what the
+     * emulator showed on 2026-09-24.
+     *
+     * Exhaustive over every event rather than case by case, so an arm added to
+     * the reducer later cannot quietly skip the release.
+     */
+    @Test
+    fun everyExitFromALiveCaptureReleasesTheRecorder() {
+        val events: List<RecEvent> = listOf(
+            press(at = 1_000),
+            RecEvent.HoldElapsed(at = 1_000, permission = PermissionHint.GRANTED),
+            RecEvent.HoldElapsed(at = 1_000, permission = PermissionHint.DENIED),
+            RecEvent.Move(x = 100f, y = 100f),
+            RecEvent.Move(x = 100f - CANCEL_SLIDE_PX, y = 100f),
+            RecEvent.Move(x = 100f, y = 100f - LOCK_SLIDE_PX),
+            RecEvent.Release(at = 1_000),
+            RecEvent.Release(at = MIN_TAKE_MS - 1),
+            RecEvent.Activate(CaptureKind.VOICE, at = 1_000, permission = PermissionHint.GRANTED),
+            RecEvent.PermissionResult(granted = true, at = 1_000),
+            RecEvent.PermissionResult(granted = false, at = 1_000),
+            RecEvent.Tick(at = 1_000),
+            RecEvent.Tick(at = VOICE_CAP_MS + 1),
+            RecEvent.Stop(at = 1_000),
+            RecEvent.Stop(at = MIN_TAKE_MS - 1),
+            RecEvent.Delete,
+            RecEvent.Cancel,
+            RecEvent.Send,
+            RecEvent.Revoked,
+            RecEvent.CaptureFailed,
+            RecEvent.PreviewReady(durationMs = 4_000),
+            RecEvent.PreviewFailed,
+        )
+        for (kind in CaptureKind.entries) {
+            val live = listOf(
+                RecState.Recording(
+                    kind = kind,
+                    pointer = PointerKind.TOUCH,
+                    startedAt = 0,
+                    originX = 100f,
+                    originY = 100f,
+                    dx = 0f,
+                    dy = 0f,
+                ),
+                RecState.Locked(kind, startedAt = 0),
+            )
+            for (state in live) {
+                for (event in events) {
+                    val step = reduce(state, event)
+                    // Still capturing (a slide up to lock, a tick under the
+                    // cap): the recorder is meant to keep running.
+                    if (isCapturing(step.state)) continue
+                    assertTrue(
+                        "$state + $event went to ${step.state} without releasing the recorder",
+                        step.effects.any { it is RecEffect.Finish },
+                    )
+                }
+            }
+        }
+    }
+
     /** §2.8 — a release that landed while the recorder was still starting: the
      *  reducer judges the hold from the press and sends; the take is judged
      *  again once the recorder has stopped. */

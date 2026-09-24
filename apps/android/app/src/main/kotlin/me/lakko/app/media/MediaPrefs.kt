@@ -6,6 +6,8 @@ package me.lakko.app.media
 import android.content.Context
 import android.content.SharedPreferences
 import java.io.File
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 /**
  * ADR-0047 — per-device media preferences.
@@ -66,10 +68,25 @@ public class MediaPrefs private constructor(context: Context) {
         }
     }
 
+    /**
+     * Mark [key] played. The set is updated in memory at once — callers read
+     * it back immediately — and written to disk on [playedWriter].
+     *
+     * The write used to happen inline, and every caller is on the main thread:
+     * the voice player marked a message played on the last step before
+     * `MediaPlayer.start()`, so a file write sat between the person pressing
+     * play and any sound. Nothing waits for this write; the worst a lost one
+     * costs is an unplayed dot showing again.
+     */
     public fun markPlayed(key: String) {
-        if (played.markPlayed(key)) {
-            runCatching { playedFile.writeText(played.encode()) }
-        }
+        if (!played.markPlayed(key)) return
+        val snapshot = played.encode()
+        playedWriter.execute { runCatching { playedFile.writeText(snapshot) } }
+    }
+
+    /** One thread, so two marks in quick succession are written in order. */
+    private val playedWriter: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "lakko-played-marks").apply { isDaemon = true }
     }
 
     public companion object {

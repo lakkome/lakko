@@ -18,6 +18,7 @@ import type { AttachmentRefBytes } from "../chat/attachments";
 import { autoplayVideoNotes } from "./media-prefs";
 import { ProgressRing } from "./MediaComposer";
 import type { MediaHub } from "./media-hub";
+import { whenVisible } from "./near-viewport";
 import { errorName, mediaErrorIsReal, playRejectionOutcome, waitForMetadata } from "./playback-outcome";
 import { nextPlaybackRate, rateLabel } from "./playback-queue";
 import { formatClock, formatTotalClock, spokenDuration } from "./recording-machine";
@@ -77,6 +78,10 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
   const [mediaDuration, setMediaDuration] = createSignal<number | null>(null);
   const [rate, setRate] = createSignal(1);
   let audio: HTMLAudioElement | null = null;
+  /** In flight: the one `prepare()` a warm-up and a press share. Without it a
+   *  press landing mid-warm would start a second download of the same blob. */
+  let preparing: Promise<HTMLAudioElement | null> | null = null;
+  let root: HTMLDivElement | undefined;
 
   const duration = (): number => props.attachment.durationMs ?? mediaDuration() ?? 0;
   const bars = (): number[] => waveformBars(props.attachment.waveform, WAVE_BARS);
@@ -86,44 +91,78 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
   // takes the colour that contrasts with that in each bubble tone and theme.
   const glyphColour = (): string => (props.incoming ? "var(--surface-elevated)" : "var(--accent)");
 
-  async function ensureAudio(): Promise<HTMLAudioElement | null> {
-    if (audio !== null) return audio;
-    setStatus("loading");
-    try {
-      const url = props.hub.urlFor(props.mediaKey) ?? (await props.hub.load(props.attachment));
-      const a = new Audio(url);
-      a.preload = "auto";
-      a.addEventListener("timeupdate", () => setPosition(a.currentTime * 1000));
-      a.addEventListener("loadedmetadata", () => {
-        if (Number.isFinite(a.duration)) setMediaDuration(Math.round(a.duration * 1000));
-      });
-      a.addEventListener("play", () => setPlaying(true));
-      a.addEventListener("pause", () => setPlaying(false));
-      a.addEventListener("ended", () => {
-        setPlaying(false);
-        setPosition(0);
-        props.hub.voiceEnded(props.mediaKey);
-      });
-      a.addEventListener("error", () => {
-        setPlaying(false);
-        // An aborted load (the source cleared on cleanup) is not a broken
-        // message; only a real media error shows "Couldn't play".
-        if (!mediaErrorIsReal(a.error?.code)) return;
-        console.warn("[voice] media error", a.error?.code ?? "none");
-        setStatus("error");
-      });
-      audio = a;
-      setStatus("idle");
-      return a;
-    } catch (err) {
-      console.warn("[voice] download or decrypt failed", errorName(err) ?? "unnamed");
+  /** The element and its listeners. Assigning `src` starts the load, so by
+   *  the time this returns the browser is already buffering and demuxing. */
+  function build(url: string): HTMLAudioElement {
+    // `preload` is set BEFORE the source, so the element starts buffering and
+    // demuxing the moment it has one rather than on the first `play()`.
+    const a = new Audio();
+    a.preload = "auto";
+    a.src = url;
+    a.addEventListener("timeupdate", () => setPosition(a.currentTime * 1000));
+    a.addEventListener("loadedmetadata", () => {
+      if (Number.isFinite(a.duration)) setMediaDuration(Math.round(a.duration * 1000));
+    });
+    a.addEventListener("play", () => setPlaying(true));
+    a.addEventListener("pause", () => setPlaying(false));
+    a.addEventListener("ended", () => {
+      setPlaying(false);
+      setPosition(0);
+      props.hub.voiceEnded(props.mediaKey);
+    });
+    a.addEventListener("error", () => {
+      setPlaying(false);
+      // An aborted load (the source cleared on cleanup) is not a broken
+      // message; only a real media error shows "Couldn't play".
+      if (!mediaErrorIsReal(a.error?.code)) return;
+      console.warn("[voice] media error", a.error?.code ?? "none");
       setStatus("error");
-      return null;
+    });
+    return a;
+  }
+
+  /**
+   * Fetch, decrypt and build the element. Says nothing about the UI on its
+   * own: it is called both from a press (where the person is waiting, so the
+   * play button shows a spinner) and from the scroll-into-view warm-up (where
+   * nothing is happening and a spinner would be a lie) — `forPress` is which.
+   *
+   * The DEFECT this exists for: all of this used to happen inside the press,
+   * so a voice message's first play spent a storage round trip and an AEAD
+   * open before a single sample was decoded, heard as a pause of about a
+   * second between pressing play and any sound. Nothing preloaded it, though
+   * the photo bubble beside it always has.
+   */
+  async function prepare(forPress: boolean): Promise<HTMLAudioElement | null> {
+    if (audio !== null) return audio;
+    // A press landing mid-warm joins the warm-up instead of starting a second
+    // download of the same blob.
+    if (preparing === null) {
+      preparing = (async () => {
+        try {
+          const url = props.hub.urlFor(props.mediaKey) ?? (await props.hub.load(props.attachment));
+          audio = build(url);
+          return audio;
+        } catch (err) {
+          console.warn("[voice] download or decrypt failed", errorName(err) ?? "unnamed");
+          return null;
+        } finally {
+          preparing = null;
+        }
+      })();
     }
+    if (forPress) setStatus("loading");
+    const a = await preparing;
+    if (forPress) setStatus(a === null ? "error" : "idle");
+    // A warm-up that failed says nothing and caches nothing: `audio` is still
+    // null, so the press retries the fetch and is the one that reports it. A
+    // background failure must not put "Couldn't play this message" under a
+    // bubble nobody has touched.
+    return a;
   }
 
   async function play(retries = 0): Promise<void> {
-    const a = await ensureAudio();
+    const a = await prepare(true);
     if (a === null) return;
     props.hub.claim(props.mediaKey, () => a.pause());
     a.playbackRate = rate();
@@ -154,7 +193,7 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
   }
 
   async function seekTo(ms: number): Promise<void> {
-    const a = await ensureAudio();
+    const a = await prepare(true);
     if (a === null) return;
     const clamped = Math.max(0, Math.min(duration() || ms, ms));
     a.currentTime = clamped / 1000;
@@ -168,6 +207,22 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
         void play();
       }
     }),
+  );
+
+  // The fix for the pause before the sound: the bytes are fetched, decrypted
+  // and handed to a buffering element while the bubble scrolls into view, so
+  // a press has nothing left to wait for. This is what every other media
+  // bubble already did (`near-viewport.ts`); the voice one was the outlier,
+  // and it is also the one kind where the delay is the whole message.
+  //
+  // An outgoing take's own bytes are already filed locally, so this resolves
+  // without touching the network for them.
+  whenVisible(
+    () => root,
+    () => {
+      if (props.attachment.blobId.length === 0 && props.hub.urlFor(props.mediaKey) === null) return;
+      void prepare(false);
+    },
   );
 
   onCleanup(() => {
@@ -188,7 +243,7 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
   }
 
   return (
-    <div class="lakko-voice">
+    <div ref={root} class="lakko-voice">
       <button
         type="button"
         class="lakko-voice-play"
@@ -221,6 +276,10 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
           aria-valuenow={Math.round(position() / 1000)}
           aria-valuetext={`${spokenDuration(position())} of ${spokenDuration(duration())}`}
           onPointerDown={(e) => {
+            // Primary button only. A right-click on the waveform is a request
+            // for the message's action menu (`MessageMenu.tsx`), and seeking
+            // on it as well would move the playhead on the way to the menu.
+            if (e.button !== 0) return;
             try {
               e.currentTarget.setPointerCapture(e.pointerId);
             } catch {
@@ -229,7 +288,8 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
             seekFromPointer(e);
           }}
           onPointerMove={(e) => {
-            if (e.buttons !== 0) seekFromPointer(e);
+            // The primary button specifically, not "any button held".
+            if ((e.buttons & 1) !== 0) seekFromPointer(e);
           }}
           onKeyDown={(e) => {
             if (uploading()) return;

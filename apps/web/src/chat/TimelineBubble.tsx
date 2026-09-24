@@ -10,17 +10,29 @@
  * once per run in a group; system rows centred and small.
  *
  * Lifted out of `routes/Chat.tsx`. Every behaviour — the op overlay (edited
- * text, deleted tombstone, reaction chips), the hover actions, the reaction
+ * text, deleted tombstone, reaction chips), the action menu, the reaction
  * pickers, the media bubbles and the file chips — is the ADR-0023 / ADR-0024
  * / ADR-0047 one; only the chrome is here. The date / run computation the
  * caller feeds in is `timeline-layout.ts`.
+ *
+ * The one behaviour that did change is HOW the actions are reached. They used
+ * to be a strip revealed on `:hover` and positioned inside the bubble, which
+ * put them over the bubble's own controls — on a voice message, over the play
+ * button, so pressing play paused it. They are now `MessageMenu.tsx`, opened
+ * on a deliberate gesture and rendered outside the bubble.
  */
-import { For, Show, type JSX } from "solid-js";
+import { createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 
 import type { MemberIdentity } from "./author-identity";
 import { formatAttachmentSize, type AttachmentRefBytes } from "./attachments";
 import { useChats } from "./ChatContext";
-import { OWN_REACTION_SENTINEL, REACTION_EMOJI, type MessageOpState } from "./message-ops";
+import { OWN_REACTION_SENTINEL, type MessageOpState } from "./message-ops";
+import {
+  LONG_PRESS_MS,
+  LONG_PRESS_SLOP_PX,
+  MessageMenu,
+  type MenuAnchor,
+} from "./MessageMenu";
 import { ownPersonKeyB64 } from "./person-key";
 import { NotSent } from "../media/MediaBubbles";
 import { shortTime } from "./timeline-layout";
@@ -58,9 +70,6 @@ export interface BubbleHost {
   onCancelEdit: () => void;
   onSaveEdit: (messageId: number) => void | Promise<void>;
   onDeleteMessage: (messageId: number) => void | Promise<void>;
-  reactPickerId: number | null;
-  onOpenReactPicker: (messageId: number) => void;
-  onCloseReactPicker: () => void;
   onReact: (messageId: number, emoji: string) => void | Promise<void>;
   /** ADR-0045 UX section 6.2.5 — whether Edit / Delete / React are offered at
    *  all. `false` once this device's membership has ended: all three compose
@@ -76,7 +85,7 @@ export interface BubbleHost {
    *  the bubble a failed take and a failed composer message are the same
    *  gesture, and the person cannot tell them apart. */
   onRetrySend: () => void;
-  /** ADR-0047 — the reaction bar's "+" opens the full picker for this id. */
+  /** ADR-0047 — the menu's "+" opens the full picker for this id. */
   fullReactPickerId: number | null;
   onOpenFullReactPicker: (messageId: number) => void;
   onCloseFullReactPicker: () => void;
@@ -212,6 +221,14 @@ export function TimelineBubble(
   );
 }
 
+/** The bubble's own interactive parts: a voice message's play button, speed
+ *  chip and waveform, a video note's surface, an attachment chip's actions. */
+const BUBBLE_CONTROLS = "button, a, input, textarea, video, [role='slider']";
+
+function startsOnControl(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest(BUBBLE_CONTROLS) !== null;
+}
+
 /**
  * ADR-0023 — the shared bubble body for both incoming + outgoing
  * messages, carrying the op overlay (edited text / deleted
@@ -257,8 +274,45 @@ function ChatBubbleBody(
   const isEdited = (): boolean => editedText() !== undefined;
   const isEditing = (): boolean =>
     props.messageId !== undefined && props.editingId === props.messageId;
-  const pickerOpen = (): boolean =>
-    props.messageId !== undefined && props.reactPickerId === props.messageId;
+
+  // ----- the action menu (see `MessageMenu.tsx`) ---------------------------
+  //
+  // Local, not hoisted to the chat view: only one menu is ever open, and the
+  // one thing the view would gain by owning the id — closing a stale menu —
+  // the backdrop, Escape and the scroll listener already do.
+  const [menuAnchor, setMenuAnchor] = createSignal<MenuAnchor | null>(null);
+  let bubbleEl: HTMLDivElement | undefined;
+  // Same predicate the strip carried: a DS messageId to reference, a live
+  // membership (ADR-0045 UX §6.2.5 — Edit / Delete / React all compose an
+  // application message, so all three die with Send), and not mid-edit.
+  const menuAvailable = (): boolean =>
+    props.actionsAvailable && props.messageId !== undefined && !isEditing() && !isDeleted();
+
+  function openMenu(x: number, y: number): void {
+    if (!menuAvailable() || bubbleEl === undefined) return;
+    const rect = bubbleEl.getBoundingClientRect();
+    setMenuAnchor({
+      bubble: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom },
+      x,
+      y,
+      // The empty half of the row is opposite the bubble: to the right of an
+      // incoming one, to the left of our own.
+      away: isIncoming ? "right" : "left",
+    });
+  }
+
+  // A touch screen has no right-click, so the deliberate act is a long press.
+  // Tracked here rather than in the menu because the gesture belongs to the
+  // bubble and must be abandoned the moment the finger starts scrolling.
+  let pressTimer: ReturnType<typeof setTimeout> | null = null;
+  let pressAt: { x: number; y: number } | null = null;
+  const cancelPress = (): void => {
+    if (pressTimer !== null) clearTimeout(pressTimer);
+    pressTimer = null;
+    pressAt = null;
+  };
+  onCleanup(cancelPress);
+
   // Reactions sorted for a stable chip order.
   const reactionEntries = (): Array<{
     emoji: string;
@@ -332,6 +386,7 @@ function ChatBubbleBody(
         </span>
       </Show>
       <div
+        ref={bubbleEl}
         class="lk-bubble"
         classList={{
           incoming: isIncoming,
@@ -342,6 +397,56 @@ function ChatBubbleBody(
           "run-start": props.startsRun,
           "run-end": props.endsRun,
         }}
+        /* The spec says the keyboard reaches the menu "on the focused
+           bubble", so the bubble is focusable. It costs one Tab stop per
+           message and buys the first keyboard path there has ever been to
+           these actions on a plain text message: `:focus-within` only ever
+           fired for a bubble that happened to contain a focusable control. */
+        tabindex={menuAvailable() ? 0 : undefined}
+        onContextMenu={(e) => {
+          if (!menuAvailable()) return;
+          // Both the mouse's right-click and the keyboard's context-menu key /
+          // Shift+F10 arrive here in the browsers that synthesise them; the
+          // keydown handler below covers the ones that do not.
+          e.preventDefault();
+          openMenu(e.clientX, e.clientY);
+        }}
+        onKeyDown={(e) => {
+          if (!menuAvailable()) return;
+          if (e.key !== "ContextMenu" && !(e.key === "F10" && e.shiftKey)) return;
+          e.preventDefault();
+          const rect = bubbleEl?.getBoundingClientRect();
+          openMenu(rect?.left ?? 0, rect?.top ?? 0);
+        }}
+        onPointerDown={(e) => {
+          if (e.pointerType !== "touch" || !menuAvailable()) return;
+          // A long press that STARTS on one of the bubble's own controls
+          // belongs to that control, not to the message: holding the
+          // waveform is a scrub, holding play is still play. This is the
+          // touch half of the defect — the menu must not take a gesture the
+          // person aimed at something else. A right-click still opens the
+          // menu anywhere, because it activates nothing on the way.
+          if (startsOnControl(e.target)) return;
+          pressAt = { x: e.clientX, y: e.clientY };
+          pressTimer = setTimeout(() => {
+            const at = pressAt;
+            cancelPress();
+            if (at !== null) openMenu(at.x, at.y);
+          }, LONG_PRESS_MS);
+        }}
+        onPointerMove={(e) => {
+          const at = pressAt;
+          if (at === null) return;
+          // A finger that has started travelling is scrolling the timeline.
+          if (
+            Math.abs(e.clientX - at.x) > LONG_PRESS_SLOP_PX ||
+            Math.abs(e.clientY - at.y) > LONG_PRESS_SLOP_PX
+          ) {
+            cancelPress();
+          }
+        }}
+        onPointerUp={cancelPress}
+        onPointerCancel={cancelPress}
       >
         <Show when={props.senderName}>{(n) => <div class="lk-sender">{n()}</div>}</Show>
         <Show
@@ -522,96 +627,33 @@ function ChatBubbleBody(
           </Show>
         </div>
 
-        {/* Per-message action menu — gated on the message having a
-            DS messageId (the op references its target by id) and on
-            the membership still holding (ADR-0045 UX section 6.2.5: Edit /
-            Delete / React each compose an application message, so
-            all three die with Send — the menu is WITHDRAWN, not
-            disabled). The hover-revealed strip carries React on any
-            message, plus Edit + Delete on our own. Inline-edit mode
-            hides it. */}
-        <Show
-          when={
-            props.actionsAvailable && props.messageId !== undefined && !isEditing() && !isDeleted()
-          }
-        >
-          <div
-            class="lakko-msg-actions"
-            role="group"
-            aria-label="Message actions"
-            style={{ [isIncoming ? "right" : "left"]: "0.4rem" }}
-          >
-            <button
-              type="button"
-              title="React"
-              aria-label="React"
-              onClick={() =>
-                pickerOpen()
-                  ? props.onCloseReactPicker()
-                  : props.onOpenReactPicker(props.messageId as number)
-              }
-            >
-              <Icon name="smile" size={16} />
-            </button>
-            <Show when={props.isOwn}>
-              <button
-                type="button"
-                title="Edit"
-                aria-label="Edit"
-                onClick={() => props.onStartEdit(props.messageId as number, displayText())}
-              >
-                <Icon name="pencil" size={16} />
-              </button>
-              <button
-                type="button"
-                title="Delete"
-                aria-label="Delete"
-                onClick={() => {
-                  if (props.messageId !== undefined) {
-                    void props.onDeleteMessage(props.messageId);
-                  }
-                }}
-              >
-                <Icon name="trash" size={16} />
-              </button>
-            </Show>
-          </div>
-        </Show>
-
-        {/* Emoji picker popover. Gated on the same predicate as the strip
-            that opens it, so a picker left open when the eviction commit
-            lands mid-poll closes with it rather than floating over a dead
-            group. */}
-        <Show when={props.actionsAvailable && pickerOpen()}>
-          <div class="lk-react-bar" style={{ [isIncoming ? "right" : "left"]: "0.4rem" }}>
-            <For each={REACTION_EMOJI}>
-              {(emoji) => (
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (props.messageId !== undefined) {
-                      void props.onReact(props.messageId, emoji);
-                    }
-                  }}
-                >
-                  {emoji}
-                </button>
-              )}
-            </For>
-            {/* ADR-0047 — "+" opens the full picker in reaction mode. */}
-            <button
-              type="button"
-              class="more"
-              aria-label="More reactions"
-              title="More reactions"
-              onClick={() => {
+        {/* The action menu, opened by the gestures wired above and rendered
+            in a portal OUTSIDE this bubble (`MessageMenu.tsx`). It carries
+            both halves the spec names — the quick reaction row and Edit /
+            Delete — because one gesture opens both. Gated on `menuAvailable`
+            at open AND here, so a menu left open when an eviction commit
+            lands mid-poll closes with the affordance rather than floating
+            over a dead group. */}
+        <Show when={menuAvailable() ? menuAnchor() : null}>
+          {(anchor) => (
+            <MessageMenu
+              anchor={anchor()}
+              canEditDelete={props.isOwn}
+              onReact={(emoji) => {
+                if (props.messageId !== undefined) void props.onReact(props.messageId, emoji);
+              }}
+              onMoreReactions={() => {
                 if (props.messageId !== undefined) props.onOpenFullReactPicker(props.messageId);
               }}
-            >
-              <Icon name="plus" size={16} />
-            </button>
-          </div>
+              onEdit={() => props.onStartEdit(props.messageId as number, displayText())}
+              onDelete={() => {
+                if (props.messageId !== undefined) void props.onDeleteMessage(props.messageId);
+              }}
+              onClose={() => setMenuAnchor(null)}
+            />
+          )}
         </Show>
+
         <Show
           when={
             props.actionsAvailable &&

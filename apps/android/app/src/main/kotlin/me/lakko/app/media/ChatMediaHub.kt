@@ -163,6 +163,10 @@ public class ChatMediaHub(
     private var ticker: Job? = null
     private var loadJob: Job? = null
 
+    /** Has [applyRate] ever touched THIS player's params? Once it has, going
+     *  back to 1x has to be applied too, or the player stays fast. */
+    private var rateApplied: Boolean = false
+
     /** Tap on a voice bubble's play button. */
     public fun toggleVoice(ref: AttachmentRef, knownDurationMs: Long, sentByMe: Boolean) {
         val key = mediaKey(ref.blobId)
@@ -242,6 +246,7 @@ public class ChatMediaHub(
                 return@launch
             }
             player = mp
+            rateApplied = false
             mp.setOnCompletionListener { onVoiceCompleted(key) }
             mp.setOnErrorListener { _, _, _ ->
                 stopPlayer()
@@ -254,8 +259,12 @@ public class ChatMediaHub(
                 runCatching { mp.seekTo((duration * seekToFraction.coerceIn(0f, 1f)).toInt()) }
             }
             mutableVoice.update { it.copy(loading = false, durationMs = duration, failedKey = null) }
-            if (!sentByMe) markPlayed(key)
             resumeVoice()
+            // AFTER `start()`. The mark itself is in memory and immediate; its
+            // disk write is now scheduled rather than inline
+            // (`MediaPrefs.markPlayed`), so nothing stands between the press
+            // and the first sample either way.
+            if (!sentByMe) markPlayed(key)
         }
     }
 
@@ -284,9 +293,22 @@ public class ChatMediaHub(
         mutableVoice.update { it.copy(playing = false) }
     }
 
+    /**
+     * Apply the chosen speed — and ONLY when it is not the default.
+     *
+     * `setPlaybackParams` is not free: it reconfigures the output with a
+     * resampler, and it is documented to START a player that is merely
+     * prepared, which is why the dance below then pauses it. Doing that at
+     * speed 1.0 on a player that has never run meant every voice message began
+     * with an unnecessary start / pause / start across the audio pipeline, at
+     * the exact moment the person expected sound. At 1.0 there is nothing to
+     * apply, so nothing is applied.
+     */
     private fun applyRate() {
         val p = player ?: return
         val rate = mutableVoice.value.rate
+        if (rate == DEFAULT_RATE && !rateApplied) return
+        rateApplied = true
         runCatching {
             val wasPlaying = p.isPlaying
             p.playbackParams = PlaybackParams().setSpeed(rate)
@@ -322,6 +344,7 @@ public class ChatMediaHub(
         ticker = null
         val p = player
         player = null
+        rateApplied = false
         if (p != null) {
             runCatching { p.stop() }
             runCatching { p.release() }
@@ -344,6 +367,9 @@ public class ChatMediaHub(
     public companion object {
         private const val TAG = "LakkoChatMediaHub"
         private const val PROGRESS_TICK_MS = 100L
+
+        /** [PLAYBACK_RATES] first entry — the speed that needs no applying. */
+        private const val DEFAULT_RATE = 1f
 
         /** Lowercase hex of a blob id — the key every media file is filed under. */
         public fun mediaKey(blobId: ByteArray): String = AttachmentBridge.hex(blobId)

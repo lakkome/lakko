@@ -294,8 +294,17 @@ differences are the title, the compose action and the row title rule.
   messages, a delivery glyph: one check sent, two checks read. Incoming
   bubbles left on the sunken surface, outgoing right on the accent. Own
   messages sent from another device of the same account are outgoing.
-- Reactions as chips under the bubble; a long-press or hover opens the
-  reaction bar and the message actions (Reply later, Edit, Delete, Copy).
+- Reactions as chips under the bubble. The reaction bar and the message
+  actions (Reply later, Edit, Delete, Copy) open on a **deliberate** gesture
+  and on nothing else: a right-click on web, a long-press on iOS and Android.
+  **Never on hover.** Hover is not an act - a pointer crossing a bubble on its
+  way somewhere else asks for nothing - and a strip that appears over the
+  bubble under the pointer takes the click the person was actually making. It
+  did exactly that to a voice message: the play button sat under the strip, so
+  pressing play paused it again and the message could not be listened to at
+  all. The menu also never overlaps the bubble's own controls, whatever opens
+  it. A keyboard reaches it with the context-menu key or Shift+F10 on the
+  focused bubble, which are the same deliberate act.
 - Message actions and the composer keep the ADR-0023, ADR-0024 and ADR-0047
   behaviour; only the chrome changes.
 - Composer: attach, text field growing to five lines, emoji or GIF picker,

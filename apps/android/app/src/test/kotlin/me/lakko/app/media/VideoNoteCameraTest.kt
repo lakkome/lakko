@@ -4,7 +4,9 @@
 package me.lakko.app.media
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -106,5 +108,79 @@ class VideoNoteCameraTest {
             VideoNoteOutcome.HOLD_TO_RECORD,
             outcome(recording = true, recordedMs = MIN_TAKE_MS - 1, sinceStartMs = 4_000),
         )
+    }
+}
+
+/**
+ * The 2026-09-24 emulator finding: the FIRST video note recorded, and every
+ * hold after it only flashed the recording overlay and went away.
+ *
+ * `VideoNoteRecorder` cannot run on the host JVM, but what it got wrong can.
+ * It had no notion of WHICH use cases a take owned: it bound through the
+ * process-singleton provider and let go with `unbindAll()`, late — after the
+ * finished file had been read and a poster frame decoded. These pin the
+ * ownership rule the recorder now delegates to, and each of them fails if a
+ * take is allowed to leave the camera bound, or to unbind one it does not own.
+ */
+class CameraOwnershipTest {
+
+    @Test
+    fun a_released_take_owns_nothing() {
+        val own = CameraOwnership<String>()
+        own.onBound(listOf("preview", "capture"))
+        assertEquals(2, own.boundCount)
+
+        own.releaseBound()
+
+        // THE regression: a take that has finished must be holding no camera.
+        assertEquals(0, own.boundCount)
+        assertTrue(own.isReleased)
+    }
+
+    @Test
+    fun release_names_exactly_what_this_take_bound() {
+        val own = CameraOwnership<String>()
+        own.onBound(listOf("preview", "capture"))
+        assertEquals(listOf("preview", "capture"), own.releaseBound())
+    }
+
+    @Test
+    fun a_second_release_unbinds_nothing_so_it_cannot_reach_a_later_take() {
+        val own = CameraOwnership<String>()
+        own.onBound(listOf("preview", "capture"))
+        own.releaseBound()
+        // The recorder's `finally { release() }` still runs after the finalize
+        // path released. It must be inert, not a second teardown.
+        assertEquals(emptyList<String>(), own.releaseBound())
+    }
+
+    @Test
+    fun a_released_take_may_never_bind_again() {
+        val own = CameraOwnership<String>()
+        own.onBound(listOf("preview"))
+        own.releaseBound()
+
+        assertFalse(own.mayBind())
+        // A bind that raced the teardown does not re-enter the ledger, or it
+        // would be held by an instance nobody will ever release again.
+        own.onBound(listOf("late-preview"))
+        assertEquals(0, own.boundCount)
+    }
+
+    @Test
+    fun rebinding_the_same_use_cases_for_a_flip_is_still_one_hold_each() {
+        val own = CameraOwnership<String>()
+        own.onBound(listOf("preview", "capture"))
+        // A flip rebinds the SAME two use cases to the other lens.
+        own.onBound(listOf("preview", "capture"))
+        assertEquals(listOf("preview", "capture"), own.releaseBound())
+    }
+
+    @Test
+    fun a_fresh_take_may_bind_and_starts_holding_nothing() {
+        val own = CameraOwnership<String>()
+        assertTrue(own.mayBind())
+        assertFalse(own.isReleased)
+        assertEquals(0, own.boundCount)
     }
 }

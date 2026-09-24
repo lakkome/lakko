@@ -359,8 +359,20 @@ internal class RecordController(
         canFlip = v.canFlip
     }
 
-    fun attachPreview(view: PreviewView?) {
+    /** The round preview's view came up; this take binds to THIS one. */
+    fun attachPreview(view: PreviewView) {
         previewView = view
+    }
+
+    /**
+     * That view went away. Identity-checked on purpose: the previous take's
+     * preview is torn down by Compose, and a blanket `attachPreview(null)`
+     * landing after a new take has already attached its own view would blank
+     * the view that take is waiting for — and the wait ends in
+     * `Couldn't start recording`.
+     */
+    fun detachPreview(view: PreviewView) {
+        if (previewView === view) previewView = null
     }
 
     fun onPermissionResult() {
@@ -511,6 +523,17 @@ internal class RecordController(
                 }
             }
         } else {
+            // Whatever a previous take left holding the camera lets go BEFORE
+            // a new one asks for it. Every exit path already finishes its take,
+            // so this should be null — but "should be" is what made the second
+            // video note fail, and a recorder that is already released treats
+            // this as a no-op.
+            video?.release()
+            // This runs from [dispatch], so the round preview has not
+            // recomposed yet: anything still here is the PREVIOUS take's view,
+            // whose surface is gone. Binding to it gives a bound camera with a
+            // dead preview. Wait for this take's own.
+            previewView = null
             val rec = VideoNoteRecorder(context, lifecycleOwner)
             video = rec
             videoLive = false
@@ -638,6 +661,10 @@ internal class RecordController(
                     val take = try {
                         when {
                             voiceTake != null -> voiceTake.await().also { captureStarted = it.started }.take
+                            // `finish` lets the camera go the moment the
+                            // recording is finalized; this catches the paths
+                            // that never got there (no recording, cancelled
+                            // mid-await) and is inert otherwise.
                             vn != null -> try {
                                 vn.finish(elapsed)
                             } finally {
@@ -1081,9 +1108,6 @@ internal fun VideoNoteOverlay(controller: RecordController, modifier: Modifier =
                             .clickable(onClickLabel = "Play with sound") { withSound = !withSound },
                     )
                 } else {
-                    DisposableEffect(Unit) {
-                        onDispose { controller.attachPreview(null) }
-                    }
                     AndroidView(
                         factory = { ctx ->
                             PreviewView(ctx).apply {
@@ -1093,6 +1117,10 @@ internal fun VideoNoteOverlay(controller: RecordController, modifier: Modifier =
                                 controller.attachPreview(this)
                             }
                         },
+                        // Carries the view, so the controller clears it only
+                        // when it is still the one it is using — a sibling
+                        // `DisposableEffect` could only blank it blindly.
+                        onRelease = { controller.detachPreview(it) },
                         modifier = Modifier.size(260.dp).clip(CircleShape),
                     )
                     if (controller.videoLive) {

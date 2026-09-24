@@ -630,8 +630,10 @@ function ChatView(props: {
   // edited (or `null`), plus the working text.
   const [editingId, setEditingId] = createSignal<number | null>(null);
   const [editText, setEditText] = createSignal("");
-  // The messageId whose reaction picker is open (or `null`).
-  const [reactPickerId, setReactPickerId] = createSignal<number | null>(null);
+  // The quick reaction row moved into the per-message action menu, which owns
+  // its own open state (`TimelineBubble.tsx` / `MessageMenu.tsx`): one gesture
+  // opens the reactions and the actions together, so the view no longer tracks
+  // "whose reaction bar is open" separately from "whose menu is open".
 
   // ADR-0024 — ephemeral typing registry, keyed on the sender's MLS
   // leaf. Never persisted; a reload starts empty (a stale `true` row
@@ -3631,7 +3633,8 @@ function ChatView(props: {
    *  same emoji toggles it off (the op + the local apply are both
    *  toggles, so they stay in sync). */
   async function onReact(messageId: number, emoji: string): Promise<void> {
-    setReactPickerId(null);
+    // The action menu closes itself after an action; only the full picker,
+    // which the view owns, has to be dismissed from here.
     setFullReactPickerId(null);
     setError(null);
     // ADR-0047 §3 — a reaction is exactly one emoji grapheme. The wire accepts
@@ -6932,17 +6935,10 @@ function ChatView(props: {
                 onStartEdit={(id, current) => {
                   setEditText(current);
                   setEditingId(id);
-                  setReactPickerId(null);
                 }}
                 onCancelEdit={() => setEditingId(null)}
                 onSaveEdit={onSaveEdit}
                 onDeleteMessage={onDeleteMessage}
-                reactPickerId={reactPickerId()}
-                onOpenReactPicker={(id) => {
-                  setReactPickerId(id);
-                  setEditingId(null);
-                }}
-                onCloseReactPicker={() => setReactPickerId(null)}
                 onReact={onReact}
                 actionsAvailable={messageActionsAvailable()}
                 hub={hub}
@@ -6953,7 +6949,6 @@ function ChatView(props: {
                 }}
                 fullReactPickerId={fullReactPickerId()}
                 onOpenFullReactPicker={(id) => {
-                  setReactPickerId(null);
                   setFullReactPickerId(id);
                 }}
                 onCloseFullReactPicker={() => setFullReactPickerId(null)}

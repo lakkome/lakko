@@ -1866,27 +1866,99 @@ a.ghost.small.lk-wide-only {
 }
 
 /*
- * ADR-0023 — per-message action strip (React / Edit / Delete).
- * Hidden by default; revealed when the hosting bubble (`<li>`)
- * is hovered or focus-within (keyboard). On touch devices with
- * no hover, the strip stays visible so the affordance is still
- * reachable.
+ * docs/ux/client-redesign.md section 5.2 — the per-message action menu is
+ * NOT revealed by hover, by `:focus-within`, or by being permanently on.
+ * There is nothing to reveal: it does not exist until a deliberate gesture
+ * creates it (`MessageMenu.tsx`), and it is then rendered in a portal
+ * outside the bubble, so it cannot sit on the bubble's own controls.
+ *
+ * What used to be here was `opacity: 0` plus `.lk-bubble:hover > …` plus a
+ * `@media (hover: none)` arm that left the strip permanently visible on a
+ * touch screen. All three are gone: a pointer crossing a bubble asks for
+ * nothing, tabbing onto a voice message's waveform slider asks for nothing,
+ * and a touch screen gets the same deliberate gesture as a long press.
+ *
+ * The one touch-only rule that remains is suppressing iOS Safari's own
+ * long-press callout, which would otherwise race our menu. Text selection is
+ * deliberately left alone: `user-select: none` here would take copy away on
+ * every phone, which is a worse trade than a selection that occasionally
+ * appears behind the menu.
  */
-.lakko-msg-actions {
-  opacity: 0;
-  transition: opacity 0.12s ease-in-out;
-  pointer-events: none;
-}
-.lk-bubble:hover > .lakko-msg-actions,
-.lk-bubble:focus-within > .lakko-msg-actions {
-  opacity: 1;
-  pointer-events: auto;
-}
 @media (hover: none) {
-  .lakko-msg-actions {
-    opacity: 1;
-    pointer-events: auto;
+  .lk-bubble {
+    -webkit-touch-callout: none;
   }
+}
+.lk-msg-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 39;
+}
+.lk-msg-menu {
+  position: fixed;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 180px;
+  padding: 4px;
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  border: 1px solid var(--surface-border);
+  box-shadow: var(--shadow-2);
+  color: var(--surface-fg);
+}
+.lk-msg-menu-reactions {
+  display: flex;
+  gap: 2px;
+}
+.lk-msg-menu-reactions button {
+  min-height: 0;
+  padding: 3px 5px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  font-size: 18px;
+  line-height: 1;
+  color: inherit;
+  cursor: pointer;
+}
+.lk-msg-menu-reactions button.more {
+  display: inline-flex;
+  align-items: center;
+  color: var(--surface-muted);
+}
+.lk-msg-menu-reactions button:hover:not(:disabled),
+.lk-msg-menu-reactions button:focus-visible {
+  background: var(--surface-hover);
+}
+.lk-msg-menu-items {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--surface-border);
+  padding-top: 2px;
+  margin-top: 2px;
+}
+.lk-msg-menu-items button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 0;
+  padding: 7px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+.lk-msg-menu-items button:hover:not(:disabled),
+.lk-msg-menu-items button:focus-visible {
+  background: var(--surface-hover);
+}
+.lk-msg-menu-items button.danger {
+  color: var(--danger);
 }
 
 /*
@@ -2612,35 +2684,6 @@ a.ghost.small.lk-wide-only {
   color: var(--danger);
 }
 
-/* Message bubble actions (React / Edit / Delete): icon buttons in a small
-   floating strip, revealed on hover of the hosting bubble. */
-.lakko-msg-actions {
-  position: absolute;
-  top: -14px;
-  display: flex;
-  gap: 2px;
-  padding: 2px;
-  border-radius: var(--radius-sm);
-  background: var(--surface-elevated);
-  border: 1px solid var(--surface-border);
-  box-shadow: var(--shadow-1);
-  color: var(--surface-muted);
-}
-.lakko-msg-actions button {
-  width: 26px;
-  height: 26px;
-  min-height: 0;
-  padding: 0;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: inherit;
-}
-.lakko-msg-actions button:hover:not(:disabled) {
-  background: var(--surface-hover);
-  color: var(--surface-fg);
-}
-
 /* Devices (Settings > Security): the list and the add-a-device panel. */
 .lk-device-add {
   display: grid;
@@ -2766,6 +2809,14 @@ a.ghost.small:hover {
   padding: 7px 12px 5px;
   border-radius: var(--radius-lg);
   overflow-wrap: anywhere;
+}
+/* The bubble is a tab stop when it has a menu (the spec puts the keyboard
+   trigger "on the focused bubble"), so it needs to say when it is focused.
+   `:focus-visible` rather than `:focus`: a mouse press focuses it too, and a
+   ring around every bubble that was clicked is noise. */
+.lk-bubble:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .lk-bubble.incoming {
   background: var(--surface-sunken);
@@ -3088,34 +3139,10 @@ a.ghost.small:hover {
 button.lk-reaction {
   cursor: pointer;
 }
-/* The quick reaction bar over a bubble. */
-.lk-react-bar {
-  position: absolute;
-  top: 1.2rem;
-  z-index: 5;
-  display: flex;
-  gap: 2px;
-  padding: 4px;
-  border-radius: var(--radius-md);
-  background: var(--surface-elevated);
-  border: 1px solid var(--surface-border);
-  box-shadow: var(--shadow-2);
-}
-.lk-react-bar button {
-  min-height: 0;
-  padding: 2px 4px;
-  border: none;
-  background: transparent;
-  font-size: 18px;
-  line-height: 1;
-  color: var(--surface-fg);
-  cursor: pointer;
-}
-.lk-react-bar button.more {
-  display: inline-flex;
-  align-items: center;
-  color: var(--surface-muted);
-}
+/* The quick reaction bar used to be its own popover positioned INSIDE the
+   bubble (`top: 1.2rem`), i.e. over the play button on a voice message, one
+   press further in than the strip that had the same defect. It is now the
+   first row of `.lk-msg-menu`, which is portaled outside the bubble. */
 /* File chips under a bubble's text. */
 .lk-chips {
   display: flex;
