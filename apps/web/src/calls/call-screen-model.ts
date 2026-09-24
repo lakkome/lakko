@@ -139,6 +139,44 @@ export function galleryParticipants<T extends FeaturedCandidate>(
   return participants.filter((p) => p.id !== featured.id);
 }
 
+/** What {@link callPeerLabel} needs to know. */
+export interface CallPeerLabelInput {
+  readonly surface: CallSurfaceKind;
+  /** The other person, as the call host resolved them, or `null` on a group
+   *  or link call where there is no single other person. */
+  readonly peerName: string | null | undefined;
+  /** Everyone on the call including this device — what the group label
+   *  counts. */
+  readonly participantCount: number;
+  /** The sole remote's display name, for the 1x1 case where the host has not
+   *  resolved one. */
+  readonly soleRemoteName: string | null | undefined;
+}
+
+/**
+ * Who is on the call, as the name at the top of the call screen (§4) and, since
+ * §4.5, on the collapsed bar.
+ *
+ * Lifted out of `routes/Call.tsx` when the bar was built, and that is the whole
+ * reason it is a function: §4.5 says the bar carries "the same label the call
+ * screen uses", and two places computing the same name from the same facts is
+ * exactly how they come to disagree. `vitest` here has no Solid transform, so
+ * the copy that lived in the view was a rule nothing could assert.
+ *
+ * A group call has no single name, so the label names the call and counts it
+ * instead of inventing a person. `Participant` for a 1x1 call the host could
+ * not name is practically unreachable — it resolves a name for every one — but
+ * it must not invent a person if it is, and `encryption-chip.ts` treats that
+ * exact word as "no name" so the sheet's sentence stays consistent with it.
+ */
+export function callPeerLabel(input: CallPeerLabelInput): string {
+  if (input.surface === "group") return `Group call · ${input.participantCount}`;
+  const given = input.peerName?.trim() ?? "";
+  if (given !== "") return given;
+  const sole = input.soleRemoteName?.trim() ?? "";
+  return sole !== "" ? sole : "Participant";
+}
+
 /** Whose picture fills the video surface. */
 export type CallFillSource = "remote" | "local" | "none";
 

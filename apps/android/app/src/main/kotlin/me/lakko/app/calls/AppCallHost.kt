@@ -144,6 +144,54 @@ public object AppCallHost {
         idleSubscription = repository.addGroupMlsIdleListener { groupIdHex -> group.onGroupSettled(groupIdHex) }
     }
 
+    /**
+     * `docs/ux/calls.md` section 4.5 — put the call in the slot away, or bring
+     * it back. Routed by kind here because the presentation belongs to the
+     * call, and there is exactly one call.
+     *
+     * Neither touches the call: not the media, not the keys, not the timer. The
+     * flag lives on the host that owns the call (cleared when a new call takes
+     * the slot), so a destination change cannot reach it and a collapse
+     * survives every navigation for as long as the call does.
+     */
+    public fun collapseCurrentCall() {
+        when (occupantNow()) {
+            CallKind.ONE_TO_ONE -> instance.collapse()
+            CallKind.GROUP -> group.collapse()
+            CallKind.LINK -> link.collapse()
+            null -> Unit
+        }
+    }
+
+    /** See [collapseCurrentCall]. A tap on the bar. */
+    public fun expandCurrentCall() {
+        when (occupantNow()) {
+            CallKind.ONE_TO_ONE -> instance.expand()
+            CallKind.GROUP -> group.expand()
+            CallKind.LINK -> link.expand()
+            null -> Unit
+        }
+    }
+
+    /**
+     * The collapsed bar's one control — section 4.5: "one round mute button,
+     * drawn on and off exactly as the call screen draws it".
+     *
+     * Routed exactly as the call screen routes its own microphone button. A 1x1
+     * call has a session on this side of the FFI and is told directly; a group
+     * or link call's screen only ever flips the store, which its host mirrors
+     * onto the session, so the bar flips the same store rather than reaching
+     * past it for a handle it does not hold.
+     */
+    public fun setCurrentCallMicrophoneEnabled(on: Boolean) {
+        when (occupantNow()) {
+            CallKind.ONE_TO_ONE -> instance.active.value?.session?.setMicrophoneEnabled(on)
+            CallKind.GROUP -> group.ui.setMic(on)
+            CallKind.LINK -> link.ui.setMic(on)
+            null -> Unit
+        }
+    }
+
     /** End whatever call occupies the slot (declines a ringing 1x1 call). */
     public fun endCurrentCall() {
         when (occupantNow()) {

@@ -202,9 +202,42 @@ public class GroupCallHost(
 
     private val mutableOverlay = MutableStateFlow(false)
 
-    /** The in-call screen is up: from the moment the session exists until the
-     *  screen's own exit after the call ended. */
+    /** The in-call screen wants to be up: from the moment the session exists
+     *  until the screen's own exit after the call ended. Whether it is actually
+     *  drawn is this AND [collapsed] being false — see [collapsed]. */
     public val overlayVisible: StateFlow<Boolean> = mutableOverlay.asStateFlow()
+
+    private val mutableCollapsed = MutableStateFlow(false)
+
+    /**
+     * `docs/ux/calls.md` section 4.5 — this call has been put away into the bar
+     * across the top of the app.
+     *
+     * A property of the CALL, not of a screen: it is set and cleared only here,
+     * so no destination change can touch it, and it is cleared where the call
+     * takes the slot rather than by anything watching the call end. Both halves
+     * of that matter. A call is born expanded because clearing it at the start
+     * is synchronous with the very assignment that makes the screen want to be
+     * up, so a new call can never flash a bar on its way to its own screen. And
+     * it is NOT cleared when a call ends, because section 4.5 says a collapsed
+     * call that ends must not throw its `Call ended` screen across whatever the
+     * person went off to read: "a person who put the call away asked not to be
+     * interrupted by it."
+     */
+    public val collapsed: StateFlow<Boolean> = mutableCollapsed.asStateFlow()
+
+    /** Put the call away (the chevron, or the system back). Never ends it. */
+    public fun collapse() {
+        mutableCollapsed.value = true
+    }
+
+    /** Bring the call back (a tap on the bar). */
+    public fun expand() {
+        mutableCollapsed.value = false
+    }
+
+    /** See [CallUiState.connectedSinceMs] — the running time the bar shows. */
+    public val connectedSinceMs: StateFlow<Long?> get() = ui.connectedSinceMs
 
     private class Active(
         val groupIdHex: String,
@@ -487,6 +520,10 @@ public class GroupCallHost(
             starting = false
             setSlot(GroupCallSlot(groupIdHex, callIdHex, starting = false))
             mutableOverlay.value = true
+            // A call is born expanded (see [collapsed]): cleared here, in the
+            // same breath as the screen being asked for, so the previous call's
+            // put-away can never suppress this one's screen.
+            mutableCollapsed.value = false
             h.connect()
             if (active !== a) return GroupCallStartOutcome.Failed("The call ended while it was connecting.")
             a.connected = true

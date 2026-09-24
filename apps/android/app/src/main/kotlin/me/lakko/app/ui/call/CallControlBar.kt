@@ -186,8 +186,13 @@ private fun CallControlButton(
  * The slashed icon is the off state's, so the glyph and the fill say the same
  * thing (section 4.1.1: "solid white with a dark slashed icon"). Speaker has no
  * slashed variant in the spec's icon list — its fill alone carries the state.
+ *
+ * `internal` rather than file-private because the collapsed call bar
+ * (`docs/ux/calls.md` section 4.5) draws the same mute button and must draw the
+ * same glyph for it; a second copy of this mapping is a second thing that can
+ * come to disagree about which state is the slashed one.
  */
-private fun CallControl.icon(): ImageVector = when (kind) {
+internal fun CallControl.icon(): ImageVector = when (kind) {
     CallControlKind.SPEAKER -> Icons.AutoMirrored.Filled.VolumeUp
     CallControlKind.MICROPHONE ->
         if (emphasis == CallControlEmphasis.SOLID) Icons.Filled.MicOff else Icons.Filled.Mic

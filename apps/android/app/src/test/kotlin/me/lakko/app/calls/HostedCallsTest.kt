@@ -849,4 +849,164 @@ class HostedCallsTest {
         runCurrent()
         assertTrue(h.port.rows.isEmpty())
     }
+
+    // ---- Putting a call away (docs/ux/calls.md section 4.5) -------------------
+
+    /**
+     * A call is born expanded. The flag is cleared in the same breath as the
+     * screen being asked for, which is why a previous call's put-away cannot
+     * suppress this one.
+     */
+    @Test
+    fun `a group call starts with its screen up, not put away`() = runTest {
+        val h = groupHarness()
+        h.host.start(groupA, video = false, joinCallIdHex = null)
+        runCurrent()
+        assertFalse(h.host.collapsed.value)
+        assertTrue(h.host.overlayVisible.value)
+    }
+
+    /**
+     * Section 4.5: collapsing "changes nothing about the call itself — the
+     * media, the keys and the timer are untouched, only the picture is put
+     * away". So the host must still hold the slot, still publish its heartbeat,
+     * and never hang the session up.
+     */
+    @Test
+    fun `collapsing a group call puts the screen away and touches nothing else`() = runTest {
+        val h = groupHarness()
+        h.host.start(groupA, video = false, joinCallIdHex = null)
+        runCurrent()
+        val session = h.port.sessions.single()
+
+        h.host.collapse()
+        runCurrent()
+
+        assertTrue("the call is put away", h.host.collapsed.value)
+        assertEquals("the call was hung up", 0, session.hangUps)
+        assertNotNull("the slot was given up", h.host.slot.value)
+        assertTrue(h.host.occupiesSlot)
+        assertNotNull("the running time was lost", h.host.connectedSinceMs.value)
+
+        // Still in the call: the heartbeat keeps telling the group so.
+        val joinsBefore = h.port.kinds().count { it == "GroupJoin" }
+        advanceTimeBy(GROUP_CALL_HEARTBEAT_MS)
+        runCurrent()
+        assertEquals(joinsBefore + 1, h.port.kinds().count { it == "GroupJoin" })
+    }
+
+    /** A tap on the bar brings it back. */
+    @Test
+    fun `expanding a group call brings the screen back`() = runTest {
+        val h = groupHarness()
+        h.host.start(groupA, video = false, joinCallIdHex = null)
+        runCurrent()
+        h.host.collapse()
+        h.host.expand()
+        runCurrent()
+        assertFalse(h.host.collapsed.value)
+        assertTrue(h.host.overlayVisible.value)
+    }
+
+    /**
+     * Section 4.5: "a person who put the call away asked not to be interrupted
+     * by it." So a collapsed call that ENDS must not un-collapse — doing so
+     * would throw the `Call ended` screen across whatever the person went off to
+     * read. The flag stays set until the next call takes the slot.
+     */
+    @Test
+    fun `a collapsed group call that ends does not throw its screen back up`() = runTest {
+        val h = groupHarness()
+        h.host.start(groupA, video = false, joinCallIdHex = null)
+        runCurrent()
+        h.host.collapse()
+        runCurrent()
+
+        h.host.leave()
+        runCurrent()
+
+        assertTrue("the ended screen was thrown up over another screen", h.host.collapsed.value)
+    }
+
+    /**
+     * ...and the very next call is nonetheless born expanded, which is the other
+     * half of the same rule. Clearing the flag at the start rather than at the
+     * end is what makes both hold at once.
+     */
+    @Test
+    fun `the call after a collapsed one still shows its own screen`() = runTest {
+        val h = groupHarness()
+        h.host.start(groupA, video = false, joinCallIdHex = null)
+        runCurrent()
+        h.host.collapse()
+        h.host.leave()
+        runCurrent()
+        assertTrue(h.host.collapsed.value)
+
+        h.host.start(groupB, video = false, joinCallIdHex = null)
+        runCurrent()
+        assertFalse("the new call inherited the last one's put-away", h.host.collapsed.value)
+        assertTrue(h.host.overlayVisible.value)
+    }
+
+    /** The same four rules for the call-link call, which has its own host. */
+    @Test
+    fun `a link call is born expanded, collapses without ending, and does not come back on its own`() =
+        runTest {
+            val h = linkHarness()
+            h.host.start(request(owner = true))
+            runCurrent()
+            assertEquals(LinkCallPhase.LIVE, h.host.slot.value?.phase)
+            assertFalse(h.host.collapsed.value)
+
+            h.host.collapse()
+            runCurrent()
+            assertTrue(h.host.collapsed.value)
+            assertEquals("the call was hung up", 0, h.port.handles.single().hangUps)
+            assertNotNull("the slot was given up", h.host.slot.value)
+
+            h.host.expand()
+            assertFalse(h.host.collapsed.value)
+
+            h.host.collapse()
+            h.host.leave()
+            runCurrent()
+            assertTrue("the ended screen was thrown up", h.host.collapsed.value)
+
+            h.host.start(request(owner = true, callByte = 0x33))
+            runCurrent()
+            assertFalse("the new call inherited the put-away", h.host.collapsed.value)
+        }
+
+    /**
+     * The running time the bar shows survives the screen. The call screen
+     * derives its own from the moment IT observed the connect, which restarts
+     * from zero when the call is put away and brought back; this one does not.
+     */
+    @Test
+    fun `the running time survives being put away and brought back`() = runTest {
+        val h = groupHarness()
+        h.host.start(groupA, video = false, joinCallIdHex = null)
+        runCurrent()
+        val connectedAt = h.host.connectedSinceMs.value
+        assertNotNull(connectedAt)
+
+        h.host.collapse()
+        h.host.expand()
+        h.host.collapse()
+        runCurrent()
+
+        assertEquals("the clock restarted", connectedAt, h.host.connectedSinceMs.value)
+    }
+
+    /** A call that never connected has no running time to show, so the bar's
+     *  line stays a state word. */
+    @Test
+    fun `a call that never connected reports no running time`() = runTest {
+        val h = groupHarness()
+        h.port.connectError = IllegalStateException("down")
+        h.host.start(groupA, video = false, joinCallIdHex = null)
+        runCurrent()
+        assertNull(h.host.connectedSinceMs.value)
+    }
 }

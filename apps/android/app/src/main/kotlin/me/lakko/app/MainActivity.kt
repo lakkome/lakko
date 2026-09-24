@@ -497,6 +497,25 @@ private fun AppRoot(
         }
     }
 
+    // ADR-0048 — one resolver for every call surface below: the collapsed bar
+    // (section 4.5) and the in-call screens must name a call identically, so
+    // they read the same directory and the same version rather than each
+    // collecting their own.
+    val profileDirectory = remember(chatRepository) {
+        me.lakko.app.profile.ProfileDirectory.get(chatRepository.context)
+    }
+    val nameVersion by profileDirectory.version.collectAsStateWithLifecycle()
+    val resolveOneToOneName: (String) -> String? = { groupIdHex ->
+        nameVersion.let {
+            chatRepository.oneToOnePeerKey(groupIdHex)?.let { key ->
+                profileDirectory.resolve(key).primary
+            }
+        }
+    }
+    val resolveGroupName: (String) -> String? = { groupIdHex ->
+        nameVersion.let { chatRepository.groupName(groupIdHex)?.name }
+    }
+
     when (val current = state) {
         AuthState.Loading -> InsetRoot { LoadingScreen() }
         is AuthState.Anon -> InsetRoot {
@@ -547,6 +566,18 @@ private fun AppRoot(
             val updateDecision by releaseChecker.decision.collectAsState()
             val context = androidx.compose.ui.platform.LocalContext.current
             val shownUpdate = updateDecision as? UpdateBannerDecision.Shown
+            // docs/ux/calls.md section 4.5 — the live call, put away. Resolved
+            // here rather than inside `SessionRoot` so that "no bar" is a `null`
+            // slot and the top strip reserves nothing when there is no call.
+            // The name resolvers are the ones the call screens use, so the bar
+            // says exactly what the screen it came from says.
+            val callBarModel = me.lakko.app.ui.call.rememberCollapsedCallBar(
+                oneToOne = callHost,
+                group = me.lakko.app.calls.AppCallHost.group,
+                link = me.lakko.app.calls.AppCallHost.link,
+                nameForOneToOne = resolveOneToOneName,
+                groupNameFor = resolveGroupName,
+            )
             SessionRoot(
                 authRepository = authRepository,
                 contactsRepository = contactsRepository,
@@ -575,6 +606,17 @@ private fun AppRoot(
                         }
                     }
                 },
+                callBar = callBarModel?.let { bar ->
+                    {
+                        me.lakko.app.ui.call.CollapsedCallBar(
+                            model = bar,
+                            onExpand = { me.lakko.app.calls.AppCallHost.expandCurrentCall() },
+                            onToggleMute = { on ->
+                                me.lakko.app.calls.AppCallHost.setCurrentCallMicrophoneEnabled(on)
+                            },
+                        )
+                    }
+                },
             )
         }
     }
@@ -583,10 +625,6 @@ private fun AppRoot(
         // The call surfaces, above every session screen — including the `/c/`
         // landing, which is drawn first. Rendered from the process-wide host,
         // so a destination change never hides or ends a call.
-        val profileDirectory = remember(chatRepository) {
-            me.lakko.app.profile.ProfileDirectory.get(chatRepository.context)
-        }
-        val nameVersion by profileDirectory.version.collectAsStateWithLifecycle()
         androidx.compose.foundation.layout.Box(modifier = Modifier.fillMaxSize()) {
             if (callSlug != null) {
                 androidx.activity.compose.BackHandler { inviteIntake.consumeCallJoin() }
@@ -600,16 +638,7 @@ private fun AppRoot(
                 )
             }
             // The 1x1 call's ringing banner and in-call screen.
-            OneToOneCallOverlay(
-                host = callHost,
-                nameForGroup = { groupIdHex ->
-                    nameVersion.let {
-                        chatRepository.oneToOnePeerKey(groupIdHex)?.let { key ->
-                            profileDirectory.resolve(key).primary
-                        }
-                    }
-                },
-            )
+            OneToOneCallOverlay(host = callHost, nameForGroup = resolveOneToOneName)
             // A call-link call that is connecting, waiting to be admitted, or
             // just ended, on screens other than its landing.
             LinkCallNoticeBar(
@@ -622,14 +651,15 @@ private fun AppRoot(
             host = me.lakko.app.calls.AppCallHost.group,
             // ADR-0051 — the group name every member holds, so a group call is
             // titled by its group instead of by a participant's label.
-            groupNameFor = { groupIdHex ->
-                nameVersion.let { chatRepository.groupName(groupIdHex)?.name }
-            },
+            groupNameFor = resolveGroupName,
         )
         // docs/ux/call-links.md section 3 — the `Invite` control reads the
         // session at the moment it is pressed; it is never held for the call.
         me.lakko.app.ui.call.LinkCallOverlay(
             host = me.lakko.app.calls.AppCallHost.link,
+            // The landing covers the collapsed bar's strip, so putting the call
+            // away leaves it — see `LinkCallOverlay`'s parameter.
+            onLeaveLanding = { inviteIntake.consumeCallJoin() },
             identity = {
                 authRepository.identitySecrets.value?.let { secrets ->
                     me.lakko.app.calls.CallInviteIdentity(
@@ -728,6 +758,16 @@ private fun SessionRoot(
     account: SessionAccount,
     /** The security / update banners, drawn above the tab content. */
     banners: (@Composable () -> Unit)?,
+    /**
+     * `docs/ux/calls.md` section 4.5 — the collapsed call bar, drawn across the
+     * top of the app above every screen and above [banners].
+     *
+     * `null` when there is no bar, which is what keeps the status-bar inset from
+     * being reserved for nothing. It sits ABOVE the notices rather than under
+     * them because it is a live control and not a notice: a person reaching for
+     * Mute must not have it move because an update notice appeared underneath.
+     */
+    callBar: (@Composable () -> Unit)?,
 ) {
     // Drive ChatRepository.bootstrap whenever a fresh
     // identity-secrets value lands. The first non-null emission
@@ -1147,15 +1187,21 @@ private fun SessionRoot(
                 .padding(padding)
                 .consumeWindowInsets(padding),
         ) {
-            if (banners != null) {
+            // One strip at the top of the app: the collapsed call bar first,
+            // then the notices. It carries the status-bar inset and the NavHost
+            // consumes it, so nothing here covers the status bar and no screen
+            // pads for it twice.
+            val topStrip = callBar != null || banners != null
+            if (topStrip) {
                 Column(modifier = Modifier.windowInsetsPadding(WindowInsets.statusBars)) {
-                    banners()
+                    callBar?.invoke()
+                    banners?.invoke()
                 }
             }
             NavHost(
                 navController = navController,
                 startDestination = Routes.CHATS,
-                modifier = if (banners != null) {
+                modifier = if (topStrip) {
                     Modifier.consumeWindowInsets(WindowInsets.statusBars)
                 } else {
                     Modifier

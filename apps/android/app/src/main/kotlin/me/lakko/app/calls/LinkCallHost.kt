@@ -174,9 +174,32 @@ public class LinkCallHost(
 
     private val mutableOverlay = MutableStateFlow(false)
 
-    /** The in-call screen is up: from the moment the call is live until the
-     *  screen's own exit after it ended. */
+    /** The in-call screen wants to be up: from the moment the call is live until
+     *  the screen's own exit after it ended. Whether it is actually drawn is
+     *  this AND [collapsed] being false. */
     public val overlayVisible: StateFlow<Boolean> = mutableOverlay.asStateFlow()
+
+    private val mutableCollapsed = MutableStateFlow(false)
+
+    /**
+     * `docs/ux/calls.md` section 4.5 — this call has been put away into the bar
+     * across the top of the app. See [GroupCallHost.collapsed] for why it is
+     * cleared where the call goes live and never where it ends.
+     */
+    public val collapsed: StateFlow<Boolean> = mutableCollapsed.asStateFlow()
+
+    /** Put the call away (the chevron, or the system back). Never ends it. */
+    public fun collapse() {
+        mutableCollapsed.value = true
+    }
+
+    /** Bring the call back (a tap on the bar). */
+    public fun expand() {
+        mutableCollapsed.value = false
+    }
+
+    /** See [CallUiState.connectedSinceMs] — the running time the bar shows. */
+    public val connectedSinceMs: StateFlow<Long?> get() = ui.connectedSinceMs
 
     private val mutableLandingClaims = MutableStateFlow(0)
 
@@ -453,7 +476,11 @@ public class LinkCallHost(
         }
         if (next == s.phase && message == s.errorMessage) return
         setSlot(s.copy(phase = next, errorMessage = message))
-        if (next == LinkCallPhase.LIVE) mutableOverlay.value = true
+        if (next == LinkCallPhase.LIVE) {
+            mutableOverlay.value = true
+            // A call is born expanded — see [collapsed].
+            mutableCollapsed.value = false
+        }
         if (!linkCallOccupiesSlot(next)) {
             // The orchestrator already closed its session; free what the call
             // still holds (its identity), outside the callback that reported it.

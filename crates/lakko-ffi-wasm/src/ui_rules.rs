@@ -12,6 +12,10 @@
 //! Nothing here touches a screen, a store or the network. A client maps what
 //! it already holds into these types, asks, and renders the answer.
 
+use lakko_ui_rules::call_bar::{
+    call_bar_status as rust_call_bar_status, call_bar_visibility as rust_call_bar_visibility,
+    CallBar as RustCallBar, CallBarPhase as RustCallBarPhase, CallBarStatus as RustCallBarStatus,
+};
 use lakko_ui_rules::capture::call_holds_capture as rust_call_holds_capture;
 use lakko_ui_rules::conversation::{
     order_conversations as rust_order_conversations, ConversationKind as RustConversationKind,
@@ -488,6 +492,90 @@ pub fn channel_info_sections(caps: ChannelInfoCapabilities) -> Vec<String> {
     .into_iter()
     .map(|s| s.name().to_string())
     .collect()
+}
+
+/// Where a call is, as the collapsed bar of `docs/ux/calls.md` section 4.5
+/// needs to see it.
+#[wasm_bindgen(js_name = CallBarPhase)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallBarPhase {
+    /// No call at all.
+    Idle = 0,
+    /// An incoming call being offered, which nobody has answered.
+    Ringing = 1,
+    /// Built, not yet on the wire.
+    Preparing = 2,
+    /// Ringing out.
+    Calling = 3,
+    /// Answered; the transport is coming up.
+    Connecting = 4,
+    /// Media is flowing.
+    Connected = 5,
+    /// The transport dropped and is being rebuilt.
+    Reconnecting = 6,
+    /// Over.
+    Ended = 7,
+}
+
+impl From<CallBarPhase> for RustCallBarPhase {
+    fn from(p: CallBarPhase) -> Self {
+        match p {
+            CallBarPhase::Idle => Self::Idle,
+            CallBarPhase::Ringing => Self::Ringing,
+            CallBarPhase::Preparing => Self::Preparing,
+            CallBarPhase::Calling => Self::Calling,
+            CallBarPhase::Connecting => Self::Connecting,
+            CallBarPhase::Connected => Self::Connected,
+            CallBarPhase::Reconnecting => Self::Reconnecting,
+            CallBarPhase::Ended => Self::Ended,
+        }
+    }
+}
+
+/// Whether the collapsed call bar is on screen.
+///
+/// `callScreenUp` is the client's own read of its call presentation. One
+/// state, one place: the bar exists because the call screen is away.
+#[wasm_bindgen(js_name = callBarVisible)]
+#[must_use]
+pub fn call_bar_visible(phase: CallBarPhase, call_screen_up: bool) -> bool {
+    matches!(
+        rust_call_bar_visibility(phase.into(), call_screen_up),
+        RustCallBar::Shown
+    )
+}
+
+/// What the collapsed bar's one status line says: `calling`, `connecting`,
+/// `reconnecting`, or `elapsed` - and never two at once, which is why this
+/// answers a single name rather than three booleans.
+///
+/// On `elapsed` the client formats {@link callBarElapsedMs}; how long a call
+/// has been running is not a presentation decision, so the rule carries the
+/// number through untouched.
+#[wasm_bindgen(js_name = callBarStatusKind)]
+#[must_use]
+pub fn call_bar_status_kind(phase: CallBarPhase) -> String {
+    match rust_call_bar_status(phase.into(), 0) {
+        RustCallBarStatus::Calling => "calling",
+        RustCallBarStatus::Connecting => "connecting",
+        RustCallBarStatus::Reconnecting => "reconnecting",
+        RustCallBarStatus::Elapsed(_) => "elapsed",
+    }
+    .to_owned()
+}
+
+/// The running time the bar shows, or `undefined` when its line carries a
+/// word instead. Reading this without {@link callBarStatusKind} is the
+/// mistake the pair exists to prevent: a line never says two things.
+#[wasm_bindgen(js_name = callBarElapsedMs)]
+#[must_use]
+pub fn call_bar_elapsed_ms(phase: CallBarPhase, connected_for_ms: u64) -> Option<u64> {
+    match rust_call_bar_status(phase.into(), connected_for_ms) {
+        RustCallBarStatus::Elapsed(ms) => Some(ms),
+        RustCallBarStatus::Calling
+        | RustCallBarStatus::Connecting
+        | RustCallBarStatus::Reconnecting => None,
+    }
 }
 
 /// What an arriving call offer does to this device —

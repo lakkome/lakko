@@ -87,6 +87,7 @@ import {
 import {
   ENDED_DISMISS_MS,
   callFillSource,
+  callPeerLabel,
   callStatusDetail,
   callSurfaceKind,
   controlsHidden,
@@ -1065,6 +1066,16 @@ const Call: Component<{
   inviteBusy?: boolean;
   /** One line on what `Invite` is doing, or `null`. */
   inviteStatus?: string | null;
+  /**
+   * Put the call away without ending it (`docs/ux/calls.md` section 4.5).
+   *
+   * Absent when there is nothing the bar could show in its place — the host
+   * asks the shared visibility rule, so this screen carries no second list of
+   * phases. Absent here means the chevron is not drawn and `Esc` does nothing,
+   * which is what keeps an ENDED call from being put away into a bar that does
+   * not take ended calls, leaving its overlay and its End button unreachable.
+   */
+  onCollapse?: (() => void) | undefined;
 }> = (props) => {
   const navigate = useNavigate();
   const [encryptionSheetOpen, setEncryptionSheetOpen] = createSignal(false);
@@ -1183,20 +1194,17 @@ const Call: Component<{
    *  only picture that exists then is their own. */
   const fill = createMemo(() => callFillSource(surface(), remoteCameraOn(), localCameraOn()));
 
-  /** The other person's name: what the host resolved, else the sole remote's,
-   *  else the honest placeholder. A group call has no single name, so the
-   *  status line names the call instead of inventing a person. */
-  const peerLabel = createMemo((): string => {
-    if (surface() === "group") return `Group call · ${callState.participants().length}`;
-    const given = props.peerName?.trim() ?? "";
-    if (given !== "") return given;
-    const sole = remotes()[0]?.displayName?.trim() ?? "";
-    // Practically unreachable — the host resolves a name for every 1x1 call —
-    // but it must not invent a person if it is. `encryption-chip.ts` treats
-    // this exact word as "no name" and produces the sentence that names
-    // nobody, so the two stay consistent.
-    return sole !== "" ? sole : "Participant";
-  });
+  /** Who is on the call, by the shared rule — lifted out of this view when the
+   *  collapsed bar was built, so the bar can show "the same label the call
+   *  screen uses" (§4.5) from one function rather than a second copy. */
+  const peerLabel = createMemo((): string =>
+    callPeerLabel({
+      surface: surface(),
+      peerName: props.peerName,
+      participantCount: callState.participants().length,
+      soleRemoteName: remotes()[0]?.displayName,
+    }),
+  );
 
   const toneId = (): string => props.peerId ?? props.peerName ?? remotes()[0]?.id ?? "peer";
 
@@ -1306,6 +1314,33 @@ const Call: Component<{
     else navigate(paths.home);
   };
 
+  /**
+   * `Esc` puts the call away (§4.5's web row: "the same chevron, or `Esc`").
+   *
+   * Not while the encryption sheet is open: the sheet owns `Esc` (it is a
+   * dialog, and closing it is what `Esc` means there), and both listeners sit
+   * on `document` in bubble phase, so which one runs first depends on mount
+   * order rather than on anything meaningful. Asking the state directly is
+   * order-independent.
+   *
+   * The participant list and the chat panel are deliberately NOT treated the
+   * same way: neither closes on `Esc` today, so guarding on them would make the
+   * key do nothing at all while one is open. They are panels inside the call and
+   * keep their state for when the person comes back.
+   */
+  createEffect(() => {
+    const collapse = props.onCollapse;
+    if (collapse === undefined) return;
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape") return;
+      if (encryptionSheetOpen()) return;
+      event.preventDefault();
+      collapse();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    onCleanup(() => document.removeEventListener("keydown", onKeyDown));
+  });
+
   return (
     <div
       class="lk-call"
@@ -1320,6 +1355,30 @@ const Call: Component<{
       onKeyDown={wake}
       onFocusIn={wake}
     >
+      {/* Put the call away, top left — §4.5's web collapse affordance, and the
+          same chevron iOS and Android use. Above the ground, the video fill and
+          the status block so a picture cannot bury it; the drawers (11) and the
+          ended overlay (12) still sit over it, which is right — a drawer is a
+          thing to close, and the chevron is absent for an ended call anyway.
+          Outside the control row on purpose: it is not one of §4.1's call
+          controls, it is a way out of the screen. */}
+      <Show when={props.onCollapse}>
+        {(collapse) => (
+          <button
+            type="button"
+            class="lk-call-collapse"
+            aria-label="Put the call away and return to the app"
+            title="Put the call away"
+            onClick={(event): void => {
+              event.stopPropagation();
+              collapse()();
+            }}
+          >
+            <Icon name="chevron" size={22} />
+          </button>
+        )}
+      </Show>
+
       {/* The ground. A voice call gets the other person's colour, blurred and
           darkened (§4.2); a video call gets the other person. */}
       <Show when={surface() !== "group"}>

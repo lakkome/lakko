@@ -55,6 +55,17 @@ export type UiRules = Pick<
   // and the two part company for a ringing offer nobody has answered;
   // `calls/capture-rule.ts` is the adapter the composer reaches it through.
   | "callHoldsCapture"
+  // Whether a live call is put away into the bar across the top of the app,
+  // and what that bar's one status line says (`docs/ux/calls.md` section 4.5).
+  // Here because the second decision is a PAIR - a kind and, only for one of
+  // the kinds, a running time - and three clients each expressing it as three
+  // independent booleans is one careless `if` from a line that says two
+  // things; `calls/call-bar-model.ts` is the adapter the bar reaches it
+  // through.
+  | "CallBarPhase"
+  | "callBarVisible"
+  | "callBarStatusKind"
+  | "callBarElapsedMs"
 >;
 
 const [rules, setRules] = createSignal<UiRules | null>(null);

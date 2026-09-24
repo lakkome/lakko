@@ -427,8 +427,14 @@ are untouched, only the picture is put away.
 
 **What the bar says**, left to right:
 
-- who is on the call: the person's name, the group's name, or `Call` for a link call
-  with no name yet — the same label the call screen uses;
+- who is on the call: **the same label the call screen uses**, read from the same
+  function rather than composed a second time. That sentence is the whole rule and it
+  has teeth; an earlier draft of it also named the words ("the person's name, the
+  group's name, or `Call` for a link call with no name yet"), and the third of those was
+  already untrue - the screen says `Group call` for a link call. Naming the words invited
+  a client to satisfy the list and break the invariant, which is the more valuable of the
+  two. If the word for a nameless link call is wrong it is wrong on the screen, and that
+  is where to change it;
 - the state or the running time, in the words of the status line and never two at
   once: `Calling...`, `Connecting...`, `Reconnecting...`, `12:04`;
 - a small lock, and only when the call screen would show its chip. The bar never

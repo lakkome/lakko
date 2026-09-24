@@ -158,6 +158,34 @@ public class CallUiState(
     private val _phase = MutableStateFlow<CallPhase>(CallPhase.Calling)
     public val phase: StateFlow<CallPhase> = _phase.asStateFlow()
 
+    private val _connectedSinceMs = MutableStateFlow<Long?>(null)
+
+    /**
+     * Wall clock at the moment this call's media first flowed, or `null` if it
+     * has not. Latched once and kept for the call's lifetime; cleared only by
+     * [reset], which is what a new call gets.
+     *
+     * It exists for the collapsed bar of `docs/ux/calls.md` section 4.5. The
+     * call screen derives its running time from the moment IT observed the
+     * connect, which is fine for a screen that is up for the whole call and
+     * wrong for a bar: putting the call away and bringing it back destroys and
+     * rebuilds the screen, and a timer restarted from zero at that point would
+     * be a clock the person can watch being wrong. So the moment is held by the
+     * call's state, which outlives every view of it.
+     */
+    public val connectedSinceMs: StateFlow<Long?> = _connectedSinceMs.asStateFlow()
+
+    /**
+     * Every write of [phase] goes through here, so the latch above cannot be
+     * bypassed by a path that sets the phase directly.
+     */
+    private fun applyPhase(next: CallPhase) {
+        if (next is CallPhase.Connected && _connectedSinceMs.value == null) {
+            _connectedSinceMs.value = System.currentTimeMillis()
+        }
+        _phase.value = next
+    }
+
     private val _participants = MutableStateFlow<List<Participant>>(emptyList())
     public val participants: StateFlow<List<Participant>> = _participants.asStateFlow()
 
@@ -363,11 +391,11 @@ public class CallUiState(
     }
 
     public fun setPhase(phase: CallPhase) {
-        _phase.value = phase
+        applyPhase(phase)
     }
 
     public fun join() {
-        _phase.value = CallPhase.Connecting
+        applyPhase(CallPhase.Connecting)
     }
 
     public fun setE2ee(state: E2eeState) {
@@ -650,7 +678,7 @@ public class CallUiState(
     /** Recompute phase + roster + video from the session's
      *  current state. Called from each [driveFrom] collector. */
     private fun rebuildFromSession(session: CallSession) {
-        _phase.value = mapSessionPhase(session.state.value)
+        applyPhase(mapSessionPhase(session.state.value))
         val connected = session.state.value == CallSession.WebCallState.Connected
         val remoteTrack = session.remoteVideoTrack.value
         // G3-2-conn-quality — local quality dot bucketed from RTT.
@@ -760,11 +788,12 @@ public class CallUiState(
         }
 
     public fun endCall() {
-        _phase.value = CallPhase.Ended(endedAtMs = System.currentTimeMillis())
+        applyPhase(CallPhase.Ended(endedAtMs = System.currentTimeMillis()))
     }
 
     public fun reset() {
         _phase.value = CallPhase.Calling
+        _connectedSinceMs.value = null
         _participants.value = emptyList()
         _pinnedId.value = null
         _participantListOpen.value = false

@@ -67,6 +67,7 @@ import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
@@ -151,6 +152,8 @@ import me.lakko.app.calls.CallUiState
 import me.lakko.app.calls.callInviteButton
 import me.lakko.app.calls.LocalVideoPreviewView
 import me.lakko.app.calls.callEncryptionSentence
+import me.lakko.app.calls.callClockOrigin
+import me.lakko.app.calls.callElapsedSecs
 import me.lakko.app.calls.callStatusSpokenLabel
 import me.lakko.app.calls.callStatusText
 import me.lakko.app.calls.safetyNumberGroups
@@ -239,6 +242,31 @@ public fun CallScreen(
      * off the self-view entirely.
      */
     onSwitchCamera: (() -> Unit)? = null,
+    /**
+     * `docs/ux/calls.md` section 4.5 — put the call away into the bar across the
+     * top of the app, without ending it. Draws the chevron at the top left.
+     *
+     * `null` leaves the chevron off, which is right for a screen with no bar to
+     * collapse into (the mock design route) — never for a live call.
+     */
+    onCollapse: (() -> Unit)? = null,
+    /**
+     * `docs/ux/calls.md` section 4.5 — the moment the CALL's media first flowed,
+     * held by the host that owns the call.
+     *
+     * Load-bearing, and the reason is that this screen is destroyed and rebuilt
+     * every time the call is put away and brought back. It used to start its
+     * clock from the moment it observed the connect, so a twelve-minute call
+     * came back reading `0:00` — see [callClockOrigin].
+     *
+     * Required and deliberately without a default. `null` is a meaningful value
+     * — the call has not connected — but OMITTING it never is, and omitting it
+     * would silently restore the defect by falling back to the state's own
+     * latch, which for the 1x1 screen is the mount moment in disguise. No unit
+     * test on this client can reach a composable's argument list; the compiler
+     * can, so this is the one guard available.
+     */
+    connectedSinceMs: Long?,
     /**
      * This is a group or call-link call, whatever the roster happens to hold
      * right now. It keeps the grid, the roster drawer and the in-call chat on
@@ -391,6 +419,8 @@ public fun CallScreen(
             speakerOn = speakerOn,
             onToggleSpeaker = { audio.toggleSpeaker() },
             onSwitchCamera = onSwitchCamera,
+            onCollapse = onCollapse,
+            connectedSinceMs = connectedSinceMs,
             // G3-2-session-bind / G3-2-call-controls — route the
             // end-call + mic/camera toggles to the real session
             // when one drives the screen; mock-state fallback
@@ -463,6 +493,11 @@ private fun InCallView(
     speakerOn: Boolean = false,
     onToggleSpeaker: () -> Unit = {},
     onSwitchCamera: (() -> Unit)? = null,
+    /** See [CallScreen]'s parameter of the same name. */
+    onCollapse: (() -> Unit)? = null,
+    /** See [CallScreen]'s parameter of the same name — required for the same
+     *  reason: an omitted moment is always a bug. */
+    connectedSinceMs: Long?,
     onEndCall: () -> Unit = { state.endCall() },
     onSetMic: (Boolean) -> Unit = { state.setMic(it) },
     onSetCamera: (Boolean) -> Unit = { state.setCamera(it) },
@@ -547,6 +582,16 @@ private fun InCallView(
     var rootSize by remember { mutableStateOf(IntSize.Zero) }
     val qualityPopoverOpen by state.qualityPopoverOpen.collectAsState()
 
+    // Section 4.5 — the call's own connect moment, resolved ONCE here so both
+    // stage layouts count from the same instant and neither can reach for a
+    // clock of its own. See [callClockOrigin] for what goes wrong when a view
+    // supplies the moment.
+    val stateConnectedSince by state.connectedSinceMs.collectAsState()
+    val clockOrigin = callClockOrigin(
+        callConnectedSinceMs = connectedSinceMs,
+        viewStateConnectedSinceMs = stateConnectedSince,
+    )
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -561,6 +606,7 @@ private fun InCallView(
                 seed = seed,
                 e2ee = e2ee,
                 onEncryptionChip = { encryptionSheetOpen = true },
+                clockOrigin = clockOrigin,
             )
             CallStage.REMOTE_VIDEO, CallStage.LOCAL_VIDEO -> {
                 val egl = remember { WebRtcPeerConnection.sharedEglContext() }
@@ -587,6 +633,7 @@ private fun InCallView(
                     e2ee = e2ee,
                     onEncryptionChip = { encryptionSheetOpen = true },
                     visible = controlsVisible,
+                    clockOrigin = clockOrigin,
                     modifier = Modifier.align(Alignment.TopCenter),
                 )
             }
@@ -603,9 +650,25 @@ private fun InCallView(
                     e2ee = e2ee,
                     onEncryptionChip = { encryptionSheetOpen = true },
                     visible = true,
+                    clockOrigin = clockOrigin,
                     modifier = Modifier.align(Alignment.TopCenter),
                 )
             }
+        }
+
+        // Section 4.5 — the way to put the call away, in the idiom the platform
+        // already teaches: a chevron at the top left, beside the system back
+        // that means the same thing. It does NOT fade with the controls: the
+        // controls fade to reveal the video, and a way out that disappears is
+        // the thing this whole section exists to stop happening.
+        if (onCollapse != null) {
+            CollapseCallButton(
+                onClick = onCollapse,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .windowInsetsPadding(WindowInsets.safeDrawing)
+                    .padding(start = 8.dp, top = 8.dp),
+            )
         }
 
         // A tap "puts things back": it brings the faded controls up and closes
@@ -737,6 +800,36 @@ private fun InCallView(
 }
 
 /**
+ * `docs/ux/calls.md` section 4.5 — put the call away without ending it.
+ *
+ * A chevron and not a back arrow: back is for leaving a place, and the call is
+ * not being left. The same glyph the platform's own sheets and media players use
+ * for "minimise this, it keeps running".
+ */
+@Composable
+private fun CollapseCallButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .size(44.dp)
+            .clip(CircleShape)
+            .background(LakkoDark.background.copy(alpha = 0.45f))
+            .clickable(onClick = onClick)
+            .semantics(mergeDescendants = true) {
+                contentDescription = "Put the call away. The call keeps running."
+                role = Role.Button
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = Icons.Filled.KeyboardArrowDown,
+            contentDescription = null,
+            tint = LakkoDark.text,
+            modifier = Modifier.size(26.dp),
+        )
+    }
+}
+
+/**
  * The voice call — `docs/ux/calls.md` section 4: "the other person's avatar
  * large and centred in the upper half, their name under it in the largest type
  * on the screen, and under that one quiet line with the state or the running
@@ -757,6 +850,8 @@ private fun CallPortrait(
     seed: String,
     e2ee: CallUiState.E2eeState,
     onEncryptionChip: () -> Unit,
+    /** The CALL's connect moment — see [callClockOrigin]. */
+    clockOrigin: Long?,
 ) {
     val tint = remember(seed) { avatarTintFor(seed, dark = true) }
     Box(
@@ -789,6 +884,7 @@ private fun CallPortrait(
                 e2ee = e2ee,
                 onEncryptionChip = onEncryptionChip,
                 portrait = true,
+                clockOrigin = clockOrigin,
             )
             Spacer(Modifier.weight(0.82f))
         }
@@ -811,6 +907,8 @@ private fun FloatingStatusHeader(
     e2ee: CallUiState.E2eeState,
     onEncryptionChip: () -> Unit,
     visible: Boolean,
+    /** The CALL's connect moment — see [callClockOrigin]. */
+    clockOrigin: Long?,
     modifier: Modifier = Modifier,
 ) {
     AnimatedVisibility(visible = visible, enter = fadeIn(), exit = fadeOut(), modifier = modifier) {
@@ -832,6 +930,7 @@ private fun FloatingStatusHeader(
                 e2ee = e2ee,
                 onEncryptionChip = onEncryptionChip,
                 portrait = false,
+                clockOrigin = clockOrigin,
             )
         }
     }
@@ -1352,24 +1451,37 @@ private fun CallStatusLine(
     /** The portrait of section 4 puts the name "in the largest type on the
      *  screen"; over a video it is one readable line among others. */
     portrait: Boolean,
+    /**
+     * The moment the CALL connected, already resolved by [callClockOrigin].
+     *
+     * This line counts from there and reads no clock of its own except `now`.
+     * It used to take its origin from `System.currentTimeMillis()` at the moment
+     * it first observed the connect, which is the same thing for a screen that
+     * is up for the whole call and wrong once the call can be put away and
+     * brought back (section 4.5): expanding rebuilds this composable, so a
+     * twelve-minute call came back reading `0:00`.
+     */
+    clockOrigin: Long?,
     modifier: Modifier = Modifier,
 ) {
     val connected = phase is CallUiState.CallPhase.Connected
     val ended = phase is CallUiState.CallPhase.Ended
-    // Wall clock at the transition, then a one-second tick. The tick STOPS when
-    // the call leaves `Connected` — a finished call must not keep counting
-    // while it waits to dismiss itself — but the last value is KEPT once the
-    // call has ended, because section 4.1 asks the ended state for the
-    // duration and there is nowhere else to get it from.
+    // A one-second tick against the CALL's origin. The tick STOPS when the call
+    // leaves `Connected` — a finished call must not keep counting while it waits
+    // to dismiss itself — but the last value is KEPT once the call has ended,
+    // because section 4.1 asks the ended state for the duration and there is
+    // nowhere else to get it from.
     var elapsedSecs by remember { mutableStateOf<Long?>(null) }
-    LaunchedEffect(connected, ended) {
+    LaunchedEffect(connected, ended, clockOrigin) {
         if (!connected) {
             if (!ended) elapsedSecs = null
             return@LaunchedEffect
         }
-        val startedAt = System.currentTimeMillis()
         while (true) {
-            elapsedSecs = ((System.currentTimeMillis() - startedAt) / 1_000L).coerceAtLeast(0L)
+            // First value before the first delay, so a screen brought back
+            // mid-call shows the real number immediately rather than a second
+            // of the last one it remembered.
+            elapsedSecs = callElapsedSecs(clockOrigin, System.currentTimeMillis())
             delay(1_000)
         }
     }

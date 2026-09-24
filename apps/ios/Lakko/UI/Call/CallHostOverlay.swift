@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import LakkoCore
 import SwiftUI
 
 /// Every call's app-wide presentation: the 1x1 ringing banner and a call link's
@@ -11,11 +12,22 @@ import SwiftUI
 /// Mounted once, at the signed-in root, so no call is owned by a screen the user
 /// can leave. Everything it shows comes from ``CallHost``, ``GroupCallHost`` and
 /// ``LinkCallHost``.
+///
+/// It also owns the one thing a call's presentation needs that no host does:
+/// whether the call is **put away** (`docs/ux/calls.md` section 4.5). Collapsing
+/// hides the full-screen call and shows ``CollapsedCallBar`` in the same top
+/// inset the link notice uses, above whatever screen is showing. The flag lives
+/// in a ``CallBarHost`` held here — the presentation mode is a property of the
+/// call, so it belongs where the calls are and nowhere a route can reach it.
 struct CallHostOverlay: ViewModifier {
     @ObservedObject var host: CallHost
     @ObservedObject var group: GroupCallHost
     @ObservedObject var link: LinkCallHost
     @ObservedObject var inviteIntake: InviteIntake
+
+    /// Collapsed / expanded, and when the live call connected. Lives as long as
+    /// this modifier, which is as long as the signed-in session.
+    @StateObject private var callBar = CallBarHost()
 
     /// The call on the full-screen presentation. The kinds are exclusive while
     /// live (``CallSlot``); a 1x1 call first only makes a stale screen of
@@ -30,6 +42,19 @@ struct CallHostOverlay: ViewModifier {
         case oneToOne(CallSession)
         case group(CallUiState, id: String)
         case link(CallUiState, id: String)
+    }
+
+    /// What the full-screen presentation shows right now, with a collapsed call
+    /// taken away from it.
+    ///
+    /// Only the three live-call branches are suppressed. An incoming ring is
+    /// never collapsed — ``CallBarPresentation/collapseSurvives(_:)`` clears the
+    /// flag for `Ringing` — but the branch is written so that a stale flag could
+    /// never swallow an offer, which would be a missed call.
+    private var presentedNow: Presented? {
+        guard callBar.collapsed else { return presented }
+        if case .incoming? = presented { return presented }
+        return nil
     }
 
     private var presented: Presented? {
@@ -60,29 +85,130 @@ struct CallHostOverlay: ViewModifier {
         host.callError ?? group.callError ?? group.callNotice
     }
 
+    // MARK: - The collapsed bar
+
+    /// Which call the bar is about. The order mirrors ``presented``'s, so the
+    /// bar and the screen are never about different calls; only one of the three
+    /// can be live at a time anyway (``CallSlot``).
+    private enum BarSubject {
+        /// A 1x1 call. The session is observed by the bar itself, because mute
+        /// and the camera are its own published state and pressing mute on the
+        /// bar has to redraw it.
+        case oneToOne(CallSession, label: String)
+        /// A group call or a call from a link, whose host already holds the
+        /// state both the screen and the bar read.
+        case external(CallUiState, label: String)
+    }
+
+    private var barSubject: BarSubject? {
+        if let session = host.activeCall {
+            return .oneToOne(
+                session,
+                label: CallPeerName.callLabel(
+                    profileName: host.activePeerName, groupCall: false))
+        }
+        if let ui = group.presentation ?? link.presentation {
+            return .external(
+                ui,
+                label: CallPeerName.callLabel(profileName: ui.peerName, groupCall: true))
+        }
+        return nil
+    }
+
+    /// The bar, wired to whichever object holds the live call's mic, camera and
+    /// encryption state — so pressing mute on the bar redraws it, and the bar
+    /// and the call screen read one value each rather than two copies.
+    @ViewBuilder
+    private var collapsedBar: some View {
+        switch barSubject {
+        case .oneToOne(let session, let label):
+            OneToOneCallBar(
+                session: session,
+                label: label,
+                phase: barPhase,
+                connectedAt: callBar.connectedAt,
+                onExpand: { callBar.expand() })
+        case .external(let ui, let label):
+            ExternalCallBar(
+                state: ui,
+                label: label,
+                phase: barPhase,
+                connectedAt: callBar.connectedAt,
+                onExpand: { callBar.expand() })
+        case nil:
+            // Unreachable: the rule hides the bar for `Idle`, which is the phase
+            // a missing subject reports.
+            EmptyView()
+        }
+    }
+
+    /// Where the live call is, as the section-4.5 rule needs to see it.
+    private var barPhase: CallBarPhase {
+        switch barSubject {
+        case .oneToOne:
+            return CallBarPresentation.phase(oneToOne: host.activeCallState)
+        case .external(let ui, _):
+            return CallBarPresentation.phase(external: ui.phase)
+        case nil:
+            return .idle
+        }
+    }
+
+    /// A collapsed call has ended. Its screen was never drawn, so nothing will
+    /// dismiss the `Call ended` overlay on its behalf — drop the presentation
+    /// the same way that overlay's own Close does, or the host holds a finished
+    /// call for the rest of the session.
+    private func dismissEndedCollapsedCall() {
+        if host.activeCall != nil {
+            host.clearFinishedCall()
+        } else if group.presentation != nil {
+            group.dismissPresentation()
+        } else if link.presentation != nil {
+            link.dismissPresentation()
+        }
+    }
+
     func body(content: Content) -> some View {
         content
             .safeAreaInset(edge: .top, spacing: 0) {
-                if let notice = link.notice {
-                    LinkCallNoticeBanner(
-                        notice: notice,
-                        // A call started here has no link and so no landing to
-                        // go back to; Open is hidden rather than dead.
-                        onOpen: link.slot?.slug.map { slug in
-                            { inviteIntake.parkCallJoin(slug: slug) }
-                        },
-                        onCancel: { link.leave() },
-                        onDismiss: { link.dismissOutcome() }
-                    )
+                // Both can be up at once — a link call whose outcome has not
+                // been dismissed leaves its notice while a NEW call of another
+                // kind runs — so they stack rather than race for the slot. The
+                // notice is above because it names an outcome and carries
+                // actions; the bar below is the live call, one tap from coming
+                // back. For one and the same link call they never overlap:
+                // `LinkCallHostRules.notice` is silent exactly while the call is
+                // live, which is the only time the bar is up for it.
+                VStack(spacing: 0) {
+                    if let notice = link.notice {
+                        LinkCallNoticeBanner(
+                            notice: notice,
+                            // A call started here has no link and so no landing
+                            // to go back to; Open is hidden rather than dead.
+                            onOpen: link.slot?.slug.map { slug in
+                                { inviteIntake.parkCallJoin(slug: slug) }
+                            },
+                            onCancel: { link.leave() },
+                            onDismiss: { link.dismissOutcome() }
+                        )
+                    }
+                    if callBarVisible(phase: barPhase, callScreenUp: presentedNow != nil) {
+                        collapsedBar
+                    }
                 }
+            }
+            // The running time and the collapse both outlive the call screen, so
+            // the phase is folded here rather than inside it.
+            .onChange(of: barPhase) { _, phase in
+                if callBar.observe(phase: phase) { dismissEndedCollapsedCall() }
             }
             .fullScreenCover(
                 isPresented: Binding(
-                    get: { presented != nil },
+                    get: { presentedNow != nil },
                     set: { _ in }
                 )
             ) {
-                switch presented {
+                switch presentedNow {
                 case .incoming?:
                     // The same entry points the banner drove: the call plumbing
                     // is untouched, only the surface changed. On a video call
@@ -102,12 +228,18 @@ struct CallHostOverlay: ViewModifier {
                     CallScreen(
                         session: session,
                         peerName: host.activePeerName,
-                        notice: host.outgoingNotice
+                        notice: host.outgoingNotice,
+                        connectedAt: callBar.connectedAt,
+                        onCollapse: { callBar.collapse() }
                     ) {
                         host.clearFinishedCall()
                     }
                 case .group(let ui, let id)?:
-                    CallScreen(externalState: ui) {
+                    CallScreen(
+                        externalState: ui,
+                        connectedAt: callBar.connectedAt,
+                        onCollapse: { callBar.collapse() }
+                    ) {
                         group.dismissPresentation()
                     }
                     .id("group-\(id)")
@@ -117,7 +249,12 @@ struct CallHostOverlay: ViewModifier {
                     // only one whose signature a joiner's committer election
                     // would follow. `LinkCallHost` holds the offer for exactly
                     // that case, so passing it through is the whole gate.
-                    CallScreen(externalState: ui, invite: link.invite) {
+                    CallScreen(
+                        externalState: ui,
+                        invite: link.invite,
+                        connectedAt: callBar.connectedAt,
+                        onCollapse: { callBar.collapse() }
+                    ) {
                         let slug = link.presentationSlug
                         link.dismissPresentation()
                         // Back to where the user was before the link, as the
@@ -175,6 +312,62 @@ extension View {
         inviteIntake: InviteIntake
     ) -> some View {
         modifier(CallHostOverlay(host: oneToOne, group: group, link: link, inviteIntake: inviteIntake))
+    }
+}
+
+/// The collapsed bar for a 1x1 call. A view of its own so the ``CallSession``
+/// can be observed: mute, the camera and the E2EE arming are its published
+/// state, and the bar both shows and toggles the first of them.
+private struct OneToOneCallBar: View {
+    @ObservedObject var session: CallSession
+    let label: String
+    let phase: CallBarPhase
+    let connectedAt: Date?
+    let onExpand: () -> Void
+
+    var body: some View {
+        CollapsedCallBar(
+            label: label,
+            isPerson: true,
+            phase: phase,
+            connectedAt: connectedAt,
+            // Exactly what decides the call screen's chip, read from the same
+            // place the screen reads it through `driveFrom`.
+            encrypted: session.e2eeActive,
+            cameraSending: session.cameraEnabled,
+            micOn: session.micEnabled,
+            onExpand: onExpand,
+            onToggleMic: { session.setMicrophoneEnabled(!session.micEnabled) })
+    }
+}
+
+/// The collapsed bar for a group call or a call from a link. The ``CallUiState``
+/// belongs to the host, so it is the same object the call screen renders — and
+/// writing the local participant's `micOn` is the whole mute control on this
+/// path, exactly as the call screen's own row does it.
+private struct ExternalCallBar: View {
+    @ObservedObject var state: CallUiState
+    let label: String
+    let phase: CallBarPhase
+    let connectedAt: Date?
+    let onExpand: () -> Void
+
+    private var local: CallUiState.Participant? {
+        state.participants.first(where: { $0.isLocal })
+    }
+
+    var body: some View {
+        let micOn = local?.micOn ?? true
+        CollapsedCallBar(
+            label: label,
+            isPerson: false,
+            phase: phase,
+            connectedAt: connectedAt,
+            encrypted: state.e2ee.active,
+            cameraSending: local?.camOn ?? false,
+            micOn: micOn,
+            onExpand: onExpand,
+            onToggleMic: { state.setMic(!micOn) })
     }
 }
 

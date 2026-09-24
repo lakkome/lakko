@@ -209,6 +209,9 @@ import { callEndedAtMs } from "./sfu-keepalive";
 import { createSfuCallUi, type SfuCallUiHandle } from "./sfu-call-ui";
 import { sfuBaseUrl } from "./sfu-config";
 import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
+import { uiRules } from "../chat/ui-rules";
+import { CallBar } from "./CallBar";
+import { callBarWouldShow } from "./call-bar-model";
 
 /** A 1x1 call that ended, for the chat view's "Last call ended" line. */
 export interface EndedCallNotice {
@@ -323,6 +326,21 @@ export interface CallHostApi {
   /** The `/c/` route is showing the link call; the host does not repeat its
    *  status elsewhere meanwhile. Returns the release. */
   claimLinkCallView(): () => void;
+  /**
+   * The call in the slot has been put away into the bar across the top of the
+   * app (`docs/ux/calls.md` section 4.5).
+   *
+   * A property of the CALL, not of a screen: it lives beside the session here
+   * rather than in any route, so a navigation cannot touch it and the call
+   * stays collapsed across every screen until the person brings it back. It
+   * says nothing about whether the bar is on screen — that is the shared rule's
+   * answer to this plus the phase (`calls/call-bar-model.ts`).
+   */
+  readonly callCollapsed: Accessor<boolean>;
+  /** Put the call away without ending it. No-op when there is no call. */
+  collapseCall(): void;
+  /** Bring the call screen back. */
+  expandCall(): void;
 }
 
 /** The call-link call in the host's link slot. */
@@ -478,6 +496,19 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
   const [linkHandle, setLinkHandle] = createSignal<MultiJoinerCall | null>(null);
   /** How many `/c/` route views are showing the link call. */
   const [linkViewClaims, setLinkViewClaims] = createSignal(0);
+
+  /**
+   * The call has been put away into the bar (`docs/ux/calls.md` section 4.5).
+   *
+   * One flag for the one call slot, whichever kind occupies it: a 1x1 call, a
+   * group call and a call-link call are never live at the same time
+   * (`call-slot.ts`), so three flags would be three ways to describe one call's
+   * presentation and would have to be kept in step.
+   *
+   * Reset by the slot-change effect below rather than by each start path, so
+   * a call is never handed to someone who put the previous one away.
+   */
+  const [collapsed, setCollapsed] = createSignal(false);
 
   /**
    * `docs/ux/calls.md` section 2.1 — "a muted chat never rings".
@@ -1912,6 +1943,28 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     });
   }
 
+  /**
+   * A new call is never handed to someone who put the last one away.
+   *
+   * Collapsing is a property of THE CALL (`docs/ux/calls.md` section 4.5), so
+   * it has to end with that call rather than persist as a preference: a person
+   * who collapsed a call an hour ago and now presses Accept expects a call
+   * screen, not a bar. One effect on the slot rather than a reset in each of the
+   * four start paths — dial, accept, start-group, start-link — because a fifth
+   * one added later would otherwise inherit the last call's presentation.
+   *
+   * Keyed on the occupant changing, which covers both directions: the slot going
+   * free, and the improbable case of it being handed straight from one kind to
+   * another without a reactive gap in between.
+   */
+  let lastOccupant: CallKind | null = null;
+  createEffect(() => {
+    const occupant = currentOccupant();
+    if (occupant === lastOccupant) return;
+    lastOccupant = occupant;
+    setCollapsed(false);
+  });
+
   /** The attempt the link slot belongs to. A report from an older attempt —
    *  one the user already left — never touches the slot. */
   let linkAttempt: object | null = null;
@@ -2319,6 +2372,9 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     linkCallInvite: linkInvite,
     linkCallInviteStatus: linkInviteStatus,
     dismissLinkCallOutcome,
+    callCollapsed: collapsed,
+    collapseCall: () => setCollapsed(true),
+    expandCall: () => setCollapsed(false),
     claimLinkCallView() {
       setLinkViewClaims((n) => n + 1);
       let released = false;
@@ -2503,10 +2559,62 @@ export function CallHostView(): JSX.Element {
     applyAudioOutput(audioEl(), callUi.settings().selectedAudioOutput);
   });
 
-  const overlayVisible = (): boolean => {
+  const oneToOneOverlayWanted = (): boolean => {
     const s = host.state();
     return s === "outgoing" || s === "connecting" || s === "connected" || s === "ending";
   };
+
+  /**
+   * The call screen would be up if the call had not been put away
+   * (`docs/ux/calls.md` section 4.5).
+   *
+   * One read over all three kinds of call, because the bar is one bar and the
+   * slot holds one call: whichever screen `collapsed` is hiding, the bar takes
+   * its place.
+   */
+  const callScreenWanted = (): boolean =>
+    oneToOneOverlayWanted() ||
+    internals.groupHandle() !== null ||
+    linkCallOverlayShown(host.linkCall()?.phase ?? null, host.linkCall()?.role ?? null);
+
+  /**
+   * The call screen is actually on screen.
+   *
+   * Fed to the shared visibility rule as its `callScreenUp`, which is what
+   * keeps "the bar is never shown over the call screen" a single decision
+   * rather than a condition repeated at both surfaces.
+   */
+  const callScreenUp = (): boolean => callScreenWanted() && !host.callCollapsed();
+
+  /** Put the call away, or `undefined` when there is nothing the bar could
+   *  show in its place — an ended call, whose overlay still owns the screen
+   *  until it is dismissed. So the chevron and `Esc` are absent exactly when
+   *  collapsing would leave the person with no call surface at all, and that
+   *  is the shared rule's answer rather than a second list of phases here. */
+  const collapsible = (): boolean => {
+    const rules = uiRules();
+    return rules !== null && callBarWouldShow(rules, callUi.phase().kind, host.state() === "ringing");
+  };
+  const collapse = (): (() => void) | undefined =>
+    collapsible() ? (): void => host.collapseCall() : undefined;
+
+  /**
+   * One surface, always: never neither.
+   *
+   * A collapsed call whose phase moves somewhere the bar does not go would be
+   * invisible with no way back — the overlay is hidden because it was put away,
+   * and the bar refuses the phase. The reachable case is a call ENDING under the
+   * bar: the store reaches `ended` while the group handle or the link slot is
+   * still held for the moment it takes to leave, and section 4.5 gives the ended
+   * overlay (and its End button) to the call screen rather than to the bar.
+   *
+   * So the screen comes back instead. Both halves of the condition come from the
+   * shared rule, so this enforces its own consequence rather than adding a
+   * second opinion about which phases collapse.
+   */
+  createEffect(() => {
+    if (host.callCollapsed() && callScreenWanted() && !collapsible()) host.expandCall();
+  });
 
   return (
     <>
@@ -2531,10 +2639,11 @@ export function CallHostView(): JSX.Element {
         />
       </Show>
 
-      <Show when={overlayVisible()}>
+      <Show when={oneToOneOverlayWanted() && !host.callCollapsed()}>
         <Call
           embedded={true}
           onExit={() => void internals.hangUp()}
+          onCollapse={collapse()}
           /* The encryption sheet's one sentence names the other person
              (docs/ux/calls.md §5), and on a 1x1 call this device knows who
              that is. */
@@ -2555,17 +2664,23 @@ export function CallHostView(): JSX.Element {
       <Show when={internals.groupHandle()}>
         {(handle) => (
           <>
-            <Call
-              embedded={true}
-              group={true}
-              onExit={() => void host.leaveGroupCall()}
-              remoteStreamFor={(participantId): MediaStream | undefined =>
-                // The roster id is `peer-<peerId>`; the SFU sets the downstream
-                // MSID stream id to that same peer id.
-                handle().remoteStreams().get(participantId.replace(/^peer-/, ""))
-              }
-              localStream={(): MediaStream | undefined => handle().localStream() ?? undefined}
-            />
+            {/* The overlay is what `collapsed` hides; the audio sinks below
+                are not, so they stay outside this branch and a collapsed call
+                keeps its sound. */}
+            <Show when={!host.callCollapsed()}>
+              <Call
+                embedded={true}
+                group={true}
+                onExit={() => void host.leaveGroupCall()}
+                onCollapse={collapse()}
+                remoteStreamFor={(participantId): MediaStream | undefined =>
+                  // The roster id is `peer-<peerId>`; the SFU sets the downstream
+                  // MSID stream id to that same peer id.
+                  handle().remoteStreams().get(participantId.replace(/^peer-/, ""))
+                }
+                localStream={(): MediaStream | undefined => handle().localStream() ?? undefined}
+              />
+            </Show>
             {/* One hidden sink per remote stream, keyed by stream identity, so
                 audio does not cut on roster churn. Remote video renders per tile
                 through `remoteStreamFor`. */}
@@ -2583,12 +2698,18 @@ export function CallHostView(): JSX.Element {
           section 5). A joiner keeps its notice until it is admitted: it has
           not published anything and is not in a call yet. */}
       <Show
-        when={linkCallOverlayShown(host.linkCall()?.phase ?? null, host.linkCall()?.role ?? null)}
+        when={
+          linkCallOverlayShown(
+            host.linkCall()?.phase ?? null,
+            host.linkCall()?.role ?? null,
+          ) && !host.callCollapsed()
+        }
       >
         <Call
           embedded={true}
           group={true}
           onExit={() => host.leaveLinkCall()}
+          onCollapse={collapse()}
           /* `docs/ux/call-links.md` section 3: the one control the call screen
              gains. Only this kind of call has it — a link names a `call_id`,
              and a call placed inside a conversation is reached through that
@@ -2611,6 +2732,23 @@ export function CallHostView(): JSX.Element {
           </For>
         )}
       </Show>
+
+      {/* The call, put away (`docs/ux/calls.md` section 4.5). Last in the
+          fragment so it paints over the app and under nothing that matters:
+          the call screen it replaces is not up while it is, and the ringing
+          screen and the group-call banner sit above it by z-index. It renders
+          nothing at all without a collapsed call. */}
+      <CallBar
+        peerName={
+          host.callOccupant() === "one-to-one"
+            ? internals.nameFor(host.callGroupIdB64())
+            : null
+        }
+        groupCall={host.callOccupant() !== null && host.callOccupant() !== "one-to-one"}
+        ringing={host.state() === "ringing"}
+        callScreenUp={callScreenUp()}
+        onExpand={() => host.expandCall()}
+      />
 
       <LinkCallNoticeView />
       <GroupCallBanner />

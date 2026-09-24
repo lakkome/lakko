@@ -99,4 +99,92 @@ class CallStatusLineTest {
         assertEquals("Call, Ringing...", callStatusSpokenLabel(null, "Ringing...", null))
         assertEquals("Call, Ringing...", callStatusSpokenLabel("  ", "Ringing...", null))
     }
+
+
+    // ---- Whose clock the running time is (docs/ux/calls.md section 4.5) -------
+
+    /**
+     * The defect this pins, measured on an emulator before the fix: the
+     * collapsed bar read `0:10`, the call was expanded, and four seconds later
+     * the call screen announced "in call, 5 seconds". Section 4.5 says
+     * collapsing leaves "the media, the keys and the timer … untouched", so a
+     * screen that restarts its clock states something false about the call.
+     *
+     * Expressed on the seam the screen actually uses: given the call's own
+     * connect moment and a view that opened twelve minutes later, the line must
+     * read the CALL's age, and reading the VIEW's age must be a different and
+     * visibly wrong answer.
+     */
+    @Test
+    fun `a view opened mid-call counts from the call's connect, not from its own start`() {
+        val callConnectedAt = 1_000L
+        val twelveMinutesIn = callConnectedAt + 12 * 60_000L
+        val viewOpenedAt = twelveMinutesIn
+
+        val origin = callClockOrigin(
+            callConnectedSinceMs = callConnectedAt,
+            viewStateConnectedSinceMs = viewOpenedAt,
+        )
+        assertEquals("the view's own moment won", callConnectedAt, origin)
+        assertEquals(720L, callElapsedSecs(origin, twelveMinutesIn))
+        assertEquals("12:00", formatCallDuration(callElapsedSecs(origin, twelveMinutesIn)!!))
+
+        // What the defect produced, kept here as the contrast: counting from the
+        // view's own moment reads a twelve-minute call as brand new.
+        assertEquals(0L, callElapsedSecs(viewOpenedAt, twelveMinutesIn))
+    }
+
+    /**
+     * The property the maintainer measured: two views of ONE call, opened at
+     * different moments, must agree about that call. A collapse and an expand is
+     * exactly this — the second view is a fresh composable over the same call.
+     */
+    @Test
+    fun `two views of one call opened at different moments agree on its elapsed`() {
+        val callConnectedAt = 0L
+        // The bar, ten seconds in.
+        val bar = callClockOrigin(callConnectedAt, viewStateConnectedSinceMs = 10_000L)
+        // The screen, expanded four seconds after that.
+        val screen = callClockOrigin(callConnectedAt, viewStateConnectedSinceMs = 14_000L)
+
+        assertEquals(10L, callElapsedSecs(bar, 10_000L))
+        assertEquals(14L, callElapsedSecs(screen, 14_000L))
+        // And at any single instant the two surfaces read identically, which is
+        // the thing a person can hold both of at once.
+        assertEquals(callElapsedSecs(bar, 14_000L), callElapsedSecs(screen, 14_000L))
+    }
+
+    /**
+     * A view's own latch is the FALLBACK and only that, so a screen with no call
+     * behind it (the mock design route) still has a clock.
+     */
+    @Test
+    fun `a view with no call behind it falls back to its own latch`() {
+        assertEquals(500L, callClockOrigin(callConnectedSinceMs = null, viewStateConnectedSinceMs = 500L))
+        assertEquals(null, callClockOrigin(callConnectedSinceMs = null, viewStateConnectedSinceMs = null))
+    }
+
+    /** A call that has not connected has no running time, so the line keeps its
+     *  state word instead of showing a clock at zero. */
+    @Test
+    fun `a call that has not connected has no running time`() {
+        assertEquals(null, callElapsedSecs(null, 5_000L))
+        assertEquals("Connected", status(connected = true, elapsedSecs = callElapsedSecs(null, 5_000L)))
+    }
+
+    /** Whole seconds, floored: a clock must never read ahead of itself. */
+    @Test
+    fun `the elapsed is floored to whole seconds`() {
+        assertEquals(0L, callElapsedSecs(0L, 999L))
+        assertEquals(1L, callElapsedSecs(0L, 1_000L))
+        assertEquals(1L, callElapsedSecs(0L, 1_999L))
+    }
+
+    /** A host clock corrected backwards mid-call reads `0:00`, not a negative
+     *  number that [formatCallDuration] would turn into no duration at all. */
+    @Test
+    fun `a clock that moved backwards does not take the duration away`() {
+        assertEquals(0L, callElapsedSecs(10_000L, 4_000L))
+        assertEquals("0:00", formatCallDuration(callElapsedSecs(10_000L, 4_000L)!!))
+    }
 }

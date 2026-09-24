@@ -577,7 +577,10 @@ public struct CallScreen: View {
     let onExit: () -> Void
     /// A camera start this screen refused because camera access is denied.
     @State private var permissionMessage: String?
-    /// When media started flowing, for the status line's running time.
+    /// When media started flowing, for the status line's running time. Seeded
+    /// from the call's own moment (`docs/ux/calls.md` section 4.5 — collapsing
+    /// leaves the timer untouched), so a call brought back from the bar carries
+    /// on counting instead of restarting at `0:00`.
     @State private var connectedAt: Date?
     /// How long media flowed, captured as the call ends so the "Call ended"
     /// screen can say it (section 4's state table). `nil` for a call that never
@@ -600,6 +603,18 @@ public struct CallScreen: View {
     @State private var selfViewOffset: CGSize = .zero
     @GestureState private var selfViewDrag: CGSize = .zero
 
+    /// `docs/ux/calls.md` section 4.5 — put the call away without ending it, or
+    /// `nil` on a surface that has nothing to put it away into (the design
+    /// preview). The chevron and the downward swipe are hidden when it is `nil`
+    /// rather than dead.
+    private let onCollapse: (() -> Void)?
+    /// A collapse is in flight, so ``onDisappear`` must not tear the call's state
+    /// down. Without this the screen going away would run its ordinary
+    /// dismissal — and on the group / link path `state` is the HOST's object, so
+    /// `state.reset()` would wipe the live call's phase, roster, encryption and
+    /// tracks on the way out of a collapse that changed nothing about the call.
+    @State private var collapsing = false
+
     /// `true` when the camera controls drive a real call, so turning the camera
     /// on must settle the camera permission first.
     private var gatesCamera: Bool { session != nil || externallyDriven }
@@ -608,6 +623,8 @@ public struct CallScreen: View {
         session: CallSession? = nil,
         peerName: String? = nil,
         notice: String? = nil,
+        connectedAt: Date? = nil,
+        onCollapse: (() -> Void)? = nil,
         onExit: @escaping () -> Void
     ) {
         self.session = session
@@ -615,6 +632,8 @@ public struct CallScreen: View {
         self.peerName = peerName
         self.notice = notice
         self.invite = nil
+        self.onCollapse = onCollapse
+        _connectedAt = State(initialValue: connectedAt)
         self.onExit = onExit
     }
 
@@ -624,6 +643,8 @@ public struct CallScreen: View {
     public init(
         externalState: CallUiState,
         invite: CallInviteOffer? = nil,
+        connectedAt: Date? = nil,
+        onCollapse: (() -> Void)? = nil,
         onExit: @escaping () -> Void
     ) {
         _state = StateObject(wrappedValue: externalState)
@@ -632,6 +653,8 @@ public struct CallScreen: View {
         self.peerName = nil
         self.notice = nil
         self.invite = invite
+        self.onCollapse = onCollapse
+        _connectedAt = State(initialValue: connectedAt)
         self.onExit = onExit
     }
 
@@ -784,9 +807,14 @@ public struct CallScreen: View {
         }
         .onDisappear {
             hideTask?.cancel()
+            // Stopped either way: a looping ringback outlives nothing, and the
+            // sound controller goes away with this view.
             sounds.controller.stopAll()
             sessionBindings.removeAll()
-            state.reset()
+            // A collapse is not a dismissal. `state` is the host's own object on
+            // the group / link path, so resetting it here would end the live
+            // call's UI on the way into the bar.
+            if !collapsing { state.reset() }
         }
         .alert(
             "Camera unavailable",
@@ -847,6 +875,25 @@ public struct CallScreen: View {
                     if state.qualityPopoverOpen { state.setQualityPopoverOpen(false) }
                     showControls()
                 }
+                // Section 4.5's other way back — a downward swipe on the screen,
+                // the idiom iOS already teaches for putting something away.
+                //
+                // On this layer for the reason the tap is: `RTCMTLVideoView`
+                // fills a video call and wins hit testing against any SwiftUI
+                // ancestor's gesture, so a swipe attached higher up would work
+                // on a portrait and not on the video. `simultaneousGesture`
+                // rather than `gesture` so the gallery's scroll view keeps
+                // whatever it has: this recognises alongside, never instead of.
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 20)
+                        .onEnded { value in
+                            guard let onCollapse,
+                                  CallBarPresentation.isCollapseSwipe(value.translation)
+                            else { return }
+                            collapsing = true
+                            onCollapse()
+                        }
+                )
 
             if layout != .gallery, local?.camOn == true, let track = state.localVideoTrack {
                 selfView(track: track)
@@ -854,10 +901,12 @@ public struct CallScreen: View {
 
             VStack(spacing: 0) {
                 if layout == .portrait {
-                    // A portrait keeps the quality dot and nothing else up
-                    // there: the name and the state belong in the middle of the
-                    // screen, with the avatar, not in a header bar.
+                    // A portrait keeps the collapse chevron and the quality dot
+                    // and nothing else up there: the name and the state belong
+                    // in the middle of the screen, with the avatar, not in a
+                    // header bar.
                     HStack {
+                        collapseChevron
                         Spacer()
                         QualityIndicator(state: state)
                     }
@@ -973,10 +1022,38 @@ public struct CallScreen: View {
         }
     }
 
+    /// `docs/ux/calls.md` section 4.5 — put the call away without ending it. A
+    /// chevron at the top left, which is where iOS puts "down, out of the way",
+    /// and the one affordance the bar's tap is the counterpart of.
+    ///
+    /// Nothing is drawn when there is nowhere to collapse into, so the design
+    /// preview does not offer a dead control.
+    @ViewBuilder
+    private var collapseChevron: some View {
+        if let onCollapse {
+            Button {
+                collapsing = true
+                onCollapse()
+            } label: {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 44, height: 44)
+                    .background(Circle().fill(Color.white.opacity(0.12)))
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Hide the call")
+            .accessibilityHint("Keeps the call running and shows it in a bar at the top")
+        }
+    }
+
     /// Over video, the name and the state float at the top on a soft shade so
     /// they stay readable — the same one line, smaller.
     private var videoOverlayHeader: some View {
         HStack(alignment: .top) {
+            collapseChevron
+                .padding(.top, 4)
             CallStatusLine(
                 name: displayName,
                 phase: displayPhase,

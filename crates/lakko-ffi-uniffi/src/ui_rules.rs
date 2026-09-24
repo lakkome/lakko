@@ -13,6 +13,10 @@
 //! Nothing here touches a screen, a store or the network. A client maps what
 //! it already holds into these types, asks, and renders the answer.
 
+use lakko_ui_rules::call_bar::{
+    call_bar_status as rust_call_bar_status, call_bar_visibility as rust_call_bar_visibility,
+    CallBar as RustCallBar, CallBarPhase as RustCallBarPhase, CallBarStatus as RustCallBarStatus,
+};
 use lakko_ui_rules::capture::call_holds_capture as rust_call_holds_capture;
 use lakko_ui_rules::conversation::{
     order_conversations as rust_order_conversations, ConversationKind as RustConversationKind,
@@ -422,6 +426,93 @@ pub fn remaining_ring_ms(offer_age_ms: u64) -> u64 {
 #[must_use]
 pub fn call_ring_window_ms() -> u64 {
     CALL_RING_WINDOW_MS
+}
+
+/// Where a call is, as the collapsed bar of `docs/ux/calls.md` section 4.5
+/// needs to see it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum CallBarPhase {
+    /// No call at all.
+    Idle,
+    /// An incoming call being offered, which nobody has answered.
+    Ringing,
+    /// Built, not yet on the wire.
+    Preparing,
+    /// Ringing out.
+    Calling,
+    /// Answered; the transport is coming up.
+    Connecting,
+    /// Media is flowing.
+    Connected,
+    /// The transport dropped and is being rebuilt.
+    Reconnecting,
+    /// Over.
+    Ended,
+}
+
+impl From<CallBarPhase> for RustCallBarPhase {
+    fn from(p: CallBarPhase) -> Self {
+        match p {
+            CallBarPhase::Idle => Self::Idle,
+            CallBarPhase::Ringing => Self::Ringing,
+            CallBarPhase::Preparing => Self::Preparing,
+            CallBarPhase::Calling => Self::Calling,
+            CallBarPhase::Connecting => Self::Connecting,
+            CallBarPhase::Connected => Self::Connected,
+            CallBarPhase::Reconnecting => Self::Reconnecting,
+            CallBarPhase::Ended => Self::Ended,
+        }
+    }
+}
+
+/// What the collapsed bar's one status line says.
+///
+/// A sum type rather than three booleans, because `docs/ux/calls.md` section
+/// 4 says the line carries the state or the running time and never two at
+/// once - an invariant a view expressed in booleans is one careless branch
+/// from breaking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum CallBarStatus {
+    /// `Calling...`
+    Calling,
+    /// `Connecting...`
+    Connecting,
+    /// `Reconnecting...`
+    Reconnecting,
+    /// The running time, in milliseconds since the call connected. The client
+    /// formats it; how long it has been is not a presentation decision.
+    Elapsed {
+        /// Milliseconds of connected media.
+        ms: u64,
+    },
+}
+
+/// Whether the collapsed call bar is on screen.
+///
+/// `callScreenUp` is the client's own read of its call presentation. One
+/// state, one place: the bar exists because the call screen is away.
+#[uniffi::export]
+#[must_use]
+pub fn call_bar_visible(phase: CallBarPhase, call_screen_up: bool) -> bool {
+    matches!(
+        rust_call_bar_visibility(phase.into(), call_screen_up),
+        RustCallBar::Shown
+    )
+}
+
+/// What the collapsed bar's one status line says.
+///
+/// `connectedForMs` is read only when the call is connected, so a caller with
+/// no clock yet may pass anything.
+#[uniffi::export]
+#[must_use]
+pub fn call_bar_status(phase: CallBarPhase, connected_for_ms: u64) -> CallBarStatus {
+    match rust_call_bar_status(phase.into(), connected_for_ms) {
+        RustCallBarStatus::Calling => CallBarStatus::Calling,
+        RustCallBarStatus::Connecting => CallBarStatus::Connecting,
+        RustCallBarStatus::Reconnecting => CallBarStatus::Reconnecting,
+        RustCallBarStatus::Elapsed(ms) => CallBarStatus::Elapsed { ms },
+    }
 }
 
 /// Whether the composer's voice and video-note recorder must stand aside

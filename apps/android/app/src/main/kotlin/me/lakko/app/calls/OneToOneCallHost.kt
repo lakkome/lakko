@@ -381,6 +381,48 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
     public val hasCall: Boolean
         get() = mutableActive.value?.let { it.session.state.value != CallSession.WebCallState.Done } == true
 
+    private val mutableCollapsed = MutableStateFlow(false)
+
+    /**
+     * `docs/ux/calls.md` section 4.5 — this call has been put away into the bar
+     * across the top of the app.
+     *
+     * A property of the CALL, not of a screen: set and cleared only here, so no
+     * destination change can touch it, and cleared in [install] — where a new
+     * call takes the slot — rather than by anything watching a call end. Both
+     * halves are deliberate. Clearing it at the start is synchronous with the
+     * assignment that publishes the new call, so a new call can never flash a
+     * bar on its way to its own screen. Not clearing it at the end is what
+     * keeps a collapsed call's `Call ended` screen from being thrown across
+     * whatever the person went off to read: section 4.5 — "a person who put the
+     * call away asked not to be interrupted by it."
+     */
+    public val collapsed: StateFlow<Boolean> = mutableCollapsed.asStateFlow()
+
+    /** Put the call away (the chevron, or the system back). Never ends it. */
+    public fun collapse() {
+        mutableCollapsed.value = true
+    }
+
+    /** Bring the call back (a tap on the bar). */
+    public fun expand() {
+        mutableCollapsed.value = false
+    }
+
+    private val mutableConnectedSince = MutableStateFlow<Long?>(null)
+
+    /**
+     * Wall clock at the moment this call's media first flowed, or `null`.
+     *
+     * The same value the transcript row's duration is built from, published so
+     * the collapsed bar can show a running time that survives the screen. The
+     * call screen derives its own from the moment IT observed the connect,
+     * which is wrong for a bar: putting the call away destroys the screen, and a
+     * timer restarted from zero on the way back would be a clock the person can
+     * watch being wrong.
+     */
+    public val connectedSinceMs: StateFlow<Long?> = mutableConnectedSince.asStateFlow()
+
     // ---- Inbound ----------------------------------------------------------
 
     private val highWater = HashMap<String, Long>()
@@ -1028,7 +1070,10 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
                 // The only place a duration can start. Latched: a reconnect
                 // passes through `Connected` again and must not restart the
                 // clock on a call that has been up for ten minutes.
-                if (s.connectedAtMs == null) s.connectedAtMs = clock()
+                if (s.connectedAtMs == null) {
+                    s.connectedAtMs = clock()
+                    mutableConnectedSince.value = s.connectedAtMs
+                }
             }
             CallSession.WebCallState.Ending -> cancelTimer(s)
             CallSession.WebCallState.Done -> {
@@ -1120,6 +1165,12 @@ public class OneToOneCallHost<S : OneToOneCallSession>(
 
     private fun install(s: Slot) {
         slot = s
+        // A call is born expanded, and with no running time yet — both cleared
+        // in the same breath as the call being published, so the previous
+        // call's put-away can never suppress this one's screen and its clock
+        // can never be inherited. See [collapsed].
+        mutableCollapsed.value = false
+        mutableConnectedSince.value = null
         mutableActive.value = s.call
         val session = s.call.session
         s.watchJob = scope.launch {

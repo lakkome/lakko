@@ -78,6 +78,23 @@ public fun BoxScope.OneToOneCallOverlay(
     val call = active ?: return
     val state by call.session.state.collectAsStateWithLifecycle()
     val name = nameForGroup(call.groupIdHex)
+    // `docs/ux/calls.md` section 4.5 — the call has been put away into the bar
+    // across the top of the app, so its screen is not drawn. "One state, one
+    // place": the same flag that hides this screen is what the bar's visibility
+    // rule is handed as `callScreenUp`, so the two can never both be up or both
+    // be gone.
+    //
+    // This gate covers the ended state too, deliberately. A collapsed call that
+    // ends must not throw its `Call ended` screen across whatever the person
+    // went off to read — section 4.5: "a person who put the call away asked not
+    // to be interrupted by it." The flag stays set until the next call takes
+    // the slot, which is what makes that hold.
+    val collapsed by host.collapsed.collectAsStateWithLifecycle()
+    // Section 4.5 — the CALL's connect moment, so the screen's running time
+    // survives being put away and brought back. The screen creates its own
+    // `CallUiState`, whose latch is the MOUNT moment in disguise, so this must
+    // come from the host. See [me.lakko.app.calls.callClockOrigin].
+    val connectedSince by host.connectedSinceMs.collectAsStateWithLifecycle()
     when (oneToOneCallPresentation(state, call.accepted, call.muted)) {
         // docs/ux/calls.md section 2.1, first row: an app that is open shows
         // the full-screen incoming call, not a strip at the top. The ring
@@ -121,11 +138,20 @@ public fun BoxScope.OneToOneCallOverlay(
                 onDecline = { host.decline() },
             )
         }
-        OneToOneCallPresentation.IN_CALL_SCREEN -> Dialog(
-            onDismissRequest = { /* exit only via the End button */ },
+        OneToOneCallPresentation.IN_CALL_SCREEN -> if (collapsed) {
+            Unit
+        } else Dialog(
+            // Section 4.5 — the system back COLLAPSES the call and never ends
+            // it: "a call is not a dialog to dismiss, and back has never meant
+            // hang up anywhere else in the app." Routed through the dialog's own
+            // back path rather than a `BackHandler` inside it, because this
+            // window's back is the platform's to deliver and that is the path it
+            // delivers it on. The dialog is not auto-dismissed by returning
+            // here: the gate above is what stops drawing it.
+            onDismissRequest = { host.collapse() },
             properties = DialogProperties(
                 usePlatformDefaultWidth = false,
-                dismissOnBackPress = false,
+                dismissOnBackPress = true,
                 dismissOnClickOutside = false,
                 // Full-screen and edge to edge: with the default the dialog is
                 // placed below the status bar but keeps the full screen height,
@@ -154,6 +180,9 @@ public fun BoxScope.OneToOneCallOverlay(
                     // docs/ux/calls.md section 4.1 — the flip button on the
                     // self-view rectangle, which is the only place it lives.
                     onSwitchCamera = { call.session.switchCamera() },
+                    // Section 4.5 — the chevron, beside the system back.
+                    onCollapse = { host.collapse() },
+                    connectedSinceMs = connectedSince,
                 )
             }
         }

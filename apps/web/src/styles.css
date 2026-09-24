@@ -4881,3 +4881,173 @@ a.lk-button-link:hover {
   font-weight: 600;
   flex: 0 0 auto;
 }
+
+/* ---------------------------------------------------------------------------
+   The collapsed call — one bar across the top of the app
+   (docs/ux/calls.md section 4.5)
+
+   It follows the APP theme, not the call screen's dark token block: the bar is
+   part of the screen the person is on, exactly as the incoming-call banner
+   above is, and a strip in the call's palette would read as a piece of the call
+   screen left behind on top of a chat.
+--------------------------------------------------------------------------- */
+:root {
+  /* One number, read by the bar and by the room it is given below, so the two
+     cannot disagree by a pixel. */
+  --lk-call-bar-h: 44px;
+}
+
+/* Make room rather than cover. `calls/CallBar.tsx` marks the document while the
+   bar is up; `box-sizing: border-box` is global, so padding on `body` shortens
+   its content box and with it `#root` — the rail, the pane, the composer and
+   the mobile tab bar all move down together and nothing is overlapped. */
+html[data-call-bar] body {
+  padding-top: calc(var(--lk-call-bar-h) + env(safe-area-inset-top));
+}
+
+.lk-callbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  /* The inset is added here and to the room above from the same one number, so
+     a notch cannot leave the bar and the space made for it a few pixels
+     apart. */
+  height: calc(var(--lk-call-bar-h) + env(safe-area-inset-top));
+  /* Above every app surface including a modal backdrop (60): a live call's mute
+     must stay reachable. Below the call screen (1000), the incoming call (1050)
+     and the group-call banner (1100) — the bar is never up at the same time as
+     the first, and the other two are calls asking to be answered. */
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  /* The shorthand first and the inset after it: the other way round the
+     shorthand resets the top to zero and the bar's contents sit under a
+     notch. */
+  padding: 0 6px 0 4px;
+  padding-top: env(safe-area-inset-top);
+  background: var(--surface-elevated);
+  border-bottom: 1px solid var(--surface-border);
+  box-shadow: var(--shadow-1);
+}
+
+/* Everything except the mute circle: the whole strip is the way back in. */
+.lk-callbar-open {
+  flex: 1;
+  min-width: 0;
+  height: calc(var(--lk-call-bar-h) - 8px);
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 0 10px;
+  border: none;
+  background: transparent;
+  color: var(--surface-fg);
+  border-radius: var(--radius-sm);
+  text-align: left;
+}
+.lk-callbar-open:hover {
+  background: var(--surface-hover);
+}
+
+/* The name gives way first: a long one truncates rather than pushing the
+   running time or the mute button off the strip. */
+.lk-callbar-who {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* The state or the running time — one of them, decided by the shared rule.
+   Tabular figures so a ticking timer does not shift the line every second. */
+.lk-callbar-state {
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--surface-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The lock and the camera glyph. Marks, not words. */
+.lk-callbar-mark {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  color: var(--surface-muted);
+}
+
+/* One round mute button, drawn on and off as the call screen draws it
+   (section 4.1.1), translated onto the app palette: ON is the quiet state — a
+   subtle fill and a plain icon; OFF is the loud one — a solid circle with the
+   slashed glyph knocked out of it. */
+.lk-callbar-mute {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-sunken);
+  color: var(--surface-fg);
+}
+.lk-callbar-mute:hover:not(:disabled) {
+  background: var(--surface-selected);
+}
+.lk-callbar-mute[data-tone="solid"] {
+  background: var(--surface-fg);
+  color: var(--surface-elevated);
+}
+.lk-callbar-mute[data-tone="solid"]:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.lk-callbar-mute:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Put the call away: the chevron at the top left of the call screen
+   (section 4.5). The same round translucent control the camera check's close
+   button already is, down to the tokens and the light focus ring, because it is
+   the same gesture in the same corner of the same surface. Rotated a quarter
+   turn: the shared `chevron` glyph points right, and down is what "put this
+   away" means here and on both phones. */
+.lk-call-collapse {
+  position: absolute;
+  top: calc(14px + env(safe-area-inset-top));
+  left: 14px;
+  z-index: 7;
+  width: 40px;
+  height: 40px;
+  min-height: 0;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: var(--call-bar-bg);
+  color: var(--call-ctl-on-fg);
+  cursor: pointer;
+}
+.lk-call-collapse:hover {
+  background: color-mix(in srgb, var(--call-bar-bg) 60%, var(--surface-fg));
+}
+.lk-call-collapse:focus-visible {
+  outline: 2px solid var(--call-ctl-on-fg);
+  outline-offset: 2px;
+}
+.lk-call-collapse > svg {
+  transform: rotate(90deg);
+}

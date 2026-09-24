@@ -71,12 +71,22 @@ public fun GroupCallOverlay(
     groupNameFor: (groupIdHex: String) -> String? = { null },
 ) {
     val visible by host.overlayVisible.collectAsStateWithLifecycle()
-    if (!visible) return
+    // `docs/ux/calls.md` section 4.5 — the call has been put away into the bar.
+    // The same flag is handed to the bar's rule as `callScreenUp`, so the screen
+    // and the bar are never both up. It covers the ended state on purpose: a
+    // collapsed call that ends must not throw its screen across whatever the
+    // person went off to read.
+    val collapsed by host.collapsed.collectAsStateWithLifecycle()
+    if (!visible || collapsed) return
     val slot by host.slot.collectAsStateWithLifecycle()
     HostedCallDialog(
         state = host.ui,
         onEndCall = { host.leave() },
         onExit = { host.onOverlayExit() },
+        onCollapse = { host.collapse() },
+        // Section 4.5 — the CALL's connect moment, so the screen's running time
+        // survives being put away and brought back.
+        connectedSinceMs = host.connectedSinceMs.collectAsStateWithLifecycle().value,
         groupName = slot?.groupIdHex?.let(groupNameFor),
     )
 }
@@ -96,9 +106,22 @@ public fun GroupCallOverlay(
 public fun LinkCallOverlay(
     host: LinkCallHost,
     identity: () -> CallInviteIdentity? = { null },
+    /**
+     * Leave the `/c/` landing this call was reached through.
+     *
+     * Called when the call is put away, and not only when it ends. The landing
+     * is drawn ABOVE the session screens — including the collapsed call bar's
+     * strip at the top of them — so a call put away while its landing was still
+     * up would leave the person looking at neither the call nor the bar.
+     * Section 4.5 collapses a call to give the app back, and the landing of a
+     * link is not the app.
+     */
+    onLeaveLanding: () -> Unit = {},
 ) {
     val visible by host.overlayVisible.collectAsStateWithLifecycle()
-    if (!visible) return
+    /** See [GroupCallOverlay] — section 4.5's collapsed presentation. */
+    val collapsed by host.collapsed.collectAsStateWithLifecycle()
+    if (!visible || collapsed) return
     val slot by host.slot.collectAsStateWithLifecycle()
     val inviteState by host.inviteLink.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
@@ -110,6 +133,12 @@ public fun LinkCallOverlay(
         state = host.ui,
         onEndCall = { host.leave() },
         onExit = { host.onOverlayExit() },
+        onCollapse = {
+            host.collapse()
+            onLeaveLanding()
+        },
+        // See [GroupCallOverlay] — section 4.5's running time.
+        connectedSinceMs = host.connectedSinceMs.collectAsStateWithLifecycle().value,
         inviteState = inviteState.takeIf { canInvite },
         onInvite = {
             scope.launch {
@@ -126,16 +155,26 @@ private fun HostedCallDialog(
     state: CallUiState,
     onEndCall: () -> Unit,
     onExit: () -> Unit,
+    /** `docs/ux/calls.md` section 4.5 — put the call away into the bar. */
+    onCollapse: () -> Unit,
+    /** `docs/ux/calls.md` section 4.5 — the CALL's connect moment, so the
+     *  running time counts from the call and not from this screen's mount. */
+    connectedSinceMs: Long?,
     groupName: String? = null,
     /** `docs/ux/call-links.md` section 3; `null` draws no `Invite` control. */
     inviteState: CallInviteLinkState? = null,
     onInvite: () -> Unit = {},
 ) {
     Dialog(
-        onDismissRequest = { /* exit only via the End button */ },
+        // Section 4.5 — the system back COLLAPSES the call and never ends it.
+        // Routed through the dialog's own back path rather than a `BackHandler`
+        // inside it, because this window's back is the platform's to deliver and
+        // that is the path it delivers it on. Returning here does not dismiss
+        // the dialog; the caller's collapse gate is what stops drawing it.
+        onDismissRequest = onCollapse,
         properties = DialogProperties(
             usePlatformDefaultWidth = false,
-            dismissOnBackPress = false,
+            dismissOnBackPress = true,
             dismissOnClickOutside = false,
             // Full-screen and edge to edge: with the default the dialog is
             // placed below the status bar but keeps the full screen height,
@@ -157,6 +196,9 @@ private fun HostedCallDialog(
                 groupName = groupName,
                 inviteState = inviteState,
                 onInvite = onInvite,
+                // Section 4.5 — the chevron, beside the system back.
+                onCollapse = onCollapse,
+                connectedSinceMs = connectedSinceMs,
             )
         }
     }

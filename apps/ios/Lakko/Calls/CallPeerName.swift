@@ -59,6 +59,22 @@ public enum CallPeerName {
         return isLocal ? "You" : placeholder
     }
 
+    /// The name at the top of a call: the resolved name when there is one, the
+    /// neutral placeholder for a nameless 1x1 call, and `Group call` for a call
+    /// nobody is the other person on.
+    ///
+    /// Here rather than inside the call screen because the collapsed bar shows
+    /// the same label (`docs/ux/calls.md` section 4.5 — *"the same label the
+    /// call screen uses"*), and two surfaces computing the same label from the
+    /// same value is two surfaces that can be changed apart.
+    ///
+    /// - Parameter groupCall: `true` when nobody is "the other person" — a
+    ///   group call, or a call from a link.
+    public static func callLabel(profileName: String?, groupCall: Bool) -> String {
+        resolve(profileName: profileName, chatTitle: nil)
+            ?? (groupCall ? "Group call" : placeholder)
+    }
+
     /// The encryption sheet's one plain sentence (`docs/ux/calls.md` section
     /// 5). Names the other person when they have a name. With no name it says
     /// something true of any call rather than inventing one — the nameless

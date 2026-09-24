@@ -26,6 +26,7 @@
 //! crate ever needs a key, a secret or a peer's assertion, it is in the wrong
 //! crate.
 
+pub mod call_bar;
 pub mod capture;
 pub mod conversation;
 pub mod info;

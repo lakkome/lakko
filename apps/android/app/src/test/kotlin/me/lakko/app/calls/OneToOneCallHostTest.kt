@@ -1027,4 +1027,137 @@ class OneToOneCallHostTest {
 
         assertEquals(1, h.port.recorded.size)
     }
+
+    // ---- Putting a call away (docs/ux/calls.md section 4.5) -------------------
+
+    /** A call is born expanded: nothing is put away until somebody puts it away. */
+    @Test
+    fun `a 1x1 call starts with its screen up, not put away`() = runTest {
+        val h = harness()
+        h.host.startOutgoing(groupA, RequestedCallKind.VOICE)
+        runCurrent()
+        assertNotNull(h.host.active.value)
+        assertFalse(h.host.collapsed.value)
+    }
+
+    /**
+     * Section 4.5: collapsing "changes nothing about the call itself — the
+     * media, the keys and the timer are untouched, only the picture is put
+     * away". Above all it must not hang up: back has never meant hang up
+     * anywhere else in the app.
+     */
+    @Test
+    fun `collapsing a 1x1 call never ends it`() = runTest {
+        val h = harness()
+        h.host.startOutgoing(groupA, RequestedCallKind.VOICE)
+        runCurrent()
+        val call = h.host.active.value!!
+
+        h.host.collapse()
+        runCurrent()
+
+        assertTrue(h.host.collapsed.value)
+        assertTrue("the call was hung up", call.session.hangUps.isEmpty())
+        assertSame("the call left the slot", call, h.host.active.value)
+        assertTrue(h.host.hasCall)
+
+        h.host.expand()
+        assertFalse(h.host.collapsed.value)
+    }
+
+    /**
+     * Section 4.5: "a person who put the call away asked not to be interrupted
+     * by it." A collapsed call that ends must not un-collapse, or its
+     * `Call ended` screen lands over whatever the person went off to read.
+     */
+    @Test
+    fun `a collapsed 1x1 call that ends does not throw its screen back up`() = runTest {
+        val h = harness()
+        h.host.startOutgoing(groupA, RequestedCallKind.VOICE)
+        runCurrent()
+        val call = h.host.active.value!!
+        h.host.collapse()
+        runCurrent()
+
+        call.session.mutableState.value = CallSession.WebCallState.Done
+        runCurrent()
+
+        assertTrue("the ended screen was thrown up over another screen", h.host.collapsed.value)
+    }
+
+    /**
+     * ...and the NEXT call still shows its own screen, which is the other half
+     * of the same rule. Clearing the flag where a call takes the slot rather
+     * than where one ends is what makes both hold at once.
+     */
+    @Test
+    fun `the 1x1 call after a collapsed one shows its own screen`() = runTest {
+        val h = harness()
+        h.host.startOutgoing(groupA, RequestedCallKind.VOICE)
+        runCurrent()
+        val first = h.host.active.value!!
+        h.host.collapse()
+        first.session.mutableState.value = CallSession.WebCallState.Done
+        runCurrent()
+        h.host.clearFinished()
+        runCurrent()
+        assertTrue(h.host.collapsed.value)
+
+        h.host.startOutgoing(groupB, RequestedCallKind.VOICE)
+        runCurrent()
+        assertNotNull(h.host.active.value)
+        assertFalse("the new call inherited the last one's put-away", h.host.collapsed.value)
+    }
+
+    /**
+     * The running time the bar shows is the call's, not the screen's: it is
+     * latched once when media first flows and survives being put away and
+     * brought back, where the screen's own timer restarts from zero.
+     */
+    @Test
+    fun `the running time is latched at the connect and survives being put away`() = runTest {
+        val h = harness()
+        h.host.startOutgoing(groupA, RequestedCallKind.VOICE)
+        runCurrent()
+        assertNull("a call that has not connected has no running time", h.host.connectedSinceMs.value)
+        val call = h.host.active.value!!
+
+        call.session.mutableState.value = CallSession.WebCallState.Connected
+        runCurrent()
+        val connectedAt = h.host.connectedSinceMs.value
+        assertEquals(h.now, connectedAt)
+
+        h.host.collapse()
+        h.host.expand()
+        runCurrent()
+        assertEquals("the clock restarted", connectedAt, h.host.connectedSinceMs.value)
+
+        // A reconnect passes through Connected again and must not restart it.
+        h.now += 60_000L
+        call.session.mutableState.value = CallSession.WebCallState.Connecting
+        runCurrent()
+        call.session.mutableState.value = CallSession.WebCallState.Connected
+        runCurrent()
+        assertEquals("a reconnect restarted the clock", connectedAt, h.host.connectedSinceMs.value)
+    }
+
+    /** A new call does not inherit the previous call's clock. */
+    @Test
+    fun `the next call starts with no running time`() = runTest {
+        val h = harness()
+        h.host.startOutgoing(groupA, RequestedCallKind.VOICE)
+        runCurrent()
+        h.host.active.value!!.session.mutableState.value = CallSession.WebCallState.Connected
+        runCurrent()
+        assertNotNull(h.host.connectedSinceMs.value)
+
+        h.host.active.value!!.session.mutableState.value = CallSession.WebCallState.Done
+        runCurrent()
+        h.host.clearFinished()
+        runCurrent()
+
+        h.host.startOutgoing(groupB, RequestedCallKind.VOICE)
+        runCurrent()
+        assertNull("the new call inherited the last one's clock", h.host.connectedSinceMs.value)
+    }
 }
