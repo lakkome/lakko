@@ -137,12 +137,28 @@ function LockTarget(props: { recorder: Recorder }): JSX.Element {
   // past the threshold: "the pointer is standing on the target" is not a state
   // that exists. What can be shown is the approach, and it is the honest
   // signal — arriving at the capsule IS the lock.
+  /**
+   * A pointer gesture is live: the take is being held, or the device it will
+   * record from is still opening under a finger that is already down.
+   *
+   * `requesting` is in it because the hold now spends its first moments there
+   * waiting for the microphone, and a target that waited for the first
+   * captured sample would flicker in under a thumb already climbing towards
+   * it — while the machine answers that climb on arrival, so the affordance
+   * would be inviting a lock that had already happened. A KEYBOARD activation
+   * passes through the same phase and is excluded: it has no pointer, so there
+   * is no slide for the target to invite.
+   */
+  const gesturing = (): boolean => {
+    const st = s();
+    return st.phase === "recording" || (st.phase === "requesting" && st.pointer !== "keyboard");
+  };
   const climb = (): number => {
     const st = s();
-    return st.phase === "recording" ? Math.min(0, st.dy) : 0;
+    return gesturing() && "dy" in st ? Math.min(0, st.dy) : 0;
   };
   return (
-    <Show when={s().phase === "recording"}>
+    <Show when={gesturing()}>
       <span
         class="lakko-lock-target"
         data-near={climb() <= -LOCK_SLIDE_PX / 2}
@@ -202,7 +218,13 @@ function LiveBar(props: { recorder: Recorder }): JSX.Element {
   };
   return (
     <>
-      <span class="lakko-rec-dot" aria-hidden="true" />
+      {/* Only once something is actually being captured. The pulsing red dot
+          is the strongest "this is recording" signal on the bar, and
+          `requesting` — where the device is still being opened — is precisely
+          the state in which that would be untrue. */}
+      <Show when={s().phase !== "requesting"}>
+        <span class="lakko-rec-dot" aria-hidden="true" />
+      </Show>
       <span aria-live="off">{formatClock(r.elapsedMs())}</span>
       <span class="lakko-level" aria-hidden="true">
         <span style={{ width: `${Math.round(r.level() * 100)}%` }} />

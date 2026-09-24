@@ -66,16 +66,34 @@ const press = (over: Partial<PressEvent> = {}): RecEvent => ({
 });
 
 /**
- * A press that has become a HOLD: the press, then the threshold arriving.
+ * A press that has become a HOLD and whose stream arrived instantly: the
+ * press, the threshold arriving, and the grant.
  *
  * The controller's one hold timer is what delivers that tick in the running
  * app (`recording-controller.ts`); here it is spelled out, because the whole
  * §3.1 distinction lives in whether it arrived.
+ *
+ * The grant is part of the helper because since the `requesting`-always fix
+ * NOTHING records without it — the threshold asks for the microphone, the
+ * grant hands it over. `acquireAt` is how long that took; `0` keeps every
+ * case below on the same `startedAt` it was written against, and the cases
+ * that are ABOUT the gap name a real one.
  */
-function hold(over: Partial<PressEvent> = {}): RecEvent[] {
+function hold({ acquireAt, ...over }: Partial<PressEvent> & { acquireAt?: number } = {}): RecEvent[] {
   const at = over.at ?? PRESS_AT;
-  return [press({ ...over, at }), { type: "tick", at: at + HOLD_TO_RECORD_MS }];
+  const held = at + HOLD_TO_RECORD_MS;
+  return [
+    press({ ...over, at }),
+    { type: "tick", at: held },
+    { type: "permission-result", granted: true, at: acquireAt ?? held },
+  ];
 }
+
+/** The two effects a hold on an already-granted device produces, in order. */
+const ASK_AND_START: RecEffect[] = [
+  { type: "request-permission", kind: "voice" },
+  { type: "start-capture", kind: "voice" },
+];
 
 /** A press released before the threshold: §3.1's tap. */
 function tap(over: Partial<PressEvent> = {}): RecEvent[] {
@@ -119,10 +137,10 @@ describe("one button: tap switches, hold records (§3.1)", () => {
     expect(early.effects).toEqual([]);
   });
 
-  it("the threshold opens the microphone, not a millisecond before", () => {
+  it("the threshold asks for the microphone, not a millisecond before", () => {
     const r = run(hold());
     expect(r.state).toMatchObject({ phase: "recording", startedAt: HELD_AT });
-    expect(r.effects).toEqual([{ type: "start-capture", kind: "voice" }]);
+    expect(r.effects).toEqual(ASK_AND_START);
   });
 
   it("a release exactly at the threshold is a hold that never got going", () => {
@@ -174,10 +192,7 @@ describe("hold and release", () => {
   it("a held release sends", () => {
     const r = run([...hold(), { type: "release", at: HELD_AT + MIN_TAKE_MS + 1 }]);
     expect(r.state.phase).toBe("idle");
-    expect(r.effects).toEqual([
-      { type: "start-capture", kind: "voice" },
-      { type: "finish", disposition: "send" },
-    ]);
+    expect(r.effects).toEqual([...ASK_AND_START, { type: "finish", disposition: "send" }]);
   });
 
   it("a take shorter than the minimum is discarded with the hint and switches nothing", () => {
@@ -199,10 +214,17 @@ describe("hold and release", () => {
     expect(r.effects).toContainEqual({ type: "finish", disposition: "send" });
   });
 
-  it("keyboard activation starts a locked recording in one step", () => {
-    const r = run([{ type: "activate", kind: "voice", at: 50, permission: "granted" }]);
-    expect(r.state).toEqual({ phase: "locked", kind: "voice", startedAt: 50 });
-    expect(r.effects).toEqual([{ type: "start-capture", kind: "voice" }]);
+  it("keyboard activation asks, then locks on the stream it gets back", () => {
+    // One gesture from the person's side, two steps here, and the second is
+    // where the take begins: a keyboard activation opens the same device a
+    // hold does, and locking before it is open would run the clock over
+    // nothing.
+    const asked = run([{ type: "activate", kind: "voice", at: 50, permission: "granted" }]);
+    expect(asked.state).toMatchObject({ phase: "requesting", pointer: "keyboard" });
+    expect(asked.effects).toEqual([{ type: "request-permission", kind: "voice" }]);
+    const started = run([{ type: "permission-result", granted: true, at: 370 }], asked.state);
+    expect(started.state).toEqual({ phase: "locked", kind: "voice", startedAt: 370 });
+    expect(started.effects).toEqual([{ type: "start-capture", kind: "voice" }]);
   });
 });
 
@@ -217,7 +239,7 @@ describe("slide gestures", () => {
   it("sliding left short of the threshold only tracks the offset", () => {
     const r = run([...hold(), { type: "move", x: 100 - CANCEL_SLIDE_PX + 1, y: 100 }]);
     expect(r.state).toMatchObject({ phase: "recording", dx: -CANCEL_SLIDE_PX + 1 });
-    expect(r.effects).toEqual([{ type: "start-capture", kind: "voice" }]);
+    expect(r.effects).toEqual(ASK_AND_START);
   });
 
   it("sliding up locks, and a release afterwards neither sends nor stops", () => {
@@ -227,7 +249,7 @@ describe("slide gestures", () => {
       { type: "release", at: 5000 },
     ]);
     expect(r.state).toEqual({ phase: "locked", kind: "voice", startedAt: HELD_AT });
-    expect(r.effects).toEqual([{ type: "start-capture", kind: "voice" }]);
+    expect(r.effects).toEqual(ASK_AND_START);
   });
 
   it("locked Stop moves to preview, and Send from preview sends it", () => {
@@ -291,7 +313,7 @@ describe("caps", () => {
 
 describe("permissions", () => {
   it("a known prompt: the hold that raised it does not record", () => {
-    const r = run([...hold({ permission: "prompt" }), { type: "permission-result", granted: true, at: HELD_AT + 100 }]);
+    const r = run(hold({ permission: "prompt", acquireAt: HELD_AT + 100 }));
     expect(r.state.phase).toBe("idle");
     expect(r.effects).toEqual([
       { type: "request-permission", kind: "voice" },
@@ -302,26 +324,21 @@ describe("permissions", () => {
   it("an unknown permission granted fast while still held records", () => {
     // The inference budget runs from the REQUEST, not from the press: charging
     // the hold threshold against it would read a prompt-less grant as a prompt.
-    const r = run([
-      ...hold({ permission: "unknown" }),
-      { type: "permission-result", granted: true, at: HELD_AT + PROMPT_INFERENCE_MS },
-    ]);
+    const r = run(hold({ permission: "unknown", acquireAt: HELD_AT + PROMPT_INFERENCE_MS }));
     expect(r.state).toMatchObject({ phase: "recording", startedAt: HELD_AT + PROMPT_INFERENCE_MS });
     expect(r.effects).toContainEqual({ type: "start-capture", kind: "voice" });
   });
 
   it("an unknown permission granted slowly is treated as a prompt", () => {
-    const r = run([
-      ...hold({ permission: "unknown" }),
-      { type: "permission-result", granted: true, at: HELD_AT + PROMPT_INFERENCE_MS + 1 },
-    ]);
+    const r = run(hold({ permission: "unknown", acquireAt: HELD_AT + PROMPT_INFERENCE_MS + 1 }));
     expect(r.state.phase).toBe("idle");
     expect(r.effects).not.toContainEqual({ type: "start-capture", kind: "voice" });
   });
 
   it("a hold released before the grant arrives hints, and never switches the mode", () => {
     const r = run([
-      ...hold({ permission: "unknown" }),
+      press({ permission: "unknown" }),
+      { type: "tick", at: HELD_AT },
       { type: "release", at: HELD_AT + 10 },
       { type: "permission-result", granted: true, at: HELD_AT + 20 },
     ]);
@@ -341,7 +358,8 @@ describe("permissions", () => {
 
   it("refused at the prompt shows the card", () => {
     const r = run([
-      ...hold({ permission: "prompt", kind: "video_note" }),
+      press({ permission: "prompt", kind: "video_note" }),
+      { type: "tick", at: HELD_AT },
       { type: "permission-result", granted: false, at: HELD_AT + 200 },
     ]);
     expect(r.effects).toContainEqual({ type: "show-denied", kind: "video_note" });
@@ -360,6 +378,179 @@ describe("permissions", () => {
     const r = run([press({ at: 2000 })], recording);
     expect(r.state).toEqual(recording);
     expect(r.effects).toEqual([]);
+  });
+});
+
+describe("the clock starts when capture does", () => {
+  /**
+   * THE DEFECT, on the common path: permission already granted.
+   *
+   * The machine used to read a `granted` hint as "the microphone is in hand"
+   * and go straight to `recording`, so the bar ran, the clock counted and the
+   * red dot pulsed while `getUserMedia` was still opening the audio device —
+   * and everything said into that window was lost. A grant means no PROMPT
+   * will appear; it says nothing about how long the device takes to open.
+   */
+  it("a granted hint asks for the stream and records nothing until it lands", () => {
+    const asked = run([press(), { type: "tick", at: HELD_AT }]);
+    expect(asked.state).toMatchObject({ phase: "requesting", kind: "voice", held: true });
+    expect(asked.effects).toEqual([{ type: "request-permission", kind: "voice" }]);
+
+    // 320ms of device-opening, which is an ordinary cost even with permission
+    // on record. Nothing captures across it.
+    const started = run([{ type: "permission-result", granted: true, at: HELD_AT + 320 }], asked.state);
+    expect(started.state).toMatchObject({ phase: "recording", startedAt: HELD_AT + 320 });
+    expect(started.effects).toEqual([{ type: "start-capture", kind: "voice" }]);
+  });
+
+  it("the elapsed time measures the audio, not the wait for the device", () => {
+    // Held for a second and a half; the device took 400ms of it. The take is
+    // 1100ms long, and that is what the clock must have been counting - the
+    // 1500 the old machine showed described a span the recording never had.
+    const r = run([
+      ...hold({ acquireAt: HELD_AT + 400 }),
+      { type: "release", at: HELD_AT + 1500 },
+    ]);
+    expect(r.effects).toContainEqual({ type: "finish", disposition: "send" });
+    const recording = run(hold({ acquireAt: HELD_AT + 400 })).state;
+    expect(recording).toMatchObject({ startedAt: HELD_AT + 400 });
+  });
+
+  it("a slow grant on an already-granted device still records", () => {
+    // The prompt inference exists for browsers that will not say whether they
+    // prompted. This one said `granted`, so there is no prompt a slow acquire
+    // could have been - and reading one would refuse every take on a device
+    // that is merely slow to open.
+    const r = run(hold({ acquireAt: HELD_AT + PROMPT_INFERENCE_MS * 3 }));
+    expect(r.state).toMatchObject({ phase: "recording", startedAt: HELD_AT + PROMPT_INFERENCE_MS * 3 });
+    expect(r.effects).toContainEqual({ type: "start-capture", kind: "voice" });
+  });
+
+  /**
+   * The invariant behind all of it, over every state and event pair the
+   * machine has: a phase that captures is reached ONLY on the event that
+   * hands the stream over, and it always says so.
+   *
+   * Written as an enumeration rather than as three examples because the
+   * defect was a single branch that took a shortcut past the acquire, and the
+   * next one would be too.
+   */
+  it("no state that captures is ever entered without the stream in hand", () => {
+    const requesting: RecState = {
+      phase: "requesting",
+      kind: "voice",
+      pointer: "touch",
+      pressedAt: PRESS_AT,
+      held: true,
+      promptRisk: "none",
+      originX: 100,
+      originY: 100,
+      dx: 0,
+      dy: 0,
+    };
+    const states: RecState[] = [
+      IDLE,
+      run([press()]).state,
+      run([press({ permission: "prompt" })]).state,
+      run([press({ permission: "unknown" })]).state,
+      requesting,
+      { ...requesting, held: false },
+      { ...requesting, pointer: "keyboard" },
+      { ...requesting, promptRisk: "possible" },
+      { ...requesting, promptRisk: "certain" },
+      run(hold()).state,
+      { phase: "locked", kind: "voice", startedAt: PRESS_AT },
+      { phase: "finalizing", kind: "voice" },
+      { phase: "preview", kind: "voice", durationMs: 2000 },
+    ];
+    const events: RecEvent[] = [
+      press(),
+      { type: "activate", kind: "voice", at: 50, permission: "granted" },
+      { type: "activate", kind: "voice", at: 50, permission: "prompt" },
+      { type: "activate", kind: "voice", at: 50, permission: "unknown" },
+      { type: "activate", kind: "voice", at: 50, permission: "denied" },
+      { type: "move", x: 100, y: 100 },
+      { type: "move", x: 100, y: 100 - LOCK_SLIDE_PX },
+      { type: "move", x: 100 - CANCEL_SLIDE_PX, y: 100 },
+      { type: "release", at: HELD_AT + MIN_TAKE_MS },
+      { type: "tick", at: HELD_AT },
+      { type: "tick", at: HELD_AT + VOICE_CAP_MS },
+      { type: "permission-result", granted: true, at: HELD_AT },
+      { type: "permission-result", granted: false, at: HELD_AT },
+      { type: "stop", at: HELD_AT + MIN_TAKE_MS },
+      { type: "delete" },
+      { type: "cancel" },
+      { type: "send" },
+      { type: "revoked" },
+      { type: "capture-failed" },
+      { type: "preview-ready", durationMs: 2000 },
+      { type: "preview-failed" },
+    ];
+    const captures = (s: RecState): s is Extract<RecState, { phase: "recording" | "locked" }> =>
+      s.phase === "recording" || s.phase === "locked";
+
+    let observed = 0;
+    for (const state of states) {
+      for (const event of events) {
+        const next = reduce(state, event);
+        if (!captures(next.state) || captures(state)) continue;
+        observed += 1;
+        // The stream arrives on exactly one event, and the effect that
+        // consumes it is emitted in the same step.
+        expect({ from: state.phase, on: event.type }).toEqual({
+          from: "requesting",
+          on: "permission-result",
+        });
+        expect(next.effects).toContainEqual({ type: "start-capture", kind: next.state.kind });
+        // And it began now, not when the gesture decided it wanted to.
+        expect(next.state).toMatchObject({ startedAt: HELD_AT });
+      }
+    }
+    // The enumeration has to actually reach the transition, or it proves
+    // nothing by finding none.
+    expect(observed).toBeGreaterThan(0);
+  });
+});
+
+describe("a pointer that travels while the device opens", () => {
+  it("lands in the cancel target and never starts a take", () => {
+    const r = run([
+      press(),
+      { type: "tick", at: HELD_AT },
+      { type: "move", x: 100 - CANCEL_SLIDE_PX, y: 100 },
+      { type: "permission-result", granted: true, at: HELD_AT + 300 },
+    ]);
+    expect(r.state).toEqual(IDLE);
+    expect(r.effects).toEqual([
+      { type: "request-permission", kind: "voice" },
+      { type: "release-stream" },
+    ]);
+  });
+
+  it("lands on the lock target and the take starts locked", () => {
+    const r = run([
+      press(),
+      { type: "tick", at: HELD_AT },
+      { type: "move", x: 100, y: 100 - LOCK_SLIDE_PX },
+      // Lifted during the wait: reaching the lock target is exactly what
+      // makes lifting it harmless.
+      { type: "release", at: HELD_AT + 100 },
+      { type: "permission-result", granted: true, at: HELD_AT + 300 },
+    ]);
+    expect(r.state).toEqual({ phase: "locked", kind: "voice", startedAt: HELD_AT + 300 });
+    expect(r.effects).toContainEqual({ type: "start-capture", kind: "voice" });
+  });
+
+  it("carries the offset it collected into the take", () => {
+    const r = run([
+      press(),
+      { type: "tick", at: HELD_AT },
+      { type: "move", x: 100 - 30, y: 100 - 20 },
+      { type: "permission-result", granted: true, at: HELD_AT + 300 },
+    ]);
+    // Short of both thresholds, so it records - with the travel the bar's
+    // "slide to cancel" feedback is drawn from, rather than from zero.
+    expect(r.state).toMatchObject({ phase: "recording", dx: -30, dy: -20 });
   });
 });
 

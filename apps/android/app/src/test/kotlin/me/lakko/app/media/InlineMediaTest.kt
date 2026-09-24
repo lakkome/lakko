@@ -124,4 +124,83 @@ class InlineMediaTest {
         assertFalse(AttachmentBridge.isInlinePreviewable(ref("audio/mp4"), fake))
         assertFalse(AttachmentBridge.isInlinePreviewable(ref("image/svg+xml"), fake))
     }
+
+    private fun ref(kind: String?, mime: String?) = AttachmentRef(
+        blobId = ByteArray(32),
+        key = ByteArray(32),
+        nonce = ByteArray(12),
+        mime = mime,
+        size = 1u,
+        name = null,
+        kind = kind,
+    )
+
+    private val voice = ref(KIND_VOICE, "audio/mp4")
+    private val photo = ref(null, "image/jpeg")
+
+    @Test
+    fun aLoneAttachmentIsTheSoleBubble() {
+        assertEquals(MediaBubble.VOICE, soleMediaBubble(false, "", listOf(voice), fake))
+        assertEquals(MediaBubble.PHOTO, soleMediaBubble(false, "", listOf(photo), fake))
+        assertEquals(MediaBubble.FILE, soleMediaBubble(false, "", listOf(ref(null, "application/pdf")), fake))
+    }
+
+    /**
+     * The "nothing but" half of [soleMediaBubble]. A voice message with a
+     * caption, or beside a second attachment, has a paragraph to sit under and
+     * keeps the bubble's own meta row; only the lone one takes a slot of its
+     * own. A tombstone shows neither.
+     */
+    @Test
+    fun anythingElseInTheBubbleMeansNoSoleBubble() {
+        assertNull(soleMediaBubble(false, "listen to this", listOf(voice), fake))
+        assertNull(soleMediaBubble(false, "", listOf(voice, photo), fake))
+        assertNull(soleMediaBubble(false, "", emptyList(), fake))
+        assertNull(soleMediaBubble(true, "", listOf(voice), fake))
+        // And each of those keeps the row under the content.
+        assertEquals(
+            BubbleMetaSlot.BUBBLE_ROW,
+            bubbleMetaSlot(soleMediaBubble(false, "listen to this", listOf(voice), fake)),
+        )
+    }
+
+    /**
+     * UX spec §2 — a lone voice message is a ROW, so the message's own time
+     * shares the quiet line under the waveform. It used to fall through to
+     * [BubbleMetaSlot.BUBBLE_ROW] and get a second row below the player, which
+     * made the bubble taller than it needed to be and read as two unrelated
+     * facts: the length of the recording on one level, the time it was sent on
+     * another.
+     */
+    @Test
+    fun aLoneVoiceMessageCarriesItsTimeOnItsOwnLine() {
+        assertEquals(BubbleMetaSlot.VOICE_LINE, bubbleMetaSlot(MediaBubble.VOICE))
+        assertEquals(
+            BubbleMetaSlot.VOICE_LINE,
+            bubbleMetaSlot(soleMediaBubble(false, "", listOf(voice), fake)),
+        )
+    }
+
+    @Test
+    fun everyBubbleShapeHasExactlyOnePlaceForItsMeta() {
+        // A lone photo or video is edge-to-edge with no chrome to carry a row,
+        // so the pill on the media; a video note is a chromeless circle, so
+        // under it; everything else keeps the row inside the bubble.
+        assertEquals(BubbleMetaSlot.MEDIA_PILL, bubbleMetaSlot(MediaBubble.PHOTO))
+        assertEquals(BubbleMetaSlot.MEDIA_PILL, bubbleMetaSlot(MediaBubble.VIDEO))
+        assertEquals(BubbleMetaSlot.BELOW_BUBBLE, bubbleMetaSlot(MediaBubble.VIDEO_NOTE))
+        assertEquals(BubbleMetaSlot.BUBBLE_ROW, bubbleMetaSlot(MediaBubble.GIF))
+        assertEquals(BubbleMetaSlot.BUBBLE_ROW, bubbleMetaSlot(MediaBubble.FILE))
+        assertEquals(BubbleMetaSlot.BUBBLE_ROW, bubbleMetaSlot(null))
+        // All four slots are reachable, so none of the four renderers in
+        // `ChatScreen` / `MediaBubbles` is dead code waiting to rot.
+        assertEquals(
+            BubbleMetaSlot.entries.toSet(),
+            MediaBubble.entries.map(::bubbleMetaSlot).toSet() + bubbleMetaSlot(null),
+        )
+        // And nothing maps the voice row back to the row below it — the defect.
+        assertFalse(MediaBubble.entries.none { bubbleMetaSlot(it) == BubbleMetaSlot.VOICE_LINE })
+        // A new bubble shape cannot silently inherit a slot: `bubbleMetaSlot`
+        // is an exhaustive `when` with no `else`, so the compiler demands one.
+    }
 }

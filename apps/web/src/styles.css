@@ -2188,29 +2188,50 @@ a.ghost.small.lk-wide-only {
   flex: 0 0 auto;
   width: 38px;
   height: 38px;
+  /* The global `button` rule floors every button at `--control-h` (40px), and
+     `min-height` beats `height` — so the disc was a 38x40 ellipse, not the
+     circle the spec asks for. Every button inside a bubble has to say this. */
+  min-height: 0;
   padding: 0;
   border-radius: 50%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border: none;
+  /* The same global rule also sets an explicit `color`, so `currentColor`
+     below was NOT the bubble's text colour: an outgoing disc came out in the
+     surface foreground (near-black) under a glyph in the accent, which on an
+     accent bubble is dark on dark — the triangle all but disappeared. The
+     speed chip beside it already says `color: inherit`; this one had to. */
+  color: inherit;
   /* The bubble's text colour, filled; the glyph inside takes the bubble's own
      background (set per tone in the component), so the button reads as solid
      on the sunken incoming surface and on the accent outgoing one alike. */
   background: currentColor;
 }
 .lakko-voice-play > span.glyph { font-size: 0.85rem; line-height: 1; }
-/* About 170px wide, as on iOS. `flex: 0 1 170px` rather than a hard width so a
-   narrow phone shrinks the column instead of pushing the row out of the
-   bubble; the seek maths reads the waveform's measured width, so a shrunk
-   column still scrubs to the right place. */
+/* The WAVEFORM is the 170px iOS names, and the column is whichever of its two
+   children is wider. They stopped being the same number when UX spec section 2's
+   "the message's own time sits on that same line" put the clock, the speed
+   control AND the message's meta on the quiet line: a column pinned to the
+   waveform's width pushed the time out of the bubble. The waveform keeps the
+   fixed width because it is the seek surface, whose scale must not depend on
+   what happens to be beside it; `flex-shrink` and `max-width` still let a
+   narrow phone shrink the whole thing, and the seek maths reads the
+   waveform's MEASURED width, so a shrunk column still scrubs to the right
+   place. */
 .lakko-voice-col {
-  flex: 0 1 170px;
-  width: 170px;
+  flex: 0 1 auto;
+  width: max-content;
+  max-width: 100%;
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+.lakko-voice-col > .lakko-wave {
+  width: 170px;
+  max-width: 100%;
 }
 .lakko-wave {
   /* `auto` basis, not `flex: 1`: inside the bubble's column the basis is a
@@ -2237,7 +2258,8 @@ a.ghost.small.lk-wide-only {
 }
 .lakko-wave > i[data-on="true"] { opacity: 1; }
 /* The one quiet line under the waveform: elapsed-or-total, the unplayed dot,
-   and the speed control at the trailing end. */
+   the speed control, and — for a voice message alone in its bubble — the
+   message's own time and ticks at the trailing end (UX spec section 2). */
 .lakko-voice-line {
   display: flex;
   align-items: center;
@@ -2245,22 +2267,54 @@ a.ghost.small.lk-wide-only {
   font-size: 0.72rem;
   line-height: 1;
 }
+/* The message's meta, when it rides this line rather than a row of its own.
+   Flat: the bubble's row has a top margin that would push this line away from
+   the waveform, and it needs none of the row's own justification - the speed
+   control's auto margin has already pushed everything here to the trailing
+   end. It also must not reintroduce the vertical growth the speed control's
+   `min-height` once caused, so nothing in it is taller than the clock. */
+.lakko-voice-line > .lk-bubble-meta {
+  margin-top: 0;
+  gap: 3px;
+  font-size: inherit;
+  line-height: inherit;
+}
 .lakko-voice-time {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-variant-numeric: tabular-nums;
   opacity: 0.8;
 }
-/* Pushed to the trailing end. It is rendered only while this message is the
-   one playing, so there is nothing to push when it is absent. */
+/* Pushed to the trailing end, and always in the line — hidden rather than
+   removed while nothing is playing, so the line holds its space.
+   THE DEFECT: this is a `<button>`, and the global `button` rule floors every
+   button at `--control-h` (40px). `min-height` beats both `height` and the
+   content, and nothing here overrode it — so the moment playback started and
+   this control entered the quiet line, the line went from about 12px to 40px
+   and the bubble jumped by nearly 30px, at the exact moment a person's eye
+   was on it. The floor is off, and every child of this line is then at most
+   as tall as the always-present clock. */
 .lakko-voice-rate {
-  margin-left: auto;
-  padding: 0;
+  position: relative;
+  /* `auto` on the leading side only, so it stays at the trailing end. */
+  margin: -3px -4px -3px auto;
+  min-height: 0;
+  /* A finger-sized target that costs no layout: the padding grows the hit
+     area, the matching negative margins give the growth back. Kept to 3px
+     vertically so it stays inside the 4px gap above and the bubble's own
+     bottom padding below, rather than reaching into the waveform — a control
+     that steals the seek surface's press is the defect one layer up. */
+  padding: 3px 4px;
   border: none;
   background: transparent;
   color: inherit;
   font-size: 0.7rem;
   font-weight: 700;
   line-height: 1;
+}
+/* Reserved: out of the picture, out of the tab order and out of a screen
+   reader's, while holding the space it will take. */
+.lakko-voice-rate[data-reserved="true"] {
+  visibility: hidden;
 }
 .lakko-unplayed {
   width: 0.45rem;

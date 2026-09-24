@@ -33,6 +33,14 @@ after a tap toggles the mode). The chosen mode is remembered per device.
    a tap (the threshold of section 3.1), after permission (§6). Haptic tick on native.
 2. While holding, the composer is replaced by the **recording bar**: a pulsing red dot,
    the elapsed time `0:07`, a live level meter, and the hint `Slide to cancel`.
+
+   **The recorder is shown as running only once it is running.** Opening a microphone
+   takes real time even on a device whose permission was granted long ago, and a person
+   who sees a red dot and a counter starts talking - so a bar that runs across that gap
+   loses the beginning of every message. The bar appears at the hold, says `Starting…`
+   while the device opens, and the dot, the clock and the elapsed time all begin at the
+   first captured sample. The duration the message carries and the waveform drawn on it
+   describe that same span, never the wait in front of it.
 3. **Release** → the message is sent.
 4. **Slide left past the threshold** → cancelled, nothing sent, a short "Cancelled" shake.
 5. **Slide up** onto the lock target → **locked**: the finger can lift, recording
@@ -69,10 +77,22 @@ Beside it a column of fixed width, about 170 pt, holding two things:
   **only while this message is the one playing**, because a speed control on a message
   nobody is listening to is a control for nothing.
 
+**The message's own time sits on that same line**, at its trailing end, rather than on a
+line of its own under the bubble. A voice message is a row, not a paragraph, and putting
+the length of the recording and the time it was sent on two different levels makes the
+bubble taller than it has any reason to be and reads as two unrelated facts.
+
 The upload and failure states live on the same row rather than replacing it: an upload in
 flight draws a progress ring around the play button, a failed one puts `Not sent · Retry`
 under the row, and a message that cannot be decoded puts `Couldn't play this message`
-there instead. Nothing about the row's geometry changes between them.
+there instead.
+
+**Nothing about the row's geometry changes, ever** - not between those states and not
+when playback starts. The speed control appears only while this message is the one
+playing, so the space it will occupy is reserved whether or not it is there; a bubble
+that grows at the moment a person presses play jumps under the eye that is watching it.
+Reserving the space is not the same as showing the control: it stays absent to the eye
+and to a screen reader until there is something to control.
 
 Only one voice message plays at a time; starting another pauses the first. Playback
 continues to the next consecutive unplayed voice message from the same sender.

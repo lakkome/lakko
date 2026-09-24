@@ -591,6 +591,18 @@ public fun formatTotalClock(ms: Long): String {
     return formatClock(seconds * 1000L)
 }
 
+/**
+ * §2 — the string the voice row's clock RESERVES space for.
+ *
+ * That line shows the TOTAL length before playback and the ELAPSED time during
+ * it, and elapsed never runs past total, so the total's rendering is the widest
+ * the clock can ever be for this message. Reserving it is what keeps a bubble
+ * from resizing at the moment someone presses play — a ten-minute message goes
+ * from `10:00` to `0:01` on that first frame, and without the reservation the
+ * bubble would visibly shrink under the eye watching it.
+ */
+public fun voiceClockReservation(durationMs: Long): String = formatTotalClock(durationMs)
+
 /** Spoken duration for labels: "12 seconds", "1 minute 5 seconds". */
 public fun spokenDuration(ms: Long): String {
     val total = maxOf(0L, Math.round(ms / 1000.0))

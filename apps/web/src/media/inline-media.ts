@@ -88,6 +88,74 @@ export function renderDecision(
 }
 
 /**
+ * The bubble of a message that is NOTHING but one piece of media — no text, no
+ * second attachment, not a tombstone, not open in the edit composer — or
+ * `null` when the message is anything else.
+ *
+ * "Nothing but" is the load-bearing half. A voice message sent WITH a caption,
+ * or beside another attachment, is an ordinary bubble that happens to contain
+ * a player: it has a paragraph to sit under, so it keeps the bubble's own meta
+ * row. Only the lone one gets a slot of its own.
+ */
+export function soleMediaBubble(
+  args: {
+    readonly deleted: boolean;
+    readonly text: string;
+    readonly attachments: ReadonlyArray<{
+      readonly kind?: string | undefined;
+      readonly mime?: string | undefined;
+    }>;
+  },
+  allowlist: WasmInlineMediaType,
+): MediaBubble | null {
+  const only = args.attachments[0];
+  if (args.deleted || args.text.length > 0 || args.attachments.length !== 1) return null;
+  if (only === undefined) return null;
+  return renderDecision(only, allowlist).bubble;
+}
+
+/**
+ * Where a message's meta line — the time, the edited marker, the delivery
+ * ticks — is drawn.
+ *
+ * Four answers, because four bubble shapes have four different places to put
+ * it, and the rule is stated once here rather than as the conditionals at the
+ * call site that used to encode it and could disagree (the voice case fell
+ * through all of them and got a second line below the row).
+ *
+ *  * `bubble-row` — a row under the content, inside the bubble's surface. The
+ *    default, and where a paragraph wants it.
+ *  * `voice-line` — the voice row's own quiet line, at its trailing end (UX
+ *    spec §2). A voice message is a ROW, not a paragraph: putting the length
+ *    of the recording and the time it was sent on two different levels makes
+ *    the bubble taller than it has any reason to be and reads as two unrelated
+ *    facts.
+ *  * `media-pill` — a translucent pill over the media (UX spec §10), because a
+ *    lone photo or video is drawn edge to edge with no chrome to carry a row.
+ *  * `below-bubble` — under the bubble, for the chromeless video-note circle
+ *    (UX spec §3), which has no surface to carry the line and no pill.
+ */
+export type BubbleMetaSlot = "bubble-row" | "voice-line" | "media-pill" | "below-bubble";
+
+/** The meta slot for a message whose sole media bubble is `sole`
+ *  (`soleMediaBubble`, `null` for every other message). */
+export function bubbleMetaSlot(sole: MediaBubble | null): BubbleMetaSlot {
+  switch (sole) {
+    case "voice":
+      return "voice-line";
+    case "photo":
+    case "video":
+      return "media-pill";
+    case "video_note":
+      return "below-bubble";
+    // A GIF keeps the row: it is a bubble with chrome, and a pill over an
+    // animation that may be 40px tall would cover it.
+    default:
+      return "bubble-row";
+  }
+}
+
+/**
  * The type an object URL's `Blob` is stamped with. Only an allowlisted type
  * is carried; anything else becomes `application/octet-stream`, so a browser
  * never sniffs a refused type into something it renders.

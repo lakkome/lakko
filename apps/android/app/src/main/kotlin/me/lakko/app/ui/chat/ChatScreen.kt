@@ -16,6 +16,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -1346,15 +1347,22 @@ private fun Bubble(
         // ADR-0047 §3 — a video note is a circle with no bubble chrome.
         // UX spec §10 — a lone photo or video is the media itself, edge to
         // edge, with the time / ticks pill drawn on it.
-        val soleBubble = if (!msg.deleted && msg.text.isEmpty() && msg.attachments.size == 1) {
-            remember(msg.messageId, msg.attachments[0].blobId) {
-                me.lakko.app.media.renderDecision(msg.attachments[0], mediaHub.allowlist).bubble
-            }
-        } else {
-            null
+        // UX spec §2 — a lone voice message is a ROW, and its own time belongs
+        // on that row rather than on a line of its own below it.
+        val soleBubble = remember(msg) {
+            me.lakko.app.media.soleMediaBubble(
+                deleted = msg.deleted,
+                text = msg.text,
+                attachments = msg.attachments,
+                allowlist = mediaHub.allowlist,
+            )
         }
-        val mediaOnly = soleBubble == me.lakko.app.media.MediaBubble.PHOTO ||
-            soleBubble == me.lakko.app.media.MediaBubble.VIDEO
+        // Where this bubble's meta line goes — ONE rule, in the media module,
+        // rather than the three conditionals that used to encode it here and
+        // could disagree (the voice case fell through all three and got a
+        // second row below the bubble).
+        val metaSlot = me.lakko.app.media.bubbleMetaSlot(soleBubble)
+        val mediaOnly = metaSlot == me.lakko.app.media.BubbleMetaSlot.MEDIA_PILL
         val chromeless = soleBubble == me.lakko.app.media.MediaBubble.VIDEO_NOTE || mediaOnly
         val menuAvailable = actionsAvailable && hasId && !msg.deleted
         val openMenu: (() -> Unit)? = if (menuAvailable) {
@@ -1391,7 +1399,15 @@ private fun Bubble(
                     ),
             ) {
                 Column(
-                    modifier = if (mediaOnly) Modifier else Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    // The meta line right-aligns itself with `fillMaxWidth`,
+                    // which takes the MAXIMUM width the parent allows - so
+                    // every bubble was stretched to `maxBubbleWidth` and a
+                    // two-word message was as wide as a paragraph. Sizing this
+                    // column to its widest child makes that fill resolve to
+                    // the content instead, so the bubble hugs what is in it
+                    // and the time still sits in the trailing corner.
+                    modifier = (if (mediaOnly) Modifier else Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
+                        .width(IntrinsicSize.Max),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     if (msg.deleted) {
@@ -1434,6 +1450,31 @@ private fun Bubble(
                                         } else {
                                             null
                                         },
+                                        // UX spec §2 — the message's own time,
+                                        // edited marker and delivery ticks ride
+                                        // the voice row's quiet line. Only for a
+                                        // voice message that is alone in its
+                                        // bubble: one with a caption, or beside
+                                        // another attachment, keeps the row
+                                        // below.
+                                        voiceMeta = if (metaSlot == me.lakko.app.media.BubbleMetaSlot.VOICE_LINE) {
+                                            {
+                                                BubbleMeta(
+                                                    edited = msg.edited,
+                                                    time = time,
+                                                    readState = if (isOwn) readState else OwnReadState.None,
+                                                    contentColor = contentColor,
+                                                    fillWidth = false,
+                                                    onRetry = if (msg.ack == Ack.FAILED) {
+                                                        { onRetrySend(msg.localId) }
+                                                    } else {
+                                                        null
+                                                    },
+                                                )
+                                            }
+                                        } else {
+                                            null
+                                        },
                                     ) {
                                         AttachmentChipRow(
                                             ref = ref,
@@ -1447,8 +1488,10 @@ private fun Bubble(
                     }
                     // UX 5.2 — the time in the lower corner, with the edited
                     // marker before it and, on own bubbles, the delivery glyph
-                    // after it. Chromeless media carries the same line below.
-                    if (!chromeless) {
+                    // after it. A voice row carries it on its own quiet line
+                    // and chromeless media below the bubble, so neither adds a
+                    // row here.
+                    if (metaSlot == me.lakko.app.media.BubbleMetaSlot.BUBBLE_ROW) {
                         BubbleMeta(
                             edited = msg.edited && !msg.deleted,
                             time = time,
@@ -1542,7 +1585,7 @@ private fun Bubble(
         // A chromeless (video note) bubble has no surface to carry the meta
         // line, so it sits under the circle. A photo or video carries it in
         // the pill on the media (UX spec §10), so nothing is drawn here.
-        if (chromeless && !mediaOnly) {
+        if (metaSlot == me.lakko.app.media.BubbleMetaSlot.BELOW_BUBBLE) {
             BubbleMeta(
                 edited = msg.edited,
                 time = time,

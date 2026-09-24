@@ -8,6 +8,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -45,6 +46,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
@@ -66,6 +68,8 @@ import me.lakko.app.media.formatTotalClock
 import me.lakko.app.media.rateLabel
 import me.lakko.app.media.renderDecision
 import me.lakko.app.media.spokenDuration
+import me.lakko.app.media.voiceClockReservation
+import me.lakko.app.media.widestRateLabel
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 import java.io.File
 
@@ -97,11 +101,18 @@ internal fun AttachmentView(
     onLongPress: (() -> Unit)? = null,
     /** UX spec §10 — the time / ticks pill drawn on a photo or video. */
     mediaOverlay: (@Composable androidx.compose.foundation.layout.BoxScope.() -> Unit)? = null,
+    /** UX spec §2 — the message's own meta line (time, edited marker, delivery
+     *  ticks), drawn at the trailing end of the voice row's quiet line instead
+     *  of on a row of its own under the bubble. Passed only when
+     *  [me.lakko.app.media.bubbleMetaSlot] says
+     *  [me.lakko.app.media.BubbleMetaSlot.VOICE_LINE]; `null` everywhere else,
+     *  and ignored by every bubble but the voice one. */
+    voiceMeta: (@Composable () -> Unit)? = null,
     fileChip: @Composable () -> Unit,
 ) {
     val decision = remember(ref.kind, ref.mime) { renderDecision(ref, hub.allowlist) }
     when (decision.bubble) {
-        MediaBubble.VOICE -> VoiceBubble(ref, hub, isOwn, contentColor, bubbleColor)
+        MediaBubble.VOICE -> VoiceBubble(ref, hub, isOwn, contentColor, bubbleColor, voiceMeta)
         MediaBubble.VIDEO_NOTE -> VideoNoteBubble(ref, hub)
         MediaBubble.GIF -> GifBubble(ref, hub, decision.inline)
         MediaBubble.PHOTO -> PhotoBubble(ref, hub, onSave, onLongPress, mediaOverlay)
@@ -119,11 +130,23 @@ private val VOICE_BUTTON_SIZE = 38.dp
  *  [VoicePlayDisc]. Neither size is a function of the other. */
 private val VOICE_TOUCH_TARGET = 48.dp
 
-/** §2 timeline bubble — the fixed width of the column beside the button.
+/** §2 timeline bubble — the fixed width of the WAVEFORM beside the button.
  *  Fixed, not `weight(1f)`: a voice message is the same size whatever the
  *  bubble around it happens to be, and the waveform is a seek surface whose
- *  scale should not depend on the length of a neighbouring caption. */
-private val VOICE_COLUMN_WIDTH = 170.dp
+ *  scale should not depend on the length of a neighbouring caption (the seek
+ *  fraction is read off this canvas, so a varying width would move where a
+ *  press lands in the audio).
+ *
+ *  The column AROUND it is `IntrinsicSize.Max` rather than this width, so the
+ *  quiet line under the waveform — which since §2's "the message's own time
+ *  sits on that same line" carries the clock, the speed control AND the
+ *  message's meta — can take the room it needs on a long clock, a 12-hour
+ *  time or a large font scale. Every child of that line either is always
+ *  present or reserves its space, so the intrinsic is constant for a given
+ *  message and the bubble still never resizes; and `width` coerces the
+ *  intrinsic into the incoming constraints, so it can never push past
+ *  `maxBubbleWidth`. */
+private val VOICE_WAVEFORM_WIDTH = 170.dp
 
 /** §2 timeline bubble — the waveform's height. */
 private val VOICE_WAVEFORM_HEIGHT = 26.dp
@@ -132,16 +155,25 @@ private val VOICE_WAVEFORM_HEIGHT = 26.dp
  * §2 timeline bubble.
  *
  * ONE row: a filled circle on the leading edge carrying the play / pause
- * glyph, then a fixed column holding the waveform above one quiet line — the
- * clock, the unplayed dot, and the speed control pushed to the trailing end.
- * The clock and the speed control belong to that column, not to the bubble, so
- * they line up with the waveform's edges rather than with the button's.
+ * glyph, then a column holding the waveform above one quiet line — the clock,
+ * the unplayed dot, the speed control, and then [meta], the message's own time
+ * and ticks, at the trailing end. The clock and the speed control belong to
+ * that column, not to the bubble, so they line up with the waveform's edges
+ * rather than with the button's.
  *
  * The upload ring and the failure line do not replace the row: the ring is
  * drawn around the play button with `requiredSize`, so it overflows the
  * button's 38dp slot without taking any layout space, and the failure line
- * goes under the row. Nothing about the row's geometry changes between the
- * states.
+ * goes under the row.
+ *
+ * **Nothing about the row's geometry changes, ever** — not between those states
+ * and not when playback starts. Three children of the quiet line come and go
+ * while a person watches the bubble, and all three RESERVE their space instead
+ * of taking it when they appear: the speed control (absent until this message
+ * is the one playing), the clock (`10:00` total becomes `0:01` elapsed on the
+ * first frame of playback), and the unplayed dot (which vanishes the moment the
+ * message is marked played). Reserving is not showing: each is absent to the
+ * eye and to TalkBack until it has something to say.
  */
 @Composable
 internal fun VoiceBubble(
@@ -150,6 +182,10 @@ internal fun VoiceBubble(
     isOwn: Boolean,
     contentColor: Color,
     bubbleColor: Color,
+    /** §2 — the message's own meta line at the trailing end of the quiet line.
+     *  `null` for a voice message that is not alone in its bubble: that one has
+     *  a paragraph to sit under and keeps the bubble's meta row. */
+    meta: (@Composable () -> Unit)? = null,
 ) {
     val key = remember(ref.blobId) { ChatMediaHub.mediaKey(ref.blobId) }
     val voice by hub.voice.collectAsStateWithLifecycle()
@@ -199,7 +235,7 @@ internal fun VoiceBubble(
                 onClick = { hub.toggleVoice(ref, knownDuration, sentByMe = isOwn) },
             )
             Column(
-                modifier = Modifier.width(VOICE_COLUMN_WIDTH),
+                modifier = Modifier.width(IntrinsicSize.Max),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 WaveformSeekBar(
@@ -208,55 +244,31 @@ internal fun VoiceBubble(
                     playedColor = contentColor,
                     idleColor = contentColor.copy(alpha = 0.35f),
                     label = "Voice message position",
-                    modifier = Modifier.fillMaxWidth().height(VOICE_WAVEFORM_HEIGHT),
+                    modifier = Modifier.width(VOICE_WAVEFORM_WIDTH).height(VOICE_WAVEFORM_HEIGHT),
                     onSeek = { f -> hub.seekVoice(ref, f, knownDuration, sentByMe = isOwn) },
                 )
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    VoiceClock(
-                        // The elapsed time while this message is the one
-                        // playing — which means the one the player is on, not
-                        // the one whose audio is moving. Reading `playing`
-                        // here snapped the clock back to the total the moment
-                        // the person paused, losing the place they paused at.
-                        text = if (isCurrent) formatClock(voice.positionMs) else formatTotalClock(duration),
-                        color = contentColor.copy(alpha = 0.8f),
-                    )
-                    if (unplayed) {
-                        Box(
-                            Modifier
-                                .size(6.dp)
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.primary)
-                                .semantics { contentDescription = "Not played" },
-                        )
-                    }
-                    Spacer(Modifier.weight(1f))
+                VoiceQuietLine(
+                    // The elapsed time while this message is the one playing —
+                    // which means the one the player is on, not the one whose
+                    // audio is moving. Reading `playing` here snapped the clock
+                    // back to the total the moment the person paused, losing the
+                    // place they paused at.
+                    clock = if (isCurrent) formatClock(voice.positionMs) else formatTotalClock(duration),
+                    clockReservation = voiceClockReservation(duration),
+                    // Reserved on an incoming message, whose dot can vanish
+                    // mid-playback; never on an own one, which has no dot to
+                    // make room for.
+                    dotSlot = !isOwn,
+                    unplayed = unplayed,
                     // §2 — only while this message is the one playing: a speed
                     // control on a message nobody is listening to is a control
                     // for nothing.
-                    if (isCurrent) {
-                        Text(
-                            text = rateLabel(voice.rate),
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold,
-                            ),
-                            color = contentColor,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(4.dp))
-                                .clickable(
-                                    onClickLabel = "Change playback speed",
-                                    role = Role.Button,
-                                    onClick = hub::cycleRate,
-                                )
-                                .padding(horizontal = 4.dp, vertical = 1.dp)
-                                .semantics { contentDescription = "Playback speed ${rateLabel(voice.rate)}" },
-                        )
-                    }
-                }
+                    showRate = isCurrent,
+                    rate = voice.rate,
+                    onCycleRate = hub::cycleRate,
+                    contentColor = contentColor,
+                    meta = meta,
+                )
             }
         }
         if (failed) {
@@ -360,14 +372,119 @@ private fun VoicePlayDisc(
     }
 }
 
-/** §2 — the bubble's quiet line, in a monospaced digit face so the number does
- *  not shuffle as it counts. */
+/**
+ * §2 — the one quiet line under the waveform: the clock, the unplayed dot, the
+ * speed control, and the message's own [meta] at the trailing end.
+ *
+ * The geometry is fixed for a given message across its whole life. Three of its
+ * children appear and disappear while the bubble is on screen, and none of them
+ * is allowed to change the line's size when it does:
+ *
+ *  * the **clock** counts, and switches from the total to the elapsed time at
+ *    the first frame of playback — it sits over a [clockReservation] twin, so a
+ *    `10:00` message does not shrink to `0:01`'s width;
+ *  * the **speed control** shows only while this message is the one playing —
+ *    reserved at [widestRateLabel], measured rather than guessed at in dp, so a
+ *    wider label or a bigger font scale still fits;
+ *  * the **unplayed dot** vanishes when the message is marked played — its 6dp
+ *    is held open on an incoming message ([dotSlot]) and never taken on an own
+ *    one, which can never show it.
+ *
+ * Each reservation is laid out and drawn in no colour, with its semantics
+ * cleared, so it is absent to the eye and to TalkBack: a speed control on a
+ * message nobody is listening to would be a control for nothing.
+ */
 @Composable
-private fun VoiceClock(text: String, color: Color) {
+private fun VoiceQuietLine(
+    clock: String,
+    clockReservation: String,
+    dotSlot: Boolean,
+    unplayed: Boolean,
+    showRate: Boolean,
+    rate: Float,
+    onCycleRate: () -> Unit,
+    contentColor: Color,
+    meta: (@Composable () -> Unit)?,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Box(contentAlignment = Alignment.CenterStart) {
+            VoiceClock(clockReservation, Color.Transparent, Modifier.clearAndSetSemantics {})
+            VoiceClock(clock, contentColor.copy(alpha = 0.8f))
+        }
+        if (dotSlot) {
+            Box(
+                Modifier
+                    .size(6.dp)
+                    .then(
+                        if (unplayed) {
+                            Modifier
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.primary)
+                                .semantics { contentDescription = "Not played" }
+                        } else {
+                            Modifier
+                        },
+                    ),
+            )
+        }
+        Spacer(Modifier.weight(1f))
+        Box(contentAlignment = Alignment.CenterEnd) {
+            VoiceRate(widestRateLabel(), Color.Transparent, Modifier.clearAndSetSemantics {})
+            if (showRate) {
+                VoiceRate(
+                    text = rateLabel(rate),
+                    color = contentColor,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .clickable(
+                            onClickLabel = "Change playback speed",
+                            role = Role.Button,
+                            onClick = onCycleRate,
+                        )
+                        .semantics { contentDescription = "Playback speed ${rateLabel(rate)}" },
+                )
+            }
+        }
+        // §2 — "The message's own time sits on that same line, at its trailing
+        // end", after the speed control, which keeps the trailing end of the
+        // voice row's own controls. So the time lands where it lands in every
+        // other bubble: last thing on the last line.
+        meta?.invoke()
+    }
+}
+
+/** §2 — the bubble's quiet clock. */
+@Composable
+private fun VoiceClock(text: String, color: Color, modifier: Modifier = Modifier) {
     Text(
         text = text,
-        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+        // Tabular figures, not a monospaced FACE: the digits stop shuffling as
+        // they count, which is the point, while the colon keeps its own width.
+        // `FontFamily.Monospace` gave the colon a full digit cell, so the
+        // clock read "0 : 03".
+        style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
         color = color,
+        modifier = modifier,
+    )
+}
+
+/** §2 — the speed control's label. The padding is INSIDE this, after the
+ *  caller's modifier, so the real control's ripple covers it and the
+ *  reservation twin measures to exactly the same size. */
+@Composable
+private fun VoiceRate(text: String, color: Color, modifier: Modifier = Modifier) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelSmall.copy(
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold,
+        ),
+        color = color,
+        modifier = modifier.padding(horizontal = 4.dp, vertical = 1.dp),
     )
 }
 
@@ -631,7 +748,7 @@ internal fun PendingMediaBubble(
                             uploadProgress = if (row.failed) null else row.progress,
                         )
                         Column(
-                            modifier = Modifier.width(VOICE_COLUMN_WIDTH),
+                            modifier = Modifier.width(IntrinsicSize.Max),
                             verticalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
                             WaveformSeekBar(
@@ -640,12 +757,27 @@ internal fun PendingMediaBubble(
                                 playedColor = MaterialTheme.colorScheme.onPrimaryContainer,
                                 idleColor = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.35f),
                                 label = "Voice message",
-                                modifier = Modifier.fillMaxWidth().height(VOICE_WAVEFORM_HEIGHT),
+                                modifier = Modifier.width(VOICE_WAVEFORM_WIDTH).height(VOICE_WAVEFORM_HEIGHT),
                                 onSeek = {},
                             )
-                            VoiceClock(
-                                text = formatTotalClock(row.durationMs ?: 0L),
-                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f),
+                            // The same line as a delivered message's, so the
+                            // height does not change when the row lands: the
+                            // speed control's space is reserved here too, even
+                            // though an in-flight message can never be playing.
+                            // No dot (an own message has none) and no meta (the
+                            // row has no DS time yet — it arrives with the
+                            // delivered bubble, which is the one width change
+                            // still left at the moment of landing).
+                            VoiceQuietLine(
+                                clock = formatTotalClock(row.durationMs ?: 0L),
+                                clockReservation = voiceClockReservation(row.durationMs ?: 0L),
+                                dotSlot = false,
+                                unplayed = false,
+                                showRate = false,
+                                rate = 1f,
+                                onCycleRate = {},
+                                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                meta = null,
                             )
                         }
                     }

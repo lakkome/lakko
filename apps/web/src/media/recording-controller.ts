@@ -248,6 +248,12 @@ export function createRecorder(opts: RecorderOptions): Recorder {
   function perform(effect: RecEffect): void {
     switch (effect.type) {
       case "request-permission": {
+        // A fresh attempt starts here, so the counters do too. Without this
+        // the "Starting..." bar shows the PREVIOUS take's length until the
+        // stream lands, which reads as a recording already several seconds
+        // in - the same lie, one state earlier.
+        setElapsed(0);
+        setLevel(0);
         const gen = generation;
         acquireStream(effect.kind).then(
           (stream) => {
@@ -273,36 +279,38 @@ export function createRecorder(opts: RecorderOptions): Recorder {
         );
         return;
       }
+      /**
+       * SYNCHRONOUS, and that is the invariant rather than an implementation
+       * detail: nothing is awaited between the machine entering a capturing
+       * phase and `MediaRecorder.start()`.
+       *
+       * THE DEFECT this shape exists for: this used to call `acquireStream`
+       * and begin the take when the promise resolved, while the machine had
+       * already entered `recording` and the ticker had already started. On the
+       * common path — permission granted, so the machine went straight to
+       * `recording` without passing through `requesting` — the recording bar
+       * ran, the clock counted and the red dot pulsed for as long as the
+       * browser took to open the audio device, and everything said into that
+       * window was lost. The fix is upstream, in the machine: the stream is
+       * acquired in `requesting`, and a capturing phase is only ever reached
+       * on the event that hands the stream over. All that is left here is to
+       * take it.
+       */
       case "start-capture": {
         setDenied(null);
         setElapsed(0);
-        if (pendingStream !== null) {
-          const stream = pendingStream;
-          pendingStream = null;
-          beginTake(effect.kind, stream);
+        const stream = pendingStream;
+        pendingStream = null;
+        if (stream === null) {
+          // Unreachable through the machine, which never asks for a capture
+          // except on the grant that produced a stream. If it ever happens,
+          // the honest answer is a recorder that did not start - never one
+          // that starts late, which is the defect above.
+          showNotice("start-failed");
+          dispatch({ type: "capture-failed" });
           return;
         }
-        const gen = generation;
-        acquireStream(effect.kind).then(
-          (stream) => {
-            if (disposed || gen !== generation || !isCapturing(state())) {
-              stopStream(stream);
-              return;
-            }
-            beginTake(effect.kind, stream);
-          },
-          (err: unknown) => {
-            if (gen !== generation) return;
-            const reason = err instanceof AcquireError ? err.reason : "failed";
-            if (reason === "denied") {
-              permission[effect.kind] = "denied";
-              dispatch({ type: "revoked" });
-            } else {
-              showNotice(reason === "no-device" && effect.kind === "video_note" ? "no-camera" : "start-failed");
-              dispatch({ type: "capture-failed" });
-            }
-          },
-        );
+        beginTake(effect.kind, stream);
         return;
       }
       case "release-stream":
@@ -414,8 +422,11 @@ export function createRecorder(opts: RecorderOptions): Recorder {
     onPointerMove(e) {
       // `pressing` too: the drift it collects decides whether the release is
       // still a tap, and it is the offset a promoted take inherits.
+      // `requesting` too: the device takes time to open, the finger does not
+      // stop for it, and the cancel and lock targets are answered from that
+      // offset the moment the stream lands.
       const phase = state().phase;
-      if (phase === "recording" || phase === "pressing") {
+      if (phase === "recording" || phase === "pressing" || phase === "requesting") {
         dispatch({ type: "move", x: e.clientX, y: e.clientY });
       }
     },

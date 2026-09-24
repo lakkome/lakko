@@ -49,6 +49,22 @@ public fun rateLabel(rate: Float): String =
     if (rate == rate.toInt().toFloat()) "${rate.toInt()}x" else "${rate}x"
 
 /**
+ * §2 — the label the voice row RESERVES space for, which is the widest one the
+ * speed control can ever show, not the one it is showing.
+ *
+ * The control appears only while this message is the one playing, and the spec
+ * is explicit that nothing about the row's geometry may change at that moment.
+ * So the row lays out this string, invisibly, whether or not the control is
+ * there. Derived from [PLAYBACK_RATES] rather than written down, so adding a
+ * rate cannot leave a stale reservation behind; by length, which decides width
+ * because the label is digits plus a dot and an `x` in a face where those have
+ * a fixed advance. What the reservation must NOT be is a dp constant: a longer
+ * label or a larger font scale would overflow one silently.
+ */
+public fun widestRateLabel(): String =
+    PLAYBACK_RATES.map(::rateLabel).maxByOrNull { it.length } ?: ""
+
+/**
  * The one-at-a-time rule (§2: "Only one voice message plays at a time;
  * starting another pauses the first"), as plain bookkeeping so it is testable
  * without a `MediaPlayer`. A player [claim]s the slot before it starts and is

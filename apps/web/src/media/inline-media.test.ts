@@ -18,8 +18,10 @@ import {
   WASM_INLINE_IMAGE,
   WASM_INLINE_VIDEO,
   blobTypeFor,
+  bubbleMetaSlot,
   inlineTypeOf,
   renderDecision,
+  soleMediaBubble,
 } from "./inline-media";
 
 beforeAll(async () => {
@@ -105,5 +107,69 @@ describe("renderDecision", () => {
     expect(blobTypeFor("audio/mp4", allowlist)).toBe("audio/mp4");
     expect(blobTypeFor("image/svg+xml", allowlist)).toBe("application/octet-stream");
     expect(blobTypeFor(undefined, allowlist)).toBe("application/octet-stream");
+  });
+});
+
+/**
+ * UX spec section 2 / section 3 / section 10 — where a message's time, edited
+ * marker and delivery ticks are drawn.
+ *
+ * THE DEFECT this rule exists for: the chat view carried two overlapping
+ * conditions instead (one for the chromeless video note, one for the
+ * edge-to-edge photo), they did not agree on whether to read the edited text
+ * or the original, and a lone VOICE message fell through both — so its own
+ * time landed on a row under the player, one level below the recording's
+ * duration, which section 2 says explicitly not to do.
+ */
+describe("where the meta line goes", () => {
+  const voice = { kind: "voice", mime: "audio/mp4" };
+  const photo = { kind: undefined, mime: "image/png" };
+  const note = { kind: "video_note", mime: "video/mp4" };
+  const gif = { kind: "gif", mime: "image/gif" };
+  const doc = { kind: undefined, mime: "application/pdf" };
+  const sole = (
+    over: Partial<Parameters<typeof soleMediaBubble>[0]> = {},
+  ): ReturnType<typeof soleMediaBubble> =>
+    soleMediaBubble({ deleted: false, text: "", attachments: [voice], ...over }, allowlist);
+
+  it("a lone voice message puts its time on the voice row's own line", () => {
+    expect(sole()).toBe("voice");
+    expect(bubbleMetaSlot(sole())).toBe("voice-line");
+  });
+
+  it("a voice message that is not alone keeps the row below", () => {
+    // Three ways to stop being "nothing but one piece of media", and each one
+    // gives the bubble a paragraph for the line to sit under.
+    expect(sole({ text: "listen to this" })).toBeNull();
+    expect(sole({ attachments: [voice, photo] })).toBeNull();
+    expect(sole({ deleted: true })).toBeNull();
+    for (const s of [{ text: "x" }, { attachments: [voice, photo] }, { deleted: true }]) {
+      expect(bubbleMetaSlot(sole(s))).toBe("bubble-row");
+    }
+  });
+
+  it("the other sole bubbles keep the slots they already had", () => {
+    expect(bubbleMetaSlot(sole({ attachments: [photo] }))).toBe("media-pill");
+    expect(bubbleMetaSlot(sole({ attachments: [{ mime: "video/mp4" }] }))).toBe("media-pill");
+    expect(bubbleMetaSlot(sole({ attachments: [note] }))).toBe("below-bubble");
+    // A GIF is a bubble WITH chrome, so a pill over it would cover an
+    // animation that may be 40px tall; a file chip is an ordinary bubble.
+    expect(bubbleMetaSlot(sole({ attachments: [gif] }))).toBe("bubble-row");
+    expect(bubbleMetaSlot(sole({ attachments: [doc] }))).toBe("bubble-row");
+  });
+
+  it("the slot follows the allowlist, never the sender's `kind` alone", () => {
+    // The same rule that picks the bubble picks the slot, so a `kind: voice`
+    // carrying a refused MIME type is a file chip with an ordinary row - it
+    // never gets a voice row to put a time on.
+    expect(sole({ attachments: [{ kind: "voice", mime: "text/html" }] })).toBe("file");
+    expect(bubbleMetaSlot(sole({ attachments: [{ kind: "voice", mime: "text/html" }] }))).toBe(
+      "bubble-row",
+    );
+  });
+
+  it("a message with no attachment at all is an ordinary bubble", () => {
+    expect(sole({ attachments: [], text: "hello" })).toBeNull();
+    expect(bubbleMetaSlot(null)).toBe("bubble-row");
   });
 });

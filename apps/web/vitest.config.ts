@@ -14,6 +14,28 @@ import { defineConfig } from "vitest/config";
 // a jsdom dependency and the Solid transform mangling plain
 // `.test.ts` modules.
 export default defineConfig({
+  // Solid publishes two builds behind export conditions, and under `node` the
+  // resolved one is `dist/server.js`, where the reactive primitives are inert
+  // stubs: `createSignal` does not notify and `mapArray` never re-diffs. That
+  // is right for SSR and useless for a test, so a suite that reaches for a
+  // primitive silently asserts nothing.
+  //
+  // `chat/call-timeline.test.ts` needs the real one. It drives `mapArray` --
+  // the reconciler `<For>` is built from -- to prove that an entry whose
+  // reference did not change is not re-created, which is what keeps a voice
+  // bubble's `onCleanup` from stopping playback every time a message arrives.
+  // That needs reactivity, but no DOM and no JSX, so it stays inside this
+  // config's plugin-free, jsdom-free shape rather than being unprovable here.
+  //
+  // Scoped deliberately narrowly: the condition selects a package's browser
+  // entry point wherever one exists, so a dependency added later resolves to
+  // its browser build in tests too. Measured green over the whole suite when
+  // it went in.
+  // `ssr.resolve.conditions`, not `resolve.conditions`: the tests run in the
+  // node environment, which goes through Vite's SSR resolver, and that one
+  // reads its own condition list. Setting only the client list looks right and
+  // changes nothing.
+  ssr: { resolve: { conditions: ["browser"] } },
   test: {
     environment: "node",
     include: ["src/**/*.test.ts"],

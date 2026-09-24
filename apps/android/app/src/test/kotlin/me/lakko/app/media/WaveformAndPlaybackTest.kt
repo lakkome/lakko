@@ -146,6 +146,64 @@ class WaveformAndPlaybackTest {
         assertEquals("1.5x", rateLabel(1.5f))
     }
 
+    /**
+     * §2 — the speed control appears only while this message is the one
+     * playing, and the row's geometry may not change at that moment, so the row
+     * lays out [widestRateLabel] invisibly whether the control is there or not.
+     * The reservation is only as good as the claim that no label can be wider
+     * than it, so that is what is asserted — over [PLAYBACK_RATES] rather than
+     * over the three labels of today, so adding a rate cannot leave a stale
+     * reservation behind.
+     */
+    @Test
+    fun theReservedRateLabelIsWiderThanEveryLabelTheControlCanShow() {
+        val reserved = widestRateLabel()
+        assertEquals("1.5x", reserved)
+        assertTrue(PLAYBACK_RATES.isNotEmpty())
+        for (rate in PLAYBACK_RATES) {
+            val label = rateLabel(rate)
+            assertTrue(
+                "reserved '$reserved' is narrower than '$label'",
+                label.length <= reserved.length,
+            )
+        }
+        // And the reservation is one of them, not an invented string: a twin
+        // that renders text the control never shows would reserve the wrong
+        // glyphs.
+        assertTrue(PLAYBACK_RATES.map(::rateLabel).contains(reserved))
+    }
+
+    /**
+     * §2 — the clock shows the total before playback and the elapsed time
+     * during it, so [voiceClockReservation] reserves the total's rendering.
+     * The claim that keeps the bubble from resizing on the first frame of
+     * playback is that no elapsed value can render wider than that, including
+     * the minute rollovers where a character is added.
+     */
+    @Test
+    fun theReservedClockIsWiderThanEveryElapsedValueItWillShow() {
+        // Around each rollover, a cap and a sub-second take: the places where
+        // the elapsed rendering gains a character or the total rounds up.
+        for (durationMs in listOf(0L, 400L, 1_000L, 59_999L, 60_000L, 599_000L, 600_001L, 15 * 60_000L)) {
+            val reserved = voiceClockReservation(durationMs)
+            var positionMs = 0L
+            while (positionMs <= durationMs) {
+                assertTrue(
+                    "elapsed '${formatClock(positionMs)}' is wider than reserved '$reserved'" +
+                        " for a ${durationMs}ms message",
+                    formatClock(positionMs).length <= reserved.length,
+                )
+                positionMs += 997L
+            }
+            assertTrue(formatClock(durationMs).length <= reserved.length)
+        }
+        // The ten-minute case the reservation exists for: without it the clock
+        // would go from five characters to three on the first frame and the
+        // bubble would shrink under the eye watching it.
+        assertEquals("10:00", voiceClockReservation(600_000L))
+        assertEquals("0:01", formatClock(1_000L))
+    }
+
     @Test
     fun onlyOnePlayerAtATime() {
         val paused = ArrayList<String>()

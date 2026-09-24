@@ -23,6 +23,7 @@ import { errorName, mediaErrorIsReal, playRejectionOutcome, waitForMetadata } fr
 import { nextPlaybackRate, rateLabel } from "./playback-queue";
 import { formatClock, formatTotalClock, spokenDuration } from "./recording-machine";
 import { PhotoBubble, VideoBubble } from "./VisualBubbles";
+import { voicePress } from "./voice-press";
 import { barIsPlayed, waveformBars } from "./waveform";
 
 /** Upload state of an outgoing media message: a completed fraction while
@@ -41,6 +42,17 @@ export interface MediaBubbleProps {
   incoming: boolean;
   upload: MediaUpload;
   onRetry: () => void;
+  /**
+   * UX spec §2 — the message's own meta line (the time, the edited marker,
+   * the delivery ticks) drawn at the trailing end of the voice row's quiet
+   * line instead of on a row of its own below the bubble.
+   *
+   * A function rather than an element: Solid's JSX creates the DOM node where
+   * it is evaluated, so an element built by the caller would be created in
+   * ITS reactive scope and go stale. Absent — which is every bubble but a
+   * lone voice message — means the caller is drawing the line itself.
+   */
+  meta?: (() => JSX.Element) | undefined;
 }
 
 const WAVE_BARS = 40;
@@ -60,6 +72,10 @@ export function NotSent(props: { onRetry: () => void }): JSX.Element {
         background: "transparent",
         color: "inherit",
         padding: 0,
+        // The global `button` rule floors every button at `--control-h`
+        // (40px), which in a bubble's meta line is nearly three times the line
+        // itself. A text affordance inside a bubble is text-sized.
+        "min-height": 0,
         "font-size": "0.78rem",
         "text-decoration": "underline",
       }}
@@ -78,6 +94,10 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
   const [mediaDuration, setMediaDuration] = createSignal<number | null>(null);
   const [rate, setRate] = createSignal(1);
   let audio: HTMLAudioElement | null = null;
+  /** Whether `audio` has been given its source. Tracked rather than read off
+   *  `audio.src`, which the cleanup clears — and read by `voicePress` to
+   *  decide whether a press can call `play()` on its own stack. */
+  let sourced = false;
   /** In flight: the one `prepare()` a warm-up and a press share. Without it a
    *  press landing mid-warm would start a second download of the same blob. */
   let preparing: Promise<HTMLAudioElement | null> | null = null;
@@ -96,14 +116,20 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
   // sunken incoming surface and on the accent outgoing one alike.
   const glyphColour = (): string => (props.incoming ? "var(--surface-sunken)" : "var(--accent)");
 
-  /** The element and its listeners. Assigning `src` starts the load, so by
-   *  the time this returns the browser is already buffering and demuxing. */
-  function build(url: string): HTMLAudioElement {
+  /**
+   * The element and its listeners, WITHOUT a source.
+   *
+   * Split from the source on purpose: creating the element costs nothing and
+   * touches no network, which is what lets a press bring it into existence —
+   * and unlock it — inside the user gesture, before anything is awaited. See
+   * `voice-press.ts`.
+   */
+  function element(): HTMLAudioElement {
+    if (audio !== null) return audio;
     // `preload` is set BEFORE the source, so the element starts buffering and
     // demuxing the moment it has one rather than on the first `play()`.
     const a = new Audio();
     a.preload = "auto";
-    a.src = url;
     a.addEventListener("timeupdate", () => setPosition(a.currentTime * 1000));
     a.addEventListener("loadedmetadata", () => {
       if (Number.isFinite(a.duration)) setMediaDuration(Math.round(a.duration * 1000));
@@ -123,7 +149,16 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
       console.warn("[voice] media error", a.error?.code ?? "none");
       setStatus("error");
     });
+    audio = a;
     return a;
+  }
+
+  /** Give the element its source. Assigning `src` starts the load, so by the
+   *  time this returns the browser is already buffering and demuxing. */
+  function attachSource(a: HTMLAudioElement, url: string): void {
+    if (sourced) return;
+    sourced = true;
+    a.src = url;
   }
 
   /**
@@ -139,15 +174,16 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
    * the photo bubble beside it always has.
    */
   async function prepare(forPress: boolean): Promise<HTMLAudioElement | null> {
-    if (audio !== null) return audio;
+    if (sourced) return element();
     // A press landing mid-warm joins the warm-up instead of starting a second
     // download of the same blob.
     if (preparing === null) {
       preparing = (async () => {
         try {
           const url = props.hub.urlFor(props.mediaKey) ?? (await props.hub.load(props.attachment));
-          audio = build(url);
-          return audio;
+          const a = element();
+          attachSource(a, url);
+          return a;
         } catch (err) {
           console.warn("[voice] download or decrypt failed", errorName(err) ?? "unnamed");
           return null;
@@ -159,42 +195,91 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
     if (forPress) setStatus("loading");
     const a = await preparing;
     if (forPress) setStatus(a === null ? "error" : "idle");
-    // A warm-up that failed says nothing and caches nothing: `audio` is still
-    // null, so the press retries the fetch and is the one that reports it. A
-    // background failure must not put "Couldn't play this message" under a
-    // bubble nobody has touched.
+    // A warm-up that failed says nothing and caches nothing: the source is
+    // still unattached, so the press retries the fetch and is the one that
+    // reports it. A background failure must not put "Couldn't play this
+    // message" under a bubble nobody has touched.
     return a;
   }
 
-  async function play(retries = 0): Promise<void> {
-    const a = await prepare(true);
-    if (a === null) return;
+  /**
+   * Start an element that already has its source.
+   *
+   * Synchronous up to and INCLUDING `play()`: everything that has to happen
+   * inside the user activation happens on the caller's stack, and the
+   * rejection is handled off the returned promise rather than by awaiting
+   * before the call. See `voice-press.ts` for what that activation buys.
+   */
+  function start(a: HTMLAudioElement, retries = 0): void {
     props.hub.claim(props.mediaKey, () => a.pause());
     a.playbackRate = rate();
-    try {
-      await a.play();
-      props.hub.markPlayed(props.mediaKey);
-    } catch (err) {
-      const name = errorName(err);
-      // Sound is the whole message, so there is no muted fallback: a refused
-      // or interrupted start returns to the play button without error copy.
-      const outcome = playRejectionOutcome(name, { retries, muted: false, canPlayMuted: false });
-      console.warn("[voice] play rejected", name ?? "unnamed", "outcome", outcome);
-      if (outcome === "retry") {
-        await play(retries + 1);
-      } else if (outcome === "error") {
-        setStatus("error");
-      } else {
-        setPlaying(false);
-        props.hub.release(props.mediaKey);
-      }
-    }
+    void a.play().then(
+      () => props.hub.markPlayed(props.mediaKey),
+      (err: unknown) => {
+        const name = errorName(err);
+        // Sound is the whole message, so there is no muted fallback: a
+        // refused or interrupted start returns to the play button without
+        // error copy.
+        const outcome = playRejectionOutcome(name, { retries, muted: false, canPlayMuted: false });
+        console.warn("[voice] play rejected", name ?? "unnamed", "outcome", outcome);
+        if (outcome === "retry") {
+          start(a, retries + 1);
+        } else if (outcome === "error") {
+          setStatus("error");
+        } else {
+          setPlaying(false);
+          props.hub.release(props.mediaKey);
+        }
+      },
+    );
   }
 
+  /** The cold path: fetch, decrypt, then start. The fetch is outside the user
+   *  activation by construction, which is why the press unlocks the element
+   *  before calling this (`toggle`). Also the auto-continue's entry point,
+   *  which has no activation of its own either. */
+  async function play(): Promise<void> {
+    const a = await prepare(true);
+    if (a === null) return;
+    start(a);
+  }
+
+  /**
+   * The press.
+   *
+   * THE DEFECT this shape exists for: a voice message could not be played on
+   * web at all, and it failed in silence. `play()` was `async` and awaited
+   * `prepare()` before reaching `a.play()`, so the call landed after the
+   * handler's task had ended and the engine refused it with
+   * `NotAllowedError` — which `playback-outcome.ts` classifies as
+   * "tap-to-play" for a voice message, meaning: go back to the triangle and
+   * say nothing. It is the one path through this bubble that reports nothing.
+   * The scroll-into-view prefetch took the download out of the press but left
+   * the await, so it narrowed the window rather than closing it.
+   *
+   * The composer's own preview player (`MediaComposer.tsx`) has always called
+   * `audio.play()` straight from its click handler, and has always worked.
+   * This is the same thing said in a `switch`.
+   */
   function toggle(): void {
-    if (uploading()) return;
-    if (playing()) audio?.pause();
-    else void play();
+    switch (voicePress({ uploading: uploading(), playing: playing(), ready: sourced })) {
+      case "ignore":
+        return;
+      case "pause":
+        audio?.pause();
+        return;
+      case "play-now":
+        start(element());
+        return;
+      case "prepare-then-play":
+        // On this stack, before anything is awaited: creating the element and
+        // loading it under the gesture is what marks it as one the person
+        // asked to hear, so the `play()` after the fetch is not refused. A
+        // source-less `load()` selects no resource and raises no error.
+        element().load();
+        void play();
+        return;
+    }
   }
 
   async function seekTo(ms: number): Promise<void> {
@@ -236,6 +321,7 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
       props.hub.release(props.mediaKey);
       audio.removeAttribute("src");
       audio = null;
+      sourced = false;
     }
   });
 
@@ -336,21 +422,35 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
               <span class="lakko-unplayed" aria-label="Not played" />
             </Show>
             {/* Only while this message is the one playing: a speed control on
-                a message nobody is listening to is a control for nothing. */}
-            <Show when={active()}>
-              <button
-                type="button"
-                class="lakko-voice-rate"
-                aria-label={`Playback speed ${rateLabel(rate())}`}
-                onClick={() => {
-                  const next = nextPlaybackRate(rate());
-                  setRate(next);
-                  if (audio !== null) audio.playbackRate = next;
-                }}
-              >
-                {rateLabel(rate())}
-              </button>
-            </Show>
+                a message nobody is listening to is a control for nothing.
+                But RESERVED rather than absent — it is in the tree either way
+                and merely hidden, because the row's geometry must not depend
+                on WHICH of its children are present (UX spec section 2 says
+                that of the upload and failure states; playback is the same
+                sentence). `visibility: hidden` is what makes "absent to the
+                eye" and "absent to a screen reader and the tab order" the
+                same thing, while holding exactly the space the control will
+                take — so no magic height has to be kept in step with a longer
+                clock (`10:32`) or a wider label (`1.5x`). */}
+            <button
+              type="button"
+              class="lakko-voice-rate"
+              data-reserved={active() ? undefined : "true"}
+              tabindex={active() ? undefined : -1}
+              aria-label={`Playback speed ${rateLabel(rate())}`}
+              onClick={() => {
+                const next = nextPlaybackRate(rate());
+                setRate(next);
+                if (audio !== null) audio.playbackRate = next;
+              }}
+            >
+              {rateLabel(rate())}
+            </button>
+            {/* UX spec §2 — "the message's own time sits on that same line",
+                after the speed control. Only when the caller handed it over,
+                which it does exactly for a voice message alone in its bubble
+                (`bubbleMetaSlot`); one with a caption keeps the row below. */}
+            <Show when={props.meta}>{(meta) => meta()()}</Show>
           </div>
         </div>
       </div>
@@ -361,7 +461,7 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
             setStatus("idle");
             void play();
           }}
-          style={{ border: "none", background: "transparent", color: "inherit", padding: 0, "font-size": "0.75rem", "text-align": "left", "text-decoration": "underline" }}
+          style={{ border: "none", background: "transparent", color: "inherit", padding: 0, "min-height": 0, "font-size": "0.75rem", "text-align": "left", "text-decoration": "underline" }}
         >
           Couldn't play this message
         </button>
@@ -649,7 +749,7 @@ export function VideoNoteBubble(props: MediaBubbleProps): JSX.Element {
             setStatus("idle");
             void startPlayback(true);
           }}
-          style={{ border: "none", background: "transparent", color: "inherit", padding: 0, "font-size": "0.75rem", "text-decoration": "underline" }}
+          style={{ border: "none", background: "transparent", color: "inherit", padding: 0, "min-height": 0, "font-size": "0.75rem", "text-decoration": "underline" }}
         >
           Couldn't play this message
         </button>
@@ -757,7 +857,7 @@ export function GifBubble(props: MediaBubbleProps): JSX.Element {
         <button
           type="button"
           onClick={load}
-          style={{ border: "none", background: "transparent", color: "inherit", padding: 0, "font-size": "0.75rem", "text-decoration": "underline", "text-align": "left" }}
+          style={{ border: "none", background: "transparent", color: "inherit", padding: 0, "min-height": 0, "font-size": "0.75rem", "text-decoration": "underline", "text-align": "left" }}
         >
           Couldn't load this GIF · Retry
         </button>

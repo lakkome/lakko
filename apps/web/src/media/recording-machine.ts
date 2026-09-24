@@ -14,9 +14,12 @@
  * The rules, and where they come from:
  *
  *   * A press does not record at once. It opens a `pressing` phase in which
- *     NOTHING is captured, and the microphone opens only once the pointer has
- *     been down for `HOLD_TO_RECORD_MS` — with permission known to be granted
- *     (§2 flow 1, §6).
+ *     NOTHING is captured, and the microphone is asked for only once the
+ *     pointer has been down for `HOLD_TO_RECORD_MS` (§2 flow 1, §6).
+ *   * Asking for it and having it are two different moments, and the machine
+ *     spends the gap between them in `requesting`. A capturing phase is
+ *     entered ONLY on the event that delivers the stream, so `startedAt` is
+ *     when capture began rather than when the machine decided to capture.
  *   * A press released before that, without drifting past `TAP_SLOP_PX`, is a
  *     TAP: it switches mic / camera mode and records nothing (§3.1). The
  *     composer is ONE button, so the tap is the only way a pointer reaches the
@@ -48,6 +51,32 @@ export type PointerKind = "mouse" | "touch" | "pen";
 /** What the browser reports before any capture is attempted. `unknown` is
  *  a browser with no Permissions API answer for this device. */
 export type PermissionHint = "granted" | "prompt" | "denied" | "unknown";
+
+/**
+ * Whether opening the stream could put a permission prompt on the screen.
+ *
+ * Kept apart from {@link PermissionHint} because the two answer different
+ * questions once `granted` no longer short-circuits the acquire: the hint is
+ * what the browser said before the gesture, this is what the machine must do
+ * with a grant that arrives slowly.
+ *
+ *   * `none` — the browser reported the permission as already granted, so the
+ *     acquire is the device opening and nothing else. However long it takes,
+ *     the take records: there was no prompt for a slow grant to have been.
+ *   * `certain` — the browser reported `prompt`. §6: the gesture that raises
+ *     the prompt does not record.
+ *   * `possible` — the browser would not say (Firefox and Safari, for camera
+ *     and microphone), so the only signal left is how long the grant took
+ *     (`PROMPT_INFERENCE_MS`).
+ */
+export type PromptRisk = "none" | "certain" | "possible";
+
+function promptRiskOf(permission: PermissionHint): PromptRisk {
+  if (permission === "granted") return "none";
+  if (permission === "prompt") return "certain";
+  // `denied` never reaches here: both callers answer it with the card first.
+  return "possible";
+}
 
 /** §2.7 — the voice cap. */
 export const VOICE_CAP_MS = 15 * 60 * 1000;
@@ -111,17 +140,39 @@ export type RecState =
       readonly dx: number;
       readonly dy: number;
     }
+  /**
+   * The stream is being OPENED, and nothing is captured yet.
+   *
+   * EVERY take passes through here, including one on a device whose
+   * permission the browser has already reported as `granted`. That report
+   * means no prompt will appear; it does not mean the microphone is in hand.
+   * `getUserMedia` still has to open an audio device, which takes real time,
+   * and the defect this phase now covers was the recording bar running across
+   * that gap — clock counting, red dot pulsing — so the first words of a
+   * message were spoken into a recorder that did not exist yet.
+   *
+   * The rule, and the one the machine is tested against: a capturing phase is
+   * reached ONLY through `permission-result`, the event that delivers the
+   * stream. Nothing else can produce a `recording` or a `locked`.
+   */
   | {
       readonly phase: "requesting";
       readonly kind: CaptureKind;
       readonly pointer: PointerKind | "keyboard";
+      /** When the request went out, which is what `PROMPT_INFERENCE_MS` is
+       *  measured against. */
       readonly pressedAt: number;
       /** The pointer is still down. */
       readonly held: boolean;
-      /** The browser said `prompt` up front. */
-      readonly knownPrompt: boolean;
+      /** Whether a prompt can have been raised by this acquire. */
+      readonly promptRisk: PromptRisk;
       readonly originX: number;
       readonly originY: number;
+      /** The offset the press carried in, kept up to date while the device
+       *  opens: the pointer goes on travelling, and the cancel and lock
+       *  targets are answered from it the moment the stream lands. */
+      readonly dx: number;
+      readonly dy: number;
     }
   | {
       readonly phase: "recording";
@@ -248,12 +299,9 @@ function fromIdle(event: RecEvent): RecStep {
     if (event.permission === "denied") {
       return step(IDLE, { type: "show-denied", kind: event.kind });
     }
-    if (event.permission === "granted") {
-      return step(
-        { phase: "locked", kind: event.kind, startedAt: event.at },
-        { type: "start-capture", kind: event.kind },
-      );
-    }
+    // Including `granted`: a keyboard activation has the same device to open
+    // as a hold does, and locking the recorder before it is open would run
+    // the clock over nothing exactly as the pointer path did.
     return step(
       {
         phase: "requesting",
@@ -261,9 +309,11 @@ function fromIdle(event: RecEvent): RecStep {
         pointer: "keyboard",
         pressedAt: event.at,
         held: false,
-        knownPrompt: event.permission === "prompt",
+        promptRisk: promptRiskOf(event.permission),
         originX: 0,
         originY: 0,
+        dx: 0,
+        dy: 0,
       },
       { type: "request-permission", kind: event.kind },
     );
@@ -312,20 +362,9 @@ function fromPressing(
       if (state.permission === "denied") {
         return step(IDLE, { type: "show-denied", kind: state.kind });
       }
-      if (state.permission === "granted") {
-        return step(
-          {
-            phase: "recording",
-            kind: state.kind,
-            startedAt: event.at,
-            originX: state.originX,
-            originY: state.originY,
-            dx: state.dx,
-            dy: state.dy,
-          },
-          { type: "start-capture", kind: state.kind },
-        );
-      }
+      // `granted` included, and that is the whole of the fix: the threshold
+      // ASKS for the microphone, it does not have it. A grant already on
+      // record only means the ask is silent.
       return step(
         {
           phase: "requesting",
@@ -337,9 +376,11 @@ function fromPressing(
           // prompt-less grant as a prompt.
           pressedAt: event.at,
           held: true,
-          knownPrompt: state.permission === "prompt",
+          promptRisk: promptRiskOf(state.permission),
           originX: state.originX,
           originY: state.originY,
+          dx: state.dx,
+          dy: state.dy,
         },
         { type: "request-permission", kind: state.kind },
       );
@@ -356,6 +397,11 @@ function fromRequesting(
   event: RecEvent,
 ): RecStep {
   switch (event.type) {
+    case "move":
+      // The device takes time to open and the pointer does not wait for it.
+      // Tracked so the gesture is answered from where the finger actually is
+      // when the stream lands, not from where it was when the request left.
+      return step({ ...state, dx: event.x - state.originX, dy: event.y - state.originY });
     case "release":
       return step({ ...state, held: false });
     case "cancel":
@@ -367,39 +413,53 @@ function fromRequesting(
         return step(IDLE, { type: "show-denied", kind: state.kind });
       }
       const prompted =
-        state.knownPrompt || event.at - state.pressedAt > PROMPT_INFERENCE_MS;
+        state.promptRisk === "certain" ||
+        (state.promptRisk === "possible" && event.at - state.pressedAt > PROMPT_INFERENCE_MS);
       if (prompted) {
         // §6: the gesture that raised the prompt does not record.
         return step(IDLE, { type: "release-stream" });
       }
-      if (state.pointer === "keyboard") {
+      if (state.dx <= -CANCEL_SLIDE_PX) {
+        // Already sitting in the cancel target, exactly as `fromPressing`
+        // reads it: a take that exists only to be discarded on the next event
+        // is not worth starting. Silent, because nothing was ever recorded to
+        // report the loss of.
+        return step(IDLE, { type: "release-stream" });
+      }
+      // The lock is answered before the release is, and for both pointer and
+      // keyboard: a pointer that has climbed onto the target has locked, and
+      // lifting it is what locking is FOR.
+      if (state.pointer === "keyboard" || state.dy <= -LOCK_SLIDE_PX) {
         return step(
           { phase: "locked", kind: state.kind, startedAt: event.at },
           { type: "start-capture", kind: state.kind },
         );
       }
-      if (state.held) {
+      if (!state.held) {
+        // Released before the (prompt-less) grant arrived. The hold threshold
+        // is already behind it - nothing reaches this state without crossing
+        // it - so this was a hold that ended before anything could record, not
+        // a tap, and it does not switch the mode.
         return step(
-          {
-            phase: "recording",
-            kind: state.kind,
-            startedAt: event.at,
-            originX: state.originX,
-            originY: state.originY,
-            dx: 0,
-            dy: 0,
-          },
-          { type: "start-capture", kind: state.kind },
+          IDLE,
+          { type: "release-stream" },
+          { type: "hint", hint: "hold-to-record" },
         );
       }
-      // Released before the (prompt-less) grant arrived. The hold threshold
-      // is already behind it - nothing reaches this state without crossing it
-      // - so this was a hold that ended before anything could record, not a
-      // tap, and it does not switch the mode.
       return step(
-        IDLE,
-        { type: "release-stream" },
-        { type: "hint", hint: "hold-to-record" },
+        {
+          phase: "recording",
+          kind: state.kind,
+          // The stream is in hand on THIS event, so this is the instant
+          // capture begins - the clock, the elapsed time and the take's own
+          // duration all measure from the same moment.
+          startedAt: event.at,
+          originX: state.originX,
+          originY: state.originY,
+          dx: state.dx,
+          dy: state.dy,
+        },
+        { type: "start-capture", kind: state.kind },
       );
     }
     default:

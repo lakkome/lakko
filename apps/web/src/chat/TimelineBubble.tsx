@@ -39,7 +39,13 @@ import { shortTime } from "./timeline-layout";
 import type { TimelineRow } from "./timeline-row";
 import { EmojiPicker } from "../media/EmojiPicker";
 import { MediaAttachment, type MediaUpload } from "../media/MediaBubbles";
-import { mediaKey, type MediaHub } from "../media/media-hub";
+import {
+  bubbleMetaSlot,
+  soleMediaBubble,
+  type BubbleMetaSlot,
+  type MediaBubble,
+} from "../media/inline-media";
+import { allowlist, mediaKey, type MediaHub } from "../media/media-hub";
 import { useProfiles } from "../profile/ProfileContext";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
@@ -345,21 +351,40 @@ function ChatBubbleBody(
     props.attachments.filter((a) => props.hub.decision(a).bubble !== "file");
   const fileRefs = (): AttachmentRefBytes[] =>
     props.attachments.filter((a) => props.hub.decision(a).bubble === "file");
+  /**
+   * The bubble of a message that is nothing but one piece of media, and where
+   * its meta line goes — ONE rule, in `inline-media.ts`, rather than the
+   * conditionals that used to encode it here.
+   *
+   * THE DEFECT: there were two of them, `chromeless` and `mediaOnly`, they did
+   * not even agree on whether to read the edited text or the original, and a
+   * lone voice message fell through both — so it got the bubble's own row
+   * under the player, putting the length of the recording and the time it was
+   * sent on two different lines. UX spec §2 puts them on one.
+   */
+  const sole = (): MediaBubble | null =>
+    soleMediaBubble(
+      {
+        // An open edit composer replaces the body, so the message is not
+        // "nothing but media" while it is up.
+        deleted: isDeleted() || isEditing(),
+        text: displayText(),
+        attachments: props.attachments,
+      },
+      // The same module-level allowlist the hub itself is built from
+      // (`media-hub.ts`), so the shape decision and the slot decision can
+      // never be made against two different answers.
+      allowlist,
+    );
+  const metaSlot = (): BubbleMetaSlot => bubbleMetaSlot(sole());
   // UX spec section 3 — a video note is a circle with no bubble chrome.
-  const chromeless = (): boolean =>
-    props.originalText.length === 0 &&
-    props.attachments.length === 1 &&
-    props.attachments[0] !== undefined &&
-    props.hub.decision(props.attachments[0]).bubble === "video_note";
   // UX spec section 10 — a lone photo or video fills its bubble, and the time
   // and ticks sit on the media in a translucent pill.
-  const mediaOnly = (): boolean => {
-    const only = props.attachments[0];
-    if (only === undefined || props.attachments.length !== 1) return false;
-    if (displayText().length > 0 || isDeleted() || isEditing()) return false;
-    const bubble = props.hub.decision(only).bubble;
-    return bubble === "photo" || bubble === "video";
-  };
+  const mediaOnly = (): boolean => metaSlot() === "media-pill";
+  // Kept apart from `mediaOnly` on this client: `.lk-bubble.media-only` draws
+  // its own surface and `.lk-bubble.chromeless` removes one, so unlike the
+  // natives' single flag these two are exclusive here.
+  const chromeless = (): boolean => metaSlot() === "below-bubble";
   const keyFor = (ref: AttachmentRefBytes): string =>
     ref.blobId.length === 0 && props.mediaLocalKey !== undefined
       ? props.mediaLocalKey
@@ -367,6 +392,60 @@ function ChatBubbleBody(
   // A pending media message keeps full opacity: its upload ring is the
   // progress signal, and a dimmed video would read as disabled.
   const pending = (): boolean => props.ack === "pending" && props.mediaLocalKey === undefined;
+
+  /**
+   * The message's own line: the time (or the retry affordance in its place),
+   * and on our own messages the delivery glyph.
+   *
+   * A FUNCTION, not a stored element: Solid's JSX creates the DOM node where
+   * it is evaluated, so one element placed in two branches would be MOVED
+   * between them rather than duplicated. Each call builds its own — the same
+   * reason the reaction chip below is written this way.
+   */
+  const metaLine = (): JSX.Element => (
+    <div class="lk-bubble-meta">
+      {/* A failed row offers Retry where the message is. The media
+          bubbles draw their own, so this is for a row that has none:
+          before it, a plain text message that did not send showed the
+          words "Not sent" and no way to act on them. */}
+      <Show
+        when={props.ack === "failed" && mediaRefs().length === 0}
+        fallback={<span>{props.time}</span>}
+      >
+        <NotSent onRetry={() => props.onRetrySend()} />
+      </Show>
+      {/* ADR-0024 — read state on our OWN acked messages. A single
+          check once published ("Sent"); a double check once
+          EVERY other member's read watermark covers this message
+          ("Read"). Gated on a present messageId. */}
+      <Show when={props.isOwn && props.ack === "sent" && props.messageId !== undefined}>
+        {(() => {
+          const read = (): boolean =>
+            props.messageId !== undefined && props.readByOthers(props.messageId);
+          // ADR-0048 UX section 5 — read receipts name the readers.
+          const readers = (): string =>
+            props.messageId === undefined
+              ? ""
+              : props
+                  .readersOf(props.messageId)
+                  .map((r) => profiles.resolve(r).name)
+                  .join(", ");
+          return (
+            <span
+              class="lk-bubble-ack"
+              classList={{ read: read() }}
+              title={
+                read() && readers().length > 0 ? `Read by ${readers()}` : read() ? "Read" : "Sent"
+              }
+              aria-label={read() ? "Read" : "Sent"}
+            >
+              <Icon name={read() ? "dcheck" : "check"} size={14} />
+            </span>
+          );
+        })()}
+      </Show>
+    </div>
+  );
 
   return (
     <li
@@ -479,6 +558,12 @@ function ChatBubbleBody(
                           incoming={isIncoming}
                           upload={props.mediaUpload}
                           onRetry={props.onRetrySend}
+                          // UX spec §2 — a voice message alone in its bubble
+                          // carries the time on its own quiet line. The slot
+                          // decides; `VoiceBubble` is the only bubble that
+                          // reads it, and the branch above is what keeps the
+                          // row from being drawn twice.
+                          meta={metaSlot() === "voice-line" ? metaLine : undefined}
                         />
                       )}
                     </For>
@@ -584,48 +669,11 @@ function ChatBubbleBody(
           </div>
         </Show>
 
-        <div class="lk-bubble-meta">
-          {/* A failed row offers Retry where the message is. The media
-              bubbles draw their own, so this is for a row that has none:
-              before it, a plain text message that did not send showed the
-              words "Not sent" and no way to act on them. */}
-          <Show
-            when={props.ack === "failed" && mediaRefs().length === 0}
-            fallback={<span>{props.time}</span>}
-          >
-            <NotSent onRetry={() => props.onRetrySend()} />
-          </Show>
-          {/* ADR-0024 — read state on our OWN acked messages. A single
-              check once published ("Sent"); a double check once
-              EVERY other member's read watermark covers this message
-              ("Read"). Gated on a present messageId. */}
-          <Show when={props.isOwn && props.ack === "sent" && props.messageId !== undefined}>
-            {(() => {
-              const read = (): boolean =>
-                props.messageId !== undefined && props.readByOthers(props.messageId);
-              // ADR-0048 UX section 5 — read receipts name the readers.
-              const readers = (): string =>
-                props.messageId === undefined
-                  ? ""
-                  : props
-                      .readersOf(props.messageId)
-                      .map((r) => profiles.resolve(r).name)
-                      .join(", ");
-              return (
-                <span
-                  class="lk-bubble-ack"
-                  classList={{ read: read() }}
-                  title={
-                    read() && readers().length > 0 ? `Read by ${readers()}` : read() ? "Read" : "Sent"
-                  }
-                  aria-label={read() ? "Read" : "Sent"}
-                >
-                  <Icon name={read() ? "dcheck" : "check"} size={14} />
-                </span>
-              );
-            })()}
-          </Show>
-        </div>
+        {/* The line itself is one function, called from wherever the slot
+            says: here as the bubble's own row, or handed to the voice bubble
+            to draw on its quiet line. Two spellings of it would be two things
+            to keep in step. */}
+        <Show when={metaSlot() !== "voice-line"}>{metaLine()}</Show>
 
         {/* The action menu, opened by the gestures wired above and rendered
             in a portal OUTSIDE this bubble (`MessageMenu.tsx`). It carries

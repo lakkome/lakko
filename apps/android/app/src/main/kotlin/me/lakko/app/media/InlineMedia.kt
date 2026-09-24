@@ -86,3 +86,56 @@ public fun renderDecision(kind: String?, mime: String?, allowlist: MediaAllowlis
 
 public fun renderDecision(ref: AttachmentRef, allowlist: MediaAllowlist): RenderDecision =
     renderDecision(ref.kind, ref.mime, allowlist)
+
+/**
+ * The bubble of a message that is NOTHING but one piece of media — no text, no
+ * second attachment, not a tombstone — or `null` when the message is anything
+ * else.
+ *
+ * "Nothing but" is the load-bearing half. A voice message sent WITH a caption,
+ * or beside another attachment, is an ordinary bubble that happens to contain a
+ * player: it has a paragraph to sit under, so it keeps the bubble's own meta
+ * row ([BubbleMetaSlot.BUBBLE_ROW]). Only the lone one gets a slot of its own.
+ */
+public fun soleMediaBubble(
+    deleted: Boolean,
+    text: String,
+    attachments: List<AttachmentRef>,
+    allowlist: MediaAllowlist,
+): MediaBubble? {
+    if (deleted || text.isNotEmpty() || attachments.size != 1) return null
+    return renderDecision(attachments[0], allowlist).bubble
+}
+
+/**
+ * Where a message's meta line — the time, the edited marker, the delivery
+ * ticks — is drawn.
+ *
+ * Four answers, because four bubble shapes have four different places to put
+ * it, and the rule is stated once here rather than as conditionals at the three
+ * call sites that used to disagree about it:
+ *
+ *  * [BUBBLE_ROW] — a row under the content, inside the bubble's surface. The
+ *    default, and where a paragraph wants it.
+ *  * [VOICE_LINE] — the voice row's own quiet line, at its trailing end (UX
+ *    spec §2). A voice message is a ROW, not a paragraph: putting the length of
+ *    the recording and the time it was sent on two different levels makes the
+ *    bubble taller than it has any reason to be and reads as two unrelated
+ *    facts.
+ *  * [MEDIA_PILL] — a translucent pill over the media (UX spec §10), because a
+ *    lone photo or video is drawn edge to edge with no chrome to carry a row.
+ *  * [BELOW_BUBBLE] — under the bubble, for the chromeless video-note circle
+ *    (UX spec §3), which has no surface to carry the line and no pill.
+ */
+public enum class BubbleMetaSlot { BUBBLE_ROW, VOICE_LINE, MEDIA_PILL, BELOW_BUBBLE }
+
+/** The meta slot for a message whose sole media bubble is [sole]
+ *  ([soleMediaBubble], `null` for every other message). */
+public fun bubbleMetaSlot(sole: MediaBubble?): BubbleMetaSlot = when (sole) {
+    MediaBubble.VOICE -> BubbleMetaSlot.VOICE_LINE
+    MediaBubble.PHOTO, MediaBubble.VIDEO -> BubbleMetaSlot.MEDIA_PILL
+    MediaBubble.VIDEO_NOTE -> BubbleMetaSlot.BELOW_BUBBLE
+    // A GIF keeps the row: it is a bubble with chrome, and a pill over an
+    // animation that may be 40dp tall would cover it.
+    MediaBubble.GIF, MediaBubble.FILE, null -> BubbleMetaSlot.BUBBLE_ROW
+}
