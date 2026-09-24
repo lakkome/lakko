@@ -36,9 +36,26 @@ final class WaveformPlaybackTests: XCTestCase {
         XCTAssertLessThan(bytes[0], 10)
     }
 
-    func testSilenceAndGarbageAreHonestZeros() {
-        XCTAssertEqual(Waveform.downsample([0, 0, 0]), Data([0, 0, 0]))
-        XCTAssertEqual(Waveform.downsample([.nan, -1, .infinity]), Data([0, 0, 0]))
+    /// An entirely silent take is ABSENT, not a row of zeros. The old name of
+    /// this test called the zeros "honest", which is what made the defect look
+    /// deliberate: a zero row floors lower than the absent placeholder, so
+    /// recording the measurement drew flatter than having none.
+    func testAnAllSilentTakeIsAbsentRatherThanARowOfZeros() {
+        XCTAssertNil(Waveform.downsample([0, 0, 0]))
+        XCTAssertNil(Waveform.downsample([.nan, -1, .infinity]))
+    }
+
+    /// Why that rule is the right way round rather than arbitrary. At 0.08 a
+    /// bar is wider than it is tall, which is what turned a waveform into a
+    /// row of dots.
+    func testTheAbsentPlaceholderStandsTallerThanAFlooredZeroRow() {
+        let absent = Waveform.bars(nil, count: 4)[0]
+        let zeros = Waveform.bars(Data(repeating: 0, count: 4), count: 4)[0]
+        XCTAssertGreaterThan(absent, zeros)
+    }
+
+    func testOneSilentSampleDoesNotSilenceATakeThatHasSound() {
+        XCTAssertNotNil(Waveform.downsample([0, 0.5, 0]))
     }
 
     func testBarsResampleAndPlaceholder() {

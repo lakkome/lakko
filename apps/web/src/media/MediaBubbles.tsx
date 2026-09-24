@@ -23,7 +23,7 @@ import { errorName, mediaErrorIsReal, playRejectionOutcome, waitForMetadata } fr
 import { nextPlaybackRate, rateLabel } from "./playback-queue";
 import { formatClock, formatTotalClock, spokenDuration } from "./recording-machine";
 import { PhotoBubble, VideoBubble } from "./VisualBubbles";
-import { waveformBars } from "./waveform";
+import { barIsPlayed, waveformBars } from "./waveform";
 
 /** Upload state of an outgoing media message: a completed fraction while
  *  uploading, `"failed"` when nothing reached the other side, `undefined`
@@ -87,9 +87,14 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
   const bars = (): number[] => waveformBars(props.attachment.waveform, WAVE_BARS);
   const uploading = (): boolean => typeof props.upload === "number";
   const unplayed = (): boolean => props.incoming && !props.hub.isPlayed(props.mediaKey);
-  // The play button is a filled circle in the bubble's text colour; its glyph
-  // takes the colour that contrasts with that in each bubble tone and theme.
-  const glyphColour = (): string => (props.incoming ? "var(--surface-elevated)" : "var(--accent)");
+  /** This message is the one being played — playing, or paused part-way
+   *  through and still holding the hub's claim. What the elapsed time and the
+   *  speed control are conditioned on (UX spec section 2). */
+  const active = (): boolean => props.hub.activeKey() === props.mediaKey;
+  // The play button is a filled circle in the bubble's text colour; the glyph
+  // is the bubble's OWN background, so it reads as a solid button on the
+  // sunken incoming surface and on the accent outgoing one alike.
+  const glyphColour = (): string => (props.incoming ? "var(--surface-sunken)" : "var(--accent)");
 
   /** The element and its listeners. Assigning `src` starts the load, so by
    *  the time this returns the browser is already buffering and demuxing. */
@@ -242,116 +247,128 @@ export function VoiceBubble(props: MediaBubbleProps): JSX.Element {
     void seekTo(fraction * duration());
   }
 
+  // UX spec section 2, "Timeline bubble" — one row: the play button on the
+  // leading edge, then a fixed-width column holding the waveform above one
+  // quiet line (time, unplayed dot, and the speed control pushed to the
+  // trailing end). The upload and failure affordances sit UNDER the row, so
+  // nothing about the row's geometry changes between states.
   return (
     <div ref={root} class="lakko-voice">
-      <button
-        type="button"
-        class="lakko-voice-play"
-        aria-label={
-          playing()
-            ? "Pause voice message"
-            : `Play voice message, ${spokenDuration(duration())}`
-        }
-        disabled={uploading()}
-        onClick={toggle}
-      >
-        <Show when={status() !== "loading"} fallback={<span class="lakko-spinner glyph" style={{ color: glyphColour() }} />}>
-          <span class="glyph" aria-hidden="true" style={{ color: glyphColour() }}>
-            {playing() ? "❚❚" : "▶"}
-          </span>
-        </Show>
-        <Show when={uploading()}>
-          <ProgressRing fraction={typeof props.upload === "number" ? props.upload : 0} stroke={glyphColour()} width={8} />
-        </Show>
-      </button>
-      <div style={{ flex: 1, display: "flex", "flex-direction": "column", gap: "0.1rem", "min-width": 0 }}>
-        <span
-          ref={wave}
-          class="lakko-wave"
-          role="slider"
-          tabindex={uploading() ? -1 : 0}
-          aria-label="Seek voice message"
-          aria-valuemin={0}
-          aria-valuemax={Math.round(duration() / 1000)}
-          aria-valuenow={Math.round(position() / 1000)}
-          aria-valuetext={`${spokenDuration(position())} of ${spokenDuration(duration())}`}
-          onPointerDown={(e) => {
-            // Primary button only. A right-click on the waveform is a request
-            // for the message's action menu (`MessageMenu.tsx`), and seeking
-            // on it as well would move the playhead on the way to the menu.
-            if (e.button !== 0) return;
-            try {
-              e.currentTarget.setPointerCapture(e.pointerId);
-            } catch {
-              // Optional.
-            }
-            seekFromPointer(e);
-          }}
-          onPointerMove={(e) => {
-            // The primary button specifically, not "any button held".
-            if ((e.buttons & 1) !== 0) seekFromPointer(e);
-          }}
-          onKeyDown={(e) => {
-            if (uploading()) return;
-            if (e.key === "ArrowRight" || e.key === "ArrowUp") {
-              e.preventDefault();
-              void seekTo(position() + SEEK_STEP_MS);
-            } else if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
-              e.preventDefault();
-              void seekTo(position() - SEEK_STEP_MS);
-            } else if (e.key === "Home") {
-              e.preventDefault();
-              void seekTo(0);
-            } else if (e.key === "End") {
-              e.preventDefault();
-              void seekTo(duration());
-            }
-          }}
-        >
-          <For each={bars()}>
-            {(h, i) => (
-              <i
-                data-on={duration() > 0 && (i() + 0.5) / WAVE_BARS <= position() / duration()}
-                style={{ height: `${Math.round(h * 100)}%` }}
-              />
-            )}
-          </For>
-        </span>
-        <Show when={status() === "error"}>
-          <button
-            type="button"
-            onClick={() => {
-              setStatus("idle");
-              void play();
-            }}
-            style={{ border: "none", background: "transparent", color: "inherit", padding: 0, "font-size": "0.75rem", "text-align": "left", "text-decoration": "underline" }}
-          >
-            Couldn't play this message
-          </button>
-        </Show>
-        <Show when={props.upload === "failed"}>
-          <NotSent onRetry={props.onRetry} />
-        </Show>
-      </div>
-      <div class="lakko-voice-meta">
-        <span style={{ display: "inline-flex", "align-items": "center", gap: "0.25rem" }}>
-          <Show when={unplayed()}>
-            <span class="lakko-unplayed" aria-label="Not played" />
-          </Show>
-          {playing() || position() > 0 ? formatClock(position()) : formatTotalClock(duration())}
-        </span>
+      <div class="lakko-voice-row">
         <button
           type="button"
-          aria-label={`Playback speed ${rateLabel(rate())}`}
-          onClick={() => {
-            const next = nextPlaybackRate(rate());
-            setRate(next);
-            if (audio !== null) audio.playbackRate = next;
-          }}
+          class="lakko-voice-play"
+          aria-label={
+            playing()
+              ? "Pause voice message"
+              : `Play voice message, ${spokenDuration(duration())}`
+          }
+          disabled={uploading()}
+          onClick={toggle}
         >
-          {rateLabel(rate())}
+          <Show when={status() !== "loading"} fallback={<span class="lakko-spinner glyph" style={{ color: glyphColour() }} />}>
+            <span class="glyph" aria-hidden="true" style={{ color: glyphColour() }}>
+              {playing() ? "❚❚" : "▶"}
+            </span>
+          </Show>
+          <Show when={uploading()}>
+            <ProgressRing fraction={typeof props.upload === "number" ? props.upload : 0} stroke={glyphColour()} width={8} />
+          </Show>
         </button>
+        <div class="lakko-voice-col">
+          <span
+            ref={wave}
+            class="lakko-wave"
+            role="slider"
+            tabindex={uploading() ? -1 : 0}
+            aria-label="Seek voice message"
+            aria-valuemin={0}
+            aria-valuemax={Math.round(duration() / 1000)}
+            aria-valuenow={Math.round(position() / 1000)}
+            aria-valuetext={`${spokenDuration(position())} of ${spokenDuration(duration())}`}
+            onPointerDown={(e) => {
+              // Primary button only. A right-click on the waveform is a request
+              // for the message's action menu (`MessageMenu.tsx`), and seeking
+              // on it as well would move the playhead on the way to the menu.
+              if (e.button !== 0) return;
+              try {
+                e.currentTarget.setPointerCapture(e.pointerId);
+              } catch {
+                // Optional.
+              }
+              seekFromPointer(e);
+            }}
+            onPointerMove={(e) => {
+              // The primary button specifically, not "any button held".
+              if ((e.buttons & 1) !== 0) seekFromPointer(e);
+            }}
+            onKeyDown={(e) => {
+              if (uploading()) return;
+              if (e.key === "ArrowRight" || e.key === "ArrowUp") {
+                e.preventDefault();
+                void seekTo(position() + SEEK_STEP_MS);
+              } else if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
+                e.preventDefault();
+                void seekTo(position() - SEEK_STEP_MS);
+              } else if (e.key === "Home") {
+                e.preventDefault();
+                void seekTo(0);
+              } else if (e.key === "End") {
+                e.preventDefault();
+                void seekTo(duration());
+              }
+            }}
+          >
+            <For each={bars()}>
+              {(h, i) => (
+                <i
+                  data-on={barIsPlayed(i(), WAVE_BARS, position(), duration())}
+                  style={{ height: `${Math.round(h * 100)}%` }}
+                />
+              )}
+            </For>
+          </span>
+          <div class="lakko-voice-line">
+            <span class="lakko-voice-time">
+              {active() ? formatClock(position()) : formatTotalClock(duration())}
+            </span>
+            <Show when={unplayed()}>
+              <span class="lakko-unplayed" aria-label="Not played" />
+            </Show>
+            {/* Only while this message is the one playing: a speed control on
+                a message nobody is listening to is a control for nothing. */}
+            <Show when={active()}>
+              <button
+                type="button"
+                class="lakko-voice-rate"
+                aria-label={`Playback speed ${rateLabel(rate())}`}
+                onClick={() => {
+                  const next = nextPlaybackRate(rate());
+                  setRate(next);
+                  if (audio !== null) audio.playbackRate = next;
+                }}
+              >
+                {rateLabel(rate())}
+              </button>
+            </Show>
+          </div>
+        </div>
       </div>
+      <Show when={status() === "error"}>
+        <button
+          type="button"
+          onClick={() => {
+            setStatus("idle");
+            void play();
+          }}
+          style={{ border: "none", background: "transparent", color: "inherit", padding: 0, "font-size": "0.75rem", "text-align": "left", "text-decoration": "underline" }}
+        >
+          Couldn't play this message
+        </button>
+      </Show>
+      <Show when={props.upload === "failed"}>
+        <NotSent onRetry={props.onRetry} />
+      </Show>
     </div>
   );
 }

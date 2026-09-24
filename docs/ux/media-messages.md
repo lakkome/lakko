@@ -50,11 +50,32 @@ mode (section 3.1). `Esc` cancels.
 
 ### Timeline bubble
 
-Play/pause button, waveform (tap or drag on it to seek), duration, a "played" state (the
-waveform fills as it plays; an unplayed incoming voice message shows a small dot until
-first play), and a speed toggle `1x / 1.5x / 2x`. Only one voice message plays at a time;
-starting another pauses the first. Playback continues to the next consecutive unplayed
-voice message from the same sender.
+The parts were written down here and their **arrangement** was not, so the three clients
+arranged them three ways and only one of them reads as a voice message. The iOS one is
+the shape; the other two come to it.
+
+**One row.** A filled circle 38 pt across on the leading edge, carrying a play or pause
+glyph - the circle takes the bubble's text colour and the glyph the bubble's own
+background, so it reads as a solid button on both the incoming and the outgoing surface.
+Beside it a column of fixed width, about 170 pt, holding two things:
+
+- the **waveform**, 26 pt tall, its bars filling with the text colour as playback passes
+  them and sitting at low opacity ahead of the playhead, so how far in you are is legible
+  without a separate progress bar. It is the scrubber: press or drag on it to seek.
+- under it one quiet line, in a small monospaced digit face so the number does not
+  shuffle as it counts: the **elapsed** time while this message is the one playing, the
+  **total** otherwise; then, on an incoming message not yet played, a small accent dot;
+  then the **speed** control pushed to the trailing end - `1x` / `1.5x` / `2x` - shown
+  **only while this message is the one playing**, because a speed control on a message
+  nobody is listening to is a control for nothing.
+
+The upload and failure states live on the same row rather than replacing it: an upload in
+flight draws a progress ring around the play button, a failed one puts `Not sent · Retry`
+under the row, and a message that cannot be decoded puts `Couldn't play this message`
+there instead. Nothing about the row's geometry changes between them.
+
+Only one voice message plays at a time; starting another pauses the first. Playback
+continues to the next consecutive unplayed voice message from the same sender.
 
 ### States
 

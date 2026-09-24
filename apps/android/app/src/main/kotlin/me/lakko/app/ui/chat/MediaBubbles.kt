@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -26,7 +27,6 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -44,8 +44,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -80,6 +83,12 @@ internal fun AttachmentView(
     hub: ChatMediaHub,
     isOwn: Boolean,
     contentColor: Color,
+    /** The colour the bubble is drawn on. UX spec §2 wants the voice play
+     *  button's glyph painted in it, so the button reads as a solid disc of
+     *  the text colour on BOTH the sunken incoming surface and the accent
+     *  outgoing one. Passed rather than re-derived from `isOwn` so it cannot
+     *  drift from the Surface it actually sits on. */
+    bubbleColor: Color,
     /** UX spec §10 — Save from the photo viewer / video player. */
     onSave: (AttachmentRef) -> Unit = {},
     /** The bubble's long-press menu, forwarded by photo and video bubbles
@@ -92,7 +101,7 @@ internal fun AttachmentView(
 ) {
     val decision = remember(ref.kind, ref.mime) { renderDecision(ref, hub.allowlist) }
     when (decision.bubble) {
-        MediaBubble.VOICE -> VoiceBubble(ref, hub, isOwn, contentColor)
+        MediaBubble.VOICE -> VoiceBubble(ref, hub, isOwn, contentColor, bubbleColor)
         MediaBubble.VIDEO_NOTE -> VideoNoteBubble(ref, hub)
         MediaBubble.GIF -> GifBubble(ref, hub, decision.inline)
         MediaBubble.PHOTO -> PhotoBubble(ref, hub, onSave, onLongPress, mediaOverlay)
@@ -101,9 +110,47 @@ internal fun AttachmentView(
     }
 }
 
-/** §2 timeline bubble. */
+/** §2 timeline bubble — the play button's DRAWN diameter. */
+private val VOICE_BUTTON_SIZE = 38.dp
+
+/** The play button's TOUCH target. The spec draws the disc at 38dp to match
+ *  iOS, which is under Android's 48dp minimum, so the target is stated
+ *  separately and allowed to overflow the drawn disc's slot — see
+ *  [VoicePlayDisc]. Neither size is a function of the other. */
+private val VOICE_TOUCH_TARGET = 48.dp
+
+/** §2 timeline bubble — the fixed width of the column beside the button.
+ *  Fixed, not `weight(1f)`: a voice message is the same size whatever the
+ *  bubble around it happens to be, and the waveform is a seek surface whose
+ *  scale should not depend on the length of a neighbouring caption. */
+private val VOICE_COLUMN_WIDTH = 170.dp
+
+/** §2 timeline bubble — the waveform's height. */
+private val VOICE_WAVEFORM_HEIGHT = 26.dp
+
+/**
+ * §2 timeline bubble.
+ *
+ * ONE row: a filled circle on the leading edge carrying the play / pause
+ * glyph, then a fixed column holding the waveform above one quiet line — the
+ * clock, the unplayed dot, and the speed control pushed to the trailing end.
+ * The clock and the speed control belong to that column, not to the bubble, so
+ * they line up with the waveform's edges rather than with the button's.
+ *
+ * The upload ring and the failure line do not replace the row: the ring is
+ * drawn around the play button with `requiredSize`, so it overflows the
+ * button's 38dp slot without taking any layout space, and the failure line
+ * goes under the row. Nothing about the row's geometry changes between the
+ * states.
+ */
 @Composable
-internal fun VoiceBubble(ref: AttachmentRef, hub: ChatMediaHub, isOwn: Boolean, contentColor: Color) {
+internal fun VoiceBubble(
+    ref: AttachmentRef,
+    hub: ChatMediaHub,
+    isOwn: Boolean,
+    contentColor: Color,
+    bubbleColor: Color,
+) {
     val key = remember(ref.blobId) { ChatMediaHub.mediaKey(ref.blobId) }
     val voice by hub.voice.collectAsStateWithLifecycle()
     val playedVersion by hub.playedChanges.collectAsStateWithLifecycle()
@@ -133,59 +180,82 @@ internal fun VoiceBubble(ref: AttachmentRef, hub: ChatMediaHub, isOwn: Boolean, 
         }
     }
 
-    Column(modifier = Modifier.widthIn(min = 200.dp, max = 260.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(contentAlignment = Alignment.Center, modifier = Modifier.size(40.dp)) {
-                if (isCurrent && voice.loading) {
-                    // §2 states — "Received, downloading": a spinner on first tap.
-                    CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.dp)
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            VoicePlayDisc(
+                playing = isCurrent && voice.playing,
+                // §2 states — "Received, downloading": a spinner on first tap.
+                loading = isCurrent && voice.loading,
+                discColor = contentColor,
+                glyphColor = bubbleColor,
+                label = if (isCurrent && voice.playing) {
+                    "Pause voice message"
                 } else {
-                    IconButton(onClick = { hub.toggleVoice(ref, knownDuration, sentByMe = isOwn) }) {
-                        Icon(
-                            imageVector = if (isCurrent && voice.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                            contentDescription = if (isCurrent && voice.playing) {
-                                "Pause voice message"
-                            } else {
-                                "Play voice message, ${spokenDuration(duration)}"
-                            },
+                    "Play voice message, ${spokenDuration(duration)}"
+                },
+                onClick = { hub.toggleVoice(ref, knownDuration, sentByMe = isOwn) },
+            )
+            Column(
+                modifier = Modifier.width(VOICE_COLUMN_WIDTH),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                WaveformSeekBar(
+                    waveform = ref.waveform,
+                    progress = progress,
+                    playedColor = contentColor,
+                    idleColor = contentColor.copy(alpha = 0.35f),
+                    label = "Voice message position",
+                    modifier = Modifier.fillMaxWidth().height(VOICE_WAVEFORM_HEIGHT),
+                    onSeek = { f -> hub.seekVoice(ref, f, knownDuration, sentByMe = isOwn) },
+                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    VoiceClock(
+                        // The elapsed time while this message is the one
+                        // playing — which means the one the player is on, not
+                        // the one whose audio is moving. Reading `playing`
+                        // here snapped the clock back to the total the moment
+                        // the person paused, losing the place they paused at.
+                        text = if (isCurrent) formatClock(voice.positionMs) else formatTotalClock(duration),
+                        color = contentColor.copy(alpha = 0.8f),
+                    )
+                    if (unplayed) {
+                        Box(
+                            Modifier
+                                .size(6.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.primary)
+                                .semantics { contentDescription = "Not played" },
                         )
                     }
-                }
-            }
-            WaveformSeekBar(
-                waveform = ref.waveform,
-                progress = progress,
-                playedColor = contentColor,
-                idleColor = contentColor.copy(alpha = 0.35f),
-                label = "Voice message position",
-                modifier = Modifier.weight(1f).height(32.dp),
-                onSeek = { f -> hub.seekVoice(ref, f, knownDuration, sentByMe = isOwn) },
-            )
-            if (unplayed) {
-                Spacer(Modifier.width(4.dp))
-                Box(
-                    Modifier
-                        .size(8.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary)
-                        .semantics { contentDescription = "Not played" },
-                )
-            }
-        }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = if (isCurrent && voice.playing) formatClock(voice.positionMs) else formatTotalClock(duration),
-                style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier.padding(start = 8.dp),
-            )
-            Spacer(Modifier.weight(1f))
-            if (isCurrent) {
-                TextButton(onClick = hub::cycleRate) {
-                    Text(
-                        rateLabel(voice.rate),
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.semantics { contentDescription = "Playback speed ${rateLabel(voice.rate)}" },
-                    )
+                    Spacer(Modifier.weight(1f))
+                    // §2 — only while this message is the one playing: a speed
+                    // control on a message nobody is listening to is a control
+                    // for nothing.
+                    if (isCurrent) {
+                        Text(
+                            text = rateLabel(voice.rate),
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                            ),
+                            color = contentColor,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .clickable(
+                                    onClickLabel = "Change playback speed",
+                                    role = Role.Button,
+                                    onClick = hub::cycleRate,
+                                )
+                                .padding(horizontal = 4.dp, vertical = 1.dp)
+                                .semantics { contentDescription = "Playback speed ${rateLabel(voice.rate)}" },
+                        )
+                    }
                 }
             }
         }
@@ -195,11 +265,110 @@ internal fun VoiceBubble(ref: AttachmentRef, hub: ChatMediaHub, isOwn: Boolean, 
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.error,
                 modifier = Modifier
-                    .padding(start = 8.dp)
                     .clickable(onClickLabel = "Retry") { hub.toggleVoice(ref, knownDuration, sentByMe = isOwn) },
             )
         }
     }
+}
+
+/**
+ * §2 — the voice bubble's play button: a filled disc [VOICE_BUTTON_SIZE]
+ * across in the bubble's text colour, its glyph in the bubble's own
+ * background, so it reads as a solid button on the sunken incoming surface and
+ * on the accent outgoing one alike.
+ *
+ * The disc is DRAWN at 38dp and TOUCHED at [VOICE_TOUCH_TARGET]: the
+ * clickable sits on a box sized past the disc with `requiredSize`, which
+ * ignores the 38dp slot's constraints, so the target overflows the slot and
+ * costs no layout. The spec's geometry stays as written and the thumb still
+ * gets its 48dp. (Compose also widens a small target's hit bounds on its own,
+ * but that is a fallback applied when nothing was hit in bounds; this states
+ * the 48dp rather than relying on it.)
+ *
+ * [uploadProgress] draws the determinate ring of the "Uploading" state AROUND
+ * the disc by the same trick, so the row is the same size whether a message is
+ * in flight or delivered.
+ *
+ * A `null` [onClick] makes it a decoration rather than a button, which is what
+ * an in-flight message wants: it carries no semantics of its own, so TalkBack
+ * reads the one the pending bubble already puts on the whole row.
+ */
+@Composable
+private fun VoicePlayDisc(
+    playing: Boolean,
+    loading: Boolean,
+    discColor: Color,
+    glyphColor: Color,
+    label: String?,
+    onClick: (() -> Unit)?,
+    uploadProgress: Float? = null,
+) {
+    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(VOICE_BUTTON_SIZE)) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .requiredSize(if (onClick == null) VOICE_BUTTON_SIZE else VOICE_TOUCH_TARGET)
+                .then(
+                    if (onClick == null) {
+                        Modifier
+                    } else {
+                        // Clipped so the ripple is a circle around the disc
+                        // rather than a 48dp square, as IconButton's is.
+                        Modifier
+                            .clip(CircleShape)
+                            .clickable(role = Role.Button, onClick = onClick)
+                    },
+                )
+                .then(
+                    if (label == null) Modifier else Modifier.semantics { contentDescription = label },
+                ),
+        ) {
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .size(VOICE_BUTTON_SIZE)
+                    .clip(CircleShape)
+                    .background(discColor),
+            ) {
+                if (loading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        color = glyphColor,
+                        strokeWidth = 2.dp,
+                    )
+                } else {
+                    Icon(
+                        imageVector = if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                        // The disc carries the label; a second one here would
+                        // make TalkBack read the button twice.
+                        contentDescription = null,
+                        tint = glyphColor,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+            }
+        }
+        if (uploadProgress != null) {
+            CircularProgressIndicator(
+                progress = { uploadProgress.coerceIn(0f, 1f) },
+                modifier = Modifier.requiredSize(VOICE_BUTTON_SIZE + 8.dp),
+                color = discColor,
+                strokeWidth = 3.dp,
+                trackColor = Color.Transparent,
+            )
+        }
+    }
+}
+
+/** §2 — the bubble's quiet line, in a monospaced digit face so the number does
+ *  not shuffle as it counts. */
+@Composable
+private fun VoiceClock(text: String, color: Color) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+        color = color,
+    )
 }
 
 /** §3 timeline bubble — a circle, no bubble chrome. */
@@ -438,24 +607,47 @@ internal fun PendingMediaBubble(
             val inner = when (row.kind) {
                 KIND_VIDEO_NOTE -> Modifier.size(240.dp)
                 KIND_GIF -> Modifier.size(width = 200.dp, height = 140.dp)
-                else -> Modifier.padding(horizontal = 12.dp, vertical = 10.dp).width(220.dp)
+                // No fixed width: the voice row sizes itself exactly as the
+                // delivered bubble's does, so nothing shifts when it lands.
+                else -> Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
             }
             Box(contentAlignment = Alignment.Center, modifier = inner) {
                 when (row.kind) {
-                    KIND_VOICE -> Row(verticalAlignment = Alignment.CenterVertically) {
-                        UploadRing(row, Modifier.size(36.dp))
-                        Spacer(Modifier.width(8.dp))
-                        WaveformSeekBar(
-                            waveform = row.waveform,
-                            progress = 0f,
-                            playedColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                            idleColor = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.35f),
-                            label = "Voice message",
-                            modifier = Modifier.weight(1f).height(28.dp),
-                            onSeek = {},
+                    // §2 — the same row as a delivered voice message, with the
+                    // determinate ring drawn around the play disc. Nothing
+                    // about the geometry changes when the upload finishes.
+                    KIND_VOICE -> Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        VoicePlayDisc(
+                            playing = false,
+                            loading = false,
+                            discColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                            glyphColor = MaterialTheme.colorScheme.primaryContainer,
+                            // The Surface above already describes the whole row.
+                            label = null,
+                            onClick = null,
+                            uploadProgress = if (row.failed) null else row.progress,
                         )
-                        Spacer(Modifier.width(6.dp))
-                        Text(formatTotalClock(row.durationMs ?: 0L), style = MaterialTheme.typography.labelSmall)
+                        Column(
+                            modifier = Modifier.width(VOICE_COLUMN_WIDTH),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            WaveformSeekBar(
+                                waveform = row.waveform,
+                                progress = 0f,
+                                playedColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                idleColor = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.35f),
+                                label = "Voice message",
+                                modifier = Modifier.fillMaxWidth().height(VOICE_WAVEFORM_HEIGHT),
+                                onSeek = {},
+                            )
+                            VoiceClock(
+                                text = formatTotalClock(row.durationMs ?: 0L),
+                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f),
+                            )
+                        }
                     }
                     KIND_VIDEO_NOTE -> {
                         row.posterBytes?.let { bytes ->

@@ -58,6 +58,16 @@ export interface MediaHub {
   /** Become the only thing playing; the previous player is paused. */
   claim(key: string, pause: () => void): void;
   release(key: string): void;
+  /**
+   * The key that currently holds the claim, or `null` — a reactive read of
+   * the ownership `claim` already tracked privately. It says nothing new
+   * about playback; it exists so a bubble can show the controls that belong
+   * only to the message being played (UX spec section 2: the speed control is
+   * shown "only while this message is the one playing"). A paused message
+   * keeps the claim, as it does on iOS, so pausing does not hide the control
+   * that was just used.
+   */
+  activeKey: Accessor<string | null>;
   /** The key a bubble should start playing now (auto-continue), or `null`. */
   requestedPlay: Accessor<string | null>;
   consumeRequest(key: string): void;
@@ -78,6 +88,9 @@ export function createMediaHub(opts: {
   const [requestedPlay, setRequestedPlay] = createSignal<string | null>(null);
   const inflight = new Map<string, Promise<string>>();
   let current: { key: string; pause: () => void } | null = null;
+  // The same ownership as `current`, readable reactively. Written wherever
+  // `current` is, and nowhere else, so the two cannot disagree.
+  const [activeKey, setActiveKey] = createSignal<string | null>(null);
 
   function file(key: string, bytes: Uint8Array | Blob, mime: string | undefined): string | null {
     const type = blobTypeFor(mime, allowlist);
@@ -149,16 +162,24 @@ export function createMediaHub(opts: {
         prev.pause();
       }
       current = { key, pause };
+      setActiveKey(key);
     },
     release(key) {
-      if (current?.key === key) current = null;
+      if (current?.key === key) {
+        current = null;
+        setActiveKey(null);
+      }
     },
+    activeKey,
     requestedPlay,
     consumeRequest(key) {
       if (requestedPlay() === key) setRequestedPlay(null);
     },
     voiceEnded(key) {
-      if (current?.key === key) current = null;
+      if (current?.key === key) {
+        current = null;
+        setActiveKey(null);
+      }
       const next = nextVoiceToPlay(
         opts.voiceQueue().map((item) => ({ ...item, played: item.played || played().has(item.key) })),
         key,
@@ -168,6 +189,7 @@ export function createMediaHub(opts: {
     dispose() {
       current?.pause();
       current = null;
+      setActiveKey(null);
       registry.dispose();
       setVersion((v) => v + 1);
     },

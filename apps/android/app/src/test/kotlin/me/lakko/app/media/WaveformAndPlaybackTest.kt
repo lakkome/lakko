@@ -44,9 +44,31 @@ class WaveformAndPlaybackTest {
     }
 
     @Test
-    fun silentAndNonFiniteSamplesAreZeros() {
-        val out = downsampleWaveform(listOf(0.0, Double.NaN, -1.0, Double.POSITIVE_INFINITY))!!
-        assertTrue(out.all { it.toInt() == 0 })
+    fun anAllSilentTakeIsAbsentRatherThanARowOfZeros() {
+        // A row of zeros floors at 0.08 in `waveformBars` while an ABSENT
+        // waveform draws the 0.15 placeholder, so returning zeros made "we
+        // measured nothing" draw FLATTER than "we have no waveform" — the
+        // dotted line a silent capture put in the bubble. Nothing to draw
+        // either way; say so in the way that draws the better placeholder.
+        assertNull(downsampleWaveform(listOf(0.0, Double.NaN, -1.0, Double.POSITIVE_INFINITY)))
+        assertNull(downsampleWaveform(List(64) { 0.0 }))
+    }
+
+    @Test
+    fun theAbsentPlaceholderStandsTallerThanAFlooredZeroRow() {
+        // Why the rule above is the right way round, asserted rather than
+        // argued: this is the whole difference between the two placeholders.
+        val absent = waveformBars(null, 8)
+        val zeros = waveformBars(ByteArray(8), 8)
+        assertTrue(absent.all { it > zeros.max() })
+    }
+
+    @Test
+    fun oneSilentSampleDoesNotSilenceATakeThatHasSound() {
+        // Only an ENTIRELY silent take is absent: a real take with a quiet
+        // stretch still has a loudest bucket, so it still has a waveform.
+        val out = downsampleWaveform(listOf(0.0, 0.0, 0.4))!!.unsigned()
+        assertEquals(listOf(0, 0, 255), out)
     }
 
     @Test
@@ -54,6 +76,30 @@ class WaveformAndPlaybackTest {
         val bars = waveformBars(byteArrayOf(0, 255.toByte()), bars = 4)
         assertEquals(listOf(0.08f, 0.08f, 1f, 1f), bars)
         assertEquals(List(3) { 0.15f }, waveformBars(null, 3))
+    }
+
+    @Test
+    fun oneOutsizedFirstSampleFloorsEverythingAfterIt() {
+        // The mechanism behind the drained accumulator in
+        // `VoiceRecorder.start`. `getMaxAmplitude` reports the peak SINCE THE
+        // PREVIOUS CALL, so an undrained first reading covers an unbounded
+        // window — the microphone's startup transient, the gain ramp, the tap
+        // that began the take — and normalisation is by the LOUDEST bucket,
+        // so that one artifact pushes every real sample to the floor and the
+        // bubble draws a dotted line.
+        //
+        // This asserts the FOLD's behaviour, not the drain: the drain is one
+        // statement against a live `MediaRecorder` with no seam to fake (see
+        // the report). Keeping it means the reason the drain exists survives
+        // even if someone removes the drain.
+        val speech = List(16) { 0.25 }
+        val withTransient = downsampleWaveform(listOf(1.0) + speech, buckets = 17)!!.unsigned()
+        assertEquals(255, withTransient.first())
+        assertTrue(withTransient.drop(1).all { it <= 64 })
+
+        // Drained, the same speech is a full-height waveform.
+        val drained = downsampleWaveform(speech, buckets = 16)!!.unsigned()
+        assertTrue(drained.all { it == 255 })
     }
 
     @Test

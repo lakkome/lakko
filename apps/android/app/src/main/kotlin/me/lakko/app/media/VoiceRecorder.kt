@@ -56,6 +56,17 @@ public class VoiceRecorder(private val context: Context) {
             r.setOnErrorListener { _, _, _ -> onError() }
             r.prepare()
             r.start()
+            // `getMaxAmplitude` reports the peak SINCE THE PREVIOUS CALL, so
+            // the first reading covers an unbounded window rather than one
+            // tick: everything from the moment the recorder was created —
+            // the microphone's startup transient, the gain ramp, the tap that
+            // began the take. That is an artifact of when the accumulator was
+            // last drained, not a measurement of anything the person said,
+            // and `downsampleWaveform` normalises by the LOUDEST bucket, so
+            // one such sample pushes every real one toward the floor and the
+            // bubble draws a flat dotted line. Drain it once here; the first
+            // real sample then covers one tick like every other.
+            runCatching { r.maxAmplitude }
             recorder = r
             output = file
             startedAt = SystemClock.elapsedRealtime()

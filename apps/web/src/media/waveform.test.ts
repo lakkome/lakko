@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { MAX_WAVEFORM_BYTES, downsampleWaveform, rmsLevel, waveformBars } from "./waveform";
+import { MAX_WAVEFORM_BYTES, barIsPlayed, downsampleWaveform, rmsLevel, waveformBars } from "./waveform";
 
 describe("downsampleWaveform", () => {
   it("never exceeds the envelope bound, whatever the take length", () => {
@@ -36,9 +36,29 @@ describe("downsampleWaveform", () => {
     expect(out[0]).toBeLessThan(10);
   });
 
-  it("empty is absent, silence is all zeros, garbage values read as zero", () => {
+  it("empty is absent, and so is an entirely silent take", () => {
     expect(downsampleWaveform([])).toBeUndefined();
-    expect(Array.from(downsampleWaveform([0, 0, 0])!)).toEqual([0, 0, 0]);
+    expect(downsampleWaveform([0, 0, 0])).toBeUndefined();
+  });
+
+  /**
+   * The reason the rule above is the right way round rather than arbitrary:
+   * `waveformBars` floors a zero row at 0.08 and draws an ABSENT waveform at
+   * 0.15, so recording "we measured silence" would draw flatter than having
+   * measured nothing at all. At 0.08 a bar is wider than it is tall, which is
+   * what turned a waveform into a row of dots.
+   */
+  it("the absent placeholder stands taller than a floored zero row would", () => {
+    const absent = waveformBars(undefined, 8)[0] ?? 0;
+    const zeros = waveformBars(new Uint8Array(8), 8)[0] ?? 0;
+    expect(absent).toBeGreaterThan(zeros);
+  });
+
+  it("one silent sample does not silence a take that has sound", () => {
+    expect(downsampleWaveform([0, 0.5, 0])).toBeDefined();
+  });
+
+  it("garbage values read as zero without silencing the take", () => {
     expect(Array.from(downsampleWaveform([Number.NaN, -1, 0.5, Infinity])!)).toEqual([0, 0, 255, 0]);
   });
 });
@@ -56,5 +76,44 @@ describe("display helpers", () => {
     expect(rmsLevel([])).toBe(0);
     expect(rmsLevel([0.5, -0.5])).toBeCloseTo(0.5);
     expect(rmsLevel([4, 4])).toBe(1);
+  });
+});
+
+/**
+ * UX spec section 2 — the waveform is the progress indicator, so which bars
+ * are behind the playhead is a rule, not a detail. It lives in one place
+ * because the bubble and the composer's preview player had drawn the same
+ * picture by two different rules.
+ */
+describe("barIsPlayed", () => {
+  it("fills a bar once the playhead passes its midpoint", () => {
+    // Four bars: midpoints at 12.5%, 37.5%, 62.5%, 87.5% of the duration.
+    const at = (ms: number): boolean[] => [0, 1, 2, 3].map((i) => barIsPlayed(i, 4, ms, 1000));
+    expect(at(0)).toEqual([false, false, false, false]);
+    expect(at(124)).toEqual([false, false, false, false]);
+    expect(at(125)).toEqual([true, false, false, false]);
+    expect(at(500)).toEqual([true, true, false, false]);
+    expect(at(1000)).toEqual([true, true, true, true]);
+  });
+
+  it("fills nothing without a playhead", () => {
+    // No duration yet (metadata still loading), a degenerate bar count, or a
+    // position that is not a number: draw the unplayed track, never a full
+    // bar on a message that has not started.
+    expect(barIsPlayed(0, 4, 500, 0)).toBe(false);
+    expect(barIsPlayed(0, 4, 500, Number.NaN)).toBe(false);
+    expect(barIsPlayed(0, 0, 500, 1000)).toBe(false);
+    expect(barIsPlayed(0, 4, Number.NaN, 1000)).toBe(false);
+  });
+
+  it("is monotone in the position and in the index", () => {
+    for (let i = 0; i < 40; i += 1) {
+      for (let ms = 0; ms <= 1000; ms += 50) {
+        if (barIsPlayed(i, 40, ms, 1000)) {
+          expect(barIsPlayed(i, 40, ms + 50, 1000)).toBe(true);
+          if (i > 0) expect(barIsPlayed(i - 1, 40, ms, 1000)).toBe(true);
+        }
+      }
+    }
   });
 });

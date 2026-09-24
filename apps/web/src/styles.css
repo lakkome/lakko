@@ -2164,32 +2164,61 @@ a.ghost.small.lk-wide-only {
   align-items: center;
   font-variant-numeric: tabular-nums;
 }
+/* UX spec docs/ux/media-messages.md section 2, "Timeline bubble" — the
+   ARRANGEMENT, which the spec had left unwritten and the three clients had
+   each guessed at. The row is the play button and one fixed-width column; the
+   failure affordances stack UNDER it, so the row's geometry is the same in
+   every state. */
 .lakko-voice {
   display: flex;
+  flex-direction: column;
+  /* Leading, not stretched: "Not sent · Retry" and "Couldn't play this
+     message" are lines under the row, not full-width bars. */
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+}
+.lakko-voice-row {
+  display: flex;
   align-items: center;
-  gap: 0.5rem;
-  min-width: min(16rem, 60vw);
+  gap: 10px;
 }
 .lakko-voice-play {
   position: relative;
   flex: 0 0 auto;
-  width: 2.2rem;
-  height: 2.2rem;
+  width: 38px;
+  height: 38px;
   padding: 0;
   border-radius: 50%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border: none;
+  /* The bubble's text colour, filled; the glyph inside takes the bubble's own
+     background (set per tone in the component), so the button reads as solid
+     on the sunken incoming surface and on the accent outgoing one alike. */
   background: currentColor;
 }
 .lakko-voice-play > span.glyph { font-size: 0.85rem; line-height: 1; }
+/* About 170px wide, as on iOS. `flex: 0 1 170px` rather than a hard width so a
+   narrow phone shrinks the column instead of pushing the row out of the
+   bubble; the seek maths reads the waveform's measured width, so a shrunk
+   column still scrubs to the right place. */
+.lakko-voice-col {
+  flex: 0 1 170px;
+  width: 170px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
 .lakko-wave {
   /* `auto` basis, not `flex: 1`: inside the bubble's column the basis is a
-   * height, and a zero basis collapsed the waveform to a line. */
+   * height, and a zero basis collapsed the waveform to a line. The width in
+   * that column comes from stretching to it, not from `flex`. */
   flex: 1 1 auto;
-  height: 1.8rem;
-  min-height: 1.8rem;
+  height: 26px;
+  min-height: 26px;
   display: flex;
   align-items: center;
   gap: 1px;
@@ -2199,27 +2228,39 @@ a.ghost.small.lk-wide-only {
 }
 .lakko-wave > i {
   flex: 1;
-  border-radius: 1px;
+  /* A capsule, as on iOS — a 1px radius on a ~3px bar read as a row of
+     squares rather than as a waveform. */
+  border-radius: 999px;
   background: currentColor;
   opacity: 0.35;
-  min-height: 2px;
+  min-height: 3px;
 }
 .lakko-wave > i[data-on="true"] { opacity: 1; }
-.lakko-voice-meta {
+/* The one quiet line under the waveform: elapsed-or-total, the unplayed dot,
+   and the speed control at the trailing end. */
+.lakko-voice-line {
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 0.1rem;
+  align-items: center;
+  gap: 6px;
   font-size: 0.72rem;
-  font-variant-numeric: tabular-nums;
+  line-height: 1;
 }
-.lakko-voice-meta button {
-  padding: 0 0.3rem;
-  font-size: 0.7rem;
-  border-radius: 999px;
+.lakko-voice-time {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+/* Pushed to the trailing end. It is rendered only while this message is the
+   one playing, so there is nothing to push when it is absent. */
+.lakko-voice-rate {
+  margin-left: auto;
+  padding: 0;
+  border: none;
   background: transparent;
   color: inherit;
-  border: 1px solid currentColor;
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1;
 }
 .lakko-unplayed {
   width: 0.45rem;

@@ -32,7 +32,14 @@ public enum Waveform {
             if v > peaks[b] { peaks[b] = v }
         }
         let loudest = peaks.max() ?? 0
-        guard loudest > 0 else { return Data(repeating: 0, count: count) }
+        // An entirely silent take has no waveform, and saying so is not the
+        // same as saying "every bar is zero". ``bars(_:count:)`` floors a zero
+        // row at 0.08 and draws an ABSENT waveform at 0.15, so recording the
+        // measurement would draw FLATTER than having no measurement at all,
+        // which is backwards. At that height a bar is wider than it is tall,
+        // which is what turned a waveform into a row of dots. Found on
+        // Android, fixed in all three ports.
+        guard loudest > 0 else { return nil }
         return Data(peaks.map { p in
             UInt8(max(0, min(255, ((p / loudest) * 255).rounded())))
         })

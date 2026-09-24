@@ -1417,6 +1417,7 @@ private fun Bubble(
                                         hub = mediaHub,
                                         isOwn = isOwn,
                                         contentColor = contentColor,
+                                        bubbleColor = background,
                                         onSave = onSave,
                                         onLongPress = openMenu,
                                         mediaOverlay = if (mediaOnly) {

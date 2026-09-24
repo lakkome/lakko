@@ -22,7 +22,7 @@ import {
   type RecState,
 } from "./recording-machine";
 import { DENIED_COPY, NOTICE_COPY, type Recorder } from "./recording-controller";
-import { waveformBars } from "./waveform";
+import { barIsPlayed, waveformBars } from "./waveform";
 
 function holding(s: RecState): boolean {
   return s.phase === "recording" || s.phase === "requesting";
@@ -284,7 +284,7 @@ function VoicePreview(props: { recorder: Recorder }): JSX.Element {
         <For each={bars()}>
           {(h, i) => (
             <i
-              data-on={duration() > 0 && (i() + 1) / bars().length <= position() / duration()}
+              data-on={barIsPlayed(i(), bars().length, position(), duration())}
               style={{ height: `${Math.round(h * 100)}%` }}
             />
           )}

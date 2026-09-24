@@ -24,10 +24,19 @@ public const val MAX_RECORDER_AMPLITUDE: Int = 32767
 
 /**
  * Fold [levels] (non-negative amplitudes, any scale) into at most [buckets]
- * bytes, normalised so the loudest bucket is 255. Returns `null` for an empty
- * series — the envelope field is then simply absent. A silent take yields all
- * zeros, which is honest: there was nothing to draw. Non-finite and negative
+ * bytes, normalised so the loudest bucket is 255. Non-finite and negative
  * samples count as silence.
+ *
+ * Returns `null` for an empty series AND for an all-silent one — the envelope
+ * field is then simply absent. This used to hand back a non-empty row of
+ * zeros, on the reasoning that it was honest about having measured nothing.
+ * It was not: [waveformBars] floors a zero byte at `0.08` while an ABSENT
+ * waveform draws the `0.15` placeholder, so "we measured nothing" rendered
+ * FLATTER than "we have no waveform" — the wrong way round, and at that height
+ * every bar is wider than it is tall, which is the dotted line a silent
+ * capture (an emulator, a microphone whose amplitude never reports) put in the
+ * bubble. There is nothing to draw either way; say so once, in the way that
+ * draws the better placeholder.
  */
 public fun downsampleWaveform(
     levels: List<Double>,
@@ -44,8 +53,8 @@ public fun downsampleWaveform(
         if (v > peaks[b]) peaks[b] = v
     }
     val max = peaks.maxOrNull() ?: 0.0
+    if (max == 0.0) return null
     val out = ByteArray(count)
-    if (max == 0.0) return out
     for (i in 0 until count) {
         val scaled = Math.round((peaks[i] / max) * 255.0).toInt().coerceIn(0, 255)
         out[i] = scaled.toByte()
