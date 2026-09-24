@@ -88,8 +88,14 @@ public struct ChatScreen: View {
     }
 
     /// ADR-0047 §6 — the call owns the audio session and the camera.
-    private var callLive: Bool {
-        viewModel.activeCall != nil || viewModel.anyCallInProgress
+    ///
+    /// This used to be `activeCall != nil || anyCallInProgress`, which answers a
+    /// different question: a ringing offer takes the call slot and takes no
+    /// microphone, so the recorder was refused at exactly the moment a voice
+    /// message was the only reply that fitted. ``CallCapture`` and the shared
+    /// rule tell the two apart.
+    private var callOwnsCapture: Bool {
+        viewModel.callOwnsCapture
     }
 
     public var body: some View {
@@ -102,12 +108,12 @@ public struct ChatScreen: View {
             .environmentObject(media.live)
             .onAppear {
                 media.updateTimeline(viewModel.messages)
-                media.callActive = callLive
+                media.callActive = callOwnsCapture
             }
             .onChange(of: viewModel.messages) { _, messages in
                 media.updateTimeline(messages)
             }
-            .onChange(of: callLive) { _, live in
+            .onChange(of: callOwnsCapture) { _, live in
                 media.callActive = live
             }
             .onDisappear { media.chatHidden() }

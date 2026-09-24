@@ -610,6 +610,21 @@ public final class ChatViewModel: ObservableObject {
         callHost.occupiesSlot || callHost.otherCallBusy || groupCallHost.occupiesSlot
     }
 
+    /// `docs/ux/media-messages.md` — a call is HOLDING the microphone and
+    /// camera, so the composer's recorder stands aside.
+    ///
+    /// Not the same question as ``anyCallInProgress``, and that is the whole
+    /// point: an offer merely being rung takes the call slot — so the call
+    /// buttons rightly stand down — while taking no microphone, so a voice
+    /// message must still be recordable. ``CallCapture`` is the seam onto the
+    /// shared rule; this only reads the facts.
+    var callOwnsCapture: Bool {
+        CallCapture.ownsCapture(
+            callInSlot: activeCall != nil || anyCallInProgress,
+            oneToOneState: callHost.activeCallState,
+            otherKindInSlot: callHost.otherCallBusy || groupCallHost.occupiesSlot)
+    }
+
     /// A group call start / join on THIS chat is past its tap but not yet
     /// holding a session.
     var groupCallStarting: Bool { groupCallHost.startingGroupIdHex == groupIdHex }

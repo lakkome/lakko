@@ -13,6 +13,7 @@
 //! Nothing here touches a screen, a store or the network. A client maps what
 //! it already holds into these types, asks, and renders the answer.
 
+use lakko_ui_rules::capture::call_holds_capture as rust_call_holds_capture;
 use lakko_ui_rules::conversation::{
     order_conversations as rust_order_conversations, ConversationKind as RustConversationKind,
     ConversationRow as RustConversationRow,
@@ -421,6 +422,20 @@ pub fn remaining_ring_ms(offer_age_ms: u64) -> u64 {
 #[must_use]
 pub fn call_ring_window_ms() -> u64 {
     CALL_RING_WINDOW_MS
+}
+
+/// Whether the composer's voice and video-note recorder must stand aside
+/// because a call is holding the microphone and camera.
+///
+/// `callInThisChat` is the client's own read of its call slot.
+/// `unansweredIncomingRing` narrows it to the one state that owns no
+/// capture: an incoming call still being offered. An outgoing call holds
+/// capture from the moment it is placed, so it is deliberately not carved
+/// out.
+#[uniffi::export]
+#[must_use]
+pub fn call_holds_capture(call_in_this_chat: bool, unanswered_incoming_ring: bool) -> bool {
+    rust_call_holds_capture(call_in_this_chat, unanswered_incoming_ring)
 }
 
 #[cfg(test)]

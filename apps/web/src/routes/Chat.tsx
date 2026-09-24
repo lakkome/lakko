@@ -50,6 +50,7 @@ import { groupIdHex as hexOf } from "../devices/sync/state";
 import { useCallHost } from "../calls/CallHostContext";
 import { QuietIncomingCallPanel } from "../calls/QuietIncomingCallPanel";
 import { quietCallOfferFor, type QuietCallOffer } from "../calls/quiet-call-offer";
+import { callOwnsCaptureIn } from "../calls/capture-rule";
 import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
 import { eventToPersistedMessage, mergeForegroundSlot } from "../chat/background-log";
 import { opsFromPersisted, persistedWithOps } from "../chat/message-ops-store";
@@ -3422,6 +3423,19 @@ function ChatView(props: {
   const pushWakeReach = createPushWakeReach();
   const callInProgress = (): boolean =>
     callHost.callLaneGroupIdB64() === props.entry.groupIdB64;
+  /**
+   * Whether a call is HOLDING the microphone and camera, so the composer's
+   * recorder must stand aside (`docs/ux/media-messages.md`).
+   *
+   * Deliberately not `callInProgress` itself, which answers a different
+   * question and has a second reader above: a ringing offer keeps the receive
+   * loop awake precisely BECAUSE the call signaling rides this journal, while
+   * the same offer holds no microphone. The rule that tells the two apart is
+   * `crates/lakko-ui-rules/src/capture.rs`, reached through
+   * `calls/capture-rule.ts`; both facts are the client's existing reads.
+   */
+  const callOwnsCapture = (): boolean =>
+    callOwnsCaptureIn(uiRules(), callHost, props.entry.groupIdB64);
   function receiveLoopPaused(): boolean {
     return mayParkReceive({
       documentHidden: globalThis.document?.visibilityState === "hidden",
@@ -4271,7 +4285,7 @@ function ChatView(props: {
 
   const recorder = createRecorder({
     onSend: sendCapturedTake,
-    inCall: () => callInProgress(),
+    inCall: () => callOwnsCapture(),
     createUrl: (blob) => hub.registry.set(`take:${Date.now()}:${Math.random()}`, blob),
     revokeUrl: (url) => {
       for (const [k, u] of hub.registry.entries()) if (u === url) hub.registry.revoke(k);
@@ -4279,10 +4293,13 @@ function ChatView(props: {
   });
   onCleanup(() => recorder.dispose());
   // UX spec §6 — the call owns the microphone and camera; a take in progress
-  // when a call starts is dropped, as is one when the membership ends.
+  // when a call starts is dropped, as is one when the membership ends. Read
+  // through the same `callOwnsCapture` the recorder is gated on, so a take is
+  // dropped exactly when recording stops being allowed: an offer merely being
+  // rung takes nothing, and the take is dropped the moment it is answered.
   createEffect(
     on(
-      () => callInProgress() || membershipEnded(),
+      () => callOwnsCapture() || membershipEnded(),
       (blocked) => {
         if (blocked && recorder.state().phase !== "idle") recorder.cancel();
       },

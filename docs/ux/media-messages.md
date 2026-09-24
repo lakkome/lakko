@@ -195,6 +195,7 @@ start.
 | Denied | An inline card above the composer: `Lakko needs microphone access to record voice messages` (or camera) with **Open Settings** on iOS/Android; on web, `Allow microphone access in your browser's site settings` |
 | Revoked while recording | Recording stops, the take is discarded, the denied card shows |
 | In a call | Mic and camera buttons are disabled with `Unavailable during a call` — the call owns the audio session and the camera |
+| A call ringing in, not yet answered | The recorder stays usable. Nothing is capturing: an incoming call does not open the callee's microphone until it is accepted. An OUTGOING call is different and is treated as in a call from the moment it is placed, because the caller's microphone opens then |
 
 Web additionally needs the deployment to allow capture: the page's Permissions-Policy
 must permit `microphone=(self)` and `camera=(self)`.

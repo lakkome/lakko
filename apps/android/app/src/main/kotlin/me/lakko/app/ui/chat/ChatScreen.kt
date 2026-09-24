@@ -118,6 +118,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.lakko.app.calls.CallSession
+import me.lakko.app.calls.callOwnsCapture
 import me.lakko.app.calls.quietOffer
 import me.lakko.app.chat.AttachmentBridge
 import androidx.compose.ui.text.style.TextDecoration
@@ -130,6 +131,7 @@ import me.lakko.app.chat.UploadStage
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 import uniffi.lakko_ffi_uniffi.GroupInfoCapabilities
 import uniffi.lakko_ffi_uniffi.InfoSection
+import uniffi.lakko_ffi_uniffi.callHoldsCapture
 import uniffi.lakko_ffi_uniffi.groupInfoSections
 
 /**
@@ -435,7 +437,19 @@ public fun ChatScreen(
     }
     val pendingMedia by viewModel.pendingMedia.collectAsStateWithLifecycle()
     val recorder = rememberRecordController(mediaHub) { take -> viewModel.sendRecordedTake(take) }
-    val callOwnsMedia = callOccupant != null
+    // `docs/ux/media-messages.md` — the recorder stands aside while a call
+    // HOLDS the microphone and camera. This used to be `callOccupant != null`,
+    // which answers a different question: an offer merely being rung takes the
+    // slot and takes no microphone, so a voice message was refused at exactly
+    // the moment it was the only reply that fitted. The rule that tells the two
+    // apart is `crates/lakko-ui-rules/src/capture.rs`; both facts are the reads
+    // this screen already has.
+    val callOwnsMedia = callOwnsCapture(
+        occupant = callOccupant,
+        call = oneToOneCall,
+        state = oneToOneCallState,
+        holdsCapture = ::callHoldsCapture,
+    )
     SideEffect { recorder.inCall = callOwnsMedia }
     // UX spec §4 — the picker: composer mode (insert, stays open) or reaction
     // mode for one message (react, closes). `null` when closed.

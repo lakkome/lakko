@@ -49,6 +49,12 @@ export type UiRules = Pick<
   | "ringDecision"
   | "remainingRingMs"
   | "callRingWindowMs"
+  // Whether a call is HOLDING the microphone and camera, so the composer's
+  // recorder must stand aside (`docs/ux/media-messages.md`). Here because
+  // every client asked a different question - is there a call in this chat -
+  // and the two part company for a ringing offer nobody has answered;
+  // `calls/capture-rule.ts` is the adapter the composer reaches it through.
+  | "callHoldsCapture"
 >;
 
 const [rules, setRules] = createSignal<UiRules | null>(null);
