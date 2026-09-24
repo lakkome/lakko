@@ -69,7 +69,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import me.lakko.app.calls.quietOffer
 import me.lakko.app.channels.ChannelsUiState
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.ChatRepository
@@ -133,6 +135,17 @@ public fun ChatListScreen(
     modifier: Modifier = Modifier,
     channels: ChannelsUiState? = null,
     deviceGroupSync: DeviceGroupSyncRepository? = null,
+    /**
+     * The process-wide 1x1 call host ([me.lakko.app.calls.AppCallHost.instance]),
+     * or `null`.
+     *
+     * `docs/ux/calls.md` section 2.1.1 — a call in a MUTED conversation makes no
+     * sound and never takes the screen over, so this list is one of the two
+     * places it is offered instead: the ringing chat's own row carries Accept and
+     * Decline. The host is the one source of what is ringing; this screen reads
+     * its slot and adds no state of its own.
+     */
+    callHost: me.lakko.app.calls.OneToOneCallHost<*>? = null,
 ) {
     val state by repository.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
@@ -153,6 +166,27 @@ public fun ChatListScreen(
     var refreshing by remember { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
     var createMenuOpen by remember { mutableStateOf(false) }
+
+    // docs/ux/calls.md section 2.1.1 — the muted conversation whose call is
+    // ringing right now, or `null`. Read straight from the one call slot: this
+    // screen keeps no call state, starts no timer and counts nothing down. The
+    // offer disappears on its own when the window runs out, because the host
+    // ends the call it belongs to and clears the slot.
+    // Both fallbacks are hoisted rather than written inline behind the `?:`, so
+    // the `remember`s are reached on every composition: a slot that only exists
+    // while nothing is ringing changes the composition's shape the moment a call
+    // arrives.
+    val noCall = remember { MutableStateFlow<me.lakko.app.calls.OneToOneCall<*>?>(null) }
+    val noCallState = remember {
+        MutableStateFlow(me.lakko.app.calls.CallSession.WebCallState.Done)
+    }
+    val ringingCall: me.lakko.app.calls.OneToOneCall<*>? by (callHost?.active ?: noCall)
+        .collectAsStateWithLifecycle()
+    val ringingCallState by (ringingCall?.session?.state ?: noCallState)
+        .collectAsStateWithLifecycle()
+    val quietCallOffer = remember(ringingCall, ringingCallState) {
+        ringingCall?.quietOffer(ringingCallState)
+    }
 
     LaunchedEffect(Unit) {
         // One immediate poll so the list is fresh on arrival; the continuous
@@ -400,6 +434,17 @@ public fun ChatListScreen(
                                             row = row,
                                             onClick = { onOpenThread(row.id) },
                                             onToggleFlag = toggle,
+                                            // Section 2.1.1 — the row carries
+                                            // Accept and Decline for exactly
+                                            // the conversation the muted call
+                                            // is ringing in, and for no other.
+                                            quietCallOffer = quietCallOffer?.takeIf { it.isFor(row.id) },
+                                            // The same two entry points the
+                                            // full-screen ring screen drives.
+                                            onAcceptCall = { withVideo ->
+                                                callHost?.accept(withVideo = withVideo)
+                                            },
+                                            onDeclineCall = { callHost?.decline() },
                                         )
                                     }
                                 }
@@ -667,6 +712,9 @@ private fun SwipeableThreadRow(
     row: ConversationListRow,
     onClick: () -> Unit,
     onToggleFlag: (FlagField) -> Unit,
+    quietCallOffer: me.lakko.app.calls.QuietCallOffer? = null,
+    onAcceptCall: (withVideo: Boolean) -> Unit = {},
+    onDeclineCall: () -> Unit = {},
 ) {
     val dismissState = rememberSwipeToDismissBoxState(
         confirmValueChange = { value ->
@@ -719,7 +767,14 @@ private fun SwipeableThreadRow(
         },
     ) {
         Box(modifier = Modifier.background(MaterialTheme.colorScheme.background)) {
-            ThreadRow(row = row, onClick = onClick, onToggleFlag = onToggleFlag)
+            ThreadRow(
+                row = row,
+                onClick = onClick,
+                onToggleFlag = onToggleFlag,
+                quietCallOffer = quietCallOffer,
+                onAcceptCall = onAcceptCall,
+                onDeclineCall = onDeclineCall,
+            )
         }
     }
 }
@@ -730,16 +785,34 @@ private fun ThreadRow(
     row: ConversationListRow,
     onClick: () -> Unit,
     onToggleFlag: (FlagField) -> Unit,
+    quietCallOffer: me.lakko.app.calls.QuietCallOffer? = null,
+    onAcceptCall: (withVideo: Boolean) -> Unit = {},
+    onDeclineCall: () -> Unit = {},
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     Box {
-        ConversationRowBody(
-            row = row,
-            modifier = Modifier.combinedClickable(
-                onClick = onClick,
-                onLongClick = { menuOpen = true },
-            ),
-        )
+        Column {
+            ConversationRowBody(
+                row = row,
+                modifier = Modifier.combinedClickable(
+                    onClick = onClick,
+                    onLongClick = { menuOpen = true },
+                ),
+            )
+            // docs/ux/calls.md section 2.1.1 — the muted conversation's call is
+            // answerable from the row, which is where the person is already
+            // looking and needs no navigation. Inside the row's own column, so
+            // the rows below move down rather than being covered.
+            quietCallOffer?.let { offer ->
+                me.lakko.app.ui.call.QuietIncomingCallRowActions(
+                    offer = offer,
+                    // The row's own title: the conversation is named once.
+                    callerName = row.title,
+                    onAccept = onAcceptCall,
+                    onDecline = onDeclineCall,
+                )
+            }
+        }
         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
             DropdownMenuItem(
                 text = { Text(if (row.pinned) "Unpin" else "Pin") },

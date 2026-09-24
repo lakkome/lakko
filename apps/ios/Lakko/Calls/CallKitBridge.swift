@@ -153,7 +153,11 @@ final class CallKitBridge {
         let surface = IncomingCallPresentation.decide(
             source: .signalingRow,
             appIsActive: appIsActive(),
-            alreadyReported: provider.isReported(uuid)
+            alreadyReported: provider.isReported(uuid),
+            // `docs/ux/calls.md` section 2.1.1 — a muted conversation's call is
+            // offered quietly, in the layout, so the phone is never told about
+            // it. Read from the host, which decided it when the row was routed.
+            quiet: host.incomingQuiet
         )
         // Which surface rings is the difference between a call the user sees
         // and one that is silent everywhere: `.none` reports to neither, and
@@ -163,8 +167,11 @@ final class CallKitBridge {
             String(describing: surface), appIsActive() ? "yes" : "no",
             provider.isReported(uuid) ? "yes" : "no")
         // Record the choice so `CallHostOverlay` can honour it for as long as
-        // the call rings, not just at the instant it started.
-        host.setRingingOnSystemUi(surface != .inApp)
+        // the call rings, not just at the instant it started. Only the two
+        // surfaces that ARE the system's own set this; `.quiet` must not, or
+        // the flag would claim the phone is ringing a call it was never told
+        // about.
+        host.setRingingOnSystemUi(surface == .systemCallUi || surface == IncomingCallUi.none)
         switch surface {
         case .systemCallUi:
             reportedUuid = uuid
@@ -192,6 +199,16 @@ final class CallKitBridge {
             )
         case .inApp:
             // `CallHostOverlay` is already showing it; the phone stays quiet.
+            break
+        case .quiet:
+            // `docs/ux/calls.md` section 2.1.1 — a muted conversation. The
+            // phone is told nothing: no report, so no ringtone, no vibration
+            // and no system call screen, whether the app is frontmost or not.
+            // The call is offered in the chat and in the conversation list
+            // instead, and every later transition of this call (answered,
+            // ended) flows through `apply` as usual — `reportConnected` on a
+            // call CallKit was never told about is a no-op, which is already
+            // the shape an `.inApp` accept has.
             break
         }
     }

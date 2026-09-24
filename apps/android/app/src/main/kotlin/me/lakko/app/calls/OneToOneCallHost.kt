@@ -284,23 +284,31 @@ public enum class OneToOneCallPresentation {
     IN_CALL_SCREEN,
 
     /**
-     * Nothing at all: the conversation is muted and this call is still
-     * ringing (`docs/ux/calls.md` section 2.1).
+     * The conversation is muted and this call is still ringing: the call is
+     * OFFERED on the two quiet in-place surfaces of `docs/ux/calls.md` section
+     * 2.1.1, and the app-wide overlay draws nothing for it.
      *
      * A screen that takes over the phone IS an interruption, so withholding
      * the ringtone while still throwing the call across whatever the person
-     * was reading would honour half the rule. The call is not dropped - it
-     * takes the slot, runs its window and lands in the history as a missed
-     * call exactly as an unmuted one does - and the moment it is accepted or
-     * connects it presents normally, because by then nobody is being
-     * interrupted.
+     * was reading would honour half the rule. But withholding the call as well
+     * is the other half's mirror image, and it is what this value used to be
+     * called: `NONE`, meaning nothing was drawn anywhere, which made a muted
+     * contact unanswerable and turned muting a conversation into half-blocking
+     * the person. Rejected on 2026-09-23.
      *
-     * The cost is real and deliberate: a muted call cannot be answered, only
-     * called back. Answering without interrupting needs a non-modal
-     * affordance no client has; section 2.1 already specifies one for the
-     * second-call case, which is where it would come from.
+     * So the interruption goes and the OFFER stays, on surfaces the person has
+     * to be looking at already — the panel at the top of that conversation
+     * ([quietCallOffer]) and that chat's row in the conversation list. Neither
+     * covers anything, neither takes focus, and both simply stop existing when
+     * the ring window runs out, because the host's own RING timer ends the call
+     * and clears the slot they read from.
+     *
+     * The call is not dropped either way: it takes the slot, runs its window
+     * and lands in the history as a missed call exactly as an unmuted one does,
+     * and the moment it is accepted or connects it presents normally, because
+     * by then nobody is being interrupted.
      */
-    NONE,
+    QUIET_OFFER,
 }
 
 /**
@@ -309,7 +317,9 @@ public enum class OneToOneCallPresentation {
  *
  * `muted` is asked FIRST among the ringing conditions for the same reason the
  * shared rule puts the interruption on one side of its own line: what mute
- * withholds is the interruption, and this screen is one.
+ * withholds is the interruption, and this screen is one. What mute does NOT
+ * withhold is the call — see [OneToOneCallPresentation.QUIET_OFFER] and
+ * [quietCallOffer], which is the surface the muted verdict hands the call to.
  */
 public fun oneToOneCallPresentation(
     state: CallSession.WebCallState,
@@ -317,7 +327,7 @@ public fun oneToOneCallPresentation(
     muted: Boolean = false,
 ): OneToOneCallPresentation =
     if (state == CallSession.WebCallState.Ringing && !accepted) {
-        if (muted) OneToOneCallPresentation.NONE else OneToOneCallPresentation.RINGING_SCREEN
+        if (muted) OneToOneCallPresentation.QUIET_OFFER else OneToOneCallPresentation.RINGING_SCREEN
     } else {
         OneToOneCallPresentation.IN_CALL_SCREEN
     }

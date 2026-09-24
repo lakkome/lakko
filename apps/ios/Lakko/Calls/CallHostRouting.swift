@@ -52,8 +52,9 @@ struct InboundCallRow: Equatable {
 ///   * **Stale offers do not ring.** An offer older than the ring window by its
 ///     DS row time does not ring and is not answered busy either: the caller
 ///     gave up already and nobody is waiting on a reply.
-///   * **A muted conversation never rings** (`docs/ux/calls.md` section 2.1).
-///     It is still recorded — only the interruption is withheld.
+///   * **A muted conversation never rings** (`docs/ux/calls.md` sections 2.1
+///     and 2.1.1). It is still OFFERED, and still answerable — only the
+///     interruption is withheld.
 ///   * **An ended call never rings again**, whatever the journal still holds.
 ///
 /// The last two are one question, answered once for all three clients by
@@ -85,14 +86,20 @@ enum CallHostRouting {
         case drop
         /// Open a ringing answerer session for this offer.
         case ring
-        /// Record the call; interrupt nobody. The conversation is muted.
+        /// Offer the call without interrupting. The conversation is muted.
         ///
-        /// Deliberately NOT ``drop``. A person who muted a conversation asked
-        /// not to be interrupted by it; they did not ask to be kept from
-        /// finding out who tried to reach them, so the call still lands in the
-        /// history and the Calls list exactly as an unanswered unmuted one
-        /// does. Only the ringtone, the vibration and the screen that takes
-        /// over the phone are withheld.
+        /// Deliberately NOT ``drop``, and — since `docs/ux/calls.md` section
+        /// 2.1.1 — not "show nothing" either. It opens the SAME ringing session
+        /// ``ring`` does, so the call is answerable for the whole window; what
+        /// is withheld is the interruption, and only that: no ringtone, no
+        /// vibration, and neither surface that takes the screen over. The call
+        /// is offered on the two quiet surfaces
+        /// ``QuietIncomingCallPresentation`` names, and lands in the history
+        /// exactly as an unanswered unmuted one does.
+        ///
+        /// It stays a separate verdict from ``ring`` because the difference is
+        /// real and is read downstream (``CallHost/incomingQuiet``); folding
+        /// the two together is what would ring a muted phone.
         case silent
         /// Publish `End{busy}` to the offering group; do not ring.
         case busy

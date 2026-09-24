@@ -58,6 +58,12 @@ public struct ChatListScreen: View {
     /// keeps the row indicators + the sort order live as sibling devices
     /// publish updates.
     @EnvironmentObject private var deviceGroupSync: DeviceGroupSyncRepository
+    /// `docs/ux/calls.md` section 2.1.1 — the app-level 1x1 call host, read for
+    /// ONE thing: a call arriving in a MUTED conversation, which is offered on
+    /// that conversation's row here as well as in the chat itself. Every other
+    /// call surface is the root view's (``CallHostOverlay``); this one has to be
+    /// where the person already looks, and answerable without navigating.
+    @EnvironmentObject private var callHost: CallHost
 
     public init(
         viewModel: ChatListViewModel,
@@ -230,12 +236,31 @@ public struct ChatListScreen: View {
                 }
             }
         } else {
+            let quietCall = callHost.quietIncomingCall
             List {
                 ForEach(visible) { row in
-                    Button { onOpen(row) } label: {
-                        ConversationRowView(row: row, timeLabel: timeLabel(row))
+                    VStack(spacing: 8) {
+                        Button { onOpen(row) } label: {
+                            ConversationRowView(row: row, timeLabel: timeLabel(row))
+                        }
+                        .buttonStyle(.plain)
+                        // `docs/ux/calls.md` section 2.1.1 — a muted
+                        // conversation's ringing call is answerable from its own
+                        // row, with no navigation. Outside the row's own tap
+                        // target on purpose: a button nested in another button's
+                        // label does not reliably receive the tap, and opening
+                        // the chat has to keep working while the offer stands.
+                        if let quietCall, QuietIncomingCallPresentation.showsOnListRow(
+                            quietCall, rowId: row.id) {
+                            QuietIncomingCallRowActions(
+                                call: quietCall,
+                                onAccept: {
+                                    callHost.acceptIncomingCall(withVideo: quietCall.video)
+                                },
+                                onDecline: { callHost.declineIncomingCall() }
+                            )
+                        }
                     }
-                    .buttonStyle(.plain)
                     .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {

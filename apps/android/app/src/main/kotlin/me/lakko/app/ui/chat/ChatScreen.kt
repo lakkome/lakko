@@ -113,9 +113,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import me.lakko.app.calls.CallSession
+import me.lakko.app.calls.quietOffer
 import me.lakko.app.chat.AttachmentBridge
 import androidx.compose.ui.text.style.TextDecoration
 import me.lakko.app.chat.Ack
@@ -385,6 +388,23 @@ public fun ChatScreen(
     // call buttons and keep media capture out of the way.
     val callOccupant by viewModel.callOccupant.collectAsStateWithLifecycle()
 
+    // docs/ux/calls.md section 2.1.1 — with ONE exception. A call in a MUTED
+    // conversation is not allowed to take the screen over, so the app-level
+    // surface draws nothing for it; it is offered here instead, as a panel in
+    // this screen's own layout. The verdict is the shared rule's, and it
+    // answers for this conversation only: a muted call ringing in some other
+    // chat is that chat's panel and this chat's business not at all.
+    val oneToOneCall by viewModel.oneToOneCall.collectAsStateWithLifecycle()
+    // Hoisted, not written inline behind the `?:`, so the `remember` is reached
+    // on every composition: a slot that only exists while the slot is empty
+    // changes the composition's shape the moment a call arrives.
+    val noOneToOneCall = remember { MutableStateFlow(CallSession.WebCallState.Done) }
+    val oneToOneCallState by (oneToOneCall?.session?.state ?: noOneToOneCall)
+        .collectAsStateWithLifecycle()
+    val quietCallOffer = remember(oneToOneCall, oneToOneCallState, state.groupIdHex) {
+        oneToOneCall?.quietOffer(oneToOneCallState)?.takeIf { it.isFor(state.groupIdHex) }
+    }
+
     // Every way into a call asks for the microphone (and, for video, the
     // camera) first; the denial dialogs are mounted by the gate itself.
     val callPermissions = me.lakko.app.ui.call.rememberCallPermissionGate()
@@ -502,6 +522,27 @@ public fun ChatScreen(
     ) { scaffoldPadding ->
     Box(modifier = Modifier.fillMaxSize().padding(scaffoldPadding)) {
     Column(modifier = Modifier.fillMaxSize()) {
+
+        // docs/ux/calls.md section 2.1.1 — a muted conversation's incoming
+        // call, offered rather than thrown. FIRST child of the column, so it
+        // sits in the layout above the timeline instead of over it: nothing
+        // already on screen is covered, nothing takes focus, and the composer
+        // keeps whatever was being typed. It leaves when the ring window runs
+        // out, because the host ends the call and clears the slot it reads.
+        quietCallOffer?.let { offer ->
+            me.lakko.app.ui.call.QuietIncomingCallPanel(
+                offer = offer,
+                // The resolved peer name — the same value this screen's own
+                // header shows for a one-to-one chat, and the same one the
+                // full-screen ring resolves for its title, so the two surfaces
+                // cannot name one caller two ways (and fall back to the same
+                // word when this device has never learned a name).
+                callerName = peerName,
+                // The same two entry points the full-screen ring screen drives.
+                onAccept = { withVideo -> viewModel.acceptIncomingCall(withVideo) },
+                onDecline = { viewModel.declineIncomingCall() },
+            )
+        }
 
         // The ongoing-group-call banner: a live call on this chat that this
         // device is not in. Hidden once this device's membership has ended —

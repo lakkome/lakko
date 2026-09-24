@@ -14,7 +14,14 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { offerAgeMs, ringVerdictAt, ringVerdictFor, type RingRules } from "./ring-rule";
+import {
+  offerAgeMs,
+  offerExpiresAtMs,
+  ringVerdictAt,
+  ringVerdictFor,
+  type RingRules,
+  type RingWindow,
+} from "./ring-rule";
 
 /** The rule's three discriminants, as `lakko-ui-rules` numbers them. */
 const DECISIONS = { Ring: 0, Silent: 1, TooLate: 2 } as const;
@@ -107,5 +114,51 @@ describe("ringVerdictAt", () => {
     const rules = fakeRules(DECISIONS.Ring);
     ringVerdictAt(rules, false, 1_500.75);
     expect(rules.asked).toEqual([{ muted: false, ageMs: 1_500n }]);
+  });
+});
+
+/**
+ * The shared window as a deadline, for the surfaces that need one rather than
+ * a verdict — the muted conversation's quiet Accept (`docs/ux/calls.md`
+ * section 2.1.1) among them.
+ *
+ * Same discipline as `fakeRules`: it records the age it was asked about and
+ * answers what the test scripted, so this file cannot pass by re-implementing
+ * `remaining_ring_ms`.
+ */
+function fakeWindow(leftMs: number): RingWindow & { readonly asked: bigint[] } {
+  const asked: bigint[] = [];
+  return {
+    asked,
+    remainingRingMs: (ageMs) => {
+      asked.push(ageMs);
+      return BigInt(leftMs);
+    },
+  };
+}
+
+describe("offerExpiresAtMs", () => {
+  it("counts from what is LEFT of the window, not from the whole of it", () => {
+    // The distinction is the whole reason this exists. An offer that reached
+    // this device 20 s old has 25 s left; a surface armed with the full window
+    // from arrival would still be offering an answer after the caller had
+    // given up and filed a missed call.
+    const window = fakeWindow(25_000);
+    expect(offerExpiresAtMs(window, NOW, 20_000)).toBe(NOW + 25_000);
+    expect(window.asked).toEqual([20_000n]);
+  });
+
+  it("gives an exhausted window a deadline that has already passed", () => {
+    const window = fakeWindow(0);
+    expect(offerExpiresAtMs(window, NOW, 90_000)).toBe(NOW);
+  });
+
+  it("hands the age across the same way the verdict does", () => {
+    // One age, two questions: a negative reading is clamped and a fractional
+    // one truncated, or the two answers could disagree about the same offer.
+    const window = fakeWindow(45_000);
+    offerExpiresAtMs(window, NOW, -5_000);
+    offerExpiresAtMs(window, NOW, 1_500.75);
+    expect(window.asked).toEqual([0n, 1_500n]);
   });
 });

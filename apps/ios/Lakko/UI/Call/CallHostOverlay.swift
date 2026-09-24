@@ -34,7 +34,14 @@ struct CallHostOverlay: ViewModifier {
 
     private var presented: Presented? {
         if IncomingCallPresentation.showsInAppScreen(
-            state: host.activeCallState, ringingOnSystemUi: host.ringingOnSystemUi) {
+            state: host.activeCallState,
+            ringingOnSystemUi: host.ringingOnSystemUi,
+            // `docs/ux/calls.md` section 2.1.1 — a muted conversation's call is
+            // answerable but never thrown across the screen. It is offered by
+            // the panel at the top of its own chat and by its row in the
+            // conversation list, both of which sit in the layout.
+            quiet: host.incomingQuiet
+        ) {
             return .incoming
         }
         if Self.presentsCallScreen(host.activeCallState), let session = host.activeCall {

@@ -36,7 +36,8 @@ what a call leaves behind. It replaces the call parts of
 | App backgrounded | The system call screen (see below), ringtone, vibration |
 | App closed | Same as backgrounded: the push wakes the app, the system call screen appears |
 | Phone locked | The system call screen on the lock screen, answer without unlocking |
-| Do Not Disturb, chat muted | Notification without sound; a muted chat never rings |
+| Chat muted | No sound, no vibration, no screen that takes over. The call is still OFFERED and still answerable - see 2.1.1 |
+| Do Not Disturb | Notification without sound |
 | Second call while already in a call | A compact banner inside the call: caller name, Accept (ends the current call) and Decline |
 
 Native clients use the platform's own call machinery: on iOS the system call screen with
@@ -68,15 +69,34 @@ reads as missed. A client may leave a quiet, passive notice behind — that is a
 call — but it must not use the platform's call affordance, and it must never demand
 attention.
 
-**With the app open, a muted call shows nothing either — decided 2026-09-23.**
-The three clients first landed split on this: two showed nothing, one still threw
-the full-screen incoming call across whatever the person was reading, silently.
-A screen that takes over the phone IS an interruption, so that honoured half the
-rule. The cost is stated rather than hidden: **a muted call cannot be answered,
-only called back**, because the full-screen screen is every client's only Accept
-surface. Answering without interrupting needs a non-modal affordance no client
-has — and this section already specifies one, for the second-call case, which is
-where it would come from if the cost turns out to bite.
+### 2.1.1 A muted conversation: offered, not thrown
+
+Muting takes away the **interruption**, not the call. Somebody who muted a
+conversation asked not to be dragged out of what they are doing by it; they did not
+ask to stop being reachable by the person, and they did not ask to be told about it
+only afterwards.
+
+So a call from a muted conversation makes **no sound and no vibration**, never takes
+the screen over, and is offered on two quiet surfaces instead:
+
+- **Inside that conversation** — a panel at the top of the chat: caller name,
+  `Voice call` or `Video call`, **Decline** and **Accept**. It sits in the layout
+  rather than over it, so nothing the person was reading moves or is covered.
+- **In the conversation list** — that chat's own row carries **Accept** and
+  **Decline** while the call is ringing. The row is where the person already looks
+  to see what is happening, and it needs no navigation to answer from.
+
+Both disappear when the ring window runs out, and the call is then recorded as
+missed exactly as an unmuted one is. Nothing about the person's own screen decides
+which surface shows: whichever of the two they are looking at is the one that
+offers the call, and a person on neither simply finds a missed call, which is what
+muting asked for.
+
+**This replaces an earlier, worse reading.** The first pass took "never rings" to
+mean "show nothing at all", which made a muted contact unanswerable — muting a
+conversation quietly became half-blocking the person. It also landed split: two
+clients showed nothing and one still threw the full-screen call across whatever
+was on screen, silently, which honoured half the rule. Neither is what mute means.
 
 **When mute cannot be read, ring.** Every ring path has to consult a flag that lives
 somewhere else — on iOS in another process, on web in the service worker — and a read can

@@ -1185,6 +1185,10 @@ private fun SessionRoot(
                         },
                         channels = channelsState,
                         deviceGroupSync = deviceGroupSync,
+                        // docs/ux/calls.md section 2.1.1 — a muted
+                        // conversation's call never takes the screen over, so
+                        // the list offers it on that chat's own row instead.
+                        callHost = me.lakko.app.calls.AppCallHost.instance,
                     )
                 }
                 // Channels (ADR-0010) — docs/ux/client-redesign.md section 5.4.

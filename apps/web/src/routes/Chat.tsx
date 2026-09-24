@@ -48,6 +48,8 @@ import { useAuth } from "../auth/AuthContext";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { groupIdHex as hexOf } from "../devices/sync/state";
 import { useCallHost } from "../calls/CallHostContext";
+import { QuietIncomingCallPanel } from "../calls/QuietIncomingCallPanel";
+import { quietCallOfferFor, type QuietCallOffer } from "../calls/quiet-call-offer";
 import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
 import { eventToPersistedMessage, mergeForegroundSlot } from "../chat/background-log";
 import { opsFromPersisted, persistedWithOps } from "../chat/message-ops-store";
@@ -707,6 +709,21 @@ function ChatView(props: {
   const liveGroupCall = createMemo<GroupCallRecord | null>(() =>
     selectLiveGroupCall(groupCalls(), groupCallClock(), groupCallViewer()),
   );
+
+  /**
+   * A call from THIS conversation, arriving while it is muted
+   * (`docs/ux/calls.md` section 2.1.1).
+   *
+   * The host holds one quiet offer for the whole session, so the conversation
+   * has to ask whether it is the one the call arrived in — and the rule that
+   * answers that, along with the window that bounds it, lives in
+   * `calls/quiet-call-offer.ts` rather than in this condition. The
+   * conversation list asks the same question about each of its rows; two
+   * components deciding it separately is how they come to disagree, and
+   * neither of them is reachable from a test.
+   */
+  const quietCall = (): QuietCallOffer | null =>
+    quietCallOfferFor(callHost.quietIncomingCall(), props.entry.groupIdB64, Date.now());
 
   /** Best name for this chat (ADR-0048 §5) — `chat/peer-name.ts`, shared with
    *  the call host's ringing banner. */
@@ -5561,6 +5578,29 @@ function ChatView(props: {
           </div>
         </div>
       </header>
+
+      {/* `docs/ux/calls.md` section 2.1.1 — a call from a MUTED conversation is
+          offered here, quietly, instead of taking the screen over. It is
+          between the header and the timeline on purpose: in the column's flow,
+          so nothing the person was reading is covered, which is what separates
+          it from the group-call strip further down (that one is sticky over the
+          timeline) and from the full-screen incoming call (a modal that covers
+          everything and takes focus).
+
+          An unmuted call never appears here — `quietIncomingCall` is null for
+          one — so this is not a second incoming-call surface competing with
+          §2.2's, it is the surface a muted call gets instead of it. */}
+      <Show when={quietCall()}>
+        {(offer) => (
+          <QuietIncomingCallPanel
+            callerName={resolvePeerName()}
+            callerId={props.entry.groupIdB64}
+            video={offer().video}
+            onAccept={(withVideo) => void callHost.acceptIncomingCall(withVideo)}
+            onDecline={() => void callHost.declineIncomingCall()}
+          />
+        )}
+      </Show>
 
       <div
         class="lk-chat-scroll"

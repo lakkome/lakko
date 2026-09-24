@@ -191,11 +191,20 @@ public enum IncomingCallUi: Equatable {
     case inApp
     /// Nothing new — this call is already ringing somewhere.
     case none
+    /// Neither of the two screens that take over: the conversation is muted
+    /// (section 2.1.1).
+    ///
+    /// Not the same as ``none``. The call is ringing and answerable, and is
+    /// offered on the two quiet, in-layout surfaces
+    /// (``QuietIncomingCallPresentation``) — what this withholds is the
+    /// interruption, so nothing here is reported to the phone and nothing is
+    /// drawn over what the person is reading.
+    case quiet
 }
 
-/// The one rule for choosing between the two incoming-call surfaces.
+/// The one rule for choosing between the incoming-call surfaces.
 ///
-/// Three facts decide it, and none of them is "which code path noticed first":
+/// Four facts decide it, and none of them is "which code path noticed first":
 ///
 ///   * **A VoIP push is not a choice.** iOS terminates an app that takes a VoIP
 ///     push without reporting a call, so a VoIP push always reports, foreground
@@ -206,6 +215,9 @@ public enum IncomingCallUi: Equatable {
 ///     AND the in-app surface for one call.
 ///   * **An active app shows its own screen.** Section 2.1's first row: with the
 ///     app open, the call takes over Lakko's own screen, not the phone's.
+///   * **A muted conversation takes over neither.** Section 2.1.1: the call is
+///     offered in the chat and in the conversation list, both in the layout, so
+///     nothing the person was reading moves or is covered.
 public enum IncomingCallPresentation {
 
     /// Whether Lakko's own full-screen incoming call should be on screen
@@ -223,22 +235,45 @@ public enum IncomingCallPresentation {
     ///     screen at all.
     ///   - ringingOnSystemUi: this call was reported to CallKit, so the phone's
     ///     own screen owns it.
+    ///   - quiet: the conversation is muted (section 2.1.1), so no surface may
+    ///     take the screen over — the call is offered in the chat and in the
+    ///     list instead. Defaulted `false` for the same reason the routing
+    ///     rule's `muted` is: a caller that cannot answer the question should
+    ///     ring rather than go quiet, which is section 2.1's own fallback.
     public static func showsInAppScreen(
-        state: CallSession.WebCallState?, ringingOnSystemUi: Bool
+        state: CallSession.WebCallState?, ringingOnSystemUi: Bool, quiet: Bool = false
     ) -> Bool {
-        state == .ringing && !ringingOnSystemUi
+        state == .ringing && !ringingOnSystemUi && !quiet
     }
 
+    /// - Parameter quiet: the conversation is muted (section 2.1.1). Defaulted
+    ///   `false` — absent means not muted, which rings, the direction a missing
+    ///   answer has to fail in.
     public static func decide(
         source: IncomingCallSource,
         appIsActive: Bool,
-        alreadyReported: Bool
+        alreadyReported: Bool,
+        quiet: Bool = false
     ) -> IncomingCallUi {
         switch source {
         case .voipPush:
+            // Still not a choice, and mute does not change it: iOS terminates
+            // an app that takes a VoIP push without reporting a call. The
+            // muted case is handled by reporting as demanded and then ending
+            // the call at once (``VoipPushRegistrar``), never by skipping the
+            // report.
             return .systemCallUi
         case .signalingRow:
+            // `alreadyReported` is read BEFORE `quiet`, and the order is the
+            // decision. It means the phone is ALREADY ringing this call from a
+            // VoIP push, on a path that read the same mute flag and chose to
+            // ring — which happens when that read could not resolve the
+            // conversation, and section 2.1's fallback for an unreadable mute
+            // flag is to ring. Answering `.quiet` here would leave a call
+            // CallKit is showing with nothing left to update it, so the
+            // already-ringing call keeps its surface.
             if alreadyReported { return .none }
+            if quiet { return .quiet }
             return appIsActive ? .inApp : .systemCallUi
         }
     }

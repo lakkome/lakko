@@ -73,8 +73,9 @@ final class CallHost: ObservableObject {
         /// shows. One value, because the whole point is that neither surface
         /// stores the finished sentence.
         var recordCall: @MainActor (_ call: FinishedCall) -> Void = { _ in }
-        /// `docs/ux/calls.md` section 2.1 — does this conversation carry the
-        /// mute flag? A muted conversation never rings; it is still recorded.
+        /// `docs/ux/calls.md` sections 2.1 and 2.1.1 — does this conversation
+        /// carry the mute flag? A muted conversation never rings; the call is
+        /// still offered, still answerable, and still recorded.
         ///
         /// Read from the App Group mirror rather than from
         /// ``DeviceGroupSyncRepository`` directly, so that all three of this
@@ -120,6 +121,18 @@ final class CallHost: ObservableObject {
     /// `true` when the ringing offer asked for video — the incoming screen
     /// says so, and it decides which accept is the primary one.
     @Published private(set) var incomingVideo: Bool = false
+    /// `true` when this ringing call arrived in a MUTED conversation
+    /// (`docs/ux/calls.md` section 2.1.1), so it must be offered without
+    /// interrupting: no ringtone, no vibration, and neither of the two surfaces
+    /// that take the screen over — ``IncomingCallScreen`` or the phone's own
+    /// call screen. The call itself is ordinary; it holds the slot and stays
+    /// answerable for the whole ring window, on the two quiet surfaces
+    /// ``QuietIncomingCallPresentation`` names.
+    ///
+    /// Written here, once, where the routing verdict is read — so the view and
+    /// ``CallKitBridge`` answer "is this the quiet ring?" from ONE value rather
+    /// than each re-deciding it.
+    @Published private(set) var incomingQuiet: Bool = false
     /// `true` when this ringing call was reported to CallKit, so the phone's own
     /// call screen owns it and Lakko must not draw its own over the top.
     ///
@@ -245,12 +258,14 @@ final class CallHost: ObservableObject {
         )
         // Every incoming OFFER is accounted for, whatever the verdict. A call
         // that does not ring is silent on both ends until the caller's own ring
-        // window writes `Missed call`, and the quiet verdicts are
+        // window writes `Missed call`, and the verdicts that show nothing are
         // indistinguishable from the outside: `drop` (past the window, or an
-        // unreadable row time), `silent` (a muted conversation), `busy` (a slot
-        // this device never released) and `apply` (a row for a call already in
-        // the slot). Nine calls in a row were lost to this on 2026-09-22, with
-        // only `drop` instrumented.
+        // unreadable row time), `busy` (a slot this device never released) and
+        // `apply` (a row for a call already in the slot). Nine calls in a row
+        // were lost to this on 2026-09-22, with only `drop` instrumented.
+        // `silent` is no longer one of them — it opens a real, answerable call
+        // and only withholds the interruption (section 2.1.1) — but it is still
+        // worth naming here, because the surface it lands on is a quiet one.
         if case .offer = row.body {
             let age = ChatRepository.parseDsTimestampMs(row.createdAt)
                 .map { String(ports.nowMs() - $0) } ?? "unreadable"
@@ -271,27 +286,31 @@ final class CallHost: ObservableObject {
             if let bytes = try? composeCallSignaling(body: .end(callId: callId, reason: .busy)) {
                 enqueuePublish(groupIdHex: row.groupIdHex, bytes: bytes)
             }
-        case .silent:
-            // `docs/ux/calls.md` section 2.1. No session, no screen, no sound —
-            // and a history row all the same, so the person can see who called
-            // while the conversation was silenced. Filed as `missed` because
-            // that is what it is and what an unanswered unmuted call becomes,
-            // so the two are indistinguishable afterwards, which is the point.
+        case .silent, .ring:
+            // `docs/ux/calls.md` section 2.1.1 — a muted conversation and an
+            // unmuted one build the SAME call. The session is opened, it takes
+            // the slot, and it stays answerable for the whole ring window;
+            // what mute withholds is the interruption, which is decided
+            // downstream from ``incomingQuiet`` by the two surfaces that take
+            // the screen over (``CallHostOverlay`` and ``CallKitBridge``).
             //
-            // Recorded once: the call id joins `endedCallIds`, so a re-delivered
-            // offer row for the same call does not file a second row.
+            // This used to open no session at all and file the missed call
+            // there and then, which left a muted contact UNANSWERABLE. The
+            // record moved rather than being written twice: the ring timer ends
+            // the session at the end of the window, and the ordinary `.done`
+            // path files the same `missed` row — so a muted call and an
+            // unanswered unmuted one are indistinguishable afterwards, which is
+            // the point. It also means an app killed mid-ring records neither,
+            // exactly as it already did for an unmuted call.
             guard case .offer(let callId, _, _, let media) = row.body else { return }
-            endedCallIds.insert(CallHostRouting.hex(callId))
-            ports.recordCall(FinishedCall(
+            let session = install(
+                callId: callId,
                 groupIdHex: row.groupIdHex,
-                row: CallTranscriptRow(direction: .incoming, outcome: .missed),
-                video: media.video,
-                // When it happened, by the server's stamp — not now, which is
-                // whenever this device got round to reading the row.
-                startedAtMs: ChatRepository.parseDsTimestampMs(row.createdAt) ?? ports.nowMs()))
-        case .ring:
-            guard case .offer(let callId, _, _, let media) = row.body else { return }
-            let session = install(callId: callId, groupIdHex: row.groupIdHex, direction: .incoming)
+                direction: .incoming,
+                quiet: action == .silent,
+                // When the call happened, by the server's stamp — not now,
+                // which is whenever this device got round to reading the row.
+                startedAtMs: ChatRepository.parseDsTimestampMs(row.createdAt))
             incomingVideo = media.video
             session.applyIncomingSignaling(row.body)
         }
@@ -434,6 +453,21 @@ final class CallHost: ObservableObject {
         activeGroupIdHex.flatMap { ports.peerName($0) }
     }
 
+    /// The muted conversation's ringing call, as the two quiet surfaces need it
+    /// (`docs/ux/calls.md` section 2.1.1), or `nil`.
+    ///
+    /// Both surfaces read this one value rather than assembling it from four
+    /// published properties each, so they cannot end up offering different
+    /// calls — or one of them offering a call the other has stopped showing.
+    var quietIncomingCall: QuietIncomingCall? {
+        QuietIncomingCallPresentation.offer(
+            state: activeCallState,
+            quiet: incomingQuiet,
+            groupIdHex: activeGroupIdHex,
+            callerName: activePeerName,
+            video: incomingVideo)
+    }
+
     /// Resolves once every publish queued so far has been attempted. Tests.
     func whenPublishesSettle() async {
         await publishTail?.value
@@ -441,12 +475,25 @@ final class CallHost: ObservableObject {
 
     // MARK: - Slot + timers
 
+    /// - Parameters:
+    ///   - quiet: this is the muted conversation's ring (section 2.1.1). Set
+    ///     BEFORE the session can reach `.ringing`, because that transition is
+    ///     what ``CallKitBridge`` and ``CallHostOverlay`` decide their surface
+    ///     from — reading it a moment later would ring the phone first and go
+    ///     quiet afterwards.
+    ///   - startedAtMs: when the call began, for the row it will leave behind.
+    ///     An incoming call passes its offer row's server stamp, so a call read
+    ///     off the journal late is filed at the moment it happened rather than
+    ///     at the moment this device got round to it; `nil` falls back to now,
+    ///     which is right for a call this device is placing.
     private func install(
         callId: Data,
         groupIdHex: String,
         direction: CallTranscriptRow.Direction,
         button: CallButtonKind? = nil,
-        surface: CallStartSurface? = nil
+        surface: CallStartSurface? = nil,
+        quiet: Bool = false,
+        startedAtMs: Int64? = nil
     ) -> CallSession {
         // A `.done` session still on screen is replaced by the new call.
         clearSlot()
@@ -468,9 +515,10 @@ final class CallHost: ObservableObject {
         session.setTurnClient(ports.turnClient())
         activeCall = session
         activeGroupIdHex = groupIdHex
+        incomingQuiet = quiet
         sessionWasPresented = false
         connectedAtMs = nil
-        callStartedAtMs = nil
+        callStartedAtMs = startedAtMs
         callWasPlaced = false
         callRecorded = false
         stateSubscription = session.$state.sink { [weak self, weak session] next in
@@ -489,6 +537,7 @@ final class CallHost: ObservableObject {
         activeGroupIdHex = nil
         activeCallState = nil
         incomingVideo = false
+        incomingQuiet = false
         ringingOnSystemUi = false
         outgoingButton = nil
         outgoingSurface = nil

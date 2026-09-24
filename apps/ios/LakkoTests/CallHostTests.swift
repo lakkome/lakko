@@ -242,17 +242,103 @@ final class CallHostTests: XCTestCase {
 
     // MARK: - A muted conversation
 
-    /// `docs/ux/calls.md` section 2.1. No session, no screen, no sound — and a
-    /// history row all the same, because the person still gets to find out who
-    /// tried to reach them.
-    func testAMutedConversationRecordsTheCallWithoutRinging() async {
+    /// `docs/ux/calls.md` section 2.1.1 — offered, not thrown.
+    ///
+    /// **What changed, and why.** This used to assert `activeCall == nil`: a
+    /// muted call opened no session at all and the missed row was filed there
+    /// and then. That made a muted contact UNANSWERABLE — muting a conversation
+    /// quietly became half-blocking the person — and section 2.1.1 now rejects
+    /// that reading. The session is built exactly as an unmuted one is; what is
+    /// withheld is the interruption, which ``CallHost/incomingQuiet`` is what
+    /// the two screen-covering surfaces read.
+    func testAMutedConversationRingsQuietlyAndStaysAnswerable() async {
         let h = Harness(nowMs: t0)
         h.mutedGroups = [groupA]
         let host = makeHost(h)
 
         host.receive(row(offer(callA, video: true), group: groupA, id: 1, atMs: t0 - 2_000))
 
-        XCTAssertNil(host.activeCall, "a muted conversation must not open a ringing session")
+        XCTAssertEqual(
+            host.activeCall?.state, .ringing,
+            "a muted conversation's call must still be answerable")
+        XCTAssertEqual(host.activeCall?.callId, callA)
+        XCTAssertEqual(host.activeGroupIdHex, groupA)
+        XCTAssertTrue(host.incomingQuiet, "and it must be the quiet ring, not the loud one")
+        XCTAssertTrue(host.incomingVideo)
+        XCTAssertTrue(
+            host.occupiesSlot, "it is an ordinary call: it holds the one call slot")
+
+        await host.whenPublishesSettle()
+        XCTAssertTrue(endReasons(h).isEmpty, "a muted call is not answered busy or declined")
+        XCTAssertTrue(
+            h.recorded.isEmpty,
+            "nothing is filed while the call is still on offer — it has not been missed yet")
+    }
+
+    /// The two quiet surfaces read ONE value, so they cannot offer different
+    /// calls, and it names the conversation so that neither appears anywhere
+    /// else.
+    func testTheQuietOfferNamesItsOwnConversationAndKind() async {
+        let h = Harness(nowMs: t0)
+        h.mutedGroups = [groupA]
+        let host = makeHost(h)
+
+        host.receive(row(offer(callA, video: true), group: groupA, id: 1, atMs: t0 - 2_000))
+
+        let quiet = host.quietIncomingCall
+        XCTAssertEqual(quiet?.groupIdHex, groupA)
+        XCTAssertEqual(quiet?.video, true)
+        XCTAssertEqual(quiet?.kindLabel, "Video call")
+        XCTAssertEqual(quiet?.displayName, "Alice")
+        XCTAssertTrue(
+            QuietIncomingCallPresentation.showsInConversation(quiet, openGroupIdHex: groupA))
+        XCTAssertFalse(
+            QuietIncomingCallPresentation.showsInConversation(quiet, openGroupIdHex: groupB),
+            "another chat must not carry a notice about this conversation")
+        XCTAssertTrue(QuietIncomingCallPresentation.showsOnListRow(quiet, rowId: groupA))
+        XCTAssertFalse(QuietIncomingCallPresentation.showsOnListRow(quiet, rowId: groupB))
+        await host.whenPublishesSettle()
+    }
+
+    /// An UNMUTED ring has the full-screen surfaces, so it must not also appear
+    /// as a panel and a pair of row buttons. Two offers for one call is the
+    /// failure the second surface makes possible.
+    func testAnUnmutedRingIsNotOfferedOnTheQuietSurfaces() async {
+        let h = Harness(nowMs: t0)
+        let host = makeHost(h)
+
+        host.receive(row(offer(callA), group: groupA, id: 1, atMs: t0 - 2_000))
+
+        XCTAssertEqual(host.activeCall?.state, .ringing)
+        XCTAssertFalse(host.incomingQuiet)
+        XCTAssertNil(host.quietIncomingCall)
+        await host.whenPublishesSettle()
+    }
+
+    /// The offer ends with the window, on the ONE ring timer the unmuted ring
+    /// already uses — and the missed row is filed there rather than up front.
+    ///
+    /// **What changed.** The record moved instead of being written twice: the
+    /// old immediate write is gone, and a muted call now becomes a missed call
+    /// by the same route an unanswered unmuted one does, so the two are
+    /// indistinguishable afterwards. The cost is stated in
+    /// ``CallHost/receive(_:)``: an app killed mid-ring records neither, which
+    /// is already true of an unmuted call.
+    func testAMutedCallBecomesAMissedCallWhenTheWindowRunsOut() async throws {
+        let h = Harness(nowMs: t0)
+        h.mutedGroups = [groupA]
+        let host = makeHost(h)
+
+        host.receive(row(offer(callA, video: true), group: groupA, id: 1, atMs: t0 - 2_000))
+        XCTAssertEqual(
+            h.timers.filter { !$0.cancelled }.map(\.afterMs),
+            [Int64(LakkoCore.callRingWindowMs())],
+            "the quiet ring is bounded by the shared window, not by a second number")
+
+        h.fireLiveTimers()
+        await host.whenPublishesSettle()
+        try await waitUntil { host.quietIncomingCall == nil }
+
         XCTAssertEqual(h.recorded.count, 1)
         XCTAssertEqual(h.recorded.first?.groupIdHex, groupA)
         XCTAssertEqual(h.recorded.first?.row.direction, .incoming)
@@ -262,37 +348,80 @@ final class CallHostTests: XCTestCase {
         // Filed at the moment it happened, by the server's stamp, not whenever
         // this device got round to reading the row.
         XCTAssertEqual(h.recorded.first?.startedAtMs, t0 - 2_000)
-
-        await host.whenPublishesSettle()
-        XCTAssertTrue(endReasons(h).isEmpty, "a muted call is not answered busy or declined")
     }
 
     /// Recorded ONCE. A journal is re-read on every catch-up, so a second
     /// delivery of the same offer must not file a second missed call.
-    func testAMutedCallIsRecordedOnlyOnce() async {
+    func testAMutedCallIsRecordedOnlyOnce() async throws {
         let h = Harness(nowMs: t0)
         h.mutedGroups = [groupA]
         let host = makeHost(h)
 
         host.receive(row(offer(callA), group: groupA, id: 1, atMs: t0 - 2_000))
         host.receive(row(offer(callA), group: groupA, id: 2, atMs: t0 - 1_000))
+        XCTAssertEqual(host.activeCall?.callId, callA, "the second row is the same call")
 
-        XCTAssertEqual(h.recorded.count, 1)
+        h.fireLiveTimers()
         await host.whenPublishesSettle()
+        try await waitUntil { host.activeCall == nil }
+        XCTAssertEqual(h.recorded.count, 1)
     }
 
-    /// Muting one conversation silences that one. The next chat still rings,
-    /// which is the difference between a mute and a broken ring path.
-    func testAnUnmutedConversationStillRingsBesideAMutedOne() async {
+    /// Accept and Decline on the quiet surfaces are the SAME entry points the
+    /// full-screen incoming call and the phone's own call screen drive — there
+    /// is one accept path and one decline path on this client.
+    ///
+    /// Accept is exercised through a refused camera permission, which is as far
+    /// as a unit test may go: granting it would build a real peer connection.
+    /// Reaching the permission gate at all is what proves the shared path.
+    func testTheQuietSurfacesDriveTheOneAcceptAndDeclinePath() async throws {
+        let h = Harness(nowMs: t0)
+        h.mutedGroups = [groupA]
+        h.camGranted = false
+        let host = makeHost(h)
+
+        host.receive(row(offer(callA, video: true), group: groupA, id: 1, atMs: t0))
+        host.acceptIncomingCall(withVideo: true)
+        try await waitUntil { host.callError != nil }
+        XCTAssertEqual(host.callError, CameraPermission.deniedMessage)
+        XCTAssertEqual(
+            host.activeCall?.state, .ringing, "a refused accept leaves the offer standing")
+        XCTAssertNotNil(host.quietIncomingCall)
+
+        host.declineIncomingCall()
+        try await waitUntil { host.activeCall == nil }
+        await host.whenPublishesSettle()
+        XCTAssertEqual(endReasons(h).map(\.2).last, .declined)
+        XCTAssertNil(host.quietIncomingCall)
+    }
+
+    /// Muting one conversation silences that one and no other, which is the
+    /// difference between a mute and a broken ring path.
+    ///
+    /// **What changed.** The second offer used to ring while the muted one was
+    /// on screen, because the muted call held no slot. It does now, so an offer
+    /// arriving from elsewhere WHILE it rings is answered busy — one call at a
+    /// time, the same as any other ring. That cost is asserted below rather than
+    /// left to be discovered; the unmuted call rings as soon as the slot is free.
+    func testMutingOneConversationDoesNotSilenceAnother() async throws {
         let h = Harness(nowMs: t0)
         h.mutedGroups = [groupA]
         let host = makeHost(h)
 
         host.receive(row(offer(callA), group: groupA, id: 1, atMs: t0 - 2_000))
-        XCTAssertNil(host.activeCall)
+        XCTAssertTrue(host.incomingQuiet)
 
         host.receive(row(offer(callB), group: groupB, id: 1, atMs: t0 - 2_000))
+        await host.whenPublishesSettle()
+        XCTAssertEqual(host.activeCall?.callId, callA, "the quiet call keeps the slot")
+        XCTAssertEqual(endReasons(h).map(\.2), [.busy], "and the second caller is told so")
+
+        host.declineIncomingCall()
+        try await waitUntil { host.activeCall == nil }
+
+        host.receive(row(offer(callB), group: groupB, id: 2, atMs: t0 - 1_000))
         XCTAssertEqual(host.activeCall?.state, .ringing)
+        XCTAssertFalse(host.incomingQuiet, "the other conversation rings out loud")
         await host.whenPublishesSettle()
     }
 

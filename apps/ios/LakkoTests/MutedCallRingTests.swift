@@ -8,6 +8,11 @@ import LakkoCore
 /// `docs/ux/calls.md` section 2.1 — "a muted chat never rings", on the three
 /// iOS surfaces that can ring.
 ///
+/// Section 2.1.1 says what "never rings" does NOT mean: the call is still
+/// OFFERED and still answerable, quietly, for the whole window. Everything here
+/// is about the verdict and the flag that carries it, both unchanged by that;
+/// what the app then DOES with a `.silent` verdict is `CallHostTests`.
+///
 /// What is tested here is the WIRING, never the rule: the rule is
 /// `lakko-ui-rules`, which pins its own boundary, its own ordering and its own
 /// `Silent`-is-not-`TooLate` distinction in Rust. What Rust cannot see is
@@ -145,7 +150,9 @@ final class MutedCallRingTests: XCTestCase {
 
     /// And `silent` is not `drop`. The distinction is the whole point: a
     /// person who muted a conversation asked not to be interrupted by it, not
-    /// to be kept from finding out who called.
+    /// to stop being reachable by the person in it — so `silent` opens the same
+    /// answerable call `ring` does and withholds only the interruption
+    /// (section 2.1.1).
     func testSilentIsNotTheSameAnswerAsDropping() {
         XCTAssertNotEqual(decide(muted: true), CallHostRouting.Action.drop)
         XCTAssertNotEqual(

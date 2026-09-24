@@ -116,3 +116,38 @@ export function ringVerdictAt(rules: RingRules, muted: boolean, ageMs: number): 
   if (decision === rules.RingDecision.Silent) return "silent";
   return "ring";
 }
+
+/**
+ * The shared window, as a deadline rather than a duration.
+ *
+ * Separate from {@link RingRules} on purpose: that interface is what the
+ * verdict needs, and widening it would force every caller that fakes the
+ * verdict to fake a deadline it never asks for.
+ */
+export interface RingWindow {
+  readonly remainingRingMs: (offerAgeMs: bigint) => bigint;
+}
+
+/** The real window, for a caller holding the wasm namespace. */
+export function ringWindowOf(wasm: Pick<Wasm, "remainingRingMs">): RingWindow {
+  return wasm;
+}
+
+/**
+ * The moment an offer of this age stops being offered, in epoch ms.
+ *
+ * Counted from what is LEFT of the shared window rather than from the whole
+ * of it, and that distinction is the point: an offer that reached this device
+ * twenty seconds old has twenty-five seconds left, not forty-five. A surface
+ * armed with the full window would still be offering an answer after the
+ * caller had given up and filed a missed call — the same drift the one shared
+ * number exists to stop, arriving through the clock instead of through a
+ * second literal.
+ *
+ * The number itself is never restated here; it comes from
+ * `lakko_ui_rules::ring::remaining_ring_ms`.
+ */
+export function offerExpiresAtMs(window: RingWindow, nowMs: number, ageMs: number): number {
+  const left = Number(window.remainingRingMs(BigInt(Math.max(0, Math.trunc(ageMs)))));
+  return nowMs + left;
+}

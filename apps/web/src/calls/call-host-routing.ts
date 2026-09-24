@@ -106,13 +106,16 @@ export type OneToOneAction =
    * conversation asked not to be interrupted by it, not to be kept from
    * finding out who tried to reach them.
    *
-   * Stated plainly: on this client that DOES mean a muted call cannot be
-   * answered, because the full-screen incoming call is the only surface the
-   * web client offers for answering one, and it is the surface being
-   * withheld. What the person gets instead is the missed-call row, which they
-   * can tap to call back. A non-modal in-app affordance — a call that can be
-   * taken without having been thrust in front of you — is the thing that
-   * would close that gap, and it does not exist yet on any platform.
+   * **And it stays answerable.** This doc used to concede the opposite: that
+   * because the full-screen incoming call was the only Accept the web client
+   * had, and it is the surface being withheld, a muted call could not be
+   * answered at all. `docs/ux/calls.md` section 2.1.1 rejects that reading —
+   * it made muting a conversation into half-blocking the person — and names
+   * two quiet surfaces the call is offered on for the whole ring window: a
+   * panel inside that conversation, and Accept / Decline on that
+   * conversation's row in the list. Neither of them is a surface this module
+   * knows about; what it decides is that the call is TAKEN, which is what
+   * gives them something to offer (`calls/quiet-call-offer.ts`).
    */
   | "silent"
   /** Hand the body to the session in the slot. */

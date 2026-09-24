@@ -576,6 +576,34 @@ public final class ChatViewModel: ObservableObject {
     /// root view presents and drives it.
     public var activeCall: CallSession? { callHost.activeCall }
 
+    /// `docs/ux/calls.md` section 2.1.1 — a muted conversation's ringing call,
+    /// when it is THIS conversation's, or `nil`.
+    ///
+    /// The one surface the root view cannot own: every other call surface is
+    /// presented app-wide from ``CallHostOverlay``, but this one has to sit in
+    /// this chat's own layout, above the message list, so that nothing the
+    /// person is reading moves or is covered. The screen re-renders on the
+    /// host's changes already (see the subscription in `init`), so the panel
+    /// appears and — when the ring window runs out and the host clears the
+    /// slot — goes away with no timer of its own.
+    var quietIncomingCall: QuietIncomingCall? {
+        let offer = callHost.quietIncomingCall
+        return QuietIncomingCallPresentation.showsInConversation(
+            offer, openGroupIdHex: groupIdHex) ? offer : nil
+    }
+
+    /// Answer the muted conversation's call from the in-chat panel. The same
+    /// entry point the full-screen incoming call and the phone's own Answer
+    /// button drive.
+    func acceptQuietIncomingCall(withVideo: Bool) {
+        callHost.acceptIncomingCall(withVideo: withVideo)
+    }
+
+    /// Refuse it, through the same one decline path.
+    func declineQuietIncomingCall() {
+        callHost.declineIncomingCall()
+    }
+
     /// Any call — 1x1, group or call link — holds the app's one call slot, so
     /// this chat's call controls stand down.
     var anyCallInProgress: Bool {

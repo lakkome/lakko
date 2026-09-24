@@ -25,11 +25,17 @@
 //! mute on any ring path was a comment in the iOS notification extension
 //! asserting that a muted chat is not woken, which no code supported.
 //!
-//! What mute does is deliberately NOT "drop the call". A person who muted a
-//! conversation asked not to be interrupted by it; they did not ask to be
-//! lied to about who tried to reach them. So a muted call is recorded exactly
-//! as an unmuted one is, and only the interruption - the ringtone, the
-//! vibration, the screen that takes over the phone - is withheld.
+//! What mute does is deliberately NOT "drop the call", and not "hide it"
+//! either. A person who muted a conversation asked not to be dragged out of
+//! what they are doing by it; they did not ask to stop being reachable by the
+//! person. So what is withheld is exactly the interruption - the ringtone,
+//! the vibration, the screen that takes over - while the call is still
+//! OFFERED, on the quiet surfaces section 2.1.1 names, and is still
+//! answerable for the whole window.
+//!
+//! The first pass got that wrong in the other direction: it read "never
+//! rings" as "show nothing", which made a muted contact unanswerable and
+//! turned muting a conversation into half-blocking the person.
 //!
 //! Pure, clock-free and platform-free: the caller supplies the age, which it
 //! reads from the delivery service's own timestamp on the offer row rather
@@ -55,11 +61,14 @@ const _: () = assert!(CALL_RING_WINDOW_MS <= 90_000);
 pub enum RingDecision {
     /// Ring: ringtone, vibration, and the call screen that takes over.
     Ring,
-    /// Record the call, interrupt nobody. The conversation is muted.
+    /// Offer the call without interrupting. The conversation is muted.
     ///
-    /// Not the same as dropping it: the call still belongs in the history,
-    /// and a person who muted a conversation still gets to find out that
-    /// somebody tried to reach them.
+    /// No sound, no vibration, and no surface that takes the screen over -
+    /// but the call IS offered, quietly, and stays answerable for the whole
+    /// window (`docs/ux/calls.md` section 2.1.1 names the two surfaces). It
+    /// is neither a dropped call nor a hidden one: muting asks not to be
+    /// interrupted by a conversation, not to stop being reachable by the
+    /// person in it.
     Silent,
     /// The caller has already given up. Record a missed call and show
     /// nothing: ringing here would offer an answer that connects to nobody.
@@ -111,7 +120,8 @@ mod tests {
         assert_eq!(ring_decision(false, 44_999), RingDecision::Ring);
     }
 
-    /// The rule that was implemented nowhere.
+    /// The rule that was implemented nowhere - and note what `Silent` means:
+    /// offered quietly and still answerable, never hidden.
     #[test]
     fn a_muted_conversation_never_rings() {
         for age in [0, 1, 1_000, 44_999] {

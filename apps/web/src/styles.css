@@ -4610,3 +4610,87 @@ a.lk-button-link:hover {
   background: var(--surface-hover);
   text-decoration: none;
 }
+
+/* ---------------------------------------------------------------------------
+   The muted conversation's quiet call (docs/ux/calls.md section 2.1.1)
+
+   Two surfaces, and neither of them covers anything. The panel is a band in
+   the conversation's own column between the header and the timeline: in flow,
+   not sticky and not a layer, because a person who muted a conversation asked
+   not to be pulled out of what they are reading. The row line is a third line
+   inside a conversation row, always visible while the call rings rather than
+   hidden behind the hover gate the pin / mute / archive actions use.
+   --------------------------------------------------------------------------- */
+.lk-quiet-call {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 24px;
+  background: var(--surface-elevated);
+  border-bottom: 1px solid var(--surface-border);
+  min-width: 0;
+}
+.lk-quiet-call-who {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.lk-quiet-call-kind {
+  font-size: 13px;
+  color: var(--surface-muted);
+}
+.lk-quiet-call-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: 0 0 auto;
+}
+.lk-quiet-call-actions button {
+  white-space: nowrap;
+}
+/* The three-action video case, the same shape section 2.2 gives the full
+   screen: the quiet option sits between the two decisions when there is room,
+   and drops to its own line when there is not, so Decline and Accept are never
+   split across rows with the ghost between them. */
+.lk-quiet-call-actions button.ghost {
+  order: 1;
+  flex-basis: 100%;
+  font-weight: 500;
+}
+@media (min-width: 560px) {
+  .lk-quiet-call-actions button.ghost {
+    order: 0;
+    flex-basis: auto;
+  }
+}
+
+.lk-row-call {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  min-width: 0;
+}
+.lk-row-call-kind {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lk-row .lk-row-call button {
+  min-height: 28px;
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 600;
+  flex: 0 0 auto;
+}

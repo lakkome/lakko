@@ -29,6 +29,8 @@ import {
 import { A, useNavigate } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
+import { useCallHost } from "../calls/CallHostContext";
+import { quietCallKindLabel, quietCallOfferFor } from "../calls/quiet-call-offer";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
 import { restoredKind } from "../auth/restore-marker";
@@ -179,6 +181,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
   const sync = useDeviceGroupSync();
   const auth = useAuth();
   const navigate = useNavigate();
+  const callHost = useCallHost();
   const copy = (): (typeof COPY)["chat"] => COPY.chat;
 
   const accountId = (): string | null => {
@@ -655,6 +658,18 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
               const label = (): string => chatLabel(g);
               const sub = (): string => subOf(g);
               const time = (): string => formatListTime(summary().lastAt, clock());
+              /**
+               * A call from this conversation, arriving while it is muted
+               * (`docs/ux/calls.md` section 2.1.1, second surface).
+               *
+               * The row is where the person already looks to see what is
+               * happening, and answering from it needs no navigation. Whether
+               * the call is this row's, and whether it is still inside the ring
+               * window, are `calls/quiet-call-offer.ts`'s to say — the same
+               * question the muted conversation's own panel asks, asked once.
+               */
+              const quietCall = () =>
+                quietCallOfferFor(callHost.quietIncomingCall(), g.groupIdB64, Date.now());
               const press = createLongPress((x, y) => setMenu({ g, x, y }));
               return (
                 <A
@@ -752,6 +767,70 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                         </button>
                       </span>
                     </div>
+                    {/* `docs/ux/calls.md` section 2.1.1 — "that chat's own row
+                        carries Accept and Decline while the call is ringing".
+                        Its own line rather than squeezed onto the preview's,
+                        and NOT behind the hover gate the pin / mute / archive
+                        actions sit behind: a call has seconds, and a control
+                        that appears only under a pointer is no control at all
+                        on a touch screen.
+
+                        Both buttons stop the click reaching the row, which is a
+                        link: answering a call is not navigation, and section
+                        2.1.1 is explicit that this surface "needs no navigation
+                        to answer from". The in-call screen is the call host's
+                        and comes up over whatever is on screen anyway.
+
+                        Two actions here, not three: section 2.1.1 names Accept
+                        and Decline for the row, and `Accept without video`
+                        would be a third control on a line that also carries the
+                        kind of call, inside a list row. It is on the muted
+                        conversation's own panel, which is where a person who
+                        cares which way they answer is one tap away. */}
+                    <Show when={quietCall()}>
+                      {(offer) => (
+                        <div
+                          class="lk-row-call"
+                          role="group"
+                          aria-label={`${quietCallKindLabel(offer().video)} from ${label()}`}
+                          /* The row arms a long press that opens its pin /
+                             mute / archive menu. A thumb held on Accept for
+                             half a second must answer the call, not open that
+                             menu, so the press never reaches the row: the
+                             detector only arms on pointerdown, so stopping it
+                             here leaves nothing armed and nothing to cancel. */
+                          onPointerDown={(e) => e.stopPropagation()}
+                        >
+                          <span class="lk-row-call-kind">
+                            {quietCallKindLabel(offer().video)}
+                          </span>
+                          <button
+                            type="button"
+                            class="danger"
+                            aria-label={`Decline call from ${label()}`}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              void callHost.declineIncomingCall();
+                            }}
+                          >
+                            Decline
+                          </button>
+                          <button
+                            type="button"
+                            class="primary"
+                            aria-label={`Accept call from ${label()}`}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              void callHost.acceptIncomingCall(offer().video);
+                            }}
+                          >
+                            Accept
+                          </button>
+                        </div>
+                      )}
+                    </Show>
                   </div>
                 </A>
               );

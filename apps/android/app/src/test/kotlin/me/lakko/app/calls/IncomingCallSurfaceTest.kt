@@ -84,11 +84,24 @@ class IncomingCallSurfaceTest {
      * withholds the ringtone. This client briefly did the other thing, which
      * honoured half the rule and was also the one point where it disagreed
      * with the other two clients.
+     *
+     * ## What changed on 2026-09-23, and why this assertion moved
+     *
+     * This test used to assert `OneToOneCallPresentation.NONE` — nothing drawn
+     * anywhere for a muted ringing call. Section 2.1.1 rejects that: it made a
+     * muted contact **unanswerable**, so muting a conversation quietly became
+     * half-blocking the person. The verdict is now `QUIET_OFFER`, which is the
+     * same refusal to interrupt plus an obligation — the call is offered on the
+     * two in-place surfaces (`QuietCallOfferTest`), and the value was renamed
+     * because `NONE` named a behaviour that no longer exists.
+     *
+     * The assertion kept here is the half that did NOT change: whatever else
+     * happens, a muted conversation never reaches [RINGING_SCREEN].
      */
     @Test
     fun `a muted conversation is not interrupted by the ring screen either`() {
         assertEquals(
-            OneToOneCallPresentation.NONE,
+            OneToOneCallPresentation.QUIET_OFFER,
             oneToOneCallPresentation(
                 CallSession.WebCallState.Ringing,
                 accepted = false,

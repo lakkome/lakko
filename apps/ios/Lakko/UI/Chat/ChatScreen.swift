@@ -133,11 +133,30 @@ public struct ChatScreen: View {
     @ViewBuilder
     private var chatBody: some View {
         VStack(spacing: 0) {
-            // No call is presented here: the 1x1 ringing banner and every
-            // full-screen call (1x1, group, call link) are presented app-wide
-            // from the root view (`CallHostOverlay`), so a call rings on any
-            // screen and survives leaving this chat. Returning to the chat of a
-            // live group call shows that call, never a second one.
+            // `docs/ux/calls.md` section 2.1.1 — the ONE call surface this
+            // screen owns: a call arriving in a MUTED conversation, offered
+            // here rather than thrown across the screen. It is a child of this
+            // VStack and not an overlay, so the message list below simply
+            // starts lower while the offer stands and nothing already on screen
+            // is covered. Bounded by the host's ring timer, not by anything
+            // here.
+            if let quietCall = viewModel.quietIncomingCall {
+                QuietIncomingCallPanel(
+                    call: quietCall,
+                    onAccept: {
+                        viewModel.acceptQuietIncomingCall(withVideo: quietCall.video)
+                    },
+                    onAcceptWithoutVideo: {
+                        viewModel.acceptQuietIncomingCall(withVideo: false)
+                    },
+                    onDecline: { viewModel.declineQuietIncomingCall() }
+                )
+            }
+            // No other call is presented here: every full-screen call (1x1,
+            // group, call link) and the full-screen incoming call are presented
+            // app-wide from the root view (`CallHostOverlay`), so a call rings
+            // on any screen and survives leaving this chat. Returning to the
+            // chat of a live group call shows that call, never a second one.
             // A live group call on this chat that this device is not in.
             // Liveness is time-based (a call nobody joined stops being
             // joinable after a minute, any call after four hours), so the

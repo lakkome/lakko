@@ -112,7 +112,18 @@ import { TurnCredentialClient } from "./turn-credential-client";
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
-import { ringRulesOf, ringVerdictFor } from "./ring-rule";
+import {
+  offerAgeMs,
+  offerExpiresAtMs,
+  ringRulesOf,
+  ringVerdictFor,
+  ringWindowOf,
+} from "./ring-rule";
+import {
+  quietCallOffer,
+  quietCallOfferIsLive,
+  type QuietCallOffer,
+} from "./quiet-call-offer";
 import { ChatClient } from "../chat/client";
 import { makeCallSignalingPublisher } from "../chat/call-signaling-publish";
 import { readIsActive } from "../chat/membership-ended";
@@ -227,9 +238,33 @@ export interface CallHostApi {
    * boundary around an attacker-influenceable input.
    */
   readonly ringingCallIdHex: Accessor<string | null>;
-  /** Answer the ringing 1x1 call. No-op when nothing is ringing. */
+  /**
+   * The muted conversation's call, offered quietly
+   * (`docs/ux/calls.md` section 2.1.1), or `null`.
+   *
+   * Non-null exactly while a MUTED 1x1 call is ringing and still inside the
+   * ring window. An unmuted call is `null` here — it takes the screen instead
+   * (section 2.2), and a quiet copy of it beside the full screen would be the
+   * interruption plus clutter.
+   *
+   * Two surfaces read it, each for its own conversation: the panel at the top
+   * of that chat and the Accept / Decline on that chat's row in the
+   * conversation list. Both go through `quietCallOfferFor`, so neither decides
+   * for itself whether the call is theirs or whether it is still live.
+   */
+  readonly quietIncomingCall: Accessor<QuietCallOffer | null>;
+  /**
+   * Answer the ringing 1x1 call. No-op when nothing is ringing.
+   *
+   * THE accept path on this client. The full-screen incoming call, the
+   * notification's Accept action and both of the muted conversation's quiet
+   * surfaces all arrive here; nothing reaches the session directly. Three
+   * surfaces each holding their own copy of "accept, and turn the camera on if
+   * they asked for video" is how they come to disagree.
+   */
   acceptIncomingCall(withVideo: boolean): Promise<void>;
-  /** Refuse the ringing 1x1 call. No-op when nothing is ringing. */
+  /** Refuse the ringing 1x1 call. No-op when nothing is ringing. THE decline
+   *  path, for the same reason as {@link acceptIncomingCall}. */
   declineIncomingCall(): Promise<void>;
   /** Hand over one decrypted call-signaling row from any receive path. Rows
    *  are delivered exactly once per `(group, messageId)`, in order. */
@@ -354,6 +389,18 @@ const CallHostContext = createContext<CallHostApi>();
 
 const LIVE_STATES: readonly WebCallState[] = ["ringing", "outgoing", "connecting", "connected", "ending"];
 
+/**
+ * How often the muted conversation's quiet offer re-checks whether the ring
+ * window has run out.
+ *
+ * A second is fine because nothing is waiting on it: the surfaces vanish on
+ * their own when the call is answered, declined or gives up, and this only
+ * covers the one case where the window simply expires. It is NOT a second copy
+ * of the window — that number is `lakko_ui_rules::ring`'s and is never
+ * restated here.
+ */
+const QUIET_OFFER_SWEEP_MS = 1_000;
+
 /** Display bands for the connection RTT — the same as the native clients. */
 export function qualityTierForRtt(rttMs: number | null): QualityTier {
   if (rttMs === null) return "good";
@@ -449,6 +496,49 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
    * tab). Read by {@link CallHostView}.
    */
   const [silentRing, setSilentRing] = createSignal(false);
+
+  /**
+   * That same muted call, as the two quiet surfaces of `docs/ux/calls.md`
+   * section 2.1.1 need to see it: the panel inside the conversation and the
+   * Accept / Decline on its row in the conversation list.
+   *
+   * Deliberately a SECOND signal rather than something {@link silentRing} is
+   * derived from, and the coupling that would create is the reason. This one
+   * is bounded by the ring window and goes empty when the window runs out;
+   * `silentRing` must stay true for as long as the call is ringing, because it
+   * is what withholds the ringtone. Folding the two together would mean that
+   * the instant the quiet offer expired, a muted call still in its session's
+   * own ring timer would start ringing out loud and throw the full screen up —
+   * the exact interruption mute exists to withhold, arriving at the end of the
+   * window instead of at the start.
+   */
+  const [quietOffer, setQuietOffer] = createSignal<QuietCallOffer | null>(null);
+
+  /**
+   * The quiet offer takes itself down when the ring window runs out, without
+   * anyone touching anything (section 2.1.1: "Both disappear when the ring
+   * window runs out").
+   *
+   * A repeating check rather than one timer set for the deadline, for two
+   * reasons that both end in a dead Accept button left on screen: a background
+   * tab's timers are throttled hard, so a single timeout armed tens of seconds
+   * out can land well after its moment; and a system clock that jumps forward
+   * moves the deadline into the past without moving the timeout. A check that
+   * re-reads the clock answers both, and it runs only while a muted call is
+   * actually being offered.
+   *
+   * It is not the only guard: {@link CallHostApi.quietIncomingCall} compares
+   * the deadline again when it is read, so a tick that has not landed yet
+   * cannot make a surface offer a call the caller has given up on.
+   */
+  createEffect(() => {
+    const offer = quietOffer();
+    if (offer === null) return;
+    const tick = setInterval(() => {
+      if (!quietCallOfferIsLive(offer, Date.now())) setQuietOffer(null);
+    }, QUIET_OFFER_SWEEP_MS);
+    onCleanup(() => clearInterval(tick));
+  });
 
   let activeCall: CallSession | null = null;
   /** The session that last occupied the slot. Unlike `activeCall` it is NOT
@@ -744,6 +834,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
           endedCallIds.add(callIdHex(callId));
           activeCall = null;
           setSilentRing(false);
+          setQuietOffer(null);
           if (reason !== undefined) setLastEnded({ groupIdB64, reason });
           setRemoteStream(null);
           setLocalStream(null);
@@ -834,6 +925,16 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     }
     try {
       const hex = callIdHex(parsed.callId);
+      // One reading of the clock, because two questions are asked about this
+      // row — may it interrupt, and how long is it still offered for — and two
+      // readings taken a few milliseconds apart could answer them
+      // inconsistently about one offer. The age itself is derived twice, here
+      // and inside `ringVerdictFor`, which is safe precisely because
+      // `offerAgeMs` is pure and both derivations are given the same two
+      // values: the alternative was a second copy of its unreadable-timestamp
+      // rule living here.
+      const nowMs = Date.now();
+      const ageMs = offerAgeMs(item.row.createdAt, nowMs);
       const decision = decideInboundSignaling({
         route: routeSignalingKind(parsed.kind),
         kind: parsed.kind,
@@ -844,7 +945,7 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
         ring: ringVerdictFor(ringRulesOf(wasm), {
           muted: isMuted(item.groupIdB64),
           rowCreatedAt: item.row.createdAt,
-          nowMs: Date.now(),
+          nowMs,
         }),
         active:
           activeCall === null
@@ -883,6 +984,21 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
           openCallJournal(session, item.groupIdB64, hex, true, parsed.mediaVideo);
           occupy(item.groupIdB64, session);
           setSilentRing(decision.oneToOne === "silent");
+          // The two quiet surfaces of section 2.1.1. The deadline comes from
+          // what is LEFT of the shared window rather than from the whole of
+          // it: a `silent` offer can already be most of the window old, and a
+          // surface counting the full window from arrival would go on offering
+          // an answer after the caller had given up.
+          setQuietOffer(
+            decision.oneToOne === "silent" && ageMs !== null
+              ? {
+                  groupIdB64: item.groupIdB64,
+                  callIdHex: hex,
+                  video: parsed.mediaVideo,
+                  expiresAtMs: offerExpiresAtMs(ringWindowOf(wasm), nowMs, ageMs),
+                }
+              : null,
+          );
           setRemoteWantsVideo(parsed.mediaVideo);
           await session.applyIncomingSignaling(parsed);
           return;
@@ -965,8 +1081,10 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     const callId = mintCallId();
     const session = buildCallSession(groupIdB64, callId, Number(wasm.callRingWindowMs()));
     // A call this device placed is never silent: mute is about being
-    // interrupted, and nobody is interrupting anybody here.
+    // interrupted, and nobody is interrupting anybody here. So there is
+    // nothing to offer quietly either.
     setSilentRing(false);
+    setQuietOffer(null);
     openCallJournal(session, groupIdB64, callIdHex(callId), false, withVideo);
     occupy(groupIdB64, session);
     try {
@@ -2164,6 +2282,11 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     // time this reads `"ringing"` the call is there.
     ringingCallIdHex: () =>
       state() === "ringing" && activeCall !== null ? callIdHex(activeCall.callId) : null,
+    // The clock is read here rather than kept in a signal: the sweep above is
+    // what makes the surfaces disappear, and this is the guard that stops a
+    // tick that has not landed yet from leaving a dead Accept on screen.
+    quietIncomingCall: () =>
+      quietCallOffer({ ringing: state() === "ringing", taken: quietOffer(), nowMs: Date.now() }),
     acceptIncomingCall: (withVideo) =>
       activeCall !== null && activeCall.getState() === "ringing"
         ? accept(withVideo)
@@ -2214,8 +2337,6 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
     silentRing,
     connStats,
     nameFor,
-    accept,
-    decline,
     hangUp,
     groupHandle,
     dismissedGroupCalls,
@@ -2248,8 +2369,15 @@ interface CallHostInternals {
   readonly silentRing: Accessor<boolean>;
   readonly connStats: Accessor<WebConnectionStats | null>;
   nameFor(groupIdB64: string | null): string;
-  accept(withVideo: boolean): Promise<void>;
-  decline(): Promise<void>;
+  /**
+   * End the live 1x1 call.
+   *
+   * Accept and Decline are deliberately NOT here: they are on the public
+   * {@link CallHostApi}, because the muted conversation's quiet surfaces
+   * (`docs/ux/calls.md` section 2.1.1) live outside this view and have to
+   * reach the same two entry points the full screen reaches. A second pair
+   * here is how the two would come to differ.
+   */
   hangUp(): Promise<void>;
   /** The live group call's session adapter, or `null`. */
   readonly groupHandle: Accessor<SfuCallUiHandle | null>;
@@ -2319,16 +2447,19 @@ export function CallHostView(): JSX.Element {
    * `docs/ux/calls.md` section 2.1 — "a muted chat never rings", decided by
    * the shared rule (`ring-rule.ts`) when the offer arrived.
    *
-   * This is the whole of what `silent` withholds on this client: the
-   * ringtone, the vibration, and the screen that takes over the tab. The call
-   * itself is untouched — it holds the slot, it runs its own ring timer, and
-   * it writes the same call-log row an unmuted call writes when it ends.
+   * This is the whole of what `silent` withholds: the ringtone, the vibration,
+   * and the screen that takes over the tab. The call itself is untouched — it
+   * holds the slot, it runs its own ring timer, and it writes the same
+   * call-log row an unmuted call writes when it ends.
    *
-   * Because that screen is also the only place this client offers Accept,
-   * withholding it means a muted call goes unanswered and leaves a
-   * missed-call row the person can tap to call back. That is a consequence of
-   * having exactly one incoming-call surface, not a decision taken here; see
-   * the `silent` arm of `call-host-routing.ts`.
+   * It is no longer the whole of what `silent` DOES. This comment used to end
+   * by conceding that, since the withheld screen was also the only Accept this
+   * client had, a muted call simply went unanswered. Section 2.1.1 rejects
+   * that: muting takes away the interruption, not the call. The call is
+   * offered on two quiet surfaces instead — a panel inside the conversation
+   * and Accept / Decline on its row in the conversation list — both driven by
+   * {@link CallHostApi.quietIncomingCall} and both reaching the same accept
+   * and decline this screen reaches.
    */
   const ringingAudibly = (): boolean => host.state() === "ringing" && !internals.silentRing();
 
@@ -2387,14 +2518,16 @@ export function CallHostView(): JSX.Element {
 
       {/* `docs/ux/calls.md` §2.2 — a ringing call takes the whole screen, not
           a strip at the top of whatever the user was reading. §2.1 exempts a
-          muted conversation: taking over the tab IS the interruption. */}
+          muted conversation: taking over the tab IS the interruption. Such a
+          call is offered by the two quiet surfaces of §2.1.1 instead, which
+          live in the conversation and on its row rather than here. */}
       <Show when={ringingAudibly()}>
         <IncomingCallScreen
           callerName={internals.nameFor(host.callGroupIdB64())}
           callerId={host.callGroupIdB64()}
           video={internals.remoteWantsVideo()}
-          onAccept={(withVideo) => void internals.accept(withVideo)}
-          onDecline={() => void internals.decline()}
+          onAccept={(withVideo) => void host.acceptIncomingCall(withVideo)}
+          onDecline={() => void host.declineIncomingCall()}
         />
       </Show>
 

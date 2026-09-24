@@ -51,6 +51,11 @@ import me.lakko.app.calls.oneToOneCallPresentation
  *    call over whatever screen is showing (`docs/ux/calls.md` section 2.2):
  *    Decline, Accept, and for a video offer an Accept-without-video between
  *    them, since an answer cannot add a media section the offer does not have.
+ *  - Unless the conversation is MUTED, in which case nothing is drawn here at
+ *    all and the call is offered in place instead (`docs/ux/calls.md` section
+ *    2.1.1): [QuietIncomingCallPanel] at the top of that conversation, and that
+ *    chat's row in the conversation list. Same call, same two entry points,
+ *    nothing covered and nothing taking focus.
  *  - An outgoing VIDEO call that has not been dialled yet is the camera check
  *    of `docs/ux/calls.md` section 3.2. A voice call never reaches that state:
  *    the host dials it as it prepares it (section 3.1).
@@ -80,13 +85,17 @@ public fun BoxScope.OneToOneCallOverlay(
         // platform downgrades its full-screen intent to a heads-up -- so this
         // is the only surface that can, and it is the SAME composable the
         // notification's full-screen intent shows when the phone is locked.
-        // Section 2.1 — a muted conversation is not interrupted, and a screen
+        // Section 2.1.1 — a muted conversation is not interrupted, and a screen
         // that takes over whatever the person is reading is an interruption.
         // The call still takes the slot, still runs its window and still lands
-        // in the history as a missed call; only this surface goes. It comes
-        // back the moment the call is accepted or connects, because by then
-        // nobody is being interrupted.
-        OneToOneCallPresentation.NONE -> Unit
+        // in the history as a missed call; what goes is only the screen that
+        // takes over. The call itself is OFFERED in place instead — the panel
+        // at the top of that conversation (`QuietIncomingCallPanel`) and that
+        // chat's row in the conversation list — so it stays answerable for the
+        // whole window without dragging anybody out of what they are doing.
+        // Nothing is drawn HERE because an app-wide overlay has nowhere to sit
+        // in somebody else's layout; the two screens draw their own.
+        OneToOneCallPresentation.QUIET_OFFER -> Unit
         OneToOneCallPresentation.RINGING_SCREEN -> Dialog(
             onDismissRequest = { /* a ring is accepted or declined, never dismissed */ },
             properties = DialogProperties(

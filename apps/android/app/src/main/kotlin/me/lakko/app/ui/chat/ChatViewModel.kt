@@ -336,6 +336,24 @@ public class ChatViewModel(
         repo.setThreadOnScreen(groupIdHex, onScreen)
     }
 
+    /**
+     * Answer the incoming call in the slot (`docs/ux/calls.md` section 2.1.1).
+     *
+     * The quiet panel this chat draws for a MUTED conversation's call is a
+     * second surface for the same call, not a second call: it drives the very
+     * entry point the full-screen ring screen drives, so there is one accept
+     * path on this client and a change to what accepting means cannot reach one
+     * surface and miss the other.
+     */
+    public fun acceptIncomingCall(withVideo: Boolean) {
+        callHost?.accept(withVideo = withVideo)
+    }
+
+    /** Refuse the incoming call in the slot; the caller is told, as ever. */
+    public fun declineIncomingCall() {
+        callHost?.decline()
+    }
+
 
     /**
      * Tap-to-call from the chat header.

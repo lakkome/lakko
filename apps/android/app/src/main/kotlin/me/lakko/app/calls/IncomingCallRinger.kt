@@ -166,9 +166,9 @@ public object IncomingCallRinger : IncomingCallRingPort {
         val surface = when (decision) {
             RingDecision.RING ->
                 ringSurface(ringing = true, appInForeground = appInForeground, remainingMs = remainingMs)
-            // `docs/ux/calls.md` section 2.1 — a muted chat never rings. No
-            // ringtone, no vibration, no full-screen intent, no call-category
-            // heads-up over whatever the person is doing.
+            // `docs/ux/calls.md` sections 2.1 and 2.1.1 — a muted chat never
+            // rings. No ringtone, no vibration, no full-screen intent, no
+            // call-category heads-up over whatever the person is doing.
             //
             // And no quiet notification either. That is a judgement, so here
             // is the reasoning. The call is ALREADY recorded, in the place a
@@ -188,15 +188,17 @@ public object IncomingCallRinger : IncomingCallRingPort {
             // and the missed-call record still lands. Only the interruption is
             // withheld.
             //
-            // The in-app screen goes too, and it is not this file that
+            // The full-screen ring goes too, and it is not this file that
             // withholds it: [me.lakko.app.ui.call.OneToOneCallOverlay] asks
             // the same shared rule through
-            // [me.lakko.app.calls.oneToOneCallPresentation]. This was briefly
-            // the other way — the sound withheld and the full-screen dialog
-            // still thrown across whatever the person was reading — which
-            // honours half of section 2.1: a screen that takes over the phone
-            // IS an interruption, and it was also the one point where this
-            // client disagreed with the other two.
+            // [me.lakko.app.calls.oneToOneCallPresentation]. What replaces it
+            // is NOT nothing — section 2.1.1, decided 2026-09-23. The call is
+            // offered on two surfaces that interrupt no one: a panel in the
+            // conversation's own layout and that chat's row in the conversation
+            // list ([me.lakko.app.calls.quietCallOffer]), so it stays
+            // answerable for the whole window. Drawing nothing at all was the
+            // first reading, and it made a muted contact unanswerable — muting
+            // a conversation became half-blocking the person.
             RingDecision.SILENT,
             // The caller has already given up.
             RingDecision.TOO_LATE,
