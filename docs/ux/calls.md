@@ -409,6 +409,98 @@ The one line of the spec every client implements is: pinned, else speaking with
 video, else first with video, else nobody. `speaking` is a hint the transport may
 never set; the rule must read the same when it is always false.
 
+### 4.5 Putting the call away without ending it
+
+A call that owns the whole screen owns the whole app. Today an answered call covers
+everything on all three clients and nothing brings the app back except hanging up: on
+Android the system back does not even collapse it, the timer simply keeps running
+behind the same picture. So a person on a call cannot look up the address they are
+being asked for, cannot read the message that just arrived, and cannot answer the one
+question the call is about. Every messenger people already use solves this the same
+way, and so does this one.
+
+**A live call collapses into one bar across the top of the app.** It sits above
+whatever screen is showing and survives every navigation: another chat, Contacts,
+Calls, Settings. The call is owned by the app-level host and not by a screen, so
+collapsing changes nothing about the call itself — the media, the keys and the timer
+are untouched, only the picture is put away.
+
+**What the bar says**, left to right:
+
+- who is on the call: the person's name, the group's name, or `Call` for a link call
+  with no name yet — the same label the call screen uses;
+- the state or the running time, in the words of the status line and never two at
+  once: `Calling...`, `Connecting...`, `Reconnecting...`, `12:04`;
+- a small lock, and only when the call screen would show its chip. The bar never
+  carries the word on its own: a claim about encryption belongs where the person can
+  open it and read the safety number, and that is one tap away;
+- a camera glyph while your own camera is sending, so a collapsed video call is never
+  a camera you forgot about;
+- one round mute button, drawn on and off exactly as the call screen draws it.
+
+**Tapping the bar anywhere else brings the call back.**
+
+**There is no End on the bar.** Ending is the one irreversible control in a call; the
+call screen sets it apart by twice the gap and paints it the only red on the screen,
+and a strip a thumb crosses on the way to a chat is the wrong place for it. Coming
+back costs one tap and the End button is where it has always been. Mute is on the bar
+because it is the control a person needs in the second they need it, and because
+pressing it the wrong way round is undone by pressing it again.
+
+**Collapsing and coming back**, each the idiom its platform already teaches:
+
+| | Collapse | Expand |
+|---|---|---|
+| iOS | a chevron at the top left of the call screen, or a downward swipe on the screen | tap the bar |
+| Android | the same chevron, or the system back, which collapses and never ends | tap the bar |
+| Web | the same chevron, or `Esc` | tap the bar, or `Enter` when it has focus |
+
+Android's back is the change people will feel first: a call is not a dialog to
+dismiss, and back has never meant hang up anywhere else in the app.
+
+**The bar is never shown over the call screen.** One state, one place — the same rule
+that keeps a floating pill off the call screen in section 4.
+
+**A call that is only ringing does not collapse.** An incoming call is answered or
+declined, and a muted conversation's call is already offered without covering anything
+(section 2.1.1), so there is nothing to put away. An outgoing call collapses from the
+moment it is placed, and the bar reads `Calling...`.
+
+**When a collapsed call ends, the bar goes away and the conversation gets its usual
+row.** Nothing is thrown across the screen: the `Call ended` overlay belongs to the
+call screen, and a person who put the call away asked not to be interrupted by it. A
+call that ends badly is not silent either way — the row and, when it was missed, the
+notification say so exactly as they do now.
+
+**The recorder stays blocked, and for the first time a person can watch it happen.** A
+live call holds the microphone, so the composer records neither a voice message nor a
+video note while one is running. That was already the rule; until the bar existed
+there was no screen on which anyone could see it refuse. Two things follow. The
+disabled recorder must say why when it is pressed, in one line, instead of sitting dim
+and silent. And the fact behind the rule widens: it asks today whether a call is live
+**in this chat**, which was the same question while a call owned the screen and is the
+wrong one the moment a person can stand in chat B with a call running from chat A. The
+microphone is just as busy. The rule's shape does not change — a call that is only
+being offered still holds nothing, an outgoing one holds capture from the moment it is
+placed — only what the clients feed it.
+
+**What each client has to expose.** The call already lives in an app-level host on all
+three — `CallHostContext` on web, `CallHostOverlay` on iOS, `HostedCallOverlays` and
+`OneToOneCallOverlay` on Android — so the bar needs no new owner, only a field beside
+the session:
+
+| Need | Why |
+|---|---|
+| `collapsed` on the call host, with an expand and a collapse | The presentation mode is a property of the call, not of a screen; a route change must never touch it |
+| The bar's label, phase, elapsed seconds, mic state, camera state and whether encryption is armed | The bar shows a subset of the call screen and reads it from the same state, so the two can never disagree |
+| The capture fact widened from "a call in this chat" to "a call is live" | The paragraph above; the shared rule itself is unchanged |
+| A collapse that is reachable without the pointer | Keyboard on web, the back gesture on Android, the swipe on iOS |
+
+**Spoken.** The bar is one button whose label names who is on the call and how long it
+has been running (`Call with Anna, 12 minutes 4 seconds, return to call`), with the
+mute button separate and naming the action and its result. State changes announce
+through it as a live region, so `Reconnecting...` is heard and not only seen.
+
 ## 5. The safety number
 
 Today the call safety number is printed across the top of the call as sixteen digits.
@@ -456,6 +548,7 @@ Flagged explicitly, because the current transport cannot support the spec:
 | A ring timeout shared by both sides (45 s) | So one side does not ring on after the other gave up |
 | An end reason (answered elsewhere, declined, missed, cancelled, failed) | Drives the transcript row and stops the other devices ringing |
 | A relay for media when a direct path fails | A call between two phones on different networks does not connect at all today |
+| A collapsed presentation on the app-level call host, and the capture fact widened to "a call is live" | Section 4.5 — the app stays usable during a call, and a chat other than the calling one must still refuse to record |
 
 Platform mechanisms: on iOS the system call integration plus its dedicated call push, on
 Android the full-screen call notification plus the phone's call integration, on web a
@@ -472,6 +565,8 @@ word).
 ## 9. Out of scope here
 
 Group call redesign beyond the shared call screen and the tile rule of section
-4.4, call recording, call links
+4.4, a floating video window (section 4.5 collapses a call to a bar; a picture-in-
+picture of the other person is a separate decision, including the system one
+each platform offers), call recording, call links
 (they keep the behaviour of [ADR-0032](../adr/0032-multi-joiner-call-links.md)),
 screen sharing, and call history sync between devices.

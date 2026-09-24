@@ -21,13 +21,22 @@
 //!
 //! So the rule is stated as what it always meant: capture is busy when a call
 //! HOLDS it, and a call that is only being offered holds nothing.
+//!
+//! The first argument used to be "a call in THIS chat", which was the same
+//! question for as long as a live call owned the whole screen: there was no
+//! other chat to be standing in. `docs/ux/calls.md` section 4.5 collapses a
+//! call to a bar, so a person can now be in chat B with a call running from
+//! chat A, and the microphone is just as busy there. The question is whether a
+//! call is live AT ALL.
 
 /// Whether the composer's voice and video-note recorder must stand aside.
 ///
-/// `call_in_this_chat` is the client's own read of its call slot - the same
-/// value each one already had. `unanswered_incoming_ring` narrows it to the
-/// one state that owns no capture: an incoming call still being offered,
-/// which the callee has not accepted.
+/// `call_is_live` is the client's read of its one call slot, which is
+/// app-wide: a call collapsed into the bar of `docs/ux/calls.md` section 4.5
+/// is live in every chat, not only in the one it was placed from.
+/// `unanswered_incoming_ring` narrows it to the one state that owns no
+/// capture: an incoming call still being offered, which the callee has not
+/// accepted.
 ///
 /// An OUTGOING call is deliberately NOT carved out, even while it is only
 /// dialing: the caller's microphone is opened as the call is placed, so it is
@@ -35,8 +44,8 @@
 /// oversight, and it is the reason this takes the narrower flag rather than
 /// "is the call ringing".
 #[must_use]
-pub const fn call_holds_capture(call_in_this_chat: bool, unanswered_incoming_ring: bool) -> bool {
-    call_in_this_chat && !unanswered_incoming_ring
+pub const fn call_holds_capture(call_is_live: bool, unanswered_incoming_ring: bool) -> bool {
+    call_is_live && !unanswered_incoming_ring
 }
 
 #[cfg(test)]

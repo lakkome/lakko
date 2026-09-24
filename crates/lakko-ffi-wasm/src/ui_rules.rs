@@ -545,15 +545,17 @@ pub fn call_ring_window_ms() -> u64 {
 /// Whether the composer's voice and video-note recorder must stand aside
 /// because a call is holding the microphone and camera.
 ///
-/// `callInThisChat` is the client's own read of its call slot.
+/// `callIsLive` is the client's read of its one app-wide call slot: a call
+/// collapsed into the bar of `docs/ux/calls.md` section 4.5 is live in every
+/// chat, not only in the one it was placed from.
 /// `unansweredIncomingRing` narrows it to the one state that owns no
 /// capture: an incoming call still being offered. An outgoing call holds
 /// capture from the moment it is placed, so it is deliberately not carved
 /// out.
 #[wasm_bindgen(js_name = callHoldsCapture)]
 #[must_use]
-pub fn call_holds_capture(call_in_this_chat: bool, unanswered_incoming_ring: bool) -> bool {
-    rust_call_holds_capture(call_in_this_chat, unanswered_incoming_ring)
+pub fn call_holds_capture(call_is_live: bool, unanswered_incoming_ring: bool) -> bool {
+    rust_call_holds_capture(call_is_live, unanswered_incoming_ring)
 }
 
 #[cfg(test)]

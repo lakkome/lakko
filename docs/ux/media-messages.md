@@ -43,9 +43,10 @@ after a tap toggles the mode). The chosen mode is remembered per device.
 8. A take shorter than **0.5 s** is discarded silently (an accidental tap), with a
    one-line hint `Hold to record`.
 
-Web has no touch-hold on desktop: **mouse-down and hold** works the same way; a plain
-**click** on the mic starts a locked recording directly (desktop has no slide gesture).
-`Esc` cancels.
+Web has no touch-hold on desktop: **mouse-down and hold** works the same way, and the
+lock and cancel targets appear under the pointer exactly as they do under a thumb, so a
+mouse reaches the whole gesture. A plain **click** does not record - it switches the
+mode (section 3.1). `Esc` cancels.
 
 ### Timeline bubble
 
@@ -80,8 +81,8 @@ Same gestures as voice, in camera mode:
    **flip camera** button while locked).
 3. Cap **60 seconds**; the ring completes and recording stops into preview.
 4. Preview: the round clip loops muted; tap to play with sound; Delete / Send.
-5. Web desktop: click the camera button → locked recording directly with the round
-   preview; `Esc` cancels.
+5. Web desktop: the same hold, with the lock and cancel targets under the pointer;
+   `Esc` cancels. A click switches the mode rather than recording (section 3.1).
 
 ### Timeline bubble
 
@@ -101,6 +102,40 @@ recording-unsupported on web), plus:
 | Camera permission denied | See §6 |
 | No camera present | Camera mode is not offered; the mic/camera toggle does nothing and says `No camera found` |
 | Poster frame missing or failed | A neutral circle with a play glyph — never a broken-image icon |
+
+### 3.1 One button, and the same one on every client
+
+The composer's right-hand button, when the text field and the tray are empty, is
+**one** button. It carries the current mode's glyph — a mic or a camera — and it
+answers two gestures:
+
+- **Tap or click: switch the mode.** Mic becomes camera, camera becomes mic. The
+  choice is remembered per device. Nothing records.
+- **Press and hold: record** in the mode the glyph is showing, with the slide-to-cancel
+  and slide-up-to-lock targets of sections 2 and 3, under a thumb and under a mouse
+  pointer alike.
+
+It is written down because the three clients had drifted into three different
+answers, and a person carrying two phones met all three in a minute: web showed
+**two** buttons side by side, a mode switch and a recorder; Android had one that
+toggled but flashed the whole screen doing it; iOS had one that ignored the tap and
+started recording a voice message the instant it was touched, so the camera mode
+could not be reached at all.
+
+A tap therefore never records, on any client. A take that begins and ends under the
+0.5 s floor is the accidental-press case of section 2 and is discarded with the same
+hint; it is not a mode switch either, because the press had already opened the
+microphone.
+
+**The keyboard and the screen reader get both gestures without either one.** Hold and
+slide are not reachable that way, so the single button carries two actions in the
+accessibility tree: activating it starts a **locked** recording in the current mode
+(section 2, step 5 — the state a person can leave with Stop), and a second action
+named `Switch to video message` / `Switch to voice message` changes the mode. On iOS
+and Android that second action is a custom accessibility action on the same button; on
+web it is a focusable control that carries no ink of its own, so the visible composer
+is still one button on all three. Without it a screen-reader user could never reach
+the camera, because the gesture that switches is the one they do not have.
 
 ## 4. Emoji picker
 
@@ -208,7 +243,9 @@ a kind**, rendered by kind.
 
 | | Web | iOS | Android |
 |---|---|---|---|
-| Hold gesture | pointer down + hold; click = locked | long-press gesture | long-press / pointer input |
+| Record button | ONE button (section 3.1): tap switches mode, hold records | same | same |
+| Hold gesture | pointer down + hold, lock and cancel targets under the pointer | long-press gesture | long-press / pointer input |
+| Mode switch for a screen reader | a focusable control carrying no ink | custom accessibility action | custom accessibility action |
 | Picker | popover above composer | bottom sheet | modal bottom sheet |
 | Skin tones | right-click | long-press | long-press |
 | Denied → settings | text instruction | **Open Settings** | **Open Settings** |
@@ -216,7 +253,8 @@ a kind**, rendered by kind.
 
 Accessibility: every control has a label ("Record voice message", "Cancel recording",
 "Play voice message, 12 seconds"); a VoiceOver/TalkBack/keyboard user can start a
-**locked** recording with a single activation, since hold-and-slide is not accessible;
+**locked** recording with a single activation, since hold-and-slide is not accessible,
+and reaches the mode switch through the second action of section 3.1;
 the waveform is exposed as a slider for seeking; duration is announced, not only shown.
 
 ## 8. Data the UI needs (input to the ADR)
