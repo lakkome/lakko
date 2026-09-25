@@ -11,6 +11,15 @@ dist/
 # them from `crates/lakko-ffi-wasm`.
 wasm/
 
+# Playwright: run output, and the audio fixtures `globalSetup` generates.
+# The fixtures are binary and reproducible from `playwright/fixtures/make-assets.mjs`,
+# so they are built rather than committed.
+test-results/
+playwright-report/
+playwright/.cache/
+playwright/fixtures/*.wav
+playwright/fixtures/*.m4a
+
 # Editor / OS
 .DS_Store
 *.log

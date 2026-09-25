@@ -605,6 +605,40 @@ targets:
     dependencies:
       - target: Lakko
 
+  # XCUITest target — the tests that need a REAL touch.
+  #
+  # Why this exists at all, given `LakkoTests` already mounts SwiftUI views in
+  # a window: a unit test can inject state and measure layout, but it cannot
+  # hold a finger down. The composer's record button answers two gestures on
+  # one control (UX spec section 3.1) and tells them apart by how long the
+  # touch lasts (`RecordingMachine.holdToRecordMs`), so every rule about it is
+  # unreachable without a touch that is genuinely held — and the simulator
+  # touch-injection tooling available outside XCUITest does not hold one (a
+  # requested 1.8 s hold arrived as a 41 ms tap). `XCUIElement.press(forDuration:)`
+  # does, which is the whole reason for a second test bundle.
+  #
+  # It drives the DEBUG-only `-LakkoUITestFixture` launch argument
+  # (`Lakko/UI/UiTestFixtures.swift`) rather than signing in: there is no test
+  # account, entering a credential is out of the question, and a test that has
+  # to reach a chat through a live deployment is a test of the deployment.
+  LakkoUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: LakkoUITests
+    settings:
+      base:
+        SWIFT_VERSION: "5.10"
+        IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+        PRODUCT_BUNDLE_IDENTIFIER: me.lakko.dev.LakkoUITests
+        GENERATE_INFOPLIST_FILE: YES
+        # A UI test bundle launches the app as a separate process rather than
+        # loading into it, so it names its target instead of carrying the
+        # BUNDLE_LOADER / TEST_HOST pair `LakkoTests` needs.
+        TEST_TARGET_NAME: Lakko
+    dependencies:
+      - target: Lakko
+
 # Local Swift Package: the LakkoCore wrapper from 1.14b.
 # Relative path resolves from `apps/ios/` to the same
 # directory. xcodegen forwards this to Xcode as a "local SPM
@@ -629,19 +663,22 @@ packages:
 # Schemes — xcodegen auto-generates one per target, but we
 # pin the explicit form so the build / archive / test actions
 # are reproducible. Single scheme `Lakko` covers Debug +
-# Release + the LakkoTests bundle (G3-4-mobile).
+# Release + both test bundles: `LakkoTests` (unit, app-hosted,
+# G3-4-mobile) and `LakkoUITests` (XCUITest).
 schemes:
   Lakko:
     build:
       targets:
         Lakko: all
         LakkoTests: [test]
+        LakkoUITests: [test]
     run:
       config: Debug
     test:
       config: Debug
       targets:
         - LakkoTests
+        - LakkoUITests
       # G3-4-mobile-call iter1 — pull `LAKKO_SFU_E2E_URL`
       # + `LAKKO_SFU_E2E_JWT` from the xcodebuild build-
       # setting environment into the test process via

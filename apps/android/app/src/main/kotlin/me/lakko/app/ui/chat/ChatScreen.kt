@@ -1299,8 +1299,14 @@ private fun DateSeparatorPill(label: String) {
     }
 }
 
+/**
+ * `internal` rather than `private` only so a UI test can render one bubble.
+ * The long press that opens the action menu lives on this composable's own
+ * Surface — not on the media inside it — so "a long press opens the menu and
+ * nothing else does" cannot be asserted anywhere below here.
+ */
 @Composable
-private fun Bubble(
+internal fun Bubble(
     msg: ChatMessage,
     /** UX 5.2 — the corner time, or `null` when the row carries no usable time. */
     time: String?,

@@ -130,6 +130,30 @@ androidx-camera        = "1.4.2"
 mlkit-barcode-scanning = "17.3.0"
 zxing-core             = "3.5.3"
 
+# The first UI tests on Android (2026-09). Nine user-visible defects were found
+# in one day by a person holding two phones and a browser, and several of them
+# were layout or gesture — the one layer this module had no test for at all.
+# These three libraries put Compose UI under test on the JVM, so a layout
+# regression is caught by `:app:testDebugUnitTest` rather than by a person on a
+# device:
+#
+#   * Robolectric runs the Android framework in-process, which is what lets
+#     `createComposeRule()` do real measurement and real gesture dispatch off a
+#     device. 4.14.1 is verified here against this module's compileSdk 35 and the
+#     JDK 21 that runs the build; newer lines exist and were not tried.
+#   * `compose.ui:ui-test-junit4` is the test surface itself (finders,
+#     `performTouchInput`, `fetchSemanticsNode().boundsInRoot`); it comes from
+#     the Compose BOM above, so it can never drift from the Compose the app
+#     draws with. `ui-test-manifest` supplies the empty activity the rule hosts
+#     the composition in, and is a debug dep because the unit tests run against
+#     the debug variant's merged manifest.
+#   * Roborazzi captures a composition to a PNG through Robolectric's native
+#     graphics pipeline, for the two assertions semantics cannot make: a
+#     baseline image, and the pixel read that proves a waveform is bars rather
+#     than a flat line.
+robolectric = "4.14.1"
+roborazzi   = "1.37.0"
+
 # G3-2 — Android WebRTC pod. `io.github.webrtc-sdk:android` is
 # the community-maintained Maven mirror of Google's `libwebrtc`
 # (Google stopped publishing `org.webrtc:google-webrtc` in
@@ -205,6 +229,17 @@ junit              = { group = "junit", name = "junit", version.ref = "junit" }
 # standard JUnit4 `@Test` annotation under the runner.
 androidx-test-runner    = { group = "androidx.test",     name = "runner", version.ref = "androidx-test-runner" }
 androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit",  version.ref = "androidx-test-ext-junit" }
+
+# The first UI tests on Android — Compose UI under Robolectric on the JVM, so
+# `./gradlew :app:testDebugUnitTest` measures real layout and dispatches real
+# gestures with no emulator. The two `compose-ui-test-*` artefacts carry no
+# version: they resolve through the same Compose BOM the app draws with.
+compose-ui-test-junit4   = { group = "androidx.compose.ui", name = "ui-test-junit4" }
+compose-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-manifest" }
+robolectric              = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
+roborazzi                = { group = "io.github.takahirom.roborazzi", name = "roborazzi",            version.ref = "roborazzi" }
+roborazzi-compose        = { group = "io.github.takahirom.roborazzi", name = "roborazzi-compose",    version.ref = "roborazzi" }
+roborazzi-junit-rule     = { group = "io.github.takahirom.roborazzi", name = "roborazzi-junit-rule", version.ref = "roborazzi" }
 
 # Phase 1.20d — Firebase Messaging (FCM) via the Firebase BoM.
 # The BoM coordinates every `com.google.firebase:firebase-*`

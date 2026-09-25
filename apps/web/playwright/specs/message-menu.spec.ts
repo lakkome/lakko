@@ -1,0 +1,146 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+/**
+ * Which gesture opens a message's action menu, with a real pointer.
+ *
+ * ## The defect
+ *
+ * The action strip was revealed on `:hover` and positioned inside the bubble.
+ * On a voice message that is exactly where the play button is, so aiming at
+ * play landed on the strip: the reaction picker opened and the message paused.
+ * A voice message could not be listened to at all.
+ *
+ * ## What this adds over `TimelineBubble.test.tsx`
+ *
+ * That file dispatches synthetic `mouseover` / `mousemove` / `focusin` events
+ * at the bubble and asserts nothing opens, which catches a handler on the
+ * wrong event. It cannot catch the other half of the same defect: a strip that
+ * is revealed by a CSS `:hover` rule rather than by a handler, and a strip
+ * whose BOX overlaps the play button. Neither is a handler and neither is
+ * visible to jsdom, which computes no `:hover` state and no boxes.
+ *
+ * Here the pointer is really over the element, the cascade really evaluates
+ * `:hover`, and the last test measures the overlap directly: a real click at
+ * the play button's own centre has to reach play.
+ */
+
+import { expect, test } from "@playwright/test";
+
+import { box, openCase } from "./harness";
+
+const MENU = "[role='menu']";
+const PLAY = "button.lakko-voice-play";
+/** A captioned voice message: it has both a surface of the bubble's own to
+ *  aim at and the play button the defect was about. */
+const CASE = "voice-captioned";
+
+test.beforeEach(async ({ page }) => {
+  await openCase(page, CASE);
+});
+
+test("a pointer resting on the bubble opens nothing", async ({ page }) => {
+  const bubble = page.locator(".lk-bubble");
+  await bubble.hover();
+  // A real hover: the cascade has evaluated `:hover` for this element and
+  // everything inside it. A `:hover`-revealed strip is visible by now.
+  await page.waitForTimeout(150);
+  expect(await page.locator(MENU).count()).toBe(0);
+});
+
+test("a pointer crossing the bubble opens nothing", async ({ page }) => {
+  const b = await box(page.locator(".lk-bubble"));
+  // Across the whole bubble, in steps, so every element under the path gets a
+  // genuine `mouseover` / `mousemove` / `pointerover` and its own `:hover`.
+  await page.mouse.move(b.x - 20, b.y + b.height / 2);
+  for (let i = 0; i <= 10; i += 1) {
+    await page.mouse.move(b.x + (b.width * i) / 10, b.y + b.height / 2);
+  }
+  expect(await page.locator(MENU).count()).toBe(0);
+});
+
+test("a left click on the bubble opens nothing", async ({ page }) => {
+  // Deliberately on the caption, not the player: a click on the bubble's own
+  // surface activates nothing, and it must not be a way into the menu either —
+  // that is what a right click is for.
+  await page.locator(".lk-bubble-text").first().click();
+  expect(await page.locator(MENU).count()).toBe(0);
+});
+
+test("tabbing onto the waveform opens nothing", async ({ page }) => {
+  await page.locator("[role='slider']").focus();
+  await expect(page.locator("[role='slider']")).toBeFocused();
+  // `:focus-within` went with `:hover` for the same reason: revealing the strip
+  // on a keyboard arrival put it over the play button without a mouse.
+  expect(await page.locator(MENU).count()).toBe(0);
+});
+
+test("a right click opens it, outside the bubble, clear of the play button", async ({ page }) => {
+  const playBefore = await box(page.locator(PLAY));
+
+  await page.locator(".lk-bubble-text").first().click({ button: "right" });
+
+  const menu = page.locator(MENU);
+  await expect(menu).toBeVisible();
+  expect(await menu.locator("[role='menuitem']").count()).toBeGreaterThan(0);
+  // The quick reactions ride the same gesture rather than sitting behind a
+  // second button — and that button was the thing positioned over play.
+  expect(await page.locator("[role='group'][aria-label='React'] [role='menuitem']").count())
+    .toBeGreaterThan(1);
+
+  // Outside the bubble's subtree, which the jsdom test also asserts...
+  expect(await page.locator(`.lk-bubble ${MENU}`).count()).toBe(0);
+  // ...and, which it cannot, clear of the play button in SPACE. This is the
+  // defect as a geometry: a menu that renders elsewhere in the tree and still
+  // covers the control is the same unpressable button.
+  const m = await box(menu);
+  const overlaps =
+    m.x < playBefore.x + playBefore.width &&
+    m.x + m.width > playBefore.x &&
+    m.y < playBefore.y + playBefore.height &&
+    m.y + m.height > playBefore.y;
+  expect(overlaps, "the open menu covers the play button").toBe(false);
+});
+
+test("a left click on the play button plays, and opens nothing", async ({ page }) => {
+  // Playwright clicks the element's own centre, so this is the aim the person
+  // took. If anything is over it — a hover strip, a stale menu, an overlay —
+  // the click lands there instead and this fails on both counts at once.
+  await page.locator(PLAY).click();
+
+  await expect(page.locator(PLAY)).toHaveAttribute("aria-label", "Pause voice message");
+  expect(await page.locator(MENU).count()).toBe(0);
+});
+
+test("a long press on the play button is still play", async ({ page }) => {
+  const b = await box(page.locator(PLAY));
+  // The touch half of the same defect, with real pointer events: the menu must
+  // not take a gesture aimed at a control. `LONG_PRESS_MS` is 500.
+  await page.locator(PLAY).dispatchEvent("pointerdown", {
+    pointerType: "touch",
+    pointerId: 1,
+    clientX: b.x + b.width / 2,
+    clientY: b.y + b.height / 2,
+    bubbles: true,
+  });
+  await page.waitForTimeout(700);
+  expect(await page.locator(MENU).count()).toBe(0);
+  await page.locator(PLAY).dispatchEvent("pointerup", {
+    pointerType: "touch",
+    pointerId: 1,
+    clientX: b.x + b.width / 2,
+    clientY: b.y + b.height / 2,
+    bubbles: true,
+  });
+});
+
+test("a long press on the bubble's own surface does open it", async ({ page }) => {
+  const caption = page.locator(".lk-bubble-text").first();
+  const b = await box(caption);
+  // The control guard must not have swallowed the gesture everywhere: a long
+  // press on the message itself is the touch path to the menu.
+  const at = { clientX: b.x + b.width / 2, clientY: b.y + b.height / 2 };
+  await caption.dispatchEvent("pointerdown", { pointerType: "touch", pointerId: 1, bubbles: true, ...at });
+  await expect(page.locator(MENU)).toBeVisible({ timeout: 2000 });
+  await caption.dispatchEvent("pointerup", { pointerType: "touch", pointerId: 1, bubbles: true, ...at });
+});

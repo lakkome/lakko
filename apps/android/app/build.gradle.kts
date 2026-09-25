@@ -277,6 +277,18 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    testOptions {
+        unitTests {
+            // The first UI tests on Android. `createComposeRule()` under
+            // Robolectric hosts the composition in a real Activity, so the
+            // resource table has to be the real one: MaterialTheme resolves the
+            // `Theme.Material3.*` parent from `res/values/themes.xml`, and the
+            // layout is measured at the density and font scale that table
+            // states. Without this every UI test fails before it can assert.
+            isIncludeAndroidResources = true
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -396,6 +408,15 @@ tasks.named("preBuild") { dependsOn(copyEmojiData) }
 android.testOptions.unitTests.all {
     // The emoji index tests parse the real dataset, from its source path.
     it.systemProperty("lakko.emojiDataPath", emojiDataSource.absolutePath)
+    // Where the Roborazzi baselines live, and when a run is allowed to WRITE
+    // them. Recording is opt-in per run — `-Plakko.roborazzi.record=true` — so
+    // an ordinary verification run can only ever compare: a run that silently
+    // re-recorded would make every baseline agree with whatever the code does
+    // today, which is the one thing a baseline must not do.
+    it.systemProperty("roborazzi.output.dir", file("src/test/screenshots").absolutePath)
+    val recording = (project.findProperty("lakko.roborazzi.record") as String?).toBoolean()
+    it.systemProperty("roborazzi.test.record", recording.toString())
+    it.systemProperty("roborazzi.test.verify", (!recording).toString())
 }
 
 dependencies {
@@ -534,6 +555,27 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.ktor.client.mock)
     testImplementation(libs.kotlinx.serialization.json)
+
+    // The first UI tests on Android. Robolectric runs the framework in-process,
+    // which is what lets `createComposeRule()` measure real layout and dispatch
+    // real gestures under `testDebugUnitTest` — no emulator, no adb.
+    //
+    // `ui-test-junit4` comes through the same Compose BOM the app draws with, so
+    // the test surface can never drift from the Compose under test.
+    // `ui-test-manifest` is the empty activity the rule hosts the composition
+    // in; it is a DEBUG dep rather than a test one because the unit tests run
+    // against the debug variant's merged manifest, and the activity has to be
+    // declared there for the rule to launch it.
+    testImplementation(platform(libs.compose.bom))
+    testImplementation(libs.compose.ui.test.junit4)
+    debugImplementation(libs.compose.ui.test.manifest)
+    testImplementation(libs.robolectric)
+    // Roborazzi — a composition to a PNG, for the two things semantics cannot
+    // answer: whether the waveform draws bars of differing heights, and whether
+    // the bubble still looks like the baseline.
+    testImplementation(libs.roborazzi)
+    testImplementation(libs.roborazzi.compose)
+    testImplementation(libs.roborazzi.junit.rule)
 
     // G3-4-mobile — instrumented test stack under
     // `app/src/androidTest/`. The first-pass SfuHealth

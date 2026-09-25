@@ -215,76 +215,20 @@ struct LakkoApp: App {
 
     var body: some Scene {
         WindowGroup {
-            // This scene body observes every `@StateObject` above, so it runs
-            // on each repository publish; `.equatable()` keeps that from
-            // re-evaluating the router, whose only input is the bundle.
-            AppRoot(services: services)
-                .equatable()
-                .environmentObject(authRepository)
-                .environmentObject(contactsRepository)
-                .environmentObject(chatRepository)
-                .environmentObject(callHost)
-                .environmentObject(groupCallHost)
-                .environmentObject(linkCallHost)
-                .environmentObject(deviceGroupSync)
-                .environmentObject(inviteIntake)
-                // Universal Links — iOS invokes this whenever the
-                // user taps a `https://lakko.me/i/<slug>` URL and
-                // the on-server `apple-app-site-association` JSON
-                // claims this bundle id. Fires for both cold-start
-                // and hot deep-link paths on iOS 14+. ``InviteIntake``
-                // parks the slug; ``AppRoot`` observes the
-                // publisher and swaps the visible destination to
-                // ``InviteLandingScreen``.
-                .onOpenURL { url in
-                    inviteIntake.handle(url)
-                }
-                // ADR-0026 Phase 4 — apply the persisted anti-censorship
-                // preference at boot: when on, fetch + verify the signed
-                // bootstrap config and publish the armed ambient config so the
-                // clients route through the obfuscated tunnel. Disarmed when
-                // off, so this is a no-op by default. Runs once on AppRoot
-                // appear; the routine is idempotent.
-                .task {
-                    AntiCensorshipManager.shared.armFromSettings()
-                }
-                // ADR-0041 Phase 1 — one-time, idempotent App Group
-                // storage migration for the rehydrated session account, so
-                // the notification-service extension can read the five
-                // decrypt inputs. Copy-not-move + never-delete-old +
-                // read-new-with-fallback-to-old, so an un-provisioned build
-                // or an interrupted migration degrades to today's behaviour
-                // rather than stranding the foreground app. No-op when
-                // there is no session. Idempotent — safe every launch.
-                .task {
-                    if case let .session(account) = authRepository.state {
-                        SharedStorageMigration.runIfNeeded(accountIdB64: account.accountIdB64)
-                    }
-                }
-                // G-29 — queue a background contact-inbox refresh as we leave
-                // the foreground, so a request that arrives while backgrounded
-                // is picked up by the next opportunistic `BGAppRefreshTask`
-                // wake (handler below) rather than waiting for a reopen. The
-                // foreground long-poll loop covers the active case.
-                .onChange(of: scenePhase) { _, phase in
-                    if phase == .background {
-                        ContactBackgroundRefresh.schedule()
-                    }
-                    // The foreground receive runs only while the app is active;
-                    // becoming active again sweeps at once, so an offer that
-                    // arrived while backgrounded rings if it is still fresh.
-                    foregroundReceive.scheduler.setForeground(phase == .active)
-                    if phase == .active {
-                        // `docs/ux/calls.md` section 2.1 — refresh the names the
-                        // notification extension may have to put on a ringing
-                        // lock screen while this app is not running.
-                        services.chatRepository.mirrorCallPeerNames()
-                    }
-                }
-                .task {
-                    foregroundReceive.scheduler.start()
-                    foregroundReceive.scheduler.setForeground(scenePhase == .active)
-                }
+            // A UI test launched with `-LakkoUITestFixture <name>` gets that
+            // fixture INSTEAD of the app, so an XCUITest can reach a real
+            // production screen without signing in. DEBUG only — see
+            // ``UiTestFixture`` for why testing through login would be testing
+            // the deployment rather than the screen.
+#if DEBUG
+            if let fixture = UiTestFixture.requested {
+                UiTestFixtureRoot(fixture: fixture)
+            } else {
+                appRoot
+            }
+#else
+            appRoot
+#endif
         }
         // G-29 — `BGAppRefreshTask` handler. iOS launches this opportunistically;
         // run one quick (non-long-poll) inbox fetch, then chain the next
@@ -294,6 +238,84 @@ struct LakkoApp: App {
             await contactsRepository.refreshInbox()
             ContactBackgroundRefresh.schedule()
         }
+    }
+
+    /// The real root of the app. Extracted from ``body`` unchanged so the
+    /// fixture branch above has something to be an alternative to; every
+    /// modifier below is exactly where it was.
+    ///
+    /// This view tree observes every `@StateObject` above, so it runs on each
+    /// repository publish; `.equatable()` keeps that from re-evaluating the
+    /// router, whose only input is the bundle.
+    @ViewBuilder
+    private var appRoot: some View {
+        AppRoot(services: services)
+            .equatable()
+            .environmentObject(authRepository)
+            .environmentObject(contactsRepository)
+            .environmentObject(chatRepository)
+            .environmentObject(callHost)
+            .environmentObject(groupCallHost)
+            .environmentObject(linkCallHost)
+            .environmentObject(deviceGroupSync)
+            .environmentObject(inviteIntake)
+            // Universal Links — iOS invokes this whenever the
+            // user taps a `https://lakko.me/i/<slug>` URL and
+            // the on-server `apple-app-site-association` JSON
+            // claims this bundle id. Fires for both cold-start
+            // and hot deep-link paths on iOS 14+. ``InviteIntake``
+            // parks the slug; ``AppRoot`` observes the
+            // publisher and swaps the visible destination to
+            // ``InviteLandingScreen``.
+            .onOpenURL { url in
+                inviteIntake.handle(url)
+            }
+            // ADR-0026 Phase 4 — apply the persisted anti-censorship
+            // preference at boot: when on, fetch + verify the signed
+            // bootstrap config and publish the armed ambient config so the
+            // clients route through the obfuscated tunnel. Disarmed when
+            // off, so this is a no-op by default. Runs once on AppRoot
+            // appear; the routine is idempotent.
+            .task {
+                AntiCensorshipManager.shared.armFromSettings()
+            }
+            // ADR-0041 Phase 1 — one-time, idempotent App Group
+            // storage migration for the rehydrated session account, so
+            // the notification-service extension can read the five
+            // decrypt inputs. Copy-not-move + never-delete-old +
+            // read-new-with-fallback-to-old, so an un-provisioned build
+            // or an interrupted migration degrades to today's behaviour
+            // rather than stranding the foreground app. No-op when
+            // there is no session. Idempotent — safe every launch.
+            .task {
+                if case let .session(account) = authRepository.state {
+                    SharedStorageMigration.runIfNeeded(accountIdB64: account.accountIdB64)
+                }
+            }
+            // G-29 — queue a background contact-inbox refresh as we leave
+            // the foreground, so a request that arrives while backgrounded
+            // is picked up by the next opportunistic `BGAppRefreshTask`
+            // wake (handler below) rather than waiting for a reopen. The
+            // foreground long-poll loop covers the active case.
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .background {
+                    ContactBackgroundRefresh.schedule()
+                }
+                // The foreground receive runs only while the app is active;
+                // becoming active again sweeps at once, so an offer that
+                // arrived while backgrounded rings if it is still fresh.
+                foregroundReceive.scheduler.setForeground(phase == .active)
+                if phase == .active {
+                    // `docs/ux/calls.md` section 2.1 — refresh the names the
+                    // notification extension may have to put on a ringing
+                    // lock screen while this app is not running.
+                    services.chatRepository.mirrorCallPeerNames()
+                }
+            }
+            .task {
+                foregroundReceive.scheduler.start()
+                foregroundReceive.scheduler.setForeground(scenePhase == .active)
+            }
     }
 }
 

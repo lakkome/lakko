@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<!--
+  SPDX-License-Identifier: AGPL-3.0-or-later
+  SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+  The fixture page the real-browser specs open. Not the app: it has no router,
+  no providers and no sign-in, and it never talks to a service.
+
+  `color-scheme: light` is pinned so a run under a dark system theme measures
+  the same cascade as one under a light theme; every measurement in the specs
+  is a geometry, and a theme that changed a control's size would be a flake
+  nobody could reproduce.
+-->
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lakko UI fixtures</title>
+    <style>
+      html { color-scheme: light; }
+      /* The app's own chat surface, so a bubble is measured on the background
+         it is drawn on rather than on a white page. */
+      body { margin: 0; padding: 24px; background: var(--surface); }
+    </style>
+  </head>
+  <body>
+    <div id="harness"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>
