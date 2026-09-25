@@ -3,8 +3,10 @@
 
 package me.lakko.app.ui.chat
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -76,6 +78,54 @@ import java.io.File
 internal const val COULD_NOT_PLAY = "Couldn't play this message"
 internal const val NOT_SENT_RETRY = "Not sent · Retry"
 
+/** What a long press on a bubble — or on any control inside one — is FOR, as
+ *  TalkBack announces it ("double tap and hold to ..."). */
+internal const val BUBBLE_ACTIONS_LABEL = "Message actions"
+
+/**
+ * A control that lives INSIDE a bubble.
+ *
+ * `docs/ux/client-redesign.md`: the deliberate gesture reaches the action menu
+ * from anywhere on the bubble, **including over the bubble's own controls**,
+ * and a press long enough to be that gesture is not also a tap on the control
+ * underneath it. Both halves are the rule, and the second is what makes the
+ * first safe — a long press that opened the menu AND played the audio under it
+ * would have done something nobody asked for.
+ *
+ * A plain `clickable` breaks both at once, and this is the whole of why: it
+ * CONSUMES the press, so the ancestor Surface holding the menu's long press
+ * never sees it, and it fires `onClick` on release whatever the press's
+ * length. On Android that left a voice message reachable only by the padding no
+ * control covered. Handing the control the menu's own callback fixes both from
+ * one place: `combinedClickable` with a non-null `onLongClick` classifies the
+ * gesture against `viewConfiguration.longPressTimeoutMillis` — the PLATFORM's
+ * threshold, not iOS's 0.5 s, because a person's press is judged against the
+ * long-press timeout their device taught them — and fires exactly one of the
+ * two callbacks. So "not also a tap" is the detector's guarantee rather than a
+ * duration comparison written here, and it survives a phone whose accessibility
+ * settings lengthen that timeout.
+ *
+ * It also keeps what `clickable` was there for: the ripple, the [role], the
+ * `onClick` semantics action, and now an `onLongClick` semantics action, so
+ * TalkBack can reach the menu on a control too.
+ *
+ * `null` [onLongPress] means no menu is offered on this row at all (a deleted
+ * or not-yet-acked message), and the control behaves exactly as it did before.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+internal fun Modifier.bubbleControl(
+    onLongPress: (() -> Unit)?,
+    onClickLabel: String? = null,
+    role: Role? = null,
+    onClick: () -> Unit,
+): Modifier = combinedClickable(
+    onClickLabel = onClickLabel,
+    role = role,
+    onClick = onClick,
+    onLongClickLabel = if (onLongPress == null) null else BUBBLE_ACTIONS_LABEL,
+    onLongClick = onLongPress,
+)
+
 /**
  * One attachment in a bubble: a voice player, a round video note, an
  * animation, a photo or video (UX spec §10), or the plain file chip — chosen by [renderDecision], which needs
@@ -95,9 +145,10 @@ internal fun AttachmentView(
     bubbleColor: Color,
     /** UX spec §10 — Save from the photo viewer / video player. */
     onSave: (AttachmentRef) -> Unit = {},
-    /** The bubble's long-press menu, forwarded by photo and video bubbles
-     *  (their own tap handler would otherwise swallow the long press);
-     *  `null` when no menu is offered. */
+    /** The bubble's long-press menu, forwarded to EVERY bubble that carries a
+     *  control of its own — their tap handlers would otherwise swallow the long
+     *  press, which is exactly the defect `docs/ux/client-redesign.md` writes
+     *  down; see [bubbleControl]. `null` when no menu is offered. */
     onLongPress: (() -> Unit)? = null,
     /** UX spec §10 — the time / ticks pill drawn on a photo or video. */
     mediaOverlay: (@Composable androidx.compose.foundation.layout.BoxScope.() -> Unit)? = null,
@@ -112,9 +163,9 @@ internal fun AttachmentView(
 ) {
     val decision = remember(ref.kind, ref.mime) { renderDecision(ref, hub.allowlist) }
     when (decision.bubble) {
-        MediaBubble.VOICE -> VoiceBubble(ref, hub, isOwn, contentColor, bubbleColor, voiceMeta)
-        MediaBubble.VIDEO_NOTE -> VideoNoteBubble(ref, hub)
-        MediaBubble.GIF -> GifBubble(ref, hub, decision.inline)
+        MediaBubble.VOICE -> VoiceBubble(ref, hub, isOwn, contentColor, bubbleColor, voiceMeta, onLongPress)
+        MediaBubble.VIDEO_NOTE -> VideoNoteBubble(ref, hub, onLongPress)
+        MediaBubble.GIF -> GifBubble(ref, hub, decision.inline, onLongPress)
         MediaBubble.PHOTO -> PhotoBubble(ref, hub, onSave, onLongPress, mediaOverlay)
         MediaBubble.VIDEO -> VideoBubble(ref, hub, onSave, onLongPress, mediaOverlay)
         MediaBubble.FILE -> fileChip()
@@ -186,6 +237,10 @@ internal fun VoiceBubble(
      *  `null` for a voice message that is not alone in its bubble: that one has
      *  a paragraph to sit under and keeps the bubble's meta row. */
     meta: (@Composable () -> Unit)? = null,
+    /** The bubble's action menu. Every control in this row takes it, so the
+     *  deliberate gesture reaches the menu over the play disc, the waveform,
+     *  the speed control and the failure line alike — see [bubbleControl]. */
+    onLongPress: (() -> Unit)? = null,
 ) {
     val key = remember(ref.blobId) { ChatMediaHub.mediaKey(ref.blobId) }
     val voice by hub.voice.collectAsStateWithLifecycle()
@@ -233,6 +288,7 @@ internal fun VoiceBubble(
                     "Play voice message, ${spokenDuration(duration)}"
                 },
                 onClick = { hub.toggleVoice(ref, knownDuration, sentByMe = isOwn) },
+                onLongPress = onLongPress,
             )
             Column(
                 modifier = Modifier.width(IntrinsicSize.Max),
@@ -245,6 +301,7 @@ internal fun VoiceBubble(
                     idleColor = contentColor.copy(alpha = 0.35f),
                     label = "Voice message position",
                     modifier = Modifier.width(VOICE_WAVEFORM_WIDTH).height(VOICE_WAVEFORM_HEIGHT),
+                    onLongPress = onLongPress,
                     onSeek = { f -> hub.seekVoice(ref, f, knownDuration, sentByMe = isOwn) },
                 )
                 VoiceQuietLine(
@@ -268,6 +325,7 @@ internal fun VoiceBubble(
                     onCycleRate = hub::cycleRate,
                     contentColor = contentColor,
                     meta = meta,
+                    onLongPress = onLongPress,
                 )
             }
         }
@@ -276,8 +334,10 @@ internal fun VoiceBubble(
                 text = COULD_NOT_PLAY,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.error,
-                modifier = Modifier
-                    .clickable(onClickLabel = "Retry") { hub.toggleVoice(ref, knownDuration, sentByMe = isOwn) },
+                modifier = Modifier.bubbleControl(
+                    onClickLabel = "Retry",
+                    onLongPress = onLongPress,
+                ) { hub.toggleVoice(ref, knownDuration, sentByMe = isOwn) },
             )
         }
     }
@@ -313,6 +373,7 @@ private fun VoicePlayDisc(
     glyphColor: Color,
     label: String?,
     onClick: (() -> Unit)?,
+    onLongPress: (() -> Unit)? = null,
     uploadProgress: Float? = null,
 ) {
     Box(contentAlignment = Alignment.Center, modifier = Modifier.size(VOICE_BUTTON_SIZE)) {
@@ -328,7 +389,7 @@ private fun VoicePlayDisc(
                         // rather than a 48dp square, as IconButton's is.
                         Modifier
                             .clip(CircleShape)
-                            .clickable(role = Role.Button, onClick = onClick)
+                            .bubbleControl(onLongPress = onLongPress, role = Role.Button, onClick = onClick)
                     },
                 )
                 .then(
@@ -405,6 +466,7 @@ private fun VoiceQuietLine(
     onCycleRate: () -> Unit,
     contentColor: Color,
     meta: (@Composable () -> Unit)?,
+    onLongPress: (() -> Unit)? = null,
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -440,7 +502,8 @@ private fun VoiceQuietLine(
                     color = contentColor,
                     modifier = Modifier
                         .clip(RoundedCornerShape(4.dp))
-                        .clickable(
+                        .bubbleControl(
+                            onLongPress = onLongPress,
                             onClickLabel = "Change playback speed",
                             role = Role.Button,
                             onClick = onCycleRate,
@@ -490,7 +553,7 @@ private fun VoiceRate(text: String, color: Color, modifier: Modifier = Modifier)
 
 /** §3 timeline bubble — a circle, no bubble chrome. */
 @Composable
-internal fun VideoNoteBubble(ref: AttachmentRef, hub: ChatMediaHub) {
+internal fun VideoNoteBubble(ref: AttachmentRef, hub: ChatMediaHub, onLongPress: (() -> Unit)? = null) {
     val scope = rememberCoroutineScope()
     val key = remember(ref.blobId) { ChatMediaHub.mediaKey(ref.blobId) }
     var poster by remember(key) { mutableStateOf<File?>(null) }
@@ -538,7 +601,10 @@ internal fun VideoNoteBubble(ref: AttachmentRef, hub: ChatMediaHub) {
                 .size(240.dp)
                 .clip(CircleShape)
                 .background(MaterialTheme.colorScheme.surfaceVariant)
-                .clickable(onClickLabel = if (playingWithSound) "Pause video message" else "Play video message") {
+                .bubbleControl(
+                    onLongPress = onLongPress,
+                    onClickLabel = if (playingWithSound) "Pause video message" else "Play video message",
+                ) {
                     if (playingWithSound) {
                         playingWithSound = false
                         hub.exclusive.release("video-$key")
@@ -614,7 +680,12 @@ internal fun VideoNoteBubble(ref: AttachmentRef, hub: ChatMediaHub) {
 /** §5 timeline — the animation itself, looping and muted, sized to its aspect
  *  ratio, with a small `GIF` label; a tap opens it full-screen. */
 @Composable
-internal fun GifBubble(ref: AttachmentRef, hub: ChatMediaHub, inline: InlineKind?) {
+internal fun GifBubble(
+    ref: AttachmentRef,
+    hub: ChatMediaHub,
+    inline: InlineKind?,
+    onLongPress: (() -> Unit)? = null,
+) {
     val key = remember(ref.blobId) { ChatMediaHub.mediaKey(ref.blobId) }
     var file by remember(key) { mutableStateOf<File?>(hub.fileFor(key)) }
     var failed by remember(key) { mutableStateOf(false) }
@@ -636,7 +707,10 @@ internal fun GifBubble(ref: AttachmentRef, hub: ChatMediaHub, inline: InlineKind
             .aspectRatio(ratio)
             .clip(RoundedCornerShape(10.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .clickable(onClickLabel = if (failed) "Retry" else "Open GIF") {
+            .bubbleControl(
+                onLongPress = onLongPress,
+                onClickLabel = if (failed) "Retry" else "Open GIF",
+            ) {
                 if (failed) {
                     failed = false
                     attempt += 1

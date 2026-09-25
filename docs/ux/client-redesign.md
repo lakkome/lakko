@@ -305,6 +305,19 @@ differences are the title, the compose action and the row title rule.
   all. The menu also never overlaps the bubble's own controls, whatever opens
   it. A keyboard reaches it with the context-menu key or Shift+F10 on the
   focused bubble, which are the same deliberate act.
+- The deliberate gesture reaches the menu from **anywhere on the bubble,
+  including over the bubble's own controls**, and a press long enough to be
+  that gesture is not also a tap on the control underneath it. Both halves are
+  the rule, and the second is what makes the first safe: a long press that
+  opened the menu AND seeked the audio under it would have done something
+  nobody asked for. Written down because "opens on a long press" was read as a
+  property of the bubble while every control inside it kept claiming the press
+  for itself. On Android that left a voice message reachable only by the
+  padding no control covered - the waveform seeked and the play disc played,
+  whatever the press's duration - where iOS had already given its waveform a
+  rule refusing a press long enough to open the menu. A control that answers a
+  tap must therefore decline a press that outlives the platform's long-press
+  threshold, and must let that press through to the bubble.
 - Message actions and the composer keep the ADR-0023, ADR-0024 and ADR-0047
   behaviour; only the chrome changes.
 - Composer: attach, text field growing to five lines, emoji or GIF picker,

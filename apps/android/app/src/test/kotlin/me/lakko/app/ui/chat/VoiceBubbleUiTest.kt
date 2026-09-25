@@ -5,6 +5,8 @@ package me.lakko.app.ui.chat
 
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -14,9 +16,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.test.click
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.longClick
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -293,6 +298,236 @@ class VoiceBubbleUiTest {
      * One incoming message in the real [Bubble] — the composable that owns the
      * long press — with the menu it opens and nothing else on screen.
      */
+    // ----- 4. the deliberate gesture reaches the menu over the bubble's own
+    //          controls, and is not also a tap on them ---------------------
+
+    /**
+     * `docs/ux/client-redesign.md` §"reactions and actions": the deliberate
+     * gesture reaches the menu from anywhere on the bubble, INCLUDING over the
+     * bubble's own controls, and a press long enough to be that gesture is not
+     * also a tap on the control underneath it. Both halves are the rule, and
+     * the second is what makes the first safe — a long press that opened the
+     * menu and seeked the audio under it would have done something nobody
+     * asked for.
+     *
+     * A voice bubble is where the rule bites hardest, because two of its three
+     * controls cover most of it: the waveform is a seek surface 170dp wide and
+     * the play disc's touch target is 48dp, so the padding neither covers is a
+     * few pixels of border. That is why the two gesture tests above use a
+     * plain paragraph — they are about the bubble — and these four use the
+     * voice bubble, which is about the controls.
+     */
+    @Test
+    fun aLongPressOnTheWaveformOpensTheActionMenu() {
+        compose.setContent { BubbleUnderTest(VOICE_MESSAGE) }
+
+        waveform().performTouchInput { longClick() }
+
+        assertMenuOpen()
+    }
+
+    @Test
+    fun aLongPressOnThePlayDiscOpensTheActionMenu() {
+        compose.setContent { BubbleUnderTest(VOICE_MESSAGE) }
+
+        playDisc().performTouchInput { longClick() }
+
+        assertMenuOpen()
+    }
+
+    @Test
+    fun aLongPressOnTheWaveformNeitherSeeksNorPlays() {
+        // The second half of the rule, on the waveform. Asserted from the idle
+        // state because from idle EVERY seek is visible in one field: the
+        // waveform's `onSeek` runs `hub.seekVoice`, which on a message that is
+        // not the current one starts it — so a player key at all means the
+        // press moved the playhead, whether or not the audio device then got
+        // as far as a sample.
+        compose.setContent { BubbleUnderTest(VOICE_MESSAGE) }
+
+        waveform().performTouchInput { longClick() }
+
+        assertVoiceUntouched()
+    }
+
+    @Test
+    fun aLongPressOnThePlayDiscNeitherPlaysNorSeeks() {
+        compose.setContent { BubbleUnderTest(VOICE_MESSAGE) }
+
+        playDisc().performTouchInput { longClick() }
+
+        assertVoiceUntouched()
+    }
+
+    // ----- 5. a plain press on either control still does its own job --------
+
+    /**
+     * A plain tap still seeks, and to the fraction of the waveform it landed
+     * on — the half of the rule that a fix declining every press would break
+     * silently, leaving a waveform that opens a menu and does nothing else.
+     *
+     * This one and the drag below render [WaveformSeekBar] on its own with a
+     * recording callback rather than inside the real [Bubble], because the
+     * question is WHICH FRACTION the gesture produced and the fraction is what
+     * this composable computes; inside a bubble it is handed to a player whose
+     * position then belongs to the audio device, so a bubble-level assertion
+     * would be measuring Robolectric's `ShadowMediaPlayer`. The tests that ask
+     * whether the MENU opens use the real bubble, because the menu is the
+     * bubble's.
+     */
+    @Test
+    fun aPlainTapOnTheWaveformSeeksToTheTappedFraction() {
+        val seeks = mutableListOf<Float>()
+        compose.setContent { RecordingWaveform(seeks::add) }
+
+        compose.onNodeWithContentDescription(WAVEFORM).performTouchInput {
+            click(percentOffset(TAP_FRACTION, 0.5f))
+        }
+
+        assertEquals("the tap produced no seek at all", 1, seeks.size)
+        assertTrue(
+            "a tap ${TAP_FRACTION * 100}% across the waveform seeked to ${seeks.first()}",
+            abs(seeks.first() - TAP_FRACTION) <= FRACTION_TOLERANCE,
+        )
+    }
+
+    @Test
+    fun aHorizontalDragOnTheWaveformScrubs() {
+        val seeks = mutableListOf<Float>()
+        compose.setContent { RecordingWaveform(seeks::add) }
+
+        compose.onNodeWithContentDescription(WAVEFORM).performTouchInput {
+            down(percentOffset(0.1f, 0.5f))
+            moveTo(percentOffset(0.5f, 0.5f))
+            moveTo(percentOffset(0.9f, 0.5f))
+            up()
+        }
+
+        // Scrubbing is a seek that FOLLOWS the finger, so one seek is not
+        // enough and the last one has to be where the finger ended. A drag
+        // that only reported its start would look like a working seek bar and
+        // feel like a broken one.
+        assertTrue("the drag produced no seek at all", seeks.isNotEmpty())
+        assertTrue(
+            "the drag reported $seeks, which does not end near the finger",
+            abs(seeks.last() - 0.9f) <= FRACTION_TOLERANCE,
+        )
+        assertTrue("the drag did not move the playhead forward: $seeks", seeks.last() > seeks.first())
+    }
+
+    // ----- 6. TalkBack reaches both, over the same control ------------------
+
+    /**
+     * A screen reader's long press never travels through the pointer pipeline —
+     * it invokes the `OnLongClick` semantics action directly — so a control that
+     * declines a touch long press would have taken the menu away from TalkBack
+     * entirely unless the action is there too.
+     *
+     * And the seek has to survive beside it: the waveform is exposed as a slider
+     * (UX spec §7), and `SetProgress` is the ONLY way a screen-reader user
+     * moves the playhead, there being no drag for them to make. Both actions are
+     * offered and the user picks, which is why this asserts the pair rather than
+     * either one.
+     */
+    @Test
+    fun theWaveformOffersTalkBackBothTheSeekAndTheMenu() {
+        compose.setContent { BubbleUnderTest(VOICE_MESSAGE) }
+
+        val config = waveform().fetchSemanticsNode().config
+
+        assertTrue(
+            "TalkBack lost the waveform's seek action",
+            config.contains(SemanticsActions.SetProgress),
+        )
+        assertTrue(
+            "TalkBack cannot reach the action menu from the waveform",
+            config.contains(SemanticsActions.OnLongClick),
+        )
+    }
+
+    @Test
+    fun thePlayDiscOffersTalkBackBothPlaybackAndTheMenu() {
+        compose.setContent { BubbleUnderTest(VOICE_MESSAGE) }
+
+        val config = playDisc().fetchSemanticsNode().config
+
+        assertTrue("TalkBack lost the play button", config.contains(SemanticsActions.OnClick))
+        assertTrue(
+            "TalkBack cannot reach the action menu from the play button",
+            config.contains(SemanticsActions.OnLongClick),
+        )
+    }
+
+    // ----- what the gesture tests reach ------------------------------------
+
+    /**
+     * The waveform inside the bubble under test.
+     *
+     * The size guard is the same one [startPlayback] carries and for the same
+     * reason: the bubble's `combinedClickable` merges its descendants, so a
+     * control that stops being a merge boundary is ABSORBED into the bubble's
+     * single node, which the finder would then match — and a gesture aimed at
+     * the bubble's centre lands on the waveform anyway, so the test would pass
+     * while measuring nothing.
+     */
+    private fun waveform() = compose
+        .onNodeWithContentDescription(WAVEFORM, useUnmergedTree = true)
+        .also { node ->
+            val size = node.fetchSemanticsNode().size
+            assertTrue(
+                "this is not the waveform but something $size big — the finder has retargeted",
+                size.width <= WAVEFORM_WIDTH_PX && size.height <= WAVEFORM_HEIGHT_PX,
+            )
+        }
+
+    private fun playDisc() = compose
+        .onNode(hasContentDescription(PLAY, substring = true), useUnmergedTree = true)
+        .also { node ->
+            val size = node.fetchSemanticsNode().size
+            assertTrue(
+                "this is not the play disc but something $size big — the finder has retargeted",
+                size.width <= TOUCH_TARGET_PX && size.height <= TOUCH_TARGET_PX,
+            )
+        }
+
+    /** Nothing about the player moved: no message is loaded, none is playing,
+     *  and the playhead is still at the start. */
+    private fun assertVoiceUntouched() {
+        val voice = hub.voice.value
+        assertEquals("the press picked a message up for the player", null, voice.key)
+        assertTrue("the press started playback", !voice.playing)
+        assertEquals("the press moved the playhead", 0L, voice.positionMs)
+    }
+
+    /** The production waveform at its production size, reporting every seek it
+     *  decides on. */
+    @Composable
+    private fun RecordingWaveform(onSeek: (Float) -> Unit) {
+        MaterialTheme {
+            Surface {
+                WaveformSeekBar(
+                    waveform = VOICE.waveform,
+                    progress = 0f,
+                    playedColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    idleColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    label = WAVEFORM,
+                    modifier = Modifier.width(170.dp).height(26.dp),
+                    // A menu to reach, so the long-press branch is armed the
+                    // way it is in a bubble that offers actions. Without it
+                    // these two would pass against a waveform that has no
+                    // long-press rule at all — which is what they did on the
+                    // first run, before the fix existed to arm.
+                    onLongPress = {},
+                    onSeek = onSeek,
+                )
+            }
+        }
+    }
+
+    /**
+     * One incoming message in the real [Bubble] — the composable that owns the
+     * long press — with the menu it opens and nothing else on screen.
+     */
     @Composable
     private fun BubbleUnderTest(msg: ChatMessage) {
         MaterialTheme {
@@ -337,6 +572,9 @@ class VoiceBubbleUiTest {
         const val BUBBLE = "voice-bubble"
         const val META = "voice-meta"
         const val PLAY = "Play voice message"
+
+        /** [WaveformSeekBar]'s own label, as [VoiceBubble] passes it. */
+        const val WAVEFORM = "Voice message position"
         const val REACT = "React"
         const val TIME = "09:00"
         const val DURATION_MS = 12_000L
@@ -347,6 +585,18 @@ class VoiceBubbleUiTest {
 
         /** The play disc's 48dp touch target, in px at the test density. */
         const val TOUCH_TARGET_PX = 48
+
+        /** [VoiceBubble]'s waveform, 170dp x 26dp, in px at the test density. */
+        const val WAVEFORM_WIDTH_PX = 170
+        const val WAVEFORM_HEIGHT_PX = 26
+
+        /** Where the tap test lands: past the middle, so a fix that reported
+         *  the centre or zero instead of the touched point still fails. */
+        const val TAP_FRACTION = 0.78f
+
+        /** The touched point is a whole pixel and the fraction is that pixel
+         *  over the width, so the two can differ by half a bar. */
+        const val FRACTION_TOLERANCE = 0.02f
 
         val VOICE = AttachmentRef(
             blobId = ByteArray(32) { 11 },
@@ -376,12 +626,14 @@ class VoiceBubbleUiTest {
          * A plain paragraph, for the two gesture tests that are about the
          * BUBBLE rather than about the media in it.
          *
-         * A voice bubble is the wrong subject for those two: its waveform is a
-         * seek surface and its play disc is a button, and each claims the press
-         * where it is drawn — which between them is most of the bubble. A long
-         * press aimed at a voice bubble's centre lands on the waveform, so a
-         * test using one would be measuring which child won rather than whether
-         * the menu opens.
+         * A voice bubble is the wrong subject for those two, and still is now
+         * that a press over its controls reaches the menu: a long press aimed at
+         * a voice bubble's centre lands on the waveform, so a test using one
+         * would be reading the waveform's rule rather than the bubble's. Which
+         * of the two it read stopped mattering to the VERDICT once both open the
+         * menu — and that is exactly why the subject has to stay a paragraph,
+         * because a test that cannot distinguish them would keep passing if the
+         * bubble's own long press were removed.
          */
         val TEXT_MESSAGE = incoming(text = "tap me", attachments = emptyList())
 

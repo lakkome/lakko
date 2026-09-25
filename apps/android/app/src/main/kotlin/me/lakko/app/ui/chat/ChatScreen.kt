@@ -1301,9 +1301,16 @@ private fun DateSeparatorPill(label: String) {
 
 /**
  * `internal` rather than `private` only so a UI test can render one bubble.
- * The long press that opens the action menu lives on this composable's own
- * Surface — not on the media inside it — so "a long press opens the menu and
- * nothing else does" cannot be asserted anywhere below here.
+ * The long press that opens the action menu starts on this composable's own
+ * Surface, so "a long press opens the menu and nothing else does" cannot be
+ * asserted anywhere below here.
+ *
+ * It does not END there: `docs/ux/client-redesign.md` requires the gesture to
+ * reach the menu over the bubble's own controls too, and a control that answers
+ * a tap consumes the press before this Surface ever sees it. So [openMenu] is
+ * threaded down to every control inside the bubble — see
+ * [me.lakko.app.ui.chat.bubbleControl] for why that is the fix rather than
+ * arranging for the press to pass through.
  */
 @Composable
 internal fun Bubble(

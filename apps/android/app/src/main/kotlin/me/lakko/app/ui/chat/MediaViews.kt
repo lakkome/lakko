@@ -33,6 +33,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.setProgress
@@ -283,6 +284,23 @@ private class VideoHolder {
 /**
  * The voice waveform as a seekable bar chart. Exposed to TalkBack as a slider
  * (UX spec §7: "the waveform is exposed as a slider for seeking").
+ *
+ * [onLongPress] is the bubble's action menu, and passing it is what makes the
+ * waveform obey `docs/ux/client-redesign.md`'s rule that the deliberate
+ * gesture reaches the menu from anywhere on the bubble, INCLUDING over the
+ * bubble's own controls, while a press long enough to be that gesture is not
+ * also a tap on the control underneath it. Both halves come from handing the
+ * callback to `detectTapGestures`, whose long-press branch fires it and then
+ * suppresses the tap for that gesture — rather than from letting the press
+ * through to the ancestor Surface, which would leave "was that a seek?" to
+ * Compose's consumption arbitration between a `Canvas` and a distant parent.
+ *
+ * The THRESHOLD is deliberately not iOS's 0.5 s even though the RULE is shared:
+ * `detectTapGestures` measures against `viewConfiguration.longPressTimeoutMillis`,
+ * the platform's own, because a person's press is judged against the long-press
+ * timeout their device taught them — it is a system (and accessibility)
+ * setting, and a hardcoded constant would make this bubble disagree with every
+ * other Android app on the same phone.
  */
 @Composable
 internal fun WaveformSeekBar(
@@ -293,10 +311,15 @@ internal fun WaveformSeekBar(
     label: String,
     modifier: Modifier = Modifier,
     bars: Int = 40,
+    /** The bubble's action menu, or `null` where no menu is offered — in which
+     *  case there is nothing to hand a long press to and the tap detector goes
+     *  back to accepting a press of any length, as it always did. */
+    onLongPress: (() -> Unit)? = null,
     onSeek: (Float) -> Unit,
 ) {
     val heights = remember(waveform, bars) { waveformBars(waveform, bars) }
     val seek by rememberUpdatedState(onSeek)
+    val longPress by rememberUpdatedState(onLongPress)
     Canvas(
         modifier = modifier
             .semantics {
@@ -306,11 +329,25 @@ internal fun WaveformSeekBar(
                     seek(target.coerceIn(0f, 1f))
                     true
                 }
-            }
-            .pointerInput(Unit) {
-                detectTapGestures { offset ->
-                    if (size.width > 0) seek((offset.x / size.width).coerceIn(0f, 1f))
+                // TalkBack reaches the menu by its own long press, which never
+                // travels through the pointer pipeline — so declining a touch
+                // long press would have taken the menu away from a screen
+                // reader if this were not here. The seek action above stays
+                // beside it: both are offered, and the user picks.
+                if (onLongPress != null) {
+                    onLongClick(label = BUBBLE_ACTIONS_LABEL) {
+                        longPress?.invoke()
+                        true
+                    }
                 }
+            }
+            .pointerInput(onLongPress == null) {
+                detectTapGestures(
+                    onLongPress = if (onLongPress == null) null else ({ longPress?.invoke() }),
+                    onTap = { offset ->
+                        if (size.width > 0) seek((offset.x / size.width).coerceIn(0f, 1f))
+                    },
+                )
             }
             .pointerInput(Unit) {
                 detectHorizontalDragGestures { change, _ ->

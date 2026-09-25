@@ -5,10 +5,8 @@ package me.lakko.app.ui.chat
 
 import android.widget.MediaController
 import android.widget.VideoView
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
@@ -90,15 +88,24 @@ private fun isAnimatedImage(mime: String?): Boolean {
     return essence == "image/gif" || essence == "image/webp"
 }
 
-@OptIn(ExperimentalFoundationApi::class)
+/**
+ * The photo / video bubble's own tap, plus the bubble's long press.
+ *
+ * Delegates to [bubbleControl] rather than calling `combinedClickable` itself,
+ * so the rule in `docs/ux/client-redesign.md` — a control answers a tap and
+ * hands a longer press to the menu — has exactly ONE definition on this client.
+ * These two bubbles were the only ones that ever took the callback; the defect
+ * was everywhere it was not taken, and one helper is what keeps a bubble added
+ * later from re-introducing it.
+ */
 private fun Modifier.mediaGestures(
     label: String,
     onClick: () -> Unit,
     onLongPress: (() -> Unit)?,
-): Modifier = combinedClickable(
+): Modifier = bubbleControl(
+    onLongPress = onLongPress,
     onClickLabel = label,
     onClick = onClick,
-    onLongClick = onLongPress,
 )
 
 /**
