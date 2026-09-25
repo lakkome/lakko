@@ -523,6 +523,37 @@ function composerCase(mode: "voice" | "video_note"): JSX.Element {
 }
 
 // ---------------------------------------------------------------------------
+// the composer's message field
+// ---------------------------------------------------------------------------
+
+/**
+ * The composer's field, alone, in the production cascade.
+ *
+ * `docs/ux` section 5.2 says the field grows with the draft to five lines and
+ * then scrolls. The GROWTH is `growComposer` in `routes/Chat.tsx` — two lines
+ * that write `scrollHeight` onto the element's own `style.height` — and the CAP
+ * is entirely the stylesheet's: `max-height`, `line-height` and
+ * `box-sizing: border-box` on `.lk-composer-input`.
+ *
+ * This case renders the field the route declares and NOTHING else, so a spec
+ * can vary the one input the route varies (the inline height) and measure what
+ * the cascade does with it. It deliberately does not reproduce `growComposer`:
+ * a fixture that computed the height would be measuring its own arithmetic
+ * instead of the cap that ships.
+ *
+ * Inside a `.lk-composer` because the form is where the field's `flex: 1` and
+ * the row's `align-items: flex-end` come from, and a field measured outside it
+ * is a field in a different layout from the shipped one.
+ */
+function composerFieldCase(): JSX.Element {
+  return (
+    <form class="lk-composer" onSubmit={(e) => e.preventDefault()}>
+      <textarea class="lk-composer-input" rows={1} placeholder="Message" />
+    </form>
+  );
+}
+
+// ---------------------------------------------------------------------------
 
 export const cases: Record<string, () => JSX.Element | Promise<JSX.Element>> = {
   /** A voice message alone in its bubble: items 1, 2, 3, 4 and 6. */
@@ -537,6 +568,8 @@ export const cases: Record<string, () => JSX.Element | Promise<JSX.Element>> = {
   "composer-video": () => composerCase("video_note"),
   /** An outgoing voice take that did not send, played back, and then retried. */
   "outgoing-voice-send": () => outgoingVoiceSendCase(),
+  /** The composer's message field, for the five-line cap. */
+  "composer-field": () => composerFieldCase(),
 };
 
 declare global {

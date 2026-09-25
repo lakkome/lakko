@@ -318,6 +318,16 @@ differences are the title, the compose action and the row title rule.
   rule refusing a press long enough to open the menu. A control that answers a
   tap must therefore decline a press that outlives the platform's long-press
   threshold, and must let that press through to the bubble.
+- **Once the menu has opened, the control underneath it receives nothing more
+  from that press** - not a tap on release, and not a drag. A finger still down
+  when the menu appears has already been answered: the person asked for the menu
+  and got it, so anything further from the same press is the app acting on an
+  instruction nobody gave. The case this decides is a press held over a voice
+  message's waveform and then slid sideways, which would open the menu AND move
+  the playhead under it. Two separate gestures stay two separate outcomes - a
+  long press opens the menu, a drag along the waveform seeks - and this says
+  only that one press may not produce both. As far as the control is concerned
+  the press ends at the moment the menu appears.
 - Message actions and the composer keep the ADR-0023, ADR-0024 and ADR-0047
   behaviour; only the chrome changes.
 - Composer: attach, text field growing to five lines, emoji or GIF picker,

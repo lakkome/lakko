@@ -1904,8 +1904,17 @@ private fun ThreadMissingHint() {
 // Composer
 // =============================================================================
 
+/**
+ * The composer row — `docs/ux/client-redesign.md` UX 5.2: attach, a text field
+ * growing to five lines, the emoji or GIF picker, and a trailing button that is
+ * a microphone with an empty draft and a send arrow otherwise.
+ *
+ * `internal` rather than private so `ComposerUiTest` drives the real thing.
+ * Every parameter is already a plain value or a callback, so nothing is
+ * loosened to reach it beyond the visibility itself.
+ */
 @Composable
-private fun Composer(
+internal fun Composer(
     /** ADR-0047 — the hold-to-record controller for this chat. */
     recorder: RecordController,
     /** ADR-0047 — an emoji the picker asked to insert at the caret. */

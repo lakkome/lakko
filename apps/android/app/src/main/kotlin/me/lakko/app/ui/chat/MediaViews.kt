@@ -15,8 +15,8 @@ import android.view.Surface
 import android.view.TextureView
 import android.widget.ImageView
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -30,6 +30,12 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.AwaitPointerEventScope
+import androidx.compose.ui.input.pointer.PointerEventTimeoutCancellationException
+import androidx.compose.ui.input.pointer.PointerId
+import androidx.compose.ui.input.pointer.PointerInputChange
+import androidx.compose.ui.input.pointer.changedToUp
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.contentDescription
@@ -289,18 +295,19 @@ private class VideoHolder {
  * waveform obey `docs/ux/client-redesign.md`'s rule that the deliberate
  * gesture reaches the menu from anywhere on the bubble, INCLUDING over the
  * bubble's own controls, while a press long enough to be that gesture is not
- * also a tap on the control underneath it. Both halves come from handing the
- * callback to `detectTapGestures`, whose long-press branch fires it and then
- * suppresses the tap for that gesture — rather than from letting the press
- * through to the ancestor Surface, which would leave "was that a seek?" to
- * Compose's consumption arbitration between a `Canvas` and a distant parent.
+ * also a tap on the control underneath it — and its companion, that once the
+ * menu has opened the control underneath it receives nothing more from that
+ * press, not a tap on release and not a drag. Both come from
+ * [trackWaveformPress], which classifies the press once; see its own
+ * documentation for why one detector rather than two.
  *
  * The THRESHOLD is deliberately not iOS's 0.5 s even though the RULE is shared:
- * `detectTapGestures` measures against `viewConfiguration.longPressTimeoutMillis`,
- * the platform's own, because a person's press is judged against the long-press
- * timeout their device taught them — it is a system (and accessibility)
- * setting, and a hardcoded constant would make this bubble disagree with every
- * other Android app on the same phone.
+ * the classification measures against
+ * `viewConfiguration.longPressTimeoutMillis`, the platform's own, because a
+ * person's press is judged against the long-press timeout their device taught
+ * them — it is a system (and accessibility) setting, and a hardcoded constant
+ * would make this bubble disagree with every other Android app on the same
+ * phone.
  */
 @Composable
 internal fun WaveformSeekBar(
@@ -342,17 +349,7 @@ internal fun WaveformSeekBar(
                 }
             }
             .pointerInput(onLongPress == null) {
-                detectTapGestures(
-                    onLongPress = if (onLongPress == null) null else ({ longPress?.invoke() }),
-                    onTap = { offset ->
-                        if (size.width > 0) seek((offset.x / size.width).coerceIn(0f, 1f))
-                    },
-                )
-            }
-            .pointerInput(Unit) {
-                detectHorizontalDragGestures { change, _ ->
-                    if (size.width > 0) seek((change.position.x / size.width).coerceIn(0f, 1f))
-                }
+                awaitEachGesture { trackWaveformPress(longPress, seek) }
             },
     ) {
         val count = heights.size
@@ -371,5 +368,127 @@ internal fun WaveformSeekBar(
                 cornerRadius = CornerRadius(barWidth / 2f, barWidth / 2f),
             )
         }
+    }
+}
+
+/**
+ * One press over the waveform, classified once as a long press, a scrub or a
+ * tap, and answered as exactly one of the three.
+ *
+ * **Why one detector and not two.** This used to be a `detectTapGestures` for
+ * the tap and the long press beside a `detectHorizontalDragGestures` for the
+ * scrub, and that arrangement could not express the rule at all: a long press
+ * and a scrub are two outcomes of the SAME press, and two detectors that never
+ * speak to each other cannot agree on which of them happened. They did not.
+ * A press held until the menu opened and then slid sideways fired the menu from
+ * the first detector and, because the drag detector is the inner node and sees
+ * a move on the main pass before the outer one consumes it, seeked from the
+ * second — so one press opened the menu AND moved the playhead under it, which
+ * `docs/ux/client-redesign.md` names as the thing that must not happen.
+ *
+ * A shared "the menu already opened" flag between the two detectors would have
+ * made the common case work and left the guarantee resting on which of two
+ * coroutines resumes first when the long-press timeout and a move land in the
+ * same instant. The rule is about what the control does, so it belongs in one
+ * state machine that decides once: past this classification there is no code
+ * path on which a long press also seeks.
+ *
+ * The three outcomes, whichever comes first after the finger goes down:
+ *  - the platform's long-press timeout expires -> [onLongPress], and the press
+ *    is over as far as this control is concerned. What remains of it is
+ *    consumed so no ancestor acts on it either, and nothing seeks.
+ *  - the finger travels past touch slop -> a scrub, which seeks to each new
+ *    position until the finger lifts.
+ *  - the finger lifts -> a tap, which seeks to where it lifted.
+ *
+ * With no [onLongPress] there is no menu to open, so the timeout is not run and
+ * the press is a tap or a scrub as it always was.
+ */
+private suspend fun AwaitPointerEventScope.trackWaveformPress(
+    onLongPress: (() -> Unit)?,
+    onSeek: (Float) -> Unit,
+) {
+    val down = awaitFirstDown(requireUnconsumed = false)
+    // Consumed for the same reason `detectTapGestures` consumes it: the press
+    // belongs to this control until the classification says otherwise.
+    down.consume()
+
+    val width = size.width
+    val slop = viewConfiguration.touchSlop
+    var position = down.position
+    var travelled = 0f
+
+    fun seekTo(x: Float) {
+        if (width > 0) onSeek((x / width).coerceIn(0f, 1f))
+    }
+
+    if (onLongPress != null) {
+        var lifted = false
+        var taken = false
+        val heldLongEnough = try {
+            withTimeout(viewConfiguration.longPressTimeoutMillis) {
+                while (travelled <= slop && !lifted && !taken) {
+                    val change = currentChange(down.id)
+                    if (change == null || change.isConsumed) {
+                        taken = true
+                    } else {
+                        travelled += (change.position - change.previousPosition).getDistance()
+                        position = change.position
+                        lifted = change.changedToUp()
+                        change.consume()
+                    }
+                }
+            }
+            false
+        } catch (_: PointerEventTimeoutCancellationException) {
+            true
+        }
+        if (heldLongEnough) {
+            onLongPress()
+            consumeThroughLift(down.id)
+            return
+        }
+        if (taken) return
+        if (lifted) {
+            if (travelled <= slop) seekTo(position.x)
+            return
+        }
+        // Fell out of the loop past the slop with the finger still down: a
+        // scrub, and its first seek is owed here because the move that crossed
+        // the slop has already been read.
+        seekTo(position.x)
+    }
+
+    var scrubbing = travelled > slop
+    while (true) {
+        val change = currentChange(down.id) ?: return
+        if (change.isConsumed) return
+        if (change.changedToUp()) {
+            change.consume()
+            if (!scrubbing) seekTo(change.position.x)
+            return
+        }
+        travelled += (change.position - change.previousPosition).getDistance()
+        if (travelled > slop) scrubbing = true
+        if (scrubbing) {
+            change.consume()
+            seekTo(change.position.x)
+        }
+    }
+}
+
+/** This gesture's pointer in the next event, or `null` once it is gone. */
+private suspend fun AwaitPointerEventScope.currentChange(id: PointerId): PointerInputChange? =
+    awaitPointerEvent().changes.firstOrNull { it.id == id }
+
+/**
+ * Swallow what is left of a press whose outcome has already been delivered, so
+ * neither this control nor any ancestor acts on it a second time.
+ */
+private suspend fun AwaitPointerEventScope.consumeThroughLift(id: PointerId) {
+    while (true) {
+        val change = currentChange(id) ?: return
+        change.consume()
+        if (change.changedToUpIgnoreConsumed()) return
     }
 }

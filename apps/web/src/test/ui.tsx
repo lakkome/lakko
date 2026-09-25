@@ -161,3 +161,45 @@ export function mouse(
 export function settle(): Promise<void> {
   return new Promise((r) => setTimeout(r, 0));
 }
+
+/**
+ * A working `localStorage`, because in this environment there is not one.
+ *
+ * Node now ships its own `localStorage` global, and it is only functional when
+ * the process was started with a valid `--localstorage-file`. It is not, so the
+ * global is an object whose `getItem` is `undefined` — and it SHADOWS the one
+ * jsdom provides, which would have worked. Measured: `localStorage ===
+ * window.localStorage` is `true` and `typeof localStorage.getItem` is
+ * `"undefined"`.
+ *
+ * That combination is the worst one for this codebase. Every module that reads
+ * the store guards with `typeof localStorage === "undefined"` — which PASSES —
+ * and then throws `localStorage.getItem is not a function` on the next line. So
+ * a component reading a persisted preference does not degrade, it fails to
+ * render, and the failure names the product module rather than the harness.
+ *
+ * Opt-in rather than installed for everyone: no existing suite needs it, and a
+ * global that appears halfway through a project's life is worth asking for by
+ * name. In-memory, and cleared for each test that asks.
+ */
+export function installLocalStorage(seed: Record<string, string> = {}): void {
+  const data = new Map(Object.entries(seed));
+  const store: Storage = {
+    get length() {
+      return data.size;
+    },
+    clear: () => data.clear(),
+    getItem: (k: string) => data.get(k) ?? null,
+    key: (i: number) => [...data.keys()][i] ?? null,
+    removeItem: (k: string) => void data.delete(k),
+    setItem: (k: string, v: string) => void data.set(k, String(v)),
+  };
+  for (const target of [globalThis, globalThis.window]) {
+    if (target === undefined) continue;
+    Object.defineProperty(target, "localStorage", {
+      value: store,
+      configurable: true,
+      writable: true,
+    });
+  }
+}

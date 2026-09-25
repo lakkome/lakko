@@ -369,6 +369,40 @@ public final class ChatMediaController: ObservableObject {
         if silence.warns != micSilent { micSilent = silence.warns }
     }
 
+#if DEBUG
+    /// DEBUG-only seam for the `LakkoUITests` fixture
+    /// (``UiTestFixture/micSilence``), and for nothing else.
+    ///
+    /// Why it exists. `recState` is `private(set)` and its only writer is
+    /// ``dispatch(_:)``, which performs the machine's effects — so the only way
+    /// into the state where the recording bar is drawn is to open a real
+    /// microphone. That left UX spec §2's `No sound from the microphone` notice
+    /// unobservable on screen by any test: the alternative is to record for two
+    /// seconds and hope the host machine's microphone happens to hear nothing,
+    /// which measures the room rather than the app. Android covers the same
+    /// notice with a Compose UI test because its bar takes the state as an
+    /// argument; this is the iOS equivalent of that argument.
+    ///
+    /// It performs NO effect, so nothing it does can start a recorder, arm a
+    /// timer or ask for a permission, and `#if DEBUG` keeps it out of a Release
+    /// build entirely.
+    func debugSetRecState(_ state: RecState) {
+        recState = state
+    }
+
+    /// DEBUG-only seam, as above: feed one level reading through the PRODUCTION
+    /// silence fold.
+    ///
+    /// Deliberately not a setter for `micSilent`. The fixture's samples run
+    /// through ``noteLevel(_:atMs:)`` itself, so what a UI test then sees on
+    /// screen was decided by ``MicrophoneSilence/observe(_:level:atMs:)`` and
+    /// the real `warns`-to-`micSilent` assignment — the one link in that chain
+    /// that no unit test can reach.
+    func debugNoteLevel(_ level: Double, atMs: Int64) {
+        noteLevel(level, atMs: atMs)
+    }
+#endif
+
     private func captureInterrupted() {
         guard recState.isCapturing else { return }
         let kind = recState.kind ?? .voice

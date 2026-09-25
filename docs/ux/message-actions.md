@@ -1,0 +1,164 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- SPDX-FileCopyrightText: 2026 Lakko Contributors -->
+
+# Message actions
+
+What a person can do to one message, what the menu that offers it looks like,
+and what each action needs that does not exist yet.
+
+This is the UX spec. The gesture that opens the menu is settled in
+[`client-redesign.md`](client-redesign.md) and is not restated here: a
+right-click on web, a long press on iOS and Android, never a hover, reachable
+from anywhere on the bubble including over its own controls, and once the menu
+is open the control underneath receives nothing more from that press.
+
+## 1. Why this exists
+
+The menu shipped with three actions - React, Edit, Delete - while
+`client-redesign.md` had been promising four. Reply and Copy were named in the
+spec and built by nobody. On iOS the one action available on someone else's
+message, React, sits behind a disclosure row (`React >`) that opens a submenu,
+so the commonest thing a person does to a message costs two taps and a
+navigation. On web the action rows are stretched to the width of the reaction
+row above them, because both live in one card.
+
+So this document settles two different things that were being confused: what
+the menu CONTAINS, and what it LOOKS LIKE.
+
+## 2. The shape
+
+**The reactions are not a menu item.** A row of emoji sits above the bubble and
+each one is one tap away, with a trailing control that opens the full picker.
+A person reacting is the commonest use of this menu by a wide margin and it must
+cost the least. Putting them behind a row that opens a submenu is the defect
+this rule exists to forbid.
+
+**The action card is sized by its own content.** It is a separate surface from
+the reaction row and must not inherit its width. On a phone it sits under the
+bubble, aligned to the bubble's own side; on web it sits where the pointer
+opened it.
+
+**The rest of the screen recedes.** While the menu is open the conversation
+behind it is dimmed or blurred, and the message being acted on stays fully
+legible in place. Without this the card reads as a dropdown that has landed on
+top of the next message - which is what it currently does on iOS - and the
+person loses track of which message they are acting on.
+
+**Order and grouping.** Actions that produce a new message first (Reply,
+Forward), then the ones that only read (Copy, Select), then the ones that change
+this message (Pin, Edit), then the destructive one, separated and in the
+platform's destructive colour. Never a row whose only purpose is to open another
+row of things.
+
+## 3. The actions
+
+| Action | Offered on | What it does |
+|---|---|---|
+| React | any message with an id | Toggles one emoji. Already built; what changes is that it is a visible row, not a submenu |
+| Reply | any message | Composes a new message that quotes this one |
+| Copy | any message with text | Puts the text on the clipboard. Nothing leaves the device |
+| Forward | any message | Sends the same content to another conversation |
+| Pin | any message, with a choice - see §4 | Keeps the message reachable at the top of the conversation |
+| Edit | own, not deleted | Already built |
+| Delete | own, not deleted | Already built |
+| Select | any message | Enters a multi-select mode, from which Delete and Forward act on the set |
+| Read by | own, in a group | Shows who has read it. The watermarks already exist (ADR-0024); nothing renders them |
+
+`Select` is listed because it is what makes Delete and Forward bearable in bulk,
+and because building either of those without it means building their
+one-message form twice.
+
+## 4. Pin: the person pinning chooses who it is pinned for
+
+A pin is offered as a choice between **pin for me** and **pin for everyone**,
+made at the moment of pinning. They are different features that happen to share
+a word:
+
+- **For me** is a flag on this device. Nothing is sent, nobody else sees it, and
+  it survives exactly as long as this device's storage does.
+- **For everyone** is group state: it travels to every member, everyone sees the
+  same pinned message, and it therefore needs an authority rule (who may pin for
+  everyone), an ordering rule (two people pinning at once), and an answer to who
+  may unpin what somebody else pinned.
+
+The choice is the maintainer's decision and it is the more expensive of the
+three possible answers, deliberately: offering only the shared pin makes a
+private bookmark impossible, and offering only the private one makes "look at
+this" impossible. The UI must make which one happened obvious afterwards - a
+message pinned only for me must not look like one the whole group can see.
+
+The authority and ordering rules for the shared pin are **not settled here**.
+They belong in the ADR, and the lesson from ADR-0042 through ADR-0044 applies
+directly: *who may write* and *which write survives* are two different questions,
+and answering only the first leaves the second to arrival order.
+
+## 5. Forward: the original author is a name and nothing more
+
+A forwarded message carries the original author's **display name as
+metadata**, and nothing else. No username, no account id, no key, no tap target,
+no route to reach them. The name is a label on the message, not a reference to a
+person.
+
+Three consequences, all of which must be stated rather than discovered:
+
+- **A recipient cannot reach the original author through a forward.** That is
+  the point: forwarding a message must not hand the receiving conversation a
+  way to contact somebody who never agreed to be contacted by them. Lakko's
+  whole contact model is capability-based (ADR-0005), and a forward that carried
+  a reachable identity would be a way around it.
+- **The name is therefore not verifiable.** What cannot be reached cannot be
+  checked. The forwarding client writes a string, and any client could write any
+  string. It is a courtesy label, not a proof of authorship, and the UI must not
+  dress it as one - no verification tick, no safety-number affordance, nothing
+  that implies the name was confirmed.
+- **It is a snapshot.** The name is captured when the message is forwarded. If
+  the author later changes their profile name (ADR-0048), the forward keeps the
+  old one, because there is nothing to look it up against.
+
+A message forwarded onward keeps the ORIGINAL author's name rather than the name
+of whoever forwarded it, so a chain does not rewrite its own history.
+
+## 6. Data the UI needs (input to the ADR)
+
+What each unbuilt action requires. This section is the handover to the
+architecture step; it is not a design.
+
+- **Copy** - nothing. Clipboard only.
+- **Reply** - an optional reference to the target message in the chat envelope
+  (`lakko-attachments`), alongside the text rather than instead of it. Note the
+  existing `edit_of` / `delete_of` / `react_to` fields are mutually exclusive
+  operations and a reply is **not** one of them: a reply is an ordinary message
+  that also points somewhere, so putting it in that set would make replying and
+  writing text exclusive. The bubble needs the quoted author and an excerpt,
+  which means either carrying them in the envelope or resolving the target
+  locally and showing a placeholder when it is not held.
+- **Forward** - an optional display-name string per §5, and a rule for
+  re-sending content. Attachments are content-addressed with their key inside
+  the reference, so forwarding the reference shares the same blob with the new
+  conversation rather than re-uploading it; whether that is acceptable, or
+  whether a forward should re-encrypt, is an ADR question with a real privacy
+  answer either way.
+- **Pin (for me)** - per-device storage keyed on conversation and message.
+- **Pin (for everyone)** - a group envelope, an authority rule, an ordering rule
+  and a conflict answer, per §4.
+- **Select** - no wire surface; a UI mode plus bulk forms of Delete and Forward.
+- **Read by** - nothing new. `ADR-0024` watermarks are already received and
+  already keyed on the sender's signature key; they are simply not rendered.
+
+## 7. Cross-platform shape
+
+One mental model, three implementations. The reaction row, the action card and
+the receding backdrop are the same idea everywhere; the mechanics are not.
+
+- **iOS** cannot express this with SwiftUI's own `.contextMenu`, which offers no
+  way to put a horizontal reaction row above the lifted bubble. That is why the
+  current menu hides reactions in a submenu. A Telegram-class menu here is a
+  custom presentation: a long press, a blurred backdrop, the bubble drawn at its
+  own position, the reaction row above and the card below.
+- **Android** has the same shape available through a custom composable over a
+  scrim; the platform's own dropdown has the same limitation as iOS's.
+- **Web** keeps the pointer-anchored card it has, with the reaction row split
+  out of it so the action rows size themselves.
+
+Whatever differs, the ACTION SET must not: a message offers the same actions on
+every client, or the menu becomes a thing people learn per device.

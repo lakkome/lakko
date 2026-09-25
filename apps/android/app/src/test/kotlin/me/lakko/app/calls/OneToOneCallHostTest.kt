@@ -1160,4 +1160,69 @@ class OneToOneCallHostTest {
         runCurrent()
         assertNull("the new call inherited the last one's clock", h.host.connectedSinceMs.value)
     }
+
+    // ---- Collapsing (`docs/ux/calls.md` section 4.5) --------------------------
+
+    /**
+     * The half of "back collapses the call and never ends it" that does not
+     * need the back key.
+     *
+     * The key itself is the platform's: the call screen is a `Dialog` with
+     * `dismissOnBackPress = true` whose `onDismissRequest` is this very
+     * [OneToOneCallHost.collapse], so what back does is exactly what this
+     * asserts. What it must NOT do is the reason the defect was worth writing
+     * down — the maintainer pressed back on a live call and the screen stayed up
+     * with the timer running, and the obvious fix for that (let the dialog
+     * dismiss) would have hung the call up instead, which "back has never meant
+     * anywhere else in the app".
+     *
+     * So every part of the call is asserted untouched, not just the flag: the
+     * call is still in the slot, its state has not moved, nothing was hung up,
+     * and the clock it counts from is the same number.
+     */
+    @Test
+    fun `collapsing a call puts it away and never ends it`() = runTest {
+        val h = harness()
+        h.host.startOutgoing(groupA, RequestedCallKind.VOICE)
+        runCurrent()
+        val call = h.host.active.value!!
+        call.session.mutableState.value = CallSession.WebCallState.Connected
+        runCurrent()
+        val clock = h.host.connectedSinceMs.value
+        assertNotNull("the call never reached a running clock to preserve", clock)
+        assertFalse("a call is born collapsed", h.host.collapsed.value)
+
+        h.host.collapse()
+        runCurrent()
+
+        assertTrue("the call was not put away", h.host.collapsed.value)
+        assertSame("collapsing took the call out of the slot", call, h.host.active.value)
+        assertEquals(
+            "collapsing moved the call's state",
+            CallSession.WebCallState.Connected,
+            call.session.state.value,
+        )
+        assertTrue("collapsing hung the call up", call.session.hangUps.isEmpty())
+        assertEquals("collapsing restarted the call's clock", clock, h.host.connectedSinceMs.value)
+    }
+
+    /** A tap on the bar, which is the same journey back. */
+    @Test
+    fun `expanding a collapsed call brings it back and never ends it`() = runTest {
+        val h = harness()
+        h.host.startOutgoing(groupA, RequestedCallKind.VOICE)
+        runCurrent()
+        val call = h.host.active.value!!
+        call.session.mutableState.value = CallSession.WebCallState.Connected
+        runCurrent()
+        h.host.collapse()
+        runCurrent()
+
+        h.host.expand()
+        runCurrent()
+
+        assertFalse("the call did not come back", h.host.collapsed.value)
+        assertSame(call, h.host.active.value)
+        assertTrue("coming back hung the call up", call.session.hangUps.isEmpty())
+    }
 }

@@ -41,6 +41,13 @@ enum UiTestFixture: String {
     /// A canned incoming voice message plus the recording composer.
     case voiceBubble
 
+    /// UX spec §2 "Hearing nothing" — the recording bar with the microphone
+    /// reporting silence, so a test can see whether the notice reaches a screen.
+    case micSilence
+
+    /// `docs/ux/calls.md` section 4.5 — the collapsed call bar on its own.
+    case callBar
+
     /// The launch argument that selects a fixture. Passed by the UI test as
     /// `["-LakkoUITestFixture", "voiceBubble"]`.
     static let launchArgument = "-LakkoUITestFixture"
@@ -67,6 +74,10 @@ struct UiTestFixtureRoot: View {
         switch fixture {
         case .voiceBubble:
             VoiceBubbleFixture()
+        case .micSilence:
+            MicrophoneSilenceFixture()
+        case .callBar:
+            CallBarFixture()
         }
     }
 }
@@ -151,6 +162,125 @@ private struct VoiceBubbleFixture: View {
         .overlay { VideoNoteOverlay(media: media) }
         .environmentObject(media)
         .environmentObject(media.live)
+    }
+}
+
+/// UX spec §2 "Hearing nothing" — the production ``RecordingBar`` with a take
+/// running and the microphone reporting nothing.
+///
+/// Why a fixture and not a unit test. `ChatMediaController.recState` is
+/// `private(set)` and its only writer performs the state machine's effects, so
+/// the only route into a recording state is to open a real microphone — and the
+/// notice then depends on what the host machine's microphone happens to hear,
+/// which is the room and not the app. The two DEBUG-only seams this uses
+/// (`debugSetRecState`, `debugNoteLevel`) exist for exactly this and are
+/// documented where they are declared.
+///
+/// What is faked and what is not: the STATE is placed, and the SAMPLES are real
+/// — they run through the production ``MicrophoneSilence/observe(_:level:atMs:)``
+/// fold and the production `warns`-to-`micSilent` assignment, so what a test
+/// then reads off the screen was decided by the shipping rule.
+private struct MicrophoneSilenceFixture: View {
+
+    @StateObject private var media: ChatMediaController
+
+    init() {
+        let defaults = UserDefaults(suiteName: "me.lakko.uitest.fixture") ?? .standard
+        let controller = ChatMediaController(
+            port: .init(sendAttachment: { _ in }, sessionToken: { nil }),
+            prefs: MediaPrefs(defaults: defaults)
+        )
+        // A voice take, a finger still down. No effect is performed, so no
+        // recorder is opened and no permission is asked for.
+        controller.debugSetRecState(.recording(kind: .voice, startedAt: 0, dx: 0, dy: 0))
+        // A clock the bar can print. The ticker is not running (nothing
+        // dispatched), so it stays where it is put.
+        controller.live.elapsedMs = 3_000
+        // Silence at the first sample and silence again once the §2 window has
+        // passed: the fold's own condition for the warning, fed the way the
+        // recorder feeds it.
+        controller.debugNoteLevel(0, atMs: 0)
+        controller.debugNoteLevel(0, atMs: MicrophoneSilence.warnAfterMs)
+        _media = StateObject(wrappedValue: controller)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("UI test fixture")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            RecordingBar(media: media)
+            HStack(spacing: 16) {
+                // §2 — "A locked take is the one most worth warning about", and
+                // the bar draws the notice differently there (it is not folded
+                // into one accessibility label), so a test needs to reach it.
+                Button("fixture: lock take") {
+                    media.debugSetRecState(.locked(kind: .voice, startedAt: 0))
+                }
+                // §2 — "clears the moment any level is measured".
+                Button("fixture: hear something") {
+                    media.debugNoteLevel(0.5, atMs: MicrophoneSilence.warnAfterMs + 100)
+                }
+            }
+            .font(.footnote)
+            Spacer()
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .environmentObject(media)
+        .environmentObject(media.live)
+    }
+}
+
+/// `docs/ux/calls.md` section 4.5 — the production ``CollapsedCallBar`` with
+/// nothing else on screen.
+///
+/// Needs no seam: the bar already takes its whole state as arguments, which is
+/// what makes it the one piece of the collapsed call that a test can look at
+/// directly. What the fixture supplies is exactly what ``CallHostOverlay``
+/// supplies from a live call — and the mute toggle mirrors the same shape, since
+/// the production bar shows a value the session publishes rather than one it
+/// keeps.
+///
+/// Everything under test — the one line, the absence of an End control, the tap
+/// that brings the call back, the mute button's two faces — is the shipping
+/// view's own.
+private struct CallBarFixture: View {
+
+    @State private var phase: CallBarPhase = .connecting
+    @State private var connectedAt: Date?
+    @State private var micOn = true
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("UI test fixture")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            CollapsedCallBar(
+                label: "Anna",
+                isPerson: true,
+                phase: phase,
+                connectedAt: connectedAt,
+                encrypted: true,
+                cameraSending: false,
+                micOn: micOn,
+                onExpand: { expanded = true },
+                onToggleMic: { micOn.toggle() })
+            // Standing in for the call screen coming back, which is all
+            // `onExpand` does in production (it flips `CallBarHost.collapsed`).
+            if expanded {
+                Text("fixture: expanded")
+            }
+            Button("fixture: connect") {
+                phase = .connected
+                connectedAt = Date()
+            }
+            .font(.footnote)
+            Spacer()
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
     }
 }
 

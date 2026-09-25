@@ -10,17 +10,27 @@ import XCTest
 ///
 /// ## What can be tested here and what cannot
 ///
-/// This client has no XCUITest target, and a SwiftUI body is unreachable from
-/// XCTest even with one, so nothing below asserts how the bar LOOKS or that a
-/// tap reaches it. What is testable is everything that was lifted out of the
-/// view on purpose: which phase the bar sees, whether a collapse outlives the
-/// call, when the running time started, the words on the line, and whether a
-/// finished drag was the swipe.
+/// A SwiftUI body is unreachable from XCTest, so nothing below asserts how the
+/// bar LOOKS or that a tap reaches it. What is testable here is everything that
+/// was lifted out of the view on purpose: which phase the bar sees, whether a
+/// collapse outlives the call, when the running time started, the words on the
+/// line, and whether a finished drag was the swipe.
 ///
-/// Three things are therefore NOT covered by any test and are covered by
-/// structure instead: that the bar is drawn in the top inset above every screen,
-/// that the call screen's `onDisappear` skips `state.reset()` during a collapse,
-/// and that the mute circle's touch target is 44 pt.
+/// The view's side of it is ``CollapsedCallBarUITests`` in the `LakkoUITests`
+/// bundle, which drives the shipping ``CollapsedCallBar`` on a real screen: that
+/// it prints the rule's verdict and only one of the four things it can say, that
+/// a tap brings the call back, that mute is there with both faces, and that
+/// there is no End control on it. (An earlier version of this paragraph said
+/// this client had no XCUITest target; it has had one since the record-gesture
+/// tests landed.)
+///
+/// Three things are still NOT covered by any test and are covered by structure
+/// instead: that the bar is drawn in the top inset above every screen, that the
+/// call screen's `onDisappear` skips `state.reset()` during a collapse, and that
+/// the mute circle's touch target is 44 pt. Nor is ``CallHostOverlay``'s own
+/// question — it asks the rule with `callScreenUp: presentedNow != nil`, and
+/// reaching that needs a live call of one of three kinds, so which ARGUMENTS the
+/// overlay passes is read rather than run.
 @MainActor
 final class CollapsedCallBarTests: XCTestCase {
 

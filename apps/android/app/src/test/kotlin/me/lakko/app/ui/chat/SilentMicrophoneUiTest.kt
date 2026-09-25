@@ -119,26 +119,31 @@ class SilentMicrophoneUiTest {
         "the composer never composed, so there is no controller to read"
     }
 
+
     /**
-     * Move both clocks forward by [ms] of the take's own time, one tick at a
-     * time.
+     * Step until the TAKE's own clock reaches [ms], rather than stepping a fixed
+     * amount and trusting it to be enough.
      *
-     * A single large jump will not do: each advance resumes the controller's tick
-     * loop at most once, so a 2 s jump yields ONE level sample two seconds in
-     * rather than twenty over two seconds — and a run of silence that has only
-     * one sample in it has not lasted anything. Stepping at the tick's own
-     * cadence, and letting the frame settle between steps, is what makes the
-     * virtual take resemble a real one; without the settle the steps ran together
-     * and the take aged without being sampled.
+     * The rule is about elapsed time inside the take, and the take's clock does
+     * not start when this helper does: the controller's tick loop is launched a
+     * coroutine later, so the first level sample lands some ticks in, and under
+     * a loaded full-suite run it lands later still. A fixed step count plus a
+     * slack constant therefore measured the HOST, not the rule, and failed about
+     * one full run in two while passing alone every time. Driving to the take's
+     * own reading removes the host from the question.
      */
-    private fun advance(ms: Long) {
-        var left = ms
-        while (left > 0) {
-            val step = minOf(TICK_MS, left)
-            ShadowLooper.idleMainLooper(step, TimeUnit.MILLISECONDS)
-            compose.mainClock.advanceTimeBy(step)
+    private fun advanceTakeTo(ms: Long) {
+        // Bounded so a take that never starts fails as a test rather than hanging.
+        val budget = ms * 4 + SILENCE_MS
+        var spent = 0L
+        while (controller().elapsedMs < ms && spent < budget) {
+            ShadowLooper.idleMainLooper(TICK_MS, TimeUnit.MILLISECONDS)
+            compose.mainClock.advanceTimeBy(TICK_MS)
             compose.waitForIdle()
-            left -= step
+            spent += TICK_MS
+        }
+        assert(controller().elapsedMs >= ms) {
+            "the take's clock reached only ${controller().elapsedMs}ms of $ms within $budget ms of stepping"
         }
     }
 
@@ -156,14 +161,14 @@ class SilentMicrophoneUiTest {
         // accused the microphone on its first zero sample would accuse every
         // microphone, since one that is merely slow to open reads zero for its
         // first tick or two.
-        advance(SILENCE_MS / 2)
+        advanceTakeTo(SILENCE_MS / 2)
         compose.onNodeWithText(WARNING).assertDoesNotExist()
         compose.onNodeWithText(SLIDE_TO_CANCEL, substring = true).assertIsDisplayed()
 
         // Past the window, with the take still running — the whole point is
         // that the warning arrives in time to be acted on rather than after the
         // message has already been sent.
-        advance(SILENCE_MS / 2 + TICK_SLACK_MS)
+        advanceTakeTo(SILENCE_MS + TICK_SLACK_MS)
         assert(controller().state is RecState.Recording) {
             "the take should still be running when the warning appears"
         }
@@ -184,7 +189,7 @@ class SilentMicrophoneUiTest {
     @Test
     fun theWarningClearsAsSoonAsSomethingIsHeard() {
         startHolding()
-        advance(SILENCE_MS + TICK_SLACK_MS)
+        advanceTakeTo(SILENCE_MS + TICK_SLACK_MS)
         compose.onNodeWithText(WARNING).assertIsDisplayed()
 
         // Robolectric's recorder cannot be made to hear anything, so the sound

@@ -415,6 +415,49 @@ class VoiceBubbleUiTest {
         assertTrue("the drag did not move the playhead forward: $seeks", seeks.last() > seeks.first())
     }
 
+    /**
+     * `docs/ux/client-redesign.md`: "Once the menu has opened, the control
+     * underneath it receives nothing more from that press — not a tap on
+     * release, and not a drag."
+     *
+     * The case the rule decides, and the one the previous fix left open: a
+     * press held over the waveform until the menu appears, then slid sideways
+     * without lifting. The tap on release was already refused — that is
+     * [aLongPressOnTheWaveformNeitherSeeksNorPlays] — but the drag arrives
+     * through a SEPARATE detector, and so had its own answer to give.
+     *
+     * The two assertions are both load-bearing and in this order. Without the
+     * first, a gesture that failed to reach the long-press threshold at all
+     * would satisfy the second trivially: nothing seeked because nothing
+     * happened. So the press has to be shown to have opened the menu before
+     * the silence underneath it means anything.
+     */
+    @Test
+    fun aDragAfterTheMenuHasOpenedDoesNotSeek() {
+        val seeks = mutableListOf<Float>()
+        var menuOpens = 0
+        compose.setContent { RecordingWaveform(seeks::add, onLongPress = { menuOpens += 1 }) }
+
+        compose.onNodeWithContentDescription(WAVEFORM).performTouchInput {
+            down(percentOffset(0.1f, 0.5f))
+            // Past the platform's own threshold rather than a constant, for the
+            // reason `WaveformSeekBar` gives for measuring against it: the
+            // gesture a person makes is judged against the timeout their device
+            // taught them, and `detectTapGestures` reads the same value.
+            advanceEventTime(viewConfiguration.longPressTimeoutMillis + 100)
+            moveTo(percentOffset(0.5f, 0.5f))
+            moveTo(percentOffset(0.9f, 0.5f))
+            up()
+        }
+
+        assertEquals("the held press never opened the menu, so this measured nothing", 1, menuOpens)
+        assertEquals(
+            "the finger slid after the menu had opened and the playhead followed it to $seeks",
+            emptyList<Float>(),
+            seeks,
+        )
+    }
+
     // ----- 6. TalkBack reaches both, over the same control ------------------
 
     /**
@@ -502,7 +545,14 @@ class VoiceBubbleUiTest {
     /** The production waveform at its production size, reporting every seek it
      *  decides on. */
     @Composable
-    private fun RecordingWaveform(onSeek: (Float) -> Unit) {
+    private fun RecordingWaveform(
+        onSeek: (Float) -> Unit,
+        // A menu to reach, so the long-press branch is armed the way it is in
+        // a bubble that offers actions. Without it these would pass against a
+        // waveform that has no long-press rule at all — which is what they did
+        // on the first run, before the fix existed to arm.
+        onLongPress: () -> Unit = {},
+    ) {
         MaterialTheme {
             Surface {
                 WaveformSeekBar(
@@ -512,12 +562,7 @@ class VoiceBubbleUiTest {
                     idleColor = MaterialTheme.colorScheme.onSurfaceVariant,
                     label = WAVEFORM,
                     modifier = Modifier.width(170.dp).height(26.dp),
-                    // A menu to reach, so the long-press branch is armed the
-                    // way it is in a bubble that offers actions. Without it
-                    // these two would pass against a waveform that has no
-                    // long-press rule at all — which is what they did on the
-                    // first run, before the fix existed to arm.
-                    onLongPress = {},
+                    onLongPress = onLongPress,
                     onSeek = onSeek,
                 )
             }
