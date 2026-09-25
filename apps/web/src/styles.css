@@ -1897,36 +1897,39 @@ a.ghost.small.lk-wide-only {
 /*
  * `docs/ux/message-actions.md` section 2: "The action card is sized by its own
  * content. It is a separate surface from the reaction row and must not inherit
- * its width."
+ * its width." And, since 2026-09-25: "Two surfaces that read as two things".
  *
- * THE DEFECT: `.lk-msg-menu` WAS the card. It carried the border, the surface,
- * the shadow and `min-width: 180px`, and its `align-items` was therefore the
+ * THE FIRST DEFECT: `.lk-msg-menu` WAS the card. It carried the border, the
+ * surface, the shadow and `min-width: 180px`, and its `align-items` was the
  * default `stretch` — so the action rows were drawn at the width of seven emoji
- * and a plus, a card three words long stretched to the width of something above
- * it. This element is now a POSITIONER with no surface of its own, and the card
- * is `.lk-msg-menu-card`, applied twice.
+ * and a plus. THE SECOND: the fix drew two cards with the same chrome 6px apart
+ * in one flex column, which the maintainer still read as one panel with an odd
+ * top row.
  *
- * It still measures as the union of the two cards, which is what
- * `message-menu-placement.ts` is handed and what keeps "never overlaps the
- * bubble" a statement about the whole footprint rather than about one card.
+ * So this element is a POSITIONER with no surface and no layout of its own. The
+ * component sizes it to the footprint of both surfaces and the gap between them
+ * (`messageMenuLayout` in `message-menu-placement.ts`) and places each surface
+ * inside it absolutely: the reaction row above the card, or below it when there
+ * is no room above. It takes no pointer events, so a press in the gap, or
+ * beside the narrower surface, reaches the backdrop and closes the menu.
  */
 .lk-msg-menu {
   position: fixed;
   z-index: 40;
-  display: flex;
-  flex-direction: column;
-  /* Not the default `stretch`, which is half of what stretched the action
-     rows. Measured: with `width: max-content` below in place this alone
-     changes nothing, because a definite width already beats `stretch` — it is
-     here so that removing the width leaves the cards shrink-to-fit rather than
-     silently restoring the defect. */
-  align-items: flex-start;
-  gap: 6px;
+  pointer-events: none;
   color: var(--surface-fg);
 }
-/* Each surface, sized by its own content — and this is the declaration that
+/* What both floating surfaces share: each is placed on its own, and each takes
+   the pointer events its positioner declines. The chrome is per surface. */
+.lk-msg-menu-surface {
+  position: absolute;
+  pointer-events: auto;
+}
+/* The action card, sized by its own content — and this is the declaration that
    does it. Measured with it removed and the old floor restored: both cards came
-   out at exactly 234px, which is the defect as a number. */
+   out at exactly 234px, which is the defect as a number. These values are the
+   ones the maintainer chose by eye and the natives now copy
+   (`message-actions.md` section 2); change them there first. */
 .lk-msg-menu-card {
   width: max-content;
   padding: 4px;
@@ -1935,9 +1938,19 @@ a.ghost.small.lk-wide-only {
   border: 1px solid var(--surface-border);
   box-shadow: var(--shadow-2);
 }
+/* The reaction row: a pill, not a second card. Same surface, border and shadow
+   as the card so the two belong together, but its own outline — fully rounded,
+   with the gap `SURFACE_GAP_PX` between it and the card — so a person reads a
+   reaction bar and a menu rather than one panel. */
 .lk-msg-menu-reactions {
   display: flex;
   gap: 2px;
+  width: max-content;
+  padding: 4px 6px;
+  border-radius: 999px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--surface-border);
+  box-shadow: var(--shadow-2);
 }
 .lk-msg-menu-reactions button {
   min-height: 0;
@@ -3273,8 +3286,8 @@ button.lk-reaction {
 /* The quick reaction bar used to be its own popover positioned INSIDE the
    bubble (`top: 1.2rem`), i.e. over the play button on a voice message, one
    press further in than the strip that had the same defect. It is now
-   `.lk-msg-menu-reactions`, the first of the two cards `.lk-msg-menu` places
-   outside the bubble in a portal. */
+   `.lk-msg-menu-reactions`, the pill `.lk-msg-menu` places beside the action
+   card, outside the bubble, in a portal. */
 /* File chips under a bubble's text. */
 .lk-chips {
   display: flex;

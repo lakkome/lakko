@@ -156,6 +156,42 @@ class MessageActionMenuTest {
         )
     }
 
+    @Test
+    fun theCardCarriesTheSharedCardNumbers() {
+        // §2: "The card's look is shared, and web's is the reference" — and the
+        // numbers are written down "so that 'the same card' is checkable rather
+        // than felt". Radius, shadow and colour are not readable here; where the
+        // rows sit inside the card, and how far apart, are.
+        compose.setContent { BubbleUnderTest(own("Hello there")) }
+
+        openMenu()
+
+        val card = compose.onNodeWithTag(ACTION_CARD_TAG).fetchSemanticsNode().boundsInWindow
+        val copy = compose.onNodeWithText("Copy").fetchSemanticsNode().boundsInWindow
+        val edit = compose.onNodeWithText("Edit").fetchSemanticsNode().boundsInWindow
+        val delete = compose.onNodeWithText("Delete").fetchSemanticsNode().boundsInWindow
+        val px = { dp: androidx.compose.ui.unit.Dp -> with(compose.density) { dp.toPx() } }
+        val tolerance = 1f
+
+        // Every row stretched to the card, as web's flex column does, so the
+        // pressed highlight reaches the card's edge on every row.
+        assertEquals(copy.width, edit.width, tolerance)
+        assertEquals(copy.width, delete.width, tolerance)
+        // Rows inset by the 4 of padding inside the 1dp border, on each side.
+        val inset = px(CARD_BORDER_WIDTH + CARD_INNER_PADDING)
+        assertEquals("row inset from the card's leading edge", inset, copy.left - card.left, tolerance)
+        assertEquals("row inset from the card's trailing edge", inset, card.right - copy.right, tolerance)
+        // Rows 2 apart; the destructive group a further 2, then the 1dp rule,
+        // then 2 more before Delete — web's gap, margin, border and padding.
+        assertEquals("gap between two ordinary rows", px(ROW_GAP), edit.top - copy.bottom, tolerance)
+        assertEquals(
+            "gap across the destructive rule",
+            px(ROW_GAP + DESTRUCTIVE_GAP + CARD_BORDER_WIDTH + DESTRUCTIVE_GAP),
+            delete.top - edit.bottom,
+            tolerance,
+        )
+    }
+
     // ----- 3. Copy -------------------------------------------------------—-
 
     @Test

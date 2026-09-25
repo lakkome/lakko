@@ -37,11 +37,18 @@
  * because the defect IS a width and jsdom computes none: every box there is
  * zero. So exactly one test of it lives here, and it does the one thing that
  * needs a browser — compares the two measured widths.
+ *
+ * The same test also measures the gap section 2 added on 2026-09-25 ("Two
+ * surfaces that read as two things"). The jsdom test pins where the component
+ * puts each surface given sizes it was handed; only here are the sizes the
+ * real ones, so only here is "a visible gap between two real boxes" a
+ * measurement rather than arithmetic on a stub.
  */
 
 import { expect, test } from "@playwright/test";
 
 import { box, openCase } from "./harness";
+import { SURFACE_GAP_PX } from "../../src/chat/MessageMenu";
 
 const MENU = "[role='menu']";
 const PLAY = "button.lakko-voice-play";
@@ -173,6 +180,11 @@ test("the action card is sized by its own content, not the reaction row's", asyn
     reactions.width,
   );
   // Two surfaces, so there is a real gap between them rather than a border
-  // inside one box.
-  expect(actions.y).toBeGreaterThan(reactions.y + reactions.height);
+  // inside one box. Which one is on top is the layout's call - the row goes
+  // below the card when there is no room above, and this case opens near the
+  // top of the viewport - so the gap is measured in the order it reports.
+  const rowAt = await page.locator(MENU).getAttribute("data-row-at");
+  const [upper, lower] = rowAt === "above" ? [reactions, actions] : [actions, reactions];
+  expect(rowAt === "above" || rowAt === "below", `row placed ${rowAt}`).toBe(true);
+  expect(lower.y - (upper.y + upper.height)).toBeCloseTo(SURFACE_GAP_PX, 0);
 });

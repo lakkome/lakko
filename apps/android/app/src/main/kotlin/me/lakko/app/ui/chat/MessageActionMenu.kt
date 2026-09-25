@@ -6,18 +6,22 @@ package me.lakko.app.ui.chat
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -42,11 +46,13 @@ import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.graphics.ClipOp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.layoutId
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
@@ -286,7 +292,11 @@ internal fun MessageReactionRow(
         shape = RoundedCornerShape(percent = 50),
         color = MaterialTheme.colorScheme.surface,
         contentColor = MaterialTheme.colorScheme.onSurface,
-        shadowElevation = 6.dp,
+        // Section 2: each of the two surfaces carries its own background,
+        // border and shadow, so the pill takes the card's border and elevation
+        // and keeps only its own shape.
+        border = menuSurfaceBorder(),
+        shadowElevation = MENU_SURFACE_ELEVATION,
     ) {
         Row(
             // A narrow window (or a longer emoji set than the six defaults)
@@ -333,6 +343,12 @@ private val REACTION_TAP_SIZE: Dp = 40.dp
  * separated and in the platform's destructive colour. Reply, Forward, Pin,
  * Select and Read by are section 3 rows that nothing has built yet; they slot
  * into that order when they land.
+ *
+ * The look is section 2's shared card, whose reference is web's
+ * `.lk-msg-menu-card` / `.lk-msg-menu-items` (`apps/web/src/styles.css`), not
+ * Material's dropdown chrome: radius 12, 4 of padding inside a 1dp border in the
+ * border colour, rows 7 by 8 with a 6 radius and the icon 8 from the label, and
+ * the destructive group set off by a rule.
  */
 @Composable
 internal fun MessageActionCard(
@@ -343,14 +359,30 @@ internal fun MessageActionCard(
     modifier: Modifier = Modifier,
 ) {
     Surface(
-        // UX section 4 — radius 12 for cards.
-        modifier = modifier.widthIn(min = CARD_MIN_WIDTH, max = CARD_MAX_WIDTH),
-        shape = RoundedCornerShape(12.dp),
+        modifier = modifier.testTag(ACTION_CARD_TAG),
+        // `medium` is Lakko's "12 for cards and rows" (`LakkoShapes`).
+        shape = MaterialTheme.shapes.medium,
         color = MaterialTheme.colorScheme.surface,
         contentColor = MaterialTheme.colorScheme.onSurface,
-        shadowElevation = 6.dp,
+        border = menuSurfaceBorder(),
+        shadowElevation = MENU_SURFACE_ELEVATION,
     ) {
-        Column {
+        Column(
+            modifier = Modifier
+                // Width of the widest row, and every row stretched to it — the
+                // shape web gets from `width: max-content` on the card and the
+                // default `stretch` of its flex column. Without this each row
+                // would be as wide as its own label and the pressed highlight
+                // would stop short of the card's edge.
+                .width(IntrinsicSize.Max)
+                // CSS padding sits INSIDE the border, so web's rows start 1 + 4
+                // in from the card's edge. A Compose `Surface` draws its border
+                // over its content rather than insetting it, so the border's
+                // width is added here to land the rows at the same place.
+                .padding(CARD_BORDER_WIDTH + CARD_INNER_PADDING),
+            // Web's `gap: 2px` between rows.
+            verticalArrangement = Arrangement.spacedBy(ROW_GAP),
+        ) {
             if (actions.canCopy) {
                 ActionRow(
                     label = "Copy",
@@ -367,25 +399,71 @@ internal fun MessageActionCard(
             }
             if (actions.canDelete) {
                 // Section 2 — the destructive action is separated and in the
-                // platform's destructive colour.
-                if (actions.canCopy || actions.canEdit) {
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                // platform's destructive colour. The rule belongs to the
+                // destructive GROUP rather than to the Delete row, as on web,
+                // so a second destructive action lands under the same rule.
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        // Web's `margin-top: 2px` on the group, on top of the
+                        // row gap above it.
+                        .padding(top = DESTRUCTIVE_GAP),
+                ) {
+                    if (actions.canCopy || actions.canEdit) {
+                        HorizontalDivider(
+                            thickness = CARD_BORDER_WIDTH,
+                            color = MaterialTheme.colorScheme.outlineVariant,
+                        )
+                        // Web's `padding-top: 2px` between the rule and the row.
+                        Spacer(Modifier.height(DESTRUCTIVE_GAP))
+                    }
+                    ActionRow(
+                        label = "Delete",
+                        icon = Icons.Filled.Delete,
+                        onClick = onDelete,
+                        tint = MaterialTheme.colorScheme.error,
+                    )
                 }
-                ActionRow(
-                    label = "Delete",
-                    icon = Icons.Filled.Delete,
-                    onClick = onDelete,
-                    tint = MaterialTheme.colorScheme.error,
-                )
             }
         }
     }
 }
 
-/** Narrow enough that the card never looks like a dialog, wide enough that no
- *  label wraps. Both are bounds, not a fixed width: the card measures itself. */
-private val CARD_MIN_WIDTH: Dp = 168.dp
-private val CARD_MAX_WIDTH: Dp = 280.dp
+/** Test tag on the card's surface: the one handle a UI test has on the card's
+ *  own bounds, which carry no semantics otherwise. */
+internal const val ACTION_CARD_TAG: String = "message-action-card"
+
+/**
+ * Section 2's shared numbers, in dp. The reference is web's card; each is named
+ * after the rule it mirrors so a divergence is a diff against a sentence.
+ */
+internal val CARD_BORDER_WIDTH: Dp = 1.dp
+internal val CARD_INNER_PADDING: Dp = 4.dp
+internal val ROW_GAP: Dp = 2.dp
+internal val DESTRUCTIVE_GAP: Dp = 2.dp
+private val ROW_PADDING_VERTICAL: Dp = 7.dp
+private val ROW_PADDING_HORIZONTAL: Dp = 8.dp
+private val ROW_RADIUS: Dp = 6.dp
+private val ROW_ICON_GAP: Dp = 8.dp
+
+/** Web's icons are 16 in a 14px label; the same pair here (`bodyMedium` is
+ *  14sp). Section 2 does not fix either, so this follows the reference. */
+private val ROW_ICON_SIZE: Dp = 16.dp
+
+/**
+ * Web's `--shadow-2` is `0 8px 24px` at 12 percent. Compose has no CSS
+ * box-shadow, and a `Surface` shadow is a Material elevation, so this is the
+ * nearest Material 3 level rather than a translation: level 4, 8dp — the same 8
+ * as the CSS y-offset, and a blur that reads soft rather than the tighter edge of
+ * the 6dp the card used before.
+ */
+private val MENU_SURFACE_ELEVATION: Dp = 8.dp
+
+/** The 1dp border in Lakko's border colour (`LakkoTokens.border`, which the
+ *  scheme carries as `outlineVariant`). */
+@Composable
+private fun menuSurfaceBorder(): BorderStroke =
+    BorderStroke(CARD_BORDER_WIDTH, MaterialTheme.colorScheme.outlineVariant)
 
 @Composable
 private fun ActionRow(
@@ -396,20 +474,24 @@ private fun ActionRow(
 ) {
     Row(
         modifier = Modifier
+            .fillMaxWidth()
+            // The pressed highlight follows the row's own 6 radius, as web's
+            // hover background does, rather than squaring off inside the card.
+            .clip(RoundedCornerShape(ROW_RADIUS))
             .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 12.dp),
+            .padding(horizontal = ROW_PADDING_HORIZONTAL, vertical = ROW_PADDING_VERTICAL),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
             imageVector = icon,
             contentDescription = null,
             tint = if (tint == Color.Unspecified) MaterialTheme.colorScheme.onSurfaceVariant else tint,
-            modifier = Modifier.size(20.dp),
+            modifier = Modifier.size(ROW_ICON_SIZE),
         )
-        Box(Modifier.width(12.dp))
+        Box(Modifier.width(ROW_ICON_GAP))
         Text(
             text = label,
-            style = MaterialTheme.typography.bodyLarge,
+            style = MaterialTheme.typography.bodyMedium,
             color = if (tint == Color.Unspecified) MaterialTheme.colorScheme.onSurface else tint,
         )
     }

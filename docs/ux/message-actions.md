@@ -44,6 +44,23 @@ legible in place. Without this the card reads as a dropdown that has landed on
 top of the next message - which is what it currently does on iOS - and the
 person loses track of which message they are acting on.
 
+**Two surfaces that read as two things.** The reaction row and the action card
+are separate floating surfaces - each with its own background, border and
+shadow, and a visible gap between them - on every client, web included. Sizing
+the two children of one wrapper separately is not enough: if they share an
+outline or touch, a person reads one panel with an odd top row. The maintainer
+asked for this on web by name (2026-09-25), having seen the natives.
+
+**The card's look is shared, and web's is the reference.** The maintainer chose
+web's card by eye, so its values are the ones the natives adopt rather than each
+platform's own dropdown chrome: corner radius 12, an inner padding of 4 around
+the rows, a 1-point border in the surface-border colour on the elevated
+surface, a soft shadow (0 8 24 at about 12 percent), rows padded 7 vertical by
+8 horizontal with a 6 radius and the leading icon 8 from the label, and the
+destructive group set off by a 1-point rule with 2 of padding above it. Where a
+platform token already carries one of these values it is used by name; the
+numbers are here so that "the same card" is checkable rather than felt.
+
 **Order and grouping.** Actions that produce a new message first (Reply,
 Forward), then the ones that only read (Copy, Select), then the ones that change
 this message (Pin, Edit), then the destructive one, separated and in the
@@ -157,8 +174,15 @@ the receding backdrop are the same idea everywhere; the mechanics are not.
   own position, the reaction row above and the card below.
 - **Android** has the same shape available through a custom composable over a
   scrim; the platform's own dropdown has the same limitation as iOS's.
-- **Web** keeps the pointer-anchored card it has, with the reaction row split
-  out of it so the action rows size themselves.
+- **Web** keeps the pointer anchor but behaves like the natives otherwise,
+  which is what the maintainer meant by "like Telegram": the menu opens at the
+  pointer and is then clamped so that BOTH surfaces sit fully inside the
+  viewport; the reaction row floats above the card with the gap between them,
+  or below it when there is no room above; and neither surface may cover the
+  bubble's own controls, which the placement rule already guarantees for the
+  card and must now guarantee for the row as well. Reopening on the same
+  message lands in the same place - the anchor is the pointer, not the previous
+  menu.
 
 Whatever differs, the ACTION SET must not: a message offers the same actions on
 every client, or the menu becomes a thing people learn per device.

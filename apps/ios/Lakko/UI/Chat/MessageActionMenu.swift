@@ -579,5 +579,13 @@ struct MessageActionCard: View {
                 .stroke(Color.lakkoBorder, lineWidth: 0.5)
         )
         .fixedSize(horizontal: true, vertical: false)
+        .accessibilityIdentifier(MessageActionCard.accessibilityID)
     }
+
+    /// Names the card in the accessibility tree. NOT how its width is
+    /// measured: an accessibility frame is whatever the bridge reports,
+    /// and for this container it reported the union of its rows - narrow
+    /// - while the drawn card spanned the screen. The UI test reads
+    /// pixels instead.
+    static let accessibilityID = "message-action-card"
 }

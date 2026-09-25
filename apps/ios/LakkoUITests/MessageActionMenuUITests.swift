@@ -128,13 +128,31 @@ final class MessageActionMenuUITests: XCTestCase {
 
         let copy = app.buttons["Copy"]
         XCTAssertTrue(copy.exists, "the card has no Copy row")
+
+        // The card as DRAWN, not as any element reports it. Two measurements
+        // lied here in turn: the Copy row's frame (a row is only as wide as its
+        // label, and sat narrow inside a card spanning the screen), and then
+        // the card's accessibility frame (reported as the union of its rows,
+        // so the same narrow number). What a person sees is pixels, so the
+        // pixels are what is measured: the contiguous run of card-surface
+        // pixels through the Copy label, against the dimmed screen either
+        // side of it.
+        let cardWidth = try drawnWidthOfSurface(through: copy.frame)
         XCTAssertLessThan(
-            copy.frame.width,
+            cardWidth,
             rowSpan,
-            "the card (\(copy.frame.width) pt) is as wide as the reaction row (\(rowSpan) pt)"
+            "the card is drawn \(cardWidth) pt wide, as wide as the reaction row (\(rowSpan) pt)"
         )
+        // A card sized by one short word is nowhere near a phone's width; a
+        // bound rather than a value, since the word changes with the locale.
+        XCTAssertLessThan(
+            cardWidth,
+            app.windows.firstMatch.frame.width * 0.6,
+            "the card is drawn \(cardWidth) pt wide: sized by its container, not its rows"
+        )
+        let card = copy
         XCTAssertGreaterThan(
-            copy.frame.minY,
+            card.frame.minY,
             firstEmoji.maxY,
             "the action card is not below the reaction row"
         )
@@ -248,5 +266,49 @@ final class MessageActionMenuUITests: XCTestCase {
     private func waitForDisappearance(of element: XCUIElement, timeout: TimeInterval) -> Bool {
         let gone = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: element)
         return XCTWaiter.wait(for: [gone], timeout: timeout) == .completed
+    }
+
+    /// Width, in points, of the light surface the screenshot shows on the
+    /// horizontal line through `rowFrame`'s centre, measured outward from that
+    /// centre until the dimmed conversation is reached on each side.
+    ///
+    /// The scrim is the conversation at roughly half brightness and the card
+    /// is the elevated surface, so a luminance threshold separates them in
+    /// both appearances. Reads the screenshot at its own scale and converts
+    /// back to points.
+    private func drawnWidthOfSurface(through rowFrame: CGRect) throws -> CGFloat {
+        let shot = XCUIScreen.main.screenshot().image
+        let cg = try XCTUnwrap(shot.cgImage, "the screenshot has no bitmap")
+        let scale = CGFloat(cg.width) / app.windows.firstMatch.frame.width
+        let data = try XCTUnwrap(cg.dataProvider?.data, "the screenshot has no pixel data")
+        let bytes = try XCTUnwrap(CFDataGetBytePtr(data))
+        let bpr = cg.bytesPerRow
+        let bpp = cg.bitsPerPixel / 8
+        // The row's vertical middle: clear of the card's rounded corners, which
+        // pull the surface in for the top and bottom 12 pt, and where the only
+        // non-surface pixels are the icon and the word - which the two scans
+        // below start OUTSIDE of, inside the row's own horizontal padding.
+        let y = Int(rowFrame.midY * scale)
+        func isSurface(_ x: Int) -> Bool {
+            guard x >= 0, x < cg.width else { return false }
+            let p = y * bpr + x * bpp
+            let r = CGFloat(bytes[p]), g = CGFloat(bytes[p + 1]), b = CGFloat(bytes[p + 2])
+            // Luminance on 0...255; the dimmed conversation sits well under this.
+            return (0.2126 * r + 0.7152 * g + 0.0722 * b) > 200
+        }
+        // Left edge: from just inside the row's leading padding, outward.
+        var left = Int((rowFrame.minX + 4) * scale)
+        XCTAssertTrue(isSurface(left), "the leading sample point is not on the card surface")
+        while isSurface(left - 1) { left -= 1 }
+        // Right edge: from just inside the row's trailing padding, outward.
+        var right = Int((rowFrame.maxX - 4) * scale)
+        XCTAssertTrue(isSurface(right), "the trailing sample point is not on the card surface")
+        while isSurface(right + 1) { right += 1 }
+        let width = CGFloat(right - left + 1) / scale
+        // The drawn surface must contain the row it was sampled around, or the
+        // number is not a card width. Rounding at two scanned edges is under a
+        // point; the rows fill the card on both sides, so no more slack is due.
+        XCTAssertGreaterThanOrEqual(width, rowFrame.width - 1, "the surface run (\(width) pt) is narrower than the row it brackets (\(rowFrame.width) pt)")
+        return width
     }
 }

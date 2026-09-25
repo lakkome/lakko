@@ -27,7 +27,9 @@
  *     here is the two things that made the defect: the TREE (one card around
  *     both, rather than two cards) and the CASCADE (a `min-width` floor and an
  *     `align-items` that stretched). The measured widths are in
- *     `playwright/specs/message-menu.spec.ts`.
+ *     `playwright/specs/message-menu.spec.ts`. Section 2 then went further -
+ *     "Two surfaces that read as two things" - so the row is also pinned here
+ *     as a pill placed on its own, with a gap between it and the card.
  *
  * Copy (section 3) is covered here too, because it needs no layout at all: the
  * clipboard is a platform call, and "was it called with the message's text" is
@@ -51,7 +53,7 @@ vi.mock("../profile/ProfileContext", () => ({
 }));
 
 import { TimelineBubble, type BubbleHost } from "./TimelineBubble";
-import { LONG_PRESS_MS } from "./MessageMenu";
+import { LONG_PRESS_MS, SURFACE_GAP_PX } from "./MessageMenu";
 import { createMediaHub, mediaKey, type MediaHub } from "../media/media-hub";
 import { shortTime } from "./timeline-layout";
 import type { AttachmentRefBytes } from "./attachments";
@@ -395,13 +397,64 @@ describe("the action card's width", () => {
     // pinning that would be pinning the harness. What matters is that the
     // element around both is not itself padded like a card.
     expect(getComputedStyle(wrapper).paddingTop).not.toBe("4px");
-    // The two declarations that did the stretching. `stretch` is what drew a
-    // card three words long at the width of seven emoji, and the floor is what
-    // stopped either card being narrower than 180px to begin with.
-    expect(getComputedStyle(wrapper).alignItems).toBe("flex-start");
+    // The floor that stopped either card being narrower than 180px. The other
+    // half of the stretching, the wrapper's flex `stretch`, is gone with the
+    // wrapper's layout: it no longer lays its children out at all (below).
     expect(getComputedStyle(wrapper).minWidth).not.toBe("180px");
     // And where the width comes from instead: the card's own content.
     expect(getComputedStyle(items as HTMLElement).width).toBe("max-content");
+  });
+
+  it("draws the row and the card as two floating surfaces with a gap", () => {
+    // `message-actions.md` section 2, "Two surfaces that read as two things".
+    // jsdom lays nothing out, so every box is zero and the layout would put
+    // the two surfaces on top of each other by default. Each surface is given
+    // a size here - the only thing this stub decides - and what is asserted is
+    // what the component then DID with the sizes: where it put each surface.
+    const ROW = { width: 234, height: 34 };
+    const CARD = { width: 118, height: 104 };
+    const real = HTMLElement.prototype.getBoundingClientRect;
+    HTMLElement.prototype.getBoundingClientRect = function rect(this: HTMLElement): DOMRect {
+      const size = this.classList.contains("lk-msg-menu-reactions")
+        ? ROW
+        : this.classList.contains("lk-msg-menu-items")
+          ? CARD
+          : { width: 0, height: 0 };
+      return new DOMRect(0, 0, size.width, size.height);
+    };
+    try {
+      const { wrapper, reactions, items } = openMenuOn(ownMessage("hello"));
+      const card = items as HTMLElement;
+
+      // Two elements, each a surface in its own right; neither holds the other.
+      expect(reactions).not.toBe(card);
+      expect(reactions.classList.contains("lk-msg-menu-surface")).toBe(true);
+      expect(card.classList.contains("lk-msg-menu-surface")).toBe(true);
+      expect(reactions.contains(card)).toBe(false);
+      expect(card.contains(reactions)).toBe(false);
+      // Each placed on its own, and the element around them is a positioner:
+      // not a flex column stacking two cards, and not something a press in the
+      // gap lands on instead of the backdrop.
+      expect(getComputedStyle(reactions).position).toBe("absolute");
+      expect(getComputedStyle(card).position).toBe("absolute");
+      expect(getComputedStyle(wrapper).display).not.toBe("flex");
+      expect(getComputedStyle(wrapper).pointerEvents).toBe("none");
+      expect(getComputedStyle(reactions).pointerEvents).toBe("auto");
+      // The row is a pill with its own outline, not a second copy of the card.
+      expect(getComputedStyle(reactions).borderRadius).toBe("999px");
+      expect(card.classList.contains("lk-msg-menu-card")).toBe(true);
+      expect(reactions.classList.contains("lk-msg-menu-card")).toBe(false);
+
+      // The gap. The pointer (y 60) leaves room above for the row, so the row
+      // floats above the card with `SURFACE_GAP_PX` of nothing between them.
+      expect(wrapper.dataset.rowAt).toBe("above");
+      const rowTop = Number.parseFloat(reactions.style.top);
+      const cardTop = Number.parseFloat(card.style.top);
+      expect(cardTop - (rowTop + ROW.height)).toBe(SURFACE_GAP_PX);
+      expect(SURFACE_GAP_PX).toBeGreaterThan(0);
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect = real;
+    }
   });
 
   it("carries the section 2 order, with Delete separated", () => {

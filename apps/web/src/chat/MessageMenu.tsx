@@ -41,11 +41,24 @@
  * reaction row and must not inherit its width." They used to be one bordered
  * box, a flex column whose `align-items` was the default `stretch`, so the
  * action rows were as wide as seven emoji and a plus - a card three words long
- * drawn at the width of something else. The rows here are therefore wrapped in
- * `.lk-msg-menu-card` twice rather than once, and the outer element is a
- * positioner carrying no surface of its own. It still measures as the union of
- * the two, which is what `message-menu-placement.ts` needs and what keeps
- * "never overlaps the bubble" true of the whole footprint.
+ * drawn at the width of something else.
+ *
+ * Sizing them separately was not enough either. The next version drew two
+ * cards with the same chrome, left-aligned 6px apart in one flex column, and
+ * the maintainer still read one panel with an odd top row (2026-09-25). So
+ * section 2 now asks for "separate floating surfaces - each with its own
+ * background, border and shadow, and a visible gap between them": the row is a
+ * pill (`.lk-msg-menu-reactions`), the card keeps the look the maintainer chose
+ * (`.lk-msg-menu-card`, unchanged - the natives copy it), and each is placed on
+ * its own by `messageMenuLayout`, which puts the row above the card, or below
+ * it when there is no room above.
+ *
+ * The outer element is a positioner with no surface of its own. It is sized to
+ * the footprint of both surfaces and the gap, so it still measures as the
+ * union - which keeps "never overlaps the bubble" a statement about the whole
+ * footprint wherever something measures the menu as one box - and it takes no
+ * pointer events, so a press in the gap between the two surfaces reaches the
+ * backdrop and closes the menu like any other press outside it.
  *
  * Order within the action card is section 2's: the ones that only read (Copy),
  * then the ones that change this message (Edit), then the destructive one,
@@ -70,9 +83,9 @@ import { Portal } from "solid-js/web";
 
 import { REACTION_EMOJI } from "./message-ops";
 import {
-  messageMenuPlacement,
+  messageMenuLayout,
   type MenuAnchorRect,
-  type MenuPlacement,
+  type MessageMenuLayout,
 } from "./message-menu-placement";
 import { Icon } from "../ui/icons";
 
@@ -96,6 +109,9 @@ export const LONG_PRESS_SLOP_PX = 10;
 
 const GAP_PX = 8;
 const MARGIN_PX = 8;
+/** Between the reaction row and the action card. Section 2 asks for "a visible
+ *  gap"; the 6px the two cards used to sit apart did not read as one. */
+export const SURFACE_GAP_PX = 8;
 
 export interface MessageMenuProps {
   anchor: MenuAnchor;
@@ -119,27 +135,44 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
   // rendered. So it renders hidden, is measured, and is then placed and shown.
   // `null` is the pre-measurement state and is what keeps a wrongly-positioned
   // first frame off the screen.
-  const [placement, setPlacement] = createSignal<MenuPlacement | null>(null);
-  let menu: HTMLDivElement | undefined;
+  const [layout, setLayout] = createSignal<MessageMenuLayout | null>(null);
+  let row: HTMLDivElement | undefined;
+  let card: HTMLDivElement | undefined;
   let firstItem: HTMLButtonElement | undefined;
 
   const measureAndPlace = (): void => {
-    if (menu === undefined) return;
-    const rect = menu.getBoundingClientRect();
-    setPlacement(
-      messageMenuPlacement({
+    if (row === undefined) return;
+    // Each surface is measured on its own, while hidden at the positioner's
+    // origin - never where a previous menu stood, so the answer depends on the
+    // gesture alone.
+    const r = row.getBoundingClientRect();
+    const c = card?.getBoundingClientRect();
+    setLayout(
+      messageMenuLayout({
         bubble: props.anchor.bubble,
         pointer: { x: props.anchor.x, y: props.anchor.y },
-        menu: { width: rect.width, height: rect.height },
+        row: { width: r.width, height: r.height },
+        card: c === undefined ? null : { width: c.width, height: c.height },
         viewport: {
-          width: globalThis.innerWidth ?? rect.width,
-          height: globalThis.innerHeight ?? rect.height,
+          width: globalThis.innerWidth ?? r.width,
+          height: globalThis.innerHeight ?? r.height,
         },
         away: props.anchor.away,
         gap: GAP_PX,
+        between: SURFACE_GAP_PX,
         margin: MARGIN_PX,
       }),
     );
+  };
+
+  /** A surface's offset inside the positioner, which sits at the footprint's
+   *  top-left corner. Before measurement both surfaces sit at its origin. */
+  const offset = (at: (l: MessageMenuLayout) => { left: number; top: number } | null) => {
+    const l = layout();
+    const p = l === null ? null : at(l);
+    return l === null || p === null
+      ? { left: "0px", top: "0px" }
+      : { left: `${p.left - l.block.left}px`, top: `${p.top - l.block.top}px` };
   };
 
   const onKey = (e: KeyboardEvent): void => {
@@ -192,17 +225,29 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
         }}
       />
       <div
-        ref={menu}
         class="lk-msg-menu"
         role="menu"
         aria-label="Message actions"
-        style={
-          placement() === null
+        data-row-at={layout()?.rowAt}
+        style={(() => {
+          const l = layout();
+          return l === null
             ? { visibility: "hidden", left: "0px", top: "0px" }
-            : { left: `${placement()?.left ?? 0}px`, top: `${placement()?.top ?? 0}px` }
-        }
+            : {
+                left: `${l.block.left}px`,
+                top: `${l.block.top}px`,
+                width: `${l.block.width}px`,
+                height: `${l.block.height}px`,
+              };
+        })()}
       >
-        <div class="lk-msg-menu-card lk-msg-menu-reactions" role="group" aria-label="React">
+        <div
+          ref={row}
+          class="lk-msg-menu-surface lk-msg-menu-reactions"
+          role="group"
+          aria-label="React"
+          style={offset((l) => l.row)}
+        >
           <For each={REACTION_EMOJI}>
             {(emoji, i) => (
               <button
@@ -234,7 +279,11 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
             and an empty bordered card under the reactions would read as a
             menu that failed to load. */}
         <Show when={copyable() !== null || props.canEditDelete}>
-          <div class="lk-msg-menu-card lk-msg-menu-items">
+          <div
+            ref={card}
+            class="lk-msg-menu-surface lk-msg-menu-card lk-msg-menu-items"
+            style={offset((l) => l.card)}
+          >
             <Show when={copyable()}>
               {(text) => (
                 <button

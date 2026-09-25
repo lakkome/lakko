@@ -239,9 +239,14 @@ test("a second press pauses", async ({ page }) => {
   // position is then checked from where the engine actually left it, so this
   // asserts that playback STOPPED rather than how fast it stopped.
   await expect.poll(() => paused(page)).toBe(true);
+  // Discriminate PLAYING from PAUSED rather than pin the clock: still playing
+  // advances about 0.25 s over the wait below, while a paused element drifts
+  // at most one decoded buffer (~0.1 s on WebKit, measured) after it was told
+  // to stop. 0.15 sits between the two. A tighter bound measured the buffer,
+  // and went red one run in several on WebKit while the element was paused.
   const stopped = await settledTime(page);
   await page.waitForTimeout(250);
-  expect(Math.abs((await currentTime(page)) - stopped)).toBeLessThan(0.02);
+  expect(Math.abs((await currentTime(page)) - stopped)).toBeLessThan(0.15);
 });
 
 // ---------------------------------------------------------------------------

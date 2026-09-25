@@ -39,7 +39,36 @@
  *
  * Pure and total: no DOM, no clock, no reads of anything the caller did not
  * pass in, and every branch is reachable from a unit test. The component that
- * uses it measures the two rectangles and does as it is told.
+ * uses it measures the rectangles and does as it is told.
+ *
+ * ## Two surfaces, one footprint
+ *
+ * `docs/ux/message-actions.md` sections 2 and 7: the reaction row and the
+ * action card are two separate floating surfaces with a visible gap between
+ * them, the row above the card or below it when there is no room above, both
+ * fully inside the viewport and neither over the bubble's own controls.
+ *
+ * `messageMenuLayout` does not grow a second copy of the rule above for the
+ * row. It stacks the two surfaces into ONE footprint - the row, the gap, the
+ * card - and hands that footprint to `messageMenuPlacement` as if it were a
+ * single menu. Everything the rule guarantees of a rectangle it places (inside
+ * the viewport, outside the bubble unless `clamped`) is then true of the
+ * footprint, and so of each surface inside it, by containment. A second
+ * placement for the row would have to re-prove both properties and would
+ * disagree with the first at exactly the edges where it matters.
+ *
+ * Inside the footprint the two surfaces share the edge that faces the bubble:
+ * left edges when the footprint is right of the bubble or above / below it
+ * (where it opens at the pointer), right edges when it is left of the bubble.
+ * Without that, the wider row would hang past the narrower card toward the
+ * bubble - still inside the footprint, but the card would float away from the
+ * message it belongs to.
+ *
+ * The card opens at the pointer, and the row goes above it when there is room
+ * between the pointer and the top of the viewport for the row and the gap;
+ * otherwise below. That decision reads the pointer and the sizes only, never a
+ * previous menu, which is why reopening on the same message lands in the same
+ * place.
  */
 
 /** The part of a DOM rect this decision needs. Viewport coordinates. */
@@ -153,4 +182,97 @@ export function placementOverlapsBubble(
     placement.top < bubble.bottom &&
     bottom > bubble.top
   );
+}
+
+/** Where the reaction row sits relative to the action card. `alone` when there
+ *  is no card to sit relative to: a message with nothing to copy and nothing
+ *  to edit offers reactions only. */
+export type ReactionRowAt = "above" | "below" | "alone";
+
+export interface SurfacePosition {
+  readonly left: number;
+  readonly top: number;
+}
+
+export interface MessageMenuLayout {
+  /** The footprint of both surfaces and the gap between them, placed by
+   *  `messageMenuPlacement`. `side` is that rule's answer for the footprint. */
+  readonly block: MenuPlacement & MenuSize;
+  readonly rowAt: ReactionRowAt;
+  /** Viewport coordinates of the reaction row. */
+  readonly row: SurfacePosition;
+  /** Viewport coordinates of the action card, `null` when there is none. */
+  readonly card: SurfacePosition | null;
+}
+
+export interface MessageMenuLayoutInput {
+  readonly bubble: MenuAnchorRect;
+  readonly pointer: { readonly x: number; readonly y: number };
+  /** The measured reaction row. */
+  readonly row: MenuSize;
+  /** The measured action card, or `null` when it is not drawn. */
+  readonly card: MenuSize | null;
+  readonly viewport: MenuViewport;
+  readonly away: "left" | "right";
+  /** Space between the footprint and the bubble. */
+  readonly gap: number;
+  /** Space between the reaction row and the action card. */
+  readonly between: number;
+  /** Space kept clear at the viewport edges. */
+  readonly margin: number;
+}
+
+export function messageMenuLayout(input: MessageMenuLayoutInput): MessageMenuLayout {
+  const { bubble, pointer, row, card, viewport, away, gap, between, margin } = input;
+
+  if (card === null) {
+    const p = messageMenuPlacement({ bubble, pointer, menu: row, viewport, away, gap, margin });
+    return {
+      block: { ...p, width: row.width, height: row.height },
+      rowAt: "alone",
+      row: { left: p.left, top: p.top },
+      card: null,
+    };
+  }
+
+  const rowAt: ReactionRowAt = pointer.y - between - row.height >= margin ? "above" : "below";
+  const size: MenuSize = {
+    width: Math.max(row.width, card.width),
+    height: row.height + between + card.height,
+  };
+  // The footprint's top such that the CARD lands at the pointer: with the row
+  // above, that is the row's height and the gap higher.
+  const anchorY = rowAt === "above" ? pointer.y - between - row.height : pointer.y;
+  const p = messageMenuPlacement({
+    bubble,
+    pointer: { x: pointer.x, y: anchorY },
+    menu: size,
+    viewport,
+    away,
+    gap,
+    margin,
+  });
+
+  // Share the edge that faces the bubble; see the module comment.
+  const alignRight = (p.side === "away" || p.side === "near") && p.left < bubble.left;
+  const leftOf = (w: number): number => (alignRight ? p.left + size.width - w : p.left);
+
+  const rowTop = rowAt === "above" ? p.top : p.top + card.height + between;
+  const cardTop = rowAt === "above" ? p.top + row.height + between : p.top;
+  return {
+    block: { ...p, ...size },
+    rowAt,
+    row: { left: leftOf(row.width), top: rowTop },
+    card: { left: leftOf(card.width), top: cardTop },
+  };
+}
+
+/** Whether a surface of `size` at `at` intersects the bubble. The same question
+ *  as `placementOverlapsBubble`, asked of one surface of the layout. */
+export function surfaceOverlapsBubble(
+  at: SurfacePosition,
+  size: MenuSize,
+  bubble: MenuAnchorRect,
+): boolean {
+  return placementOverlapsBubble({ ...at, side: "clamped" }, size, bubble);
 }
