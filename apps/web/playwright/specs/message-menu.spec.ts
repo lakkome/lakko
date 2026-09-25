@@ -23,6 +23,20 @@
  * Here the pointer is really over the element, the cascade really evaluates
  * `:hover`, and the last test measures the overlap directly: a real click at
  * the play button's own centre has to reach play.
+ *
+ * ## The second defect, and why one test of it is here
+ *
+ * `message-actions.md` section 2: "The action card is sized by its own content.
+ * It is a separate surface from the reaction row and must not inherit its
+ * width." It did inherit it — both rows were children of one bordered box whose
+ * `align-items` was the default `stretch` — so a card three words long was
+ * drawn at the width of seven emoji and a plus.
+ *
+ * `TimelineBubble.test.tsx` covers the tree and the cascade that caused that,
+ * which is most of it. What it cannot cover is the defect as a person saw it,
+ * because the defect IS a width and jsdom computes none: every box there is
+ * zero. So exactly one test of it lives here, and it does the one thing that
+ * needs a browser — compares the two measured widths.
  */
 
 import { expect, test } from "@playwright/test";
@@ -143,4 +157,22 @@ test("a long press on the bubble's own surface does open it", async ({ page }) =
   await caption.dispatchEvent("pointerdown", { pointerType: "touch", pointerId: 1, bubbles: true, ...at });
   await expect(page.locator(MENU)).toBeVisible({ timeout: 2000 });
   await caption.dispatchEvent("pointerup", { pointerType: "touch", pointerId: 1, bubbles: true, ...at });
+});
+
+test("the action card is sized by its own content, not the reaction row's", async ({ page }) => {
+  await page.locator(".lk-bubble-text").first().click({ button: "right" });
+  await expect(page.locator(MENU)).toBeVisible();
+
+  const reactions = await box(page.locator(".lk-msg-menu-reactions"));
+  const actions = await box(page.locator(".lk-msg-menu-items"));
+
+  // The defect, as a number: these two were EQUAL, because both were stretched
+  // children of one card. A row reading "Copy" is not as wide as seven emoji
+  // and a plus, and now it is not drawn as if it were.
+  expect(actions.width, "the action card is still as wide as the reaction row").toBeLessThan(
+    reactions.width,
+  );
+  // Two surfaces, so there is a real gap between them rather than a border
+  // inside one box.
+  expect(actions.y).toBeGreaterThan(reactions.y + reactions.height);
 });

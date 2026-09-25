@@ -20,6 +20,19 @@
  *     `"voice-line"` and is tested; nothing tested that the component then
  *     actually hands the line to the voice bubble.
  *
+ *  3. The reaction row and the action rows lived in ONE card, so the action
+ *     rows were stretched to the width of seven emoji and a plus —
+ *     `message-actions.md` section 2 makes the action card a separate surface
+ *     "sized by its own content". jsdom computes no widths, so what is provable
+ *     here is the two things that made the defect: the TREE (one card around
+ *     both, rather than two cards) and the CASCADE (a `min-width` floor and an
+ *     `align-items` that stretched). The measured widths are in
+ *     `playwright/specs/message-menu.spec.ts`.
+ *
+ * Copy (section 3) is covered here too, because it needs no layout at all: the
+ * clipboard is a platform call, and "was it called with the message's text" is
+ * exactly what this harness can see.
+ *
  * The two context hooks are replaced because they are name resolvers, not part
  * of either defect: reaching them would mean standing up an MLS identity and a
  * profile store to answer a question about a `contextmenu` handler.
@@ -27,7 +40,7 @@
 
 // @vitest-environment jsdom
 
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./ChatContext", () => ({ useChats: () => ({ identity: () => null }) }));
 vi.mock("../profile/ProfileContext", () => ({
@@ -43,7 +56,17 @@ import { createMediaHub, mediaKey, type MediaHub } from "../media/media-hub";
 import { shortTime } from "./timeline-layout";
 import type { AttachmentRefBytes } from "./attachments";
 import type { TimelineRow } from "./timeline-row";
-import { all, initWasm, mouse, one, pointer, present, renderUi } from "../test/ui";
+import {
+  all,
+  initWasm,
+  installStylesheet,
+  mouse,
+  one,
+  pointer,
+  present,
+  renderUi,
+  settle,
+} from "../test/ui";
 
 beforeAll(async () => {
   await initWasm();
@@ -128,6 +151,21 @@ function incoming(text: string, attachments: AttachmentRefBytes[] = []): Timelin
       senderKey: "peer-key",
       createdAt: SENT_AT,
     },
+  };
+}
+
+/** Our own acked message, which is the only kind that offers Edit and Delete —
+ *  and therefore the only one whose action card has more than one row. */
+function ownMessage(text: string, attachments: AttachmentRefBytes[] = []): TimelineRow {
+  return {
+    kind: "outgoing",
+    tempId: 7,
+    plaintext: text,
+    attachments,
+    ack: "sent",
+    messageId: 42,
+    createdAt: SENT_AT,
+    authorKey: "own-key",
   };
 }
 
@@ -219,6 +257,13 @@ describe("a long press aimed at a control", () => {
   beforeEach(() => {
     vi.useFakeTimers();
   });
+  // Restored, because vitest does not: without this the fake clock leaks into
+  // every describe below and a `setTimeout(0)` there never fires, so a test
+  // awaiting a settled promise times out twenty seconds later with a message
+  // about its own `await` rather than about the clock.
+  afterEach(() => {
+    vi.useRealTimers();
+  });
 
   it("on the play button belongs to the button, not the message", () => {
     mount(incoming("", [voiceRef()]));
@@ -296,5 +341,150 @@ describe("where a message's time is drawn", () => {
     const bubble = mount(incoming("just words"));
     expect(present(":scope > .lk-bubble-meta", bubble)).toBe(true);
     expect(all(".lk-bubble-meta").length).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Defect 3 — the action card is a separate surface from the reaction row.
+// `message-actions.md` section 2.
+// ---------------------------------------------------------------------------
+
+/** Open the menu on `row` and hand back the three elements section 2 names. */
+function openMenuOn(row: TimelineRow, over: Partial<BubbleHost> = {}): {
+  wrapper: HTMLElement;
+  reactions: HTMLElement;
+  items: HTMLElement | null;
+} {
+  const bubble = mount(row, over);
+  mouse(bubble, "contextmenu", { clientX: 40, clientY: 60 });
+  return {
+    wrapper: one("[role='menu']"),
+    reactions: one(".lk-msg-menu-reactions"),
+    items: document.querySelector<HTMLElement>(".lk-msg-menu-items"),
+  };
+}
+
+describe("the action card's width", () => {
+  beforeEach(() => {
+    installStylesheet();
+  });
+
+  it("is its own, not the reaction row's", () => {
+    const { wrapper, reactions, items } = openMenuOn(ownMessage("hello"));
+
+    // The two rows were ALREADY siblings under this element, so the tree alone
+    // does not tell the defect from the fix. It is pinned anyway, because
+    // nesting one inside the other would make every assertion below vacuous.
+    expect(items).not.toBeNull();
+    expect(reactions.contains(items as Node)).toBe(false);
+    expect((items as HTMLElement).contains(reactions)).toBe(false);
+    expect((items as HTMLElement).parentElement).toBe(wrapper);
+    expect(reactions.parentElement).toBe(wrapper);
+
+    // What WAS the defect is which element is the card, and that is entirely a
+    // matter of the cascade. `display: flex` on the reaction row is the
+    // control: if jsdom dropped the sheet, every read below is a default and
+    // this fails rather than passing vacuously.
+    expect(getComputedStyle(reactions).display).toBe("flex");
+    // The surface is on each card. It used to be on the element AROUND both —
+    // one bordered, padded box, which is what made the second row's width the
+    // first row's business.
+    expect(getComputedStyle(reactions).paddingTop).toBe("4px");
+    expect(getComputedStyle(items as HTMLElement).paddingTop).toBe("4px");
+    // Not `"0px"`: jsdom serialises an unset `padding-top` as `"0"`, and
+    // pinning that would be pinning the harness. What matters is that the
+    // element around both is not itself padded like a card.
+    expect(getComputedStyle(wrapper).paddingTop).not.toBe("4px");
+    // The two declarations that did the stretching. `stretch` is what drew a
+    // card three words long at the width of seven emoji, and the floor is what
+    // stopped either card being narrower than 180px to begin with.
+    expect(getComputedStyle(wrapper).alignItems).toBe("flex-start");
+    expect(getComputedStyle(wrapper).minWidth).not.toBe("180px");
+    // And where the width comes from instead: the card's own content.
+    expect(getComputedStyle(items as HTMLElement).width).toBe("max-content");
+  });
+
+  it("carries the section 2 order, with Delete separated", () => {
+    const { items } = openMenuOn(ownMessage("hello"));
+    const labels = all("[role='menuitem'] span", items as HTMLElement).map((s) => s.textContent);
+    // Section 2: the ones that only read (Copy), then the ones that change this
+    // message (Edit), then the destructive one.
+    expect(labels).toEqual(["Copy", "Edit", "Delete"]);
+    // "separated", and structurally so: the divider is a wrapper of its own,
+    // not a border hung off the colour class.
+    const del = one(".lk-msg-menu-destructive [role='menuitem']");
+    expect(del.classList.contains("danger")).toBe(true);
+    expect(present(".lk-msg-menu-destructive", items as HTMLElement)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Copy — `message-actions.md` section 3. "Nothing leaves the device."
+// ---------------------------------------------------------------------------
+
+describe("Copy", () => {
+  /** Every text handed to the clipboard, in order. jsdom has no clipboard at
+   *  all, so this stands in for the platform and asserts only what our own
+   *  code did to it. */
+  let written: string[];
+
+  beforeEach(() => {
+    written = [];
+    Object.defineProperty(globalThis.navigator, "clipboard", {
+      value: {
+        writeText: (t: string): Promise<void> => {
+          written.push(t);
+          return Promise.resolve();
+        },
+      },
+      configurable: true,
+    });
+  });
+
+  it("puts the message's text on the clipboard", async () => {
+    const { items } = openMenuOn(incoming("the exact words"));
+    // An incoming message's action card has exactly the one row.
+    const copy = one("[role='menuitem']", items as HTMLElement);
+    expect(copy.textContent).toContain("Copy");
+    mouse(copy, "click");
+    await settle();
+    expect(written).toEqual(["the exact words"]);
+  });
+
+  it("copies what the person is reading, not the original, once edited", async () => {
+    const { items } = openMenuOn(incoming("before"), {
+      opState: () => ({ editedText: "after", reactions: new Map() }),
+    });
+    mouse(one("[role='menuitem']", items as HTMLElement), "click");
+    await settle();
+    expect(written).toEqual(["after"]);
+  });
+
+  it("is offered on somebody else's message too", () => {
+    // Not the Edit / Delete predicate: section 3 offers Copy on "any message
+    // with text", and an incoming message has no Edit row at all.
+    const { items } = openMenuOn(incoming("hello"));
+    expect(all("[role='menuitem']", items as HTMLElement).length).toBe(1);
+    expect((items as HTMLElement).textContent).toContain("Copy");
+  });
+
+  it("is absent on a message with no text", () => {
+    // A lone voice message: there is nothing to put on the clipboard, and an
+    // action that copies an empty string is worse than one that is not there.
+    const { items } = openMenuOn(ownMessage("", [voiceRef()]));
+    expect(present(".lk-msg-menu-items")).toBe(true);
+    expect((items as HTMLElement).textContent).not.toContain("Copy");
+    expect(all("[role='menuitem'] span", items as HTMLElement).map((s) => s.textContent)).toEqual([
+      "Edit",
+      "Delete",
+    ]);
+  });
+
+  it("leaves an incoming media message no action card at all", () => {
+    // Nothing to copy and nothing to edit, so the second surface is not drawn:
+    // an empty bordered card under the reactions reads as a menu that failed.
+    const { items } = openMenuOn(incoming("", [voiceRef()]));
+    expect(items).toBeNull();
+    expect(present("[role='group'][aria-label='React']")).toBe(true);
   });
 });

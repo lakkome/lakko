@@ -171,18 +171,27 @@ class VoiceBubbleUiTest {
         compose.onNodeWithTag(BUBBLE).fetchSemanticsNode().size.height
 
     /**
-     * The action menu is open, judged by its first item being in the tree.
+     * The action menu is open, judged by its scrim being in the tree.
      *
-     * Not `assertIsDisplayed`: the menu is a `DropdownMenu`, which Compose puts
-     * in a `Popup` — its own window, which Robolectric never places on a real
-     * display, so every popup here reports itself as not displayed whether it
-     * opened or not. Existence is the question this can answer, and it is the
-     * one that discriminates: [assertMenuClosed] is the same finder, and the
-     * gestures that must not open the menu leave nothing for it to find.
+     * The scrim rather than a row of the card, because `docs/ux/message-actions.md`
+     * §3 makes the card's rows conditional — Copy needs text and Edit / Delete
+     * need the message to be our own, so an incoming voice message with no
+     * caption offers no card rows at all — while the scrim is there whenever the
+     * menu is. It used to be the "React" row, which §2 deleted: the reactions
+     * are now a row of their own above the bubble rather than a row that opens
+     * one.
+     *
+     * Not `assertIsDisplayed`: the menu lives in a `Popup` — its own window,
+     * which Robolectric never places on a real display, so every popup here
+     * reports itself as not displayed whether it opened or not. Existence is the
+     * question this can answer, and it is the one that discriminates:
+     * [assertMenuClosed] is the same finder, and the gestures that must not open
+     * the menu leave nothing for it to find.
      */
-    private fun assertMenuOpen() = compose.onNodeWithText(REACT).assertExists()
+    private fun assertMenuOpen() = compose.onNodeWithContentDescription(MENU_SCRIM).assertExists()
 
-    private fun assertMenuClosed() = compose.onNodeWithText(REACT).assertDoesNotExist()
+    private fun assertMenuClosed() =
+        compose.onNodeWithContentDescription(MENU_SCRIM).assertDoesNotExist()
 
     // ----- 1. the bubble does not change height when playback starts -------
 
@@ -620,7 +629,9 @@ class VoiceBubbleUiTest {
 
         /** [WaveformSeekBar]'s own label, as [VoiceBubble] passes it. */
         const val WAVEFORM = "Voice message position"
-        const val REACT = "React"
+        /** [CLOSE_MENU_LABEL] — the action menu's scrim, which is the one node
+         *  present whenever the menu is open whatever rows it offers. */
+        const val MENU_SCRIM = CLOSE_MENU_LABEL
         const val TIME = "09:00"
         const val DURATION_MS = 12_000L
 

@@ -85,9 +85,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.positionOnScreen
+import androidx.compose.ui.unit.toSize
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
@@ -1351,7 +1355,12 @@ internal fun Bubble(
     // offered on any message with an id.
     val hasId = msg.messageId != 0L
     var menuOpen by remember { mutableStateOf(false) }
-    var pickingReaction by remember { mutableStateOf(false) }
+    // `docs/ux/message-actions.md` §2 — the menu is drawn around the bubble in
+    // window coordinates (reaction row above, card below, scrim everywhere
+    // else), so the bubble's own rectangle is what the presentation is built
+    // from. Null until the bubble has been laid out once.
+    var bubbleBounds by remember { mutableStateOf<Rect?>(null) }
+    val context = LocalContext.current
 
     Column(
         horizontalAlignment = if (isOwn) Alignment.End else Alignment.Start,
@@ -1379,10 +1388,7 @@ internal fun Bubble(
         val chromeless = soleBubble == me.lakko.app.media.MediaBubble.VIDEO_NOTE || mediaOnly
         val menuAvailable = actionsAvailable && hasId && !msg.deleted
         val openMenu: (() -> Unit)? = if (menuAvailable) {
-            {
-                pickingReaction = false
-                menuOpen = true
-            }
+            { menuOpen = true }
         } else {
             null
         }
@@ -1394,17 +1400,20 @@ internal fun Bubble(
                 contentColor = contentColor,
                 modifier = Modifier
                     .widthIn(max = maxBubbleWidth)
+                    .onGloballyPositioned {
+                        // On SCREEN, not in the window: the menu is a
+                        // popup, which is a window of its own, and screen
+                        // space is the only one the two share.
+                        bubbleBounds = Rect(it.positionOnScreen(), it.size.toSize())
+                    }
                     .then(
                         // ADR-0045 UX §6.2.5 — no long press once the
                         // membership has ended: the menu it opens offers
                         // three ops the core now refuses, permanently.
-                        if (actionsAvailable && hasId && !msg.deleted) {
+                        if (menuAvailable) {
                             Modifier.combinedClickable(
                                 onClick = {},
-                                onLongClick = {
-                                    pickingReaction = false
-                                    menuOpen = true
-                                },
+                                onLongClick = { menuOpen = true },
                             )
                         } else {
                             Modifier
@@ -1520,62 +1529,46 @@ internal fun Bubble(
                 }
             }
 
-            // ADR-0023 — long-press action menu anchored to the bubble.
-            DropdownMenu(
-                expanded = menuOpen,
-                onDismissRequest = {
-                    menuOpen = false
-                    pickingReaction = false
-                },
-            ) {
-                if (pickingReaction) {
-                    // Emoji picker — a single row of the six core
-                    // reactions. Tapping one sends the toggle op.
-                    Row(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        for (emoji in REACTION_EMOJIS) {
-                            TextButton(onClick = {
-                                onReact(emoji)
-                                menuOpen = false
-                                pickingReaction = false
-                            }) { Text(emoji) }
-                        }
-                        // ADR-0047 / UX spec §4 — any emoji, through the picker
-                        // in reaction mode (Emoji tab only; a tap reacts).
-                        TextButton(
-                            onClick = {
-                                menuOpen = false
-                                pickingReaction = false
-                                onOpenReactionPicker()
-                            },
-                            modifier = Modifier.semantics { contentDescription = "More reactions" },
-                        ) { Text("+") }
-                    }
-                } else {
-                    DropdownMenuItem(
-                        text = { Text("React") },
-                        onClick = { pickingReaction = true },
-                    )
-                    // Edit / Delete only on our own (outgoing) messages.
-                    if (isOwn) {
-                        DropdownMenuItem(
-                            text = { Text("Edit") },
-                            onClick = {
-                                menuOpen = false
-                                onEdit()
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Delete") },
-                            onClick = {
-                                menuOpen = false
-                                onDelete()
-                            },
-                        )
-                    }
-                }
+            // ADR-0023 + `docs/ux/message-actions.md` §2 — the long-press menu.
+            // The reactions are NOT a row in it: they are a row of their own
+            // above the bubble, one tap each, because reacting is the commonest
+            // thing a person does here and used to cost two taps.
+            val bounds = bubbleBounds
+            if (menuOpen && bounds != null) {
+                MessageActionMenuOverlay(
+                    bubbleBounds = bounds,
+                    alignEnd = isOwn,
+                    actions = messageActionsFor(
+                        isOwn = isOwn,
+                        deleted = msg.deleted,
+                        text = msg.text,
+                        menuAvailable = menuAvailable,
+                    ),
+                    reactions = REACTION_EMOJIS,
+                    onReact = { emoji ->
+                        menuOpen = false
+                        onReact(emoji)
+                    },
+                    // ADR-0047 / UX spec §4 — any emoji, through the picker in
+                    // reaction mode (Emoji tab only; a tap reacts).
+                    onOpenReactionPicker = {
+                        menuOpen = false
+                        onOpenReactionPicker()
+                    },
+                    onCopy = {
+                        menuOpen = false
+                        copyMessageText(context, msg.text)
+                    },
+                    onEdit = {
+                        menuOpen = false
+                        onEdit()
+                    },
+                    onDelete = {
+                        menuOpen = false
+                        onDelete()
+                    },
+                    onDismiss = { menuOpen = false },
+                )
             }
         }
 

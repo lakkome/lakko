@@ -92,6 +92,9 @@ struct VoiceBubble: View {
     @EnvironmentObject private var live: MediaLiveState
     /// When the touch now on the waveform went down — see ``VoiceSeekGate``.
     @State private var waveformPressStart: Date?
+    /// `client-redesign.md` — whether the message action menu is on screen, and
+    /// therefore whether this press has already been answered. See ``toggle()``.
+    @Environment(\.messageMenuPresenter) private var menu
 
     private var tint: Color { incoming ? Color.lakkoText : Color.lakkoAccentForeground }
     private var isPending: Bool { upload != nil }
@@ -128,6 +131,9 @@ struct VoiceBubble: View {
                         Spacer(minLength: 0)
                         if active != nil {
                             Button(PlaybackQueue.rateLabel(media.rate)) {
+                                // Same rule as ``toggle()``: a press the menu
+                                // has already answered ends here.
+                                guard menu?.isOpen != true else { return }
                                 media.rate = PlaybackQueue.nextRate(after: media.rate)
                             }
                             .font(.caption2.bold())
@@ -209,7 +215,26 @@ struct VoiceBubble: View {
             }
     }
 
+    /// Play or pause, unless the press that arrived here has already been
+    /// answered by the message menu.
+    ///
+    /// `client-redesign.md`: "once the menu has opened, the control underneath
+    /// receives nothing more from that press — not a tap on release, and not a
+    /// drag." A press held over the play disc opens the menu at
+    /// ``MessageLongPress/thresholdSeconds`` with the finger still down; the lift
+    /// that follows would otherwise arrive here and start playback nobody asked
+    /// for.
+    ///
+    /// This is the same rule ``VoiceSeekGate`` already gives the waveform,
+    /// reached from the other end: the waveform asks how long the press lasted,
+    /// and this asks whether the menu took it. The menu's own presence is the
+    /// stronger question — it cannot go stale, and it needs no press clock —
+    /// which is why the play button is written this way and not with a second
+    /// timer. It is deliberately independent of `MessageMenuHost`'s `.disabled`
+    /// so that the rule does not rest on SwiftUI cancelling an in-flight button
+    /// press when its subtree is disabled.
     private func toggle() {
+        if menu?.isOpen == true { return }
         if isPending {
             media.toggleVoice(key: mediaKey, ref: nil, fileURL: media.localFile(for: mediaKey))
         } else {

@@ -174,9 +174,16 @@ public enum VoicePrefetch {
 /// When a touch on the waveform is a seek.
 public enum VoiceSeekGate {
 
-    /// UIKit's default long-press threshold, which is what opens the message's
-    /// context menu.
-    public static let longPressSeconds: TimeInterval = 0.5
+    /// The press that opens the message's action menu.
+    ///
+    /// Read from ``MessageLongPress/thresholdSeconds`` rather than written down
+    /// again: the menu is a custom presentation now
+    /// (`docs/ux/message-actions.md` §7), so the number that opens it is the
+    /// app's and no longer UIKit's. Two copies of it would drift, and the drift
+    /// is silent in the worst direction — a seek gate at 0.5 s against a menu
+    /// that opened at 0.4 s means one press both opens the menu and moves the
+    /// playhead, which is what `client-redesign.md` forbids.
+    public static let longPressSeconds: TimeInterval = MessageLongPress.thresholdSeconds
 
     /// Whether a touch that has just lifted off the waveform should move the
     /// playhead.

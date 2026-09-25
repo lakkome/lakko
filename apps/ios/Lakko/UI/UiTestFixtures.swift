@@ -48,6 +48,10 @@ enum UiTestFixture: String {
     /// `docs/ux/calls.md` section 4.5 — the collapsed call bar on its own.
     case callBar
 
+    /// `docs/ux/message-actions.md` sections 2 and 3 — two messages and the
+    /// per-message action menu, so a test can hold a finger on a bubble.
+    case messageActions
+
     /// The launch argument that selects a fixture. Passed by the UI test as
     /// `["-LakkoUITestFixture", "voiceBubble"]`.
     static let launchArgument = "-LakkoUITestFixture"
@@ -78,7 +82,101 @@ struct UiTestFixtureRoot: View {
             MicrophoneSilenceFixture()
         case .callBar:
             CallBarFixture()
+        case .messageActions:
+            MessageActionsFixture()
         }
+    }
+}
+
+/// `docs/ux/message-actions.md` — one incoming and one outgoing message, with
+/// the production action menu over them.
+///
+/// Why a fixture. The menu opens on a press held past
+/// ``MessageLongPress/thresholdSeconds``, and nothing outside XCUITest holds a
+/// touch down for real (see `LakkoUITests`' own note). Everything here is the
+/// shipping surface: ``MessageMenuHost`` presents it, ``MessageRow`` draws the
+/// bubbles and reports their frames, and the row itself decides which actions
+/// this message offers. The fixture supplies two `ChatMessage` values and three
+/// readouts a test can look at — nothing else.
+///
+/// The readouts are outcomes, not stand-ins. `reacted` shows what the row's
+/// `onReact` was handed, which is the same closure the view model is wired to in
+/// production; and the clipboard line is read back out of `UIPasteboard`, so the
+/// assertion is on a round trip through the real pasteboard rather than on a
+/// string the fixture kept for itself.
+private struct MessageActionsFixture: View {
+
+    /// Two directions, because the menu's content differs by exactly that:
+    /// Delete and Edit are offered on one and not on the other.
+    private let incoming = ChatMessage(
+        messageId: 101,
+        direction: .incoming,
+        text: "Their message",
+        createdAt: "2026-09-25T10:00:00Z",
+        authorKeyB64: "them"
+    )
+    private let outgoing = ChatMessage(
+        messageId: 102,
+        direction: .outgoing,
+        text: "My message",
+        createdAt: "2026-09-25T10:01:00Z",
+        authorKeyB64: "me"
+    )
+
+    @State private var reacted: String?
+    @State private var clipboard: String?
+    @State private var edited = false
+    @State private var deleted = false
+
+    var body: some View {
+        MessageMenuHost {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("UI test fixture")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                row(incoming)
+                row(outgoing)
+                Spacer()
+                if let reacted {
+                    Text("fixture: reacted \(reacted)")
+                }
+                if let clipboard {
+                    Text("fixture: clipboard \(clipboard)")
+                }
+                if edited {
+                    Text("fixture: edit")
+                }
+                if deleted {
+                    Text("fixture: delete")
+                }
+                // Reads the general pasteboard from inside the app, which is
+                // where Copy wrote it. A test process reading another app's
+                // pasteboard is a cross-process paste and raises the system
+                // permission banner; this keeps the round trip inside one
+                // process and leaves the assertion on screen.
+                Button("fixture: read clipboard") {
+                    clipboard = UIPasteboard.general.string
+                }
+                .font(.footnote)
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        }
+    }
+
+    private func row(_ message: ChatMessage) -> some View {
+        MessageRow(
+            message: message,
+            ownIdentity: "me",
+            timeLabel: "10:00",
+            maxBubbleWidth: 280,
+            actionsAvailable: true,
+            readState: message.direction == .outgoing ? .sent : nil,
+            onPreview: { _ in },
+            onEdit: { edited = true },
+            onDelete: { deleted = true },
+            onReact: { reacted = $0 }
+        )
     }
 }
 

@@ -26,6 +26,7 @@ import { createSignal, For, Index, onCleanup, Show, type JSX } from "solid-js";
 import type { MemberIdentity } from "./author-identity";
 import { formatAttachmentSize, type AttachmentRefBytes } from "./attachments";
 import { useChats } from "./ChatContext";
+import { copyMessageText } from "./copy-message";
 import { OWN_REACTION_SENTINEL, type MessageOpState } from "./message-ops";
 import {
   LONG_PRESS_MS,
@@ -711,12 +712,21 @@ function ChatBubbleBody(
             <MessageMenu
               anchor={anchor()}
               canEditDelete={props.isOwn}
+              /* `message-actions.md` section 3 — offered on "any message with
+                 text", which is not the same predicate as Edit / Delete: Copy
+                 is offered on somebody else's message too, and withheld from
+                 our own lone photo. The text is the one on screen, so an
+                 edited message copies what the person is reading. */
+              copyText={displayText().length > 0 ? displayText() : null}
               onReact={(emoji) => {
                 if (props.messageId !== undefined) void props.onReact(props.messageId, emoji);
               }}
               onMoreReactions={() => {
                 if (props.messageId !== undefined) props.onOpenFullReactPicker(props.messageId);
               }}
+              /* Nothing is sent and nothing is stored: the text goes from this
+                 device's memory to this device's clipboard. */
+              onCopy={(text) => void copyMessageText(text)}
               onEdit={() => props.onStartEdit(props.messageId as number, displayText())}
               onDelete={() => {
                 if (props.messageId !== undefined) void props.onDeleteMessage(props.messageId);

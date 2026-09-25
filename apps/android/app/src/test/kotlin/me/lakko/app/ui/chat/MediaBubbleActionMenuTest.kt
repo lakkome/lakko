@@ -15,8 +15,8 @@ import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.longClick
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CoroutineScope
@@ -125,7 +125,7 @@ class MediaBubbleActionMenuTest {
 
         compose.onNodeWithTag(BUBBLE).performTouchInput { longClick() }
 
-        compose.onNodeWithText(REACT).assertExists()
+        compose.onNodeWithContentDescription(MENU_SCRIM).assertExists()
         compose.onNode(hasClickLabel("Play video message"), useUnmergedTree = true).assertExists()
     }
 
@@ -134,10 +134,11 @@ class MediaBubbleActionMenuTest {
 
         compose.onNodeWithTag(BUBBLE).performTouchInput { longClick() }
 
-        // Existence, not display: the menu is a `DropdownMenu` in a `Popup`,
-        // which Robolectric never places on a real display — see
-        // `VoiceBubbleUiTest.assertMenuOpen`.
-        compose.onNodeWithText(REACT).assertExists()
+        // Existence, not display: the menu lives in a `Popup`, which
+        // Robolectric never places on a real display — see
+        // `VoiceBubbleUiTest.assertMenuOpen`, which also says why the anchor is
+        // the scrim rather than a row of the card.
+        compose.onNodeWithContentDescription(MENU_SCRIM).assertExists()
     }
 
     /** A control's `onClick` label, which no stock matcher reaches. */
@@ -177,7 +178,10 @@ class MediaBubbleActionMenuTest {
 
     private companion object {
         const val BUBBLE = "media-bubble"
-        const val REACT = "React"
+
+        /** [CLOSE_MENU_LABEL] — the action menu's scrim, the one node present
+         *  whenever the menu is open whatever rows it offers. */
+        const val MENU_SCRIM = CLOSE_MENU_LABEL
         const val TIME = "09:00"
 
         /** Every bubble here is the message's SOLE attachment with no caption,

@@ -1894,19 +1894,46 @@ a.ghost.small.lk-wide-only {
   inset: 0;
   z-index: 39;
 }
+/*
+ * `docs/ux/message-actions.md` section 2: "The action card is sized by its own
+ * content. It is a separate surface from the reaction row and must not inherit
+ * its width."
+ *
+ * THE DEFECT: `.lk-msg-menu` WAS the card. It carried the border, the surface,
+ * the shadow and `min-width: 180px`, and its `align-items` was therefore the
+ * default `stretch` — so the action rows were drawn at the width of seven emoji
+ * and a plus, a card three words long stretched to the width of something above
+ * it. This element is now a POSITIONER with no surface of its own, and the card
+ * is `.lk-msg-menu-card`, applied twice.
+ *
+ * It still measures as the union of the two cards, which is what
+ * `message-menu-placement.ts` is handed and what keeps "never overlaps the
+ * bubble" a statement about the whole footprint rather than about one card.
+ */
 .lk-msg-menu {
   position: fixed;
   z-index: 40;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  min-width: 180px;
+  /* Not the default `stretch`, which is half of what stretched the action
+     rows. Measured: with `width: max-content` below in place this alone
+     changes nothing, because a definite width already beats `stretch` — it is
+     here so that removing the width leaves the cards shrink-to-fit rather than
+     silently restoring the defect. */
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--surface-fg);
+}
+/* Each surface, sized by its own content — and this is the declaration that
+   does it. Measured with it removed and the old floor restored: both cards came
+   out at exactly 234px, which is the defect as a number. */
+.lk-msg-menu-card {
+  width: max-content;
   padding: 4px;
   border-radius: var(--radius-md);
   background: var(--surface-elevated);
   border: 1px solid var(--surface-border);
   box-shadow: var(--shadow-2);
-  color: var(--surface-fg);
 }
 .lk-msg-menu-reactions {
   display: flex;
@@ -1933,6 +1960,15 @@ a.ghost.small.lk-wide-only {
   background: var(--surface-hover);
 }
 .lk-msg-menu-items {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+/* Section 2's "then the destructive one, separated". The separator lives on
+   this wrapper rather than on `button.danger`, because "separated" and "in the
+   destructive colour" are two requirements and a rule that hangs one off the
+   other's selector loses both the moment a second destructive action lands. */
+.lk-msg-menu-destructive {
   display: flex;
   flex-direction: column;
   border-top: 1px solid var(--surface-border);
@@ -3236,8 +3272,9 @@ button.lk-reaction {
 }
 /* The quick reaction bar used to be its own popover positioned INSIDE the
    bubble (`top: 1.2rem`), i.e. over the play button on a voice message, one
-   press further in than the strip that had the same defect. It is now the
-   first row of `.lk-msg-menu`, which is portaled outside the bubble. */
+   press further in than the strip that had the same defect. It is now
+   `.lk-msg-menu-reactions`, the first of the two cards `.lk-msg-menu` places
+   outside the bubble in a portal. */
 /* File chips under a bubble's text. */
 .lk-chips {
   display: flex;

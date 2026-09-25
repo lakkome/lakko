@@ -43,6 +43,36 @@ async function currentTime(page: Page): Promise<number> {
   });
 }
 
+/** Whether the element that has a source is paused - the product's own claim,
+ *  which is a state rather than a rate. */
+async function paused(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const a = window.__lakkoHarness.audios.find((el) => el.src !== "");
+    return a === undefined ? false : a.paused;
+  });
+}
+
+/**
+ * The position once the engine has stopped moving it, rather than at the
+ * instant of the click.
+ *
+ * A media element that is told to pause can still finish a buffer it had
+ * already decoded, so `currentTime` keeps creeping for a moment afterwards.
+ * Reading it immediately and demanding it hold to within 50ms measured that
+ * buffer, not whether playback stopped, and failed about one run in six under
+ * parallel load - the profile that gets a test deleted rather than fixed.
+ */
+async function settledTime(page: Page): Promise<number> {
+  let last = await currentTime(page);
+  for (let i = 0; i < 20; i += 1) {
+    await page.waitForTimeout(50);
+    const now = await currentTime(page);
+    if (now === last) return now;
+    last = now;
+  }
+  return last;
+}
+
 // ---------------------------------------------------------------------------
 // Defect — the bubble grew by nearly 30px the moment playback started.
 // ---------------------------------------------------------------------------
@@ -205,10 +235,13 @@ test("a second press pauses", async ({ page }) => {
   await page.locator(PLAY).click();
 
   await expect(page.locator(PLAY)).toHaveAttribute("aria-label", /^Play voice message/);
-  const stopped = await currentTime(page);
+  // Paused, not merely relabelled. The element's own state is the claim; the
+  // position is then checked from where the engine actually left it, so this
+  // asserts that playback STOPPED rather than how fast it stopped.
+  await expect.poll(() => paused(page)).toBe(true);
+  const stopped = await settledTime(page);
   await page.waitForTimeout(250);
-  // Paused, not merely relabelled: the position is where it was left.
-  expect(Math.abs((await currentTime(page)) - stopped)).toBeLessThan(0.05);
+  expect(Math.abs((await currentTime(page)) - stopped)).toBeLessThan(0.02);
 });
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,488 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+package me.lakko.app.ui.chat
+
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.graphics.ClipOp
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.layoutId
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
+import androidx.compose.ui.window.PopupProperties
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionOnScreen
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
+
+/**
+ * The per-message action menu — `docs/ux/message-actions.md` sections 2, 3
+ * and 7.
+ *
+ * Section 7 says the platform's own dropdown cannot express this shape, and
+ * that is why this file exists rather than another `DropdownMenu`: a
+ * `DropdownMenu` is one vertical column of rows, so a reaction row inside it
+ * can only be a row that opens another row of things — which is the defect
+ * section 2 forbids in as many words, and which is what Android shipped (the
+ * commonest action on a message cost two taps).
+ *
+ * Three pieces, and they are deliberately separate composables rather than one:
+ *
+ *  - [MessageReactionRow] sits ABOVE the bubble. One tap per emoji.
+ *  - [MessageActionCard] sits BELOW it, and is a surface of its own so that it
+ *    is sized by its own content. Section 2: "It is a separate surface from the
+ *    reaction row and must not inherit its width." Putting both in one card is
+ *    what stretches the action rows to the width of the emoji row, which is the
+ *    web defect the same sentence was written against.
+ *  - [MessageActionMenuOverlay] is the presentation: one window-sized popup
+ *    carrying a scrim with a hole where the bubble is, so the conversation
+ *    recedes and the acted-on message stays fully legible IN PLACE. It is
+ *    literally in place: nothing is drawn over the bubble and the bubble is not
+ *    moved or copied, the dim is simply not painted there.
+ */
+
+/** Radius of the undimmed hole in the scrim. UX section 4 — 18 for bubbles, so
+ *  the hole follows the bubble's own corners rather than squaring them off. */
+private val HOLE_RADIUS: Dp = 18.dp
+
+/** Gap between the bubble and each of the two surfaces around it. */
+private val BUBBLE_GAP: Dp = 8.dp
+
+/** Keep both surfaces this far from the window edges. */
+private val WINDOW_MARGIN: Dp = 8.dp
+
+/** The scrim's opacity. Enough that the conversation reads as behind the menu,
+ *  little enough that a person still sees where in the conversation they are. */
+private const val SCRIM_ALPHA: Float = 0.45f
+
+/** Label on the scrim, which dismisses the menu. Also the one node that says
+ *  "the menu is open" whatever actions this particular message offers, which is
+ *  what the UI tests anchor on. */
+internal const val CLOSE_MENU_LABEL: String = "Close message actions"
+
+/** Label on the reaction row's trailing control. */
+internal const val MORE_REACTIONS_LABEL: String = "More reactions"
+
+/**
+ * Which rows [MessageActionCard] offers. Computed by the caller from the
+ * message, so the card stays a pure renderer of a decision taken once.
+ *
+ * React is NOT here: section 2 takes the reactions out of the card entirely, so
+ * a card with no rows at all is a real state (someone else's message with no
+ * text) and the reaction row above it is still the whole point of the menu.
+ */
+internal data class MessageActions(
+    /** Section 3 — Copy is offered on "any message with text". */
+    val canCopy: Boolean,
+    /** Section 3 — Edit and Delete on "own, not deleted". */
+    val canEdit: Boolean,
+    val canDelete: Boolean,
+) {
+    /** Whether the card has anything to draw. */
+    val any: Boolean get() = canCopy || canEdit || canDelete
+}
+
+/**
+ * Section 3's actions for [msg] as seen by this device. [menuAvailable] is the
+ * caller's ADR-0045 §6.2.5 gate (no membership, no ops).
+ */
+internal fun messageActionsFor(
+    isOwn: Boolean,
+    deleted: Boolean,
+    text: String,
+    menuAvailable: Boolean,
+): MessageActions = MessageActions(
+    // Copy reads a string this device already holds and sends nothing, so it is
+    // the one action that does NOT die with the membership gate. It is still
+    // gated on the menu being available because the menu is how it is reached.
+    canCopy = menuAvailable && text.isNotEmpty(),
+    canEdit = menuAvailable && isOwn && !deleted,
+    canDelete = menuAvailable && isOwn && !deleted,
+)
+
+/**
+ * Put [text] on the system clipboard. Section 3: "Nothing leaves the device."
+ *
+ * The clip label is what the OS shows in its own paste UI; the message text is
+ * the clip itself.
+ */
+internal fun copyMessageText(context: Context, text: String) {
+    val clipboard =
+        context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            ?: return
+    clipboard.setPrimaryClip(ClipData.newPlainText("Lakko message", text))
+}
+
+/**
+ * The whole presentation: a window-sized popup holding the scrim, the reaction
+ * row above [bubbleBounds] and the action card below it.
+ *
+ * [bubbleBounds] is the bubble's rectangle in WINDOW coordinates, which is the
+ * same space the popup's own content is placed in (see [WindowOriginProvider]),
+ * so the two need no translation between them.
+ *
+ * [alignEnd] follows the bubble's side of the conversation — section 2: "on a
+ * phone it sits under the bubble, aligned to the bubble's own side".
+ */
+@Composable
+internal fun MessageActionMenuOverlay(
+    bubbleBounds: Rect,
+    alignEnd: Boolean,
+    actions: MessageActions,
+    reactions: List<String>,
+    onReact: (String) -> Unit,
+    onOpenReactionPicker: () -> Unit,
+    onCopy: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Popup(
+        popupPositionProvider = WindowOriginProvider,
+        onDismissRequest = onDismiss,
+        // Focusable so the system back gesture reaches `onDismissRequest`
+        // rather than leaving the chat while the menu is up.
+        properties = PopupProperties(focusable = true),
+    ) {
+        val holeRadius = with(LocalDensity.current) { HOLE_RADIUS.toPx() }
+        // A popup is its OWN WINDOW, and that is the whole difficulty here.
+        // The bubble measures itself in the chat window's space; this content
+        // lives in the popup's, which the system lays out inside its insets,
+        // so the status bar's height sits between the two origins. Measured on
+        // a phone: the popup's content began at screen y=128 while the bubble
+        // reported its position from y=0, so a hole drawn at the bubble's raw
+        // coordinates landed 128px low - over the message BELOW the one being
+        // acted on, which from the outside reads as "the area around the tap
+        // is lit rather than the message".
+        //
+        // `positionInWindow` cannot bridge it: inside a popup it reports a
+        // position in the POPUP's window and so answers zero. Screen space is
+        // the one coordinate system both windows share, so both sides are
+        // measured there and the difference is the offset.
+        var origin by remember { mutableStateOf<Offset?>(null) }
+        Box(
+            Modifier
+                .fillMaxSize()
+                .onGloballyPositioned { origin = it.positionOnScreen() },
+        ) {
+            // Nothing is placed until the origin is known - one frame - because
+            // a hole drawn at the wrong offset is worse than no hole at all.
+            val bubble = origin?.let { bubbleBounds.translate(-it) } ?: return@Box
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .semantics { contentDescription = CLOSE_MENU_LABEL }
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        // No ripple: a ripple over the whole conversation reads
+                        // as a control, and the scrim is a way out, not a row.
+                        indication = null,
+                        onClick = onDismiss,
+                    )
+                    .drawBehind {
+                        val hole = Path().apply {
+                            addRoundRect(
+                                RoundRect(
+                                    bubble,
+                                    CornerRadius(holeRadius, holeRadius),
+                                ),
+                            )
+                        }
+                        // Everything BUT the bubble is dimmed, so the message
+                        // being acted on is untouched rather than redrawn.
+                        clipPath(hole, ClipOp.Difference) {
+                            drawRect(Color.Black.copy(alpha = SCRIM_ALPHA))
+                        }
+                    },
+            )
+            MenuLayout(
+                bubble = bubble,
+                alignEnd = alignEnd,
+                row = {
+                    MessageReactionRow(
+                        reactions = reactions,
+                        onReact = onReact,
+                        onOpenPicker = onOpenReactionPicker,
+                    )
+                },
+                card = {
+                    if (actions.any) {
+                        MessageActionCard(
+                            actions = actions,
+                            onCopy = onCopy,
+                            onEdit = onEdit,
+                            onDelete = onDelete,
+                        )
+                    }
+                },
+            )
+        }
+    }
+}
+
+/**
+ * Section 2 — the reaction row: a horizontal row of emoji, each one tap, with a
+ * trailing control that opens the full picker.
+ *
+ * It is a pill of its own rather than the first row of the card, and that is the
+ * width rule in section 2: two surfaces, each sized by what is in it.
+ */
+@Composable
+internal fun MessageReactionRow(
+    reactions: List<String>,
+    onReact: (String) -> Unit,
+    onOpenPicker: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(percent = 50),
+        color = MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        shadowElevation = 6.dp,
+    ) {
+        Row(
+            // A narrow window (or a longer emoji set than the six defaults)
+            // scrolls rather than clipping the picker control off the end: the
+            // trailing control is the only route to any other emoji.
+            modifier = Modifier
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 6.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            for (emoji in reactions) {
+                Box(
+                    modifier = Modifier
+                        .size(REACTION_TAP_SIZE)
+                        .clickable(onClickLabel = "React $emoji") { onReact(emoji) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(text = emoji, style = MaterialTheme.typography.titleMedium)
+                }
+            }
+            Box(
+                modifier = Modifier
+                    .size(REACTION_TAP_SIZE)
+                    .semantics { contentDescription = MORE_REACTIONS_LABEL }
+                    .clickable { onOpenPicker() },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(text = "+", style = MaterialTheme.typography.titleMedium)
+            }
+        }
+    }
+}
+
+/** Each emoji's own tap target. 40dp keeps six of them plus the picker within a
+ *  narrow phone while clearing the 40dp minimum in `docs/ux/navigation.md`. */
+private val REACTION_TAP_SIZE: Dp = 40.dp
+
+/**
+ * Section 2 — the action card, sized by its own content and nothing else.
+ *
+ * Section 2's order, of what exists today: the reading action first (Copy),
+ * then the one that changes this message (Edit), then the destructive one,
+ * separated and in the platform's destructive colour. Reply, Forward, Pin,
+ * Select and Read by are section 3 rows that nothing has built yet; they slot
+ * into that order when they land.
+ */
+@Composable
+internal fun MessageActionCard(
+    actions: MessageActions,
+    onCopy: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        // UX section 4 — radius 12 for cards.
+        modifier = modifier.widthIn(min = CARD_MIN_WIDTH, max = CARD_MAX_WIDTH),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        shadowElevation = 6.dp,
+    ) {
+        Column {
+            if (actions.canCopy) {
+                ActionRow(
+                    label = "Copy",
+                    icon = Icons.Filled.ContentCopy,
+                    onClick = onCopy,
+                )
+            }
+            if (actions.canEdit) {
+                ActionRow(
+                    label = "Edit",
+                    icon = Icons.Filled.Edit,
+                    onClick = onEdit,
+                )
+            }
+            if (actions.canDelete) {
+                // Section 2 — the destructive action is separated and in the
+                // platform's destructive colour.
+                if (actions.canCopy || actions.canEdit) {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                }
+                ActionRow(
+                    label = "Delete",
+                    icon = Icons.Filled.Delete,
+                    onClick = onDelete,
+                    tint = MaterialTheme.colorScheme.error,
+                )
+            }
+        }
+    }
+}
+
+/** Narrow enough that the card never looks like a dialog, wide enough that no
+ *  label wraps. Both are bounds, not a fixed width: the card measures itself. */
+private val CARD_MIN_WIDTH: Dp = 168.dp
+private val CARD_MAX_WIDTH: Dp = 280.dp
+
+@Composable
+private fun ActionRow(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onClick: () -> Unit,
+    tint: Color = Color.Unspecified,
+) {
+    Row(
+        modifier = Modifier
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = if (tint == Color.Unspecified) MaterialTheme.colorScheme.onSurfaceVariant else tint,
+            modifier = Modifier.size(20.dp),
+        )
+        Box(Modifier.width(12.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyLarge,
+            color = if (tint == Color.Unspecified) MaterialTheme.colorScheme.onSurface else tint,
+        )
+    }
+}
+
+/**
+ * Places the reaction row above [bubble] and the card below it, both clamped
+ * into the window.
+ *
+ * A `Layout` rather than two `offset` modifiers because both offsets depend on
+ * the measured size of the thing being offset — the row's own width decides
+ * where its right edge can sit, and the card's own height decides whether it
+ * still fits under the bubble.
+ */
+@Composable
+private fun MenuLayout(
+    bubble: Rect,
+    alignEnd: Boolean,
+    row: @Composable () -> Unit,
+    card: @Composable () -> Unit,
+) {
+    val density = LocalDensity.current
+    val gap = with(density) { BUBBLE_GAP.roundToPx() }
+    val margin = with(density) { WINDOW_MARGIN.roundToPx() }
+    Layout(
+        content = {
+            Box(Modifier.layoutId(SLOT_ROW)) { row() }
+            Box(Modifier.layoutId(SLOT_CARD)) { card() }
+        },
+    ) { measurables, constraints ->
+        val loose = constraints.copy(minWidth = 0, minHeight = 0)
+        val rowPlaceable = measurables.first { it.layoutId == SLOT_ROW }.measure(loose)
+        val cardPlaceable = measurables.first { it.layoutId == SLOT_CARD }.measure(loose)
+        val width = constraints.maxWidth
+        val height = constraints.maxHeight
+
+        fun x(itemWidth: Int): Int {
+            val wanted = if (alignEnd) bubble.right.toInt() - itemWidth else bubble.left.toInt()
+            return wanted.coerceIn(margin, (width - itemWidth - margin).coerceAtLeast(margin))
+        }
+
+        fun clampY(wanted: Int, itemHeight: Int): Int =
+            wanted.coerceIn(margin, (height - itemHeight - margin).coerceAtLeast(margin))
+
+        layout(width, height) {
+            // `place`, not `placeRelative`: these coordinates are already window
+            // coordinates read off the bubble, so mirroring them under RTL would
+            // move both surfaces away from the bubble they belong to.
+            rowPlaceable.place(
+                x = x(rowPlaceable.width),
+                y = clampY(bubble.top.toInt() - gap - rowPlaceable.height, rowPlaceable.height),
+            )
+            cardPlaceable.place(
+                x = x(cardPlaceable.width),
+                y = clampY(bubble.bottom.toInt() + gap, cardPlaceable.height),
+            )
+        }
+    }
+}
+
+private const val SLOT_ROW = "reaction-row"
+private const val SLOT_CARD = "action-card"
+
+/**
+ * Puts the popup's content at the window's own origin, so the content's
+ * coordinate space IS the window's and a bubble rectangle read with
+ * `boundsInWindow()` can be used verbatim.
+ */
+private object WindowOriginProvider : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowSize: IntSize,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize,
+    ): IntOffset = IntOffset.Zero
+}

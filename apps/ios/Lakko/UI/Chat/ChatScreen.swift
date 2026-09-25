@@ -102,7 +102,13 @@ public struct ChatScreen: View {
 #if DEBUG
         let _ = BodyEvaluationCounter.tick("ChatScreen")
 #endif
-        chatBody
+        // `docs/ux/message-actions.md` §2 — the per-message menu is a custom
+        // presentation (§7: `.contextMenu` cannot put a reaction row above the
+        // bubble), so the conversation is wrapped in the host that dims it and
+        // draws the menu over it. Inside the `.environmentObject` calls below,
+        // deliberately: the menu re-draws the production bubble, and a media
+        // bubble reads the controller out of the environment.
+        MessageMenuHost { chatBody }
             .overlay { VideoNoteOverlay(media: media) }
             .environmentObject(media)
             .environmentObject(media.live)
@@ -1157,7 +1163,12 @@ private struct DateSeparator: View {
     }
 }
 
-private struct MessageRow: View {
+/// One message in the timeline.
+///
+/// Internal rather than private so the DEBUG-only UI-test fixture
+/// (`UiTestFixtures.swift`) can mount the shipping row instead of a copy of it.
+/// Nothing else outside this file constructs one.
+struct MessageRow: View {
     let message: ChatMessage
     /// ADR-0023 — the local member's IDENTITY (their signature key),
     /// used to highlight the reaction chips this user contributed. Never
@@ -1204,8 +1215,19 @@ private struct MessageRow: View {
     /// `docs/ux/calls.md` section 6 — tapping a call row calls back.
     var onCallBack: () -> Void = {}
 
-    /// ADR-0023 — emoji palette for the quick reaction picker.
-    private static let reactionPalette = ["👍", "❤️", "😂", "😮", "😢", "🙏"]
+    /// `docs/ux/message-actions.md` — where the menu goes when it opens, `nil`
+    /// outside a ``MessageMenuHost``.
+    @Environment(\.messageMenuPresenter) private var menuPresenter
+
+    /// Where this row's bubble is on screen.
+    ///
+    /// A reference held in `@State` rather than a `CGRect` in `@State`, and the
+    /// difference is not stylistic: the frame changes on every scroll tick, so a
+    /// value in `@State` would invalidate this row's body on every one of them,
+    /// for every visible row, to serve a gesture that happens once. `@State`
+    /// keeps the same box across the row's re-creations; writing through it
+    /// invalidates nothing.
+    @State private var bubbleFrame = BubbleFrameBox()
 
     private static let avatarSize: CGFloat = 28
 
@@ -1230,6 +1252,10 @@ private struct MessageRow: View {
 
     @ViewBuilder
     private func visualMedia(_ ref: AttachmentRef) -> some View {
+        menuTarget(visualMediaContent(ref))
+    }
+
+    private func visualMediaContent(_ ref: AttachmentRef) -> some View {
         Group {
             if InlineMedia.decision(for: ref).bubble == .video {
                 VideoBubble(ref: ref, overlay: AnyView(mediaMetaPill))
@@ -1237,7 +1263,19 @@ private struct MessageRow: View {
                 PhotoBubble(ref: ref, overlay: AnyView(mediaMetaPill))
             }
         }
-        .contextMenu { menuItems }
+    }
+
+    /// The bare video note plus its time, which is the whole bubble for that
+    /// kind of message.
+    ///
+    /// One definition for both directions: it used to be written out twice, once
+    /// in each arm of ``body``, and the menu now has to be attached to it — so a
+    /// second copy would be a second place to forget.
+    private func videoNoteColumn(alignment: HorizontalAlignment) -> some View {
+        VStack(alignment: alignment, spacing: 2) {
+            bareVideoNote
+            metaRow
+        }
     }
 
     /// Edit / Delete are offered only on our own outgoing
@@ -1268,11 +1306,7 @@ private struct MessageRow: View {
                 Spacer(minLength: 0)
                 bubbleColumn(alignment: .trailing) {
                     if isBareVideoNote {
-                        VStack(alignment: .trailing, spacing: 2) {
-                            bareVideoNote
-                            metaRow
-                        }
-                        .contextMenu { menuItems }
+                        menuTarget(videoNoteColumn(alignment: .trailing))
                     } else if let ref = bareVisualMedia {
                         visualMedia(ref)
                     } else {
@@ -1304,11 +1338,7 @@ private struct MessageRow: View {
                             .padding(.leading, 4)
                     }
                     if isBareVideoNote {
-                        VStack(alignment: .leading, spacing: 2) {
-                            bareVideoNote
-                            metaRow
-                        }
-                        .contextMenu { menuItems }
+                        menuTarget(videoNoteColumn(alignment: .leading))
                     } else if let ref = bareVisualMedia {
                         visualMedia(ref)
                     } else {
@@ -1397,30 +1427,96 @@ private struct MessageRow: View {
         }
     }
 
-    @ViewBuilder
-    private var menuItems: some View {
-        if canReact {
-            // Quick-react palette — a sub-menu of the six core
-            // emoji; tapping one toggles it on the message.
-            Menu {
-                ForEach(Self.reactionPalette, id: \.self) { emoji in
-                    Button(emoji) { onReact(emoji) }
+    /// `docs/ux/message-actions.md` §3 — Copy, on "any message with text".
+    ///
+    /// A tombstone has no text left and a lone attachment never had any. Gated on
+    /// `actionsAvailable` like the other two even though Copy composes nothing and
+    /// sends nothing: ADR-0045 UX §6.2.5 withdraws the per-message menu WHOLESALE
+    /// when this device's membership ends, and Copy lives in that menu. Offering a
+    /// one-item menu on a dead group would quietly reinterpret "withdrawn", which
+    /// is a decision for the spec and not for this row.
+    private var canCopy: Bool {
+        actionsAvailable
+            && message.direction != .system
+            && !message.deleted
+            && !message.text.isEmpty
+    }
+
+    /// `docs/ux/message-actions.md` §3 — the card's rows for THIS message.
+    private var menuActions: [MessageMenuAction] {
+        MessageMenuAction.offered(canEditOrDelete: canEditOrDelete, hasText: canCopy)
+    }
+
+    /// Make a bubble the thing the menu opens on.
+    ///
+    /// `client-redesign.md` — the gesture is a long press, it reaches the menu
+    /// from anywhere on the bubble INCLUDING over the bubble's own controls, and
+    /// once the menu has opened the control underneath receives nothing more
+    /// from that press.
+    ///
+    /// `simultaneousGesture` is what buys the first half. A plain
+    /// `.onLongPressGesture` here would lose SwiftUI's arbitration to whatever
+    /// control the press started on — the play disc, the waveform, a photo — and
+    /// the menu would then be reachable only through the padding no control
+    /// covers, which is the exact defect `client-redesign.md` records Android
+    /// having had. A simultaneous gesture is recognised alongside the control's
+    /// own instead of competing with it.
+    ///
+    /// The second half is not here: it is `MessageMenuHost`'s `.disabled` plus
+    /// each control's own rule about a press that outlives
+    /// ``MessageLongPress/thresholdSeconds`` (``VoiceSeekGate``).
+    ///
+    /// `content` is captured for the menu WITHOUT these two modifiers, so the
+    /// copy the menu draws neither reports its own frame over this row's nor
+    /// carries a second long press.
+    private func menuTarget<Content: View>(_ content: Content) -> some View {
+        content
+            .onGeometryChange(for: CGRect.self) { proxy in
+                proxy.frame(in: .global)
+            } action: { frame in
+                bubbleFrame.frame = frame
+            }
+            .simultaneousGesture(
+                LongPressGesture(minimumDuration: MessageLongPress.thresholdSeconds)
+                    .onEnded { _ in openMenu(AnyView(content)) }
+            )
+    }
+
+    private func openMenu(_ bubble: AnyView) {
+        guard let menuPresenter else { return }
+        let frame = bubbleFrame.frame
+        // Nothing has reported a frame yet, so there is nowhere to draw the
+        // menu. Opening it anyway would put the bubble copy at the window's
+        // corner.
+        guard frame != .zero else { return }
+        let actions = menuActions
+        // A menu with no reaction row and no actions is an empty card over a
+        // dimmed screen. The case is real: a tombstone offers neither.
+        guard canReact || !actions.isEmpty else { return }
+        menuPresenter.open(
+            MessageMenuRequest(
+                id: message.id,
+                bubbleFrame: frame,
+                isOutgoing: isOutgoing,
+                actions: actions,
+                canReact: canReact,
+                bubble: bubble,
+                onReact: onReact,
+                onMoreReactions: onMoreReactions,
+                perform: { action in
+                    switch action {
+                    case .copy:
+                        // Decided here because this is what knows which text the
+                        // person can see.
+                        MessageClipboard.copy(message.text)
+                    case .edit:
+                        onEdit()
+                    case .delete:
+                        onDelete()
+                    }
                 }
-                Button { onMoreReactions() } label: {
-                    Label("More reactions", systemImage: "plus")
-                }
-            } label: {
-                Label("React", systemImage: "face.smiling")
-            }
-        }
-        if canEditOrDelete {
-            Button { onEdit() } label: {
-                Label("Edit", systemImage: "pencil")
-            }
-            Button(role: .destructive) { onDelete() } label: {
-                Label("Delete", systemImage: "trash")
-            }
-        }
+            )
+        )
     }
 
     /// The bubble: radius 18, incoming on the sunken surface, outgoing on the
@@ -1428,6 +1524,11 @@ private struct MessageRow: View {
     /// lower trailing corner, beside the last line of text.
     @ViewBuilder
     private var bubble: some View {
+        menuTarget(bubbleContent)
+    }
+
+    @ViewBuilder
+    private var bubbleContent: some View {
         HStack(alignment: .bottom, spacing: 8) {
             VStack(alignment: .leading, spacing: 6) {
                 if message.deleted {
@@ -1437,9 +1538,17 @@ private struct MessageRow: View {
                         .opacity(0.7)
                 } else {
                     if !message.text.isEmpty {
+                        // No `.textSelection(.enabled)`. It installs UIKit's own
+                        // long press for a selection loupe over the same pixels
+                        // and the same duration as the gesture that opens the
+                        // message menu, and `.contextMenu` used to be the thing
+                        // that won that arbitration. With a custom presentation
+                        // the two would both answer one press — a selection
+                        // loupe under a menu. `docs/ux/message-actions.md` §3
+                        // replaces what selection was being used for with Copy,
+                        // which takes the whole message in one tap.
                         Text(message.text)
                             .font(.body)
-                            .textSelection(.enabled)
                     }
                     if !message.attachments.isEmpty {
                         attachmentChips
@@ -1453,7 +1562,6 @@ private struct MessageRow: View {
         .background(isOutgoing ? Color.lakkoAccent : Color.lakkoSurfaceSunken)
         .foregroundStyle(isOutgoing ? Color.lakkoAccentForeground : Color.lakkoText)
         .clipShape(RoundedRectangle(cornerRadius: LakkoRadius.bubble, style: .continuous))
-        .contextMenu { menuItems }
     }
 
     /// "(edited)", the time, and — on own messages — the delivery glyph.
