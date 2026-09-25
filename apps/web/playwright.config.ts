@@ -67,9 +67,14 @@ export default defineConfig({
       name: "chromium",
       use: {
         ...devices["Desktop Chrome"],
-        // The recorder asks for the microphone for real; without the grant the
-        // machine lands in its denied card instead of recording.
-        permissions: ["microphone"],
+        // The recorder asks for the microphone and — for a video note — the
+        // camera for real. Without the microphone grant the machine lands in
+        // its denied card; without the CAMERA grant it does something quieter
+        // and easy to misread, because a permission the browser reports as
+        // `prompt` means "this gesture would raise a dialog", and §6 says such
+        // a gesture does not record. Measured: no bar, no red dot, no recorder,
+        // and nothing on screen to say why.
+        permissions: ["microphone", "camera"],
         launchOptions: {
           args: [
             // A fake microphone and camera, so nothing touches real hardware

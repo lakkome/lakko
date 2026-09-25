@@ -109,6 +109,29 @@ continues to the next consecutive unplayed voice message from the same sender.
 | Received, downloading | Play button shows a spinner on first tap; the file is fetched and decrypted, then plays |
 | Download or decrypt failed | `Couldn't play this message` inline; a retry on tap. Never plays partial or unauthenticated bytes |
 | Recording format unsupported (web only) | Mic button disabled with tooltip `Voice messages can't be recorded in this browser`. Receiving still works |
+| Hearing nothing | The recording bar says `No sound from the microphone` in place of its hint, and clears the moment any level is measured |
+
+**A take that hears nothing says so while it is being made.** When the measured
+input level has stayed at zero for two seconds the recording bar says so, and
+it says it *during* the take rather than after: a warning that arrives once the
+message is already sent has cost the person the whole recording and tells them
+only that it was wasted. The take is never blocked and never discarded on that
+account - a quiet room is not an error and refusing to send would be the client
+overruling the person about their own message - so the warning is a warning,
+and the message sends with whatever was captured.
+
+Written down because silence was invisible from inside the app. A chain of
+voice messages recorded on an Android emulator whose microphone toggle was off
+arrived as digital silence (`mean_volume: -83.3 dB`), and nothing anywhere -
+not the bar, not the waveform, not the sent bubble - said the microphone had
+given nothing; the cause was found by measuring the file with an external tool.
+Every client already samples the level to draw the live meter, so the signal
+the warning needs is one each of them is holding and none of them reads.
+
+The two seconds are the spec's number, not a platform's: below about one second
+a microphone that is merely slow to warm up would be accused of being dead, and
+past three the person has already committed to the take. All three clients use
+the same value so the same room produces the same warning on each.
 
 ## 3. Video notes (round video)
 

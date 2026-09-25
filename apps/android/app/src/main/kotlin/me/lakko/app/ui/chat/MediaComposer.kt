@@ -112,7 +112,9 @@ import me.lakko.app.media.RecHint
 import me.lakko.app.media.RecState
 import me.lakko.app.media.RecordedTake
 import me.lakko.app.media.RecorderThread
+import me.lakko.app.media.SILENCE_WARNING_MS
 import me.lakko.app.media.SentTakeOutcome
+import me.lakko.app.media.SilenceWatch
 import me.lakko.app.media.TAP_MAX_MS
 import me.lakko.app.media.sentTakeOutcome
 import me.lakko.app.media.CameraLens
@@ -125,6 +127,7 @@ import me.lakko.app.media.capFor
 import me.lakko.app.media.formatClock
 import me.lakko.app.media.formatTotalClock
 import me.lakko.app.media.isCapturing
+import me.lakko.app.media.observeLevel
 import me.lakko.app.media.reduce
 import me.lakko.app.media.spokenDuration
 import java.util.UUID
@@ -148,6 +151,10 @@ internal object RecordCopy {
     const val STARTING_CAMERA = "Starting camera"
     const val IN_CALL = "Unavailable during a call"
     const val SLIDE_TO_CANCEL = "Slide to cancel"
+
+    /** §2 "Hearing nothing" — replaces the hint while the input reads zero. */
+    const val NO_MIC_SOUND = "No sound from the microphone"
+
     const val DENIED_MIC = "Lakko needs microphone access to record voice messages"
     const val DENIED_CAMERA = "Lakko needs camera access to record video messages"
 
@@ -178,6 +185,15 @@ internal class RecordController(
     var elapsedMs by mutableLongStateOf(0L)
         private set
     var level by mutableFloatStateOf(0f)
+        private set
+
+    /**
+     * §2 "Hearing nothing" — the microphone has given nothing for
+     * [SILENCE_WARNING_MS], so the bar says so in place of its hint. Decided by
+     * [observeLevel] over the samples the live meter is already taking; nothing
+     * about the take changes because of it.
+     */
+    var micSilent by mutableStateOf(false)
         private set
     var notice by mutableStateOf<String?>(null)
         private set
@@ -222,6 +238,9 @@ internal class RecordController(
     private val cameraPresent: Boolean
         get() = cameraFeature && cameraLenses?.isNotEmpty() != false
     internal var requestPermissions: ((Array<String>) -> Unit)? = null
+
+    /** §2 — the run of silence in the take being recorded now. */
+    private var silence = SilenceWatch()
 
     private var voice: VoiceRecorder? = null
     /** The voice recorder's start, running on [RecorderThread]; `true` once it
@@ -491,6 +510,11 @@ internal class RecordController(
     private fun startCapture(kind: CaptureKind) {
         elapsedMs = 0L
         level = 0f
+        // Per take: the previous take's silence says nothing about this one, and
+        // a warning left standing from it would be about a microphone that is
+        // no longer being asked anything.
+        silence = SilenceWatch()
+        micSilent = false
         captureStartedAt = now()
         val stamp = System.currentTimeMillis()
         if (kind == CaptureKind.VOICE) {
@@ -594,6 +618,23 @@ internal class RecordController(
         }
     }
 
+    /**
+     * One level reading from the live recorder, taken at [atMs] of the take's
+     * elapsed time: it drives the meter and, through [observeLevel], §2's
+     * "Hearing nothing" warning.
+     *
+     * `internal` rather than private because it is also where
+     * `SilentMicrophoneUiTest` hands in a sample: Robolectric's `MediaRecorder`
+     * reports amplitude 0 and cannot be made to hear anything, so a JVM test can
+     * reach the silent case for free but needs this to reach the other one. The
+     * fold, the state and the bar on the far side of it are the production ones.
+     */
+    internal fun onLevelSample(level: Double, atMs: Long) {
+        this.level = level.toFloat()
+        silence = observeLevel(silence, level, atMs)
+        micSilent = silence.warns
+    }
+
     private fun startTick() {
         tickJob?.cancel()
         tickJob = scope.launch {
@@ -605,7 +646,10 @@ internal class RecordController(
                     (video != null && !videoLive)
                 elapsedMs = if (starting) 0L else now() - captureStartedAt
                 if (v != null && !starting) {
-                    level = withContext(RecorderThread.dispatcher) { v.sampleLevel() }.toFloat()
+                    onLevelSample(
+                        withContext(RecorderThread.dispatcher) { v.sampleLevel() },
+                        elapsedMs,
+                    )
                 }
                 if (!requiredPermissions(kind).all(::isGranted)) {
                     dispatch(RecEvent.Revoked)
@@ -928,12 +972,19 @@ internal fun RecordingBar(controller: RecordController, modifier: Modifier = Mod
             Spacer(Modifier.width(8.dp))
             LevelMeter(controller.level, Modifier.width(40.dp).height(16.dp))
             Spacer(Modifier.weight(1f))
-            Text(
-                text = "< ${RecordCopy.SLIDE_TO_CANCEL}",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.offset { IntOffset((minOf(0f, s.dx) * density).toInt(), 0) },
-            )
+            // §2 "Hearing nothing" — IN PLACE OF the hint, not beside it: two
+            // competing lines in one slot would push the slide affordance around
+            // mid-gesture, and the warning is the more urgent of the two.
+            if (controller.micSilent) {
+                SilentMicNotice()
+            } else {
+                Text(
+                    text = "< ${RecordCopy.SLIDE_TO_CANCEL}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.offset { IntOffset((minOf(0f, s.dx) * density).toInt(), 0) },
+                )
+            }
         }
 
         is RecState.Locked -> Row(
@@ -950,6 +1001,14 @@ internal fun RecordingBar(controller: RecordController, modifier: Modifier = Mod
                 style = MaterialTheme.typography.bodyMedium,
             )
             Spacer(Modifier.weight(1f))
+            // A locked take is the one most worth warning about: the finger is
+            // off the button and it runs until it is stopped, so a silent one
+            // can waste minutes rather than seconds. Never reached by a video
+            // note, whose level is not sampled at all, so it cannot be accused.
+            if (controller.micSilent) {
+                SilentMicNotice()
+                Spacer(Modifier.width(8.dp))
+            }
             if (s.kind == CaptureKind.VIDEO_NOTE && controller.canFlip) {
                 IconButton(onClick = controller::flipCamera) {
                     Icon(Icons.Filled.Cameraswitch, contentDescription = "Flip camera")
@@ -989,6 +1048,20 @@ internal fun RecordingBar(controller: RecordController, modifier: Modifier = Mod
 
         else -> Unit
     }
+}
+
+/**
+ * §2 "Hearing nothing" — the one place the warning is drawn, so the recording
+ * and locked bars cannot word or colour it two ways. An advisory colour rather
+ * than `error`: nothing has failed and nothing is being refused.
+ */
+@Composable
+private fun SilentMicNotice() {
+    Text(
+        text = RecordCopy.NO_MIC_SOUND,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 @Composable

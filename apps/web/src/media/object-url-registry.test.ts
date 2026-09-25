@@ -64,6 +64,38 @@ describe("ObjectUrlRegistry", () => {
     expect(registry.isDisposed).toBe(true);
   });
 
+  it("renaming moves the one URL and revokes nothing", () => {
+    // What an outgoing take's bytes do when its upload lands. A media element
+    // may be READING this URL at that moment, so the move has to leave the URL
+    // string alone: `set` under the new key plus `revoke` of the old one made a
+    // second copy of the same bytes and pulled the first out from under it.
+    const { registry, live } = harness();
+    const url = registry.set("local:1", blob());
+    expect(registry.rename("local:1", "7e7e")).toBe(true);
+    expect(registry.get("7e7e")).toBe(url);
+    expect(registry.get("local:1")).toBeNull();
+    expect(live).toEqual(new Set([url]));
+    expect(registry.size).toBe(1);
+  });
+
+  it("renaming an unknown key changes nothing and says so", () => {
+    const { registry, live } = harness();
+    const kept = registry.set("a", blob());
+    expect(registry.rename("nothing", "a")).toBe(false);
+    expect(registry.get("a")).toBe(kept);
+    expect(live).toEqual(new Set([kept]));
+  });
+
+  it("renaming onto an occupied key releases what was there", () => {
+    const { registry, live } = harness();
+    const stale = registry.set("7e7e", blob());
+    const url = registry.set("local:1", blob());
+    expect(registry.rename("local:1", "7e7e")).toBe(true);
+    expect(registry.get("7e7e")).toBe(url);
+    expect(live).toEqual(new Set([url]));
+    expect(stale).not.toBe(url);
+  });
+
   it("revoking an unknown key is a no-op", () => {
     const { registry, live } = harness();
     registry.set("a", blob());

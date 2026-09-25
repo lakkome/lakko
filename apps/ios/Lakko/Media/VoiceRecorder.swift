@@ -33,8 +33,16 @@ public final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
 
     private static let log = Logger(subsystem: "me.lakko.media", category: "voice-recorder")
 
-    /// Latest level (0...1) for the live meter.
-    public var onLevel: ((Double) -> Void)?
+    /// Latest level (0...1) for the live meter, with the recorder's own elapsed
+    /// milliseconds at the moment it was taken.
+    ///
+    /// The time comes from the recorder rather than from the controller's tick
+    /// because it is the clock the sample actually belongs to: the tick runs from
+    /// the machine's start, which is ``VoiceCapture/inputSettleSeconds`` before
+    /// the first captured frame. ``MicrophoneSilence`` measures a run of silence
+    /// against it, and a run that began before anything was captured would be
+    /// counting the route change as silence the microphone gave.
+    public var onLevel: ((Double, Int64) -> Void)?
     /// The recording stopped for a reason other than `stop()` / `discard()`
     /// (an interruption, an encoder error).
     public var onInterrupted: (() -> Void)?
@@ -111,7 +119,7 @@ public final class VoiceRecorder: NSObject, AVAudioRecorderDelegate {
         recorder.updateMeters()
         let level = Waveform.linearLevel(decibels: recorder.averagePower(forChannel: 0))
         levels.append(level)
-        onLevel?(level)
+        onLevel?(level, Int64((recorder.currentTime * 1000).rounded()))
     }
 
     /// Stop and hand over the take. `nil` when nothing was recording.

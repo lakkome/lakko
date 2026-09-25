@@ -39,13 +39,31 @@
  * wrapper objects looks like an entirely new list on every recompute, so every
  * bubble in the conversation would be torn down and rebuilt each time a
  * message arrived — losing playing video, open previews and scroll position.
- * The timeline's own row objects are stable across a `setRows`, and the point
- * of this module is to preserve that, so each row and each call keeps ONE
- * wrapper for as long as it exists (a `WeakMap`, so a row that leaves the
- * conversation takes its wrapper with it).
+ * So each row and each call keeps ONE wrapper for as long as it exists.
  *
- * This is memoization, not state: the same row object always produces the same
- * wrapper, and the wrapper's content depends on nothing but that row.
+ * A wrapper is keyed on the row's IDENTITY (`rowIdentity` — a `tempId` or a DS
+ * `messageId`), not on the row object, and THAT is the correction this module
+ * carried a defect for. A row object is immutable and replaced on every state
+ * change: `{...r, ack}` on the ack flip, and a whole new row when an upload
+ * lands. Keyed on the object, every one of those replacements produced a new
+ * wrapper and rebuilt the bubble — measured: a person playing back their own
+ * voice message lost the sound the moment the send landed, because the element
+ * making it was inside a bubble that had just been discarded. (The old text here
+ * said "the timeline's own row objects are stable across a `setRows`". That
+ * holds for every row the update did not touch, and is false for exactly the one
+ * it did — which is the row the bubble is about.)
+ *
+ * The other half of the same correction: `entry.row` is a LIVE read, which is
+ * why the rows arrive as a FUNCTION rather than as an array. A wrapper that
+ * outlives a replacement has to hand out the CURRENT row, or a bubble that is
+ * no longer rebuilt would go on showing the row it was built with — reading
+ * `Not sent` under a message that has been sent. Where the function is a
+ * reactive read (Solid's signal accessor, in `routes/Chat.tsx`), reading
+ * `entry.row` inside a computation tracks it, so the renderer updates the
+ * bubble instead of replacing it.
+ *
+ * This is memoization, not state: what a wrapper hands out depends on nothing
+ * but the rows it is asked about.
  */
 
 import type { CallLogEntry } from "../calls/call-log";
@@ -63,22 +81,84 @@ import type { CallLogEntry } from "../calls/call-log";
  */
 export type RowTimeOf<Row> = (row: Row) => string | undefined;
 
+/** Which row a row IS, as something that outlives the row object
+ *  (`timeline-row.ts` `rowIdentity` is the timeline's own). */
+export type RowIdentityOf<Row> = (row: Row) => string;
+
 /** One entry of the merged conversation. */
 export type ConversationEntry<Row> =
   | { readonly kind: "message"; readonly row: Row }
   | { readonly kind: "call"; readonly call: CallLogEntry };
 
-/** One wrapper per row / call object, for as long as it exists. */
-const messageWrappers = new WeakMap<object, unknown>();
-const callWrappers = new WeakMap<CallLogEntry, unknown>();
+/**
+ * One conversation's bookkeeping, keyed on the rows accessor — which is one
+ * object per conversation for its lifetime, and is also what makes two
+ * conversations' identities (`out:1` in both) impossible to confuse.
+ */
+interface Bookkeeping<Row> {
+  /** One wrapper per row identity, for as long as that row is in the list. */
+  readonly wrappers: Map<string, ConversationEntry<Row>>;
+  /** The rows array `byId` was built from, so it is rebuilt exactly when the
+   *  list changes rather than on every read. */
+  indexed: readonly Row[] | null;
+  byId: Map<string, Row>;
+}
 
-function messageEntry<Row extends object>(row: Row): ConversationEntry<Row> {
-  const cached = messageWrappers.get(row);
-  if (cached !== undefined) return cached as ConversationEntry<Row>;
-  const made: ConversationEntry<Row> = { kind: "message", row };
-  messageWrappers.set(row, made);
+const books = new WeakMap<object, Bookkeeping<never>>();
+
+function bookkeeping<Row extends object>(rows: () => readonly Row[]): Bookkeeping<Row> {
+  const existing = books.get(rows);
+  if (existing !== undefined) return existing as unknown as Bookkeeping<Row>;
+  const made: Bookkeeping<Row> = { wrappers: new Map(), indexed: null, byId: new Map() };
+  books.set(rows, made as unknown as Bookkeeping<never>);
   return made;
 }
+
+/** The row `id` names, as it is NOW. Reading `rows()` here is what makes
+ *  `entry.row` reactive for a caller whose accessor is a signal. */
+function currentRow<Row extends object>(
+  book: Bookkeeping<Row>,
+  rows: () => readonly Row[],
+  identityOf: RowIdentityOf<Row>,
+  id: string,
+): Row | undefined {
+  const current = rows();
+  if (book.indexed !== current) {
+    const byId = new Map<string, Row>();
+    for (const row of current) byId.set(identityOf(row), row);
+    book.indexed = current;
+    book.byId = byId;
+  }
+  return book.byId.get(id);
+}
+
+function messageEntry<Row extends object>(
+  book: Bookkeeping<Row>,
+  rows: () => readonly Row[],
+  identityOf: RowIdentityOf<Row>,
+  row: Row,
+): ConversationEntry<Row> {
+  const id = identityOf(row);
+  const cached = book.wrappers.get(id);
+  if (cached !== undefined) return cached;
+  // The last row seen under this identity, so a read taken after the row has
+  // left the conversation answers with what it last was rather than throwing.
+  // Nothing renders such an entry — it is no longer in the list.
+  let last = row;
+  const made: ConversationEntry<Row> = {
+    kind: "message",
+    get row(): Row {
+      const now = currentRow(book, rows, identityOf, id);
+      if (now !== undefined) last = now;
+      return last;
+    },
+  };
+  book.wrappers.set(id, made);
+  return made;
+}
+
+/** One wrapper per call row object, for as long as it exists. */
+const callWrappers = new WeakMap<CallLogEntry, unknown>();
 
 function callEntry<Row>(call: CallLogEntry): ConversationEntry<Row> {
   const cached = callWrappers.get(call);
@@ -116,30 +196,48 @@ function effectiveTimes<Row>(rows: readonly Row[], timeOf: RowTimeOf<Row>): numb
 /**
  * Interleave a conversation's message rows with its call rows, oldest first.
  *
- * `rows` must already be oldest-first (the timeline's own order); `calls` may
- * be in any order. The message rows come out in exactly their input order.
+ * `rows` is a FUNCTION returning the conversation's rows as they are now — see
+ * the module doc; it must return them oldest-first (the timeline's own order),
+ * and `calls` may be in any order. The message rows come out in exactly their
+ * input order.
  */
 export function mergeConversationEntries<Row extends object>(
-  rows: readonly Row[],
+  rows: () => readonly Row[],
   calls: readonly CallLogEntry[],
   timeOf: RowTimeOf<Row>,
+  identityOf: RowIdentityOf<Row>,
 ): ConversationEntry<Row>[] {
-  if (calls.length === 0) return rows.map((row) => messageEntry(row));
-  const times = effectiveTimes(rows, timeOf);
-  const pending = [...calls].sort((a, b) => a.startedAtMs - b.startedAtMs);
+  const book = bookkeeping(rows);
+  const current = rows();
   const out: ConversationEntry<Row>[] = [];
-  let next = 0;
-  for (let i = 0; i < rows.length; i += 1) {
-    const at = times[i] ?? Number.NEGATIVE_INFINITY;
-    // Strictly-less, so a call that ties with a message is drawn after it.
-    while (next < pending.length && (pending[next] as CallLogEntry).startedAtMs < at) {
-      out.push(callEntry(pending[next] as CallLogEntry));
-      next += 1;
+  const entry = (row: Row): ConversationEntry<Row> => messageEntry(book, rows, identityOf, row);
+  if (calls.length === 0) {
+    for (const row of current) out.push(entry(row));
+  } else {
+    const times = effectiveTimes(current, timeOf);
+    const pending = [...calls].sort((a, b) => a.startedAtMs - b.startedAtMs);
+    let next = 0;
+    for (let i = 0; i < current.length; i += 1) {
+      const at = times[i] ?? Number.NEGATIVE_INFINITY;
+      // Strictly-less, so a call that ties with a message is drawn after it.
+      while (next < pending.length && (pending[next] as CallLogEntry).startedAtMs < at) {
+        out.push(callEntry(pending[next] as CallLogEntry));
+        next += 1;
+      }
+      out.push(entry(current[i] as Row));
     }
-    out.push(messageEntry(rows[i] as Row));
+    for (; next < pending.length; next += 1) {
+      out.push(callEntry(pending[next] as CallLogEntry));
+    }
   }
-  for (; next < pending.length; next += 1) {
-    out.push(callEntry(pending[next] as CallLogEntry));
+  // A row that has left the conversation takes its wrapper with it, which is
+  // what the `WeakMap` on the row object used to do for free. Without this the
+  // map would hold every row the conversation has ever shown.
+  if (book.wrappers.size > current.length) {
+    const live = new Set(current.map((row) => identityOf(row)));
+    for (const id of [...book.wrappers.keys()]) {
+      if (!live.has(id)) book.wrappers.delete(id);
+    }
   }
   return out;
 }

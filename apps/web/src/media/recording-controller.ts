@@ -28,6 +28,7 @@ import {
   type PermissionState,
 } from "./media-capture";
 import { recordMode, setRecordMode } from "./media-prefs";
+import { QUIET_WATCH, observeLevel, type SilenceWatch } from "./microphone-silence";
 import {
   HOLD_TO_RECORD_MS,
   IDLE,
@@ -70,6 +71,10 @@ export interface Recorder {
   readonly state: Accessor<RecState>;
   readonly elapsedMs: Accessor<number>;
   readonly level: Accessor<number>;
+  /** UX spec section 2 "Hearing nothing" - the microphone has given nothing for
+   *  two seconds and the bar should say so. Never true before a meter has
+   *  measured anything, so an absent meter accuses nobody. */
+  readonly micSilent: Accessor<boolean>;
   readonly notice: Accessor<RecorderNotice | null>;
   readonly denied: Accessor<CaptureKind | null>;
   readonly preview: Accessor<PreviewTake | null>;
@@ -110,6 +115,11 @@ export function createRecorder(opts: RecorderOptions): Recorder {
   const [state, setState] = createSignal<RecState>(IDLE);
   const [elapsedMs, setElapsed] = createSignal(0);
   const [level, setLevel] = createSignal(0);
+  const [micSilent, setMicSilent] = createSignal(false);
+  // One run per take, folded forward in the ticker. Plain state rather than a
+  // signal: the fold's inputs are read at the same 100 ms tick that writes it,
+  // so nothing else ever needs to observe it changing.
+  let silence: SilenceWatch = QUIET_WATCH;
   const [notice, setNotice] = createSignal<RecorderNotice | null>(null);
   const [denied, setDenied] = createSignal<CaptureKind | null>(null);
   const [preview, setPreview] = createSignal<PreviewTake | null>(null);
@@ -172,8 +182,18 @@ export function createRecorder(opts: RecorderOptions): Recorder {
     ticker = setInterval(() => {
       const s = state();
       if (s.phase === "recording" || s.phase === "locked") {
-        setElapsed(Math.max(0, Date.now() - s.startedAt));
+        const elapsed = Math.max(0, Date.now() - s.startedAt);
+        setElapsed(elapsed);
         setLevel(take?.level() ?? 0);
+        // Only a voice take is judged: the spec's rule is in section 2, and a
+        // video note's bar has no line to say it in. `null` is a take whose
+        // meter has measured nothing at all, which is not the same as a meter
+        // reporting zero and must not raise the warning.
+        const measured = mode() === "voice" ? (take?.measuredLevel() ?? null) : null;
+        if (measured !== null) {
+          silence = observeLevel(silence, measured, elapsed);
+          setMicSilent(silence.warns);
+        }
         dispatch({ type: "tick", at: Date.now() });
       } else {
         stopTicker();
@@ -241,6 +261,10 @@ export function createRecorder(opts: RecorderOptions): Recorder {
       return;
     }
     take = t;
+    // A fresh take is owed a fresh verdict; a warning earned by the last one
+    // would otherwise open this one.
+    silence = QUIET_WATCH;
+    setMicSilent(false);
     setFacing(t.facingMode);
     setLiveStream(kind === "video_note" ? t.previewStream : null);
   }
@@ -394,6 +418,7 @@ export function createRecorder(opts: RecorderOptions): Recorder {
     state,
     elapsedMs,
     level,
+    micSilent,
     notice,
     denied,
     preview,

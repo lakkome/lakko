@@ -21,7 +21,7 @@
  * button, so pressing play paused it. They are now `MessageMenu.tsx`, opened
  * on a deliberate gesture and rendered outside the bubble.
  */
-import { createSignal, For, onCleanup, Show, type JSX } from "solid-js";
+import { createSignal, For, Index, onCleanup, Show, type JSX } from "solid-js";
 
 import type { MemberIdentity } from "./author-identity";
 import { formatAttachmentSize, type AttachmentRefBytes } from "./attachments";
@@ -209,19 +209,34 @@ export function TimelineBubble(
   }
   // Outgoing — our own message. Edit/Delete offered once acked
   // (a pending bubble has no messageId yet).
-  const r = props.row;
+  //
+  // Read through `live()` rather than captured, because an outgoing row object
+  // is REPLACED on every state change — `{...r, ack}` on the ack flip, and a
+  // whole new row when an upload lands — and the timeline now keeps this bubble
+  // alive across that replacement instead of rebuilding it
+  // (`call-timeline.ts`). Captured, the bubble would go on showing the row it
+  // was built with: `Not sent` under a message that has been sent. The reads
+  // below are all inside JSX expressions, which is what makes them reactive.
+  const built = props.row;
+  const live = (): typeof built => (props.row.kind === "outgoing" ? props.row : built);
   return (
     <ChatBubbleBody
-      messageId={r.ack === "sent" ? r.messageId : undefined}
+      messageId={live().ack === "sent" ? live().messageId : undefined}
       isOwn={true}
-      ack={r.ack}
-      originalText={r.plaintext}
-      attachments={r.attachments}
-      time={r.ack === "pending" ? "Sending..." : r.ack === "failed" ? "Not sent" : shortTime(r.createdAt)}
+      ack={live().ack}
+      originalText={live().plaintext}
+      attachments={live().attachments}
+      time={
+        live().ack === "pending"
+          ? "Sending..."
+          : live().ack === "failed"
+            ? "Not sent"
+            : shortTime(live().createdAt)
+      }
       senderName={null}
       avatar={null}
       tone="outgoing"
-      mediaLocalKey={r.mediaLocalKey}
+      mediaLocalKey={live().mediaLocalKey}
       {...props}
     />
   );
@@ -549,12 +564,21 @@ function ChatBubbleBody(
                     class="lk-bubble-media"
                     classList={{ "after-text": displayText().length > 0 }}
                   >
-                    <For each={mediaRefs()}>
+                    {/* `Index`, not `For`, and it is the media bubble's
+                        lifetime that turns on it. A message's attachments are
+                        fixed in number and order for as long as it exists, so
+                        slot 0 always means the same attachment — while the REF
+                        object at that slot is replaced when an outgoing take's
+                        upload lands (the placeholder gives way to the uploaded
+                        ref). `For` reconciles by reference, so that replacement
+                        discarded the bubble and, with it, the element playing
+                        the message the person was listening to. */}
+                    <Index each={mediaRefs()}>
                       {(ref) => (
                         <MediaAttachment
-                          attachment={ref}
+                          attachment={ref()}
                           hub={props.hub}
-                          mediaKey={keyFor(ref)}
+                          mediaKey={keyFor(ref())}
                           incoming={isIncoming}
                           upload={props.mediaUpload}
                           onRetry={props.onRetrySend}
@@ -566,7 +590,7 @@ function ChatBubbleBody(
                           meta={metaSlot() === "voice-line" ? metaLine : undefined}
                         />
                       )}
-                    </For>
+                    </Index>
                   </div>
                 </Show>
                 <Show when={fileRefs().length > 0}>

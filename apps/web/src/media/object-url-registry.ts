@@ -66,6 +66,31 @@ export class ObjectUrlRegistry {
     return url;
   }
 
+  /**
+   * Move the URL filed under `from` to `to`, keeping the URL ITSELF.
+   *
+   * Not a copy: nothing is created, nothing is revoked, and the URL string does
+   * not change — which is the whole point. An outgoing take's bytes are filed
+   * under a local key and re-filed under the blob id once the upload lands, and
+   * doing that as `set` + `revoke` meant a second `Blob` of the same bytes, a
+   * second URL, and the FIRST one revoked from under whatever was playing it.
+   * Moving the one entry leaves a media element that is mid-playback holding a
+   * source that is still valid.
+   *
+   * `false` when `from` holds nothing (so the caller can file the bytes
+   * itself). An existing entry at `to` is released, as `set` would.
+   */
+  rename(from: string, to: string): boolean {
+    const url = this.urls.get(from);
+    if (url === undefined) return false;
+    if (from === to) return true;
+    const replaced = this.urls.get(to);
+    this.urls.delete(from);
+    this.urls.set(to, url);
+    if (replaced !== undefined && replaced !== url) this.release(replaced);
+    return true;
+  }
+
   revoke(key: string): void {
     const url = this.urls.get(key);
     if (url === undefined) return;

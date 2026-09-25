@@ -27,6 +27,32 @@
  * shortly after the first frames land and JPEG-encoded under the 256 KiB thumb
  * bound.
  *
+ * ### The recorder is never handed a canvas nobody has drawn on
+ *
+ * THE DEFECT this shape exists for: the camera was attached to a `<video>`, the
+ * element was asked to play without waiting, a draw loop that returns early
+ * while the source has no frame was armed, and `canvas.captureStream()` was
+ * handed to a fresh `MediaRecorder` — all in one synchronous breath, so the
+ * canvas could not possibly have been drawn on yet. `getUserMedia` resolving
+ * means the DEVICE is open; the first frame arrives some time after that (tens
+ * of milliseconds on a fake camera, hundreds on a real one). The audio covered
+ * the whole take and the picture covered the take minus that window, silently
+ * sliding the two against each other by exactly the camera's opening time.
+ *
+ * Two things now hold, and they answer different halves:
+ *
+ *   * `acquireStream` does not resolve for a video note until the source has a
+ *     frame that can be DRAWN. That happens while the machine is still in
+ *     `requesting` — so the wait lands under the bar's "Starting…", where a
+ *     person is told the device is opening, rather than under a clock and a red
+ *     dot that would be claiming to record it. `start()` then draws that frame
+ *     synchronously, before the recorder exists.
+ *   * the canvas is captured in EXPLICIT-FRAME mode (`captureStream(0)` plus
+ *     `requestFrame()`), so a frame is emitted only ever right after a
+ *     successful `drawImage`. That is structural rather than timing: even if the
+ *     wait above times out on a camera that never produces anything, the
+ *     encoder cannot receive the blank canvas.
+ *
  * Duration is measured with the monotonic clock from start to stop: the MP4
  * a `MediaRecorder` emits may carry no usable duration.
  */
@@ -47,6 +73,20 @@ const LEVEL_SAMPLE_MS = 50;
 const VIDEO_FPS = 30;
 /** When the poster frame is taken, after the first frame is drawn. */
 const POSTER_DELAY_MS = 300;
+/**
+ * How long a video note waits for the camera's FIRST frame before going ahead
+ * without one.
+ *
+ * A bound rather than an open wait: a camera that opens and then never produces
+ * anything must not hold a press down forever. Going ahead is safe because the
+ * capture is explicit-frame — nothing reaches the encoder until something has
+ * been drawn — so the cost of the timeout is a take whose picture starts late,
+ * which is what happened on every take before this existed.
+ */
+const FIRST_FRAME_TIMEOUT_MS = 2000;
+/** How often the first-frame wait re-checks, for engines with no
+ *  `requestVideoFrameCallback` (Firefox) and as a floor under it. */
+const FRAME_POLL_MS = 16;
 
 export interface CapturedPoster {
   readonly blob: Blob;
@@ -122,13 +162,96 @@ function classify(err: unknown): AcquireFailure {
   return "failed";
 }
 
-/** Open the stream `kind` records from. Rejects with [`AcquireError`]. */
+/**
+ * The `<video>` a video-note stream has already been decoded into, ready to be
+ * drawn from synchronously.
+ *
+ * Keyed by the stream it decodes, so it travels with that stream from
+ * `acquireStream` to whichever `MediaTake` ends up recording it — the take is
+ * constructed from the stream alone, and a `<video>` created inside `start()`
+ * cannot have a frame yet however the camera is behaving. Released by
+ * `stopStream`, which is the one place a stream's life ends.
+ */
+const preparedSources = new WeakMap<MediaStream, HTMLVideoElement>();
+
+/** A muted, playing `<video>` fed by `stream`. */
+function sourceVideoFor(stream: MediaStream): HTMLVideoElement {
+  const video = document.createElement("video");
+  video.muted = true;
+  video.playsInline = true;
+  video.srcObject = stream;
+  void video.play().catch(() => undefined);
+  return video;
+}
+
+/**
+ * Whether `video` has a frame `drawImage` would draw.
+ *
+ * Both halves are load-bearing: the dimensions because the square crop is
+ * computed from them (`squareCrop` refuses a frame with no usable size), and
+ * `HAVE_CURRENT_DATA` because that is the platform's own statement that a frame
+ * for the current position exists.
+ */
+function hasFrame(video: HTMLVideoElement): boolean {
+  return video.videoWidth > 0 && video.videoHeight > 0 && video.readyState >= 2;
+}
+
+/** Wait for `video` to have a drawable frame. Resolves either way — `false` on
+ *  the timeout — because every draw is guarded regardless. */
+function waitForFrame(video: HTMLVideoElement, timeoutMs: number): Promise<boolean> {
+  if (hasFrame(video)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ok: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      clearInterval(poll);
+      resolve(ok);
+    };
+    const deadline = setTimeout(() => finish(false), timeoutMs);
+    // A PRESENTED frame is the strongest signal, where the engine offers it.
+    const rvfc =
+      typeof video.requestVideoFrameCallback === "function"
+        ? video.requestVideoFrameCallback.bind(video)
+        : null;
+    const onPresented = (): void => {
+      if (hasFrame(video)) finish(true);
+      else if (!settled) rvfc?.(onPresented);
+    };
+    rvfc?.(onPresented);
+    // And a poll under it: Firefox has no `requestVideoFrameCallback`, and a
+    // rejected `play()` presents nothing while the metadata and the first
+    // decoded frame still arrive.
+    const poll = setInterval(() => {
+      if (hasFrame(video)) finish(true);
+    }, FRAME_POLL_MS);
+  });
+}
+
+/**
+ * Open the stream `kind` records from. Rejects with [`AcquireError`].
+ *
+ * For a video note this also waits for the camera's first frame (see the class
+ * doc) — so the returned stream is one a take can draw from at once, and the
+ * wait is spent in the machine's `requesting` phase.
+ *
+ * One consequence, stated because it is not obvious: `requesting` is also what
+ * `PROMPT_INFERENCE_MS` is measured against, and on a browser that will not
+ * report a camera permission (Firefox, Safari) a grant slower than a second is
+ * read as "a prompt was shown", which does not record. The camera's warm-up now
+ * counts towards that second. It is additive to a `getUserMedia` that can
+ * already exceed it on a cold camera, so this narrows an existing margin rather
+ * than opening a new failure — and the alternative, recording a canvas with
+ * nothing on it, is the defect.
+ */
 export async function acquireStream(
   kind: CaptureKind,
   facing: "user" | "environment" = "user",
 ): Promise<MediaStream> {
+  let stream: MediaStream;
   try {
-    return await navigator.mediaDevices.getUserMedia(
+    stream = await navigator.mediaDevices.getUserMedia(
       kind === "voice"
         ? { audio: true }
         : {
@@ -139,9 +262,22 @@ export async function acquireStream(
   } catch (err) {
     throw new AcquireError(classify(err), err);
   }
+  if (kind === "video_note") {
+    const video = sourceVideoFor(stream);
+    preparedSources.set(stream, video);
+    await waitForFrame(video, FIRST_FRAME_TIMEOUT_MS);
+  }
+  return stream;
 }
 
 export function stopStream(stream: MediaStream | null): void {
+  if (stream !== null) {
+    const prepared = preparedSources.get(stream);
+    if (prepared !== undefined) {
+      preparedSources.delete(stream);
+      prepared.srcObject = null;
+    }
+  }
   for (const track of stream?.getTracks() ?? []) track.stop();
 }
 
@@ -155,14 +291,27 @@ export class MediaTake {
   private readonly levels: number[] = [];
   private startedAt = 0;
   private currentLevel = 0;
+  /** The same reading as `currentLevel` before the meter's ×3 display gain.
+   *  `microphone-silence.ts` compares against a floor shared with iOS and
+   *  Android, so it must see the scale those two see, not this one's. */
+  private rawLevel = 0;
+  /** Whether the analyser has ever produced a reading. A take whose meter never
+   *  started (no audio track, no `AudioContext`, or the catch below) has MADE no
+   *  measurement, and a silence warning drawn from an absent measurement would
+   *  accuse a microphone that may be working. */
+  private levelSampled = false;
   private endedHandler: (() => void) | null = null;
   // Video-note pipeline.
   private sourceVideo: HTMLVideoElement | null = null;
   private canvas: HTMLCanvasElement | null = null;
   private canvasStream: MediaStream | null = null;
+  /** The capture track, when it is in explicit-frame mode: the one thing that
+   *  emits a frame, and only ever right after a draw. */
+  private canvasTrack: CanvasCaptureMediaStreamTrack | null = null;
   private drawTimer: ReturnType<typeof setInterval> | null = null;
   private poster: CapturedPoster | undefined;
   private posterTimer: ReturnType<typeof setTimeout> | null = null;
+  private posterArmed = false;
   private facing: "user" | "environment" = "user";
   private stopped = false;
 
@@ -183,6 +332,18 @@ export class MediaTake {
   /** Current level, 0..1, for the meter. */
   level(): number {
     return this.currentLevel;
+  }
+
+  /**
+   * The newest reading on the raw 0..1 scale the three clients share, or `null`
+   * when the meter has produced nothing to read.
+   *
+   * `null` and `0` are deliberately different answers: `0` is the meter saying
+   * it heard nothing, `null` is there being no meter to say it. UX spec §2's
+   * warning must follow only the first.
+   */
+  measuredLevel(): number | null {
+    return this.levelSampled ? this.rawLevel : null;
   }
 
   /** Called once if any captured track ends on its own — permission revoked,
@@ -210,6 +371,10 @@ export class MediaTake {
     this.startLevelSampling();
     this.startedAt = performance.now();
     recorder.start(1000);
+    // The take's first picture, pushed once the encoder is running and from a
+    // canvas that already holds a camera frame — so the video track starts
+    // where the audio track does. The draw loop pushes the rest.
+    this.canvasTrack?.requestFrame();
   }
 
   private startLevelSampling(): void {
@@ -227,6 +392,8 @@ export class MediaTake {
         analyser.getFloatTimeDomainData(buffer);
         const level = rmsLevel(buffer);
         this.currentLevel = Math.min(1, level * 3);
+        this.rawLevel = level;
+        this.levelSampled = true;
         this.levels.push(level);
       }, LEVEL_SAMPLE_MS);
     } catch {
@@ -236,12 +403,12 @@ export class MediaTake {
   }
 
   private startVideoPipeline(): MediaStream {
-    const video = document.createElement("video");
-    video.muted = true;
-    video.playsInline = true;
-    video.srcObject = this.stream;
-    void video.play().catch(() => undefined);
-    this.sourceVideo = video;
+    // The source `acquireStream` already waited for a frame on, or a fresh one
+    // when there is none (a take whose stream came from somewhere else). Taken
+    // out of the map here: from now on this take owns it and tears it down.
+    const prepared = preparedSources.get(this.stream);
+    preparedSources.delete(this.stream);
+    this.sourceVideo = prepared ?? sourceVideoFor(this.stream);
 
     const settings = this.stream.getVideoTracks()[0]?.getSettings();
     const initial = squareCrop(settings?.width ?? 640, settings?.height ?? 480);
@@ -251,27 +418,59 @@ export class MediaTake {
     this.canvas = canvas;
     const g = canvas.getContext("2d");
 
-    let firstFrame = true;
+    // BEFORE the canvas is captured and before the recorder exists: the frame
+    // the acquire waited for goes on now, synchronously, so there is no moment
+    // at which this canvas is both capturable and blank.
+    this.drawFrame(g);
+    this.canvasStream = this.captureCanvas(canvas);
     this.drawTimer = setInterval(() => {
-      const src = this.sourceVideo;
-      if (g === null || src === null || src.videoWidth === 0) return;
-      const crop = squareCrop(src.videoWidth, src.videoHeight, canvas.width);
-      if (crop === null) return;
-      g.drawImage(src, crop.sx, crop.sy, crop.sourceSide, crop.sourceSide, 0, 0, canvas.width, canvas.height);
-      if (firstFrame) {
-        firstFrame = false;
-        this.posterTimer = setTimeout(() => {
-          void this.capturePoster();
-        }, POSTER_DELAY_MS);
-      }
+      if (this.drawFrame(g)) this.canvasTrack?.requestFrame();
     }, 1000 / VIDEO_FPS);
 
     const out = new MediaStream();
-    const canvasStream = canvas.captureStream(VIDEO_FPS);
-    this.canvasStream = canvasStream;
-    for (const t of canvasStream.getVideoTracks()) out.addTrack(t);
+    for (const t of this.canvasStream.getVideoTracks()) out.addTrack(t);
     for (const t of this.stream.getAudioTracks()) out.addTrack(t);
     return out;
+  }
+
+  /**
+   * Capture `canvas` in explicit-frame mode, so only a drawn frame is ever
+   * emitted.
+   *
+   * `captureStream(0)` produces nothing until `requestFrame()`, which is the
+   * guarantee; a browser whose track has no `requestFrame` would then produce
+   * nothing AT ALL, so that one falls back to the timed capture rather than
+   * recording a picture-less note. Nothing is lost there that the first-frame
+   * wait has not already secured.
+   */
+  private captureCanvas(canvas: HTMLCanvasElement): MediaStream {
+    const onDemand = canvas.captureStream(0);
+    const track = onDemand.getVideoTracks()[0] as CanvasCaptureMediaStreamTrack | undefined;
+    if (track !== undefined && typeof track.requestFrame === "function") {
+      this.canvasTrack = track;
+      return onDemand;
+    }
+    for (const t of onDemand.getTracks()) t.stop();
+    return canvas.captureStream(VIDEO_FPS);
+  }
+
+  /** Draw the source's current frame, centre-cropped onto the canvas. `false`
+   *  when there is no frame to draw — which is what keeps a blank canvas from
+   *  being offered to the encoder. */
+  private drawFrame(g: CanvasRenderingContext2D | null): boolean {
+    const src = this.sourceVideo;
+    const canvas = this.canvas;
+    if (g === null || src === null || canvas === null || src.videoWidth === 0) return false;
+    const crop = squareCrop(src.videoWidth, src.videoHeight, canvas.width);
+    if (crop === null) return false;
+    g.drawImage(src, crop.sx, crop.sy, crop.sourceSide, crop.sourceSide, 0, 0, canvas.width, canvas.height);
+    if (!this.posterArmed) {
+      this.posterArmed = true;
+      this.posterTimer = setTimeout(() => {
+        void this.capturePoster();
+      }, POSTER_DELAY_MS);
+    }
+    return true;
   }
 
   private async capturePoster(): Promise<void> {
@@ -319,6 +518,11 @@ export class MediaTake {
     this.sourceVideo.srcObject = new MediaStream([newTrack]);
     void this.sourceVideo.play().catch(() => undefined);
     this.facing = next;
+    // The same wait as the take's own start, for the same reason: until the new
+    // camera has produced a frame there is nothing to draw, and the draw loop
+    // would be holding the old camera's last frame. Bounded, and a timeout
+    // changes nothing — the loop is guarded either way.
+    await waitForFrame(this.sourceVideo, FIRST_FRAME_TIMEOUT_MS);
     return true;
   }
 
@@ -338,6 +542,7 @@ export class MediaTake {
     }
     stopStream(this.canvasStream);
     this.canvasStream = null;
+    this.canvasTrack = null;
     stopStream(this.stream);
   }
 

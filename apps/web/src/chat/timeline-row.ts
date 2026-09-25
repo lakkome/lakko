@@ -87,6 +87,28 @@ export function rowMessageId(row: TimelineRow): number | undefined {
  * `/chat/:id` (from the Chats list) and `/groups/:id` (from the Groups list)
  * both render this; `backTo` is the list the conversation was opened from, so
 
+/**
+ * Which row this IS, as a string that outlives the row object.
+ *
+ * A row object is immutable and REPLACED on every state change: the ack flip,
+ * a failed send, and an upload landing (which swaps the placeholder attachment
+ * ref for the uploaded one and gives the row its DS id). So the object is not
+ * the row's identity — `tempId` is, for an outgoing bubble, and the DS
+ * `messageId` for an incoming one. Both are stable for as long as the row
+ * exists, and every incoming event kind carries a `messageId`, so this is
+ * total.
+ *
+ * Load-bearing for the timeline's reconciliation (`call-timeline.ts`): keyed on
+ * the object, a replaced row looks like a NEW row to the list that draws it,
+ * and the bubble — with whatever is playing inside it — is torn down and
+ * rebuilt.
+ *
+ * The two prefixes are what keeps a `tempId` from ever colliding with a DS id.
+ */
+export function rowIdentity(row: TimelineRow): string {
+  return row.kind === "outgoing" ? `out:${row.tempId}` : `in:${row.event.messageId}`;
+}
+
 /** When a timeline row was created: the DS row's `created_at`, or `undefined`
  *  for an outgoing bubble the DS has not acknowledged yet. Read-only. */
 export function rowCreatedAt(row: TimelineRow): string | undefined {

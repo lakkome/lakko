@@ -48,6 +48,23 @@ export interface MediaHub {
   loadThumb(thumb: ThumbRefBytes): Promise<string | null>;
   /** File local bytes (a take not yet uploaded) under `key`. */
   fileLocal(key: string, blob: Blob, mime: string | undefined): string | null;
+  /**
+   * Re-key everything about `from` to `to`: an outgoing take's own bytes, once
+   * the upload comes back and the message is known by its blob id.
+   *
+   * A MOVE, and every part of it matters, because a bubble may be playing these
+   * bytes as this happens. The object URL is kept as it is (see
+   * `ObjectUrlRegistry.rename`), so an element mid-playback keeps a valid
+   * source; and the playback bookkeeping goes with it — the one-at-a-time claim,
+   * the played mark and a pending auto-continue request — or the bubble would
+   * carry on making sound while the hub believed some other key was the one
+   * playing, showing the total duration in place of the elapsed time and
+   * hiding the speed control that was just used.
+   *
+   * `false` when nothing was filed under `from`, so the caller can file the
+   * bytes itself.
+   */
+  adopt(from: string, to: string): boolean;
   revoke(key: string): void;
 
   isPlayed(key: string): boolean;
@@ -137,6 +154,23 @@ export function createMediaHub(opts: {
       return fetchAndFile(`thumb:${mediaKey(thumb.blobId)}`, thumb, thumb.mime);
     },
     fileLocal: (key, blob, mime) => file(key, blob, mime),
+    adopt(from, to) {
+      if (from === to) return registry.has(from);
+      const moved = registry.rename(from, to);
+      if (played().has(from)) {
+        const next = new Set(played());
+        next.delete(from);
+        next.add(to);
+        setPlayed(next);
+      }
+      if (current?.key === from) {
+        current = { key: to, pause: current.pause };
+        setActiveKey(to);
+      }
+      if (requestedPlay() === from) setRequestedPlay(to);
+      if (moved) setVersion((v) => v + 1);
+      return moved;
+    },
     revoke(key) {
       registry.revoke(key);
       setVersion((v) => v + 1);

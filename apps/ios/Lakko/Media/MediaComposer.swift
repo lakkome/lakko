@@ -247,17 +247,29 @@ struct RecordingBar: View {
                 LevelMeter(level: live.level)
                     .frame(width: 40, height: 18)
                 Spacer(minLength: 4)
-                HStack(spacing: 4) {
-                    Image(systemName: "chevron.left")
-                    Text("Slide to cancel")
+                // §2 "Hearing nothing" — IN PLACE OF the hint, not beside it: two
+                // competing lines in one slot would push the slide affordance
+                // around mid-gesture, and the warning is the more urgent of the
+                // two.
+                if media.micSilent {
+                    silentMicNotice
+                } else {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left")
+                        Text("Slide to cancel")
+                    }
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .offset(x: min(0, dx / 2))
+                    .opacity(1 + max(-0.8, dx / RecordingMachine.cancelSlidePoints))
                 }
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .offset(x: min(0, dx / 2))
-                .opacity(1 + max(-0.8, dx / RecordingMachine.cancelSlidePoints))
             }
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("Recording, \(RecordingMachine.spokenDuration(ms: live.elapsedMs))")
+            // The warning has to be IN the label, not merely on screen: combining
+            // the children into one element and giving it an explicit label is
+            // what makes VoiceOver read this row, so a `Text` added inside it is
+            // never spoken on its own.
+            .accessibilityLabel(recordingLabel)
         case .locked(let kind, _):
             HStack(spacing: 8) {
                 Button(role: .destructive) { media.deleteTake() } label: {
@@ -270,6 +282,14 @@ struct RecordingBar: View {
                     LevelMeter(level: live.level).frame(width: 40, height: 18)
                 }
                 Spacer(minLength: 4)
+                // A locked take is the one most worth warning about: the finger is
+                // off the button and it runs until it is stopped, so a silent one
+                // can waste minutes rather than seconds. Never reached by a video
+                // note, whose level is not sampled at all, so it cannot be
+                // accused. Unlike the row above, this one is left to VoiceOver as
+                // it stands: combining its children into one label would take the
+                // Delete and Stop buttons away.
+                if media.micSilent { silentMicNotice }
             }
         case .finalizing:
             HStack(spacing: 8) {
@@ -294,6 +314,24 @@ struct RecordingBar: View {
         case .idle, .pressing, .requesting:
             EmptyView()
         }
+    }
+
+    /// §2 "Hearing nothing" — the one place the warning is drawn, so the
+    /// recording and locked bars cannot word or colour it two ways. An advisory
+    /// style rather than a red one: nothing has failed and nothing is being
+    /// refused.
+    private var silentMicNotice: some View {
+        Text(MicrophoneSilence.warningCopy)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+    }
+
+    /// What VoiceOver reads for the recording row, whose children are combined
+    /// into one element — so the warning has to be said here or not at all.
+    private var recordingLabel: String {
+        let duration = RecordingMachine.spokenDuration(ms: live.elapsedMs)
+        guard media.micSilent else { return "Recording, \(duration)" }
+        return "Recording, \(duration), \(MicrophoneSilence.warningCopy)"
     }
 
     private var clock: some View {

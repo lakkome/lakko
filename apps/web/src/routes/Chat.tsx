@@ -353,6 +353,7 @@ import { ModalLayer } from "../ui/ModalLayer";
 import {
   rowAuthorIdentity,
   rowCreatedAt,
+  rowIdentity,
   rowMessageId,
   type TimelineRow,
 } from "../chat/timeline-row";
@@ -563,8 +564,12 @@ function ChatView(props: {
    *  device's call rows, in time order (`chat/call-timeline.ts`). Merged
    *  BEFORE the layout, so a call on a new day carries that day's separator
    *  and a call between two of someone's messages breaks their run. */
+  // `rows` itself, not `rows()`: an entry's `row` is a LIVE read, so a row that
+  // is replaced (an ack flip, an upload landing) updates the bubble it belongs
+  // to instead of replacing it — `chat/call-timeline.ts` states why that is
+  // load-bearing and what it cost before.
   const timelineEntries = createMemo(() =>
-    mergeConversationEntries(rows(), callRows(), rowCreatedAt),
+    mergeConversationEntries(rows, callRows(), rowCreatedAt, rowIdentity),
   );
   // docs/ux section 5.2 — date separators + sender runs, one layout record
   // per entry (`chat/timeline-layout.ts`). An outgoing row and an incoming row
@@ -4180,11 +4185,17 @@ function ChatView(props: {
       const uploaded = job.uploaded;
       const envelopeBytes = await composeEnvelope("", [uploaded]);
       const result = await chat.sendMessage(props.requireIdentity(), props.entry.group, envelopeBytes);
-      // File the local bytes under the real blob id before the row flips, so
-      // the re-rendered bubble plays them without downloading its own upload.
+      // The take's own bytes are already in the hub under the local key; MOVE
+      // them to the real blob id before the row flips, so the bubble finds them
+      // there without downloading its own upload. A move rather than a re-file
+      // plus a revoke: the bubble may be PLAYING these bytes right now (a take
+      // that failed to send can be played and then retried), and re-filing them
+      // made a second copy under a second URL while revoking the first from
+      // under the element that was reading it.
+      const sentKey = mediaKey(uploaded.blobId);
       const bytes = job.bytes;
-      if (bytes !== undefined) {
-        hub.fileLocal(mediaKey(uploaded.blobId), new Blob([bytes.slice()]), uploaded.mime);
+      if (!hub.adopt(job.localKey, sentKey) && bytes !== undefined) {
+        hub.fileLocal(sentKey, new Blob([bytes.slice()]), uploaded.mime);
       }
       setRows(
         rows().map((r) =>
@@ -4202,7 +4213,6 @@ function ChatView(props: {
             : r,
         ),
       );
-      hub.revoke(job.localKey);
       mediaJobs.delete(job.tempId);
       setMediaUpload(job.tempId, null);
     } catch (err) {

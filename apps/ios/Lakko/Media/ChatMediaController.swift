@@ -73,6 +73,15 @@ public final class ChatMediaController: ObservableObject {
         get { live.level }
         set { live.level = newValue }
     }
+    /// UX spec §2 "Hearing nothing" — the microphone has given nothing for
+    /// ``MicrophoneSilence/warnAfterMs``, so the bar says so in place of its
+    /// hint. Decided by ``MicrophoneSilence`` over the samples the live meter is
+    /// already taking; nothing about the take changes because of it.
+    ///
+    /// Published on the controller rather than in ``live`` because it flips at
+    /// most twice in a take, not twenty times a second — provided the assignment
+    /// is guarded, which is why ``noteLevel(_:atMs:)`` compares before it writes.
+    @Published public private(set) var micSilent: Bool = false
     @Published public private(set) var hint: String?
     @Published public private(set) var denied: DeniedResource?
     @Published public private(set) var previewTake: CapturedTake?
@@ -86,6 +95,9 @@ public final class ChatMediaController: ObservableObject {
         }
     }
     public let hasCamera: Bool
+
+    /// UX spec §2 — the run of silence in the take being recorded now.
+    private var silence = MicrophoneSilence.Watch()
 
     private var voiceRecorder: VoiceRecorder?
     private var videoRecorder: VideoNoteRecorder?
@@ -302,10 +314,17 @@ public final class ChatMediaController: ObservableObject {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         elapsedMs = 0
         level = 0
+        // Per take: the previous take's silence says nothing about this one, and a
+        // warning left standing from it would be about a microphone that is no
+        // longer being asked anything.
+        silence = MicrophoneSilence.Watch()
+        micSilent = false
         switch kind {
         case .voice:
             let recorder = VoiceRecorder()
-            recorder.onLevel = { [weak self] level in self?.level = level }
+            recorder.onLevel = { [weak self] level, recordedMs in
+                self?.noteLevel(level, atMs: recordedMs)
+            }
             recorder.onInterrupted = { [weak self] in self?.captureInterrupted() }
             do {
                 try recorder.start(directory: captureDirectory)
@@ -334,6 +353,20 @@ public final class ChatMediaController: ObservableObject {
                 }
             }
         }
+    }
+
+    /// One level reading from the live recorder, taken at `atMs` of its own
+    /// elapsed time: it drives the meter and, through ``MicrophoneSilence``,
+    /// §2's "Hearing nothing" warning.
+    ///
+    /// The `warns` comparison before the assignment is load-bearing: `@Published`
+    /// fires on every write, equal or not, and this runs twenty times a second,
+    /// so writing unconditionally would re-render the chat screen at the meter's
+    /// cadence for a value that changes at most twice in a take.
+    private func noteLevel(_ level: Double, atMs: Int64) {
+        self.level = level
+        silence = MicrophoneSilence.observe(silence, level: level, atMs: atMs)
+        if silence.warns != micSilent { micSilent = silence.warns }
     }
 
     private func captureInterrupted() {

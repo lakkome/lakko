@@ -21,6 +21,7 @@ import {
   LOCK_SLIDE_PX,
   type RecState,
 } from "./recording-machine";
+import { SILENT_MIC_NOTICE } from "./microphone-silence";
 import { DENIED_COPY, NOTICE_COPY, type Recorder } from "./recording-controller";
 import { barIsPlayed, waveformBars } from "./waveform";
 
@@ -249,11 +250,28 @@ function LiveBar(props: { recorder: Recorder }): JSX.Element {
             overflow: "hidden",
           }}
         >
-          ‹ Slide to cancel
+          {r.micSilent() ? SILENT_MIC_NOTICE : "‹ Slide to cancel"}
         </span>
       </Show>
       <Show when={s().phase === "locked"}>
-        <span style={{ flex: 1 }} />
+        {/* The locked bar's spare slot. A locked take runs hands-free until it
+            is stopped, so a silent one wastes minutes rather than the seconds a
+            held take can, which is why the notice is worth the slot here even
+            though there is no hint to displace. */}
+        <Show when={r.micSilent()} fallback={<span style={{ flex: 1 }} />}>
+          <span
+            style={{
+              flex: 1,
+              "text-align": "center",
+              color: "var(--surface-muted)",
+              "font-size": "0.85rem",
+              "white-space": "nowrap",
+              overflow: "hidden",
+            }}
+          >
+            {SILENT_MIC_NOTICE}
+          </span>
+        </Show>
         <button type="button" onClick={() => r.remove()} aria-label="Delete recording">
           Delete
         </button>

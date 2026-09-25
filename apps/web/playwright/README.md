@@ -47,17 +47,26 @@ reproduces a component's markup, and the only things stood in for are the two
 name-resolver contexts (`harness/context-stubs.ts`) and the network, replaced by
 filing the media bytes through the hub's own `fileLocal`.
 
-Three narrow observers exist so a spec can read what the DOM does not expose:
-the `Audio` elements the page constructed, the count of `getUserMedia` calls,
-and the count of `MediaRecorder.start()` calls. All three delegate to the
-platform — the element, the stream and the encoder are real.
+A few narrow observers exist so a spec can read what the DOM does not expose:
+the `Audio` elements the page constructed, how many `getUserMedia` calls were
+made and how many have answered, the count of `MediaRecorder.start()` calls, and
+the pixels of the canvas a video note's recorder was handed at the instant it was
+started. Every one of them delegates to the platform — the element, the stream,
+the canvas and the encoder are real.
 
 ## Browsers
 
-**Chromium** runs everything. **WebKit** runs the layout and menu specs; the
-recording specs skip on it by name, because the microphone here is Chromium's
+**Chromium** runs everything. **WebKit** runs the layout, menu and
+outgoing-media specs; the two specs that RECORD (`recording`, `video-note`) skip
+on it by name, because the microphone and camera here are Chromium's
 `--use-fake-device-for-media-stream` fed by `--use-file-for-fake-audio-capture`
 and Playwright's WebKit has no equivalent.
+
+Both devices are granted in `playwright.config.ts`, and the camera grant is not
+decoration: a permission the browser reports as `prompt` means the gesture would
+raise a dialog, and UX spec section 6 says such a gesture does not record — so
+without it a video-note hold produces no bar, no red dot, no recorder, and
+nothing on screen to say why.
 
 ## What is NOT covered here, and why
 
@@ -82,14 +91,27 @@ in `VoiceBubble.test.tsx`.
 
 **iOS and Android.** This is web only.
 
-## One trap, recorded because it cost a rewrite
+## Two traps, recorded because each cost a rewrite
 
-Chromium's fake microphone opens in a few tens of milliseconds; a real one takes
-a few hundred. The "recording lost the start of the phrase" defect lives in that
+**A fake device is faster than a real one.** Chromium's fake microphone opens in
+a few tens of milliseconds; a real one takes a few hundred. The "recording lost the start of the phrase" defect lives in that
 window, so against the fake device's own timing the measured loss was 11–54ms —
 inside the encoder's frame quantisation, and the test passed on a recorder that
 was demonstrably losing audio. It only failed when the suite happened to run
 enough workers in parallel to contend the device (330–463ms). A test whose
 discrimination depends on the worker count is not a test, so the harness now
 models a realistically slow device on request (`?gumDelay=`), which changes the
-environment and not the product.
+environment and not the product. `?camWarmup=` is the same knob one step
+further in, for the CAMERA: `getUserMedia` resolving means the device is open,
+and the first frame lands some time after that — tens of milliseconds here,
+hundreds on a real camera — so it makes a `<video>` fed by a stream report no
+frame size for that long, which is the platform signal the video-note pipeline
+itself tests.
+
+**A fixed wait cannot name a window whose start moves.** The video-note spec
+samples the bar between the device opening and the camera producing a frame. A
+first attempt waited 220ms after the press; it passed on the run where six tests
+shared the fake device and failed on the run where three did, because
+`getUserMedia`'s own latency moves with worker contention (measured here from
+23ms to 479ms). The harness now reports the resolution (`gumAnswers()`) and the
+sample is taken from it.
