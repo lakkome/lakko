@@ -3419,10 +3419,11 @@ blocker.
   external-join proposal is a stored MLS proposal like any other.~~ **S7 landed and
   dissolved neither half, deliberately.** The Lakko-side `pending_external_joins`
   `Vec` is **kept** — it is the quarantine that stops a `/g/` link-holder filling the
-  member proposal store — so it is still in memory and still outside the staged
-  rollback. One correction to the framing: it is **not epoch-bound**. The retained
+  member proposal store — so it is still outside the staged rollback (and, since
+  2026-09-26, no longer in memory only: it is persisted as a row in the storage
+  provider and read back by `Group::load`, see the ADR-0027 update note). One correction to the framing: it is **not epoch-bound**. The retained
   `KeyPackage` outlives epoch advances; only the joiner's *original* external proposal
-  had to arrive at a matching epoch. What drops an entry is a restart, or the joiner
+  had to arrive at a matching epoch. What drops an entry is the joiner
   landing (`pending_external_joins()` filters members). **Two in-memory lifetimes now
   meet on the client side and the mismatch is handled rather than prevented:** the
   quarantine lives on the `Group` while the retry record lives beside the chat, and

@@ -183,12 +183,16 @@ export async function approveCoPublisher(
   });
 }
 
-/** Reject a pending co-publisher — local drop, no commit, no epoch advance. */
+/** Reject a pending co-publisher — drops the retained request, no commit, no
+ *  epoch advance. The retained set lives in the MLS storage snapshot (which is
+ *  why the call takes the identity, like `approveExternalJoin`), so the drop is
+ *  captured by the channel log's next snapshot flush and survives a restart. */
 export function rejectCoPublisher(
+  identity: Identity,
   publisherGroup: PublisherGroup,
   proposalRef: Uint8Array,
 ): void {
-  publisherGroup.rejectExternalJoin(proposalRef);
+  publisherGroup.rejectExternalJoin(identity, proposalRef);
 }
 
 // ---------------------------------------------------------

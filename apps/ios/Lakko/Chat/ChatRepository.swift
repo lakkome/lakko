@@ -2666,17 +2666,25 @@ public final class ChatRepository: ObservableObject {
     }
 
     /// ADR-0027 (G-3) — reject a pending external-join request (owner/admin
-    /// only). Local-only: drops the retained proposal so it leaves the pending
-    /// list. No commit, no journal post — the joiner never receives a Welcome.
+    /// only). Drops the retained proposal so it leaves the pending list. No
+    /// commit, no journal post — the joiner never receives a Welcome.
+    ///
+    /// The retained set lives inside the MLS storage snapshot (which is why the
+    /// core takes the identity: it writes the durable copy), so the
+    /// `persistSnapshotBestEffort()` below is what makes the rejection survive
+    /// a restart — without it the request would reappear on the next launch.
     public func rejectExternalJoin(
         groupIdHex: String,
         proposalRef: Data
     ) throws {
+        guard let identity = canonicalIdentity else {
+            throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
+        }
         guard let record = groups[groupIdHex] else {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
         }
         do {
-            try record.group.rejectExternalJoin(proposalRef: proposalRef)
+            try record.group.rejectExternalJoin(identity: identity, proposalRef: proposalRef)
         } catch {
             throw ChatError.wrapped("rejectExternalJoin failed", underlying: error)
         }

@@ -198,12 +198,13 @@ struct CoPublishersPanel: View {
     }
 
     private func reject(_ ref: Data) async {
-        guard let publisherGroup else { return }
+        guard let identity, let publisherGroup else { return }
         busy = true
         error = nil
         defer { busy = false }
         do {
-            try CoPublisher.reject(publisherGroup: publisherGroup, proposalRef: ref)
+            try CoPublisher.reject(
+                identity: identity, publisherGroup: publisherGroup, proposalRef: ref)
             await refreshPending()
         } catch {
             NSLog("Channels: reject co-publisher failed: %@", String(describing: error))

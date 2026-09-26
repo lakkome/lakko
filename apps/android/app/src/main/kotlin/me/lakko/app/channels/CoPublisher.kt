@@ -162,9 +162,13 @@ public object CoPublisher {
         resealSubscribers(channelsClient, identity, publisherGroup, channelIdHex)
     }
 
-    /** Reject a pending co-publisher — local drop, no commit, no epoch advance. */
-    public fun reject(publisherGroup: PublisherGroup, proposalRef: ByteArray) {
-        publisherGroup.rejectExternalJoin(proposalRef)
+    /** Reject a pending co-publisher — no commit, no epoch advance, nothing on
+     *  the journal. The retained request set lives in the provider's MLS
+     *  storage, so the drop is written there through [identity]; the caller
+     *  persists the provider snapshot afterwards or the request is back after
+     *  a restart. */
+    public fun reject(identity: Identity, publisherGroup: PublisherGroup, proposalRef: ByteArray) {
+        publisherGroup.rejectExternalJoin(identity, proposalRef)
     }
 
     // -----------------------------------------------------------------

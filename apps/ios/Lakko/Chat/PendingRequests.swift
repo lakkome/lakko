@@ -350,21 +350,11 @@ public func waitingQueueLine(_ pendingCount: Int) -> String? {
     pendingCount < 2 ? nil : "\(pendingCount) changes are now waiting to apply."
 }
 
-/// ADR-0045 S7 residual 2 — the one property of the external-join quarantine a
-/// client can state, and it changes what an admin does.
-///
-/// `Group::pending_external_joins` is **in-memory**: it is not in the provider
-/// snapshot and the poll cursor has already advanced past the proposals that
-/// populated it, so a restart loses the list and no re-fetch brings it back.
-/// ADR-0027 records this as v1 behaviour with persistence as a follow-up.
-///
-/// Stating it is the honest option. The alternative a client could reach for —
-/// ageing rows out of the panel — would be strictly worse: the request stays
-/// live for the joiner, who goes on polling, so hiding it would make the admin
-/// stop seeing something that is still happening.
-public let joinRequestsNotSaved =
-    "Join requests are not saved. If this app restarts before you decide, "
-    + "they have to be sent again."
+// The "Join requests are not saved" note that used to live here is gone with
+// the reason for it: since 2026-09-26 `Group::pending_external_joins` rides the
+// MLS storage snapshot (ADR-0027 update note), so a restart shows the same
+// list. Rows are still never aged out, which would hide something still live
+// for the joiner.
 
 public func waitingToBeAdded(_ requests: [PendingRequest]) -> [PendingRequest] {
     requests.filter { $0.kind == .add && $0.state == .waiting }

@@ -233,7 +233,6 @@ import {
   visibleRequests,
   waitingQueueLine,
   waitingToBeAdded,
-  JOIN_REQUESTS_NOT_SAVED,
   type PendingRequest,
   type ProposalRecordView,
 } from "../chat/pending-requests";
@@ -5243,7 +5242,11 @@ function ChatView(props: {
         kind: "approve-join",
         subjectKeyB64: base64Encode(proposalRef),
       });
-      await contacts.rejectExternalJoin(props.entry.group, proposalRef);
+      await contacts.rejectExternalJoin(
+        props.requireIdentity(),
+        props.entry.group,
+        proposalRef,
+      );
       setMembersVersion(membersVersion() + 1);
       // Acting on the queue is what may have made room for the request the
       // quarantine turned away, so the notice about it stops being current.
@@ -6459,22 +6462,6 @@ function ChatView(props: {
                 >
                   Join requests ({pendingJoins().length})
                 </h3>
-                {/* ADR-0045 S7 residual 2 — the quarantine's one statable
-                    property. `Group::pending_external_joins` is in-memory: it is
-                    not in the provider snapshot, and the poll cursor has already
-                    advanced past the proposals that populated it, so a restart
-                    loses the list and no re-fetch brings it back. Ageing rows out
-                    of the panel instead would be strictly worse — the request
-                    stays live for the joiner, who goes on polling. */}
-                <p
-                  style={{
-                    "font-size": "0.7rem",
-                    color: "var(--surface-muted)",
-                    margin: "0 0 0.4rem 0",
-                  }}
-                >
-                  {JOIN_REQUESTS_NOT_SAVED}
-                </p>
                 {/* ADR-0027 / §7.1 — a request the quarantine turned away. It
                     is in no list below, because the core never kept it, and it
                     gets no Approve for the same reason: there is nothing to

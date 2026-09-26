@@ -137,7 +137,6 @@ import {
   rowAnnotation,
   visibleRequests,
   waitingQueueLine,
-  JOIN_REQUESTS_NOT_SAVED,
   waitingToBeAdded,
   type ProposalRecordView,
   type RequestObservation,
@@ -555,13 +554,5 @@ describe("the queue an approve grows", () => {
     for (const n of [2, 10, 64, 100]) {
       expect(waitingQueueLine(n) ?? "").not.toMatch(/limit|maximum|of \d+|full|cap/);
     }
-  });
-
-  /** The quarantine's one statable property. Not a deadline — a volatility. */
-  it("says the join-request list is not saved, and offers no expiry", () => {
-    expect(JOIN_REQUESTS_NOT_SAVED).toContain("not saved");
-    expect(JOIN_REQUESTS_NOT_SAVED.toLowerCase()).not.toMatch(
-      /expire|expires|expired|days|hours|deadline/,
-    );
   });
 });

@@ -348,12 +348,4 @@ final class UnappliedRequestsTests: XCTestCase {
             }
         }
     }
-
-    /// The quarantine's one statable property. Not a deadline — a volatility.
-    func testTheJoinRequestListIsDescribedAsUnsavedAndGivenNoExpiry() {
-        XCTAssertTrue(joinRequestsNotSaved.contains("not saved"))
-        for word in ["expire", "days", "hours", "deadline"] {
-            XCTAssertFalse(joinRequestsNotSaved.lowercased().contains(word))
-        }
-    }
 }

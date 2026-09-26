@@ -223,7 +223,7 @@ function fakeGroup(opts: {
         pending += 1;
         return new Uint8Array([0xac, ref[0] ?? 0]);
       }),
-      rejectExternalJoin: vi.fn(() => {
+      rejectExternalJoin: vi.fn((_id: unknown, _ref: Uint8Array) => {
         order.push("rejectExternalJoin");
       }),
       pendingExternalJoins: vi.fn(() => new Uint8Array(0)),

@@ -1589,9 +1589,16 @@ impl Group {
 
     /// Reject a retained external-join proposal — discards it locally without
     /// adding the joiner or advancing the epoch (ADR-0027).
-    pub fn reject_external_join(&self, proposal_ref: Vec<u8>) -> Result<(), FfiError> {
+    /// `identity` is what the durable copy of the pending set is written
+    /// through (the request set rides the MLS storage snapshot, so a decision
+    /// survives a restart).
+    pub fn reject_external_join(
+        &self,
+        identity: &Identity,
+        proposal_ref: Vec<u8>,
+    ) -> Result<(), FfiError> {
         let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
-        g.reject_external_join(&proposal_ref)?;
+        g.reject_external_join(&identity.inner, &proposal_ref)?;
         Ok(())
     }
 
@@ -2450,9 +2457,17 @@ impl PublisherGroup {
 
     /// ADR-0028 OQ3 — reject a retained co-publisher external-join (local drop;
     /// no epoch advance).
-    pub fn reject_external_join(&self, proposal_ref: Vec<u8>) -> Result<(), FfiError> {
+    /// `identity` is what the durable copy of the pending set is written
+    /// through (the request set rides the MLS storage snapshot, so a decision
+    /// survives a restart).
+    pub fn reject_external_join(
+        &self,
+        identity: &Identity,
+        proposal_ref: Vec<u8>,
+    ) -> Result<(), FfiError> {
         let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
-        g.inner_mut().reject_external_join(&proposal_ref)?;
+        g.inner_mut()
+            .reject_external_join(&identity.inner, &proposal_ref)?;
         Ok(())
     }
 }

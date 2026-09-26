@@ -33,13 +33,39 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 > One framing below is now wrong rather than merely incomplete: a retained request is
 > described as **epoch-bound and ephemeral**. The retained *KeyPackage* outlives epoch
 > advances — only the joiner's original external proposal had to arrive at a matching
-> epoch. What still drops it is a restart (the queue is in-memory) and, new under S7, the
+> epoch. What still drops it is, new under S7, the
 > joiner having landed: `pending_external_joins()` filters members, so an approved request
 > retires itself on every device with no message saying so.
 >
 > The **role gate is unchanged and is still the boundary.** What changed is that the
 > admin's approval is now an MLS-authenticated artifact — its own signature on its own
 > proposal — rather than a local decision expressed as a commit.
+>
+> **Update (2026-09-26): the retained queue survives a restart.** The v1 "persistence
+> is a follow-up" is closed. The `Vec<PendingExternalJoin>` stays the working copy, and
+> its durable copy is a row in the identity's OpenMLS storage provider under
+> `lakko/pending-external-joins/v1\0 ‖ group_id` (body `version ‖ count ‖ [len(4 BE) ‖
+> KeyPackage]*`, only the KeyPackages written, the joiner key re-derived from each leaf
+> on decode so the two cannot disagree on disk). Because it is a provider row it rides
+> `Identity::snapshot_storage` / `restore_storage` unchanged and reaches every client's
+> device-key-wrapped snapshot with **no client store change**; every mutation (retain,
+> approve, reject) rewrites it — which is why `reject_external_join` now takes the
+> `Identity` on both FFI surfaces — and `Group::load` reads it back, bounded and
+> fail-closed (unknown version, count over the cap, a package over 16 KiB, truncation,
+> trailing bytes, a repeated joiner, or a package that no longer validates against the
+> ciphersuite all refuse the row). A row that does not decode is **deleted and read as
+> empty**, never surfaced as a load error: it is local bookkeeping a joiner can refresh by
+> asking again, and failing `Group::load` over it would take the chat down with it. An
+> empty set deletes the row, so a group with nothing pending leaves no trace. What this
+> closes in the product: an owner whose app restarted while a `/g/` request was pending
+> forgot it, and the joiner — whose landing has no deadline (ADR-0045 decision 2) —
+> waited forever for a decision nobody could make any more; seen live on 2026-09-26.
+> Pinned by `tests/external_join_persistence.rs` (survives a restart and is still
+> approvable + sweepable; a rejection stays rejected; several survive in order) plus
+> three in-module tests (row key and version pinned; written on retain, removed when
+> empty; a corrupt row dropped, not fatal) and the `pending_external_joins_decode` fuzz
+> target. `DeviceGroup` and `PublisherGroup` construct through `from_mls_group` and
+> start empty as before; the co-publisher approve persists through the same helper.
 
 ## Context
 
@@ -111,7 +137,7 @@ Phase-4-scale and land behind the channel path.
 > | This ADR specified | What was built | Why it matters |
 > |---|---|---|
 > | `{ joiner_signature_key, joiner_credential, proposal_ref }` | `{ joiner_signature_key, retained }` | No credential is carried (Lakko's `BasicCredential` is empty — see [ADR-0001](./0001-mls-only.md) § Identity), and the **signature key is the handle**: `approve` / `reject` take it, and it is what the role table and contact graph resolve. The parameter is still *named* `proposal_ref` in the signature, which is a naming leftover from this ADR, not an openmls `ProposalRef`. `retained` was added later (`8018e8b`) and is the anti-spam counterpart — see below. |
-> | `MlsGroup::store_pending_proposal` (the openmls proposal store) | A Lakko-side in-memory `Vec<PendingExternalJoin>` on the `Group`, `MAX_PENDING_EXTERNAL_JOINS`-bounded, deduped by signature key | **This is the difference that ended up mattering most.** Keeping strangers out of the member proposal store keeps their requests out of the *member* quota — which is exactly why [ADR-0045](./0045-remote-commit-epoch-fork.md) decision 4's plan to retire this queue did not survive: merging them would have handed any `/g/` link-holder the group-membership-freeze primitive **C-66** had just closed. The code comment at the call site says it outright: the quarantine is *"nowhere near `store_pending_proposal`"*. The costs of the substitution are real and are stated in the head note: the queue does not survive a restart. |
+> | `MlsGroup::store_pending_proposal` (the openmls proposal store) | A Lakko-side `Vec<PendingExternalJoin>` on the `Group`, `MAX_PENDING_EXTERNAL_JOINS`-bounded, deduped by signature key, persisted since 2026-09-26 as a row in the identity's storage provider (see the update note above) | **This is the difference that ended up mattering most.** Keeping strangers out of the member proposal store keeps their requests out of the *member* quota — which is exactly why [ADR-0045](./0045-remote-commit-epoch-fork.md) decision 4's plan to retire this queue did not survive: merging them would have handed any `/g/` link-holder the group-membership-freeze primitive **C-66** had just closed. The code comment at the call site says it outright: the quarantine is *"nowhere near `store_pending_proposal`"*. The costs of the substitution are real and are stated in the head note: the queue does not survive a restart. |
 > | `commit_to_pending_proposals` over the single targeted proposal | `add_member` with the retained KeyPackage (2026-06-24) → since S7, `propose_add_member` | `commit_to_pending_proposals` is commit-**all**; it cannot target one joiner, and it would sweep whatever else the store held. Reusing the audited `add_member` path gave single-joiner targeting for free. S7 then replaced the commit entirely — see the head note. |
 >
 > One more consequence of the quarantine being Lakko-side rather than

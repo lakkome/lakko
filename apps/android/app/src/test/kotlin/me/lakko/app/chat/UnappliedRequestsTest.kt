@@ -414,12 +414,4 @@ class UnappliedRequestsTest {
             assertTrue("implies a limit: $line", !banned.containsMatchIn(line))
         }
     }
-
-    /** The quarantine's one statable property. Not a deadline — a volatility. */
-    @Test
-    fun `the join-request list is described as unsaved and given no expiry`() {
-        assertTrue(JOIN_REQUESTS_NOT_SAVED.contains("not saved"))
-        val banned = Regex("expire|expires|expired|days|hours|deadline")
-        assertTrue(!banned.containsMatchIn(JOIN_REQUESTS_NOT_SAVED.lowercase()))
-    }
 }

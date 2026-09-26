@@ -3622,19 +3622,6 @@ private fun MembersSheet(
                         text = "Join requests (${pendingJoins.size})",
                         style = MaterialTheme.typography.titleSmall,
                     )
-                    // ADR-0045 S7 residual 2 — the quarantine's one statable
-                    // property. `Group::pending_external_joins` is in-memory: it
-                    // is not in the provider snapshot, and the poll cursor has
-                    // already advanced past the proposals that populated it, so
-                    // a restart loses the list and no re-fetch brings it back.
-                    // Ageing rows out of the panel instead would be strictly
-                    // worse — the request stays live for the joiner, who goes on
-                    // polling.
-                    Text(
-                        text = me.lakko.app.chat.JOIN_REQUESTS_NOT_SAVED,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
                     // ADR-0027 / UX §7.1 — a request the quarantine turned
                     // away. It is in no row below, because the core never kept
                     // it, and it gets no Approve for the same reason: there is

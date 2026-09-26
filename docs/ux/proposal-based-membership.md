@@ -1606,9 +1606,10 @@ emptied the set, which it does not.
 
 **The queue depth, named where it is grown.** When an approve does not land in the same
 breath, the notice names how many changes are now waiting; and the `Join requests` panel
-states the one property of the quarantine that is statable — it is in memory and lost on
-restart. Stating that beats ageing rows out, which would hide something still live for
-the joiner.
+no longer needs to state the one property of the quarantine that used to be statable —
+that it was in memory and lost on restart. Since 2026-09-26 the retained requests ride
+the MLS storage snapshot (ADR-0027 update note), so a restart shows the same list; rows
+are still never aged out, which would hide something still live for the joiner.
 
 **What is deliberately not built, and why it is not a client's to build.** Any actual
 **bound** on the queue: `MAX_PENDING_PROPOSALS` is `pub(crate)` and

@@ -1789,10 +1789,13 @@ private fun CoPublishersCard(
                             error = null
                             scope.launch {
                                 try {
-                                    // A local drop of the retained request: no
-                                    // commit, no epoch advance, nothing to persist.
-                                    pending = pub.withIdentity(persist = false) {
-                                        CoPublisher.reject(pg, ref)
+                                    // A drop of the retained request: no commit,
+                                    // no epoch advance. The retained set is part
+                                    // of the provider snapshot, so this persists
+                                    // (the default) or the request reappears on
+                                    // the next open.
+                                    pending = pub.withIdentity { id ->
+                                        CoPublisher.reject(id, pg, ref)
                                         CoPublisher.pending(pg)
                                     }
                                 } catch (e: Throwable) {

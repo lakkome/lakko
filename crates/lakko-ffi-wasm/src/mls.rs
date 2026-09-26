@@ -1114,13 +1114,21 @@ impl Group {
 
     /// Reject a retained external-join proposal — discards it locally without
     /// adding the joiner or advancing the epoch (ADR-0027).
+    /// `identity` is what the durable copy of the pending set is written
+    /// through (the request set rides the MLS storage snapshot, so a decision
+    /// survives a restart).
     #[wasm_bindgen(js_name = rejectExternalJoin)]
-    pub fn reject_external_join(&self, proposal_ref: &[u8]) -> Result<(), JsValue> {
+    pub fn reject_external_join(
+        &self,
+        identity: &Identity,
+        proposal_ref: &[u8],
+    ) -> Result<(), JsValue> {
         let mut g = self
             .inner
             .lock()
             .map_err(|_| js_error("internal lock poisoned"))?;
-        g.reject_external_join(proposal_ref).map_err(mls_err)?;
+        g.reject_external_join(&identity.inner, proposal_ref)
+            .map_err(mls_err)?;
         Ok(())
     }
 
@@ -2200,14 +2208,21 @@ impl PublisherGroup {
 
     /// ADR-0028 OQ3 — reject a retained co-publisher external-join (local drop;
     /// no epoch advance).
+    /// `identity` is what the durable copy of the pending set is written
+    /// through (the request set rides the MLS storage snapshot, so a decision
+    /// survives a restart).
     #[wasm_bindgen(js_name = rejectExternalJoin)]
-    pub fn reject_external_join(&self, proposal_ref: &[u8]) -> Result<(), JsValue> {
+    pub fn reject_external_join(
+        &self,
+        identity: &Identity,
+        proposal_ref: &[u8],
+    ) -> Result<(), JsValue> {
         let mut g = self
             .inner
             .lock()
             .map_err(|_| js_error("internal lock poisoned"))?;
         g.inner_mut()
-            .reject_external_join(proposal_ref)
+            .reject_external_join(&identity.inner, proposal_ref)
             .map_err(mls_err)?;
         Ok(())
     }

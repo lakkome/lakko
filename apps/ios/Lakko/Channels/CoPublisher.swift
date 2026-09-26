@@ -126,12 +126,16 @@ public enum CoPublisher {
         )
     }
 
-    /// Reject a pending co-publisher — local drop, no commit, no epoch advance.
+    /// Reject a pending co-publisher — no commit, no epoch advance. The
+    /// retained request set is part of the PublisherGroup's persisted MLS
+    /// storage, so the core takes the identity to write the durable copy and
+    /// the rejection survives a restart.
     public static func reject(
+        identity: Identity,
         publisherGroup: PublisherGroup,
         proposalRef: Data
     ) throws {
-        try publisherGroup.rejectExternalJoin(proposalRef: proposalRef)
+        try publisherGroup.rejectExternalJoin(identity: identity, proposalRef: proposalRef)
     }
 
     // MARK: - Joiner side — a prospective co-publisher requests + joins

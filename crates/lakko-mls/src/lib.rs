@@ -110,6 +110,29 @@ pub mod fuzz_api {
         crate::WelcomeRendezvous::decode(bytes).is_ok()
     }
 
+    /// Try to decode a persisted pending-external-joins row
+    /// (`group::decode_pending_external_joins`, ADR-0027). The bytes come out
+    /// of the device's own MLS storage snapshot — device-key-wrapped, so not
+    /// attacker-writable in the ordinary case — but the snapshot also rides
+    /// the phrase-sealed backup a hostile storage tier serves, and the row is
+    /// the first Lakko-owned parser `Group::load` runs. The bounded,
+    /// fail-closed parser must stay panic-free on arbitrary input.
+    ///
+    /// The validating identity is built once from a fixed seed: only the
+    /// ciphersuite matters to the check, and a corpus entry that reaches the
+    /// signature verify with a matching suite is what the fuzzer is for.
+    #[must_use]
+    pub fn decode_pending_external_joins(bytes: &[u8]) -> bool {
+        use std::sync::OnceLock;
+        static IDENTITY: OnceLock<Option<crate::Identity>> = OnceLock::new();
+        let Some(identity) =
+            IDENTITY.get_or_init(|| crate::Identity::from_seed(&[0x5Fu8; 64]).ok())
+        else {
+            return false;
+        };
+        crate::group::decode_pending_external_joins(bytes, identity).is_ok()
+    }
+
     /// Try to decode a device-pairing QR payload (`pairing::decode`). Returns
     /// `true` on a successful prost decode + the structural binding checks
     /// (version / account_id-length + match / rendezvous-pseudonym-length). The

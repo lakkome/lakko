@@ -116,7 +116,11 @@ export function CoPublishersPanel(props: {
   function onReject(ref: Uint8Array): void {
     setError(null);
     try {
-      rejectCoPublisher(props.publisherGroup, ref);
+      rejectCoPublisher(props.identity, props.publisherGroup, ref);
+      // The retained set lives in the provider's MLS storage (ADR-0027
+      // update note); snapshot it so the rejection survives a restart, the
+      // same flush the approve schedules.
+      channelsActions.notePublisherGroupChanged();
       setPending(pendingCoPublishers(props.publisherGroup));
     } catch (err) {
       setError(coPublisherRefusal(err) ?? `Could not reject: ${String(err)}`);

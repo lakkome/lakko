@@ -119,6 +119,32 @@ const GROUP_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::Mls10;
 /// retained — anti-spam, since a non-member can post these.
 const MAX_PENDING_EXTERNAL_JOINS: usize = 64;
 
+/// Storage-provider row under which a group's retained external-join
+/// requests are persisted (ADR-0027, the "persistence is a follow-up" of the
+/// original v1).
+///
+/// The row lives in the same key-value provider OpenMLS writes the group
+/// state into, so it rides [`Identity::snapshot_storage`] /
+/// [`Identity::restore_storage`] unchanged and reaches every client's
+/// device-key-wrapped snapshot with no client-side store change. The key is
+/// `DOMAIN ‖ group_id`; the NUL keeps it out of any OpenMLS label prefix,
+/// which are all printable.
+///
+/// **What this closes.** Before it, the queue was a plain `Vec` on the
+/// `Group`, so an owner whose app restarted while a `/g/` request was
+/// pending forgot the request, and the joiner — whose landing says "Request
+/// sent, waiting for an admin" with no deadline (ADR-0045 decision 2) — waited
+/// forever for a decision nobody could make any more.
+const PENDING_EXTERNAL_JOINS_ROW_DOMAIN: &[u8] = b"lakko/pending-external-joins/v1\0";
+
+/// Version byte of the row body (`version ‖ count ‖ [len(4 BE) ‖ KeyPackage]*`).
+const PENDING_EXTERNAL_JOINS_ROW_VERSION: u8 = 0x01;
+
+/// Upper bound on one retained KeyPackage's wire size inside the row. A
+/// real one is a few hundred bytes; the bound exists so a corrupt length
+/// prefix cannot ask for an allocation the row does not carry.
+const MAX_PENDING_KEY_PACKAGE_BYTES: usize = 16 * 1024;
+
 /// Max **member** proposals retained per group awaiting an ADR-0045 sweep.
 ///
 /// The sibling of [`MAX_PENDING_EXTERNAL_JOINS`], and needed for the same
@@ -222,8 +248,8 @@ const fn pending_capacity(is_owner_response: bool) -> usize {
 /// [`Group::approve_external_join`] / [`Group::reject_external_join`].
 /// `key_package` is the joiner's KeyPackage that an approve adds via the
 /// existing, audited [`Group::add_member`] path.
-struct PendingExternalJoin {
-    joiner_signature_key: Vec<u8>,
+pub(crate) struct PendingExternalJoin {
+    pub(crate) joiner_signature_key: Vec<u8>,
     key_package: KeyPackage,
 }
 
@@ -235,10 +261,128 @@ struct PendingExternalJoin {
 pub struct Group {
     inner: MlsGroup,
     /// External-join proposals (ADR-0027) awaiting an owner/admin approve /
-    /// reject. **In-memory only in v1** — proposals are epoch-bound +
-    /// ephemeral, so an app restart drops them and the joiner re-sends;
-    /// persistence is a follow-up. Bounded by [`MAX_PENDING_EXTERNAL_JOINS`].
+    /// reject. Bounded by [`MAX_PENDING_EXTERNAL_JOINS`].
+    ///
+    /// The `Vec` is the working copy; the durable copy is the
+    /// [`PENDING_EXTERNAL_JOINS_ROW_DOMAIN`] row in the identity's storage
+    /// provider, rewritten by every mutation
+    /// ([`Self::persist_pending_external_joins`]) and read back by
+    /// [`Group::load`] — so a request survives the owner's app restart, which
+    /// is the one thing the in-memory v1 could not offer.
     pending_external_joins: Vec<PendingExternalJoin>,
+}
+
+/// The provider row key for `group_id`'s retained external-join requests.
+fn pending_external_joins_row_key(group_id: &[u8]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(PENDING_EXTERNAL_JOINS_ROW_DOMAIN.len() + group_id.len());
+    key.extend_from_slice(PENDING_EXTERNAL_JOINS_ROW_DOMAIN);
+    key.extend_from_slice(group_id);
+    key
+}
+
+/// Encode the retained requests as the row body. Only the KeyPackages are
+/// written: the signature key is re-derived from each package's leaf on
+/// decode, so the two can never disagree on disk.
+///
+/// # Errors
+///
+/// [`Error::KeyPackage`] if a retained package fails to serialize, or
+/// [`Error::Group`] if the set somehow exceeds what a one-byte count or a
+/// four-byte length can carry (unreachable under the retention cap).
+fn encode_pending_external_joins(pending: &[PendingExternalJoin]) -> Result<Vec<u8>> {
+    let count = u8::try_from(pending.len())
+        .map_err(|_| Error::Group("pending external joins exceed the row count".into()))?;
+    let mut out = vec![PENDING_EXTERNAL_JOINS_ROW_VERSION, count];
+    for p in pending {
+        let kp = crate::key_package::serialize(&p.key_package)?;
+        let len = u32::try_from(kp.len())
+            .map_err(|_| Error::Group("retained KeyPackage exceeds the row length".into()))?;
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(&kp);
+    }
+    Ok(out)
+}
+
+/// Decode a row body written by [`encode_pending_external_joins`], bounded
+/// and fail-closed: an unknown version, a count over
+/// [`MAX_PENDING_EXTERNAL_JOINS`], a length over
+/// [`MAX_PENDING_KEY_PACKAGE_BYTES`], a truncated body, trailing bytes, or a
+/// KeyPackage that no longer validates against this identity's ciphersuite
+/// all refuse the whole row. Each package is re-validated exactly as
+/// [`Group::add_member_from_wire`] validates one off the wire, so what comes
+/// back from disk is never weaker than what was retained.
+///
+/// # Errors
+///
+/// [`Error::Group`] on a framing violation, [`Error::KeyPackage`] on a
+/// package that fails to parse or validate.
+pub(crate) fn decode_pending_external_joins(
+    bytes: &[u8],
+    identity: &Identity,
+) -> Result<Vec<PendingExternalJoin>> {
+    let (&version, rest) = bytes
+        .split_first()
+        .ok_or_else(|| Error::Group("pending external joins row is empty".into()))?;
+    if version != PENDING_EXTERNAL_JOINS_ROW_VERSION {
+        return Err(Error::Group(format!(
+            "pending external joins row version {version} is not {PENDING_EXTERNAL_JOINS_ROW_VERSION}"
+        )));
+    }
+    let (&count, mut cur) = rest
+        .split_first()
+        .ok_or_else(|| Error::Group("pending external joins row has no count".into()))?;
+    let count = usize::from(count);
+    if count > MAX_PENDING_EXTERNAL_JOINS {
+        return Err(Error::Group(format!(
+            "pending external joins row counts {count}, over the cap of {MAX_PENDING_EXTERNAL_JOINS}"
+        )));
+    }
+    let mut pending = Vec::with_capacity(count);
+    for _ in 0..count {
+        if cur.len() < 4 {
+            return Err(Error::Group(
+                "pending external joins row truncated at a length".into(),
+            ));
+        }
+        let (len_bytes, tail) = cur.split_at(4);
+        let mut len_arr = [0u8; 4];
+        len_arr.copy_from_slice(len_bytes);
+        let len = u32::from_be_bytes(len_arr) as usize;
+        if len == 0 || len > MAX_PENDING_KEY_PACKAGE_BYTES {
+            return Err(Error::Group(format!(
+                "pending external joins row names a {len}-byte KeyPackage"
+            )));
+        }
+        if tail.len() < len {
+            return Err(Error::Group(
+                "pending external joins row truncated in a KeyPackage".into(),
+            ));
+        }
+        let (kp_bytes, tail) = tail.split_at(len);
+        cur = tail;
+        let key_package = crate::key_package::deserialize(kp_bytes)?
+            .validate(identity.provider.crypto(), GROUP_PROTOCOL_VERSION)
+            .map_err(|e| Error::KeyPackage(format!("retained KeyPackage validate: {e:?}")))?;
+        let joiner_signature_key = key_package.leaf_node().signature_key().as_slice().to_vec();
+        if pending
+            .iter()
+            .any(|p: &PendingExternalJoin| p.joiner_signature_key == joiner_signature_key)
+        {
+            return Err(Error::Group(
+                "pending external joins row repeats a joiner".into(),
+            ));
+        }
+        pending.push(PendingExternalJoin {
+            joiner_signature_key,
+            key_package,
+        });
+    }
+    if !cur.is_empty() {
+        return Err(Error::Group(
+            "pending external joins row has trailing bytes".into(),
+        ));
+    }
+    Ok(pending)
 }
 
 /// Output of [`Group::add_member`].
@@ -941,7 +1085,11 @@ impl Group {
     /// key + KeyPackage, de-dups by signature key, and retains it under the
     /// [`MAX_PENDING_EXTERNAL_JOINS`] cap. The event is always surfaced even
     /// when the cap drops the retention.
-    fn retain_external_join(&mut self, qp: &QueuedProposal) -> Result<Incoming> {
+    fn retain_external_join(
+        &mut self,
+        identity: &Identity,
+        qp: &QueuedProposal,
+    ) -> Result<Incoming> {
         if !matches!(qp.sender(), Sender::NewMemberProposal) {
             return Err(Error::Group(
                 "external join proposal from a non-new-member sender refused".into(),
@@ -983,6 +1131,7 @@ impl Group {
                 key_package,
             });
         }
+        self.persist_pending_external_joins(identity)?;
         // Report whether an approve can act on this, rather than leaving the
         // caller to find out by failing. `already_pending` counts as retained:
         // the entry is there, this event is just a duplicate of one already
@@ -1092,6 +1241,65 @@ impl Group {
             .retain(|p| p.joiner_signature_key != proposal_ref);
     }
 
+    /// Write the retained requests to their provider row, or delete the row
+    /// when nothing is retained, so a group with no pending request leaves no
+    /// trace in the snapshot.
+    ///
+    /// Called after every mutation of the set — retain, approve, reject — and
+    /// only then: the reads never write. A failure here is surfaced rather
+    /// than swallowed, because a mutation the snapshot will not carry is the
+    /// exact defect this row exists to close.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Identity`] if the provider lock is poisoned; what
+    /// [`encode_pending_external_joins`] returns.
+    fn persist_pending_external_joins(&self, identity: &Identity) -> Result<()> {
+        let key = pending_external_joins_row_key(&self.group_id());
+        let mut map = identity
+            .provider
+            .storage()
+            .values
+            .write()
+            .map_err(|_| Error::Identity("storage RwLock poisoned".to_string()))?;
+        if self.pending_external_joins.is_empty() {
+            map.remove(&key);
+        } else {
+            map.insert(
+                key,
+                encode_pending_external_joins(&self.pending_external_joins)?,
+            );
+        }
+        Ok(())
+    }
+
+    /// Read `group_id`'s retained requests back from the provider row.
+    ///
+    /// An absent row is an empty set. A row that does not decode — written
+    /// by no version of this crate, or damaged in the store — is **deleted
+    /// and read as empty**, never as an error: this is local bookkeeping
+    /// that a joiner can always refresh by asking again, and failing the
+    /// whole `Group::load` over it would take the chat down with it. The
+    /// same outcome the in-memory v1 produced on every restart, confined to
+    /// the corrupt case.
+    fn load_pending_external_joins(
+        identity: &Identity,
+        group_id: &[u8],
+    ) -> Vec<PendingExternalJoin> {
+        let key = pending_external_joins_row_key(group_id);
+        let Ok(mut map) = identity.provider.storage().values.write() else {
+            return Vec::new();
+        };
+        let Some(row) = map.get(&key) else {
+            return Vec::new();
+        };
+        if let Ok(pending) = decode_pending_external_joins(row, identity) {
+            return pending;
+        }
+        map.remove(&key);
+        Vec::new()
+    }
+
     /// Approve a retained external-join request — **proposes** adding the
     /// joiner (ADR-0027 G-3, converged onto the ADR-0045 proposal path by S7).
     /// `proposal_ref` is the joiner's signature key from
@@ -1175,6 +1383,7 @@ impl Group {
         // Only now. The decision has been made and is on its way to the wire;
         // a refusal above left the request where it was.
         self.drop_pending_external_join(proposal_ref);
+        self.persist_pending_external_joins(identity)?;
         Ok(proposal)
     }
 
@@ -1214,17 +1423,20 @@ impl Group {
         let key_package = self.pending_external_join_key_package(proposal_ref)?;
         let addition = self.add_member(identity, key_package)?;
         self.drop_pending_external_join(proposal_ref);
+        self.persist_pending_external_joins(identity)?;
         Ok(addition)
     }
 
     /// Reject a retained external-join proposal — discards it locally without
     /// adding the joiner or advancing the epoch (ADR-0027). Local-only (no
     /// commit, no peer effect); the clients gate the affordance on `own_role`.
+    /// `identity` is what the durable copy of the set is written through, so
+    /// a rejected request stays rejected across a restart.
     ///
     /// # Errors
     ///
     /// [`Error::Group`] if no pending proposal matches `proposal_ref`.
-    pub fn reject_external_join(&mut self, proposal_ref: &[u8]) -> Result<()> {
+    pub fn reject_external_join(&mut self, identity: &Identity, proposal_ref: &[u8]) -> Result<()> {
         let pos = self
             .pending_external_joins
             .iter()
@@ -1236,7 +1448,7 @@ impl Group {
                 )
             })?;
         self.pending_external_joins.remove(pos);
-        Ok(())
+        self.persist_pending_external_joins(identity)
     }
 
     /// Run the checks every peer will run on a role-table rewrite, locally and
@@ -2470,7 +2682,7 @@ impl Group {
                 self.gate_incoming_proposal(identity, *qp)
             },
             ProcessedMessageContent::ExternalJoinProposalMessage(qp) => {
-                self.retain_external_join(&qp)
+                self.retain_external_join(identity, &qp)
             },
         }
     }
@@ -2766,7 +2978,7 @@ impl Group {
                 }))
             },
             ProcessedMessageContent::ExternalJoinProposalMessage(qp) => {
-                self.retain_external_join(&qp)
+                self.retain_external_join(identity, &qp)
             },
         }
     }
@@ -2856,7 +3068,7 @@ impl Group {
                 }))
             },
             ProcessedMessageContent::ExternalJoinProposalMessage(qp) => {
-                self.retain_external_join(&qp)
+                self.retain_external_join(identity, &qp)
             },
         }
     }
@@ -3034,7 +3246,10 @@ impl Group {
         let id = GroupId::from_slice(group_id);
         let loaded = MlsGroup::load(identity.provider.storage(), &id)
             .map_err(|e| Error::Group(format!("load: {e:?}")))?;
-        Ok(loaded.map(Self::from_mls_group))
+        Ok(loaded.map(|inner| Self {
+            inner,
+            pending_external_joins: Self::load_pending_external_joins(identity, group_id),
+        }))
     }
 
     /// Wrap an already-constructed [`MlsGroup`] in the Lakko
@@ -6282,6 +6497,101 @@ mod external_join_tests {
         assert!(alice_g.pending_external_joins().is_empty());
     }
 
+    /// The row is keyed on a NUL-terminated domain no OpenMLS label shares,
+    /// and the row body's first byte is the version. Pinned so a drift fails
+    /// here rather than as a request that quietly stops surviving restarts.
+    #[test]
+    fn pending_row_key_and_version_are_pinned() {
+        assert_eq!(
+            PENDING_EXTERNAL_JOINS_ROW_DOMAIN,
+            b"lakko/pending-external-joins/v1\0"
+        );
+        let key = pending_external_joins_row_key(&[0xAB, 0xCD]);
+        assert!(key.starts_with(PENDING_EXTERNAL_JOINS_ROW_DOMAIN));
+        assert_eq!(
+            &key[PENDING_EXTERNAL_JOINS_ROW_DOMAIN.len()..],
+            &[0xAB, 0xCD]
+        );
+        assert_eq!(PENDING_EXTERNAL_JOINS_ROW_VERSION, 0x01);
+        assert_eq!(
+            encode_pending_external_joins(&[]).expect("encode"),
+            vec![0x01, 0x00]
+        );
+    }
+
+    /// A retained request writes the row; the last decision removes it, so a
+    /// group with nothing pending leaves no trace in the snapshot.
+    #[test]
+    fn pending_row_is_written_on_retain_and_removed_when_empty() {
+        let alice = Identity::from_seed(&[0xA7u8; 64]).expect("alice");
+        let mut alice_g = Group::create(&alice).expect("create");
+        let dave = Identity::from_seed(&[0xD7u8; 64]).expect("dave");
+        let key = pending_external_joins_row_key(&alice_g.group_id());
+        let has_row = |id: &Identity| {
+            id.provider
+                .storage()
+                .values
+                .read()
+                .expect("lock")
+                .contains_key(&key)
+        };
+        assert!(!has_row(&alice), "a fresh group has no row");
+
+        let prop = external_join_proposal(&dave, &alice_g.group_id(), alice_g.epoch());
+        alice_g.process_incoming(&alice, &prop).expect("process");
+        assert!(has_row(&alice), "a retained request writes the row");
+
+        alice_g
+            .reject_external_join(&alice, &pk(&dave))
+            .expect("reject");
+        assert!(!has_row(&alice), "an empty set removes the row");
+    }
+
+    /// A row that does not decode is dropped and read as empty — local
+    /// bookkeeping a joiner can refresh by asking again must never take the
+    /// chat down with it.
+    #[test]
+    fn corrupt_pending_row_is_dropped_not_fatal() {
+        let alice = Identity::from_seed(&[0xA8u8; 64]).expect("alice");
+        let alice_g = Group::create(&alice).expect("create");
+        let gid = alice_g.group_id();
+        let key = pending_external_joins_row_key(&gid);
+        for garbage in [
+            Vec::new(),
+            vec![0x02, 0x00],
+            vec![0x01],
+            vec![0x01, 0x01, 0x00, 0x00, 0x00, 0x05, 0xAA],
+            vec![0x01, 0x01, 0xFF, 0xFF, 0xFF, 0xFF],
+            vec![0x01, 0x00, 0x00],
+        ] {
+            alice
+                .provider
+                .storage()
+                .values
+                .write()
+                .expect("lock")
+                .insert(key.clone(), garbage.clone());
+            assert!(
+                decode_pending_external_joins(&garbage, &alice).is_err(),
+                "{garbage:02x?} must not decode"
+            );
+            let loaded = Group::load(&alice, &gid)
+                .expect("load never fails over the row")
+                .expect("group present");
+            assert!(loaded.pending_external_joins().is_empty());
+            assert!(
+                !alice
+                    .provider
+                    .storage()
+                    .values
+                    .read()
+                    .expect("lock")
+                    .contains_key(&key),
+                "the corrupt row is deleted"
+            );
+        }
+    }
+
     #[test]
     fn reject_removes_without_adding() {
         let alice = Identity::from_seed(&[0xA2u8; 64]).expect("alice");
@@ -6293,7 +6603,9 @@ mod external_join_tests {
         alice_g.process_incoming(&alice, &prop).expect("process");
         assert_eq!(alice_g.pending_external_joins().len(), 1);
 
-        alice_g.reject_external_join(&dave_pk).expect("reject");
+        alice_g
+            .reject_external_join(&alice, &dave_pk)
+            .expect("reject");
         assert!(alice_g.pending_external_joins().is_empty());
         assert!(
             !alice_g
@@ -6325,7 +6637,7 @@ mod external_join_tests {
         let alice = Identity::from_seed(&[0xA4u8; 64]).expect("alice");
         let mut alice_g = Group::create(&alice).expect("create");
         assert!(alice_g.approve_external_join(&alice, b"nope").is_err());
-        assert!(alice_g.reject_external_join(b"nope").is_err());
+        assert!(alice_g.reject_external_join(&alice, b"nope").is_err());
     }
 
     #[test]

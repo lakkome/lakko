@@ -3165,20 +3165,37 @@ export class ContactsClient {
     });
   }
 
-  /** ADR-0027 (G-3) — reject a pending external-join request. Local-only: drops
-   *  the retained proposal so it no longer surfaces in
+  /** ADR-0027 (G-3) — reject a pending external-join request. Drops the
+   *  retained proposal so it no longer surfaces in
    *  `group.pendingExternalJoins()`. Produces no commit and no journal post —
    *  the joiner simply never receives a Welcome and its proposal lapses when the
    *  group epoch next advances. The UI shows the action to owners / admins
    *  only; there is no peer-verifiable gate because there is no network
-   *  artefact to gate. */
-  async rejectExternalJoin(group: WasmGroup, proposalRef: Uint8Array): Promise<void> {
-    try {
-      group.rejectExternalJoin(proposalRef);
-    } catch (err) {
-      throw ContactsError.wrap(err);
-    }
-    await this.persistBestEffort();
+   *  artefact to gate.
+   *
+   *  The retained set is no longer in-memory only: the core persists it inside
+   *  the MLS storage snapshot (which is why the wasm call takes the identity,
+   *  like `approveExternalJoin`), so the `persistBestEffort()` after the drop
+   *  writes the rejection to the durable snapshot and it survives a restart —
+   *  a rejected request does not come back as pending when the owner's app
+   *  reopens. */
+  async rejectExternalJoin(
+    identity: IdentitySecrets | null,
+    group: WasmGroup,
+    proposalRef: Uint8Array,
+  ): Promise<void> {
+    const myIdentity = await this.resolveIdentity(identity);
+
+    // SERIALIZED per group like `approveExternalJoin`: the drop rewrites the
+    // retained set in the MLS store and the snapshot that follows captures it.
+    await withGroupMlsLock(base64Encode(group.groupId), async () => {
+      try {
+        group.rejectExternalJoin(myIdentity, proposalRef);
+      } catch (err) {
+        throw ContactsError.wrap(err);
+      }
+      await this.persistBestEffort();
+    });
   }
 
   /** ADR-0028 OQ2 (G-3) — read the join-attribution envelopes from a group's

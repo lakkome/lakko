@@ -2457,8 +2457,12 @@ public class ChatRepository(
 
     /**
      * ADR-0027 (G-3) — reject a pending external-join request (owner/admin only).
-     * Local-only: drops the retained proposal so it leaves the pending list. No
-     * commit, no journal post — the joiner never receives a Welcome.
+     * Drops the retained proposal so it leaves the pending list. No commit, no
+     * journal post — the joiner never receives a Welcome. The retained set is
+     * persisted inside the MLS storage snapshot, so the rejection is written to
+     * the durable copy and the following `persistSnapshotBestEffort()` is what
+     * makes it survive a restart — without it the request would be back in the
+     * pending list the next time the group is loaded.
      */
     public suspend fun rejectExternalJoin(
         groupIdHex: String,
@@ -2470,6 +2474,10 @@ public class ChatRepository(
         groupIdHex: String,
         proposalRef: ByteArray,
     ): Unit {
+        val identity = canonicalIdentity.get()
+            ?: throw IllegalStateException(
+                "ChatRepository not bootstrapped — call bootstrap() first",
+            )
         // G-37 — local-only (no DS call): provider work start to finish.
         groupLock(groupIdHex).withLock {
             providerLock.withLock {
@@ -2479,7 +2487,7 @@ public class ChatRepository(
                         IllegalStateException("missing group record"),
                     )
                 try {
-                    record.group.rejectExternalJoin(proposalRef)
+                    record.group.rejectExternalJoin(identity, proposalRef)
                 } catch (e: FfiException) {
                     throw ChatError("rejectExternalJoin failed", e)
                 }
