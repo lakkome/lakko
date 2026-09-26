@@ -360,9 +360,15 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
     accepted().find((c) => c.signaturePubkeyB64 === selectedKey());
 
   /** The registry row of the 1x1 chat with this contact, if this device
-   *  holds one: linked at accept, or found by its two-member roster. */
+   *  holds one: the id linked at accept when the registry still holds it,
+   *  else the two-member roster scan. A linked id whose chat is gone (deleted
+   *  here, or never present on this device) is NOT an address: seen live
+   *  2026-09-26 as a contact whose Message opened "Conversation not found". */
   const groupWith = (c: AcceptedContact): ActiveGroup | undefined => {
-    if (c.groupIdB64 !== undefined) return chats.get(c.groupIdB64);
+    if (c.groupIdB64 !== undefined) {
+      const linked = chats.get(c.groupIdB64);
+      if (linked !== undefined) return linked;
+    }
     const own = chats.identity();
     const ownB64 = own === null ? null : base64Encode(own.signaturePublicKey);
     for (const g of chats.groups()) {
@@ -381,12 +387,9 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
     return undefined;
   };
 
-  /** The 1x1 chat with this contact, if this device holds one. A linked id
-   *  is an address whether or not the registry currently holds the row. */
+  /** The 1x1 chat with this contact, if this device holds one - `null`
+   *  otherwise, so Message starts a chat instead of opening a dead link. */
   const chatWith = (c: AcceptedContact): string | null => {
-    if (c.groupIdB64 !== undefined) {
-      return paths.chat(base64UrlEncodeNoPad(base64Decode(c.groupIdB64)));
-    }
     const g = groupWith(c);
     return g === undefined ? null : paths.chat(base64UrlEncodeNoPad(g.group.groupId));
   };
