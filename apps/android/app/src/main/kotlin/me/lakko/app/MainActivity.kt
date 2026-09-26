@@ -1559,6 +1559,47 @@ private fun SessionRoot(
                         // stays beneath it, so Back and `Message` return here.
                         onOpenContact = { key -> navController.navigate(Routes.contact(key)) },
                         groupTitle = groupTitle,
+                        // ADR-0052 decision 2 / UX 5.1 — Forward opens the
+                        // picker with the message in the one-shot slot; the
+                        // picker's route takes it into its own view model.
+                        onForwardMessage = { request ->
+                            me.lakko.app.chat.PendingForward.publish(request)
+                            navController.navigate(Routes.FORWARD)
+                        },
+                        // UX 5.1 "Tap to jump" — the origin conversation is
+                        // pushed over this one; Back returns here.
+                        onOpenConversation = { hex ->
+                            navController.navigate(Routes.chat(hex)) { launchSingleTop = true }
+                        },
+                    )
+                }
+                composable(Routes.FORWARD) {
+                    // The request is taken from the slot ONCE, into a view
+                    // model scoped to this back-stack entry, so a rotation
+                    // keeps it and a second visit to the route starts empty.
+                    val forwardVm: me.lakko.app.ui.chat.ForwardViewModel = viewModel(
+                        factory = singletonViewModelFactory {
+                            me.lakko.app.ui.chat.ForwardViewModel(
+                                repo = chatRepository,
+                                request = me.lakko.app.chat.PendingForward.take(),
+                            )
+                        },
+                    )
+                    me.lakko.app.ui.chat.ForwardPickerScreen(
+                        viewModel = forwardVm,
+                        repository = chatRepository,
+                        deviceGroupSync = deviceGroupSync,
+                        onBack = { navController.popBackStack() },
+                        // Section 5.1 — picking sends at once and takes the
+                        // person to that conversation. The picker leaves the
+                        // back stack; a forward into the conversation it was
+                        // opened from lands on the same screen.
+                        onForwarded = { hex ->
+                            navController.navigate(Routes.chat(hex)) {
+                                popUpTo(Routes.FORWARD) { inclusive = true }
+                                launchSingleTop = true
+                            }
+                        },
                     )
                 }
 
@@ -1686,6 +1727,9 @@ private object Routes {
 
     const val CHAT = "chat/{groupIdHex}"
     fun chat(groupIdHex: String): String = "chat/$groupIdHex"
+    /** ADR-0052 decision 2 — the "Forward to" picker. Argument-less: the
+     *  message rides the [me.lakko.app.chat.PendingForward] slot. */
+    const val FORWARD = "forward"
     const val NEW_CHAT = "new_chat"
     const val NEW_GROUP = "new_group"
     const val CHANNEL_NEW = "channel_new"

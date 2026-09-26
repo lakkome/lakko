@@ -351,6 +351,10 @@ public struct PersistedMessage: Codable, Equatable {
     /// a reply. Absent on an ordinary message and on a row written before the
     /// field existed; both read back as `nil`.
     public let reply: PersistedReply?
+    /// ADR-0052 decision 2 — the forward attribution and origin, when this
+    /// message was forwarded. Absent on an ordinary message and on a row
+    /// written before the field existed; both read back as `nil`.
+    public let forward: PersistedForward?
 
     public init(
         messageId: Int64,
@@ -362,7 +366,8 @@ public struct PersistedMessage: Codable, Equatable {
         edited: Bool = false,
         deleted: Bool = false,
         reactions: [PersistedReaction] = [],
-        reply: PersistedReply? = nil
+        reply: PersistedReply? = nil,
+        forward: PersistedForward? = nil
     ) {
         self.messageId = messageId
         self.direction = direction
@@ -374,6 +379,7 @@ public struct PersistedMessage: Codable, Equatable {
         self.deleted = deleted
         self.reactions = reactions
         self.reply = reply
+        self.forward = forward
     }
 
     // ADR-0023 — custom decoder so a blob written before any of these fields
@@ -381,7 +387,7 @@ public struct PersistedMessage: Codable, Equatable {
     // envelopes loadable.
     enum CodingKeys: String, CodingKey {
         case messageId, direction, text, attachments, createdAt
-        case authorKeyB64, edited, deleted, reactions, reply
+        case authorKeyB64, edited, deleted, reactions, reply, forward
     }
 
     public init(from decoder: Decoder) throws {
@@ -402,6 +408,22 @@ public struct PersistedMessage: Codable, Equatable {
         // them must not cost the message, the group or the whole transcript.
         self.reactions = (try? c.decode([PersistedReaction].self, forKey: .reactions)) ?? []
         self.reply = try c.decodeIfPresent(PersistedReply.self, forKey: .reply)
+        self.forward = try c.decodeIfPresent(PersistedForward.self, forKey: .forward)
+    }
+}
+
+/// ADR-0052 decision 2 — JSON projection of a ``ForwardRef``: the original
+/// author's name and the origin reference exactly as the envelope carried
+/// them, so the "Forwarded from" line and its tap target survive a relaunch.
+public struct PersistedForward: Codable, Equatable {
+    public let author: String?
+    public let originGroupIdHex: String?
+    public let originMessageId: Int64?
+
+    public init(author: String?, originGroupIdHex: String?, originMessageId: Int64?) {
+        self.author = author
+        self.originGroupIdHex = originGroupIdHex
+        self.originMessageId = originMessageId
     }
 }
 

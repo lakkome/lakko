@@ -3103,6 +3103,75 @@ a.ghost.small:hover {
 .lk-bubble.incoming .lk-reply-quote-name {
   color: var(--accent);
 }
+/* ADR-0052 decision 2 / section 5.1 — the "Forwarded from" line: one muted
+   line above the content, inside the bubble, a small forward arrow before it.
+   Plain text: no link styling, no underline, no colour that reads as a name a
+   person can reach (section 5 - the name is a label, not a person). A button
+   for accessibility; the hover tint is the only sign it does anything, and on
+   a device that does not hold the origin it does nothing. */
+.lk-forward-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  margin: 0 0 4px;
+  padding: 0 4px 0 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  opacity: 0.75;
+  font: inherit;
+  font-size: 12px;
+  line-height: 16px;
+  font-style: italic;
+  text-align: left;
+  cursor: pointer;
+}
+.lk-forward-line:hover:not(:disabled) {
+  opacity: 1;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+.lk-forward-line:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 1px;
+}
+.lk-forward-line-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The picker (`chat/ForwardPicker.tsx`): the Chats list's own row, drawn as
+   a button inside the layer. */
+.lk-forward-search {
+  margin: 0;
+}
+.lk-forward-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.lk-forward-row {
+  width: 100%;
+  border: none;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.lk-forward-row:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+.lk-forward-row:disabled {
+  cursor: default;
+}
+.lk-forward-row:disabled:not([aria-busy="true"]) {
+  opacity: 0.6;
+}
 /* Section 3.1 "Tap to jump" — the quoted row is highlighted for about a
    second and a half in the surface tint the pressed / selected state uses,
    then returns to normal. */

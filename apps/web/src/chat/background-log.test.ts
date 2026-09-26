@@ -210,6 +210,31 @@ describe("eventToPersistedMessage", () => {
     expect("reply" in plain).toBe(false);
   });
 
+  it("persists the ADR-0052 forward attribution verbatim, and omits it when absent", () => {
+    const base = {
+      kind: "application" as const,
+      messageId: 44,
+      text: "fwd",
+      plaintext: "fwd",
+      attachments: [],
+      senderLeaf: undefined,
+      senderKey: undefined,
+      createdAt: "t",
+    };
+    const full = eventToPersistedMessage({
+      ...base,
+      forward: { author: "Anna", origin: { groupIdB64: "Zw==", messageId: 41 } },
+    });
+    expect(full.forward).toEqual({
+      author: "Anna",
+      origin: { groupIdB64: "Zw==", messageId: "41" },
+    });
+    const nameOnly = eventToPersistedMessage({ ...base, forward: { author: "Anna" } });
+    expect(nameOnly.forward).toEqual({ author: "Anna" });
+    const plain = eventToPersistedMessage(base);
+    expect("forward" in plain).toBe(false);
+  });
+
   it("persists a system row the way the chat view does", () => {
     const row = eventToPersistedMessage({
       kind: "system",

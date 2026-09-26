@@ -22,7 +22,7 @@
 #![no_main]
 
 use lakko_attachments::fuzz_api::{
-    media_metadata_within_bounds, parse_message_body, reply_within_bounds,
+    media_metadata_within_bounds, parse_message_body, reply_within_bounds, forward_within_bounds,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -32,4 +32,5 @@ fuzz_target!(|data: &[u8]| {
     // ADR-0052: a reply's snapshots survive parse only within their bounds,
     // and the bound is idempotent under compose_reply -> parse_body.
     assert!(reply_within_bounds(data));
+    assert!(forward_within_bounds(data), "ADR-0052: a forward that survives parse is within its bounds and idempotent");
 });

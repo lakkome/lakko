@@ -204,6 +204,46 @@ only; tapping does nothing and does not explain, because explaining would
 confirm that the conversation exists. The reference points at a message, never
 at a person - the author stays unreachable as above.
 
+### 5.1 Forward: the flow
+
+**Choosing Forward** opens a conversation picker: the same merged list the
+Chats tab shows (one-to-one chats and groups this device is a live member of,
+pinned first, newest next, with the search field), one row per conversation,
+no multi-select in this wave. Picking a row sends at once - no comment field,
+no confirmation - and takes the person to that conversation, where the
+forwarded message is the newest bubble. Cancel (Back, Escape, the backdrop)
+sends nothing.
+
+**What is sent** is a new message from the forwarder: the original's text
+verbatim (the edited text if it was edited), its attachments re-encrypted
+under fresh keys and uploaded again (decision 2's OQ1: the two conversations
+never share a blob), the original author's display name as the forwarder's
+timeline shows it, and - when the forwarder is in the origin conversation,
+which a forwarder always is - the origin reference. A forwarded message's
+quote (if it was a reply) is NOT carried; a forwarded forward carries the
+ORIGINAL author's name and origin, never the forwarder's. Reactions are not
+carried. A message that cannot be forwarded yet (its attachments still
+uploading, or a failed send) does not offer Forward.
+
+**The bubble.** A forwarded message draws one line above its content, inside
+the bubble, in the muted text colour with a small forward arrow:
+"Forwarded from <name>", or "Forwarded" when no name was carried. The name is
+plain text - no avatar, no username, no verification mark, no link styling
+(section 5: it is a label, not a person). The forwarder is still the message's
+author for everything else: the sender name on the bubble, edit, delete, the
+read state.
+
+**Tap to jump.** Tapping the line takes the person to the original when this
+device holds the origin conversation and the message in it: switch to that
+conversation and highlight the message the way a reply's quote does. When
+the device does not hold the conversation, or holds it but not the message,
+the tap does nothing and says nothing (section 5: an explanation would confirm
+the conversation exists). The line is a button for accessibility purposes on
+every platform, named "Forwarded from <name>".
+
+**Copy of the day.** "Forwarded from" is the only new string; the picker's
+title is "Forward to".
+
 ## 6. Data the UI needs (input to the ADR)
 
 What each unbuilt action requires. This section is the handover to the

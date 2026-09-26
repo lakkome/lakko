@@ -1,0 +1,267 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+package me.lakko.app.ui.chat
+
+import android.text.format.DateFormat
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import me.lakko.app.chat.ChatRepository
+import me.lakko.app.chat.ConversationRowKind
+import me.lakko.app.chat.ForwardRequest
+import me.lakko.app.chat.ForwardSender
+import me.lakko.app.chat.conversationRowMatchesQuery
+import me.lakko.app.chat.orderConversationRows
+import me.lakko.app.devices.sync.DeviceGroupSyncRepository
+import me.lakko.app.devices.sync.FlagsState
+import me.lakko.app.devices.sync.ReadCursorState
+import me.lakko.app.profile.ProfileDirectory
+import java.time.ZoneId
+import java.util.Locale
+
+/**
+ * ADR-0052 decision 2 / `docs/ux/message-actions.md` section 5.1 — the
+ * "Forward to" picker.
+ *
+ * The same merged list the Chats tab shows, restricted to what a forward can
+ * go to: one-to-one chats and groups this device is a LIVE member of, pinned
+ * first, newest next, with the search field. Channels are not here (a forward
+ * is a chat message), and neither is a conversation whose membership has
+ * ended (the core refuses the send). One row per conversation, no
+ * multi-select in this wave.
+ *
+ * Picking a row sends at once — no comment field, no confirmation — and takes
+ * the person to that conversation, where the forward is the newest bubble.
+ * While the attachments are being re-encrypted and uploaded the list is busy
+ * and takes no second pick. Back cancels and sends nothing.
+ *
+ * The rows are built by the same function the Chats tab uses
+ * ([threadConversationRows]), so the two lists cannot drift.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+public fun ForwardPickerScreen(
+    viewModel: ForwardViewModel,
+    repository: ChatRepository,
+    deviceGroupSync: DeviceGroupSyncRepository?,
+    onBack: () -> Unit,
+    /** The forward landed in this conversation: open it. */
+    onForwarded: (targetGroupIdHex: String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    // A picker with nothing to forward — a process restored onto this route —
+    // closes rather than showing a list that can do nothing.
+    if (viewModel.request == null) {
+        LaunchedEffect(Unit) { onBack() }
+        return
+    }
+    val state by repository.state.collectAsStateWithLifecycle()
+    val busy by viewModel.busy.collectAsStateWithLifecycle()
+    val error by viewModel.error.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val directory = remember(repository) { ProfileDirectory.get(repository.context) }
+    val nameVersion by directory.version.collectAsStateWithLifecycle()
+    val groupNameVersion by me.lakko.app.chat.GroupNameStore.version.collectAsStateWithLifecycle()
+    val flagsState = deviceGroupSync?.flags?.collectAsStateWithLifecycle()
+    val flagsMap: Map<String, FlagsState> = flagsState?.value ?: emptyMap()
+    val readCursorState = deviceGroupSync?.readCursors?.collectAsStateWithLifecycle()
+    val readCursorMap: Map<String, ReadCursorState> = readCursorState?.value ?: emptyMap()
+    var query by rememberSaveable { mutableStateOf("") }
+
+    val zone = remember { ZoneId.systemDefault() }
+    val locale = remember { Locale.getDefault() }
+    val use24h = remember(context) { DateFormat.is24HourFormat(context) }
+
+    val rows = remember(state, nameVersion, groupNameVersion, flagsMap, readCursorMap) {
+        orderConversationRows(
+            threadConversationRows(
+                context = context,
+                repository = repository,
+                directory = directory,
+                // Live memberships only: a forward is a send, and the core
+                // refuses one into a group this device has left or been
+                // removed from.
+                threads = state.threads.filter { !it.membershipEnded },
+                flagsMap = flagsMap,
+                readCursorMap = readCursorMap,
+                nowMs = System.currentTimeMillis(),
+                zone = zone,
+                use24h = use24h,
+                locale = locale,
+            ),
+        )
+    }
+    val visible = remember(rows, query) {
+        rows.filter { conversationRowMatchesQuery(query, it.title, it.preview) }
+    }
+
+    Scaffold(
+        modifier = modifier,
+        topBar = {
+            TopAppBar(
+                // Section 5.1 — "the picker's title is 'Forward to'".
+                title = { Text(FORWARD_PICKER_TITLE) },
+                navigationIcon = {
+                    IconButton(onClick = onBack, enabled = !busy) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding),
+        ) {
+            SearchField(query = query, onQueryChange = { query = it })
+            if (busy) {
+                // The attachments are being re-encrypted and uploaded under
+                // fresh keys (ADR-0052 OQ1); the list waits for the send.
+                LinearProgressIndicator(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { contentDescription = FORWARDING_LABEL },
+                )
+            }
+            error?.let { message ->
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                )
+            }
+            if (visible.isEmpty()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(
+                        text = if (query.isBlank()) "No conversations yet" else "Nothing matches",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .alpha(if (busy) 0.6f else 1f),
+                    contentPadding = PaddingValues(vertical = 4.dp),
+                ) {
+                    items(items = visible, key = { "${it.kind}:${it.id}" }) { row ->
+                        // The list only ever holds chats and groups; the kind
+                        // is checked so a channel row could never be picked
+                        // as a send target even if one were mapped in later.
+                        val pickable = !busy && row.kind != ConversationRowKind.CHANNEL
+                        ConversationRowBody(
+                            row = row,
+                            modifier = Modifier.clickable(enabled = pickable) {
+                                viewModel.forward(row.id) { onForwarded(row.id) }
+                            },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Section 5.1's title for the picker. */
+internal const val FORWARD_PICKER_TITLE: String = "Forward to"
+
+/** What the progress line says while the forward is in flight. */
+internal const val FORWARDING_LABEL: String = "Forwarding"
+
+/**
+ * The picker's state: the request it was opened with (taken once from the
+ * [me.lakko.app.chat.PendingForward] slot, so it survives rotation with the
+ * view model rather than being spent by it), the in-flight flag, and the
+ * last failure.
+ */
+public class ForwardViewModel(
+    private val repo: ChatRepository,
+    /** `null` when the slot was empty on arrival — the picker then closes. */
+    public val request: ForwardRequest?,
+    private val sender: ForwardSender = ForwardSender(
+        send = { target, text, attachments, forward ->
+            repo.sendMessage(
+                groupIdHex = target,
+                plaintext = text,
+                attachments = attachments,
+                forward = forward,
+            )
+        },
+    ),
+) : ViewModel() {
+    private val mutableBusy = MutableStateFlow(false)
+    private val mutableError = MutableStateFlow<String?>(null)
+
+    /** `true` from the pick until the send lands or fails. */
+    public val busy: StateFlow<Boolean> = mutableBusy.asStateFlow()
+
+    /** One sentence when the last forward failed, else `null`. */
+    public val error: StateFlow<String?> = mutableError.asStateFlow()
+
+    /**
+     * Send the request into [targetGroupIdHex]; [onDone] runs on success. A
+     * second pick while one is in flight is ignored — the list is disabled
+     * meanwhile, so this is the seam's own guard rather than the UI's.
+     */
+    public fun forward(targetGroupIdHex: String, onDone: () -> Unit) {
+        val req = request ?: return
+        if (!mutableBusy.compareAndSet(expect = false, update = true)) return
+        mutableError.value = null
+        viewModelScope.launch {
+            try {
+                sender.forward(req, targetGroupIdHex)
+                mutableBusy.value = false
+                onDone()
+            } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                mutableBusy.value = false
+                throw e
+            } catch (e: Throwable) {
+                mutableBusy.value = false
+                // A refusal that names itself keeps its own words, as the
+                // composer's failure line does.
+                mutableError.value = e.message?.takeIf { it.isNotBlank() } ?: "Could not forward."
+            }
+        }
+    }
+}

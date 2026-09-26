@@ -78,6 +78,16 @@ extension PersistedMessage {
             : msg.reply.map {
                 PersistedReply(target: $0.target, author: $0.author, excerpt: $0.excerpt)
             }
+        // ADR-0052 decision 2 — the same for a deleted forward: the tombstone
+        // draws no attribution line, and the name is somebody's.
+        self.forward = msg.deleted
+            ? nil
+            : msg.forward.map {
+                PersistedForward(
+                    author: $0.author,
+                    originGroupIdHex: $0.originGroupIdHex,
+                    originMessageId: $0.originMessageId)
+            }
     }
 
     /// Inverse — reconstruct a runtime ``ChatMessage`` from
@@ -110,6 +120,12 @@ extension PersistedMessage {
             },
             reply: reply.map {
                 ReplyRef(target: $0.target, author: $0.author, excerpt: $0.excerpt)
+            },
+            forward: forward.map {
+                ForwardRef(
+                    author: $0.author,
+                    originGroupIdHex: $0.originGroupIdHex,
+                    originMessageId: $0.originMessageId)
             }
         )
     }

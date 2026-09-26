@@ -71,8 +71,11 @@ const IV_LEN = 12;
  *
  * v4 adds [`PersistedMessage.reply`] (ADR-0052). A row without it reads as
  * a plain message, which is exactly what it was.
+ *
+ * v5 adds [`PersistedMessage.forward`] (ADR-0052 decision 2). A row without
+ * it reads as a message that was not forwarded, which is exactly what it was.
  */
-export const MESSAGE_LOG_VERSION = 4;
+export const MESSAGE_LOG_VERSION = 5;
 
 export interface PersistedAttachment {
   /** Base64-encoded 32-byte SHA-256 blob id. */
@@ -176,6 +179,24 @@ export interface PersistedMessage {
    * Absent on a plain message and on a row written before v4.
    */
   readonly reply?: PersistedReply;
+  /**
+   * ADR-0052 decision 2 — this message was forwarded. The name and the origin
+   * are stored as received / as sent: the name is the forwarder's label and
+   * is never looked up, the origin is what a tap on the line jumps to.
+   * Absent on a message that was not forwarded and on a row written before v5.
+   */
+  readonly forward?: PersistedForward;
+}
+
+/** ADR-0052 decision 2 — a persisted forward attribution. */
+export interface PersistedForward {
+  readonly author?: string;
+  readonly origin?: {
+    /** The origin conversation's group id, standard base64. */
+    readonly groupIdB64: string;
+    /** The original's DS `messageId`, stringified like `messageId` above. */
+    readonly messageId: string;
+  };
 }
 
 /** ADR-0052 — a persisted reply reference. */

@@ -79,6 +79,7 @@ class MessageActionMenuTest {
     private var edits = 0
     private var deletes = 0
     private var replies = 0
+    private var forwards = 0
     private var pickerOpens = 0
 
     @Before
@@ -139,6 +140,40 @@ class MessageActionMenuTest {
         // message comes first).
         compose.onNodeWithText("Reply").performClick()
         assertEquals(1, replies)
+    }
+
+    // ----- 5.1 Forward is second, on any sent message with an id -----------
+    @Test
+    fun forwardIsTheSecondRowAndFiresOnce() {
+        // ADR-0052 decision 2 / §5.1 — Forward is offered on any message with
+        // an id that is not deleted and whose send is complete, own or not.
+        // §2's order: the actions that produce a new message first (Reply,
+        // then Forward), then Copy, then Edit, then Delete.
+        compose.setContent { BubbleUnderTest(own("Hello there")) }
+        openMenu()
+
+        val top = { label: String -> compose.onNodeWithText(label).fetchSemanticsNode().boundsInWindow.top }
+        val reply = top("Reply")
+        val forward = top("Forward")
+        val copy = top("Copy")
+        val edit = top("Edit")
+        val delete = top("Delete")
+        assertTrue("Forward ($forward) must sit below Reply ($reply)", reply < forward)
+        assertTrue("Copy ($copy) must sit below Forward ($forward)", forward < copy)
+        assertTrue("Edit ($edit) must sit below Copy ($copy)", copy < edit)
+        assertTrue("Delete ($delete) must sit below Edit ($edit)", edit < delete)
+
+        compose.onNodeWithText("Forward").performClick()
+        assertEquals(1, forwards)
+        assertEquals(0, replies)
+    }
+
+    @Test
+    fun forwardIsOfferedOnSomeoneElsesMessageToo() {
+        compose.setContent { BubbleUnderTest(incoming("Hello there")) }
+        openMenu()
+        compose.onNodeWithText("Forward").performClick()
+        assertEquals(1, forwards)
     }
 
     // ----- 2. the card is sized by its own content -------------------------
@@ -349,6 +384,7 @@ class MessageActionMenuTest {
                         onReact = { reacted += it },
                         onRetrySend = {},
                         onReply = { replies += 1 },
+                        onForward = { forwards += 1 },
                     )
                 }
             }

@@ -270,7 +270,9 @@ final class ForegroundReceiveSchedulerTests: XCTestCase {
 final class UnreadCountingTests: XCTestCase {
 
     private func message(_ id: Int64) -> IncomingChatEvent {
-        .application(messageId: id, text: "hi", attachments: [], senderKey: nil, createdAt: "", reply: nil)
+        .application(
+            messageId: id, text: "hi", attachments: [], senderKey: nil, createdAt: "", reply: nil,
+            forward: nil)
     }
 
     func testOnlyIncomingChatMessagesCount() {

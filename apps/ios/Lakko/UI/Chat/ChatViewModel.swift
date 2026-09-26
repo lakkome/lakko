@@ -2334,6 +2334,134 @@ public final class ChatViewModel: ObservableObject {
         return replyingTo?.snapshot
     }
 
+    // MARK: - ADR-0052 decision 2 — forward
+
+    /// The message whose "Forward to" picker is open, `nil` when it is not
+    /// (`docs/ux/message-actions.md` section 5.1). Drives the sheet.
+    @Published public private(set) var forwardingMessage: ChatMessage?
+
+    /// ADR-0052 / section 5.1 "tap to jump" — a message id the chat screen
+    /// should scroll to and highlight as soon as it is on screen: set on the
+    /// ORIGIN conversation's model when a forward's attribution is tapped
+    /// elsewhere, consumed once by the screen. Published so a screen that is
+    /// already showing picks it up as well as one that is about to appear.
+    @Published public private(set) var pendingJump: Int64?
+
+    /// The list model the picker's rows are built from — the same code the
+    /// Chats tab runs, over the same repository, so the picker cannot disagree
+    /// with the tab about what a conversation is called. Made on first use:
+    /// most chats are never forwarded from.
+    private lazy var forwardListModel = ChatListViewModel(repository: repository)
+
+    /// Open the picker for `message`. Refused for a row that cannot be
+    /// forwarded (the menu withholds Forward there too): no id, a tombstone,
+    /// or a send that has not completed.
+    func beginForward(_ message: ChatMessage) {
+        guard message.messageId > 0, !message.deleted, message.ack == .sent else { return }
+        forwardingMessage = message
+    }
+
+    /// Cancel (Back, the sheet swiped away) sends nothing.
+    func cancelForward() {
+        forwardingMessage = nil
+    }
+
+    /// Section 5.1 — the picker's rows: the chats and groups this device is a
+    /// LIVE member of, in the Chats tab's own order (pinned first, newest
+    /// next). Channels are not conversations a message can be forwarded into,
+    /// and an ended membership cannot receive a send.
+    func forwardTargets(
+        flags: [String: FlagsState],
+        readCursors: [String: ReadCursorState]
+    ) -> [ConversationListRow] {
+        let rows = ChatListScreen.chatRows(
+            viewModel: forwardListModel, flags: flags, readCursors: readCursors)
+        return ConversationList.sorted(rows.filter { $0.endedLine == nil })
+    }
+
+    /// Section 5.1 — what the timeline calls the ORIGINAL author of
+    /// `message`, for the "Forwarded from" line a recipient will read. An own
+    /// message carries this account's own profile name (or username): a
+    /// recipient reading "You" would be reading the wrong person. Anyone
+    /// else's carries their resolved name, else the other person's name in a
+    /// 1x1. `nil` when nothing is known — the line then reads "Forwarded"
+    /// rather than the roster's placeholder word.
+    func forwardAuthorLabel(for message: ChatMessage) -> String? {
+        switch message.direction {
+        case .outgoing:
+            let directory = ProfileDirectory.shared
+            return directory.ownProfile?.displayName ?? directory.ownUsername
+        case .incoming, .system:
+            if let key = message.authorKeyB64,
+               let resolved = ProfileDirectory.shared.resolve(signatureKeyB64: key),
+               !resolved.isPlaceholder
+            {
+                return resolved.name
+            }
+            return oneToOnePeerName
+        }
+    }
+
+    /// Picking a row: send `message` to `targetGroupIdHex` at once and close
+    /// the picker. The caller then navigates to that conversation, where the
+    /// forwarded message is the newest bubble.
+    ///
+    /// The attachments are downloaded, re-encrypted under fresh keys and
+    /// uploaded again before the send (ADR-0052 decision 2, OQ1), so the
+    /// target's row appears once they are — the same order a media send
+    /// keeps. A failure before the send leaves no row anywhere; it is said
+    /// once, here, in the send-error slot of the chat the person forwarded
+    /// from, because the target chat has nothing to attach it to.
+    func forward(_ message: ChatMessage, to targetGroupIdHex: String) {
+        forwardingMessage = nil
+        let payload = ForwardPayload.forwardPayload(
+            of: message,
+            authorLabel: forwardAuthorLabel(for: message),
+            originGroupIdHex: groupIdHex)
+        let repository = repository
+        Task { @MainActor [weak self] in
+            do {
+                let refs = try await ForwardAttachments.reencryptAll(message.attachments)
+                try await repository.sendMessage(
+                    groupIdHex: targetGroupIdHex,
+                    plaintext: payload.text,
+                    attachments: refs,
+                    forward: payload.forward)
+            } catch {
+                NSLog("ADR-0052 forward failed: \(error)")
+                self?.sendError = "Forward failed. Try again."
+            }
+        }
+    }
+
+    /// Section 5.1 "tap to jump" — where a forward's attribution leads, or
+    /// `nil` when it leads nowhere on this device: the forward carried no
+    /// origin, this device does not hold that conversation, or holds it but
+    /// not the message. `nil` means do nothing and say nothing (section 5: an
+    /// explanation would confirm the conversation exists).
+    func forwardOriginJump(of forward: ForwardRef) -> (groupIdHex: String, messageId: Int64)? {
+        guard let origin = forward.originGroupIdHex, let messageId = forward.originMessageId,
+              let thread = repository.state.threads.first(where: { $0.groupIdHex == origin }),
+              thread.messages.contains(where: {
+                  $0.messageId == messageId && !ChatTimeline.isHiddenSystemRow($0)
+              })
+        else { return nil }
+        return (origin, messageId)
+    }
+
+    /// Ask this conversation's screen to scroll to `messageId` when it is on
+    /// screen (set by the shell on the ORIGIN conversation's model before it
+    /// navigates there).
+    public func requestJump(to messageId: Int64) {
+        pendingJump = messageId
+    }
+
+    /// The screen takes the pending jump exactly once.
+    func takePendingJump() -> Int64? {
+        defer { pendingJump = nil }
+        return pendingJump
+    }
+
     /// What the timeline calls the author of `message` (section 3.1): "You"
     /// for an own message; for anyone else the resolved name, falling back
     /// to the other person's name in a 1x1 and to the resolver's own

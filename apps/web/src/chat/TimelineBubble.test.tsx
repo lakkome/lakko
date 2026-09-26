@@ -131,6 +131,8 @@ function host(over: Partial<BubbleHost> = {}): BubbleHost {
     onReact: () => {},
     onReply: () => {},
     onJumpTo: () => {},
+    onForward: () => {},
+    onOpenForwardOrigin: () => {},
     actionsAvailable: true,
     hub,
     mediaUpload: undefined,
@@ -462,10 +464,10 @@ describe("the action card's width", () => {
   it("carries the section 2 order, with Delete separated", () => {
     const { items } = openMenuOn(ownMessage("hello"));
     const labels = all("[role='menuitem'] span", items as HTMLElement).map((s) => s.textContent);
-    // Section 2: the ones that produce a new message (Reply, ADR-0052), then
-    // the ones that only read (Copy), then the ones that change this message
-    // (Edit), then the destructive one.
-    expect(labels).toEqual(["Reply", "Copy", "Edit", "Delete"]);
+    // Section 2: the ones that produce a new message (Reply, then Forward -
+    // ADR-0052 decisions 1 and 2), then the ones that only read (Copy), then
+    // the ones that change this message (Edit), then the destructive one.
+    expect(labels).toEqual(["Reply", "Forward", "Copy", "Edit", "Delete"]);
     // "separated", and structurally so: the divider is a wrapper of its own,
     // not a border hung off the colour class.
     const del = one(".lk-msg-menu-destructive [role='menuitem']");
@@ -518,7 +520,7 @@ describe("Copy", () => {
     // Not the Edit / Delete predicate: section 3 offers Copy on "any message
     // with text", and an incoming message has no Edit row at all.
     const { items } = openMenuOn(incoming("hello"));
-    expect(labelsOf(items as HTMLElement)).toEqual(["Reply", "Copy"]);
+    expect(labelsOf(items as HTMLElement)).toEqual(["Reply", "Forward", "Copy"]);
   });
 
   it("is absent on a message with no text", () => {
@@ -527,14 +529,15 @@ describe("Copy", () => {
     const { items } = openMenuOn(ownMessage("", [voiceRef()]));
     expect(present(".lk-msg-menu-items")).toBe(true);
     expect((items as HTMLElement).textContent).not.toContain("Copy");
-    expect(labelsOf(items as HTMLElement)).toEqual(["Reply", "Edit", "Delete"]);
+    expect(labelsOf(items as HTMLElement)).toEqual(["Reply", "Forward", "Edit", "Delete"]);
   });
 
-  it("leaves an incoming media message with Reply alone in the card", () => {
-    // Nothing to copy and nothing to edit; Reply is offered on any message
-    // with an id (ADR-0052), so the card is drawn with that one row.
+  it("leaves an incoming media message with Reply and Forward alone in the card", () => {
+    // Nothing to copy and nothing to edit; Reply and Forward are offered on
+    // any complete message with an id (ADR-0052), so the card is drawn with
+    // those two rows.
     const { items } = openMenuOn(incoming("", [voiceRef()]));
-    expect(labelsOf(items as HTMLElement)).toEqual(["Reply"]);
+    expect(labelsOf(items as HTMLElement)).toEqual(["Reply", "Forward"]);
     expect(present("[role='group'][aria-label='React']")).toBe(true);
   });
 });
@@ -617,6 +620,82 @@ describe("Reply", () => {
   it("a media message sent as a reply keeps the ordinary bubble, so the quote has a surface", () => {
     const bubble = mount(withReply(incoming("", [voiceRef()]), { target: 41, author: "A", excerpt: "x" }));
     expect(present(".lk-reply-quote", bubble)).toBe(true);
+    expect(bubble.classList.contains("chromeless")).toBe(false);
+    expect(bubble.classList.contains("media-only")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Forward — ADR-0052 decision 2, `message-actions.md` sections 5 and 5.1.
+// ---------------------------------------------------------------------------
+
+describe("Forward", () => {
+  function withForward(
+    row: TimelineRow,
+    forward: { author?: string; origin?: { groupIdB64: string; messageId: number } },
+  ): TimelineRow {
+    if (row.kind === "outgoing") return { ...row, forward };
+    if (row.event.kind !== "application") return row;
+    return { ...row, event: { ...row.event, forward } };
+  }
+
+  it("is the SECOND row of the card, after Reply, and hands the view this message's id", () => {
+    const chosen: number[] = [];
+    const { items } = openMenuOn(incoming("hello"), { onForward: (id) => chosen.push(id) });
+    const rows = all<HTMLElement>("[role='menuitem']", items as HTMLElement);
+    expect(rows[0]?.textContent).toContain("Reply");
+    expect(rows[1]?.textContent).toContain("Forward");
+    mouse(rows[1] as HTMLElement, "click");
+    expect(chosen).toEqual([42]);
+    expect(present("[role='menu']")).toBe(false);
+  });
+
+  it("draws one named line above the content, on both sides, with the arrow", () => {
+    for (const row of [incoming("the words"), ownMessage("the words")]) {
+      document.body.innerHTML = "";
+      const bubble = mount(withForward(row, { author: "Anna" }));
+      const line = one<HTMLButtonElement>("button.lk-forward-line", bubble);
+      expect(line.getAttribute("aria-label")).toBe("Forwarded from Anna");
+      expect(one(".lk-forward-line-text", line).textContent).toBe("Forwarded from Anna");
+      expect(present("svg", line)).toBe(true);
+      // Above the content: the line precedes the text node in the bubble.
+      const text = one(".lk-bubble-text", bubble);
+      expect(line.compareDocumentPosition(text) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      // A label, not a person: plain text, no link.
+      expect(present("a", line)).toBe(false);
+    }
+  });
+
+  it("reads just Forwarded when no name was carried", () => {
+    const bubble = mount(withForward(incoming("ok"), { origin: { groupIdB64: "Zw==", messageId: 3 } }));
+    const line = one<HTMLButtonElement>("button.lk-forward-line", bubble);
+    expect(line.getAttribute("aria-label")).toBe("Forwarded");
+    expect(line.textContent).toBe("Forwarded");
+  });
+
+  it("pressing the line hands the view the carried origin, or undefined when there is none", () => {
+    const seen: unknown[] = [];
+    const origin = { groupIdB64: "Zw==", messageId: 3 };
+    let bubble = mount(withForward(incoming("ok"), { author: "A", origin }), {
+      onOpenForwardOrigin: (o) => seen.push(o),
+    });
+    mouse(one("button.lk-forward-line", bubble), "click");
+    document.body.innerHTML = "";
+    bubble = mount(withForward(incoming("ok"), { author: "A" }), {
+      onOpenForwardOrigin: (o) => seen.push(o),
+    });
+    mouse(one("button.lk-forward-line", bubble), "click");
+    expect(seen).toEqual([origin, undefined]);
+  });
+
+  it("a plain message draws no line", () => {
+    const bubble = mount(incoming("ok"));
+    expect(present(".lk-forward-line", bubble)).toBe(false);
+  });
+
+  it("a forwarded media message keeps the ordinary bubble, so the line has a surface", () => {
+    const bubble = mount(withForward(incoming("", [voiceRef()]), { author: "A" }));
+    expect(present(".lk-forward-line", bubble)).toBe(true);
     expect(bubble.classList.contains("chromeless")).toBe(false);
     expect(bubble.classList.contains("media-only")).toBe(false);
   });

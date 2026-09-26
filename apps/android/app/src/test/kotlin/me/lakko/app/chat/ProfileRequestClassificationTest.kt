@@ -59,6 +59,9 @@ class ProfileRequestClassificationTest {
         replyTo = null,
         replyAuthor = null,
         replyExcerpt = null,
+        forwardedFrom = null,
+        forwardOriginGroupB64 = null,
+        forwardOriginMessageId = null,
     )
 
     private fun classify(

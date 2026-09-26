@@ -300,6 +300,61 @@ export async function downloadAndDecryptRef(
 }
 
 /**
+ * ADR-0052 decision 2, OQ1 — re-encrypt one attachment for a forward: fetch
+ * and open the source blob, seal the plaintext under a FRESH key + nonce,
+ * upload it as its own blob, and hand back a ref that carries the source's
+ * MIME, name and ADR-0047 media metadata (kind / duration / waveform /
+ * dimensions) verbatim. A video note's poster frame is re-encrypted the same
+ * way, so the forwarded message references no blob the source does.
+ *
+ * The two conversations therefore never share a ciphertext object: the
+ * storage tier sees two unrelated blobs fetched by two unrelated groups. The
+ * cost is one download and one upload per attachment, and it is paid.
+ */
+export async function reencryptAttachmentRef(
+  ref: AttachmentRefBytes,
+  storage: StorageClient = new StorageClient(),
+): Promise<AttachmentRefBytes> {
+  let thumb: ThumbRefBytes | undefined;
+  if (ref.thumb !== undefined) {
+    const t = ref.thumb;
+    const posterBytes = await downloadAndDecryptRef(
+      { blobId: t.blobId, key: t.key, nonce: t.nonce, mime: t.mime, size: t.size, name: undefined },
+      storage,
+    );
+    const fresh = await encryptAndUploadBytes(
+      posterBytes,
+      { mime: t.mime, name: undefined },
+      {},
+      storage,
+    );
+    thumb = {
+      blobId: fresh.blobId,
+      key: fresh.key,
+      nonce: fresh.nonce,
+      mime: fresh.mime,
+      size: fresh.size,
+      width: t.width,
+      height: t.height,
+    };
+  }
+  const bytes = await downloadAndDecryptRef(ref, storage);
+  return encryptAndUploadBytes(
+    bytes,
+    { mime: ref.mime, name: ref.name },
+    {
+      ...(ref.kind === undefined ? {} : { kind: ref.kind }),
+      ...(ref.durationMs === undefined ? {} : { durationMs: ref.durationMs }),
+      ...(ref.waveform === undefined ? {} : { waveform: ref.waveform }),
+      ...(ref.width === undefined ? {} : { width: ref.width }),
+      ...(ref.height === undefined ? {} : { height: ref.height }),
+      ...(thumb === undefined ? {} : { thumb }),
+    },
+    storage,
+  );
+}
+
+/**
  * Build the MLS Application-message JSON envelope from
  * `(text, refs)`. Hand the resulting bytes to
  * `Group.createApplicationMessage(identity, bytes)` exactly like
@@ -365,6 +420,58 @@ export async function composeReplyEnvelope(
   try {
     addRefsToBuilder(wasm, builder, refs);
     return builder.buildReply(target, reply.author, reply.excerpt);
+  } catch (err) {
+    builder.free();
+    throw err;
+  }
+}
+
+/**
+ * ADR-0052 decision 2 — where a forwarded message came from: the origin
+ * conversation's group id (standard base64, the `ChatContext` registry key)
+ * and the original's DS `messageId`. Travels only inside the sealed envelope
+ * and is used for one thing: a recipient who also holds that conversation
+ * can jump to the original. Both halves are set or neither is.
+ */
+export interface ForwardOrigin {
+  readonly groupIdB64: string;
+  readonly messageId: number;
+}
+
+/**
+ * ADR-0052 decision 2 — what a forwarded chat message carries about its
+ * origin: the ORIGINAL author's display name as the forwarder's timeline
+ * showed it (a label, never a reachable identity, never verified) and the
+ * origin reference. Either may be absent; the bubble then reads "Forwarded"
+ * and a tap on it does nothing.
+ */
+export interface ForwardRef {
+  readonly author?: string;
+  readonly origin?: ForwardOrigin;
+}
+
+/**
+ * ADR-0052 decision 2 — compose a **forward**: the same chat envelope as
+ * [`composeEnvelope`] (text + refs — the refs are the RE-ENCRYPTED ones, never
+ * the source's), also carrying the original author's name and the origin
+ * reference. The core truncates an over-long name to 255 bytes on a
+ * character boundary and drops an origin it cannot carry, so the caller
+ * passes what it has without counting bytes.
+ */
+export async function composeForwardEnvelope(
+  text: string,
+  refs: readonly AttachmentRefBytes[],
+  forward: ForwardRef,
+): Promise<Uint8Array> {
+  const wasm = await loadWasm();
+  const builder = new wasm.EnvelopeBuilder(text);
+  try {
+    addRefsToBuilder(wasm, builder, refs);
+    return builder.buildForward(
+      forward.author,
+      forward.origin?.groupIdB64,
+      forward.origin === undefined ? undefined : BigInt(forward.origin.messageId),
+    );
   } catch (err) {
     builder.free();
     throw err;
@@ -514,6 +621,10 @@ export type ParsedBodyResult =
        *  ordinary chat message; `target` stays the op field and is never set
        *  here. */
       reply?: ReplyRef;
+      /** ADR-0052 decision 2 — set when this chat message was forwarded: the
+       *  original author's name and / or the origin reference, as the
+       *  forwarder wrote them. */
+      forward?: ForwardRef;
     }
   | { kind: "edit"; target: number; text: string }
   | { kind: "delete"; target: number }
@@ -587,17 +698,40 @@ export async function parseBodyEnvelope(
     // author / excerpt are kept out of the object when absent so a reply with
     // no snapshot and a plain message read the same way everywhere.
     const replyTo = parsed.replyTo;
-    if (replyTo === undefined) {
-      return { kind: "chat", text: parsed.text, attachments };
+    let reply: ReplyRef | undefined;
+    if (replyTo !== undefined) {
+      const author = parsed.replyAuthor;
+      const excerpt = parsed.replyExcerpt;
+      reply = {
+        target: Number(replyTo),
+        ...(author === undefined ? {} : { author }),
+        ...(excerpt === undefined ? {} : { excerpt }),
+      };
     }
-    const author = parsed.replyAuthor;
-    const excerpt = parsed.replyExcerpt;
-    const reply: ReplyRef = {
-      target: Number(replyTo),
-      ...(author === undefined ? {} : { author }),
-      ...(excerpt === undefined ? {} : { excerpt }),
+    // ADR-0052 decision 2 — the forward attribution, only ever present on a
+    // chat body. The core hands the origin as a pair that is either both set
+    // or both absent; a name alone is a forward that reads "Forwarded from X"
+    // with nothing to jump to. Absent fields stay out of the object so a
+    // plain message and a forward read the same way everywhere.
+    const forwardedFrom = parsed.forwardedFrom;
+    const originGroup = parsed.forwardOriginGroupB64;
+    const originMessage = parsed.forwardOriginMessageId;
+    let forward: ForwardRef | undefined;
+    if (forwardedFrom !== undefined || (originGroup !== undefined && originMessage !== undefined)) {
+      forward = {
+        ...(forwardedFrom === undefined ? {} : { author: forwardedFrom }),
+        ...(originGroup === undefined || originMessage === undefined
+          ? {}
+          : { origin: { groupIdB64: originGroup, messageId: Number(originMessage) } }),
+      };
+    }
+    return {
+      kind: "chat",
+      text: parsed.text,
+      attachments,
+      ...(reply === undefined ? {} : { reply }),
+      ...(forward === undefined ? {} : { forward }),
     };
-    return { kind: "chat", text: parsed.text, attachments, reply };
   } finally {
     parsed.free();
   }

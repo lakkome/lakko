@@ -30,7 +30,15 @@
   emulator in both directions (quote on both sides, strip cleared by the send,
   tap-to-jump highlight seen on Android); web seen in the Playwright harness
   (`?case=reply`) and deployed to `test.lakko.me`.
-- **Decision 2 (Forward) and Decision 3 (Pin): not built.**
+- **Decision 2 (Forward): built end to end 2026-09-26** - core
+  (`forwarded_from` + the origin pair, `MessageBody::Chat { forward }`,
+  `compose_forward`, the fuzz oracle), both FFI surfaces
+  (`compose_forward_envelope` / `buildForward` and the three parsed fields)
+  and all three clients per [`docs/ux/message-actions.md`](../ux/message-actions.md)
+  section 5.1 (the Forward row, the "Forward to" picker, re-encryption of every
+  attachment, the attribution line, tap-to-jump across conversations). Walked
+  live web -> iOS, iOS -> iOS and Android -> Android; see PRODUCT-READINESS.
+- **Decision 3 (Pin): not built.**
 
 ## Context
 

@@ -32,6 +32,7 @@ import type { IncomingChatEvent } from "./client";
 import { attachmentsPreviewLabel } from "./list-preview";
 import type { PersistedGroup, PersistedMessage } from "./message-log-store";
 import { persistedFromAttachmentRef } from "./persisted-attachment";
+import { persistedFromForwardRef } from "./forward";
 import { persistedFromReplyRef } from "./reply-snapshot";
 
 /** Numeric DS id of a persisted row, or `null` when it does not parse. */
@@ -246,6 +247,8 @@ export function eventToPersistedMessage(
       authorKeyB64: authorIdentityToPersisted(e.senderKey),
       // ADR-0052 — the reply reference, verbatim.
       ...(e.reply === undefined ? {} : { reply: persistedFromReplyRef(e.reply) }),
+      // ADR-0052 decision 2 — the forward attribution, verbatim.
+      ...(e.forward === undefined ? {} : { forward: persistedFromForwardRef(e.forward) }),
     };
   }
   return {

@@ -991,7 +991,17 @@ private struct SessionRoot: View, Equatable {
                 // One contact card: the chat's header opens the same pushed
                 // screen the Contacts list does (`docs/ux/conversation-info.md`
                 // section 3, "Except a person").
-                onOpenContact: { messageId in push(.contactDetail(messageId: messageId), on: tab) }
+                onOpenContact: { messageId in push(.contactDetail(messageId: messageId), on: tab) },
+                // ADR-0052 decision 2 — after a forward, the conversation it
+                // went to; on a tapped attribution, the origin, told which
+                // message to show before it is on screen. Pop back to it when
+                // it is already on this stack, else push it.
+                onOpenConversation: { targetGroupIdHex, jumpTo in
+                    if let jumpTo {
+                        chatViewModel(for: targetGroupIdHex).requestJump(to: jumpTo)
+                    }
+                    returnToOrPush(.chat(groupIdHex: targetGroupIdHex), on: tab)
+                }
             )
             // UX spec section 5.2 — a pushed chat fills the screen; the tab
             // bar returns with the list.

@@ -61,11 +61,14 @@
  * backdrop and closes the menu like any other press outside it.
  *
  * Order within the action card is section 2's: the actions that produce a NEW
- * message first (Reply - ADR-0052 decision 1; Forward is not built), then the
+ * message first (Reply, then Forward - ADR-0052 decisions 1 and 2), then the
  * ones that only read (Copy), then the ones that change this message (Edit),
  * then the destructive one, separated and in the platform's destructive
  * colour. Reply is offered on any message with an id, which is every message
- * this menu opens on. The separation of the destructive row is its own element
+ * this menu opens on; Forward on any such message whose send is complete
+ * (`canForward` - section 5.1: a message whose attachments are still
+ * uploading, or that failed to send, does not offer it). The separation of
+ * the destructive row is its own element
  * rather than a border hung off `.danger`, because "separated" and "red" are
  * two of the spec's requirements and a selector that conflates them breaks
  * both at once when a second destructive action lands.
@@ -128,6 +131,11 @@ export interface MessageMenuProps {
   onMoreReactions: () => void;
   /** ADR-0052 — arm the composer's reply strip for this message. */
   onReply: () => void;
+  /** ADR-0052 decision 2 — whether Forward is offered: the message has an id
+   *  and its send is complete. */
+  canForward: boolean;
+  /** ADR-0052 decision 2 — open the "Forward to" picker for this message. */
+  onForward: () => void;
   onCopy: (text: string) => void;
   onEdit: () => void;
   onDelete: () => void;
@@ -288,6 +296,12 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
               <Icon name="reply" size={16} />
               <span>Reply</span>
             </button>
+            <Show when={props.canForward}>
+              <button type="button" role="menuitem" onClick={() => run(() => props.onForward())}>
+                <Icon name="forward" size={16} />
+                <span>Forward</span>
+              </button>
+            </Show>
             <Show when={copyable()}>
               {(text) => (
                 <button

@@ -277,6 +277,41 @@ pub fn compose_reply_envelope(
     inner::compose_reply(&text, refs_from_ffi(attachments)?, &reply).map_err(Into::into)
 }
 
+/// ADR-0052 — build a forwarded message: the copied text and the
+/// RE-ENCRYPTED attachments (the caller downloads, re-encrypts under fresh
+/// keys and uploads before calling this - the refs passed here are the new
+/// ones), with the original author's display name as a snapshot and, when
+/// the forwarder holds the original, its location for a recipient who is also
+/// in that conversation. A forward of a forward passes the ORIGINAL name and
+/// origin, never the forwarder's.
+///
+/// # Errors
+///
+/// - [`FfiError::Attachment`] on a wrong-length byte field in any passed
+///   `AttachmentRef` (or on a `serde_json` failure, impossible for valid
+///   inputs).
+#[uniffi::export]
+pub fn compose_forward_envelope(
+    text: String,
+    attachments: Vec<AttachmentRef>,
+    forwarded_from: Option<String>,
+    origin_group_id_b64: Option<String>,
+    origin_message_id: Option<i64>,
+) -> Result<Vec<u8>, FfiError> {
+    let origin = match (origin_group_id_b64, origin_message_id) {
+        (Some(group_id_b64), Some(message_id)) => Some(inner::ForwardOrigin {
+            group_id_b64,
+            message_id,
+        }),
+        _ => None,
+    };
+    let forward = inner::Forward {
+        author: forwarded_from,
+        origin,
+    };
+    inner::compose_forward(&text, refs_from_ffi(attachments)?, &forward).map_err(Into::into)
+}
+
 /// Convert FFI attachment refs to the wire shape: byte fields to base64,
 /// lengths checked up front so a wrong-shape input fails fast at the FFI
 /// rather than at JSON parse on the other side.
@@ -410,6 +445,16 @@ pub struct ParsedBody {
     /// ADR-0052 — an excerpt of the quoted message's own text, one level
     /// deep, unchanged by later edits or deletion of the original.
     pub reply_excerpt: Option<String>,
+    /// ADR-0052 — on a forwarded message, the ORIGINAL author's display name
+    /// as a snapshot: a label, never a verified identity or a route to them.
+    pub forwarded_from: Option<String>,
+    /// ADR-0052 — base64 of the origin conversation's group id, present only
+    /// together with `forward_origin_message_id`; for a local jump by a
+    /// recipient who is also in that conversation, never shown as such.
+    pub forward_origin_group_b64: Option<String>,
+    /// ADR-0052 — the DS `messageId` of the original in the origin
+    /// conversation.
+    pub forward_origin_message_id: Option<i64>,
 }
 
 /// Build an EDIT envelope (ADR-0023) replacing the target message's
@@ -476,6 +521,7 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             text,
             attachments,
             reply,
+            forward,
         } => ParsedBody {
             kind: MessageBodyKind::Chat,
             text,
@@ -486,6 +532,11 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             reply_to: reply.as_ref().map(|r| r.target),
             reply_author: reply.as_ref().and_then(|r| r.author.clone()),
             reply_excerpt: reply.and_then(|r| r.excerpt),
+            forwarded_from: forward.as_ref().and_then(|f| f.author.clone()),
+            forward_origin_group_b64: forward
+                .as_ref()
+                .and_then(|f| f.origin.as_ref().map(|o| o.group_id_b64.clone())),
+            forward_origin_message_id: forward.and_then(|f| f.origin.map(|o| o.message_id)),
         },
         inner::MessageBody::Edit { target, text } => ParsedBody {
             kind: MessageBodyKind::Edit,
@@ -497,6 +548,9 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             reply_to: None,
             reply_author: None,
             reply_excerpt: None,
+            forwarded_from: None,
+            forward_origin_group_b64: None,
+            forward_origin_message_id: None,
         },
         inner::MessageBody::Delete { target } => ParsedBody {
             kind: MessageBodyKind::Delete,
@@ -508,6 +562,9 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             reply_to: None,
             reply_author: None,
             reply_excerpt: None,
+            forwarded_from: None,
+            forward_origin_group_b64: None,
+            forward_origin_message_id: None,
         },
         inner::MessageBody::Reaction { target, emoji } => ParsedBody {
             kind: MessageBodyKind::Reaction,
@@ -519,6 +576,9 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             reply_to: None,
             reply_author: None,
             reply_excerpt: None,
+            forwarded_from: None,
+            forward_origin_group_b64: None,
+            forward_origin_message_id: None,
         },
         inner::MessageBody::Typing { is_typing } => ParsedBody {
             kind: MessageBodyKind::Typing,
@@ -530,6 +590,9 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             reply_to: None,
             reply_author: None,
             reply_excerpt: None,
+            forwarded_from: None,
+            forward_origin_group_b64: None,
+            forward_origin_message_id: None,
         },
         inner::MessageBody::ReadReceipt { up_to } => ParsedBody {
             kind: MessageBodyKind::ReadReceipt,
@@ -541,6 +604,9 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             reply_to: None,
             reply_author: None,
             reply_excerpt: None,
+            forwarded_from: None,
+            forward_origin_group_b64: None,
+            forward_origin_message_id: None,
         },
     }
 }
@@ -943,5 +1009,37 @@ mod tests {
         assert_eq!(body.reply_to, None);
         assert_eq!(body.reply_author, None);
         assert_eq!(body.reply_excerpt, None);
+    }
+
+    #[test]
+    fn forward_round_trips_and_stays_a_chat() {
+        let wire = compose_forward_envelope(
+            "copied".to_string(),
+            vec![],
+            Some("Alice".to_string()),
+            Some("Z3JvdXA=".to_string()),
+            Some(41),
+        )
+        .unwrap();
+        let body = parse_body_envelope(wire);
+        assert_eq!(body.kind, MessageBodyKind::Chat);
+        assert_eq!(body.forwarded_from.as_deref(), Some("Alice"));
+        assert_eq!(body.forward_origin_group_b64.as_deref(), Some("Z3JvdXA="));
+        assert_eq!(body.forward_origin_message_id, Some(41));
+        assert_eq!(body.target, None);
+        assert_eq!(body.reply_to, None);
+        // Half an origin is no origin; the name still travels.
+        let wire = compose_forward_envelope(
+            "x".to_string(),
+            vec![],
+            Some("Alice".to_string()),
+            Some("Z3JvdXA=".to_string()),
+            None,
+        )
+        .unwrap();
+        let body = parse_body_envelope(wire);
+        assert_eq!(body.forwarded_from.as_deref(), Some("Alice"));
+        assert_eq!(body.forward_origin_group_b64, None);
+        assert_eq!(body.forward_origin_message_id, None);
     }
 }

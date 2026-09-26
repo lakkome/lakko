@@ -24,7 +24,13 @@
 import { createSignal, For, Index, onCleanup, Show, type JSX } from "solid-js";
 
 import type { MemberIdentity } from "./author-identity";
-import { formatAttachmentSize, type AttachmentRefBytes, type ReplyRef } from "./attachments";
+import {
+  formatAttachmentSize,
+  type AttachmentRefBytes,
+  type ForwardOrigin,
+  type ForwardRef,
+  type ReplyRef,
+} from "./attachments";
 import { useChats } from "./ChatContext";
 import { copyMessageText } from "./copy-message";
 import { OWN_REACTION_SENTINEL, type MessageOpState } from "./message-ops";
@@ -34,6 +40,7 @@ import {
   MessageMenu,
   type MenuAnchor,
 } from "./MessageMenu";
+import { forwardLineLabel } from "./forward";
 import { ownPersonKeyB64 } from "./person-key";
 import { replyQuoteLabel, replyQuoteLines } from "./reply-snapshot";
 import { NotSent } from "../media/MediaBubbles";
@@ -85,6 +92,14 @@ export interface BubbleHost {
   /** ADR-0052 — the quote block was pressed: scroll to the quoted message if
    *  the timeline holds it, else do nothing. */
   onJumpTo: (messageId: number) => void;
+  /** ADR-0052 decision 2 — Forward was chosen on this message: the view opens
+   *  the "Forward to" picker for it. */
+  onForward: (messageId: number) => void;
+  /** ADR-0052 decision 2 — the "Forwarded from" line was pressed. The view
+   *  goes to the original when it holds the origin conversation, else does
+   *  nothing and says nothing; `undefined` when the forward carried no
+   *  origin, which is the same nothing. */
+  onOpenForwardOrigin: (origin: ForwardOrigin | undefined) => void;
   /** ADR-0045 UX section 6.2.5 — whether Edit / Delete / React are offered at
    *  all. `false` once this device's membership has ended: all three compose
    *  an application message, so all three are refused by the same core gate
@@ -212,6 +227,7 @@ export function TimelineBubble(
         }
         tone={own ? "outgoing" : "incoming"}
         reply={ev.reply}
+        forward={ev.forward}
         {...props}
       />
     );
@@ -247,6 +263,7 @@ export function TimelineBubble(
       tone="outgoing"
       mediaLocalKey={live().mediaLocalKey}
       reply={live().reply}
+      forward={live().forward}
       {...props}
     />
   );
@@ -283,6 +300,9 @@ function ChatBubbleBody(
     /** ADR-0052 — the reply reference this message carries, drawn as the
      *  quote block above the text. The snapshot, never the original. */
     reply?: ReplyRef | undefined;
+    /** ADR-0052 decision 2 — the forward attribution this message carries,
+     *  drawn as one muted line above the content. A label, never a person. */
+    forward?: ForwardRef | undefined;
     /** The local short time (`17:21`), or the pending / failed word. */
     time: string;
     /** The sender's name above the bubble, or `null` (a 1x1, a run, own). */
@@ -391,9 +411,10 @@ function ChatBubbleBody(
    */
   // ADR-0052 — a reply is never "nothing but media": its quote block needs
   // the bubble's own surface to sit on, so a voice message or a photo sent as
-  // a reply keeps the ordinary chrome.
+  // a reply keeps the ordinary chrome. A forward keeps it for the same reason:
+  // its "Forwarded from" line sits inside the bubble.
   const sole = (): MediaBubble | null =>
-    props.reply !== undefined
+    props.reply !== undefined || props.forward !== undefined
       ? null
       : soleMediaBubble(
           {
@@ -577,6 +598,26 @@ function ChatBubbleBody(
                     snapshot the envelope carries and never re-reads the
                     original. A button, named for accessibility, that jumps
                     to the quoted message when this timeline holds it. */}
+                {/* ADR-0052 decision 2 / section 5.1 — the forward line: one
+                    muted line above the content, a small forward arrow, then
+                    "Forwarded from <name>" or "Forwarded". Plain text - no
+                    avatar, no username, no link styling: the name is a label,
+                    not a person (section 5). A button named for
+                    accessibility; the view decides whether the tap goes
+                    anywhere, and says nothing when it does not. */}
+                <Show when={props.forward}>
+                  {(forward) => (
+                    <button
+                      type="button"
+                      class="lk-forward-line"
+                      aria-label={forwardLineLabel(forward())}
+                      onClick={() => props.onOpenForwardOrigin(forward().origin)}
+                    >
+                      <Icon name="forward" size={14} />
+                      <span class="lk-forward-line-text">{forwardLineLabel(forward())}</span>
+                    </button>
+                  )}
+                </Show>
                 <Show when={props.reply}>
                   {(reply) => {
                     const lines = (): ReturnType<typeof replyQuoteLines> =>
@@ -768,6 +809,13 @@ function ChatBubbleBody(
               }}
               onReply={() => {
                 if (props.messageId !== undefined) props.onReply(props.messageId);
+              }}
+              /* Section 5.1 — offered once the send is complete. An incoming
+                 row is always complete; an own row is once acked. The id gate
+                 is the menu's own (it never opens without one). */
+              canForward={props.messageId !== undefined && props.ack === "sent"}
+              onForward={() => {
+                if (props.messageId !== undefined) props.onForward(props.messageId);
               }}
               /* Nothing is sent and nothing is stored: the text goes from this
                  device's memory to this device's clipboard. */

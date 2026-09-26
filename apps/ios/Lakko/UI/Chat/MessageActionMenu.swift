@@ -63,6 +63,12 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
     /// (section 3.1). Any message with an id.
     case reply
 
+    /// ADR-0052 decision 2 — opens the conversation picker; picking a row
+    /// sends this message there (section 5.1). Any landed message that is not
+    /// a tombstone: a row still sending or one that failed has nothing that
+    /// can be forwarded yet.
+    case forward
+
     /// Puts the message text on the clipboard. Nothing leaves the device.
     case copy
 
@@ -77,6 +83,7 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
     public var title: String {
         switch self {
         case .reply: return "Reply"
+        case .forward: return "Forward"
         case .copy: return "Copy"
         case .edit: return "Edit"
         case .delete: return "Delete"
@@ -86,6 +93,7 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
     public var systemImage: String {
         switch self {
         case .reply: return "arrowshape.turn.up.left"
+        case .forward: return "arrowshape.turn.up.right"
         case .copy: return "doc.on.doc"
         case .edit: return "pencil"
         case .delete: return "trash"
@@ -102,19 +110,22 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
     /// **The order is the rule, not the list.** Section 2: the new-message
     /// actions come first, then the ones that only read, then the ones that
     /// change this message, and the destructive one comes last and separated.
-    /// Reply starts a new message, Copy reads, Edit changes, Delete destroys,
-    /// so with today's four the order falls out — and it will keep falling out
-    /// when Forward arrives beside Reply and Pin arrives beside Edit.
+    /// Reply and Forward start a new message, Copy reads, Edit changes, Delete
+    /// destroys, so with today's five the order falls out — and it will keep
+    /// falling out when Pin arrives beside Edit.
     ///
     /// React is NOT in this list, which is the whole point of section 2: it is a
     /// row of its own above the bubble, not an item in this card.
     public static func offered(
-        canReply: Bool, canEditOrDelete: Bool, hasText: Bool
+        canReply: Bool, canForward: Bool, canEditOrDelete: Bool, hasText: Bool
     ) -> [MessageMenuAction] {
         var actions: [MessageMenuAction] = []
         // Section 3.1 — any message with an id; a tombstone and a row that
         // has not landed have nothing to point at.
         if canReply { actions.append(.reply) }
+        // Section 5.1 — any landed message that is not a tombstone; a row
+        // still sending, or one whose send failed, cannot be forwarded yet.
+        if canForward { actions.append(.forward) }
         // Section 3 — "any message with text". A message with only an
         // attachment has nothing to put on the clipboard, and a tombstone has
         // nothing left at all.

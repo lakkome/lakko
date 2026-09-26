@@ -139,6 +139,17 @@ pub const MAX_REPLY_AUTHOR_BYTES: usize = 255;
 /// parse and truncated on a character boundary on compose.
 pub const MAX_REPLY_EXCERPT_BYTES: usize = 512;
 
+/// ADR-0052 — the longest original-author name a forward may carry, in
+/// bytes; the same cap as a reply's quoted author, for the same reason.
+/// Dropped alone on parse and truncated on compose.
+pub const MAX_FORWARDED_FROM_BYTES: usize = 255;
+
+/// ADR-0052 — the longest origin conversation id a forward may carry, in
+/// bytes of its base64 form. A group id is a few dozen bytes; this bounds
+/// the attacker-touchable parser well above it. Over it, the origin is
+/// dropped as a whole (an id that is not one points nowhere).
+pub const MAX_FORWARD_ORIGIN_GROUP_BYTES: usize = 128;
+
 /// ADR-0047 — the wire value of [`AttachmentRef::kind`] for a voice
 /// message.
 pub const MEDIA_KIND_VOICE: &str = "voice";
@@ -983,6 +994,37 @@ pub struct Envelope {
         deserialize_with = "lenient"
     )]
     pub reply_excerpt: Option<String>,
+    /// ADR-0052 — the ORIGINAL author's display name on a forwarded message,
+    /// a snapshot taken when it was forwarded: a courtesy label, never a
+    /// verified identity and never a route to the person (no username, no
+    /// account id, no key). A forward of a forward keeps this name rather
+    /// than the forwarder's. Dropped alone if empty or over
+    /// [`MAX_FORWARDED_FROM_BYTES`].
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient"
+    )]
+    pub forwarded_from: Option<String>,
+    /// ADR-0052 — the conversation the forwarded message came from, as the
+    /// base64 of its group id, so a recipient who is ALSO in that conversation
+    /// can be taken to the original. Rides only inside the sealed payload;
+    /// no server ever sees it. Meaningful only with
+    /// [`Self::forward_origin_message`]; dropped as a pair otherwise.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient"
+    )]
+    pub forward_origin_group: Option<String>,
+    /// ADR-0052 — the DS `messageId` of the original inside
+    /// [`Self::forward_origin_group`].
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient"
+    )]
+    pub forward_origin_message: Option<i64>,
 }
 
 impl Envelope {
@@ -1004,6 +1046,9 @@ impl Envelope {
             reply_to: None,
             reply_author: None,
             reply_excerpt: None,
+            forwarded_from: None,
+            forward_origin_group: None,
+            forward_origin_message: None,
         }
     }
 
@@ -1018,6 +1063,33 @@ impl Envelope {
             author: bounded_snapshot(self.reply_author.as_deref(), MAX_REPLY_AUTHOR_BYTES),
             excerpt: bounded_snapshot(self.reply_excerpt.as_deref(), MAX_REPLY_EXCERPT_BYTES),
         })
+    }
+
+    /// The forward attribution this envelope carries: the original author's
+    /// name (dropped alone when empty or over its bound) and the origin
+    /// reference (kept only when BOTH halves are present and the group id is
+    /// within its bound). `None` when neither survives - a message with no
+    /// attribution is simply a message.
+    #[must_use]
+    fn forward(&self) -> Option<Forward> {
+        let author = bounded_snapshot(self.forwarded_from.as_deref(), MAX_FORWARDED_FROM_BYTES);
+        let origin = match (
+            bounded_snapshot(
+                self.forward_origin_group.as_deref(),
+                MAX_FORWARD_ORIGIN_GROUP_BYTES,
+            ),
+            self.forward_origin_message,
+        ) {
+            (Some(group_id_b64), Some(message_id)) => Some(ForwardOrigin {
+                group_id_b64,
+                message_id,
+            }),
+            _ => None,
+        };
+        if author.is_none() && origin.is_none() {
+            return None;
+        }
+        Some(Forward { author, origin })
     }
 }
 
@@ -1071,6 +1143,30 @@ pub struct Reply {
     pub excerpt: Option<String>,
 }
 
+/// ADR-0052 — where a forwarded message came from, for one purpose: a
+/// recipient who is also in that conversation can be taken to the original.
+/// A recipient who is not learns an opaque id they cannot open, and nothing
+/// else - the reference points at a message, never at a person.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForwardOrigin {
+    /// Base64 of the origin conversation's group id.
+    pub group_id_b64: String,
+    /// DS `messageId` of the original in that conversation.
+    pub message_id: i64,
+}
+
+/// ADR-0052 — what a forwarded message carries about its origin: the
+/// original author's display name as a snapshot (a label, not an identity)
+/// and, when the forwarder held it, the origin reference. At least one of
+/// the two is present.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Forward {
+    /// The original author's display name at forward time, if carried.
+    pub author: Option<String>,
+    /// The original message's location, if carried.
+    pub origin: Option<ForwardOrigin>,
+}
+
 /// The receiver-side classification of a decoded [`Envelope`]
 /// (ADR-0023). A plain message is [`Self::Chat`]; the three op
 /// variants carry the DS `messageId` of the message they act on.
@@ -1086,6 +1182,9 @@ pub enum MessageBody {
         /// `Chat` classification only: an op that also carried reply fields
         /// is that op, and the reply is ignored.
         reply: Option<Reply>,
+        /// ADR-0052 — the attribution of a forwarded message, if any. Like
+        /// `reply`, on the `Chat` classification only.
+        forward: Option<Forward>,
     },
     /// Replace the target message's body with `text`.
     Edit {
@@ -1131,6 +1230,7 @@ impl Envelope {
         // Read before `text` / `attachments` are moved out below; the reply is
         // exclusive with nothing and is simply carried on the Chat exits.
         let reply = self.reply();
+        let forward = self.forward();
         let op_count = u8::from(self.edit_of.is_some())
             + u8::from(self.delete_of.is_some())
             + u8::from(self.react_to.is_some())
@@ -1163,6 +1263,7 @@ impl Envelope {
                     text: self.text,
                     attachments: self.attachments,
                     reply,
+                    forward,
                 };
             }
         }
@@ -1170,6 +1271,7 @@ impl Envelope {
             text: self.text,
             attachments: self.attachments,
             reply,
+            forward,
         }
     }
 }
@@ -1234,6 +1336,43 @@ pub fn compose_reply(
     };
     serde_json::to_vec(&envelope)
         .map_err(|e| AttachmentError::WireFormat(format!("compose_reply: {e}")))
+}
+
+/// Encode a FORWARDED message (ADR-0052): the copied text and the
+/// re-encrypted attachments, with the original author's name as a snapshot
+/// and, when the forwarder holds the original, its location. The name is
+/// trimmed and truncated on a character boundary to its bound; an empty one
+/// is not carried. The origin is carried only when its group id is within
+/// bound - a forward that cannot name its origin is still a forward.
+///
+/// A forward of a forward passes the ORIGINAL author's name and origin, so a
+/// chain does not rewrite its own history; that is the caller's rule and the
+/// crate cannot check it.
+///
+/// # Errors
+///
+/// [`AttachmentError::WireFormat`] if serialisation fails.
+pub fn compose_forward(
+    text: &str,
+    attachments: Vec<AttachmentRef>,
+    forward: &Forward,
+) -> Result<Vec<u8>, AttachmentError> {
+    let origin = forward.origin.as_ref().filter(|o| {
+        !o.group_id_b64.is_empty() && o.group_id_b64.len() <= MAX_FORWARD_ORIGIN_GROUP_BYTES
+    });
+    let envelope = Envelope {
+        text: text.to_string(),
+        attachments: attachments
+            .into_iter()
+            .map(AttachmentRef::sanitized)
+            .collect(),
+        forwarded_from: truncated_snapshot(forward.author.as_deref(), MAX_FORWARDED_FROM_BYTES),
+        forward_origin_group: origin.map(|o| o.group_id_b64.clone()),
+        forward_origin_message: origin.map(|o| o.message_id),
+        ..Envelope::base()
+    };
+    serde_json::to_vec(&envelope)
+        .map_err(|e| AttachmentError::WireFormat(format!("compose_forward: {e}")))
 }
 
 /// Encode an EDIT of the message whose DS `messageId` is `target`,
@@ -1375,11 +1514,13 @@ pub fn parse_body(bytes: &[u8]) -> MessageBody {
             text: format!("[unsupported v{} message]", env.v),
             attachments: Vec::new(),
             reply: None,
+            forward: None,
         },
         Err(_) => MessageBody::Chat {
             text: String::from_utf8_lossy(bytes).into_owned(),
             attachments: Vec::new(),
             reply: None,
+            forward: None,
         },
     }
 }
@@ -1419,8 +1560,9 @@ pub enum AttachmentError {
 #[doc(hidden)]
 pub mod fuzz_api {
     use super::{
-        compose, compose_reply, parse, parse_body, AttachmentRef, MediaKind, MessageBody,
-        MAX_MEDIA_DIMENSION, MAX_REPLY_AUTHOR_BYTES, MAX_REPLY_EXCERPT_BYTES, MAX_THUMB_BYTES,
+        compose, compose_forward, compose_reply, parse, parse_body, AttachmentRef, MediaKind,
+        MessageBody, MAX_FORWARDED_FROM_BYTES, MAX_FORWARD_ORIGIN_GROUP_BYTES, MAX_MEDIA_DIMENSION,
+        MAX_REPLY_AUTHOR_BYTES, MAX_REPLY_EXCERPT_BYTES, MAX_THUMB_BYTES,
         MAX_VIDEO_NOTE_DURATION_MS, MAX_VOICE_DURATION_MS, MAX_WAVEFORM_BYTES,
     };
 
@@ -1437,6 +1579,7 @@ pub mod fuzz_api {
             text,
             attachments,
             reply: Some(reply),
+            ..
         } = parse_body(bytes)
         else {
             return true;
@@ -1453,6 +1596,41 @@ pub mod fuzz_api {
             return false;
         };
         matches!(parse_body(&recomposed), MessageBody::Chat { reply: Some(again), .. } if again == reply)
+    }
+
+    /// ADR-0052 property oracle for a forward over attacker-controlled bytes:
+    /// the author name that survives [`parse_body`] is non-empty and within
+    /// its bound, an origin is either whole (group id within bound AND a
+    /// message id) or absent, and the bound is idempotent: re-composing the
+    /// parsed chat as a forward and parsing again yields the same forward.
+    #[must_use]
+    pub fn forward_within_bounds(bytes: &[u8]) -> bool {
+        let MessageBody::Chat {
+            text,
+            attachments,
+            forward: Some(forward),
+            ..
+        } = parse_body(bytes)
+        else {
+            return true;
+        };
+        if let Some(a) = &forward.author {
+            if a.is_empty() || a.len() > MAX_FORWARDED_FROM_BYTES {
+                return false;
+            }
+        }
+        if let Some(o) = &forward.origin {
+            if o.group_id_b64.is_empty() || o.group_id_b64.len() > MAX_FORWARD_ORIGIN_GROUP_BYTES {
+                return false;
+            }
+        }
+        if forward.author.is_none() && forward.origin.is_none() {
+            return false;
+        }
+        let Ok(recomposed) = compose_forward(&text, attachments, &forward) else {
+            return false;
+        };
+        matches!(parse_body(&recomposed), MessageBody::Chat { forward: Some(again), .. } if again == forward)
     }
 
     /// ADR-0047 property oracle over attacker-controlled bytes.
@@ -1726,6 +1904,7 @@ mod tests {
                 text: "hello".to_string(),
                 attachments: Vec::new(),
                 reply: None,
+                forward: None,
             }
         );
     }
@@ -2525,5 +2704,157 @@ mod reply_tests {
             parse_body(bytes),
             MessageBody::Edit { target: 3, .. }
         ));
+    }
+}
+
+#[cfg(test)]
+mod forward_tests {
+    use super::{
+        compose, compose_forward, parse_body, Forward, ForwardOrigin, MessageBody,
+        MAX_FORWARDED_FROM_BYTES, MAX_FORWARD_ORIGIN_GROUP_BYTES,
+    };
+
+    fn chat_forward(bytes: &[u8]) -> Option<Forward> {
+        match parse_body(bytes) {
+            MessageBody::Chat { forward, .. } => forward,
+            other => panic!("not a chat: {other:?}"),
+        }
+    }
+
+    fn full() -> Forward {
+        Forward {
+            author: Some("Alice".into()),
+            origin: Some(ForwardOrigin {
+                group_id_b64: "Z3JvdXAtaWQ=".into(),
+                message_id: 41,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_forward_round_trips_with_name_and_origin() {
+        let bytes = compose_forward("hello", Vec::new(), &full()).unwrap();
+        assert_eq!(chat_forward(&bytes), Some(full()));
+    }
+
+    #[test]
+    fn a_plain_message_carries_no_forward() {
+        let bytes = compose("hello", Vec::new()).unwrap();
+        assert_eq!(chat_forward(&bytes), None);
+    }
+
+    #[test]
+    fn a_forward_is_not_an_operation() {
+        let bytes = compose_forward("hello", Vec::new(), &full()).unwrap();
+        assert!(matches!(parse_body(&bytes), MessageBody::Chat { .. }));
+        // An op that also carries forward fields is that op.
+        let json = br#"{"v":1,"text":"","attachments":[],"delete_of":7,"forwarded_from":"Alice"}"#;
+        assert!(matches!(
+            parse_body(json),
+            MessageBody::Delete { target: 7 }
+        ));
+    }
+
+    #[test]
+    fn a_name_alone_is_a_forward_and_an_origin_alone_is_a_forward() {
+        let json = br#"{"v":1,"text":"x","attachments":[],"forwarded_from":"Alice"}"#;
+        assert_eq!(
+            chat_forward(json),
+            Some(Forward {
+                author: Some("Alice".into()),
+                origin: None
+            })
+        );
+        let json = br#"{"v":1,"text":"x","attachments":[],"forward_origin_group":"Z3JvdXA=","forward_origin_message":3}"#;
+        assert_eq!(
+            chat_forward(json),
+            Some(Forward {
+                author: None,
+                origin: Some(ForwardOrigin {
+                    group_id_b64: "Z3JvdXA=".into(),
+                    message_id: 3
+                })
+            })
+        );
+    }
+
+    #[test]
+    fn half_an_origin_is_no_origin() {
+        let json = br#"{"v":1,"text":"x","attachments":[],"forwarded_from":"Alice","forward_origin_group":"Z3JvdXA="}"#;
+        assert_eq!(chat_forward(json).unwrap().origin, None);
+        let json = br#"{"v":1,"text":"x","attachments":[],"forwarded_from":"Alice","forward_origin_message":3}"#;
+        assert_eq!(chat_forward(json).unwrap().origin, None);
+        // Half an origin with no name is no forward at all.
+        let json = br#"{"v":1,"text":"x","attachments":[],"forward_origin_message":3}"#;
+        assert_eq!(chat_forward(json), None);
+    }
+
+    #[test]
+    fn an_over_long_name_is_dropped_alone_on_parse_and_truncated_on_compose() {
+        let long = "a".repeat(MAX_FORWARDED_FROM_BYTES + 1);
+        let json = format!(
+            r#"{{"v":1,"text":"x","attachments":[],"forwarded_from":"{long}","forward_origin_group":"Z3JvdXA=","forward_origin_message":3}}"#
+        );
+        let f = chat_forward(json.as_bytes()).unwrap();
+        assert_eq!(f.author, None);
+        assert!(f.origin.is_some());
+        let composed = compose_forward(
+            "x",
+            Vec::new(),
+            &Forward {
+                author: Some("\u{0431}".repeat(200)),
+                origin: None,
+            },
+        )
+        .unwrap();
+        let author = chat_forward(&composed).unwrap().author.unwrap();
+        assert!(author.len() <= MAX_FORWARDED_FROM_BYTES);
+        assert!(author.chars().all(|c| c == '\u{0431}'));
+    }
+
+    #[test]
+    fn an_over_long_origin_group_drops_the_origin_on_both_sides() {
+        let long = "g".repeat(MAX_FORWARD_ORIGIN_GROUP_BYTES + 1);
+        let json = format!(
+            r#"{{"v":1,"text":"x","attachments":[],"forwarded_from":"Alice","forward_origin_group":"{long}","forward_origin_message":3}}"#
+        );
+        assert_eq!(chat_forward(json.as_bytes()).unwrap().origin, None);
+        let composed = compose_forward(
+            "x",
+            Vec::new(),
+            &Forward {
+                author: Some("Alice".into()),
+                origin: Some(ForwardOrigin {
+                    group_id_b64: long,
+                    message_id: 3,
+                }),
+            },
+        )
+        .unwrap();
+        assert_eq!(chat_forward(&composed).unwrap().origin, None);
+    }
+
+    #[test]
+    fn a_wrong_typed_field_is_dropped_alone_and_the_message_survives() {
+        let json = br#"{"v":1,"text":"still here","attachments":[],"forwarded_from":42,"forward_origin_group":"Z3JvdXA=","forward_origin_message":"nine"}"#;
+        match parse_body(json) {
+            MessageBody::Chat { text, forward, .. } => {
+                assert_eq!(text, "still here");
+                assert_eq!(forward, None);
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_forward_and_a_reply_can_share_an_envelope_on_parse() {
+        let json = br#"{"v":1,"text":"x","attachments":[],"forwarded_from":"Alice","reply_to":5}"#;
+        match parse_body(json) {
+            MessageBody::Chat { reply, forward, .. } => {
+                assert_eq!(reply.unwrap().target, 5);
+                assert_eq!(forward.unwrap().author.as_deref(), Some("Alice"));
+            },
+            other => panic!("{other:?}"),
+        }
     }
 }

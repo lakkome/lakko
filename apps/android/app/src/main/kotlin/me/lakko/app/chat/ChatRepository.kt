@@ -2875,6 +2875,10 @@ public class ChatRepository(
         attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef> = emptyList(),
         /** ADR-0052 — the quote this message carries, when it is a reply. */
         reply: ReplyRef? = null,
+        /** ADR-0052 decision 2 — the attribution this message carries, when it
+         *  is a forward. A forward never carries a quote, so the two are not
+         *  set together. */
+        forward: ForwardRef? = null,
     ): Unit =
         withContext(mlsDispatcher) {
             sendMessageOnMlsThread(
@@ -2882,6 +2886,7 @@ public class ChatRepository(
                 plaintext = plaintext,
                 attachments = attachments,
                 reply = reply,
+                forward = forward,
             )
         }
 
@@ -2890,6 +2895,7 @@ public class ChatRepository(
         plaintext: String,
         attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef> = emptyList(),
         reply: ReplyRef? = null,
+        forward: ForwardRef? = null,
     ): Unit {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException("ChatRepository not bootstrapped")
@@ -2915,6 +2921,7 @@ public class ChatRepository(
             createdAt = java.time.Instant.now().toString(),
             authorKey = null,
             reply = reply,
+            forward = forward,
         )
         publishThreadList()
         try {
@@ -2926,6 +2933,7 @@ public class ChatRepository(
                 plaintext = plaintext,
                 attachments = attachments,
                 reply = reply,
+                forward = forward,
             )
         } catch (e: Throwable) {
             record.markFailed(localId)
@@ -2978,8 +2986,9 @@ public class ChatRepository(
                 plaintext = row.text,
                 attachments = row.attachments,
                 // The quote goes again with the words: the row is the only
-                // place either was ever kept.
+                // place either was ever kept. The forward attribution too.
                 reply = row.reply,
+                forward = row.forward,
             )
         } catch (e: Throwable) {
             record.markFailed(localId)
@@ -2997,6 +3006,7 @@ public class ChatRepository(
         plaintext: String,
         attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef>,
         reply: ReplyRef? = null,
+        forward: ForwardRef? = null,
     ) {
         groupLock(groupIdHex).withLock {
             // 1.19c4: build the JSON envelope before
@@ -3009,8 +3019,21 @@ public class ChatRepository(
             // ADR-0052 — a reply is the same envelope with `reply_to` and the
             // snapshot beside the text; the core bounds the excerpt and drops
             // an empty string, so what is passed is what the spec says.
+            // ADR-0052 decision 2 — a forward is the same envelope with the
+            // original author's name and the origin pair; the core truncates
+            // the name and drops an over-long origin. The origin group id
+            // crosses as STANDARD base64 of the raw id, while the app keys
+            // groups on hex, so the conversion happens here, once.
             val envelopeBytes = try {
-                if (reply != null) {
+                if (forward != null) {
+                    uniffi.lakko_ffi_uniffi.composeForwardEnvelope(
+                        text = plaintext,
+                        attachments = attachments,
+                        forwardedFrom = forward.author,
+                        originGroupIdB64 = forward.originGroupIdHex?.let(::forwardOriginGroupIdB64From),
+                        originMessageId = forward.originMessageId,
+                    )
+                } else if (reply != null) {
                     uniffi.lakko_ffi_uniffi.composeReplyEnvelope(
                         text = plaintext,
                         attachments = attachments,
@@ -7111,6 +7134,13 @@ public data class ChatMessage(
      * the quote is drawn from this alone, never from the target.
      */
     val reply: ReplyRef? = null,
+    /**
+     * ADR-0052 decision 2 — the attribution this message carries when it is a
+     * forward: the original author's display name and, when the forwarder
+     * could name it, where the original lives. `null` for an ordinary
+     * message. The forwarder is still this row's author for everything else.
+     */
+    val forward: ForwardRef? = null,
 ) {
     /**
      * The stable identity of this row.
@@ -7135,6 +7165,26 @@ public data class ReplyRef(
     val target: Long,
     val author: String?,
     val excerpt: String?,
+)
+
+/**
+ * ADR-0052 decision 2 — a forward's attribution, as the envelope carries it.
+ *
+ * [author] is the original author's display name as it stood when the message
+ * was forwarded: a SNAPSHOT and a courtesy label, never a reference to a
+ * person (`docs/ux/message-actions.md` section 5) — no username, no key, no
+ * route. `null` when the forwarder carried none, and the bubble then reads
+ * "Forwarded".
+ *
+ * [originGroupIdHex] + [originMessageId] point at the original MESSAGE, both
+ * or neither, inside the encrypted payload only. They exist so a recipient who
+ * is also in that conversation can jump to it; a recipient who is not sees
+ * the name only, and nothing here says whether that conversation exists.
+ */
+public data class ForwardRef(
+    val author: String?,
+    val originGroupIdHex: String?,
+    val originMessageId: Long?,
 )
 
 /** Whether an outgoing row reached the server. */
@@ -7297,6 +7347,9 @@ private class GroupRecord(
         authorKey: MemberIdentity?,
         /** ADR-0052 — carried on the row so the sender sees its own quote. */
         reply: ReplyRef? = null,
+        /** ADR-0052 decision 2 — carried on the row so the sender sees its
+         *  own "Forwarded from" line, and so a retry sends it again. */
+        forward: ForwardRef? = null,
     ) {
         messages.add(
             ChatMessage(
@@ -7309,6 +7362,7 @@ private class GroupRecord(
                 ack = Ack.PENDING,
                 localId = localId,
                 reply = reply,
+                forward = forward,
             ),
         )
     }
@@ -7472,6 +7526,9 @@ private class GroupRecord(
                         authorKey = event.senderKey,
                         // ADR-0052 — the quote as the envelope carried it.
                         reply = event.reply,
+                        // ADR-0052 decision 2 — the forward attribution as the
+                        // envelope carried it; the name is never resolved.
+                        forward = event.forward,
                     ),
                 )
                 is IncomingChatEvent.Op -> applyOpInternal(

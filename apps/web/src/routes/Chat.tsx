@@ -52,7 +52,19 @@ import { QuietIncomingCallPanel } from "../calls/QuietIncomingCallPanel";
 import { quietCallOfferFor, type QuietCallOffer } from "../calls/quiet-call-offer";
 import { callOwnsCaptureNow } from "../calls/capture-rule";
 import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
-import { eventToPersistedMessage, mergeForegroundSlot } from "../chat/background-log";
+import {
+  appendToGroupSlot,
+  eventToPersistedMessage,
+  mergeForegroundSlot,
+} from "../chat/background-log";
+import {
+  forwardJumpTarget,
+  forwardPayloadOf,
+  forwardRefFromPersisted,
+  persistedFromForwardRef,
+} from "../chat/forward";
+import { ForwardPicker } from "../chat/ForwardPicker";
+import type { ForwardPickerRow } from "../chat/forward-picker";
 import {
   persistedFromReplyRef,
   replyRefFromPersisted,
@@ -140,8 +152,10 @@ import { isSingleEmojiGrapheme } from "../media/emoji/emoji-index";
 import { MAX_GIF_FULL_BYTES, fetchGifMedia, type GifItem } from "../media/gif-client";
 import {
   composeEnvelope,
+  composeForwardEnvelope,
   composeReplyEnvelope,
   encryptAndUploadBytes,
+  reencryptAttachmentRef,
   composeEditEnvelope,
   composeDeleteEnvelope,
   composeReactionEnvelope,
@@ -150,6 +164,7 @@ import {
   downloadAndDecryptRef,
   encryptAndUploadFile,
   formatAttachmentSize,
+  type ForwardOrigin,
   type ReplyRef,
   saveDecryptedBytes,
   type AttachmentMediaMeta,
@@ -356,6 +371,7 @@ import {
   rowCreatedAt,
   rowIdentity,
   rowMessageId,
+  dedupByMessageId,
   type TimelineRow,
 } from "../chat/timeline-row";
 import { TimelineBubble } from "../chat/TimelineBubble";
@@ -571,8 +587,11 @@ function ChatView(props: {
   // is replaced (an ack flip, an upload landing) updates the bubble it belongs
   // to instead of replacing it — `chat/call-timeline.ts` states why that is
   // load-bearing and what it cost before.
+  // One DS id, one bubble (`dedupByMessageId`): a row can reach this list by
+  // more than one route, and the list is where every route meets.
+  const uniqueRows = createMemo(() => dedupByMessageId(rows()));
   const timelineEntries = createMemo(() =>
-    mergeConversationEntries(rows, callRows(), rowCreatedAt, rowIdentity),
+    mergeConversationEntries(uniqueRows, callRows(), rowCreatedAt, rowIdentity),
   );
   // docs/ux section 5.2 — date separators + sender runs, one layout record
   // per entry (`chat/timeline-layout.ts`). An outgoing row and an incoming row
@@ -680,6 +699,179 @@ function ChatView(props: {
     if (armed === null) return undefined;
     setReplyingTo(null);
     return { target: armed.target, author: armed.author, excerpt: armed.excerpt };
+  }
+  // ADR-0052 decision 2 / message-actions.md section 5.1 — the message the
+  // "Forward to" picker is open for, by DS id; `null` when the picker is
+  // closed. Session-scoped like the reply strip: this view is keyed on the
+  // group id, so switching conversation drops it.
+  const [forwardingId, setForwardingId] = createSignal<number | null>(null);
+  /** The timeline's name for a row's author: "You" for an own message (this
+   *  device's or this person's other device, ADR-0050), else the one display
+   *  resolver, else the same fallback the bubble draws. Shared by the reply
+   *  snapshot and the forward attribution so the two never name one person
+   *  two ways. */
+  function authorLabelOf(row: TimelineRow): string {
+    const own = ownPersonKeyB64(chats.identity());
+    const senderKey =
+      row.kind === "incoming" && row.event.kind === "application" ? row.event.senderKey : undefined;
+    return row.kind === "outgoing" || (senderKey !== undefined && senderKey === own)
+      ? "You"
+      : senderKey !== undefined
+        ? profiles.resolve(senderKey).name
+        : "Unknown sender";
+  }
+  /** The name a FORWARD carries for a row's author (spec section 5): the
+   *  recipient reads it, so an own message names this account - the profile
+   *  name, else the username - never "You", which is the timeline's word for
+   *  the viewer and a lie on every other screen (seen live 2026-09-26 as
+   *  "Forwarded from You" on the recipient's phone). An author the timeline
+   *  cannot name yields no name at all, so the bubble reads "Forwarded". */
+  function forwardAuthorLabelOf(row: TimelineRow): string | undefined {
+    const label = authorLabelOf(row);
+    if (label === "You") {
+      const own = profiles.ownProfile().displayName?.trim();
+      if (own) return own;
+      const s = auth.state();
+      return s.kind === "session" && s.account.username.trim() !== ""
+        ? s.account.username
+        : undefined;
+    }
+    return label === "Unknown sender" ? undefined : label;
+  }
+  /** Section 5.1 — the href of another conversation, routed by ITS kind the
+   *  way the Chats list routes a row (a one-to-one under `/chat/`, a group
+   *  under `/groups/`). */
+  function hrefOfConversation(target: ActiveGroup): string {
+    const s = auth.state();
+    const persisted =
+      s.kind === "session" ? persistedConversationKind(s.account.accountId, target.groupIdB64) : null;
+    const kind = decideConversationKind(persisted, peopleCountOf(target.group));
+    const slug = base64UrlEncodeNoPad(target.group.groupId);
+    return kind === "chat" ? paths.chat(slug) : paths.groupChat(slug);
+  }
+  /**
+   * Section 5.1 "What is sent" — a row of the picker was chosen for the
+   * message `forwardingId` names. Compose the payload (the pure rule in
+   * `chat/forward.ts`), re-encrypt every attachment under fresh keys so the
+   * two conversations never share a blob (decision 2, OQ1), publish through
+   * the TARGET group's own send path — `chat.sendMessage` takes that group's
+   * MLS lock, like every send — record the sent row where the target's
+   * timeline will find it, and go there. A throw keeps the picker open with
+   * the error shown; nothing was sent.
+   */
+  async function forwardTo(target: ForwardPickerRow): Promise<void> {
+    const messageId = forwardingId();
+    if (messageId === null) return;
+    const row = rows().find((r) => rowMessageId(r) === messageId);
+    if (row === undefined) throw new Error("That message is no longer here.");
+    const entry = chats.get(target.id);
+    if (entry === undefined) throw new Error("That conversation is no longer here.");
+    const original =
+      row.kind === "outgoing" ? row.plaintext : row.event.kind === "application" ? row.event.text : "";
+    const attachments =
+      row.kind === "outgoing"
+        ? row.attachments
+        : row.event.kind === "application"
+          ? row.event.attachments
+          : [];
+    const carried =
+      row.kind === "outgoing" ? row.forward : row.event.kind === "application" ? row.event.forward : undefined;
+    const payload = forwardPayloadOf(
+      {
+        text: original,
+        editedText: msgOps().get(messageId)?.editedText,
+        attachments,
+        messageId,
+        forward: carried,
+      },
+      forwardAuthorLabelOf(row),
+      props.entry.groupIdB64,
+    );
+    // Sequential, not `Promise.all`: one failure must not leave the others
+    // uploaded and orphaned, and a forward is rarely more than a few files.
+    const fresh: AttachmentRefBytes[] = [];
+    for (const a of payload.attachments) fresh.push(await reencryptAttachmentRef(a));
+    const bytes = await composeForwardEnvelope(payload.text, fresh, payload.forward);
+    let result: Awaited<ReturnType<typeof chat.sendMessage>>;
+    try {
+      result = await chat.sendMessage(props.requireIdentity(), entry.group, bytes);
+    } catch (err) {
+      throw new Error(sendFailureNotice(membershipRefusalOf(err, membershipRetryMaySucceed)));
+    }
+    // This device's signature key: one key for the device across every group
+    // it is a leaf of (ADR-0050), so the key read off this roster names this
+    // device in the target's roster too.
+    const authorKey = ownSignatureKeyB64();
+    if (entry.groupIdB64 === props.entry.groupIdB64) {
+      // Into this very conversation: the row is the timeline's, acked at once
+      // (the sender never receives its own message back), persisted by the
+      // ordinary sweep.
+      setRows([
+        ...rows(),
+        {
+          kind: "outgoing",
+          tempId: nextTempId++,
+          plaintext: payload.text,
+          attachments: fresh,
+          ack: "sent",
+          messageId: result.messageId,
+          createdAt: result.createdAt,
+          authorKey,
+          forward: payload.forward,
+        },
+      ]);
+      setForwardingId(null);
+      return;
+    }
+    // Into another conversation: the sent row goes straight into that
+    // conversation's slot of the persisted log — the only record of an own
+    // message, since the DS never echoes it back — so the view opened next
+    // seeds from it. Awaited BEFORE navigating: the destination hydrates from
+    // the log on mount.
+    const s = auth.state();
+    if (s.kind === "session") {
+      const deviceKey = await getDeviceKey(s.account.accountId);
+      if (deviceKey !== null) {
+        const hex = hexOf(entry.group.groupId);
+        const sent: PersistedMessage = {
+          messageId: String(result.messageId),
+          direction: "outgoing",
+          text: payload.text,
+          attachments: fresh.map((a) => persistedFromAttachmentRef(a)),
+          createdAt: result.createdAt,
+          authorKeyB64: authorIdentityToPersisted(authorKey),
+          forward: persistedFromForwardRef(payload.forward),
+        };
+        await updateMessageLog(s.account.accountId, deviceKey, (existing) => {
+          const groups = existing?.groups ?? {};
+          return {
+            version: MESSAGE_LOG_VERSION,
+            groups: { ...groups, [hex]: appendToGroupSlot(groups[hex], [sent], 0) },
+          };
+        });
+      }
+    }
+    setForwardingId(null);
+    navigate(hrefOfConversation(entry));
+  }
+  /**
+   * Section 5.1 "Tap to jump" — the "Forwarded from" line was pressed. When
+   * this device holds the origin conversation: this one, so scroll to the
+   * original if the timeline holds it; another, so open it at that message
+   * (`?at=`, honoured on mount below). Otherwise nothing happens and nothing
+   * is said — an explanation would confirm the conversation exists.
+   */
+  function onOpenForwardOrigin(origin: ForwardOrigin | undefined): void {
+    if (origin === undefined) return;
+    const target = forwardJumpTarget({ origin }, (id) => chats.get(id) !== undefined);
+    if (target === null) return;
+    if (target.groupIdB64 === props.entry.groupIdB64) {
+      jumpToMessage(target.messageId);
+      return;
+    }
+    const entry = chats.get(target.groupIdB64);
+    if (entry === undefined) return;
+    navigate(`${hrefOfConversation(entry)}?at=${String(target.messageId)}`);
   }
   // The quick reaction row moved into the per-message action menu, which owns
   // its own open state (`TimelineBubble.tsx` / `MessageMenu.tsx`): one gesture
@@ -998,7 +1190,30 @@ function ChatView(props: {
   // or `?call=video` (docs/ux/client-redesign.md section 5.3): the same header
   // buttons, pressed once the chat can offer a call. The parameter is dropped
   // from the URL first, so a reload or Back does not place a second call.
-  const [searchParams, setSearchParams] = useSearchParams<{ call?: string }>();
+  const [searchParams, setSearchParams] = useSearchParams<{ call?: string; at?: string }>();
+  // ADR-0052 decision 2 — `?at=<messageId>`: a forwarded message's "Forwarded
+  // from" line in another conversation opened this one at its original. The
+  // jump runs once the row is in the loaded timeline (the log hydrates
+  // asynchronously), then the parameter is dropped so a reload or Back does
+  // not jump again. A message this device does not hold is never found, and
+  // then nothing happens and nothing is said (section 5.1).
+  let atHandled = false;
+  createEffect(() => {
+    const at = searchParams.at;
+    const held = rows();
+    if (atHandled || at === undefined) return;
+    const id = Number(at);
+    if (!Number.isFinite(id)) {
+      atHandled = true;
+      setSearchParams({ at: undefined }, { replace: true });
+      return;
+    }
+    if (!held.some((r) => rowMessageId(r) === id)) return;
+    atHandled = true;
+    setSearchParams({ at: undefined }, { replace: true });
+    // The row exists in the list; give it a frame to exist in the DOM.
+    requestAnimationFrame(() => jumpToMessage(id));
+  });
   let autoCallHandled = false;
   createEffect(() => {
     const wanted = searchParams.call;
@@ -5376,7 +5591,7 @@ function ChatView(props: {
       // brings them back for good, because the op rows are long behind the
       // cursor and MLS forward secrecy will not decrypt them a second time.
       const ops = msgOps();
-      const messages = rows()
+      const messages = dedupByMessageId(rows())
         .map((r) => timelineRowToPersisted(r, hub.playedKeys()))
         .filter((m): m is PersistedMessage => m !== null)
         .map((m) => persistedWithOps(m, ops.get(Number(m.messageId))));
@@ -6900,6 +7115,15 @@ function ChatView(props: {
         </Show>
       </ModalLayer>
 
+      {/* ADR-0052 decision 2 / section 5.1 — the "Forward to" picker, open
+          while a message id is armed. Picking sends at once and navigates;
+          Back, Esc and the backdrop send nothing. */}
+      <ForwardPicker
+        open={forwardingId() !== null}
+        onClose={() => setForwardingId(null)}
+        onPick={forwardTo}
+      />
+
       {/* The layer carries its own copy of both while it is open, so an
           action refused there is readable rather than dimmed out behind it. */}
       <Show when={!infoOpen()}>
@@ -6986,6 +7210,8 @@ function ChatView(props: {
                 onCancelEdit={() => setEditingId(null)}
                 onReply={onStartReply}
                 onJumpTo={jumpToMessage}
+                onForward={(id) => setForwardingId(id)}
+                onOpenForwardOrigin={onOpenForwardOrigin}
                 onSaveEdit={onSaveEdit}
                 onDeleteMessage={onDeleteMessage}
                 onReact={onReact}
@@ -7642,6 +7868,8 @@ function timelineRowToPersisted(
       authorKeyB64: authorIdentityToPersisted(row.authorKey),
       // ADR-0052 — the reply reference, so the quote survives a reload.
       ...(row.reply === undefined ? {} : { reply: persistedFromReplyRef(row.reply) }),
+      // ADR-0052 decision 2 — the forward attribution, verbatim.
+      ...(row.forward === undefined ? {} : { forward: persistedFromForwardRef(row.forward) }),
     };
   }
   // Incoming: split application vs system.
@@ -7728,20 +7956,35 @@ function timelineRowToPersisted(
  *  Caveat: `system` rows survive the round trip with their
  *  text already baked in; the systemKind discriminator isn't
  *  recoverable but the rendered string is the same. */
+/**
+ * Client-side ids for rows restored from the log. Every restored outgoing row
+ * used to be `tempId: -1`, so they all shared the identity `out:-1` that the
+ * timeline's entry bookkeeping (`chat/call-timeline.ts`) keys on - and its
+ * live read answers with the LAST row under an identity, so a chat with N
+ * restored own messages drew the newest one N times and the others not at
+ * all. Seen live on 2026-09-26 with messages forwarded into a chat. Negative
+ * and counting down, so no restored id can meet a live `nextTempId`.
+ */
+let restoredTempId = -1;
+
 function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
   const attachments = m.attachments.map((a) => attachmentRefFromPersisted(a).ref);
   // ADR-0052 — absent on a plain message and on a row written before v4.
   const reply = replyRefFromPersisted(m.reply);
+  // ADR-0052 decision 2 — absent unless forwarded, and on a row before v5.
+  const forward = forwardRefFromPersisted(m.forward);
   if (m.direction === "outgoing") {
+    restoredTempId -= 1;
     return {
       kind: "outgoing",
-      tempId: -1,
+      tempId: restoredTempId,
       plaintext: m.text,
       attachments,
       ack: "sent",
       messageId: Number(m.messageId),
       createdAt: m.createdAt,
       ...(reply === undefined ? {} : { reply }),
+      ...(forward === undefined ? {} : { forward }),
       // Absent on a row written before this field existed, and
       // `null` when it could not be resolved — both restore as
       // `undefined`, which fails the edit/delete gate closed rather
@@ -7773,6 +8016,7 @@ function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
         senderKey: persistedAuthorIdentity(m.authorKeyB64),
         createdAt: m.createdAt,
         ...(reply === undefined ? {} : { reply }),
+        ...(forward === undefined ? {} : { forward }),
       },
     };
   }

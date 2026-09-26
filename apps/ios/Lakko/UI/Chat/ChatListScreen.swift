@@ -153,8 +153,24 @@ public struct ChatListScreen: View {
     /// own — and a channel's last post time has to become the same field as a
     /// chat's last message time, or the one ordering has nothing to order by.
     private var rows: [ConversationListRow] {
-        let flagsMap = deviceGroupSync.flags
-        let chatRows = viewModel.threads.map { thread -> ConversationListRow in
+        let chatRows = Self.chatRows(
+            viewModel: viewModel,
+            flags: deviceGroupSync.flags,
+            readCursors: deviceGroupSync.readCursors)
+        return ConversationList.filtered(
+            ConversationList.sorted(chatRows + channelRows), query: searchText)
+    }
+
+    /// The chat and group rows, in the shape the ordering takes. One
+    /// definition: the Chats tab draws these, and ADR-0052's "Forward to"
+    /// picker (``ForwardPickerScreen``) lists the same rows, so the two cannot
+    /// disagree about what a conversation is called or which ones exist.
+    static func chatRows(
+        viewModel: ChatListViewModel,
+        flags flagsMap: [String: FlagsState],
+        readCursors: [String: ReadCursorState]
+    ) -> [ConversationListRow] {
+        viewModel.threads.map { thread -> ConversationListRow in
             let kind = viewModel.kind(of: thread.groupIdHex)
             let flags = flagsMap[thread.groupIdHex]
             return ConversationListRow(
@@ -167,7 +183,7 @@ public struct ChatListScreen: View {
                     local: thread.unread,
                     cursorDerived: Self.unreadCount(
                         thread: thread,
-                        cursor: deviceGroupSync.readCursors[thread.groupIdHex])),
+                        cursor: readCursors[thread.groupIdHex])),
                 pinned: flags?.pinned == true,
                 muted: flags?.muted == true,
                 archived: flags?.archived == true,
@@ -179,8 +195,6 @@ public struct ChatListScreen: View {
                     membershipState(
                         isActive: !thread.membershipEnded, leaveRequestedAtMs: nil)))
         }
-        return ConversationList.filtered(
-            ConversationList.sorted(chatRows + channelRows), query: searchText)
     }
 
     /// A subscribed channel, in the shape the ordering takes.
@@ -511,7 +525,9 @@ public struct ChatListScreen: View {
 /// One row of the merged list, drawn identically for all three kinds (spec
 /// section 2.1): same avatar treatment, same title, same second line, same
 /// trailing column.
-private struct ConversationRowView: View {
+/// Internal rather than private: ADR-0052's "Forward to" picker draws the same
+/// row (section 5.1, "the same merged list the Chats tab shows").
+struct ConversationRowView: View {
     let row: ConversationListRow
     /// The last activity's time, `nil` when nothing has happened yet.
     let timeLabel: String?

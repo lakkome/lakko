@@ -201,50 +201,18 @@ public fun ChatListScreen(
     // Chats and groups. They were already one store split by a filter, so they
     // merge by dropping it.
     val threadRows = remember(state, nameVersion, groupNameVersion, flagsMap, readCursorMap) {
-        val now = System.currentTimeMillis()
-        state.threads.map { thread ->
-            val kind = conversationKind(context, repository, thread.groupIdHex)
-            // A call row IS the conversation's last event and belongs in the
-            // preview; the receive loop's bookkeeping rows are not and never
-            // did. Found live: a group whose only rows were commits showed the
-            // literal "[mls commit]" as its preview, which is a protocol name
-            // in a person's face and the one thing the copy rules forbid
-            // outright. A call row is a system row carrying its parts, so the
-            // two are told apart by what the row HOLDS, not by its text.
-            val last = thread.messages.lastOrNull { it.direction != Direction.System || it.call != null }
-                ?: thread.messages.lastOrNull { it.call != null }
-            val lastMs = last?.let { parseMessageTimeMs(it.createdAt) }
-            val senderName = last?.takeIf { it.direction == Direction.Incoming }
-                ?.authorKey?.let { directory.resolve(it).primary }
-            val flags = flagsMap[thread.groupIdHex]
-            ConversationListRow(
-                id = thread.groupIdHex,
-                kind = kind.toRowKind(),
-                title = conversationTitle(context, repository, directory, thread.groupIdHex),
-                preview = rowPreview(
-                    thread,
-                    last,
-                    isGroup = kind == ConversationKind.Group,
-                    senderName = senderName,
-                ),
-                time = lastMs?.let { formatListTime(it, now, zone, use24h, locale) },
-                // A conversation nothing has happened in yet has no activity
-                // at all, and the shared rule puts "never" at the bottom and
-                // breaks the tie on the title — so an unrelated refresh never
-                // reshuffles the empty ones.
-                lastActivityMs = lastMs,
-                // ADR-0045 UX §6.2.4 / §6.2.11 — no badge once the membership
-                // has ended; the count would be frozen for good.
-                unread = if (thread.membershipEnded) {
-                    0
-                } else {
-                    unreadCount(thread = thread, cursor = readCursorMap[thread.groupIdHex])
-                },
-                pinned = flags?.pinned == true,
-                muted = flags?.muted == true,
-                archived = flags?.archived == true,
-            )
-        }
+        threadConversationRows(
+            context = context,
+            repository = repository,
+            directory = directory,
+            threads = state.threads,
+            flagsMap = flagsMap,
+            readCursorMap = readCursorMap,
+            nowMs = System.currentTimeMillis(),
+            zone = zone,
+            use24h = use24h,
+            locale = locale,
+        )
     }
 
     // Channels are their own store, so they have to be mapped in. Their last
@@ -585,6 +553,67 @@ private fun findByNameMessageSafely(found: FoundByName, typed: String): String? 
 }
 
 /**
+ * The chat-and-group rows of the merged list, one per thread, as Compose draws
+ * them. Shared with the "Forward to" picker (ADR-0052 decision 2 / UX 5.1),
+ * which lists "the same merged list the Chats tab shows" and must not build a
+ * second one.
+ */
+internal fun threadConversationRows(
+    context: android.content.Context,
+    repository: ChatRepository,
+    directory: ProfileDirectory,
+    threads: List<ChatThread>,
+    flagsMap: Map<String, FlagsState>,
+    readCursorMap: Map<String, ReadCursorState>,
+    nowMs: Long,
+    zone: ZoneId,
+    use24h: Boolean,
+    locale: Locale,
+): List<ConversationListRow> = threads.map { thread ->
+    val kind = conversationKind(context, repository, thread.groupIdHex)
+    // A call row IS the conversation's last event and belongs in the
+    // preview; the receive loop's bookkeeping rows are not and never
+    // did. Found live: a group whose only rows were commits showed the
+    // literal "[mls commit]" as its preview, which is a protocol name
+    // in a person's face and the one thing the copy rules forbid
+    // outright. A call row is a system row carrying its parts, so the
+    // two are told apart by what the row HOLDS, not by its text.
+    val last = thread.messages.lastOrNull { it.direction != Direction.System || it.call != null }
+        ?: thread.messages.lastOrNull { it.call != null }
+    val lastMs = last?.let { parseMessageTimeMs(it.createdAt) }
+    val senderName = last?.takeIf { it.direction == Direction.Incoming }
+        ?.authorKey?.let { directory.resolve(it).primary }
+    val flags = flagsMap[thread.groupIdHex]
+    ConversationListRow(
+        id = thread.groupIdHex,
+        kind = kind.toRowKind(),
+        title = conversationTitle(context, repository, directory, thread.groupIdHex),
+        preview = rowPreview(
+            thread,
+            last,
+            isGroup = kind == ConversationKind.Group,
+            senderName = senderName,
+        ),
+        time = lastMs?.let { formatListTime(it, nowMs, zone, use24h, locale) },
+        // A conversation nothing has happened in yet has no activity
+        // at all, and the shared rule puts "never" at the bottom and
+        // breaks the tie on the title — so an unrelated refresh never
+        // reshuffles the empty ones.
+        lastActivityMs = lastMs,
+        // ADR-0045 UX §6.2.4 / §6.2.11 — no badge once the membership
+        // has ended; the count would be frozen for good.
+        unread = if (thread.membershipEnded) {
+            0
+        } else {
+            unreadCount(thread = thread, cursor = readCursorMap[thread.groupIdHex])
+        },
+        pinned = flags?.pinned == true,
+        muted = flags?.muted == true,
+        archived = flags?.archived == true,
+    )
+}
+
+/**
  * The second line of a row: the membership-ended line when this device's
  * membership is over (ADR-0045 UX §6.2.4), else the last message's preview
  * with its sender prefix, else "No messages yet".
@@ -672,7 +701,7 @@ private fun hexToBytes(hex: String): ByteArray? {
  * here.
  */
 @Composable
-private fun SearchField(query: String, onQueryChange: (String) -> Unit) {
+internal fun SearchField(query: String, onQueryChange: (String) -> Unit) {
     OutlinedTextField(
         value = query,
         onValueChange = onQueryChange,
@@ -845,7 +874,7 @@ private fun ThreadRow(
  * is — a channel simply has no flags and no badge to draw.
  */
 @Composable
-private fun ConversationRowBody(row: ConversationListRow, modifier: Modifier = Modifier) {
+internal fun ConversationRowBody(row: ConversationListRow, modifier: Modifier = Modifier) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = modifier

@@ -47,6 +47,9 @@ const PATHS = {
   copy: `<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/>`,
   // ADR-0052 — the Reply row of the message menu: an arrow curving back.
   reply: `<path d="m9 7-5 5 5 5"/><path d="M4 12h9.5a6 6 0 0 1 6 6v1"/>`,
+  // ADR-0052 decision 2 — the Forward row of the message menu and the line
+  // above a forwarded bubble: the reply arrow, curving the other way.
+  forward: `<path d="m15 7 5 5-5 5"/><path d="M20 12h-9.5a6 6 0 0 0-6 6v1"/>`,
   close: `<path d="M6 6l12 12M18 6 6 18"/>`,
   incoming: `<path d="M19 5 9 15M9 8v7h7"/>`,
   outgoing: `<path d="M5 19 15 9M15 16V9H8"/>`,

@@ -570,6 +570,33 @@ impl EnvelopeBuilder {
         };
         inner::compose_reply(&self.text, self.refs, &reply).map_err(attachment_err)
     }
+
+    /// ADR-0052 — consume the builder + emit a FORWARDED message: the copied
+    /// text and the re-encrypted attachments added with `add`, with the
+    /// original author's name as a snapshot and, when both halves are given,
+    /// the origin (base64 group id + `bigint` message id) for a recipient who
+    /// is also in that conversation. A forward of a forward passes the
+    /// ORIGINAL name and origin, never the forwarder's.
+    #[wasm_bindgen(js_name = buildForward)]
+    pub fn build_forward(
+        self,
+        forwarded_from: Option<String>,
+        origin_group_id_b64: Option<String>,
+        origin_message_id: Option<i64>,
+    ) -> Result<Vec<u8>, JsError> {
+        let origin = match (origin_group_id_b64, origin_message_id) {
+            (Some(group_id_b64), Some(message_id)) => Some(inner::ForwardOrigin {
+                group_id_b64,
+                message_id,
+            }),
+            _ => None,
+        };
+        let forward = inner::Forward {
+            author: forwarded_from,
+            origin,
+        };
+        inner::compose_forward(&self.text, self.refs, &forward).map_err(attachment_err)
+    }
 }
 
 /// Convenience for the no-attachment case: build a text-only
@@ -632,10 +659,34 @@ pub struct ParsedBody {
     reply_to: Option<i64>,
     reply_author: Option<String>,
     reply_excerpt: Option<String>,
+    forwarded_from: Option<String>,
+    forward_origin_group_b64: Option<String>,
+    forward_origin_message_id: Option<i64>,
 }
 
 #[wasm_bindgen]
 impl ParsedBody {
+    /// ADR-0052 — on a forwarded message, the ORIGINAL author's display name
+    /// as a snapshot: a label, never a verified identity or a route to them.
+    #[wasm_bindgen(getter, js_name = forwardedFrom)]
+    pub fn forwarded_from(&self) -> Option<String> {
+        self.forwarded_from.clone()
+    }
+
+    /// ADR-0052 — base64 of the origin conversation's group id, set only
+    /// together with `forwardOriginMessageId`; for a local jump by a recipient
+    /// who is also in that conversation.
+    #[wasm_bindgen(getter, js_name = forwardOriginGroupB64)]
+    pub fn forward_origin_group_b64(&self) -> Option<String> {
+        self.forward_origin_group_b64.clone()
+    }
+
+    /// ADR-0052 — the DS `messageId` of the original (a `bigint`).
+    #[wasm_bindgen(getter, js_name = forwardOriginMessageId)]
+    pub fn forward_origin_message_id(&self) -> Option<i64> {
+        self.forward_origin_message_id
+    }
+
     /// ADR-0052 — the DS `messageId` this message replies to, or `undefined`
     /// (a `bigint`, like `target`). Only ever set on `kind == "chat"`.
     #[wasm_bindgen(getter, js_name = replyTo)]
@@ -771,6 +822,7 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             text,
             attachments,
             reply,
+            forward,
         } => ParsedBody {
             kind: "chat",
             text,
@@ -781,6 +833,11 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             reply_to: reply.as_ref().map(|r| r.target),
             reply_author: reply.as_ref().and_then(|r| r.author.clone()),
             reply_excerpt: reply.and_then(|r| r.excerpt),
+            forwarded_from: forward.as_ref().and_then(|f| f.author.clone()),
+            forward_origin_group_b64: forward
+                .as_ref()
+                .and_then(|f| f.origin.as_ref().map(|o| o.group_id_b64.clone())),
+            forward_origin_message_id: forward.and_then(|f| f.origin.map(|o| o.message_id)),
         },
         inner::MessageBody::Edit { target, text } => ParsedBody {
             kind: "edit",
@@ -792,6 +849,9 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             reply_to: None,
             reply_author: None,
             reply_excerpt: None,
+            forwarded_from: None,
+            forward_origin_group_b64: None,
+            forward_origin_message_id: None,
         },
         inner::MessageBody::Delete { target } => ParsedBody {
             kind: "delete",
@@ -803,6 +863,9 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             reply_to: None,
             reply_author: None,
             reply_excerpt: None,
+            forwarded_from: None,
+            forward_origin_group_b64: None,
+            forward_origin_message_id: None,
         },
         inner::MessageBody::Reaction { target, emoji } => ParsedBody {
             kind: "reaction",
@@ -814,6 +877,9 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             reply_to: None,
             reply_author: None,
             reply_excerpt: None,
+            forwarded_from: None,
+            forward_origin_group_b64: None,
+            forward_origin_message_id: None,
         },
         inner::MessageBody::Typing { is_typing } => ParsedBody {
             kind: "typing",
@@ -825,6 +891,9 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             reply_to: None,
             reply_author: None,
             reply_excerpt: None,
+            forwarded_from: None,
+            forward_origin_group_b64: None,
+            forward_origin_message_id: None,
         },
         inner::MessageBody::ReadReceipt { up_to } => ParsedBody {
             kind: "read-receipt",
@@ -836,6 +905,9 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             reply_to: None,
             reply_author: None,
             reply_excerpt: None,
+            forwarded_from: None,
+            forward_origin_group_b64: None,
+            forward_origin_message_id: None,
         },
     }
 }
@@ -1162,5 +1234,26 @@ mod tests {
 
         let body = parse_body_envelope(&compose_envelope_text("hi").unwrap());
         assert_eq!(body.reply_to(), None);
+    }
+
+    #[test]
+    fn forward_round_trips_through_the_builder() {
+        let b = EnvelopeBuilder::new("copied".to_string());
+        let wire = b
+            .build_forward(
+                Some("Alice".to_string()),
+                Some("Z3JvdXA=".to_string()),
+                Some(41),
+            )
+            .unwrap();
+        let body = parse_body_envelope(&wire);
+        assert_eq!(body.kind(), "chat");
+        assert_eq!(body.forwarded_from().as_deref(), Some("Alice"));
+        assert_eq!(body.forward_origin_group_b64().as_deref(), Some("Z3JvdXA="));
+        assert_eq!(body.forward_origin_message_id(), Some(41));
+        assert_eq!(body.reply_to(), None);
+        let body = parse_body_envelope(&compose_envelope_text("hi").unwrap());
+        assert_eq!(body.forwarded_from(), None);
+        assert_eq!(body.forward_origin_message_id(), None);
     }
 }

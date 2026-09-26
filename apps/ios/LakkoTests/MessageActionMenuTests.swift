@@ -36,7 +36,7 @@ final class MessageActionMenuTests: XCTestCase {
     /// message is an action the author-only receive gate (ADR-0023) would refuse
     /// anyway, so offering it would be a control that silently does nothing.
     func testSomeoneElsesMessageOffersCopyAndNeitherEditNorDelete() {
-        let actions = MessageMenuAction.offered(canReply: false, canEditOrDelete: false, hasText: true)
+        let actions = MessageMenuAction.offered(canReply: false, canForward: false, canEditOrDelete: false, hasText: true)
 
         XCTAssertEqual(actions, [.copy])
         XCTAssertFalse(actions.contains(.delete), "Delete was offered on someone else's message")
@@ -47,7 +47,7 @@ final class MessageActionMenuTests: XCTestCase {
     /// the one that changes the message, then the destructive one last.
     func testOwnMessageOffersCopyEditAndDeleteInThatOrder() {
         XCTAssertEqual(
-            MessageMenuAction.offered(canReply: false, canEditOrDelete: true, hasText: true),
+            MessageMenuAction.offered(canReply: false, canForward: false, canEditOrDelete: true, hasText: true),
             [.copy, .edit, .delete]
         )
     }
@@ -57,24 +57,69 @@ final class MessageActionMenuTests: XCTestCase {
     /// alike, and Delete is still last.
     func testReplyIsOfferedFirstOnAnyMessageWithAnId() {
         XCTAssertEqual(
-            MessageMenuAction.offered(canReply: true, canEditOrDelete: true, hasText: true),
+            MessageMenuAction.offered(canReply: true, canForward: false, canEditOrDelete: true, hasText: true),
             [.reply, .copy, .edit, .delete]
         )
         XCTAssertEqual(
-            MessageMenuAction.offered(canReply: true, canEditOrDelete: false, hasText: true),
+            MessageMenuAction.offered(canReply: true, canForward: false, canEditOrDelete: false, hasText: true),
             [.reply, .copy]
         )
         XCTAssertEqual(
-            MessageMenuAction.offered(canReply: true, canEditOrDelete: false, hasText: false),
+            MessageMenuAction.offered(canReply: true, canForward: false, canEditOrDelete: false, hasText: false),
             [.reply]
         )
+    }
+
+    /// ADR-0052 decision 2 / section 2 — Forward is the SECOND row, right
+    /// after Reply and before everything that only reads or changes: Reply,
+    /// Forward, Copy, Edit, Delete. On someone else's message the same two
+    /// lead and Copy follows.
+    func testForwardIsOfferedSecondAfterReply() {
+        XCTAssertEqual(
+            MessageMenuAction.offered(
+                canReply: true, canForward: true, canEditOrDelete: true, hasText: true),
+            [.reply, .forward, .copy, .edit, .delete]
+        )
+        XCTAssertEqual(
+            MessageMenuAction.offered(
+                canReply: true, canForward: true, canEditOrDelete: false, hasText: true),
+            [.reply, .forward, .copy]
+        )
+        XCTAssertEqual(
+            MessageMenuAction.offered(
+                canReply: true, canForward: true, canEditOrDelete: false, hasText: false),
+            [.reply, .forward]
+        )
+    }
+
+    /// Section 5.1 — a message still sending or one whose send failed does not
+    /// offer Forward even though it offers Reply (the caller passes the two
+    /// separately); Forward alone is a valid card too.
+    func testForwardIsWithheldIndependentlyOfReply() {
+        XCTAssertEqual(
+            MessageMenuAction.offered(
+                canReply: true, canForward: false, canEditOrDelete: false, hasText: false),
+            [.reply]
+        )
+        XCTAssertEqual(
+            MessageMenuAction.offered(
+                canReply: false, canForward: true, canEditOrDelete: false, hasText: false),
+            [.forward]
+        )
+    }
+
+    /// Forward has its own title and its own glyph, the mirror of Reply's.
+    func testForwardHasItsOwnTitleAndGlyph() {
+        XCTAssertEqual(MessageMenuAction.forward.title, "Forward")
+        XCTAssertEqual(MessageMenuAction.forward.systemImage, "arrowshape.turn.up.right")
+        XCTAssertFalse(MessageMenuAction.forward.isDestructive)
     }
 
     /// A tombstone and a row that has not landed offer no Reply (the caller
     /// passes `canReply: false`); with nothing else the card is empty.
     func testNoReplyMeansNoFirstRow() {
         XCTAssertEqual(
-            MessageMenuAction.offered(canReply: false, canEditOrDelete: false, hasText: false),
+            MessageMenuAction.offered(canReply: false, canForward: false, canEditOrDelete: false, hasText: false),
             []
         )
     }
@@ -83,11 +128,11 @@ final class MessageActionMenuTests: XCTestCase {
     /// a photo with no caption and a tombstone have none.
     func testCopyIsOfferedOnlyWhereThereIsText() {
         XCTAssertEqual(
-            MessageMenuAction.offered(canReply: false, canEditOrDelete: true, hasText: false),
+            MessageMenuAction.offered(canReply: false, canForward: false, canEditOrDelete: true, hasText: false),
             [.edit, .delete]
         )
         XCTAssertEqual(
-            MessageMenuAction.offered(canReply: false, canEditOrDelete: false, hasText: false),
+            MessageMenuAction.offered(canReply: false, canForward: false, canEditOrDelete: false, hasText: false),
             [],
             "a message with nothing to copy and nothing to change offered an action anyway"
         )
@@ -101,7 +146,7 @@ final class MessageActionMenuTests: XCTestCase {
     /// in the wrong place.
     func testDeleteIsTheOnlyDestructiveActionAndComesLast() {
         XCTAssertEqual(MessageMenuAction.allCases.filter(\.isDestructive), [.delete])
-        XCTAssertEqual(MessageMenuAction.offered(canReply: false, canEditOrDelete: true, hasText: true).last, .delete)
+        XCTAssertEqual(MessageMenuAction.offered(canReply: false, canForward: false, canEditOrDelete: true, hasText: true).last, .delete)
     }
 
     // MARK: - Section 2: the shape

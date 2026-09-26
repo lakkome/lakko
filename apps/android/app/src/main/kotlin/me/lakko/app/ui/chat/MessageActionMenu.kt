@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Forward
 import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
@@ -133,9 +134,12 @@ internal data class MessageActions(
     val canDelete: Boolean,
     /** Section 3.1 (ADR-0052) — Reply is offered on any message with an id. */
     val canReply: Boolean = false,
+    /** Section 5.1 (ADR-0052 decision 2) — Forward is offered on any message
+     *  with an id that is not deleted and whose send is complete. */
+    val canForward: Boolean = false,
 ) {
     /** Whether the card has anything to draw. */
-    val any: Boolean get() = canCopy || canEdit || canDelete || canReply
+    val any: Boolean get() = canCopy || canEdit || canDelete || canReply || canForward
 }
 
 /**
@@ -147,6 +151,10 @@ internal fun messageActionsFor(
     deleted: Boolean,
     text: String,
     menuAvailable: Boolean,
+    /** Section 5.1 — whether the row's send has landed. A row still sending,
+     *  or one that failed, has nothing a forward could point at and may hold
+     *  attachments that never reached storage; it does not offer Forward. */
+    sendComplete: Boolean = true,
 ): MessageActions = MessageActions(
     // Copy reads a string this device already holds and sends nothing, so it is
     // the one action that does NOT die with the membership gate. It is still
@@ -159,6 +167,10 @@ internal fun messageActionsFor(
     // gate and the membership gate: a reply composes an application message,
     // which the core refuses once membership has ended, like Send.
     canReply = menuAvailable,
+    // Section 5.1 — "A message that cannot be forwarded yet (its attachments
+    // still uploading, or a failed send) does not offer Forward." The id gate
+    // and the deleted gate ride in `menuAvailable`, as for Reply.
+    canForward = menuAvailable && sendComplete,
 )
 
 /**
@@ -198,6 +210,8 @@ internal fun MessageActionMenuOverlay(
     onEdit: () -> Unit,
     onDelete: () -> Unit,
     onDismiss: () -> Unit,
+    /** Section 5.1 (ADR-0052 decision 2) — Forward was chosen. */
+    onForward: () -> Unit = {},
 ) {
     Popup(
         popupPositionProvider = WindowOriginProvider,
@@ -272,6 +286,7 @@ internal fun MessageActionMenuOverlay(
                         MessageActionCard(
                             actions = actions,
                             onReply = onReply,
+                            onForward = onForward,
                             onCopy = onCopy,
                             onEdit = onEdit,
                             onDelete = onDelete,
@@ -348,11 +363,12 @@ private val REACTION_TAP_SIZE: Dp = 40.dp
 /**
  * Section 2 — the action card, sized by its own content and nothing else.
  *
- * Section 2's order, of what exists today: the action that produces a new
- * message first (Reply), then the reading action (Copy), then the one that
- * changes this message (Edit), then the destructive one, separated and in the
- * platform's destructive colour. Forward, Pin, Select and Read by are section
- * 3 rows that nothing has built yet; they slot into that order when they land.
+ * Section 2's order, of what exists today: the actions that produce a new
+ * message first (Reply, then Forward), then the reading action (Copy), then
+ * the one that changes this message (Edit), then the destructive one,
+ * separated and in the platform's destructive colour. Pin, Select and Read by
+ * are section 3 rows that nothing has built yet; they slot into that order
+ * when they land.
  *
  * The look is section 2's shared card, whose reference is web's
  * `.lk-msg-menu-card` / `.lk-msg-menu-items` (`apps/web/src/styles.css`), not
@@ -368,6 +384,7 @@ internal fun MessageActionCard(
     onEdit: () -> Unit,
     onDelete: () -> Unit,
     modifier: Modifier = Modifier,
+    onForward: () -> Unit = {},
 ) {
     Surface(
         modifier = modifier.testTag(ACTION_CARD_TAG),
@@ -401,6 +418,15 @@ internal fun MessageActionCard(
                     onClick = onReply,
                 )
             }
+            if (actions.canForward) {
+                // Section 5.1 — second: it also produces a new message, in
+                // another conversation.
+                ActionRow(
+                    label = "Forward",
+                    icon = Icons.AutoMirrored.Filled.Forward,
+                    onClick = onForward,
+                )
+            }
             if (actions.canCopy) {
                 ActionRow(
                     label = "Copy",
@@ -427,7 +453,7 @@ internal fun MessageActionCard(
                         // row gap above it.
                         .padding(top = DESTRUCTIVE_GAP),
                 ) {
-                    if (actions.canReply || actions.canCopy || actions.canEdit) {
+                    if (actions.canReply || actions.canForward || actions.canCopy || actions.canEdit) {
                         HorizontalDivider(
                             thickness = CARD_BORDER_WIDTH,
                             color = MaterialTheme.colorScheme.outlineVariant,

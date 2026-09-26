@@ -846,6 +846,17 @@ internal fun toEvent(
                                 excerpt = body.replyExcerpt,
                             )
                         },
+                        // ADR-0052 decision 2 — the forward attribution, only
+                        // for `CHAT`. The core hands the origin pair both or
+                        // neither; the group id arrives as standard base64 and
+                        // is keyed here as the hex the app names groups by. A
+                        // pair whose id does not decode is dropped as a whole,
+                        // never half-kept.
+                        forward = forwardRefFrom(
+                            forwardedFrom = body.forwardedFrom,
+                            originGroupB64 = body.forwardOriginGroupB64,
+                            originMessageId = body.forwardOriginMessageId,
+                        ),
                     )
                     MessageBodyKind.EDIT -> IncomingChatEvent.Op(
                         messageId = messageId,
@@ -976,6 +987,9 @@ public sealed interface IncomingChatEvent {
         /** ADR-0052 — the reply reference and quote, when the envelope
          *  carried `reply_to`; `null` for an ordinary message. */
         val reply: ReplyRef? = null,
+        /** ADR-0052 decision 2 — the forward attribution, when the envelope
+         *  carried `forwarded_from` or an origin; `null` otherwise. */
+        val forward: ForwardRef? = null,
         /** Zero or more attachment refs from the envelope. */
         val attachments: List<AttachmentRef>,
         /** Alias of [text] — kept for the few call sites that

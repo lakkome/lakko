@@ -2581,7 +2581,8 @@ public final class ChatRepository: ObservableObject {
             envelopeBytes = try Self.composeChatEnvelope(
                 text: row.text,
                 attachments: row.attachments,
-                reply: row.reply
+                reply: row.reply,
+                forward: row.forward
             )
         } catch {
             record.markFailed(localId: localId)
@@ -2617,11 +2618,25 @@ public final class ChatRepository: ObservableObject {
     /// `text` + `attachments`, plus the reference and the snapshot) and never
     /// through the mutually exclusive op composers. The core truncates an
     /// over-long snapshot on a character boundary and drops an empty one.
+    ///
+    /// ADR-0052 decision 2 — a forward is likewise an ordinary chat message
+    /// that also says where it came from, through `composeForwardEnvelope`.
+    /// A forward never carries a quote (section 5.1: "a forwarded message's
+    /// quote is NOT carried"), so the two never meet; the forward is checked
+    /// first so that a row somehow holding both is sent as what it is.
     static func composeChatEnvelope(
         text: String,
         attachments: [AttachmentRef],
-        reply: ReplyRef?
+        reply: ReplyRef?,
+        forward: ForwardRef? = nil
     ) throws -> Data {
+        if let forward {
+            return try AttachmentBridge.composeForwardBytes(
+                text: text,
+                attachments: attachments,
+                forward: forward
+            )
+        }
         if let reply {
             return try AttachmentBridge.composeReplyBytes(
                 text: text,
@@ -2639,7 +2654,8 @@ public final class ChatRepository: ObservableObject {
         groupIdHex: String,
         plaintext: String,
         attachments: [AttachmentRef] = [],
-        reply: ReplyRef? = nil
+        reply: ReplyRef? = nil,
+        forward: ForwardRef? = nil
     ) async throws {
         guard canonicalIdentity != nil else {
             throw ChatError.argument("ChatRepository not bootstrapped")
@@ -2661,7 +2677,8 @@ public final class ChatRepository: ObservableObject {
             envelopeBytes = try Self.composeChatEnvelope(
                 text: plaintext,
                 attachments: attachments,
-                reply: reply
+                reply: reply,
+                forward: forward
             )
         } catch {
             throw ChatError.wrapped(
@@ -2695,7 +2712,8 @@ public final class ChatRepository: ObservableObject {
             attachments: attachments,
             createdAt: Self.isoTimestamp(ms: Self.nowMs()),
             authorKeyB64: AuthorIdentity.own(group: record.group),
-            reply: reply
+            reply: reply,
+            forward: forward
         )
         state = state.with(threads: buildThreadList())
         // ADR-0045 — the seal and the publish are SERIALIZED against the
@@ -5747,6 +5765,13 @@ public struct ChatMessage: Equatable, Identifiable {
     /// (`docs/ux/message-actions.md` section 3.1), so it renders the same
     /// whether the original was edited, deleted or never held on this device.
     public let reply: ReplyRef?
+    /// ADR-0052 decision 2 — set when this message was forwarded from
+    /// somewhere else: the original author's display name as the forwarder's
+    /// timeline showed it (a courtesy label, never a verified identity), and
+    /// — when the forwarder held the original — where it came from, so a
+    /// recipient who is also in that conversation can be taken to it. `nil`
+    /// for a message written in this conversation.
+    public let forward: ForwardRef?
 
     /// Whether an outgoing row reached the server.
     public enum Ack: Equatable {
@@ -5771,7 +5796,8 @@ public struct ChatMessage: Equatable, Identifiable {
         reactions: [Reaction] = [],
         ack: Ack = .sent,
         localId: Int64 = 0,
-        reply: ReplyRef? = nil
+        reply: ReplyRef? = nil,
+        forward: ForwardRef? = nil
     ) {
         self.messageId = messageId
         self.direction = direction
@@ -5785,6 +5811,7 @@ public struct ChatMessage: Equatable, Identifiable {
         self.ack = ack
         self.localId = localId
         self.reply = reply
+        self.forward = forward
     }
 
     /// `Identifiable` conformance for SwiftUI `ForEach`.
@@ -5844,6 +5871,38 @@ public struct ReplyRef: Equatable, Codable {
         self.author = author
         self.excerpt = excerpt
     }
+}
+
+/// ADR-0052 decision 2 — what a forwarded message carries about where it
+/// came from.
+///
+/// `author` is the ORIGINAL author's display name as the forwarder's timeline
+/// showed it when Forward was chosen: a snapshot and a courtesy label, never
+/// a verified identity, never a route to that person
+/// (`docs/ux/message-actions.md` section 5). `originGroupIdHex` and
+/// `originMessageId` name the original message — both or neither — so a
+/// recipient who also holds that conversation can jump to it; for anyone else
+/// the pair is an opaque id they cannot open. Every field may be `nil` on a
+/// forward that arrived without it; the bubble then reads "Forwarded".
+public struct ForwardRef: Equatable, Codable {
+    public let author: String?
+    public let originGroupIdHex: String?
+    public let originMessageId: Int64?
+
+    public init(author: String?, originGroupIdHex: String?, originMessageId: Int64?) {
+        self.author = author
+        // The origin is a pair: half of one points at nothing.
+        if let originGroupIdHex, let originMessageId {
+            self.originGroupIdHex = originGroupIdHex
+            self.originMessageId = originMessageId
+        } else {
+            self.originGroupIdHex = nil
+            self.originMessageId = nil
+        }
+    }
+
+    /// Whether this forward names the original message.
+    public var hasOrigin: Bool { originGroupIdHex != nil && originMessageId != nil }
 }
 
 /// ADR-0023 — a single reaction: who reacted with which emoji.
@@ -5957,7 +6016,8 @@ private final class GroupRecord {
         attachments: [AttachmentRef],
         createdAt: String,
         authorKeyB64: MemberIdentity?,
-        reply: ReplyRef? = nil
+        reply: ReplyRef? = nil,
+        forward: ForwardRef? = nil
     ) {
         messages.append(
             ChatMessage(
@@ -5969,7 +6029,8 @@ private final class GroupRecord {
                 authorKeyB64: authorKeyB64,
                 ack: .pending,
                 localId: localId,
-                reply: reply
+                reply: reply,
+                forward: forward
             )
         )
     }
@@ -5991,7 +6052,8 @@ private final class GroupRecord {
             reactions: old.reactions,
             ack: .sent,
             localId: localId,
-            reply: old.reply
+            reply: old.reply,
+            forward: old.forward
         )
     }
 
@@ -6103,7 +6165,8 @@ private final class GroupRecord {
         for event in events {
             switch event {
             case .application(
-                let messageId, let text, let attachments, let senderKey, let createdAt, let reply):
+                let messageId, let text, let attachments, let senderKey, let createdAt, let reply,
+                let forward):
                 // ADR-0050 — a message from this PERSON's other device
                 // arrives as an incoming row (another leaf sealed it) but is
                 // ours: same side, no sender name.
@@ -6116,7 +6179,8 @@ private final class GroupRecord {
                         attachments: attachments,
                         createdAt: createdAt,
                         authorKeyB64: senderKey,
-                        reply: reply
+                        reply: reply,
+                        forward: forward
                     )
                 )
             case .op(_, let op, let target, let text, let emoji, let senderKey, let createdAt):

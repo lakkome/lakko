@@ -34,6 +34,15 @@ public struct ChatScreen: View {
     /// the Contacts list pushes it: one card (`docs/ux/conversation-info.md`
     /// section 3, "Except a person").
     public var onOpenContact: (Int64) -> Void
+    /// ADR-0052 decision 2 — open another conversation, pushed the way the
+    /// Chats list pushes it: after a forward, the conversation it went to;
+    /// on a tapped attribution, the origin, with the message to scroll to.
+    public var onOpenConversation: (_ groupIdHex: String, _ jumpTo: Int64?) -> Void
+
+    /// ADR-0052 — the pinned / muted / archived flags and read cursors the
+    /// "Forward to" picker's rows are built with, exactly as the Chats tab
+    /// builds its own. Read only inside the picker sheet.
+    @EnvironmentObject private var deviceGroupSync: DeviceGroupSyncRepository
 
     // 1.19c3 — picker state. Swift's `PhotosPicker` returns
     // `PhotosPickerItem`s asynchronously (we resolve them to
@@ -93,12 +102,14 @@ public struct ChatScreen: View {
         viewModel: ChatViewModel,
         contacts: ContactsViewModel,
         onBack: @escaping () -> Void,
-        onOpenContact: @escaping (Int64) -> Void = { _ in }
+        onOpenContact: @escaping (Int64) -> Void = { _ in },
+        onOpenConversation: @escaping (String, Int64?) -> Void = { _, _ in }
     ) {
         self.viewModel = viewModel
         self.contacts = contacts
         self.onBack = onBack
         self.onOpenContact = onOpenContact
+        self.onOpenConversation = onOpenConversation
         _media = StateObject(wrappedValue: ChatMediaController(port: viewModel.mediaPort()))
     }
 
@@ -250,6 +261,33 @@ public struct ChatScreen: View {
         .onChange(of: viewModel.composerFocusRequest) { _, _ in
             // ADR-0052 — choosing Reply puts the keyboard on the composer.
             composerFocused = true
+        }
+        // ADR-0052 decision 2 — a forward's attribution tapped elsewhere asked
+        // this conversation to show the original: consumed once, on appear
+        // (the screen was pushed for it) or on change (it was already up).
+        .onAppear { consumePendingJump() }
+        .onChange(of: viewModel.pendingJump) { _, _ in consumePendingJump() }
+        // ADR-0052 decision 2 / section 5.1 — the "Forward to" picker, a
+        // sheet over the chat. Picking sends at once and dismisses, then
+        // opens that conversation; Cancel sends nothing.
+        .sheet(
+            isPresented: Binding(
+                get: { viewModel.forwardingMessage != nil },
+                set: { open in if !open { viewModel.cancelForward() } }
+            )
+        ) {
+            if let message = viewModel.forwardingMessage {
+                ForwardPickerScreen(
+                    rows: viewModel.forwardTargets(
+                        flags: deviceGroupSync.flags,
+                        readCursors: deviceGroupSync.readCursors),
+                    onPick: { row in
+                        viewModel.forward(message, to: row.id)
+                        onOpenConversation(row.id, nil)
+                    },
+                    onCancel: { viewModel.cancelForward() }
+                )
+            }
         }
         .navigationTitle(headline)
         .navigationBarTitleDisplayMode(.inline)
@@ -594,7 +632,12 @@ public struct ChatScreen: View {
                                 onReply: { viewModel.beginReply(entry.message) },
                                 // Section 3.1 "tap to jump" — the quote's
                                 // target, by message id.
-                                onQuoteTap: jumpToQuoted
+                                onQuoteTap: jumpToQuoted,
+                                // ADR-0052 decision 2 — Forward opens the
+                                // picker; the attribution line leads to the
+                                // original when this device holds it.
+                                onForward: { viewModel.beginForward(entry.message) },
+                                onForwardTap: jumpToForwardOrigin
                             )
                             // Tighter inside a run, a clear gap between runs.
                             .padding(.top, entry.startsRun ? 10 : 2)
@@ -686,6 +729,31 @@ public struct ChatScreen: View {
             $0.messageId == messageId && !ChatTimeline.isHiddenSystemRow($0)
         }) else { return }
         quoteJump = QuoteJump(messageId: messageId, nonce: (quoteJump?.nonce ?? 0) + 1)
+    }
+
+    /// ADR-0052 decision 2 / section 5.1 "tap to jump" — the attribution of a
+    /// forwarded message was tapped. When the original is in THIS
+    /// conversation it is the same scroll a quote makes; when it is in
+    /// another one this device holds, that conversation is opened with the
+    /// message to show; otherwise nothing happens and nothing is said.
+    private func jumpToForwardOrigin(_ forward: ForwardRef) {
+        guard let target = viewModel.forwardOriginJump(of: forward) else { return }
+        if target.groupIdHex == viewModel.groupIdHex {
+            jumpToQuoted(target.messageId)
+        } else {
+            onOpenConversation(target.groupIdHex, target.messageId)
+        }
+    }
+
+    /// Take the jump another screen asked for, once the timeline has had a
+    /// moment to lay out — a `scrollTo` issued in the same tick the list
+    /// appears has nothing to scroll yet.
+    private func consumePendingJump() {
+        guard let messageId = viewModel.takePendingJump() else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(350))
+            jumpToQuoted(messageId)
+        }
     }
 
     @ViewBuilder
@@ -1299,6 +1367,12 @@ struct MessageRow: View {
     /// ADR-0052 / section 3.1 — the quote block was tapped; the argument is
     /// the quoted message's id. The screen decides whether it can jump.
     var onQuoteTap: (Int64) -> Void = { _ in }
+    /// ADR-0052 decision 2 — the menu's Forward: open the picker for this
+    /// message.
+    var onForward: () -> Void = {}
+    /// ADR-0052 decision 2 / section 5.1 — the "Forwarded from" line was
+    /// tapped. The screen decides whether it leads anywhere.
+    var onForwardTap: (ForwardRef) -> Void = { _ in }
 
     /// `docs/ux/message-actions.md` — where the menu goes when it opens, `nil`
     /// outside a ``MessageMenuHost``.
@@ -1321,8 +1395,11 @@ struct MessageRow: View {
     ///
     /// ADR-0052 — never for a reply: the quote block needs a bubble to sit in,
     /// so a video note sent as a reply draws inside one.
+    ///
+    /// Nor for a forward (ADR-0052 decision 2): the attribution line sits
+    /// inside the bubble, above the content.
     private var isBareVideoNote: Bool {
-        guard !message.deleted, message.reply == nil, message.text.isEmpty,
+        guard !message.deleted, message.reply == nil, message.forward == nil, message.text.isEmpty,
               message.attachments.count == 1,
               let ref = message.attachments.first else { return false }
         return InlineMedia.decision(for: ref).bubble == .videoNote
@@ -1333,7 +1410,7 @@ struct MessageRow: View {
     ///
     /// ADR-0052 — never for a reply, for the same reason as ``isBareVideoNote``.
     private var bareVisualMedia: AttachmentRef? {
-        guard !message.deleted, message.reply == nil, message.text.isEmpty,
+        guard !message.deleted, message.reply == nil, message.forward == nil, message.text.isEmpty,
               message.attachments.count == 1,
               let ref = message.attachments.first else { return nil }
         switch InlineMedia.decision(for: ref).bubble {
@@ -1393,6 +1470,12 @@ struct MessageRow: View {
     /// which is the same set React is: not a system row, landed, not a
     /// tombstone, and only while this device can still send.
     private var canReply: Bool { canReact }
+
+    /// ADR-0052 decision 2 / section 5.1 — Forward is offered on any landed
+    /// message that is not a tombstone, and only once its send is complete:
+    /// a row still sending or one that failed has nothing on the server to
+    /// forward yet.
+    private var canForward: Bool { canReact && message.ack == .sent }
 
     private var isOutgoing: Bool { message.direction == .outgoing }
 
@@ -1542,7 +1625,8 @@ struct MessageRow: View {
     /// `docs/ux/message-actions.md` §3 — the card's rows for THIS message.
     private var menuActions: [MessageMenuAction] {
         MessageMenuAction.offered(
-            canReply: canReply, canEditOrDelete: canEditOrDelete, hasText: canCopy)
+            canReply: canReply, canForward: canForward, canEditOrDelete: canEditOrDelete,
+            hasText: canCopy)
     }
 
     /// Make a bubble the thing the menu opens on.
@@ -1605,6 +1689,8 @@ struct MessageRow: View {
                     switch action {
                     case .reply:
                         onReply()
+                    case .forward:
+                        onForward()
                     case .copy:
                         // Decided here because this is what knows which text the
                         // person can see.
@@ -1637,6 +1723,15 @@ struct MessageRow: View {
                         .font(.body.italic())
                         .opacity(0.7)
                 } else {
+                    // ADR-0052 decision 2 / section 5.1 — one line above the
+                    // content: "Forwarded from <name>", drawn from what the
+                    // envelope carried and dressed as nothing more than a
+                    // label.
+                    if let forward = message.forward {
+                        ForwardedLine(forward: forward, outgoing: isOutgoing) {
+                            onForwardTap(forward)
+                        }
+                    }
                     // ADR-0052 / section 3.1 — the quote block above the text,
                     // drawn from the snapshot the envelope carried and never
                     // from the quoted message itself.

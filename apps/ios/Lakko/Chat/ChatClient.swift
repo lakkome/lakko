@@ -653,7 +653,15 @@ public final class ChatClient {
                             target: $0,
                             author: parsed.replyAuthor,
                             excerpt: parsed.replyExcerpt)
-                    }
+                    },
+                    // ADR-0052 decision 2 — a forward is a chat body that also
+                    // names its original author and, when the forwarder held
+                    // it, the original message. Carried as data, never
+                    // resolved here; the bubble draws the line from it.
+                    forward: ForwardPayload.received(
+                        author: parsed.forwardedFrom,
+                        originGroupIdB64: parsed.forwardOriginGroupB64,
+                        originMessageId: parsed.forwardOriginMessageId)
                 )
             case .edit:
                 return .op(
@@ -975,13 +983,19 @@ public enum IncomingChatEvent: Equatable {
     /// target id plus whatever snapshot of the quoted author and excerpt the
     /// replier sent. Carried as data, never resolved against the timeline
     /// here; the row draws the quote from it.
+    ///
+    /// ADR-0052 decision 2 — `forward` is set when the envelope carried a
+    /// `forwarded_from` or an origin reference: the original author's name
+    /// as the forwarder wrote it, and the original message's location when
+    /// the forwarder sent one. Data, not a resolved reference.
     case application(
         messageId: Int64,
         text: String,
         attachments: [AttachmentRef],
         senderKey: MemberIdentity?,
         createdAt: String,
-        reply: ReplyRef?
+        reply: ReplyRef?,
+        forward: ForwardRef?
     )
     /// ADR-0023 — an edit / delete / reaction op carried in the
     /// same JSON envelope shape as a chat message. The

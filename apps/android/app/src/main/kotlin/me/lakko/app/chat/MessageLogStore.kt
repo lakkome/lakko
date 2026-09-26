@@ -350,6 +350,13 @@ public data class PersistedMessage(
      * target on relaunch.
      */
     val reply: PersistedReply? = null,
+    /**
+     * ADR-0052 decision 2 — the forward attribution this row carries, when it
+     * is a forward. Nullable with a default for the same reason as [reply]: a
+     * row written before forwards existed reads back as an ordinary message.
+     * The name is stored as it arrived — a snapshot, never re-resolved.
+     */
+    val forward: PersistedForward? = null,
 ) {
     /** Explicit companion so the conversion helpers below can
      *  attach as `PersistedMessage.Companion.from(msg)`. */
@@ -362,6 +369,14 @@ public data class PersistedReply(
     val target: Long,
     val author: String? = null,
     val excerpt: String? = null,
+)
+
+/** ADR-0052 decision 2 — a stored [ForwardRef]. */
+@Serializable
+public data class PersistedForward(
+    val author: String? = null,
+    val originGroupIdHex: String? = null,
+    val originMessageId: Long? = null,
 )
 
 /**
@@ -495,6 +510,19 @@ public fun PersistedMessage.Companion.from(msg: ChatMessage): PersistedMessage =
         } else {
             msg.reply?.let { PersistedReply(target = it.target, author = it.author, excerpt = it.excerpt) }
         },
+        // The attribution is content too: kept while the row stands, dropped
+        // with the words when the row is deleted.
+        forward = if (msg.deleted) {
+            null
+        } else {
+            msg.forward?.let {
+                PersistedForward(
+                    author = it.author,
+                    originGroupIdHex = it.originGroupIdHex,
+                    originMessageId = it.originMessageId,
+                )
+            }
+        },
     )
 
 /** Inverse — reconstruct a runtime [ChatMessage] from the JSON
@@ -529,6 +557,13 @@ public fun PersistedMessage.toChatMessage(): ChatMessage? {
         // is, rather than being dropped or guessed at.
         call = call?.toTranscriptEntry(),
         reply = reply?.let { ReplyRef(target = it.target, author = it.author, excerpt = it.excerpt) },
+        forward = forward?.let {
+            ForwardRef(
+                author = it.author,
+                originGroupIdHex = it.originGroupIdHex,
+                originMessageId = it.originMessageId,
+            )
+        },
     )
 }
 

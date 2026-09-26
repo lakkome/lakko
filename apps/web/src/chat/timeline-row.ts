@@ -9,7 +9,7 @@
  * can share it without importing the route.
  */
 import type { MemberIdentity } from "./author-identity";
-import type { AttachmentRefBytes, ReplyRef } from "./attachments";
+import type { AttachmentRefBytes, ForwardRef, ReplyRef } from "./attachments";
 import type { IncomingChatEvent } from "./client";
 
 /** A timeline entry — verified incoming events PLUS optimistic
@@ -55,6 +55,9 @@ export type TimelineRow =
       /** ADR-0052 — the reply this row was sent as, so the sender's own bubble
        *  draws the quote it sent and Retry re-sends the same reference. */
       reply?: ReplyRef;
+      /** ADR-0052 decision 2 — the forward attribution this row was sent
+       *  with, so the sender's own bubble draws the line it sent. */
+      forward?: ForwardRef;
     };
 
 /** Read the author IDENTITY a displayed row should be gated on:
@@ -126,4 +129,26 @@ export function rowCreatedAt(row: TimelineRow): string | undefined {
 export function rowSenderKey(row: TimelineRow): string | undefined {
   if (row.kind !== "incoming") return undefined;
   return (row.event as { senderKey?: string }).senderKey;
+}
+
+/**
+ * One DS id, one row. Rows that reached the list by two routes (a row this
+ * device filed into another conversation's log and then met again on that
+ * conversation's mount, a persisted row and its live twin) collapse to the
+ * FIRST occurrence; a row with no DS id yet (an unsent outgoing bubble) is
+ * always kept. Order is preserved. Found live on 2026-09-26: a message
+ * forwarded into another chat was drawn there three and four times over.
+ */
+export function dedupByMessageId(rows: readonly TimelineRow[]): TimelineRow[] {
+  const seen = new Set<number>();
+  const out: TimelineRow[] = [];
+  for (const row of rows) {
+    const id = rowMessageId(row);
+    if (id !== undefined) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+    }
+    out.push(row);
+  }
+  return out;
 }

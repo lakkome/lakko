@@ -45,6 +45,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import me.lakko.app.chat.ReplyArmed
 import me.lakko.app.chat.ReplyRef
 import me.lakko.app.chat.replyQuoteLines
+import me.lakko.app.chat.ForwardRef
+import me.lakko.app.chat.ForwardRequest
+import me.lakko.app.chat.PendingMessageJump
+import me.lakko.app.chat.forwardLineLabel
+import androidx.compose.material.icons.automirrored.filled.Forward
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -188,6 +193,13 @@ public fun ChatScreen(
     /** The group's title (local name or member-derived) for a group chat;
      *  a 1x1 chat names the other person itself. Never a hex id. */
     groupTitle: String? = null,
+    /** ADR-0052 decision 2 / UX 5.1 — Forward was chosen on a message: open
+     *  the "Forward to" picker with it. */
+    onForwardMessage: (ForwardRequest) -> Unit = {},
+    /** UX 5.1 "Tap to jump" — open another conversation this device holds,
+     *  after the message to light in it has been published to
+     *  [PendingMessageJump]. */
+    onOpenConversation: (groupIdHex: String) -> Unit = {},
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
@@ -298,6 +310,47 @@ public fun ChatScreen(
                 listState.animateScrollToItem(index)
                 highlightedMessageId = target
             }
+        }
+    }
+    // UX 5.1 "Tap to jump" — a forward's attribution goes to the original
+    // when this device holds the origin conversation AND the message in it.
+    // In this conversation it is the reply jump; in another it is a
+    // navigation with the message id left in [PendingMessageJump] for the
+    // destination to consume below. Otherwise nothing happens and nothing is
+    // said (section 5: an explanation would confirm the conversation exists).
+    val jumpToForward: (ForwardRef) -> Unit = { forward ->
+        val target = viewModel.forwardJumpTarget(forward)
+        if (target != null) {
+            val (originHex, messageId) = target
+            if (originHex == state.groupIdHex) {
+                jumpToMessage(messageId)
+            } else {
+                PendingMessageJump.publish(originHex, messageId)
+                onOpenConversation(originHex)
+            }
+        }
+    }
+    // The destination half: once this screen's timeline holds the row a jump
+    // named, scroll to it and light it. Keyed on the timeline so a screen
+    // opened before its thread rehydrated still consumes the jump when the
+    // rows arrive; a jump that names a row this timeline never shows is
+    // spent the first time the timeline is non-empty, not kept forever.
+    LaunchedEffect(timeline) {
+        val pending = PendingMessageJump.peek(state.groupIdHex)
+        if (pending != null && timeline.isNotEmpty()) {
+            PendingMessageJump.take(state.groupIdHex)
+            jumpToMessage(pending)
+        }
+    }
+    // What the timeline calls a message's author: "You" for an own message,
+    // the other person in a two-member chat, the resolved name otherwise.
+    // One rule for the reply quote and the forward attribution, so the two
+    // cannot name the same person differently.
+    val timelineAuthorLabel: (ChatMessage) -> String = { msg ->
+        when {
+            msg.direction == Direction.Outgoing -> "You"
+            !isGroupChat && peerName != null -> peerName
+            else -> msg.authorKey?.let(viewModel::nameOf) ?: viewModel.nameOfKeyB64(null)
         }
     }
     val maxBubbleWidth: Dp = (LocalConfiguration.current.screenWidthDp * 0.78f).dp
@@ -795,15 +848,24 @@ public fun ChatScreen(
                             // resolved name otherwise.
                             onReply = {
                                 editTarget = null
-                                val label = when {
-                                    msg.direction == Direction.Outgoing -> "You"
-                                    !isGroupChat && peerName != null -> peerName
-                                    else -> msg.authorKey?.let(viewModel::nameOf)
-                                        ?: viewModel.nameOfKeyB64(null)
-                                }
-                                viewModel.onReplyToMessage(msg, label)
+                                viewModel.onReplyToMessage(msg, timelineAuthorLabel(msg))
                             },
                             onJumpToReply = jumpToMessage,
+                            // ADR-0052 decision 2 / UX 5.1 — Forward hands the
+                            // row, with the name the timeline shows for its
+                            // author, to the picker. The name is decided HERE
+                            // because this is where that resolution lives; the
+                            // picker never re-derives it.
+                            onForward = {
+                                onForwardMessage(
+                                    ForwardRequest(
+                                        sourceGroupIdHex = state.groupIdHex,
+                                        message = msg,
+                                        authorLabel = timelineAuthorLabel(msg),
+                                    ),
+                                )
+                            },
+                            onJumpToForward = jumpToForward,
                             highlighted = msg.messageId != 0L && highlightedMessageId == msg.messageId,
                             onReact = { emoji ->
                                 viewModel.onReactToMessage(msg.messageId, emoji)
@@ -1123,6 +1185,10 @@ private fun MessageRow(
     onJumpToReply: (Long) -> Unit = {},
     /** UX 3.1 — this row is the one a tapped quote just scrolled to. */
     highlighted: Boolean = false,
+    /** ADR-0052 decision 2 / UX 5.1 — Forward was chosen on this message. */
+    onForward: () -> Unit = {},
+    /** UX 5.1 — this row's "Forwarded from" line was tapped. */
+    onJumpToForward: (ForwardRef) -> Unit = {},
 ) {
     val gapAbove = if (firstInRun) 8.dp else 2.dp
     // UX 3.1 — "the surface tint used for the pressed state": Material's
@@ -1155,6 +1221,8 @@ private fun MessageRow(
                 isOwn = true,
                 onReply = onReply,
                 onJumpToReply = onJumpToReply,
+                onForward = onForward,
+                onJumpToForward = onJumpToForward,
                 // ADR-0024 — own bubble: compute the read tick.
                 readState = ownReadStateFor(
                     messageId = msg.messageId,
@@ -1217,6 +1285,8 @@ private fun MessageRow(
                     isOwn = false,
                     onReply = onReply,
                     onJumpToReply = onJumpToReply,
+                    onForward = onForward,
+                    onJumpToForward = onJumpToForward,
                     // Incoming bubbles never show our read state.
                     readState = OwnReadState.None,
                     // UX section 4 — incoming on the sunken surface.
@@ -1406,6 +1476,10 @@ internal fun Bubble(
     onReply: () -> Unit = {},
     /** UX 3.1 — the quote block was tapped; the argument is the target id. */
     onJumpToReply: (Long) -> Unit = {},
+    /** ADR-0052 decision 2 / UX 5.1 — Forward was chosen on this message. */
+    onForward: () -> Unit = {},
+    /** UX 5.1 — the "Forwarded from" line was tapped. */
+    onJumpToForward: (ForwardRef) -> Unit = {},
 ) {
     // ADR-0023 — every affordance is gated on the message having a
     // real DS messageId (0 ⇒ a not-yet-acked outgoing row that no
@@ -1432,8 +1506,10 @@ internal fun Bubble(
         // ADR-0052 — a reply is never "nothing but one piece of media": its
         // quote block needs the bubble's chrome to sit in, so a quoted photo
         // or voice message keeps the ordinary bubble around it.
+        // ADR-0052 decision 2 — a forward's attribution line needs the same
+        // chrome, for the same reason.
         val soleBubble = remember(msg) {
-            if (msg.reply != null) {
+            if (msg.reply != null || msg.forward != null) {
                 null
             } else {
                 me.lakko.app.media.soleMediaBubble(
@@ -1509,6 +1585,18 @@ internal fun Bubble(
                         // ADR-0052 / UX 3.1 — the quote above the message's
                         // own text, in the bubble's own colours, drawn from
                         // the snapshot the envelope carried and nothing else.
+                        // ADR-0052 decision 2 / UX 5.1 — one line above the
+                        // content: "Forwarded from <name>" or "Forwarded".
+                        // The forwarder stays the row's author for everything
+                        // else; the name is a label, not a person.
+                        val forward = msg.forward
+                        if (forward != null) {
+                            ForwardLine(
+                                forward = forward,
+                                contentColor = contentColor,
+                                onClick = { onJumpToForward(forward) },
+                            )
+                        }
                         val reply = msg.reply
                         if (reply != null) {
                             ReplyQuote(
@@ -1619,6 +1707,9 @@ internal fun Bubble(
                         deleted = msg.deleted,
                         text = msg.text,
                         menuAvailable = menuAvailable,
+                        // UX 5.1 — no Forward on a row still sending or
+                        // one that failed.
+                        sendComplete = msg.ack == Ack.SENT,
                     ),
                     reactions = REACTION_EMOJIS,
                     onReact = { emoji ->
@@ -1634,6 +1725,10 @@ internal fun Bubble(
                     onReply = {
                         menuOpen = false
                         onReply()
+                    },
+                    onForward = {
+                        menuOpen = false
+                        onForward()
                     },
                     onCopy = {
                         menuOpen = false
@@ -1743,6 +1838,52 @@ internal fun ReplyStrip(
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+    }
+}
+
+/**
+ * UX 5.1 — the attribution line inside a forwarded message's bubble, above
+ * its content: a small forward arrow and "Forwarded from <name>", or
+ * "Forwarded" when no name was carried, in the muted tone of the bubble's own
+ * content colour. Plain text — no avatar, no username, no verification mark,
+ * no link styling (section 5: a label, not a person).
+ *
+ * It is a button for accessibility, named after the line itself; tapping it
+ * jumps to the original when this device holds it and does nothing otherwise.
+ */
+@Composable
+internal fun ForwardLine(
+    forward: ForwardRef,
+    contentColor: Color,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val label = forwardLineLabel(forward)
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(6.dp))
+            .clickable(onClick = onClick)
+            .semantics {
+                role = Role.Button
+                contentDescription = label
+            }
+            .padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.Forward,
+            contentDescription = null,
+            tint = contentColor.copy(alpha = 0.7f),
+            modifier = Modifier.size(14.dp),
+        )
+        Spacer(Modifier.width(4.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = contentColor.copy(alpha = 0.7f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

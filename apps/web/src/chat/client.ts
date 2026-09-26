@@ -87,6 +87,7 @@ import type { IdentitySecrets } from "../auth/AuthContext";
 import {
   parseBodyEnvelope,
   type AttachmentRefBytes,
+  type ForwardRef,
   type ReplyRef,
 } from "./attachments";
 import { tryDecodeSecretEnvelope } from "../push/group-routing";
@@ -171,6 +172,10 @@ export type IncomingChatEvent =
        *  DS `messageId` plus the quoted author / excerpt snapshot as the
        *  replier wrote them. Absent on a plain message. */
       reply?: ReplyRef;
+      /** ADR-0052 decision 2 — set when this message was forwarded: the
+       *  original author's name and / or the origin reference, as the
+       *  forwarder wrote them. Absent on a plain message. */
+      forward?: ForwardRef;
     }
   | {
       /** ADR-0023 / ADR-0024 — an edit / delete / reaction op OR a
@@ -1332,6 +1337,9 @@ export async function toEvent(
         // ADR-0052 — the reply reference rides through unchanged; the
         // snapshot is the replier's and is never re-read from the target.
         ...(body.reply === undefined ? {} : { reply: body.reply }),
+        // ADR-0052 decision 2 — the forward attribution rides through
+        // unchanged; the name is the forwarder's claim and is never resolved.
+        ...(body.forward === undefined ? {} : { forward: body.forward }),
       };
     }
     return {

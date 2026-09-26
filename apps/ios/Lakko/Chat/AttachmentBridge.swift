@@ -320,6 +320,30 @@ public enum AttachmentBridge {
         )
     }
 
+    /// ADR-0052 decision 2 — compose a **forward**: an ordinary chat envelope
+    /// (`text` + `attachments`, already re-encrypted under fresh keys by the
+    /// caller) that also carries the original author's display name and,
+    /// when the forwarder held the original, its conversation id and DS
+    /// `messageId`. The core truncates an over-long name on a character
+    /// boundary and drops an over-long origin, so nothing is pre-trimmed
+    /// here. The origin group id crosses as STANDARD base64 of the raw id
+    /// (the wire shape), converted from the app's hex by
+    /// ``ForwardPayload/groupIdB64(fromHex:)``.
+    public static func composeForwardBytes(
+        text: String,
+        attachments: [AttachmentRef],
+        forward: ForwardRef
+    ) throws -> Data {
+        let originB64 = forward.originGroupIdHex.flatMap(ForwardPayload.groupIdB64(fromHex:))
+        return try composeForwardEnvelope(
+            text: text,
+            attachments: attachments,
+            forwardedFrom: forward.author,
+            originGroupIdB64: originB64,
+            originMessageId: originB64 == nil ? nil : forward.originMessageId
+        )
+    }
+
     /// ADR-0023 — compose an **edit** op envelope: rewrite the
     /// text of the message identified by the DS `target` id to
     /// `newText`. The result is a normal MLS Application message

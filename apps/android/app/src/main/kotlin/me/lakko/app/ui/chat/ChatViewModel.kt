@@ -1505,6 +1505,16 @@ public class ChatViewModel(
         profileNames.resolve(identity).primary
 
     /**
+     * ADR-0052 decision 2 / UX 5.1 "Tap to jump" — where a forwarded
+     * message's attribution takes the person, or `null` for nowhere: the
+     * origin conversation and message id when this device holds both. The
+     * rule is [me.lakko.app.chat.forwardJumpTarget]; this reads it over the
+     * repository's current threads.
+     */
+    public fun forwardJumpTarget(forward: me.lakko.app.chat.ForwardRef): Pair<String, Long>? =
+        me.lakko.app.chat.forwardJumpTarget(forward, repo.state.value.threads)
+
+    /**
      * ADR-0048 UX §5 — the chat header title: in a two-member chat the OTHER
      * person's resolved name; in a group `null` (the group label is unchanged).
      * `null` too while the roster cannot be read.
