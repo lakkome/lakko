@@ -105,6 +105,38 @@ version(1) ‖ group_id_len(2 BE) ‖ group_id ‖ issuer_pubkey(32)
            ‖ expiry_ms(8 BE) ‖ sig(64)
 ```
 
+**Amended 2026-09-26 (v2, a flag day - v1 is refused):** the capability gained a
+sealed preview between `expiry_ms` and the signature:
+
+```text
+version(1)=2 ‖ group_id_len(2 BE) ‖ group_id ‖ issuer_pubkey(32)
+             ‖ expiry_ms(8 BE) ‖ preview_len(2 BE) ‖ sealed_preview ‖ sig(64)
+sealed_preview = nonce(12) ‖ ChaCha20-Poly1305(link_key,
+                 version(1)=1 ‖ group_name_len(1) ‖ group_name
+                 ‖ inviter_len(1) ‖ inviter_name ‖ member_count(2 BE))
+```
+
+The person opening a link saw only the issuer's fingerprint, which tells them
+nothing about what they are joining (UX spec
+[`group-invite-page.md`](../ux/group-invite-page.md)). The preview - the
+group's name, the inviter's display name and the member count at mint time - is
+sealed under a random 32-byte **link key** carried in the URL **fragment**
+(`https://lakko.me/g/<slug>#<key>`), which a browser never sends and an app
+never uploads, so the discovery ledger holding pointer-link capabilities and
+every access log stay ciphertext-only (invariants #1, #2, #5). Whoever holds
+the whole link reads the preview, which is the point of a link one shares. The
+preview sits inside the signature, so it cannot be swapped under a genuine
+capability; it remains the issuer's claim (the inviter name is self-asserted,
+like a profile name), which is why the fingerprint stays on the page as the
+out-of-band check. `preview_len = 0` is a link without a preview, and a page
+whose fragment is missing or whose key does not open the preview shows the
+page without one, never a guess. Both names follow the display-name rule;
+`MAX_SEALED_PREVIEW_LEN` bounds the field before any allocation. Core:
+`lakko-contacts::group_invite::{compose_with_preview, generate_link_key,
+GroupInviteCapability::open_preview, GroupInvitePreview}`; FFI
+`composeGroupInviteCapabilityWithPreview` -> `{wire, linkKey}` and
+`GroupInviteCapability.openPreview(linkKey)` / `hasPreview` on both surfaces.
+
 - `group_id` — the target group's opaque MLS `GroupId` bytes the joiner passes
   to `create_external_join_proposal`. **Length-prefixed** (an MLS `GroupId` is
   variable-length; Lakko's `Group::group_id()` is a `Vec<u8>`), bounded by
@@ -130,6 +162,10 @@ Mirror ADR-0009's `/c/` exactly, under a new `/g/` prefix:
   server blob ledger needed in v1).
 - The joiner-side parser (`decode_and_verify`) checks version + length +
   expiry + the issuer signature, fail-closed.
+- **Since v2** both forms carry the link key as the URL fragment
+  (`#<base64url key>`); the fragment is never part of the request path, so a
+  pointer link's capability on the ledger and an inline link's capability in an
+  access log are equally unable to reveal the preview.
 
 ### 3. Epoch acquisition — the joiner reads it from the journal
 

@@ -2511,22 +2511,54 @@ public class ChatRepository(
                 "no live Group handle for $groupIdHex",
                 IllegalStateException("missing group record"),
             )
-        val wire = try {
-            uniffi.lakko_ffi_uniffi.composeGroupInviteCapability(
-                identity.ed25519Seed(),
-                record.group.groupId(),
+        // ADR-0028 v2 (docs/ux/group-invite-page.md) — the link carries a
+        // sealed preview: the group's shared name, this device's own profile
+        // name and the roster size at mint time, all already on the device.
+        // Sealed under a fresh link key that goes into the URL fragment and
+        // nowhere a server reads. The core trims the names and reads a blank
+        // one as absent.
+        val groupName = groupName(groupIdHex)?.name
+        val inviterName = ownDisplayName()
+        val members = (memberCount(groupIdHex) ?: 0).coerceIn(0, UShort.MAX_VALUE.toInt()).toUShort()
+        val seed = identity.ed25519Seed()
+        val groupId = record.group.groupId()
+        val mint = try {
+            uniffi.lakko_ffi_uniffi.composeGroupInviteCapabilityWithPreview(
+                seed,
+                groupId,
                 0u,
+                groupName,
+                inviterName,
+                members,
             )
         } catch (e: FfiException) {
-            throw ChatError("composeGroupInviteCapability failed", e)
+            // A stored name that fails the display-name rule (it should not:
+            // both were gated by that rule when stored). The link must still
+            // mint; it carries the count and no names rather than no link.
+            android.util.Log.w("ChatRepository", "invite preview refused a name; minting without names", e)
+            try {
+                uniffi.lakko_ffi_uniffi.composeGroupInviteCapabilityWithPreview(
+                    seed,
+                    groupId,
+                    0u,
+                    null,
+                    null,
+                    members,
+                )
+            } catch (again: FfiException) {
+                throw ChatError("composeGroupInviteCapabilityWithPreview failed", again)
+            }
         }
+        val wire = mint.wire
         // Production default (ADR-0028 OQ1): upload to the discovery ledger --
         // the server-side anti-abuse surface (per-joiner consume dedup + soft
         // max_uses) -- and share the short pointer URL. On an upload failure (a
         // censored / offline network) fall back to the inline form so the link
         // still works without the round-trip. `max_uses` is a soft throttle,
         // not an access control: the admin approval gate stays the boundary.
-        return try {
+        // Either form takes the link key as its fragment; the copy action
+        // copies the whole string.
+        val url = try {
             val blobId = discovery.uploadGroupInvite(wire, 0xFFFFFFFFL)
             composePointerGroupInviteUrl(blobId)
         } catch (e: Throwable) {
@@ -2537,6 +2569,7 @@ public class ChatRepository(
                     me.lakko.app.auth.base64UrlEncodeNoPad(wire)
             }
         }
+        return appendGroupInviteLinkKey(url, mint.linkKey)
     }
 
     /**
@@ -2553,9 +2586,8 @@ public class ChatRepository(
             ?: throw IllegalStateException(
                 "ChatRepository not bootstrapped — call bootstrap() first",
             )
-        val idx = link.lastIndexOf("/g/")
-        if (idx < 0) return false
-        val slug = link.substring(idx + 3)
+        // The slug ends before the `#<link key>` fragment (ADR-0028 v2).
+        val slug = groupInviteSlugOf(link) ?: return false
         val parsed = try {
             parseGroupInviteSlug(slug)
         } catch (e: GroupInviteUrlException) {
@@ -2605,6 +2637,58 @@ public class ChatRepository(
                 )
                 Pair(fetched, parsed.blobId)
             }
+        }
+    }
+
+    /**
+     * What the group invite page shows before anyone taps (ADR-0028 v2,
+     * `docs/ux/group-invite-page.md` section 3). Decodes + verifies the
+     * capability, checks expiry at [nowMs], and opens the sealed preview under
+     * [linkKey] when the link has one.
+     *
+     * The preview is best-effort by design: an absent key, a wrong-length key,
+     * a link minted without a preview, or a key the preview does not open
+     * under all read as `preview = null` — the page then shows no preview,
+     * never a guess and never an error for that. The signature already gates
+     * the capability.
+     *
+     * @throws ChatError when the capability does not decode or verify — the
+     *   page's "invalid or expired" state.
+     */
+    public suspend fun inspectGroupInvite(
+        capabilityWire: ByteArray,
+        linkKey: ByteArray?,
+        nowMs: ULong,
+    ): GroupInviteCard = withContext(mlsDispatcher) {
+        val cap = try {
+            uniffi.lakko_ffi_uniffi.GroupInviteCapability.decodeAndVerify(capabilityWire)
+        } catch (e: FfiException) {
+            throw ChatError("group invite capability did not verify", e)
+        }
+        try {
+            val preview = if (linkKey != null && linkKey.size == GROUP_INVITE_LINK_KEY_LEN && cap.hasPreview()) {
+                try {
+                    cap.openPreview(linkKey)?.let {
+                        GroupInvitePreviewUi(
+                            groupName = it.groupName,
+                            inviterName = it.inviterName,
+                            memberCount = it.memberCount.toInt(),
+                        )
+                    }
+                } catch (e: FfiException) {
+                    android.util.Log.w("ChatRepository", "invite preview did not open; showing the page without one", e)
+                    null
+                }
+            } else {
+                null
+            }
+            GroupInviteCard(
+                fingerprint = cap.issuerFingerprint(),
+                valid = cap.isValidNow(nowMs),
+                preview = preview,
+            )
+        } finally {
+            cap.destroy()
         }
     }
 

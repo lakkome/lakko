@@ -75,7 +75,7 @@ import { opsFromPersisted, persistedWithOps } from "../chat/message-ops-store";
 import { sendFailureNotice, withSendAck } from "../chat/send-failure";
 import { memberKeysOf, peerName } from "../chat/peer-name";
 import { ownPersonKeyB64, peopleCountOf, personKeyOf } from "../chat/person-key";
-import { groupTitle } from "../chat/group-title";
+import { groupTitle, isUnnamedGroupLabel } from "../chat/group-title";
 import { memberListLabelOf, memberNameOf } from "../profile/member-label";
 import { groupCallsFor } from "../calls/group-call-store";
 import { chatCallAffordance, type ChatCallAffordance } from "../calls/group-call-host";
@@ -5265,11 +5265,23 @@ function ChatView(props: {
     setNotice(null);
     setBusy(true);
     try {
+      // ADR-0028 v2 — the preview the link carries: the shared group name
+      // (ADR-0051) or the user-given label, never a stand-in; this device's
+      // own profile name; the people in the roster now. The link key rides
+      // the URL fragment (docs/ux/group-invite-page.md).
+      const ownLabel = props.entry.label;
       const link = await contacts.createGroupInviteLink(
         props.requireIdentity(),
         props.entry.group,
         0n,
         window.location.origin,
+        {
+          groupName:
+            groupNames.nameOf(props.entry.groupIdB64) ??
+            (isUnnamedGroupLabel(ownLabel) ? undefined : ownLabel.trim()),
+          inviterName: profiles.ownProfile().displayName?.trim() || undefined,
+          memberCount: memberCount(),
+        },
       );
       setInviteLink(link);
     } catch (err) {

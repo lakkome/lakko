@@ -1158,6 +1158,7 @@ private struct SessionRoot: View, Equatable {
             JoinGroupLandingScreen(
                 viewModel: JoinGroupLandingViewModel(
                     slug: slug,
+                    linkKeyFragment: inviteIntake.pendingGroupJoinFragment,
                     repository: chatRepository,
                     intake: inviteIntake
                 ),

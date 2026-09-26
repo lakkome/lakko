@@ -23,6 +23,25 @@ describe("joinGroupAuthLinks", () => {
     expect(url.searchParams.get("return")).toBe(`/g/${slug}`);
   });
 
+  it("keeps the link key fragment in the return path, so the preview survives the round trip", () => {
+    const hash = "#XFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFw";
+    const { signup, login } = joinGroupAuthLinks(slug, hash);
+    for (const href of [signup, login]) {
+      const url = new URL(href, "http://lakko.test");
+      expect(url.hash).toBe("");
+      expect(url.searchParams.get("return")).toBe(`/g/${slug}${hash}`);
+    }
+  });
+
+  it("accepts a fragment without its leading # and leaves an empty one out", () => {
+    expect(
+      new URL(joinGroupAuthLinks(slug, "abc").login, "http://lakko.test").searchParams.get("return"),
+    ).toBe(`/g/${slug}#abc`);
+    expect(
+      new URL(joinGroupAuthLinks(slug, "").login, "http://lakko.test").searchParams.get("return"),
+    ).toBe(`/g/${slug}`);
+  });
+
   it("offers log-in that returns to the invite", () => {
     const { login } = joinGroupAuthLinks(slug);
     const url = new URL(login, "http://lakko.test");

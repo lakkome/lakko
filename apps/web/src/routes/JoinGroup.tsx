@@ -23,6 +23,13 @@
  * approval gate is the security boundary. Public route (anonymous visitors land
  * here and are prompted to log in), mirroring the `/i/` contact-invite route.
  *
+ * Since ADR-0028 v2 the capability also carries a sealed preview (the group's
+ * name, the inviter's name, the member count at mint time) under a link key
+ * that rides the URL fragment; the card's headline comes from it
+ * (docs/ux/group-invite-page.md section 3), and the issuer fingerprint moves
+ * to the foot. A missing or refused preview shows the same card without a
+ * headline name — never a guess, never an error.
+ *
  * ## What this side is NOT told (ADR-0045 S7 residual 1)
  *
  * A sweep can exclude the approval-derived `Add` — `narrow_sweep_by_exclusion`
@@ -41,7 +48,7 @@
  * KeyPackage. It never claims that is why.
  */
 import { Show, createMemo, createResource, createSignal, onCleanup } from "solid-js";
-import { A, useNavigate, useParams } from "@solidjs/router";
+import { A, useLocation, useNavigate, useParams } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
 import { useProfiles } from "../profile/ProfileContext";
@@ -60,6 +67,16 @@ import { paths } from "./paths";
 import { PublicLayout } from "../ui/PublicLayout";
 import { joinGroupAuthLinks } from "./join-group-auth";
 import { recordConversationKind } from "../chat/conversation-kind-store";
+// ADR-0028 v2 — the sealed preview and the link key in the URL fragment
+// (docs/ux/group-invite-page.md). The copy lives in a plain module for the
+// same `vitest` reason as the wait copy above.
+import { decodeGroupInviteLinkKey } from "../contacts/group-invite";
+import type { GroupInviteCapability as WasmGroupInviteCapability } from "../../wasm/lakko_ffi_wasm";
+import {
+  inviteHeadline,
+  invitedByLine,
+  type GroupInvitePreviewData,
+} from "./join-group-preview";
 
 type JoinPhase = "idle" | "requesting" | "waiting" | "joined" | "error";
 
@@ -72,10 +89,37 @@ interface DecodedTicket {
   blobId: Uint8Array | null;
   fingerprint: string;
   valid: boolean;
+  /** The sealed preview, opened with the link key from the URL fragment —
+   *  `null` when the link carries none, the fragment is absent or not a key,
+   *  or the key does not open it. All three show the same page. */
+  preview: GroupInvitePreviewData | null;
+}
+
+/** Open the link's sealed preview with the key in the URL fragment. A link
+ *  without a preview, a fragment that is absent or not a 32-byte key, and a
+ *  key the preview refuses all yield `null` — the page then shows no preview,
+ *  never a guess and never an error for that (the signature already gated the
+ *  capability). */
+function openPreview(cap: WasmGroupInviteCapability, hash: string): GroupInvitePreviewData | null {
+  if (!cap.hasPreview) return null;
+  const key = decodeGroupInviteLinkKey(hash);
+  if (key === null) return null;
+  try {
+    const opened = cap.openPreview(key);
+    if (opened === undefined) return null;
+    return {
+      groupName: opened.groupName,
+      inviterName: opened.inviterName,
+      memberCount: opened.memberCount,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export default function JoinGroup() {
   const params = useParams<{ slug: string }>();
+  const location = useLocation();
   const auth = useAuth();
   const chats = useChats();
   const profiles = useProfiles();
@@ -96,9 +140,10 @@ export default function JoinGroup() {
 
   // Resolve the slug (pointer => ledger fetch, inline => passthrough), then
   // decode + verify the capability in a memo-driven resource so the panel
-  // renders the right state without imperative juggling. Re-runs on navigation.
-  const slugSignal = createMemo(() => params.slug);
-  const [decoded] = createResource(slugSignal, async (slug): Promise<DecodedTicket | null> => {
+  // renders the right state without imperative juggling. Re-runs on navigation
+  // — of the slug or of the fragment, since the fragment holds the link key.
+  const source = createMemo(() => ({ slug: params.slug, hash: location.hash }));
+  const [decoded] = createResource(source, async ({ slug, hash }): Promise<DecodedTicket | null> => {
     try {
       const { capabilityWire, blobId } = await client.resolveGroupInviteSlug(slug);
       const wasm = await loadWasm();
@@ -108,6 +153,7 @@ export default function JoinGroup() {
         blobId,
         fingerprint: cap.issuerFingerprint(),
         valid: cap.isValidNow(BigInt(Date.now())),
+        preview: openPreview(cap, hash),
       };
     } catch (err) {
       // eslint-disable-next-line no-console
@@ -208,38 +254,52 @@ export default function JoinGroup() {
     }
   }
 
+  // The card's headline (spec section 3): the inviter as the subject, the
+  // group's name or `a group`, the count at mint time; without a preview,
+  // `You are invited to a group` and nothing more.
+  const headline = createMemo(() => inviteHeadline(decoded()?.preview ?? null));
+  const authLinks = () => joinGroupAuthLinks(params.slug, location.hash);
+
   return (
     <PublicLayout>
-      <h1>Join a group</h1>
       <Show when={decoded.loading}>
+        <h1>Join a group</h1>
         <p>Loading invite…</p>
       </Show>
       <Show when={!decoded.loading && (decoded() === null || decoded()?.valid === false)}>
+        <h1>Join a group</h1>
         <p>This invite link is invalid or has expired.</p>
         <A href={paths.home}>Open Lakko</A>
       </Show>
       <Show when={!decoded.loading && decoded() !== null && decoded()?.valid === true}>
+        <Show when={headline().title} fallback={<h1>{headline().lead}</h1>}>
+          {(title) => (
+            <>
+              <p style={{ margin: "0 0 4px" }}>{headline().lead}</p>
+              <h1 style={{ "margin-top": "0" }}>{title()}</h1>
+            </>
+          )}
+        </Show>
+        <Show when={headline().members}>{(members) => <p>{members()}</p>}</Show>
         <Show
           when={auth.state().kind === "session" && auth.identitySecrets() !== null}
           fallback={
             <>
               <p>You need an account to ask to join. Create one, or log in.</p>
               <div class="lk-actions">
-                <A href={joinGroupAuthLinks(params.slug).signup}>
+                <A href={authLinks().signup}>
                   <button class="primary" type="button">
                     Sign up
                   </button>
                 </A>
-                <A href={joinGroupAuthLinks(params.slug).login}>
+                <A href={authLinks().login}>
                   <button type="button">Log in</button>
                 </A>
               </div>
+              <p class="lk-meta">{invitedByLine(decoded()?.fingerprint ?? "")}</p>
             </>
           }
         >
-          <p>
-            Invited by: <code>{decoded()?.fingerprint}</code>
-          </p>
           <Show when={phase() === "idle"}>
             <button type="button" class="primary" onClick={() => void onRequest(decoded()!)}>
               Request to join
@@ -267,6 +327,10 @@ export default function JoinGroup() {
           <Show when={phase() === "error"}>
             <p style={{ color: "var(--error)" }}>Failed: {error()}</p>
           </Show>
+          {/* The one thing on the page the inviter cannot fake stays, at the
+              foot and in the muted style, for a person who was told the
+              digits out of band. */}
+          <p class="lk-meta">{invitedByLine(decoded()?.fingerprint ?? "")}</p>
         </Show>
       </Show>
     </PublicLayout>

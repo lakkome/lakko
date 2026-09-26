@@ -32,9 +32,13 @@ use lakko_contacts::committer_beacon::{
     COMMITTER_BEACON_PAYLOAD_LEN, COMMITTER_BEACON_WORST_CASE_POLL_MS,
 };
 use lakko_contacts::group_invite::{
-    compose as rust_group_invite_compose, decode_and_verify as rust_group_invite_decode,
+    compose as rust_group_invite_compose,
+    compose_with_preview as rust_group_invite_compose_with_preview,
+    decode_and_verify as rust_group_invite_decode, generate_link_key as rust_generate_link_key,
     group_sign_revocation as rust_group_sign_revocation,
-    GroupInviteCapability as RustGroupInviteCapability, MAX_GROUP_ID_LEN,
+    GroupInviteCapability as RustGroupInviteCapability,
+    GroupInvitePreview as RustGroupInvitePreview, LINK_KEY_LEN as GROUP_INVITE_LINK_KEY_LEN,
+    MAX_GROUP_ID_LEN,
 };
 use lakko_contacts::group_join_attribution::{
     compose_attribution as rust_group_join_attribution_compose,
@@ -2531,6 +2535,109 @@ pub fn sign_group_invite_revocation(
 
 /// Composed + verified group join-ticket capability (ADR-0028). Mirror of
 /// [`lakko_contacts::GroupInviteCapability`].
+/// The preview a `/g/` link shows before the person asks to join (ADR-0028
+/// v2): the ISSUER's claim at mint time, sealed under the link key that rides
+/// in the URL fragment.
+#[wasm_bindgen(js_name = GroupInvitePreview)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WasmGroupInvitePreview {
+    group_name: Option<String>,
+    inviter_name: Option<String>,
+    member_count: u16,
+}
+
+#[wasm_bindgen(js_class = GroupInvitePreview)]
+impl WasmGroupInvitePreview {
+    /// The group's name, or `undefined`.
+    #[wasm_bindgen(getter, js_name = groupName)]
+    pub fn group_name(&self) -> Option<String> {
+        self.group_name.clone()
+    }
+
+    /// The inviter's display name, or `undefined`.
+    #[wasm_bindgen(getter, js_name = inviterName)]
+    pub fn inviter_name(&self) -> Option<String> {
+        self.inviter_name.clone()
+    }
+
+    /// How many people were in the group when the link was minted.
+    #[wasm_bindgen(getter, js_name = memberCount)]
+    pub fn member_count(&self) -> u16 {
+        self.member_count
+    }
+}
+
+/// What `composeGroupInviteCapabilityWithPreview` mints: the signed capability
+/// bytes (the slug) and the fresh 32-byte link key that goes in the URL
+/// fragment and nowhere a server reads.
+#[wasm_bindgen(js_name = GroupInviteMint)]
+pub struct WasmGroupInviteMint {
+    wire: Vec<u8>,
+    link_key: Vec<u8>,
+}
+
+#[wasm_bindgen(js_class = GroupInviteMint)]
+impl WasmGroupInviteMint {
+    /// The capability bytes.
+    #[wasm_bindgen(getter)]
+    pub fn wire(&self) -> Vec<u8> {
+        self.wire.clone()
+    }
+
+    /// The link key (32 bytes) for the URL fragment.
+    #[wasm_bindgen(getter, js_name = linkKey)]
+    pub fn link_key(&self) -> Vec<u8> {
+        self.link_key.clone()
+    }
+}
+
+/// Mint a `/g/` capability that carries a sealed preview (ADR-0028 v2). Names
+/// are prepared like a profile / group name (trimmed; blank = none) and
+/// refused past the display-name rule.
+///
+/// # Errors
+///
+/// Throws on a bad seed / group id or a name the rule refuses.
+#[wasm_bindgen(js_name = composeGroupInviteCapabilityWithPreview)]
+pub fn compose_group_invite_capability_with_preview(
+    issuer_signing_seed: &[u8],
+    group_id: &[u8],
+    expiry_ms: u64,
+    group_name: Option<String>,
+    inviter_name: Option<String>,
+    member_count: u16,
+) -> Result<WasmGroupInviteMint, JsError> {
+    if issuer_signing_seed.len() != 32 {
+        return Err(JsError::new("issuerSigningSeed must be 32 bytes"));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(issuer_signing_seed);
+    let signing = SigningKey::from_seed(&seed);
+    if group_id.is_empty() || group_id.len() > MAX_GROUP_ID_LEN {
+        return Err(JsError::new(&format!(
+            "groupId must be 1..={MAX_GROUP_ID_LEN} bytes"
+        )));
+    }
+    let name_error = |e: DisplayNameError| JsError::new(&format!("{e}"));
+    let preview = RustGroupInvitePreview {
+        group_name: rust_normalize_display_name(group_name.as_deref().unwrap_or(""))
+            .map_err(name_error)?,
+        inviter_name: rust_normalize_display_name(inviter_name.as_deref().unwrap_or(""))
+            .map_err(name_error)?,
+        member_count,
+    };
+    let link_key = rust_generate_link_key();
+    let wire =
+        rust_group_invite_compose_with_preview(&signing, group_id, expiry_ms, &preview, &link_key)
+            .map_err(|e| JsError::new(&format!("{e}")))?;
+    Ok(WasmGroupInviteMint {
+        wire,
+        link_key: link_key.to_vec(),
+    })
+}
+
+/// Decoded, signature-verified group join-ticket (ADR-0028) — the wasm face
+/// of [`lakko_contacts::GroupInviteCapability`].
 #[wasm_bindgen]
 pub struct GroupInviteCapability {
     pub(crate) inner: RustGroupInviteCapability,
@@ -2575,6 +2682,39 @@ impl GroupInviteCapability {
     #[wasm_bindgen(js_name = issuerFingerprint)]
     pub fn issuer_fingerprint(&self) -> String {
         self.inner.issuer_fingerprint()
+    }
+
+    /// Whether the link carries a sealed preview at all.
+    #[wasm_bindgen(getter, js_name = hasPreview)]
+    pub fn has_preview(&self) -> bool {
+        !self.inner.sealed_preview.is_empty()
+    }
+
+    /// Open the sealed preview with the link key from the URL fragment.
+    /// `undefined` when the link carries no preview. A wrong or tampered key
+    /// throws; the caller shows the page without a preview, never a guess.
+    ///
+    /// # Errors
+    ///
+    /// Throws when `linkKey` is not 32 bytes or the preview does not open.
+    #[wasm_bindgen(js_name = openPreview)]
+    pub fn open_preview(&self, link_key: &[u8]) -> Result<Option<WasmGroupInvitePreview>, JsError> {
+        if link_key.len() != GROUP_INVITE_LINK_KEY_LEN {
+            return Err(JsError::new(&format!(
+                "linkKey must be {GROUP_INVITE_LINK_KEY_LEN} bytes"
+            )));
+        }
+        let mut key = [0u8; GROUP_INVITE_LINK_KEY_LEN];
+        key.copy_from_slice(link_key);
+        let opened = self
+            .inner
+            .open_preview(&key)
+            .map_err(|e| JsError::new(&format!("{e}")))?;
+        Ok(opened.map(|p| WasmGroupInvitePreview {
+            group_name: p.group_name,
+            inviter_name: p.inviter_name,
+            member_count: p.member_count,
+        }))
     }
 }
 

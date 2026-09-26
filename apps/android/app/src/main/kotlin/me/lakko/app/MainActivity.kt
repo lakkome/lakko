@@ -363,7 +363,10 @@ class MainActivity : ComponentActivity() {
         if (!path.startsWith("/g/")) return
         val slug = path.removePrefix("/g/").trim().removeSuffix("/")
         if (slug.isEmpty()) return
-        inviteIntake.publishGroupJoin(slug)
+        // ADR-0028 v2 — the `#<link key>` fragment unlocks the page's preview.
+        // It is read here and nowhere else: `Uri.fragment` is decoded, never
+        // sent, and a URL that lost it still joins, only without the preview.
+        inviteIntake.publishGroupJoin(slug, uri.fragment?.takeIf { it.isNotBlank() })
     }
 
     /**
@@ -1101,10 +1104,10 @@ private fun SessionRoot(
 
     // ADR-0028 (G-3) — a tapped `/g/<slug>` group join-ticket link pushes the
     // group-join landing the same way.
-    val pendingGroupJoinSlug by inviteIntake.pendingGroupJoinSlug.collectAsStateWithLifecycle()
-    LaunchedEffect(pendingGroupJoinSlug) {
-        val slug = pendingGroupJoinSlug ?: return@LaunchedEffect
-        navController.navigate(Routes.groupJoin(slug)) { launchSingleTop = true }
+    val pendingGroupJoin by inviteIntake.pendingGroupJoin.collectAsStateWithLifecycle()
+    LaunchedEffect(pendingGroupJoin) {
+        val link = pendingGroupJoin ?: return@LaunchedEffect
+        navController.navigate(Routes.groupJoin(link)) { launchSingleTop = true }
         inviteIntake.consumeGroupJoin()
     }
 
@@ -1691,11 +1694,18 @@ private fun SessionRoot(
                 composable(Routes.GROUP_JOIN) { entry ->
                     // ADR-0028 (G-3) — request to join the group the `/g/<slug>`
                     // link points at + poll for the admin's approval.
-                    val groupJoinSlug = entry.arguments?.getString("slug") ?: return@composable
+                    // The one argument carries `<slug>` or `<slug>#<fragment>`
+                    // (ADR-0028 v2); the fragment is the preview's link key.
+                    val groupJoinArgument = entry.arguments?.getString("slug") ?: return@composable
+                    val groupJoinLink = me.lakko.app.chat.parseGroupJoinArgument(groupJoinArgument)
                     val groupJoinVm: me.lakko.app.ui.chat.JoinGroupLandingViewModel = viewModel(
-                        key = "group-join-$groupJoinSlug",
+                        key = "group-join-$groupJoinArgument",
                         factory = singletonViewModelFactory {
-                            me.lakko.app.ui.chat.JoinGroupLandingViewModel(chatRepository, groupJoinSlug)
+                            me.lakko.app.ui.chat.JoinGroupLandingViewModel(
+                                chatRepository,
+                                groupJoinLink.slug,
+                                me.lakko.app.chat.parseGroupInviteLinkKey(groupJoinLink.fragment),
+                            )
                         },
                     )
                     me.lakko.app.ui.chat.JoinGroupLandingScreen(
@@ -1756,7 +1766,8 @@ private object Routes {
     const val INVITE = "invite/{slug}"
     fun invite(slug: String): String = "invite/${android.net.Uri.encode(slug)}"
     const val GROUP_JOIN = "group_join/{slug}"
-    fun groupJoin(slug: String): String = "group_join/${android.net.Uri.encode(slug)}"
+    fun groupJoin(link: me.lakko.app.chat.GroupJoinLink): String =
+        "group_join/${android.net.Uri.encode(me.lakko.app.chat.composeGroupJoinArgument(link))}"
 }
 
 private data class TabSpec(

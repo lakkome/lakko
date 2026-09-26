@@ -46,14 +46,17 @@ import type { Wasm } from "../wasm";
 import { DiscoveryClient } from "../discovery/client";
 import { base64Decode, base64Encode, base64UrlDecodeNoPad } from "../auth/account-id";
 import {
+  appendGroupInviteLinkKey,
   composeInlineGroupInviteUrl,
   composePointerGroupInviteUrl,
   parseGroupInviteSlug,
+  splitGroupInviteLink,
 } from "./group-invite";
 import { DsClient } from "../ds/client";
 import { withGroupMlsLock } from "../mls/group-lock";
 import type { IdentitySecrets } from "../auth/AuthContext";
 import type {
+  GroupInviteMint as WasmGroupInviteMint,
   Group as WasmGroup,
   Identity as WasmIdentity,
 } from "../../wasm/lakko_ffi_wasm";
@@ -120,6 +123,15 @@ import { ROLE_CHANGE_ALREADY_PENDING } from "../chat/ownership-transfer";
  *  (Phase 1.16e6c2). See `ChatClientOptions` in
  *  `chat/client.ts` for the rationale — same shape, same
  *  semantics, applied to a different surface. */
+/** What a group invite link's sealed preview says (ADR-0028 v2): the group's
+ *  name and the inviter's own display name as the device knows them at mint
+ *  time (blank / absent = none), and the roster size. */
+export interface GroupInviteMintPreview {
+  readonly groupName?: string | undefined;
+  readonly inviterName?: string | undefined;
+  readonly memberCount: number;
+}
+
 export interface ContactsClientOptions {
   /** Returns the **canonical** `WasmIdentity` for this session.
    *  See `<ChatProvider>` (1.16e6c1). When unset, the client
@@ -3224,6 +3236,14 @@ export class ContactsClient {
    *  admin approves (ADR-0027). The link conveys only the `group_id` — it
    *  authorizes nobody; the admin approval gate is the security boundary.
    *
+   *  ADR-0028 v2 (docs/ux/group-invite-page.md): the capability also carries a
+   *  **sealed preview** — the group's name, the inviter's display name and the
+   *  member count at mint time — encrypted under a fresh link key that rides
+   *  the URL **fragment** (`#<key>`), which no browser sends and no ledger
+   *  stores. Both the pointer and the inline form carry the same fragment. A
+   *  name the display-name rule refuses is left out rather than failing the
+   *  mint: the page then shows no name, never a guess.
+   *
    *  `expiryMs` is UNIX millis (`0` = never expires). The UI gates the
    *  affordance on `ownRole` (owner / admin), matching add / remove. */
   async createGroupInviteLink(
@@ -3231,13 +3251,39 @@ export class ContactsClient {
     group: WasmGroup,
     expiryMs: bigint,
     origin: string,
+    preview: GroupInviteMintPreview,
     maxUses: number = 0xff_ff_ff_ff,
   ): Promise<string> {
     const wasm = await loadWasm();
     const myIdentity = await this.resolveAccountIdentity(identity);
+    const memberCount = Math.min(0xff_ff, Math.max(0, Math.floor(preview.memberCount)));
+    const mintWith = (names: {
+      groupName?: string | undefined;
+      inviterName?: string | undefined;
+    }) =>
+      wasm.composeGroupInviteCapabilityWithPreview(
+        myIdentity.ed25519Seed,
+        group.groupId,
+        expiryMs,
+        names.groupName,
+        names.inviterName,
+        memberCount,
+      );
     let wire: Uint8Array;
+    let linkKey: Uint8Array;
     try {
-      wire = wasm.composeGroupInviteCapability(myIdentity.ed25519Seed, group.groupId, expiryMs);
+      let mint: WasmGroupInviteMint;
+      try {
+        mint = mintWith({ groupName: preview.groupName, inviterName: preview.inviterName });
+      } catch (err) {
+        // The names come from user-typed fields (a group label, a profile
+        // name); one the rule refuses must not take the link with it.
+        // eslint-disable-next-line no-console
+        console.warn("group-invite: preview names refused, minting without names", err);
+        mint = mintWith({});
+      }
+      wire = mint.wire;
+      linkKey = mint.linkKey;
     } catch (err) {
       throw ContactsError.wrap(err);
     }
@@ -3247,12 +3293,14 @@ export class ContactsClient {
     // offline network) fall back to the inline form so the link still works
     // without the round-trip. `max_uses` is a soft throttle, not an access
     // control: the admin approval gate stays the security boundary.
+    let url: string;
     try {
       const blobId = await this.discovery.uploadGroupInvite(wire, maxUses);
-      return composePointerGroupInviteUrl(blobId, origin);
+      url = composePointerGroupInviteUrl(blobId, origin);
     } catch {
-      return composeInlineGroupInviteUrl(wire, origin);
+      url = composeInlineGroupInviteUrl(wire, origin);
     }
+    return appendGroupInviteLinkKey(url, linkKey);
   }
 
   /** ADR-0028 revoke — the issuer revokes a previously-created group invite
@@ -3265,12 +3313,12 @@ export class ContactsClient {
     identity: IdentitySecrets | null,
     link: string,
   ): Promise<boolean> {
-    const idx = link.lastIndexOf("/g/");
-    if (idx < 0) return false;
-    const slug = link.slice(idx + 3);
+    // The slug ends where the fragment (the ADR-0028 v2 link key) begins.
+    const split = splitGroupInviteLink(link);
+    if (split === null) return false;
     let blobId: Uint8Array;
     try {
-      blobId = base64UrlDecodeNoPad(slug);
+      blobId = base64UrlDecodeNoPad(split.slug);
     } catch {
       return false;
     }

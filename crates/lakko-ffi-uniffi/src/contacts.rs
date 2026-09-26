@@ -58,9 +58,13 @@ use lakko_contacts::committer_beacon::{
     COMMITTER_BEACON_PAYLOAD_LEN, COMMITTER_BEACON_WORST_CASE_POLL_MS,
 };
 use lakko_contacts::group_invite::{
-    compose as rust_group_invite_compose, decode_and_verify as rust_group_invite_decode,
+    compose as rust_group_invite_compose,
+    compose_with_preview as rust_group_invite_compose_with_preview,
+    decode_and_verify as rust_group_invite_decode, generate_link_key as rust_generate_link_key,
     group_sign_revocation as rust_group_sign_revocation,
-    GroupInviteCapability as RustGroupInviteCapability, MAX_GROUP_ID_LEN,
+    GroupInviteCapability as RustGroupInviteCapability,
+    GroupInvitePreview as RustGroupInvitePreview, LINK_KEY_LEN as GROUP_INVITE_LINK_KEY_LEN,
+    MAX_GROUP_ID_LEN,
 };
 use lakko_contacts::group_join_attribution::{
     compose_attribution as rust_group_join_attribution_compose,
@@ -2475,6 +2479,71 @@ pub fn sign_group_invite_revocation(
 
 /// Composed + verified group join-ticket capability (ADR-0028). Mirror of
 /// [`lakko_contacts::GroupInviteCapability`].
+/// The preview a `/g/` link shows before the person asks to join (ADR-0028
+/// v2): the ISSUER's claim at mint time, sealed under the link key that rides
+/// in the URL fragment. Names are optional; the count is a snapshot.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct GroupInvitePreview {
+    pub group_name: Option<String>,
+    pub inviter_name: Option<String>,
+    pub member_count: u16,
+}
+
+/// What `compose_group_invite_capability_with_preview` mints: the signed
+/// capability bytes (the slug) and the fresh 32-byte link key the caller puts
+/// in the URL fragment and nowhere a server reads.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct GroupInviteMint {
+    pub wire: Vec<u8>,
+    pub link_key: Vec<u8>,
+}
+
+/// Mint a `/g/` capability that carries a sealed preview (ADR-0028 v2). Names
+/// are prepared like a profile / group name (trimmed; blank = none) and
+/// refused past the display-name rule. `member_count` is what the issuer's
+/// roster says now.
+///
+/// # Errors
+///
+/// * [`FfiError::Contacts`] for a bad seed / group id, or a name the rule
+///   refuses.
+#[uniffi::export]
+pub fn compose_group_invite_capability_with_preview(
+    issuer_signing_seed: Vec<u8>,
+    group_id: Vec<u8>,
+    expiry_ms: u64,
+    group_name: Option<String>,
+    inviter_name: Option<String>,
+    member_count: u16,
+) -> Result<GroupInviteMint, FfiError> {
+    if issuer_signing_seed.len() != 32 {
+        return Err(FfiError::Contacts(
+            "issuerSigningSeed must be 32 bytes".to_string(),
+        ));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&issuer_signing_seed);
+    let signing = SigningKey::from_seed(&seed);
+    if group_id.is_empty() || group_id.len() > MAX_GROUP_ID_LEN {
+        return Err(FfiError::Contacts(format!(
+            "groupId must be 1..={MAX_GROUP_ID_LEN} bytes",
+        )));
+    }
+    let preview = RustGroupInvitePreview {
+        group_name: rust_normalize_display_name(group_name.as_deref().unwrap_or(""))?,
+        inviter_name: rust_normalize_display_name(inviter_name.as_deref().unwrap_or(""))?,
+        member_count,
+    };
+    let link_key = rust_generate_link_key();
+    let wire = rust_group_invite_compose_with_preview(
+        &signing, &group_id, expiry_ms, &preview, &link_key,
+    )?;
+    Ok(GroupInviteMint {
+        wire,
+        link_key: link_key.to_vec(),
+    })
+}
+
 #[derive(uniffi::Object)]
 pub struct GroupInviteCapability {
     pub(crate) inner: RustGroupInviteCapability,
@@ -2519,6 +2588,35 @@ impl GroupInviteCapability {
     /// Signal-style anti-phishing fingerprint of the issuer's key.
     pub fn issuer_fingerprint(&self) -> String {
         self.inner.issuer_fingerprint()
+    }
+
+    /// Whether the link carries a sealed preview at all (a v2 link minted
+    /// without one, or an older client's, shows the fingerprint only).
+    pub fn has_preview(&self) -> bool {
+        !self.inner.sealed_preview.is_empty()
+    }
+
+    /// Open the sealed preview with the link key from the URL fragment. `None`
+    /// when the link carries no preview. A wrong or tampered key is an error;
+    /// the caller shows the page without a preview, never a guess.
+    ///
+    /// # Errors
+    ///
+    /// * [`FfiError::Contacts`] when `link_key` is not 32 bytes or the preview
+    ///   does not open under it.
+    pub fn open_preview(&self, link_key: Vec<u8>) -> Result<Option<GroupInvitePreview>, FfiError> {
+        if link_key.len() != GROUP_INVITE_LINK_KEY_LEN {
+            return Err(FfiError::Contacts(format!(
+                "linkKey must be {GROUP_INVITE_LINK_KEY_LEN} bytes",
+            )));
+        }
+        let mut key = [0u8; GROUP_INVITE_LINK_KEY_LEN];
+        key.copy_from_slice(&link_key);
+        Ok(self.inner.open_preview(&key)?.map(|p| GroupInvitePreview {
+            group_name: p.group_name,
+            inviter_name: p.inviter_name,
+            member_count: p.member_count,
+        }))
     }
 }
 
@@ -3792,6 +3890,35 @@ mod tests {
         let dispatched = dispatch_incoming_envelope(clear).expect("dispatch clear");
         assert_eq!(dispatched.kind, FfiIncomingEnvelopeKind::GroupName);
         assert_eq!(dispatched.group_name.map(|g| g.name), Some(String::new()));
+    }
+
+    #[test]
+    fn group_invite_preview_round_trips_over_the_ffi() {
+        let seed = vec![7u8; 32];
+        let mint = compose_group_invite_capability_with_preview(
+            seed.clone(),
+            vec![1, 2, 3, 4],
+            0,
+            Some("  Weekend plans ".to_string()),
+            Some("Anna".to_string()),
+            4,
+        )
+        .expect("mint");
+        let cap = GroupInviteCapability::decode_and_verify(mint.wire.clone()).expect("decode");
+        assert!(cap.has_preview());
+        let preview = cap
+            .open_preview(mint.link_key.clone())
+            .expect("open")
+            .expect("some");
+        assert_eq!(preview.group_name.as_deref(), Some("Weekend plans"));
+        assert_eq!(preview.inviter_name.as_deref(), Some("Anna"));
+        assert_eq!(preview.member_count, 4);
+        assert!(cap.open_preview(vec![0u8; 32]).is_err());
+        assert!(cap.open_preview(vec![0u8; 5]).is_err());
+        let plain = compose_group_invite_capability(seed, vec![1, 2, 3, 4], 0).expect("plain");
+        let cap = GroupInviteCapability::decode_and_verify(plain).expect("decode");
+        assert!(!cap.has_preview());
+        assert_eq!(cap.open_preview(mint.link_key).expect("open"), None);
     }
 
     #[test]

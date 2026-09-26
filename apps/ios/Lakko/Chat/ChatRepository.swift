@@ -2691,6 +2691,17 @@ public final class ChatRepository: ObservableObject {
     /// admin approves (ADR-0027). The link conveys only the `group_id` — it
     /// authorizes nobody; the admin gate is the security boundary. `0` = never
     /// expires.
+    ///
+    /// **ADR-0028 v2 - the link carries a sealed preview.** The group's name
+    /// (the shared store's, empty = none), this device's own profile display
+    /// name (empty = none) and the roster size at this moment are sealed under
+    /// a fresh 32-byte link key inside the signed capability, and the key rides
+    /// the URL **fragment** - `https://lakko.me/g/<slug>#<key>` - which never
+    /// reaches the discovery ledger (the pointer upload carries the ciphertext
+    /// only) and is never logged. Both the pointer form and the inline fallback
+    /// carry it; `Copy link` copies the whole string. A name the display-name
+    /// rule refuses fails the mint rather than minting a link that says
+    /// something else.
     public func createGroupInviteLink(groupIdHex: String) async throws -> String {
         guard let identity = accountIdentity else {
             throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
@@ -2698,30 +2709,37 @@ public final class ChatRepository: ObservableObject {
         guard let record = groups[groupIdHex] else {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
         }
-        let wire: Data
+        let mint: GroupInviteMint
         do {
-            wire = try composeGroupInviteCapability(
+            mint = try composeGroupInviteCapabilityWithPreview(
                 issuerSigningSeed: identity.ed25519Seed(),
                 groupId: record.group.groupId(),
-                expiryMs: 0
+                expiryMs: 0,
+                groupName: groupName(groupIdHex: groupIdHex),
+                inviterName: ProfileDirectory.shared.ownProfile?.displayName,
+                memberCount: UInt16(clamping: memberCount(groupIdHex: groupIdHex) ?? 0)
             )
         } catch {
-            throw ChatError.wrapped("composeGroupInviteCapability failed", underlying: error)
+            throw ChatError.wrapped(
+                "composeGroupInviteCapabilityWithPreview failed", underlying: error)
         }
+        let wire = mint.wire
         // Production default (ADR-0028 OQ1): upload to the discovery ledger —
         // the server-side anti-abuse surface (per-joiner consume dedup + soft
         // max_uses) — and share the short pointer URL. On an upload failure (a
         // censored / offline network) fall back to the inline form so the link
         // still works without the round-trip. `max_uses` is a soft throttle,
         // not an access control: the admin approval gate stays the boundary.
+        let base: String
         do {
             let blobId = try await discovery.uploadGroupInvite(
                 capabilityBytes: wire, maxUses: UInt32.max)
-            return try GroupInviteUrl.composePointerGroupInviteUrl(blobId: blobId)
+            base = try GroupInviteUrl.composePointerGroupInviteUrl(blobId: blobId)
         } catch {
-            return (try? GroupInviteUrl.composeInlineGroupInviteUrl(capabilityBytes: wire))
+            base = (try? GroupInviteUrl.composeInlineGroupInviteUrl(capabilityBytes: wire))
                 ?? ("https://lakko.me/g/" + base64UrlEncodeNoPad(wire))
         }
+        return GroupInviteLink.withLinkKey(base, linkKey: mint.linkKey)
     }
 
     /// ADR-0028 revoke — the issuer revokes a previously-created group invite
@@ -2732,8 +2750,13 @@ public final class ChatRepository: ObservableObject {
         guard let identity = accountIdentity else {
             throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
         }
-        guard let range = link.range(of: "/g/", options: .backwards) else { return false }
-        let slug = String(link[range.upperBound...])
+        // The slug ends where the fragment begins: the link key after `#` is
+        // not part of the slug and is never handed to a parser or a server.
+        let withoutFragment = GroupInviteLink.split(link).base
+        guard let range = withoutFragment.range(of: "/g/", options: .backwards) else {
+            return false
+        }
+        let slug = String(withoutFragment[range.upperBound...])
         let parsed: GroupInviteUrl.ParsedGroupInvite
         do {
             parsed = try GroupInviteUrl.parseGroupInviteSlug(slug)

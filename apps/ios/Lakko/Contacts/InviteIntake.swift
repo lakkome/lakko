@@ -48,6 +48,13 @@ public final class InviteIntake: ObservableObject {
     /// group-join is pending. Drives ``JoinGroupLandingScreen``.
     @Published public private(set) var pendingGroupJoinSlug: String?
 
+    /// ADR-0028 v2 - the URL fragment that came with ``pendingGroupJoinSlug``
+    /// (the sealed preview's link key, base64url), or `nil` when the link had
+    /// none. Kept beside the slug rather than inside it because the slug is
+    /// what the ledger and the parsers see and the fragment must reach neither
+    /// - it is decoded on the device and nowhere else.
+    public private(set) var pendingGroupJoinFragment: String?
+
     /// ADR-0032 (G-21/G-22) — the slug from the most recent
     /// `lakko.me/c/<slug>` multi-joiner call-invite link tap. `nil` when no
     /// call-join is pending. Drives ``JoinCallLandingScreen``.
@@ -78,6 +85,9 @@ public final class InviteIntake: ObservableObject {
         if let slug = Self.slug(from: path, prefix: "/i/") {
             pendingSlug = slug
         } else if let slug = Self.slug(from: path, prefix: "/g/") {
+            // The fragment is set BEFORE the published slug so an observer
+            // that wakes on the slug already finds its key.
+            pendingGroupJoinFragment = Self.fragment(of: url)
             pendingGroupJoinSlug = slug
         } else if let slug = Self.slug(from: path, prefix: "/c/") {
             pendingCallJoinSlug = slug
@@ -98,6 +108,14 @@ public final class InviteIntake: ObservableObject {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    /// The raw URL fragment (nothing after `#` is percent-decoded by
+    /// `URL.fragment`, and base64url never needs it), `nil` when absent or
+    /// empty.
+    static func fragment(of url: URL) -> String? {
+        guard let fragment = url.fragment, !fragment.isEmpty else { return nil }
+        return fragment
+    }
+
     /// Consume the pending contact-invite slug — called by
     /// ``InviteLandingScreen`` once the result has been surfaced to
     /// the user (and the user has acknowledged it with Done / Open
@@ -110,6 +128,7 @@ public final class InviteIntake: ObservableObject {
     /// ``JoinGroupLandingScreen`` on dismiss.
     public func clearGroupJoin() {
         pendingGroupJoinSlug = nil
+        pendingGroupJoinFragment = nil
     }
 
     /// ADR-0032 — consume the pending call-join slug + auto-resume flag, called

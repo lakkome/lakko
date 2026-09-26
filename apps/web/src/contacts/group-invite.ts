@@ -13,13 +13,17 @@
  *     URL, the joiner fetches the capability from
  *     `/discovery/group-invite/<blob_id>`. This is the OQ1 indirection that
  *     adds the server-side anti-abuse ledger (consume dedup + soft max_uses).
- *   * **inline** — the full `GroupInviteCapability` wire bytes (>= 108 bytes).
+ *   * **inline** — the full `GroupInviteCapability` wire bytes (>= 110 bytes).
  *     The censored-region fallback: no `/discovery/group-invite` round-trip on
  *     open, the capability rides inside the URL itself.
  *
  * The smallest legal inline capability is 1 (version) + 2 (gid_len) + 1 (min
- * gid) + 32 (issuer_pubkey) + 8 (expiry) + 64 (signature) = 108 bytes, well
- * above the 32-byte pointer, so a byte-length test cleanly discriminates.
+ * gid) + 32 (issuer_pubkey) + 8 (expiry) + 2 (preview_len, ADR-0028 v2) + 64
+ * (signature) = 110 bytes, well above the 32-byte pointer, so a byte-length
+ * test cleanly discriminates.
+ *
+ * Either form may carry the ADR-0028 v2 **link key** as the URL fragment
+ * (`#<key>`) — see `appendGroupInviteLinkKey` / `splitGroupInviteLink` below.
  */
 import { base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
 
@@ -102,4 +106,63 @@ export function parseGroupInviteSlug(slug: string): ParsedGroupInvite {
       `${GROUP_INVITE_BLOB_ID_LEN}-byte pointer nor a ` +
       `>= ${GROUP_INVITE_INLINE_MIN_LEN}-byte inline capability`,
   );
+}
+
+// ----------------------------------------------------------------------------
+// The link key (ADR-0028 v2, docs/ux/group-invite-page.md section 4)
+// ----------------------------------------------------------------------------
+
+/** Length of the link key that opens a capability's sealed preview — the
+ *  `LINK_KEY_LEN` of `lakko-contacts::group_invite`, 32 bytes. */
+export const GROUP_INVITE_LINK_KEY_LEN = 32;
+
+/** Append the link key to a `/g/` URL as its **fragment**:
+ *  `<origin>/g/<slug>#<key, base64url no-pad>`. The fragment is the one part
+ *  of a URL a browser never sends, so the discovery ledger and every access
+ *  log see only the sealed preview. Both the pointer and the inline form take
+ *  the same fragment. */
+export function appendGroupInviteLinkKey(url: string, linkKey: Uint8Array): string {
+  if (linkKey.length !== GROUP_INVITE_LINK_KEY_LEN) {
+    throw new Error(
+      `linkKey must be ${GROUP_INVITE_LINK_KEY_LEN} bytes, got ${linkKey.length}`,
+    );
+  }
+  if (url.includes("#")) {
+    throw new Error("url already carries a fragment");
+  }
+  return `${url}#${base64UrlEncodeNoPad(linkKey)}`;
+}
+
+/** Read the link key back out of a URL fragment (`location.hash`, with or
+ *  without the leading `#`). Never throws: an absent, undecodable or
+ *  wrong-length fragment is `null`, and the page then shows no preview — the
+ *  spec's "never a guess, never an error for that". */
+export function decodeGroupInviteLinkKey(fragment: string | null | undefined): Uint8Array | null {
+  if (fragment === null || fragment === undefined) return null;
+  const raw = fragment.startsWith("#") ? fragment.slice(1) : fragment;
+  if (raw.length === 0) return null;
+  let bytes: Uint8Array;
+  try {
+    bytes = base64UrlDecodeNoPad(raw);
+  } catch {
+    return null;
+  }
+  return bytes.length === GROUP_INVITE_LINK_KEY_LEN ? bytes : null;
+}
+
+/** Split a full `/g/` link into its slug and its link key. `null` when the
+ *  string is not a group-invite link at all; `linkKey` is `null` when the
+ *  fragment is absent or not a key. The revoke path reads the slug from here,
+ *  so the fragment can never be mistaken for part of the blob id. */
+export function splitGroupInviteLink(
+  link: string,
+): { readonly slug: string; readonly linkKey: Uint8Array | null } | null {
+  const idx = link.lastIndexOf(GROUP_INVITE_URL_PREFIX);
+  if (idx < 0) return null;
+  const rest = link.slice(idx + GROUP_INVITE_URL_PREFIX.length);
+  const hashAt = rest.indexOf("#");
+  const slug = hashAt < 0 ? rest : rest.slice(0, hashAt);
+  if (slug.length === 0) return null;
+  const linkKey = hashAt < 0 ? null : decodeGroupInviteLinkKey(rest.slice(hashAt));
+  return { slug, linkKey };
 }

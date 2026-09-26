@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -25,6 +26,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -37,11 +39,26 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import me.lakko.app.chat.ChatRepository
+import me.lakko.app.chat.GROUP_INVITE_INVALID_COPY
+import me.lakko.app.chat.GROUP_INVITE_REQUEST_TO_JOIN
+import me.lakko.app.chat.GroupInviteCard
+import me.lakko.app.chat.groupInvitePageLines
+import me.lakko.app.chat.invitedByLine
 
 /**
  * ADR-0028 (G-3) — drives the `/g/<slug>` group join-ticket landing. Decodes +
- * verifies the capability, posts an external-join proposal (ADR-0027), and
- * polls until the rendezvous Welcome lands.
+ * verifies the capability and opens its sealed preview (ADR-0028 v2,
+ * `docs/ux/group-invite-page.md`), shows the card, and on `Request to join`
+ * posts an external-join proposal (ADR-0027), then polls until the rendezvous
+ * Welcome lands.
+ *
+ * **The preview is shown before anyone taps, and a missing one is not an
+ * error.** The link key rides in the URL fragment; a chat app that strips
+ * fragments, a hand-typed URL, a link minted without a preview or a key the
+ * preview does not open under all land on the same page without a preview
+ * (`You are invited to a group`) — nothing invents a name and the page does
+ * not say why. Only a capability that fails to decode, verify or is past its
+ * expiry is the invalid state.
  *
  * **The wait is TWO-stage since ADR-0045 S7, and the copy says so.** An admin's
  * approve no longer admits anyone by itself: it publishes an `Add` proposal, and
@@ -70,19 +87,41 @@ import me.lakko.app.chat.ChatRepository
 public class JoinGroupLandingViewModel(
     private val repository: ChatRepository,
     private val slug: String,
+    /** The 32-byte link key from the URL fragment, or `null` when the tapped
+     *  URL had none (or one of the wrong shape) — the page then shows no
+     *  preview. */
+    private val linkKey: ByteArray?,
 ) : ViewModel() {
 
-    /** Local FSM: Requesting -> Waiting (poll loop) -> Joined / Failed. */
+    /** Local FSM: Loading -> Invalid | Ready -> Requesting -> Waiting (poll
+     *  loop) -> Joined / Failed. */
     public sealed interface State {
+        /** Resolving the slug and opening the preview. */
+        public data object Loading : State
+        /** The capability does not decode, verify, or has expired. */
+        public data object Invalid : State
+        /** The card is on screen; nothing has been sent yet. */
+        public data object Ready : State
         public data object Requesting : State
         public data object Waiting : State
         public data class Joined(val groupIdHex: String) : State
         public data class Failed(val message: String) : State
     }
 
-    private val mutableState: MutableStateFlow<State> = MutableStateFlow(State.Requesting)
+    private val mutableState: MutableStateFlow<State> = MutableStateFlow(State.Loading)
     public val state: StateFlow<State> = mutableState.asStateFlow()
+
+    private val mutableCard: MutableStateFlow<GroupInviteCard?> = MutableStateFlow(null)
+
+    /** The card's facts once the link is decoded: fingerprint, expiry, the
+     *  preview or `null`. Stays on screen through the whole wait. */
+    public val card: StateFlow<GroupInviteCard?> = mutableCard.asStateFlow()
+
     private var started = false
+
+    /** The resolved capability wire + the ledger blob id (pointer form only),
+     *  kept so `Request again` does not re-resolve the slug. */
+    private var resolved: Pair<ByteArray, ByteArray?>? = null
 
     private val mutableRequesting: MutableStateFlow<Boolean> = MutableStateFlow(false)
 
@@ -94,48 +133,71 @@ public class JoinGroupLandingViewModel(
 
     private var pollJob: kotlinx.coroutines.Job? = null
 
-    /** Drive the request + poll loop exactly once. */
+    /** Resolve + decode the link exactly once and show the card. */
     public fun start() {
         if (started) return
         started = true
-        request()
-    }
-
-    /**
-     * ADR-0045 S7 residual 1 — send the request. Reached once from [start] and
-     * again from the `Request again` control, which is the joiner's only
-     * repair: a fresh request mints a fresh KeyPackage. Deliberately
-     * user-driven and never automatic — each press is a journal row held to the
-     * DS's 30-day TTL, and a timer would spin against a group that is merely
-     * quiet.
-     */
-    public fun request() {
-        if (mutableRequesting.value) return
-        mutableRequesting.value = true
-        // A re-request replaces the poll rather than adding a second one.
-        pollJob?.cancel()
-        pollJob = viewModelScope.launch {
+        viewModelScope.launch {
             // A tapped link starts (or recreates) the activity, whose shell
             // bootstraps a fresh repository on its own dispatcher while the
-            // router already shows this screen. Requesting before that has
+            // router already shows this screen. Resolving before that has
             // finished used to surface the repository's own guard - "not
             // bootstrapped" - as the landing's error, so a link tapped from a
             // browser could never join. Wait for the identity instead; the
             // shell's loading state is what the person sees meanwhile.
             repository.state.first { it.bootstrapped }
             val nowMs = System.currentTimeMillis().toULong()
-            val groupId: ByteArray
-            val joinerKey: ByteArray
             try {
                 // ADR-0028 OQ1 — resolve the slug (a 32-byte content-addressed
                 // pointer => fetch the capability from the ledger; an inline
-                // capability => pass through), then request to join, registering
-                // a consume against the ledger when the link was a pointer.
-                val resolved = repository.resolveGroupInviteSlug(slug)
+                // capability => pass through).
+                val wireAndBlob = repository.resolveGroupInviteSlug(slug)
+                val card = repository.inspectGroupInvite(wireAndBlob.first, linkKey, nowMs)
+                if (!card.valid) {
+                    mutableState.value = State.Invalid
+                    return@launch
+                }
+                resolved = wireAndBlob
+                mutableCard.value = card
+                mutableState.value = State.Ready
+            } catch (e: Throwable) {
+                // A slug that does not resolve, a ledger row that is gone, a
+                // capability that does not verify: all one state for the
+                // person (spec section 3, `Invalid or expired link`).
+                android.util.Log.w("JoinGroupLanding", "invite link did not open", e)
+                mutableState.value = State.Invalid
+            }
+        }
+    }
+
+    /**
+     * ADR-0045 S7 residual 1 — send the request. Reached from the card's
+     * `Request to join` and again from the `Request again` control, which is
+     * the joiner's only repair: a fresh request mints a fresh KeyPackage.
+     * Deliberately user-driven and never automatic — each press is a journal
+     * row held to the DS's 30-day TTL, and a timer would spin against a group
+     * that is merely quiet.
+     */
+    public fun request() {
+        if (mutableRequesting.value) return
+        val ticket = resolved ?: return
+        mutableRequesting.value = true
+        // Only the first request passes through `Requesting`; a re-request
+        // keeps the wait copy on screen.
+        if (mutableState.value == State.Ready) mutableState.value = State.Requesting
+        // A re-request replaces the poll rather than adding a second one.
+        pollJob?.cancel()
+        pollJob = viewModelScope.launch {
+            val nowMs = System.currentTimeMillis().toULong()
+            val groupId: ByteArray
+            val joinerKey: ByteArray
+            try {
+                // Request to join, registering a consume against the ledger
+                // when the link was a pointer.
                 val result = repository.requestToJoinFromLink(
-                    resolved.first,
+                    ticket.first,
                     nowMs,
-                    resolved.second,
+                    ticket.second,
                 )
                 groupId = result.first
                 joinerKey = result.second
@@ -187,6 +249,7 @@ public fun JoinGroupLandingScreen(
     onDone: () -> Unit,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val card by viewModel.card.collectAsStateWithLifecycle()
     val requesting by viewModel.requesting.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { viewModel.start() }
     Scaffold(
@@ -210,26 +273,49 @@ public fun JoinGroupLandingScreen(
         verticalArrangement = Arrangement.Center,
     ) {
         when (val s = state) {
+            is JoinGroupLandingViewModel.State.Loading -> {
+                CircularProgressIndicator()
+                Spacer(Modifier.height(8.dp))
+                Text("Loading invite…")
+            }
+            is JoinGroupLandingViewModel.State.Invalid -> {
+                Text(GROUP_INVITE_INVALID_COPY, textAlign = TextAlign.Center)
+                Spacer(Modifier.height(12.dp))
+                Button(onClick = onDone) { Text("Open Lakko") }
+            }
+            is JoinGroupLandingViewModel.State.Ready -> {
+                InviteHeadline(card)
+                Spacer(Modifier.height(16.dp))
+                Button(onClick = { viewModel.request() }) { Text(GROUP_INVITE_REQUEST_TO_JOIN) }
+                InviteFoot(card)
+            }
             is JoinGroupLandingViewModel.State.Requesting -> {
+                InviteHeadline(card)
+                Spacer(Modifier.height(16.dp))
                 CircularProgressIndicator()
                 Spacer(Modifier.height(8.dp))
                 Text("Sending request…")
+                InviteFoot(card)
             }
             is JoinGroupLandingViewModel.State.Waiting -> {
+                InviteHeadline(card)
+                Spacer(Modifier.height(16.dp))
                 CircularProgressIndicator()
                 Spacer(Modifier.height(8.dp))
-                Text(me.lakko.app.chat.JOIN_WAIT_PRIMARY)
+                Text(me.lakko.app.chat.JOIN_WAIT_PRIMARY, textAlign = TextAlign.Center)
                 Spacer(Modifier.height(4.dp))
                 Text(
                     text = me.lakko.app.chat.JOIN_WAIT_SECONDARY,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
                 )
                 Spacer(Modifier.height(12.dp))
                 Button(
                     onClick = { viewModel.request() },
                     enabled = !requesting,
                 ) { Text(me.lakko.app.chat.JOIN_REQUEST_AGAIN) }
+                InviteFoot(card)
             }
             is JoinGroupLandingViewModel.State.Joined -> {
                 Text("You joined the group. Find it under Groups.")
@@ -237,11 +323,62 @@ public fun JoinGroupLandingScreen(
                 Button(onClick = onDone) { Text("Done") }
             }
             is JoinGroupLandingViewModel.State.Failed -> {
-                Text(s.message, color = MaterialTheme.colorScheme.error)
+                Text(s.message, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center)
                 Spacer(Modifier.height(12.dp))
                 Button(onClick = onDone) { Text("Close") }
             }
         }
     }
     }
+}
+
+/**
+ * The card's headline (spec section 3): `<Inviter> invites you to` /
+ * `You are invited to`, the group name (or `a group` folded into the
+ * headline), and `1 member` / `N members` — each line only when the preview
+ * supplies it.
+ */
+@Composable
+private fun InviteHeadline(card: GroupInviteCard?) {
+    val lines = groupInvitePageLines(card?.preview)
+    Text(
+        text = lines.headline,
+        style = MaterialTheme.typography.titleMedium,
+        textAlign = TextAlign.Center,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    lines.groupLine?.let { name ->
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = name,
+            style = MaterialTheme.typography.headlineSmall,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+    lines.membersLine?.let { members ->
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = members,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+/** The muted foot: `Invited by <fingerprint>` — the one thing on the page the
+ *  inviter cannot fake, kept so digits told out of band can be compared. */
+@Composable
+private fun InviteFoot(card: GroupInviteCard?) {
+    val fingerprint = card?.fingerprint ?: return
+    Spacer(Modifier.height(16.dp))
+    Text(
+        text = invitedByLine(fingerprint),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        textAlign = TextAlign.Center,
+        modifier = Modifier.fillMaxWidth(),
+    )
 }

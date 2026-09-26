@@ -6,6 +6,7 @@ package me.lakko.app.contacts
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import me.lakko.app.chat.GroupJoinLink
 
 /**
  * Tiny state holder for a pending invite-link slug an external
@@ -46,12 +47,13 @@ public class InviteIntake {
      *  to the [InviteLandingScreen] when non-null. */
     public val pendingInviteSlug: StateFlow<String?> = mutableSlug.asStateFlow()
 
-    private val mutableGroupJoinSlug: MutableStateFlow<String?> = MutableStateFlow(null)
+    private val mutableGroupJoin: MutableStateFlow<GroupJoinLink?> = MutableStateFlow(null)
 
-    /** ADR-0028 (G-3) — slug from the most recent unconsumed
-     *  `https://lakko.me/g/<slug>` group join-ticket deep-link, or `null`. The
-     *  router navigates to the group-join landing when non-null. */
-    public val pendingGroupJoinSlug: StateFlow<String?> = mutableGroupJoinSlug.asStateFlow()
+    /** ADR-0028 (G-3) — the slug (and, since v2, the `#<link key>` fragment
+     *  when the link still had one) from the most recent unconsumed
+     *  `https://lakko.me/g/<slug>#<key>` group join-ticket deep-link, or
+     *  `null`. The router navigates to the group-join landing when non-null. */
+    public val pendingGroupJoin: StateFlow<GroupJoinLink?> = mutableGroupJoin.asStateFlow()
 
     /** Publish a new slug — called from
      *  [me.lakko.app.MainActivity.handleInviteIntent]. Replaces
@@ -67,16 +69,18 @@ public class InviteIntake {
         mutableSlug.value = null
     }
 
-    /** ADR-0028 (G-3) — publish a group join-ticket slug, called from
-     *  [me.lakko.app.MainActivity.handleGroupJoinIntent]. */
-    public fun publishGroupJoin(slug: String) {
-        mutableGroupJoinSlug.value = slug
+    /** ADR-0028 (G-3) — publish a group join-ticket slug with its fragment,
+     *  called from [me.lakko.app.MainActivity.handleGroupJoinIntent]. The
+     *  fragment carries the preview's link key; `null` when the tapped URL had
+     *  none (the page then shows no preview). */
+    public fun publishGroupJoin(slug: String, fragment: String?) {
+        mutableGroupJoin.value = GroupJoinLink(slug = slug, fragment = fragment)
     }
 
     /** ADR-0028 (G-3) — clear the group-join slot once the landing screen has
      *  mounted + read the slug. */
     public fun consumeGroupJoin() {
-        mutableGroupJoinSlug.value = null
+        mutableGroupJoin.value = null
     }
 
     private val mutableCallJoinSlug: MutableStateFlow<String?> = MutableStateFlow(null)
