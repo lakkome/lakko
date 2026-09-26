@@ -105,8 +105,21 @@ public final class JoinGroupLandingViewModel: ObservableObject {
 
     private func startPolling(groupId: Data, joinerKey: Data) {
         let repo = repository
+        let groupIdHex = DsClient.pseudonymHex(groupId)
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
+                // The sweep publishes the Welcome twice: to the group journal
+                // as a rendezvous, which the poll below reads, and to the
+                // joiner's mailbox, which the inbox poll reads (the sweep
+                // cannot tell a link joiner from a contact). When the mailbox
+                // copy lands first, the group is already ours and the
+                // rendezvous can never open again - its KeyPackage is spent -
+                // so without this check the landing waited forever on a join
+                // that had happened.
+                if await repo.hasGroup(groupIdHex: groupIdHex) {
+                    self?.state = .joined(groupIdHex: groupIdHex)
+                    return
+                }
                 do {
                     if let hex = try await repo.pollForJoinWelcome(
                         groupId: groupId,

@@ -48,6 +48,7 @@ import { useProfiles } from "../profile/ProfileContext";
 import { ContactsClient } from "../contacts/client";
 import { loadWasm } from "../wasm";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
+import { base64Encode } from "../auth/account-id";
 // ADR-0045 S7 residual 1, the joiner's half. The copy and the one repair live
 // in a plain module because `vitest.config.ts` cannot test a `.tsx` file.
 import {
@@ -151,30 +152,46 @@ export default function JoinGroup() {
       // publishes a proposal, and the rendezvous appears only once a committer
       // sweeps it — so this poll spans both stages and keeps running until a
       // Welcome arrives or the page unmounts.
+      const groupIdB64 = base64Encode(groupId);
+      const finish = (active: { groupIdB64: string }): void => {
+        if (pollTimer !== undefined) clearInterval(pollTimer);
+        // docs/ux/client-redesign.md section 3 — a conversation joined
+        // through an invite link is a group whatever its size.
+        {
+          const s = auth.state();
+          if (s.kind === "session") recordConversationKind(s.account.accountId, active.groupIdB64, "group");
+        }
+        setPhase("joined");
+        navigate(paths.chat(base64UrlEncodeNoPad(groupId)));
+      };
       pollTimer = window.setInterval(() => {
         void (async () => {
           try {
+            // The sweep publishes the Welcome twice: to the group journal as
+            // a rendezvous, which this poll reads, and to the joiner's
+            // mailbox, which the inbox poll reads (the sweep cannot tell a
+            // link joiner from a contact). When the mailbox copy lands
+            // first, the group is already ours and the rendezvous can never
+            // open again - its KeyPackage is spent - so without this check
+            // the page waited forever on a join that had happened.
+            const landed = chats.get(groupIdB64);
+            if (landed !== undefined) {
+              finish(landed);
+              return;
+            }
             const group = await client.pollForJoinWelcome(
               auth.identitySecrets(),
               groupId,
               joinerSignatureKey,
             );
             if (group !== null) {
-              if (pollTimer !== undefined) clearInterval(pollTimer);
               // Register the joined group so the chat route can find it, and
               // ADR-0048 §2 — publish this device's profile into it: the
               // members already there cannot learn the newcomer's name any
               // other way.
               const active = chats.add({ label: "Group", group });
               profiles.groupJoined(active.groupIdB64);
-              // docs/ux/client-redesign.md section 3 — a conversation joined
-              // through an invite link is a group whatever its size.
-              {
-                const s = auth.state();
-                if (s.kind === "session") recordConversationKind(s.account.accountId, active.groupIdB64, "group");
-              }
-              setPhase("joined");
-              navigate(paths.chat(base64UrlEncodeNoPad(group.groupId)));
+              finish(active);
             }
           } catch (err) {
             if (pollTimer !== undefined) clearInterval(pollTimer);

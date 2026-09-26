@@ -64,10 +64,10 @@
   `/g/` link, the owner's sheet offered `Pin for everyone`, the pin reached
   the member's bar (`Test User 2 - owner here: ...`), the member's own sheet
   offered `Pin for me` alone, and the owner's `Unpin` took the bar down on
-  both. **Not walked:** the list control, the growth re-send, a native
-  member of an admin-run group (no native account of mine is a member of a
-  group whose owner I control - the iOS dev build opens a `/g/` link in
-  Safari, and the Android landing fails, see PRODUCT-READINESS). Two
+  both. **And with a native owner:** the iOS account owned a group with an
+  Android member and a web member (the latter joined through a `/g/` link),
+  and its `Pin for everyone` reached both members' bars within seconds.
+  **Not walked:** the list control, the growth re-send. Two
   defects found on the walk and closed: the iOS scope sheet's fixed detent
   clipped its only row (the height now counts the navigation bar), and
   Android acted at once on a one-row `Pin` where the spec says the one-row

@@ -32,6 +32,7 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -114,6 +115,14 @@ public class JoinGroupLandingViewModel(
         // A re-request replaces the poll rather than adding a second one.
         pollJob?.cancel()
         pollJob = viewModelScope.launch {
+            // A tapped link starts (or recreates) the activity, whose shell
+            // bootstraps a fresh repository on its own dispatcher while the
+            // router already shows this screen. Requesting before that has
+            // finished used to surface the repository's own guard - "not
+            // bootstrapped" - as the landing's error, so a link tapped from a
+            // browser could never join. Wait for the identity instead; the
+            // shell's loading state is what the person sees meanwhile.
+            repository.state.first { it.bootstrapped }
             val nowMs = System.currentTimeMillis().toULong()
             val groupId: ByteArray
             val joinerKey: ByteArray
@@ -140,7 +149,20 @@ public class JoinGroupLandingViewModel(
             // below runs for the rest of the wait, and holding the flag across
             // it would disable `Request again` forever.
             mutableRequesting.value = false
+            val groupIdHex = me.lakko.app.ds.DsClient.pseudonymHex(groupId)
             while (isActive) {
+                // The sweep publishes the Welcome twice: to the group journal
+                // as a rendezvous, which the poll below reads, and to the
+                // joiner's mailbox, which the inbox poll reads (the sweep
+                // cannot tell a link joiner from a contact). When the mailbox
+                // copy lands first, the group is already ours and the
+                // rendezvous can never open again - its KeyPackage is spent -
+                // so without this check the landing waited forever on a join
+                // that had happened.
+                if (repository.state.value.threads.any { it.groupIdHex.equals(groupIdHex, ignoreCase = true) }) {
+                    mutableState.value = State.Joined(groupIdHex)
+                    return@launch
+                }
                 try {
                     val hex = repository.pollForJoinWelcome(groupId, joinerKey)
                     if (hex != null) {
