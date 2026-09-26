@@ -59,10 +59,15 @@
   iOS simulator and the Android emulator in both directions - `Pin for both`
   from Android put the bar on iOS within seconds (`Anna Weber` on the
   Android side, `You` on the iOS side), and `Unpin` from iOS took it down on
-  Android. **Not walked:** a shared pin sent or received by the web client
-  and the owner/admin gate in a group - no account at hand was owner or
-  admin of a group shared with another device, and web had no one-to-one
-  with one; both rest on the unit tests (web drives the real wasm). Two
+  Android. **Then the group case, on web:** the web account created a group
+  (owner), a guest account in the simulator's Safari joined it through a
+  `/g/` link, the owner's sheet offered `Pin for everyone`, the pin reached
+  the member's bar (`Test User 2 - owner here: ...`), the member's own sheet
+  offered `Pin for me` alone, and the owner's `Unpin` took the bar down on
+  both. **Not walked:** the list control, the growth re-send, a native
+  member of an admin-run group (no native account of mine is a member of a
+  group whose owner I control - the iOS dev build opens a `/g/` link in
+  Safari, and the Android landing fails, see PRODUCT-READINESS). Two
   defects found on the walk and closed: the iOS scope sheet's fixed detent
   clipped its only row (the height now counts the navigation bar), and
   Android acted at once on a one-row `Pin` where the spec says the one-row
