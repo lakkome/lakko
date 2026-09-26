@@ -82,7 +82,6 @@ import { loadWasm as loadWasmForCalls } from "../wasm";
 // this is the same instance and not a second one.
 import { membershipRefusalRetryMaySucceed as wasmMembershipRefusalRetryMaySucceed } from "../../wasm/lakko_ffi_wasm";
 import {
-  deleteGroupFromMessageLog,
   loadMessageLog,
   MESSAGE_LOG_VERSION,
   updateMessageLog,
@@ -105,13 +104,7 @@ import {
   sleepCancellable,
 } from "../ds/long-poll-loop";
 import { ContactsClient } from "../contacts/client";
-import {
-  loadAccepted,
-  removeAccepted,
-  subscribeAcceptedChanged,
-  upsertAccepted,
-} from "../contacts/local-store";
-import { ContactDetailView } from "../contacts/ContactDetailView";
+import { loadAccepted, subscribeAcceptedChanged } from "../contacts/local-store";
 import {
   findPersonRecord,
   groupInfoSections,
@@ -240,7 +233,6 @@ import {
 import {
   armRetry,
   armedRetries,
-  clearArmedRetries,
   armedApproveJoinRetry,
   armedRetryFor,
   claimArmedRetry,
@@ -254,7 +246,6 @@ import {
 // ADR-0045 S7 residual 1 — the request that left the pending set without
 // landing. Same split, same reason as above.
 import {
-  clearUnappliedForGroup,
   dismissUnapplied,
   loadUnapplied,
   recordUnapplied,
@@ -308,7 +299,6 @@ import {
   // (the button in the exit block) is rendered by this file.
   DELETE_CHAT_CONTROL,
   FROZEN_ROSTER_HEADER,
-  clearLeaveRequested,
   composerState,
   loadLeaveRequestedAt,
   membershipEnded as membershipHasEnded,
@@ -324,6 +314,7 @@ import {
 } from "../chat/membership-ended";
 import { removeMemberConfirmation } from "../chat/remove-member-confirm";
 import { deleteChatConfirmation } from "../chat/delete-chat-confirm";
+import { deleteChat } from "../chat/delete-chat";
 import { leaveGroupConfirmation } from "../chat/leave-group-confirm";
 import { namedAction, requestConfirm } from "../ui/confirm-dialog";
 import {
@@ -375,7 +366,6 @@ import {
   type TimelineLayout,
 } from "../chat/timeline-layout";
 import {
-  forgetConversationKind,
   observeConversationKind,
   persistedConversationKind,
   recordConversationKind,
@@ -825,8 +815,11 @@ function ChatView(props: {
    * exactly the way the contact list opens it, Message included - from here
    * Message is just the way back. Until 2026-09-26 the chat rendered a
    * second copy of that card as a layer, with Message withheld, and the same
-   * person had two cards. The layer survives for a one-to-one only as the
-   * fallback for a contact record that cannot be found (`infoOpening`).
+   * person had two cards. A one-to-one whose contact record cannot be found
+   * (a roster that cannot be read) opens nothing at all (`infoOpening`):
+   * every one-to-one peer is a contact by construction
+   * (`contacts/adopt-one-to-one.ts`), so there is no "not a contact" card
+   * left to draw.
    */
   function openInfo(): void {
     setHeaderMenuOpen(false);
@@ -2374,22 +2367,10 @@ function ChatView(props: {
    * Reachable only once the membership has ended (the exit block's `ended`
    * arm), so this never removes a live conversation.
    *
-   * **What it removes:** this group's entry in the per-account message log
-   * (a read-modify-write on a store that already exists — the log is keyed
-   * `{ groupIdHex -> PersistedGroup }` internally, so no new store is needed),
-   * its pending-request observations, its durable leave record, and its row in
-   * the in-memory group registry.
-   *
-   * **What it does NOT remove, which is why the confirmation body is exact
-   * rather than sweeping:** the inactive MLS group stays in the provider
-   * snapshot as inert bytes. `Group` exposes no delete, so a `Group::delete`
-   * is a real (small) core follow-up rather than something this rides free.
-   * The remnant is inert in the strong sense — it cannot send, decrypt, export
-   * or process anything — but it is not nothing.
-   *
-   * The push subscription is already gone by this point: the §6.2.8 teardown
-   * retires it at the moment of the eviction, not at the moment of the delete,
-   * so a user who never presses this button still stops being woken.
+   * What is removed, what is deliberately NOT (the inert MLS remnant in the
+   * provider snapshot), and why the push subscription is already gone by
+   * this point are all stated once, on `chat/delete-chat.ts`. This function
+   * owns only the confirmation and the busy / error state around it.
    */
   async function onDeleteChat(): Promise<void> {
     const s = auth.state();
@@ -2410,35 +2391,20 @@ function ChatView(props: {
     ) {
       return;
     }
-    const accountIdB64 = s.account.accountId;
-    const groupIdB64 = base64Encode(props.entry.group.groupId);
     setError(null);
     setBusy(true);
     try {
-      const deviceKey = await getDeviceKey(accountIdB64);
-      if (deviceKey !== null) {
-        await deleteGroupFromMessageLog(
-          accountIdB64,
-          deviceKey,
-          groupIdHexForLog(),
-        );
-      }
-      // Local bookkeeping for a group that no longer exists here. All are
-      // best-effort by construction and none can fail the delete.
-      forgetConversationKind(accountIdB64, groupIdB64);
-      pruneObservations(accountIdB64, groupIdB64, []);
-      clearUnappliedForGroup(accountIdB64, groupIdB64);
-      clearLeaveRequested(accountIdB64, groupIdB64);
-      // ADR-0045 UX §7 — an armed re-send names a group that is gone from
-      // here. The verdict would drop it anyway on `membershipEnded`, so this
-      // is tidiness rather than a gate; it is here because leaving a record
-      // behind for a deleted chat is the kind of residue that later reads as
-      // a bug.
-      clearArmedRetries(retryScopeKey(accountIdB64, groupIdB64));
-      // Drop the row from the registry LAST, so a failure above leaves the
-      // chat reachable rather than orphaning a transcript behind a row the
-      // user can no longer open.
-      chats.remove(groupIdB64);
+      // The removal itself — which stores, in which order — lives in
+      // `chat/delete-chat.ts`, shared with the contact card, which is where
+      // an ended ONE-TO-ONE is closed from (this exit block is the group
+      // layer's). The registry row goes last there, so a failure leaves the
+      // chat reachable.
+      await deleteChat({
+        accountIdB64: s.account.accountId,
+        groupIdB64: base64Encode(props.entry.group.groupId),
+        groupIdHex: groupIdHexForLog(),
+        chats,
+      });
       props.onLeave();
     } catch (err) {
       setError(formatError(err));
@@ -5440,9 +5406,10 @@ function ChatView(props: {
 
   /**
    * The other person in a one-to-one conversation, as the contact list knows
-   * them - or `null` when they are not in it. Not being a contact is a real
-   * answer, not a failure: the conversation still opens a PERSON, with the
-   * two contact-list blocks absent (`chat/conversation-info.ts`).
+   * them. `null` only while the roster cannot be read: every one-to-one peer
+   * is a contact by construction (`contacts/adopt-one-to-one.ts`), so a
+   * missing record is not a state with a screen of its own - the header then
+   * opens nothing (`chat/conversation-info.ts`).
    */
   const personRecord = createMemo(() => {
     acceptedVersion();
@@ -5452,82 +5419,6 @@ function ChatView(props: {
       peerKeyB64: peerKeyB64(),
     });
   });
-
-  /**
-   * The FALLBACK for a one-to-one's header, reached only when the other
-   * person's contact record cannot be found (`infoOpening` answers `layer`
-   * for a person without one): the person screen that already exists
-   * (`contacts/ContactDetailView.tsx`), rendered here with the two
-   * contact-list blocks absent. With a record the header navigates to the
-   * contact's own page instead and this is never rendered.
-   *
-   * `Message` returns to the conversation, which is open behind this layer;
-   * `Call` / `Video` route through the same buttons the header carries, so a
-   * call started here is the call started there.
-   */
-  const PersonInfo = (): JSX.Element => (
-    <Show
-      when={peerKeyB64()}
-      fallback={
-        // A one-to-one with no second person: the roster has not landed yet,
-        // or the other person is gone. The copy fits both, because from here
-        // the two look the same.
-        <p class="lk-meta">
-          There is nobody else in this conversation right now.
-        </p>
-      }
-    >
-      {(key) => (
-        <ContactDetailView
-          personKeyB64={key()}
-          localName={personRecord()?.displayName ?? ""}
-          // The chat with this person IS the one open behind this layer, so
-          // Call and Video are live rather than disabled with "send a message
-          // first".
-          chatHref={paths.chat(base64UrlEncodeNoPad(props.entry.group.groupId))}
-          canStartChat={false}
-          busy={busy}
-          error={error}
-          myPubkey={() => chats.identity()?.signaturePublicKey ?? null}
-          onBack={null}
-          onMessage={closeInfo}
-          onCall={(withVideo) => {
-            closeInfo();
-            onCallButton(withVideo);
-          }}
-          onRename={
-            personRecord() === null
-              ? null
-              : (newName) => {
-                  const record = personRecord();
-                  if (record === null) return;
-                  upsertAccepted({ ...record, displayName: newName.trim() });
-                  setAcceptedVersion(acceptedVersion() + 1);
-                }
-          }
-          onRemove={
-            personRecord() === null
-              ? null
-              : () => {
-                  const record = personRecord();
-                  if (record === null) return;
-                  removeAccepted(record.signaturePubkeyB64);
-                  setAcceptedVersion(acceptedVersion() + 1);
-                }
-          }
-          // ADR-0045 UX §6.2 — the same two consequences the group panel has
-          // had all along, now reaching a one-to-one as well: no `Call` (the
-          // per-call seed comes from a group this device is no longer in) and
-          // `Delete this chat` in its place. Before the header started routing
-          // by what the conversation IS, an ended one-to-one still opened the
-          // group panel and got the control from there; afterwards it got
-          // nothing, and there was no way to close the conversation at all.
-          membershipEnded={membershipEnded()}
-          onDeleteChat={() => void onDeleteChat()}
-        />
-      )}
-    </Show>
-  );
 
   // The timeline scrolls in its own region. Follow new rows while the reader
   // is at (or near) the bottom; leave the position alone once they have
@@ -5909,21 +5800,19 @@ function ChatView(props: {
           group to name, no owner to transfer and nothing to leave that is not
           simply the other person. */}
       <ModalLayer
-        open={infoOpen() && infoTarget() !== null}
+        open={infoOpen() && infoTarget() === "group"}
         title={infoTargetHeading()}
         onClose={closeInfo}
       >
-        {/* The layer is closed while `infoTarget()` is null, so this branch
-            never has to choose a panel for an unknown destination: a
-            one-to-one showing the group panel is precisely the defect the
-            routing was changed to fix, and a fallback here would reopen it
-            for the first render. */}
-        <Show when={infoTarget() === "group"} fallback={<PersonInfo />}>
+        {/* The layer is the GROUP's idiom and nothing else's: a person's info
+            is their own page (`openInfo` navigates there), so this never has
+            to choose a panel for any other destination. A one-to-one showing
+            the group panel is precisely the defect the routing was changed to
+            fix, and a fallback here would reopen it for the first render. */}
+        <Show when={infoTarget() === "group"}>
           {/* `docs/ux/conversation-info.md` section 4 — an action refused
               says so IN PLACE and the layer stays open. These two used to sit
-              under the panel, which is now behind the dim and unreadable.
-              The person branch has the same pair inside it already, so this
-              is the group's copy rather than a shared one. */}
+              under the panel, which is now behind the dim and unreadable. */}
           <Show when={error()}>{(message) => <div class="form-error">{message()}</div>}</Show>
           <Show when={notice()}>{(message) => <div class="form-notice">{message()}</div>}</Show>
           {/* 1.18g — the add-member form, reached from `Add member` in the

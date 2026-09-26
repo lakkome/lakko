@@ -116,10 +116,14 @@ export const GROUP_ONLY_SECTIONS: readonly InfoSection[] = [
   "leave-group",
 ];
 
-/** What the viewer is to a one-to-one conversation (spec section 2.1). */
+/**
+ * What the viewer is to a one-to-one conversation (spec section 2.1).
+ *
+ * There is no `isContact`: the other person in a one-to-one IS a contact, by
+ * construction (`contacts/adopt-one-to-one.ts`), so a person's card is always
+ * the contact card and the shared rule takes no such flag.
+ */
 export interface PersonInfoCapabilities {
-  /** The person is in the viewer's contact list, so it can be edited. */
-  readonly isContact: boolean;
   /** This device's membership in the conversation is over (ADR-0045 UX 6.2). */
   readonly membershipEnded: boolean;
 }
@@ -237,7 +241,7 @@ export function personInfoSections(
   if (rules === null) return [];
   return known(
     rules.personInfoSections(
-      new rules.PersonInfoCapabilities(caps.isContact, caps.membershipEnded),
+      new rules.PersonInfoCapabilities(caps.membershipEnded),
     ),
   );
 }
@@ -252,13 +256,16 @@ export function personInfoSections(
  *   Until 2026-09-26 the chat rendered a second copy of the card as a layer
  *   with Message withheld, which needed an "origin" threaded through the
  *   shared rule and showed the same person twice.
- * - `layer`: a group's info, which has no screen of its own to reuse; and
- *   the fallback for a one-to-one whose contact record cannot be found (a
- *   roster that cannot be read - unreachable in the normal case, since every
- *   one-to-one peer is derived into the contact list).
+ * - `layer`: a group's info, which has no screen of its own to reuse. The
+ *   layer is the group's idiom and nobody else's.
  * - `nothing`: the destination is not yet known (the shared rules have not
- *   loaded). Opening a layer now would show whatever branch the rules resolve
- *   to a moment later, which for a contact is the second card again.
+ *   loaded), or it is a person whose contact record cannot be found. The
+ *   first: opening a layer now would show whatever branch the rules resolve
+ *   to a moment later. The second: every one-to-one peer is a contact by
+ *   construction (`contacts/adopt-one-to-one.ts`), so a missing record means
+ *   a roster that cannot be read, and there is no "not a contact" card to
+ *   draw in its place - the not-a-contact state was retired on 2026-09-26
+ *   along with the layer that rendered it.
  */
 export type InfoOpening = "contact-page" | "layer" | "nothing";
 
@@ -271,9 +278,9 @@ export function infoOpening(
   target: InfoTarget | null,
   personRecord: PersonRecordLike | null,
 ): InfoOpening {
-  if (target === null) return "nothing";
-  if (target === "person" && personRecord !== null) return "contact-page";
-  return "layer";
+  if (target === "person") return personRecord === null ? "nothing" : "contact-page";
+  if (target === "group") return "layer";
+  return "nothing";
 }
 
 /**
@@ -334,7 +341,7 @@ export interface PersonRecordLike {
 
 /**
  * The contact record for the other person in a one-to-one chat, or `null`
- * when they are not in the viewer's contact list.
+ * when none can be found.
  *
  * Two ways in, and the order matters. The chat's own link (written at accept
  * time, when the contact and the 1x1 group are created together) is exact.
@@ -342,9 +349,11 @@ export interface PersonRecordLike {
  * handshake and a chat joined from a Welcome, where no link was ever
  * written.
  *
- * `null` is a real answer, not a failure: a one-to-one still opens the
- * person, with the two contact-list blocks absent. It never falls back to
- * the group panel, which is the defect this whole module exists to close.
+ * `null` means a roster that cannot be read, not a person outside the
+ * contact list - there is no such person, since every one-to-one peer is
+ * adopted into the list (`contacts/adopt-one-to-one.ts`). The header then
+ * opens nothing ({@link infoOpening}); it never falls back to the group
+ * panel, which is the defect this whole module exists to close.
  *
  * Not part of the shared rule and deliberately so: which record this device
  * happens to hold is this device's storage, not a presentation decision three

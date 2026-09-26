@@ -248,29 +248,18 @@ impl From<RustInfoTarget> for InfoTarget {
 #[wasm_bindgen]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PersonInfoCapabilities {
-    is_contact: bool,
     membership_ended: bool,
 }
 
 #[wasm_bindgen]
 impl PersonInfoCapabilities {
-    /// `isContact`: the other person is in this device's contact list.
     /// `membershipEnded`: this device's membership in the conversation is
-    /// over (ADR-0045 UX 6.2).
+    /// over (ADR-0045 UX 6.2). A person's card is the contact card; there is
+    /// no `isContact`.
     #[wasm_bindgen(constructor)]
     #[must_use]
-    pub fn new(is_contact: bool, membership_ended: bool) -> Self {
-        Self {
-            is_contact,
-            membership_ended,
-        }
-    }
-
-    /// The other person is in this device's contact list.
-    #[wasm_bindgen(getter, js_name = isContact)]
-    #[must_use]
-    pub fn is_contact(&self) -> bool {
-        self.is_contact
+    pub fn new(membership_ended: bool) -> Self {
+        Self { membership_ended }
     }
 
     /// This device's membership in the conversation is over.
@@ -432,7 +421,6 @@ pub fn info_target(kind: ConversationKind) -> InfoTarget {
 #[must_use]
 pub fn person_info_sections(caps: PersonInfoCapabilities) -> Vec<String> {
     rust_person_info_sections(RustPersonInfoCapabilities {
-        is_contact: caps.is_contact,
         membership_ended: caps.membership_ended,
     })
     .into_iter()
@@ -642,7 +630,7 @@ mod tests {
 
     #[test]
     fn the_sections_cross_the_boundary_as_the_names_web_already_uses() {
-        let ended = person_info_sections(PersonInfoCapabilities::new(true, true));
+        let ended = person_info_sections(PersonInfoCapabilities::new(true));
         assert!(ended.contains(&"delete-chat".to_string()));
         assert!(!ended.contains(&"call".to_string()));
         assert!(

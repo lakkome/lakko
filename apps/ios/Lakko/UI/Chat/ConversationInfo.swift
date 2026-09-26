@@ -31,9 +31,10 @@ public enum ConversationInfoDestination: Equatable {
     ///
     /// - Parameter contactMessageId: the accepted contact behind them, keyed
     ///   on the request's mailbox id — the same key the contacts list uses.
-    ///   `nil` when this device holds no contact for the other person, which
-    ///   is a real state (a conversation that arrived before the contact did)
-    ///   and not an error: what is known about them is still shown.
+    ///   `nil` when no record can be resolved - a roster that cannot be read
+    ///   - in which case the header opens nothing. Every one-to-one peer is
+    ///   a contact by construction (section 2.1), so this is not a "not a
+    ///   contact" state; there is no screen for it.
     case person(contactMessageId: Int64?)
     /// A group opens the group.
     case group

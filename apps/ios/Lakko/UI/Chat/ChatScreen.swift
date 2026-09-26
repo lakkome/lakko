@@ -263,13 +263,17 @@ public struct ChatScreen: View {
                 // ONLY way into this conversation's info, and what opens
                 // follows from what the conversation is.
                 Button {
-                    // A person with a contact record opens the one contact
-                    // card, pushed. A group, or a roster that cannot be read,
-                    // opens the layer.
-                    if case .person(let contactMessageId?) = infoDestination {
+                    // A person opens the one contact card, pushed; a group
+                    // opens its layer. A one-to-one whose record cannot be
+                    // resolved (a roster that cannot be read) opens nothing:
+                    // that is not a state with a screen.
+                    switch infoDestination {
+                    case .person(let contactMessageId?):
                         onOpenContact(contactMessageId)
-                    } else {
+                    case .group:
                         viewModel.openConversationInfo()
+                    case .person(nil), .channel:
+                        break
                     }
                 } label: {
                     ChatTitleView(title: headline, subtitle: subtitle, identity: viewModel.groupIdHex,
@@ -324,15 +328,7 @@ public struct ChatScreen: View {
             ConversationInfoSheet(
                 destination: infoDestination,
                 chat: viewModel,
-                contacts: contacts,
-                // The person screen's Call and Video open a call in the chat
-                // this layer sits over, so they drive the header's own entry
-                // point rather than a second one.
-                onCall: { _, video in
-                    viewModel.closeConversationInfo()
-                    viewModel.onCallButton(video: video)
-                },
-                // ADR-0045 UX §6.2.4 — a deleted chat's row is gone from the
+                // ADR-0045 UX 6.2.4 - a deleted chat's row is gone from the
                 // registry, so the screen it was opened from has nothing left
                 // to show. Route back the same way the Back button does.
                 onDeleted: onBack

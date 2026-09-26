@@ -37,17 +37,14 @@ package me.lakko.app.chat
 
 /** Which info a conversation's header opens. */
 public sealed interface ConversationInfo {
-    /** A person this device holds as a contact: the full contact screen. */
-    public data class Person(val contactKey: String) : ConversationInfo
-
     /**
-     * A person this device does NOT hold as a contact — a chat that outlived
-     * its contact row, which removing a contact deliberately leaves behind.
-     *
-     * It is still a person, so it must not fall back to the group panel; what
-     * it shows is what is knowable without a contact record.
+     * A person. [contactKey] is the route key of their contact card — every
+     * one-to-one peer is a contact by construction
+     * ([me.lakko.app.contacts.OneToOneIsAContact]), so the only way it is
+     * `null` is a roster that cannot be read (no record resolves), and then
+     * there is nothing to open: not a state with a screen.
      */
-    public data object PersonUnknown : ConversationInfo
+    public data class Person(val contactKey: String?) : ConversationInfo
 
     /** A group: the roster, the name, the invite link, the roles, the exit. */
     public data object Group : ConversationInfo
@@ -92,7 +89,7 @@ public fun conversationInfo(
         contacts.firstOrNull { it.routeKey == peerRouteKey }
             ?.let { return ConversationInfo.Person(it.routeKey) }
     }
-    return ConversationInfo.PersonUnknown
+    return ConversationInfo.Person(contactKey = null)
 }
 
 /**
@@ -106,8 +103,8 @@ public fun conversationInfo(
  * header hosted that screen inside a sheet instead, without `Message`, and a
  * person looking at both saw two cards for one contact ("Except a person").
  *
- * The one person left in a layer is the one with no contact record, because
- * there is no contact screen to push for them.
+ * A person with no contact key has nothing to open — `null` here, and the
+ * header does nothing.
  */
 public sealed interface HeaderInfoPresentation {
     /** Push the contact screen — the same destination the contacts list opens. */
@@ -115,14 +112,13 @@ public sealed interface HeaderInfoPresentation {
 
     /** The group's own layer over the conversation. */
     public data object GroupLayer : HeaderInfoPresentation
-
-    /** The fallback layer for a person this device holds no contact record for. */
-    public data object UnknownPersonLayer : HeaderInfoPresentation
 }
 
-/** Which presentation the header gives [info]. Total, so a caller cannot forget one. */
-public fun headerInfoPresentation(info: ConversationInfo): HeaderInfoPresentation = when (info) {
-    is ConversationInfo.Person -> HeaderInfoPresentation.ContactScreen(info.contactKey)
+/**
+ * Which presentation the header gives [info], or `null` when there is nothing
+ * to open. Total over [ConversationInfo], so a caller cannot forget one.
+ */
+public fun headerInfoPresentation(info: ConversationInfo): HeaderInfoPresentation? = when (info) {
+    is ConversationInfo.Person -> info.contactKey?.let(HeaderInfoPresentation::ContactScreen)
     ConversationInfo.Group -> HeaderInfoPresentation.GroupLayer
-    ConversationInfo.PersonUnknown -> HeaderInfoPresentation.UnknownPersonLayer
 }

@@ -20,13 +20,12 @@
  * cards for one contact.
  *
  * Message, Call and Video are offered wherever the card was opened from;
- * from the conversation, Message simply returns to it. The one caller that
- * still renders this view inside the chat is the fallback for a one-to-one
- * whose contact record cannot be found (a roster that cannot be read), which
- * is why the props take a key and a name rather than a contact record, and
- * why Back, Rename and Remove are nullable: a chat with someone who is not
- * in the contact list still opens a PERSON - with the two contact-list
- * blocks simply absent - never the group panel.
+ * from the conversation, Message simply returns to it. The chat used to keep
+ * a second caller for a one-to-one whose contact record could not be found,
+ * rendering this view with Rename and Remove withheld; that "not a contact"
+ * state is gone, because the other person in a one-to-one IS a contact by
+ * construction (`contacts/adopt-one-to-one.ts`), and the Contacts route is
+ * now the one caller.
  *
  * Which blocks appear is NOT decided here and no longer decided on this
  * client at all: it is `lakko_ui_rules::info`, reached through
@@ -65,18 +64,16 @@ export interface ContactDetailViewProps {
   readonly busy: () => boolean;
   readonly error: () => string | null;
   readonly myPubkey: () => Uint8Array | null;
-  /** The narrow-screen way back to the list; `null` where there is no list. */
-  readonly onBack: (() => void) | null;
+  /** The narrow-screen way back to the list. */
+  readonly onBack: () => void;
   /** Message: open the conversation with this person. Always offered; a
    *  caller that IS the conversation passes the way back to it. */
   readonly onMessage: () => void;
   readonly onCall: (withVideo: boolean) => void;
-  /** Set the viewer's own name for this person; blank clears it. `null` when
-   *  they are not in the contact list, so there is no name to set. */
-  readonly onRename: ((newName: string) => void) | null;
-  /** Called after the user confirmed the removal. `null` when they are not
-   *  in the contact list, so there is nothing to remove. */
-  readonly onRemove: (() => void) | null;
+  /** Set the viewer's own name for this person; blank clears it. */
+  readonly onRename: (newName: string) => void;
+  /** Called after the user confirmed the removal. */
+  readonly onRemove: () => void;
   /**
    * Whether this device's membership in the conversation behind this screen
    * has ended (ADR-0045 UX 6.2).
@@ -99,14 +96,8 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
   const profiles = useProfiles();
   // Which blocks this screen holds - the shared rule
   // (`chat/conversation-info.ts` -> `crates/lakko-ui-rules`), not this file.
-  //
-  // Being in the contact list is what the two editable blocks hang on, and the
-  // one signal for it is whether the caller handed over a way to remove them.
   const sections = createMemo(() =>
-    personInfoSections(uiRules(), {
-      isContact: props.onRemove !== null,
-      membershipEnded: props.membershipEnded,
-    }),
+    personInfoSections(uiRules(), { membershipEnded: props.membershipEnded }),
   );
   const resolved = (): ReturnType<typeof profiles.resolve> =>
     profiles.resolve(props.personKeyB64);
@@ -162,7 +153,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
     setEditing(true);
   }
   function saveEdit(): void {
-    props.onRename?.(draft());
+    props.onRename(draft());
     setEditing(false);
   }
 
@@ -176,7 +167,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
       cancelLabel: "Cancel",
       tone: "danger",
     });
-    if (ok) props.onRemove?.();
+    if (ok) props.onRemove();
   }
 
   const actions = (): ReadonlyArray<{
@@ -234,19 +225,15 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
   return (
     <article>
       <div class="lk-page lk-stack lk-contact-detail">
-        <Show when={props.onBack}>
-          {(back) => (
-            <button
-              type="button"
-              class="ghost small lk-narrow-only"
-              style={{ "align-self": "flex-start" }}
-              onClick={() => back()()}
-            >
-              <Icon name="back" size={16} />
-              Contacts
-            </button>
-          )}
-        </Show>
+        <button
+          type="button"
+          class="ghost small lk-narrow-only"
+          style={{ "align-self": "flex-start" }}
+          onClick={() => props.onBack()}
+        >
+          <Icon name="back" size={16} />
+          Contacts
+        </button>
 
         <header class="lk-contact-head">
           <Avatar label={name()} id={props.personKeyB64} size="xl" />
@@ -334,8 +321,6 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
         </section>
         </Show>
 
-        {/* Only for someone already in the contact list: there is no
-            local name to set for a person the viewer has not added. */}
         <Show when={sections().includes("rename-contact")}>
           <section class="lk-card">
             <div class="lk-card-row">

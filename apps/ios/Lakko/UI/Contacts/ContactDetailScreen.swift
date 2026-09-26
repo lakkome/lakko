@@ -82,7 +82,6 @@ struct ContactDetailScreen: View {
         // `viewModel.contact(messageId:)` found one.
         let sections = personInfoSections(
             caps: PersonInfoCapabilities(
-                isContact: true,
                 membershipEnded: chat.map { viewModel.membershipEnded(groupIdHex: $0) } ?? false))
         List {
             Section {

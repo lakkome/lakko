@@ -126,14 +126,10 @@ describe("the vocabulary that crosses the boundary", () => {
   // ever dropped, on any target, under any capabilities. A rename or an
   // addition in Rust fails here rather than silently un-rendering a control.
   it("nothing the core emits is dropped on the way in", () => {
-    for (const isContact of [true, false]) {
-      for (const membershipEnded of [true, false]) {
-        const caps = { isContact, membershipEnded };
-        const raw = wasm.personInfoSections(
-          new wasm.PersonInfoCapabilities(isContact, membershipEnded),
-        );
-        expect(personInfoSections(rules, caps)).toHaveLength(raw.length);
-      }
+    for (const membershipEnded of [true, false]) {
+      const caps = { membershipEnded };
+      const raw = wasm.personInfoSections(new wasm.PersonInfoCapabilities(membershipEnded));
+      expect(personInfoSections(rules, caps)).toHaveLength(raw.length);
     }
     for (const caps of everyGroupCapability()) {
       const raw = wasm.groupInfoSections(
@@ -172,12 +168,8 @@ describe("the vocabulary that crosses the boundary", () => {
   // missing on the other two clients.
   it("every name a view branches on is one the core actually produces", () => {
     const produced = new Set<InfoSection>();
-    for (const isContact of [true, false]) {
-      for (const membershipEnded of [true, false]) {
-        for (const s of personInfoSections(rules, { isContact, membershipEnded })) {
-          produced.add(s);
-        }
-      }
+    for (const membershipEnded of [true, false]) {
+      for (const s of personInfoSections(rules, { membershipEnded })) produced.add(s);
     }
     for (const caps of everyGroupCapability()) {
       for (const s of groupInfoSections(rules, caps)) produced.add(s);
@@ -226,27 +218,19 @@ describe("the vocabulary that crosses the boundary", () => {
 
 describe("personInfoSections", () => {
   it("renders nothing until the shared rules have loaded", () => {
-    expect(personInfoSections(null, { isContact: true, membershipEnded: false })).toEqual([]);
+    expect(personInfoSections(null, { membershipEnded: false })).toEqual([]);
   });
 
-  it("offers the contact-list blocks only for someone in the contact list", () => {
-    const contact = personInfoSections(rules, {
-      isContact: true,
-      membershipEnded: false,
-    });
+  // The other person in a one-to-one IS a contact by construction
+  // (`contacts/adopt-one-to-one.ts`), so there is no `isContact` flag any
+  // more and the contact-list blocks are always there. Until 2026-09-26 the
+  // rule took one and a "stranger" got a card with these three withheld.
+  it("always offers the contact-list blocks", () => {
+    const contact = personInfoSections(rules, { membershipEnded: false });
     expect(contact).toContain("safety-number");
     expect(contact).toContain("rename-contact");
     expect(contact).toContain("remove-contact");
-
-    const stranger = personInfoSections(rules, {
-      isContact: false,
-      membershipEnded: false,
-    });
-    expect(stranger).not.toContain("safety-number");
-    expect(stranger).not.toContain("rename-contact");
-    expect(stranger).not.toContain("remove-contact");
-    // Still a PERSON, not a group: not being a contact is a real answer.
-    expect(stranger).toContain("call");
+    expect(contact).toContain("call");
   });
 
   // Spec section 2.1 (2026-09-26): Message, wherever the card was opened
@@ -255,11 +239,7 @@ describe("personInfoSections", () => {
   // gave one person two cards; the origin is gone and there is no argument
   // left to withhold it on.
   it("offers Message whoever is looking, unless the conversation is over", () => {
-    for (const isContact of [true, false]) {
-      expect(personInfoSections(rules, { isContact, membershipEnded: false })).toContain(
-        "message",
-      );
-    }
+    expect(personInfoSections(rules, { membershipEnded: false })).toContain("message");
   });
 
   // The defect of 2026-09-23: tapping a person's name showed `Group name`,
@@ -268,13 +248,11 @@ describe("personInfoSections", () => {
   // exhaustively on this side of the boundary as well as in the core, because
   // what the core decides and what this client receives are two claims.
   it("never shows anything that only makes sense for a group", () => {
-    for (const isContact of [true, false]) {
-      for (const membershipEnded of [true, false]) {
-        const sections = personInfoSections(rules, { isContact, membershipEnded });
-        expect(holdsGroupOnlySection(sections)).toBe(false);
-        for (const groupOnly of GROUP_ONLY_SECTIONS) {
-          expect(sections).not.toContain(groupOnly);
-        }
+    for (const membershipEnded of [true, false]) {
+      const sections = personInfoSections(rules, { membershipEnded });
+      expect(holdsGroupOnlySection(sections)).toBe(false);
+      for (const groupOnly of GROUP_ONLY_SECTIONS) {
+        expect(sections).not.toContain(groupOnly);
       }
     }
   });
@@ -284,22 +262,14 @@ describe("personInfoSections", () => {
   // routing by what the conversation IS — so ending a one-to-one left a
   // conversation that could never be closed on this client at all.
   it("an ended one-to-one can be closed, and no longer offers a call", () => {
-    for (const isContact of [true, false]) {
-      const sections = personInfoSections(rules, {
-        isContact,
-        membershipEnded: true,
-      });
-      expect(sections).toContain("delete-chat");
-      expect(sections).not.toContain("call");
-    }
+    const sections = personInfoSections(rules, { membershipEnded: true });
+    expect(sections).toContain("delete-chat");
+    expect(sections).not.toContain("call");
   });
 
   it("an ended one-to-one still says everything about the person", () => {
     // The conversation ended; they did not.
-    const sections = personInfoSections(rules, {
-      isContact: true,
-      membershipEnded: true,
-    });
+    const sections = personInfoSections(rules, { membershipEnded: true });
     expect(sections).toContain("safety-number");
     expect(sections).toContain("rename-contact");
     expect(sections).toContain("remove-contact");
@@ -440,21 +410,11 @@ describe("findPersonRecord", () => {
     ).toBe(byKey);
   });
 
-  it("is null when the other person is not in the contact list", () => {
+  it("is null when no record can be found", () => {
     expect(
       findPersonRecord([byKey], { groupIdB64: "g9", peerKeyB64: "keyZ" }),
     ).toBeNull();
     expect(findPersonRecord([byKey], { groupIdB64: "g9", peerKeyB64: null })).toBeNull();
-  });
-
-  it("an unknown person still opens a person, so the sections stay a person's", () => {
-    const record = findPersonRecord([], { groupIdB64: "g9", peerKeyB64: "keyZ" });
-    const sections = personInfoSections(rules, {
-      isContact: record !== null,
-      membershipEnded: false,
-    });
-    expect(holdsGroupOnlySection(sections)).toBe(false);
-    expect(sections).toContain("call");
   });
 });
 
@@ -462,18 +422,19 @@ describe("infoOpening", () => {
   // `docs/ux/conversation-info.md` section 3, "Except a person": a person's
   // info IS the contact screen and there is one of it, so from the
   // conversation the header goes to the contact's own page rather than
-  // rendering a second card as a layer. The layer is the group's idiom, and
-  // the fallback for a one-to-one whose contact record cannot be found.
+  // rendering a second card as a layer. The layer is the group's idiom and
+  // nobody else's.
   const record = { signaturePubkeyB64: "keyA", groupIdB64: "g1" };
 
   it("a contact opens their own page, never a layer", () => {
     expect(infoOpening("person", record)).toBe("contact-page");
   });
 
-  it("a person without a contact record falls back to the layer", () => {
-    // A roster that cannot be read: still a PERSON, still not the group panel
-    // - the layer renders the person screen with the contact blocks absent.
-    expect(infoOpening("person", null)).toBe("layer");
+  it("a person without a contact record opens nothing", () => {
+    // A roster that cannot be read. Every one-to-one peer is a contact by
+    // construction, so this is not a state with a card of its own: not the
+    // group panel, and no longer the retired "not a contact" layer either.
+    expect(infoOpening("person", null)).toBe("nothing");
   });
 
   it("a group opens the layer whatever record is at hand", () => {

@@ -142,7 +142,7 @@ public fun ContactDetailScreen(
     // call, and its answer changes only when one of its inputs does.
     val sections = remember(membershipEnded) {
         personInfoSections(
-            PersonInfoCapabilities(isContact = true, membershipEnded = membershipEnded),
+            PersonInfoCapabilities(membershipEnded = membershipEnded),
         )
     }
     // Read through `nameVersion` so a profile or a username arriving later

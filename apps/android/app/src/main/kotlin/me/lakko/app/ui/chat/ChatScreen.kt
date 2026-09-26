@@ -279,9 +279,6 @@ public fun ChatScreen(
             contacts = contactLinks,
         )
     }
-    // The person layer's own open state. The group's lives in the view model
-    // (it refreshes the roster on open); a person's has nothing to refresh.
-    var personInfoOpen by remember(state.groupIdHex) { mutableStateOf(false) }
     // UX 5.2 — the timeline's clock: DS `created_at` rendered in the device's
     // 12/24-hour format; date separators relative to now.
     val zone = remember { ZoneId.systemDefault() }
@@ -575,15 +572,16 @@ public fun ChatScreen(
             },
             // Section 1 — the ONE way into this conversation's info. Which
             // one opens, and how, is `conversationInfo`'s and
-            // `headerInfoPresentation`'s answer, never this screen's.
+            // `headerInfoPresentation`'s answer, never this screen's. A
+            // one-to-one whose record cannot be resolved has nothing to
+            // open, so the tap does nothing.
             onShowInfo = {
                 when (val open = me.lakko.app.chat.headerInfoPresentation(conversationInfo)) {
                     me.lakko.app.chat.HeaderInfoPresentation.GroupLayer ->
                         if (!viewModel.membersPanelOpen.value) viewModel.toggleMembersPanel()
                     is me.lakko.app.chat.HeaderInfoPresentation.ContactScreen ->
                         onOpenContact(open.contactKey)
-                    me.lakko.app.chat.HeaderInfoPresentation.UnknownPersonLayer ->
-                        personInfoOpen = true
+                    null -> Unit
                 }
             },
         )
@@ -667,42 +665,6 @@ public fun ChatScreen(
         val membersPanelOpen by viewModel.membersPanelOpen.collectAsStateWithLifecycle()
         if (membersPanelOpen && conversationInfo == ConversationInfo.Group) {
             MembersSheet(viewModel = viewModel, onChatDeleted = onNavigateBack)
-        }
-
-        // The one person left in a layer: somebody this device holds no
-        // contact record for. A contact is pushed as a screen (see
-        // `onOpenContact` above), and the guard on the kind — not the flag
-        // alone — is what keeps this sheet from ever fronting a contact or a
-        // group.
-        if (personInfoOpen && conversationInfo == ConversationInfo.PersonUnknown) {
-            UnknownPersonSheet(
-                peerName = headerTitle,
-                peerUsername = peerUsername,
-                avatarSeed = state.groupIdHex,
-                // The same gate and the same routing the header's own call
-                // buttons use. A call already holding the slot hides it here;
-                // an ended membership is the RULE's to decide, so it is passed
-                // on rather than pre-judged.
-                onStartCall = if (callOccupant != null) {
-                    null
-                } else {
-                    { video ->
-                        callPermissions.request(video = video) { granted ->
-                            viewModel.onCallButton(video = granted)
-                        }
-                    }
-                },
-                // ADR-0045 UX 6.2.4 — this lived in the group panel, which a
-                // one-to-one no longer opens, so without it a finished chat
-                // could never be removed from the list.
-                onDeleteChat = {
-                    viewModel.onDeleteChat()
-                    personInfoOpen = false
-                    onNavigateBack()
-                },
-                membershipEnded = membershipEnded,
-                onDismiss = { personInfoOpen = false },
-            )
         }
 
         // No call is drawn here: the 1x1, group and call-link in-call screens

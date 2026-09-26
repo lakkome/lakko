@@ -74,8 +74,10 @@ client now derives the contact from the conversation: whenever the set of
 conversations changes, each one-to-one peer without a row gets one (named by
 the profile they sent, with their account id when a profile carried it), and a
 row that never recorded its conversation is completed. The "not one of your
-contacts" state is therefore unreachable from a one-to-one conversation and is
-kept only as a fallback for a roster that cannot be read.
+contacts" state is gone with it - the copy, the screens and the `is_contact`
+flag the shared rule took: a person's card is the contact card. A one-to-one
+whose roster cannot be read (no record can be resolved) simply has nothing to
+open from its header; it is not a state with a screen.
 
 - Name and `@username`.
 - Message, Call, Video - always, wherever the card was opened from. From the

@@ -45,8 +45,16 @@ import {
   base64UrlDecodeNoPad,
   base64UrlEncodeNoPad,
 } from "../auth/account-id";
-import { useChats } from "../chat/ChatContext";
+import { useChats, type ActiveGroup } from "../chat/ChatContext";
 import { recordConversationKind } from "../chat/conversation-kind-store";
+import { deleteChat } from "../chat/delete-chat";
+import { deleteChatConfirmation } from "../chat/delete-chat-confirm";
+import {
+  loadLeaveRequestedAt,
+  membershipEnded as membershipHasEnded,
+  membershipState,
+  readIsActive,
+} from "../chat/membership-ended";
 import { ContactsClient } from "../contacts/client";
 import type { IncomingContactRequest, SendResult } from "../contacts/client";
 import { ContactDetailView } from "../contacts/ContactDetailView";
@@ -72,6 +80,7 @@ import { memberNameOf } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
 import { mayLookUp, usernameReason, type UsernameCheck } from "../profile/rules";
 import { createUsernameCheck } from "../profile/username-field";
+import { requestConfirm } from "../ui/confirm-dialog";
 import { Icon } from "../ui/icons";
 import { paths } from "./paths";
 
@@ -350,12 +359,10 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   const selected = (): AcceptedContact | undefined =>
     accepted().find((c) => c.signaturePubkeyB64 === selectedKey());
 
-  /** The 1x1 chat with this contact, if this device holds one: linked at
-   *  accept, or found by its two-member roster. */
-  const chatWith = (c: AcceptedContact): string | null => {
-    if (c.groupIdB64 !== undefined) {
-      return paths.chat(base64UrlEncodeNoPad(base64Decode(c.groupIdB64)));
-    }
+  /** The registry row of the 1x1 chat with this contact, if this device
+   *  holds one: linked at accept, or found by its two-member roster. */
+  const groupWith = (c: AcceptedContact): ActiveGroup | undefined => {
+    if (c.groupIdB64 !== undefined) return chats.get(c.groupIdB64);
     const own = chats.identity();
     const ownB64 = own === null ? null : base64Encode(own.signaturePublicKey);
     for (const g of chats.groups()) {
@@ -368,11 +375,84 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
         continue;
       }
       if (keys.length === 2 && keys.includes(c.signaturePubkeyB64) && keys.includes(ownB64 ?? "")) {
-        return paths.chat(base64UrlEncodeNoPad(g.group.groupId));
+        return g;
       }
     }
-    return null;
+    return undefined;
   };
+
+  /** The 1x1 chat with this contact, if this device holds one. A linked id
+   *  is an address whether or not the registry currently holds the row. */
+  const chatWith = (c: AcceptedContact): string | null => {
+    if (c.groupIdB64 !== undefined) {
+      return paths.chat(base64UrlEncodeNoPad(base64Decode(c.groupIdB64)));
+    }
+    const g = groupWith(c);
+    return g === undefined ? null : paths.chat(base64UrlEncodeNoPad(g.group.groupId));
+  };
+
+  /**
+   * Whether this contact's 1x1 chat has ENDED — the same two reads the
+   * conversation's own header makes (`routes/Chat.tsx` `membership`):
+   * `isActive` off the live handle decides, the leave record only narrows
+   * the copy. `docs/ux/conversation-info.md` section 3 sends a person's
+   * header here rather than to a conversation page of its own, so this card
+   * is the only place on web an ended one-to-one can be closed from, as it
+   * already is on iOS and Android. No chat, or a live one, reads `false`.
+   */
+  const chatMembershipEnded = (c: AcceptedContact): boolean => {
+    const g = groupWith(c);
+    if (g === undefined) return false;
+    const s = auth.state();
+    return membershipHasEnded(
+      membershipState({
+        isActive: readIsActive(g.group),
+        leaveRequestedAtMs:
+          s.kind === "session"
+            ? loadLeaveRequestedAt(s.account.accountId, g.groupIdB64)
+            : undefined,
+      }),
+    );
+  };
+
+  /** The chat's label for the confirmation: the local name when there is
+   *  one, else what the roster would show for this person. */
+  const chatLabelOf = (c: AcceptedContact): string =>
+    c.displayName.trim().length > 0
+      ? c.displayName.trim()
+      : memberNameOf(profiles.resolve(c.signaturePubkeyB64));
+
+  /**
+   * ADR-0045 UX §6.2.4 — `Delete this chat`, for an ended one-to-one. The
+   * confirmation is the only protection there is, so it states exactly what
+   * is destroyed and names the chat; the removal itself is the shared
+   * `chat/delete-chat.ts`, whose registry-row-last order keeps the chat
+   * reachable when an earlier step fails.
+   */
+  async function onDeleteChat(c: AcceptedContact): Promise<void> {
+    const s = auth.state();
+    if (s.kind !== "session") return;
+    const g = groupWith(c);
+    if (g === undefined) return;
+    if (!(await requestConfirm(deleteChatConfirmation({ chatLabel: chatLabelOf(c) })))) {
+      return;
+    }
+    setDetailError(null);
+    setDetailBusy(true);
+    try {
+      await deleteChat({
+        accountIdB64: s.account.accountId,
+        groupIdB64: g.groupIdB64,
+        groupIdHex: syncGroupIdHex(g.group.groupId),
+        chats,
+      });
+      clearSelection();
+    } catch (err) {
+      setDetailError(formatContactsError(err, chatLabelOf(c)));
+    } finally {
+      setDetailBusy(false);
+    }
+  }
 
   // ---- detail actions --------------------------------------------
   const [detailBusy, setDetailBusy] = createSignal(false);
@@ -497,14 +577,20 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
                 onRemoveAccepted(c());
                 clearSelection();
               }}
-              // This screen is about the PERSON, not about a conversation:
-              // there is no conversation of its own whose membership could
-              // have ended, so `Call` stays and `Delete this chat` never
-              // appears. The route does not track the membership of whatever
-              // 1x1 chat `chatHref` points at; the conversation's OWN header
-              // is where that state is known and rendered.
-              membershipEnded={false}
-              onDeleteChat={null}
+              // The membership of this person's 1x1 chat, read off the live
+              // handle the same way the conversation's header reads it. It
+              // has to be here: a one-to-one's header opens THIS card rather
+              // than a conversation page of its own (`conversation-info.md`
+              // section 3), so an ended one-to-one that could only be deleted
+              // from its header could not be deleted at all — which is how
+              // web shipped, while iOS and Android rendered the block. Read
+              // again whenever the selection or the registry changes; it is
+              // terminal, so a stale `false` lasts only until the card is
+              // next opened.
+              membershipEnded={chatMembershipEnded(c())}
+              onDeleteChat={
+                chatMembershipEnded(c()) ? () => void onDeleteChat(c()) : null
+              }
             />
           )}
         </Show>

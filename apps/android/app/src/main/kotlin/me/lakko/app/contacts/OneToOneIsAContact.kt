@@ -13,8 +13,8 @@ import java.security.MessageDigest
  * ContactAck, while the conversation itself arrives by another event (the MLS
  * Welcome, or a second device being admitted to the account's conversations),
  * so any path that delivered the conversation without the acknowledgement left
- * a named chat, an empty Contacts tab and a conversation info sheet reading
- * "Not in your contacts" - seen live on a second device.
+ * a named chat, an empty Contacts tab and a conversation info sheet saying the
+ * peer was not one of your contacts - seen live on a second device.
  *
  * This is the pure half of [ContactsRepository.adoptOneToOnePeer]: the accepted
  * list after adopting the peer, or `null` when it is already complete.

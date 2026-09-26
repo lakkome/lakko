@@ -4,6 +4,7 @@
 package me.lakko.app.chat
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
@@ -135,9 +136,10 @@ class ConversationInfoTest {
     }
 
     @Test
-    fun `a chat that outlived its contact is still a person`() {
-        // Removing a contact deliberately leaves the chat behind. It must not
-        // fall back to the group panel.
+    fun `a one-to-one whose record cannot be resolved is a person with no card`() {
+        // A roster that cannot be read: still a person, never the group
+        // panel, and no card to open (every peer is a contact by construction,
+        // so this is the only way the key is absent).
         val info = conversationInfo(
             kind = ConversationKind.Chat,
             otherMemberCount = 1,
@@ -145,11 +147,11 @@ class ConversationInfoTest {
             peerRouteKey = "gone-key",
             contacts = listOf(anna, ivan),
         )
-        assertEquals(ConversationInfo.PersonUnknown, info)
+        assertEquals(ConversationInfo.Person(contactKey = null), info)
     }
 
     @Test
-    fun `no contacts at all still opens a person`() {
+    fun `no contacts at all is still a person, with no card`() {
         val info = conversationInfo(
             kind = ConversationKind.Chat,
             otherMemberCount = 1,
@@ -157,7 +159,7 @@ class ConversationInfoTest {
             peerRouteKey = "anna-key",
             contacts = emptyList(),
         )
-        assertEquals(ConversationInfo.PersonUnknown, info)
+        assertEquals(ConversationInfo.Person(contactKey = null), info)
     }
 
     // ---------------------------------------------------------------------
@@ -181,12 +183,10 @@ class ConversationInfoTest {
     }
 
     @Test
-    fun `a person with no contact record is the fallback layer`() {
-        // No contact screen exists to push for them, so the layer stays.
-        assertEquals(
-            HeaderInfoPresentation.UnknownPersonLayer,
-            headerInfoPresentation(ConversationInfo.PersonUnknown),
-        )
+    fun `a person with no record gives the header nothing to open`() {
+        // docs/ux/conversation-info.md section 2.1 — not a state with a
+        // screen: the tap does nothing, and nothing is said.
+        assertNull(headerInfoPresentation(ConversationInfo.Person(contactKey = null)))
     }
 
     @Test

@@ -21,8 +21,8 @@ import XCTest
 /// to stop following it.
 final class ConversationInfoTests: XCTestCase {
 
-    private func person(_ isContact: Bool, ended: Bool) -> PersonInfoCapabilities {
-        PersonInfoCapabilities(isContact: isContact, membershipEnded: ended)
+    private func person(ended: Bool) -> PersonInfoCapabilities {
+        PersonInfoCapabilities(membershipEnded: ended)
     }
 
     // MARK: - Section 1: which info opens, and what iOS routes on
@@ -90,43 +90,29 @@ final class ConversationInfoTests: XCTestCase {
             .groupName, .renameGroup, .memberList, .addMember,
             .inviteLink, .roles, .transferOwnership, .leaveGroup,
         ]
-        for isContact in [false, true] {
-            for ended in [false, true] {
-                let sections = personInfoSections(caps: person(isContact, ended: ended))
-                for forbidden in groupShaped {
-                    XCTAssertFalse(
-                        sections.contains(forbidden),
-                        "contact=\(isContact) ended=\(ended) showed \(forbidden)")
-                }
+        for ended in [false, true] {
+            let sections = personInfoSections(caps: person(ended: ended))
+            for forbidden in groupShaped {
+                XCTAssertFalse(
+                    sections.contains(forbidden),
+                    "ended=\(ended) showed \(forbidden)")
             }
         }
     }
 
     func testAContactGetsTheNumberTheNameAndTheWayOutOfTheList() {
-        let sections = personInfoSections(caps: person(true, ended: false))
+        let sections = personInfoSections(caps: person(ended: false))
         XCTAssertTrue(sections.contains(.safetyNumber))
         XCTAssertTrue(sections.contains(.renameContact))
         XCTAssertTrue(sections.contains(.removeContact))
-    }
-
-    /// A conversation that outlived its contact record is still a person, and
-    /// offers nothing that would act on a record it does not have.
-    func testAPersonWhoIsNotAContactOffersNothingToActOnARecordWith() {
-        let sections = personInfoSections(caps: person(false, ended: false))
-        XCTAssertFalse(sections.contains(.safetyNumber))
-        XCTAssertFalse(sections.contains(.renameContact))
-        XCTAssertFalse(sections.contains(.removeContact))
-        XCTAssertTrue(sections.contains(.call))
     }
 
     /// One card wherever it was opened from: Message is always there; from
     /// the chat it returns to it. Withholding it by origin gave one contact
     /// two cards (seen side by side on 2026-09-26).
     func testMessageIsOfferedWhateverTheCardWasOpenedFrom() {
-        for isContact in [false, true] {
-            XCTAssertTrue(personInfoSections(caps: person(isContact, ended: false)).contains(.message))
-            XCTAssertTrue(personInfoSections(caps: person(isContact, ended: true)).contains(.message))
-        }
+        XCTAssertTrue(personInfoSections(caps: person(ended: false)).contains(.message))
+        XCTAssertTrue(personInfoSections(caps: person(ended: true)).contains(.message))
     }
 
     // MARK: - The first defect this closes: an ended one-to-one had no exit
@@ -136,28 +122,23 @@ final class ConversationInfoTests: XCTestCase {
     /// — so ending a one-to-one left a conversation that could never be
     /// closed.
     func testAnEndedOneToOneCanBeClosed() {
-        for isContact in [false, true] {
-            XCTAssertTrue(
-                personInfoSections(caps: person(isContact, ended: true)).contains(.deleteChat),
-                "an ended one-to-one (contact=\(isContact)) had no way out")
-        }
+        XCTAssertTrue(
+            personInfoSections(caps: person(ended: true)).contains(.deleteChat),
+            "an ended one-to-one had no way out")
     }
 
     /// The other half of the same state: the per-call key comes from a group
     /// this device is no longer in, so a call control would assert a live
     /// session there is not.
     func testAnEndedOneToOneOffersNoCall() {
-        for isContact in [false, true] {
-            XCTAssertFalse(
-                personInfoSections(caps: person(isContact, ended: true))
-                    .contains(.call),
-                "an ended one-to-one (contact=\(isContact)) still offered a call")
-        }
+        XCTAssertFalse(
+            personInfoSections(caps: person(ended: true)).contains(.call),
+            "an ended one-to-one still offered a call")
     }
 
     /// The person is still the person: what ended is the conversation.
     func testAnEndedOneToOneStillShowsEverythingAboutThePerson() {
-        let sections = personInfoSections(caps: person(true, ended: true))
+        let sections = personInfoSections(caps: person(ended: true))
         XCTAssertTrue(sections.contains(.safetyNumber))
         XCTAssertTrue(sections.contains(.renameContact))
         XCTAssertTrue(sections.contains(.removeContact))
@@ -284,7 +265,7 @@ final class ConversationInfoTests: XCTestCase {
     /// destination's sections are empty, and a person's and a group's never
     /// coincide.
     func testTheThreeDestinationsAreDistinctAndNoneIsEmpty() {
-        let personSections = personInfoSections(caps: person(true, ended: false))
+        let personSections = personInfoSections(caps: person(ended: false))
         let groupSections = groupInfoSections(
             caps: GroupInfoCapabilities(
                 canManageMembers: false, canRename: false, canMintInvite: false,

@@ -243,16 +243,14 @@ impl From<RustInfoSection> for InfoSection {
 /// What the viewer is to a one-to-one conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
 pub struct PersonInfoCapabilities {
-    /// The other person is in this device's contact list.
-    pub is_contact: bool,
     /// This device's membership in the conversation is over (ADR-0045 UX 6.2).
+    /// A person's card is the contact card; there is no `is_contact`.
     pub membership_ended: bool,
 }
 
 impl From<PersonInfoCapabilities> for RustPersonInfoCapabilities {
     fn from(c: PersonInfoCapabilities) -> Self {
         Self {
-            is_contact: c.is_contact,
             membership_ended: c.membership_ended,
         }
     }
@@ -538,7 +536,6 @@ mod tests {
     #[test]
     fn the_sections_cross_the_boundary_as_the_core_decided_them() {
         let ended = person_info_sections(PersonInfoCapabilities {
-            is_contact: true,
             membership_ended: true,
         });
         assert!(ended.contains(&InfoSection::DeleteChat));

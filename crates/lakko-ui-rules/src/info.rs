@@ -162,15 +162,14 @@ impl InfoSection {
 /// What the viewer is to a one-to-one conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PersonInfoCapabilities {
-    /// The other person is in this device's contact list, so the contact
-    /// blocks have a record to act on. Since 2026-09-26 every client derives
-    /// the contact row from the one-to-one conversation itself
-    /// (`docs/ux/conversation-info.md` section 2.1), so from a conversation
-    /// this is `true` whenever the roster can be read; `false` survives as
-    /// the fallback for a roster that cannot be.
-    pub is_contact: bool,
     /// This device's membership in the conversation is over (ADR-0045 UX
     /// 6.2).
+    ///
+    /// There is no `is_contact` any more: a person's card IS the contact
+    /// card. Every client derives the contact row from the one-to-one
+    /// conversation itself (`docs/ux/conversation-info.md` section 2.1), so
+    /// a person you can open a card for is a contact by construction, and the
+    /// "not one of your contacts" state the flag used to select is gone.
     pub membership_ended: bool,
 }
 
@@ -268,11 +267,9 @@ pub fn person_info_sections(caps: PersonInfoCapabilities) -> Vec<InfoSection> {
     // (seen side by side on 2026-09-26). From the conversation the control
     // simply returns to it.
     sections.push(InfoSection::Message);
-    if caps.is_contact {
-        sections.push(InfoSection::SafetyNumber);
-        sections.push(InfoSection::RenameContact);
-        sections.push(InfoSection::RemoveContact);
-    }
+    sections.push(InfoSection::SafetyNumber);
+    sections.push(InfoSection::RenameContact);
+    sections.push(InfoSection::RemoveContact);
     sections
 }
 
@@ -346,9 +343,8 @@ mod tests {
     use super::*;
     use crate::conversation::ConversationKind;
 
-    fn person(is_contact: bool, ended: bool) -> PersonInfoCapabilities {
+    fn person(ended: bool) -> PersonInfoCapabilities {
         PersonInfoCapabilities {
-            is_contact,
             membership_ended: ended,
         }
     }
@@ -376,35 +372,34 @@ mod tests {
     /// it is checked exhaustively.
     #[test]
     fn a_person_never_carries_anything_group_shaped() {
-        {
-            for &is_contact in &[false, true] {
-                for &ended in &[false, true] {
-                    let sections = person_info_sections(person(is_contact, ended));
-                    assert!(
-                        !sections.iter().any(|s| s.group_only()),
-                        "contact={is_contact} ended={ended} -> {sections:?}"
-                    );
-                }
-            }
+        for &ended in &[false, true] {
+            let sections = person_info_sections(person(ended));
+            assert!(
+                !sections.iter().any(|s| s.group_only()),
+                "ended={ended} -> {sections:?}"
+            );
         }
     }
 
     #[test]
     fn a_contact_gets_the_number_the_name_and_the_way_out_of_the_list() {
-        let sections = person_info_sections(person(true, false));
+        let sections = person_info_sections(person(false));
         assert!(sections.contains(&InfoSection::SafetyNumber));
         assert!(sections.contains(&InfoSection::RenameContact));
         assert!(sections.contains(&InfoSection::RemoveContact));
     }
 
-    /// A conversation that outlived its contact record is still a person.
+    /// A person's card is the contact card: the three contact blocks are
+    /// always there, live or ended. The "not a contact" state that withheld
+    /// them is gone (2026-09-26).
     #[test]
-    fn a_person_who_is_not_a_contact_offers_nothing_to_act_on_a_record_with() {
-        let sections = person_info_sections(person(false, false));
-        assert!(!sections.contains(&InfoSection::SafetyNumber));
-        assert!(!sections.contains(&InfoSection::RenameContact));
-        assert!(!sections.contains(&InfoSection::RemoveContact));
-        assert!(sections.contains(&InfoSection::Call));
+    fn a_person_always_gets_the_contact_blocks() {
+        for &ended in &[false, true] {
+            let sections = person_info_sections(person(ended));
+            assert!(sections.contains(&InfoSection::SafetyNumber));
+            assert!(sections.contains(&InfoSection::RenameContact));
+            assert!(sections.contains(&InfoSection::RemoveContact));
+        }
     }
 
     /// One card wherever it was opened from: `Message` is always there, and
@@ -412,10 +407,8 @@ mod tests {
     /// gave the same person two cards.
     #[test]
     fn message_is_offered_whatever_the_card_was_opened_from() {
-        for &is_contact in &[false, true] {
-            assert!(person_info_sections(person(is_contact, false)).contains(&InfoSection::Message));
-            assert!(person_info_sections(person(is_contact, true)).contains(&InfoSection::Message));
-        }
+        assert!(person_info_sections(person(false)).contains(&InfoSection::Message));
+        assert!(person_info_sections(person(true)).contains(&InfoSection::Message));
     }
 
     /// The divergence that let a one-to-one end with no way to close it: the
@@ -424,8 +417,8 @@ mod tests {
     #[test]
     fn an_ended_conversation_can_always_be_closed_whatever_kind_it_was() {
         for sections in [
-            person_info_sections(person(true, true)),
-            person_info_sections(person(false, true)),
+            person_info_sections(person(true)),
+            person_info_sections(person(true)),
             group_info_sections(group(true)),
         ] {
             assert!(sections.contains(&InfoSection::DeleteChat), "{sections:?}");
@@ -436,7 +429,7 @@ mod tests {
     /// comes from a group this device is no longer in.
     #[test]
     fn an_ended_conversation_offers_no_call_and_no_group_action() {
-        let p = person_info_sections(person(true, true));
+        let p = person_info_sections(person(true));
         assert!(!p.contains(&InfoSection::Call));
         let g = group_info_sections(group(true));
         for gone in [
@@ -453,7 +446,7 @@ mod tests {
     /// The person is still the person: what ends is the conversation.
     #[test]
     fn an_ended_conversation_still_shows_everything_about_the_person() {
-        let sections = person_info_sections(person(true, true));
+        let sections = person_info_sections(person(true));
         assert!(sections.contains(&InfoSection::SafetyNumber));
         assert!(sections.contains(&InfoSection::RenameContact));
         assert!(sections.contains(&InfoSection::RemoveContact));
@@ -605,15 +598,7 @@ mod tests {
     /// offers, and it is the one control here that destroys user data.
     #[test]
     fn a_live_conversation_never_offers_to_delete_itself() {
-        {
-            for &is_contact in &[false, true] {
-                let sections = person_info_sections(person(is_contact, false));
-                assert!(
-                    !sections.contains(&InfoSection::DeleteChat),
-                    "contact={is_contact} -> {sections:?}"
-                );
-            }
-        }
+        assert!(!person_info_sections(person(false)).contains(&InfoSection::DeleteChat));
         assert!(!group_info_sections(group(false)).contains(&InfoSection::DeleteChat));
     }
 
