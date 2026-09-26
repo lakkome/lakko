@@ -105,6 +105,12 @@ public fun ContactDetailScreen(
     /** ADR-0045 UX 6.2.4 — forget a chat this device is out of. The host owns
      *  where to land afterwards. */
     onDeleteChat: (groupIdHex: String) -> Unit,
+    /** The contact's one-to-one chat on THIS device: the linked id only while
+     *  the chat still exists here, else the roster scan, else `null`. The
+     *  default trusts the link, which is what every caller did until a stale
+     *  link opened a dead chat (2026-09-26); the host passes
+     *  `ChatRepository.chatGroupIdHexFor`. */
+    resolveChat: (linkedGroupIdHex: String?, peerKey: ByteArray) -> String? = { linked, _ -> linked },
     modifier: Modifier = Modifier,
 ) {
     val contactsState by contactsRepository.state.collectAsStateWithLifecycle()
@@ -130,7 +136,7 @@ public fun ContactDetailScreen(
     // Section 4 — an ended membership turns the actions over. Read when the
     // screen opens (and again if the contact's chat link changes): the state
     // is terminal, so there is nothing to re-check on a timer.
-    val groupIdHex = contact?.groupIdHex
+    val groupIdHex = contact?.let { resolveChat(it.groupIdHex, it.request.fromPubkey) }
     val membershipEnded = remember(groupIdHex) {
         groupIdHex?.let(chatMembershipEnded) ?: false
     }
@@ -155,7 +161,7 @@ public fun ContactDetailScreen(
             ContactDetailBody(
                 contactKey = contactKey,
                 name = resolvedName,
-                groupIdHex = c.groupIdHex,
+                groupIdHex = groupIdHex,
                 sections = sections,
                 onOpenChat = onOpenChat,
                 onStartCall = onStartCall,

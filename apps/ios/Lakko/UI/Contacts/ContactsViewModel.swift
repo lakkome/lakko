@@ -320,10 +320,15 @@ public final class ContactsViewModel: ObservableObject {
     /// case where the OTHER side accepted and the Welcome created the chat
     /// here). A read over the live rosters, no state change.
     public func chatGroupIdHex(for contact: AcceptedContact) -> String? {
-        if let known = contact.groupIdHex { return known }
-        guard let chatRepository else { return nil }
+        guard let chatRepository else { return contact.groupIdHex }
+        // The linked id is an address only while this device still holds the
+        // chat: a link whose chat is gone (deleted here, or never present on
+        // this device) opened a dead chat - seen live on web 2026-09-26, and
+        // the same trust existed here.
+        let known = chatRepository.knownGroupIdHexes
+        if let linked = contact.groupIdHex, known.contains(linked) { return linked }
         let key = contact.request.fromPubkey
-        return chatRepository.knownGroupIdHexes.first {
+        return known.first {
             chatRepository.oneToOnePeerSignatureKey(groupIdHex: $0) == key
         }
     }

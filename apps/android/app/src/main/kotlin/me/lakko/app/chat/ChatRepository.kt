@@ -5733,6 +5733,21 @@ public class ChatRepository(
      * group state that touches no provider storage, and the FFI `Group` guards
      * it with its own `Mutex`.
      */
+    /**
+     * The one-to-one chat with the person holding [peerKey]: the id a contact
+     * row linked at accept, but only while this device still holds that chat,
+     * else the two-person chat whose other member holds the key, else `null`.
+     *
+     * A linked id whose chat is gone (deleted here, or never present on this
+     * device) is NOT an address - seen live on web 2026-09-26 as a contact
+     * whose Message opened "Conversation not found". The same trust existed
+     * here and is closed the same way.
+     */
+    public fun chatGroupIdHexFor(linkedGroupIdHex: String?, peerKey: ByteArray): String? {
+        if (linkedGroupIdHex != null && groups.containsKey(linkedGroupIdHex)) return linkedGroupIdHex
+        return groups.keys.firstOrNull { hex -> oneToOnePeerKey(hex)?.contentEquals(peerKey) == true }
+    }
+
     public fun isGroupActive(groupIdHex: String): Boolean? {
         val record = groups[groupIdHex] ?: return null
         return readIsActive { record.group.isActive() }

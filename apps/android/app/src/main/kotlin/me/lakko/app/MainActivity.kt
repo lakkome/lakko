@@ -1424,6 +1424,7 @@ private fun SessionRoot(
                         // way the chat screen reads it: an unreadable handle
                         // is not evidence of an eviction.
                         chatMembershipEnded = { hex -> chatRepository.isGroupActive(hex) == false },
+                        resolveChat = { linked, key -> chatRepository.chatGroupIdHexFor(linked, key) },
                         // UX 6.2.4 — after the delete, land wherever the chat
                         // was opened from: pop the deleted chat off the stack
                         // too when this screen was pushed from it.
