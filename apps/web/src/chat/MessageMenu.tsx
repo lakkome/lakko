@@ -82,22 +82,27 @@ import { createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js"
 import { Portal } from "solid-js/web";
 
 import { REACTION_EMOJI } from "./message-ops";
-import {
-  messageMenuLayout,
-  type MenuAnchorRect,
-  type MessageMenuLayout,
-} from "./message-menu-placement";
+import { messageMenuLayout, type MessageMenuLayout } from "./message-menu-placement";
 import { Icon } from "../ui/icons";
+
+/** The part of a DOM rect the anchor carries. Viewport coordinates. */
+export interface MenuAnchorRect {
+  readonly left: number;
+  readonly top: number;
+  readonly right: number;
+  readonly bottom: number;
+}
 
 /** Where the menu was asked for, and by what. */
 export interface MenuAnchor {
-  /** The bubble's rectangle at the moment of the gesture. */
+  /** The bubble's rectangle at the moment of the gesture. Not consulted by
+   *  the placement any more - the menu opens at the pointer, over the
+   *  message - but a keyboard trigger has no pointer and takes its x/y from
+   *  this rectangle's corner. */
   readonly bubble: MenuAnchorRect;
   /** The pointer, or the bubble's top-left corner for a keyboard trigger. */
   readonly x: number;
   readonly y: number;
-  /** Which side of the row is empty: `right` beside an incoming bubble. */
-  readonly away: "left" | "right";
 }
 
 /** Hold this long for a touch press to become the menu gesture. Matches the
@@ -106,8 +111,6 @@ export interface MenuAnchor {
 export const LONG_PRESS_MS = 500;
 /** How far a touch may drift and still be a long press rather than a scroll. */
 export const LONG_PRESS_SLOP_PX = 10;
-
-const GAP_PX = 8;
 const MARGIN_PX = 8;
 /** Between the reaction row and the action card. Section 2 asks for "a visible
  *  gap"; the 6px the two cards used to sit apart did not read as one. */
@@ -149,7 +152,6 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
     const c = card?.getBoundingClientRect();
     setLayout(
       messageMenuLayout({
-        bubble: props.anchor.bubble,
         pointer: { x: props.anchor.x, y: props.anchor.y },
         row: { width: r.width, height: r.height },
         card: c === undefined ? null : { width: c.width, height: c.height },
@@ -157,8 +159,6 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
           width: globalThis.innerWidth ?? r.width,
           height: globalThis.innerHeight ?? r.height,
         },
-        away: props.anchor.away,
-        gap: GAP_PX,
         between: SURFACE_GAP_PX,
         margin: MARGIN_PX,
       }),

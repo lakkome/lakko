@@ -174,15 +174,18 @@ the receding backdrop are the same idea everywhere; the mechanics are not.
   own position, the reaction row above and the card below.
 - **Android** has the same shape available through a custom composable over a
   scrim; the platform's own dropdown has the same limitation as iOS's.
-- **Web** keeps the pointer anchor but behaves like the natives otherwise,
-  which is what the maintainer meant by "like Telegram": the menu opens at the
-  pointer and is then clamped so that BOTH surfaces sit fully inside the
-  viewport; the reaction row floats above the card with the gap between them,
-  or below it when there is no room above; and neither surface may cover the
-  bubble's own controls, which the placement rule already guarantees for the
-  card and must now guarantee for the row as well. Reopening on the same
-  message lands in the same place - the anchor is the pointer, not the previous
-  menu.
+- **Web** opens at the pointer and OVER the message, the way Telegram's does
+  (the maintainer put the two side by side, 2026-09-26): the card's near corner
+  is where the pointer was - its left edge ordinarily, its right edge when the
+  block would run off the right of the viewport - the reaction row floats above
+  the card with the gap between them, or below it when there is no room above,
+  and both surfaces share the edge that meets the pointer. Nothing moves the
+  block except the viewport's edge; whether it covers the bubble is not a
+  question the placement asks. An earlier rule kept the menu outside the
+  bubble; it was the cure for a hover strip that stole the play button, and it
+  put the menu somewhere off to the side on a wide screen. Reopening on the
+  same message lands in the same place - the anchor is the pointer, not the
+  previous menu.
 
 Whatever differs, the ACTION SET must not: a message offers the same actions on
 every client, or the menu becomes a thing people learn per device.

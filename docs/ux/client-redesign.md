@@ -302,9 +302,14 @@ differences are the title, the compose action and the row title rule.
   bubble under the pointer takes the click the person was actually making. It
   did exactly that to a voice message: the play button sat under the strip, so
   pressing play paused it again and the message could not be listened to at
-  all. The menu also never overlaps the bubble's own controls, whatever opens
-  it. A keyboard reaches it with the context-menu key or Shift+F10 on the
-  focused bubble, which are the same deliberate act.
+  all. That strip is why nothing may ever appear over a bubble's controls
+  WITHOUT a deliberate gesture - and there is no such thing left. The menu a
+  right-click or long press opens is different: on web it opens at the pointer
+  and over the message, the way Telegram's does, because the person has just
+  acted on this message and a menu placed off to its side makes them travel to
+  it; the only thing that moves it is the viewport's edge. A keyboard reaches
+  it with the context-menu key or Shift+F10 on the focused bubble, which are
+  the same deliberate act.
 - The deliberate gesture reaches the menu from **anywhere on the bubble,
   including over the bubble's own controls**, and a press long enough to be
   that gesture is not also a tap on the control underneath it. Both halves are

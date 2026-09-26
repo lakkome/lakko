@@ -319,7 +319,6 @@ function ChatBubbleBody(
       y,
       // The empty half of the row is opposite the bubble: to the right of an
       // incoming one, to the left of our own.
-      away: isIncoming ? "right" : "left",
     });
   }
 

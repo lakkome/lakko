@@ -96,31 +96,35 @@ test("tabbing onto the waveform opens nothing", async ({ page }) => {
   expect(await page.locator(MENU).count()).toBe(0);
 });
 
-test("a right click opens it, outside the bubble, clear of the play button", async ({ page }) => {
-  const playBefore = await box(page.locator(PLAY));
-
-  await page.locator(".lk-bubble-text").first().click({ button: "right" });
-
+test("a right click opens it at the pointer, over the message", async ({ page }) => {
+  // docs/ux/message-actions.md section 7 - like Telegram: the card's near
+  // corner is where the pointer was, on top of the message, not pushed off to
+  // the bubble's side. The outside-the-bubble rule this test used to pin was
+  // the cure for a HOVER strip that stole the play button; a menu a person has
+  // just right-clicked for intercepts nothing they are about to press.
+  const play = page.locator(PLAY);
+  const box = (await play.boundingBox())!;
+  const px = box.x + box.width / 2;
+  const py = box.y + box.height / 2;
+  await page.mouse.click(px, py, { button: "right" });
   const menu = page.locator(MENU);
   await expect(menu).toBeVisible();
   expect(await menu.locator("[role='menuitem']").count()).toBeGreaterThan(0);
-  // The quick reactions ride the same gesture rather than sitting behind a
-  // second button — and that button was the thing positioned over play.
-  expect(await page.locator("[role='group'][aria-label='React'] [role='menuitem']").count())
-    .toBeGreaterThan(1);
 
-  // Outside the bubble's subtree, which the jsdom test also asserts...
+  const card = await page.locator(".lk-msg-menu-card.lk-msg-menu-items").boundingBox();
+  const row = await page.locator(".lk-msg-menu-reactions").boundingBox();
+  expect(card, "no action card was drawn").not.toBeNull();
+  expect(row, "no reaction row was drawn").not.toBeNull();
+  // The card's top edge is at the pointer, and one of its vertical edges is
+  // too - the left one ordinarily, the right one when it opened leftward.
+  expect(Math.abs(card!.y - py)).toBeLessThanOrEqual(1);
+  const atLeft = Math.abs(card!.x - px) <= 1;
+  const atRight = Math.abs(card!.x + card!.width - px) <= 1;
+  expect(atLeft || atRight, `card x ${card!.x}..${card!.x + card!.width} vs pointer ${px}`).toBe(true);
+  // It may sit over the bubble; that is the design, not a defect. What must
+  // still hold is that it is one thing the person opened on purpose and the
+  // play button is not reachable THROUGH it.
   expect(await page.locator(`.lk-bubble ${MENU}`).count()).toBe(0);
-  // ...and, which it cannot, clear of the play button in SPACE. This is the
-  // defect as a geometry: a menu that renders elsewhere in the tree and still
-  // covers the control is the same unpressable button.
-  const m = await box(menu);
-  const overlaps =
-    m.x < playBefore.x + playBefore.width &&
-    m.x + m.width > playBefore.x &&
-    m.y < playBefore.y + playBefore.height &&
-    m.y + m.height > playBefore.y;
-  expect(overlaps, "the open menu covers the play button").toBe(false);
 });
 
 test("a left click on the play button plays, and opens nothing", async ({ page }) => {
