@@ -27,9 +27,8 @@ use lakko_ui_rules::info::{
     group_info_sections as rust_group_info_sections, info_target as rust_info_target,
     person_info_sections as rust_person_info_sections,
     ChannelInfoCapabilities as RustChannelInfoCapabilities,
-    GroupInfoCapabilities as RustGroupInfoCapabilities, InfoOrigin as RustInfoOrigin,
-    InfoSection as RustInfoSection, InfoTarget as RustInfoTarget,
-    PersonInfoCapabilities as RustPersonInfoCapabilities,
+    GroupInfoCapabilities as RustGroupInfoCapabilities, InfoSection as RustInfoSection,
+    InfoTarget as RustInfoTarget, PersonInfoCapabilities as RustPersonInfoCapabilities,
 };
 use lakko_ui_rules::lookup::{
     bare_name as rust_bare_name, looks_like_a_name as rust_looks_like_a_name,
@@ -241,25 +240,6 @@ impl From<RustInfoSection> for InfoSection {
     }
 }
 
-/// Where the info was opened from. It decides one thing — whether `Message`
-/// is offered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
-pub enum InfoOrigin {
-    /// From the conversation's own header.
-    Conversation,
-    /// From the contact list, a search result, a call record.
-    Elsewhere,
-}
-
-impl From<InfoOrigin> for RustInfoOrigin {
-    fn from(o: InfoOrigin) -> Self {
-        match o {
-            InfoOrigin::Conversation => Self::Conversation,
-            InfoOrigin::Elsewhere => Self::Elsewhere,
-        }
-    }
-}
-
 /// What the viewer is to a one-to-one conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
 pub struct PersonInfoCapabilities {
@@ -348,8 +328,8 @@ pub fn info_target(kind: ConversationKind) -> InfoTarget {
 /// link to mint and nothing to leave but the person.
 #[uniffi::export]
 #[must_use]
-pub fn person_info_sections(origin: InfoOrigin, caps: PersonInfoCapabilities) -> Vec<InfoSection> {
-    rust_person_info_sections(origin.into(), caps.into())
+pub fn person_info_sections(caps: PersonInfoCapabilities) -> Vec<InfoSection> {
+    rust_person_info_sections(caps.into())
         .into_iter()
         .map(Into::into)
         .collect()
@@ -557,13 +537,10 @@ mod tests {
 
     #[test]
     fn the_sections_cross_the_boundary_as_the_core_decided_them() {
-        let ended = person_info_sections(
-            InfoOrigin::Conversation,
-            PersonInfoCapabilities {
-                is_contact: true,
-                membership_ended: true,
-            },
-        );
+        let ended = person_info_sections(PersonInfoCapabilities {
+            is_contact: true,
+            membership_ended: true,
+        });
         assert!(ended.contains(&InfoSection::DeleteChat));
         assert!(!ended.contains(&InfoSection::Call));
         assert!(channel_info_sections(ChannelInfoCapabilities {

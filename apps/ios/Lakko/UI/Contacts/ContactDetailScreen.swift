@@ -32,25 +32,12 @@ struct ContactDetailScreen: View {
     /// resolves ``TabRoute/safetyNumber(messageId:)``; as a sheet it is a
     /// layer over the conversation and carries its own stack and its own way
     /// out, because neither is there to inherit.
-    enum Presentation {
-        case pushed
-        case sheet
-    }
-
     @ObservedObject var viewModel: ContactsViewModel
     let messageId: Int64
     /// Open the 1x1 chat.
     let onOpenChat: (String) -> Void
     /// Start a call in the 1x1 chat; `video` asks for the camera.
     let onCall: (_ groupIdHex: String, _ video: Bool) -> Void
-    var presentation: Presentation = .pushed
-    /// Where the info was opened from. It decides one thing — whether
-    /// `Message` is offered — and the shared rule decides it, not this file:
-    /// opened from the chat itself, `Message` would lead back to the screen
-    /// behind the sheet.
-    var origin: InfoOrigin = .elsewhere
-    /// Close the layer. Only reached in ``Presentation/sheet``.
-    var onDone: () -> Void = {}
     /// The chat is gone and whatever is behind this has nothing left to show
     /// (ADR-0045 UX 6.2.4). Called only after a delete actually landed.
     var onChatDeleted: () -> Void = {}
@@ -61,27 +48,11 @@ struct ContactDetailScreen: View {
     @State private var confirmingDeleteChat = false
 
     var body: some View {
-        switch presentation {
-        case .pushed:
-            content
-        case .sheet:
-            NavigationStack {
-                content
-                    // The safety number is a `NavigationLink(value:)`, so in a
-                    // sheet it needs a stack that answers for it. Pushed, the
-                    // tab's stack does.
-                    .navigationDestination(for: TabRoute.self) { route in
-                        if case .safetyNumber(let id) = route {
-                            SafetyNumberScreen(viewModel: viewModel, messageId: id)
-                        }
-                    }
-                    .toolbar {
-                        ToolbarItem(placement: .topBarTrailing) {
-                            Button("Done", action: onDone)
-                        }
-                    }
-            }
-        }
+        // One presentation: pushed on the tab's stack, from the Contacts list
+        // and from a chat's header alike (`docs/ux/conversation-info.md`
+        // section 3, "Except a person"). The sheet presentation, and the
+        // origin that hid Message on it, gave one contact two cards.
+        content
     }
 
     @ViewBuilder
@@ -110,7 +81,6 @@ struct ContactDetailScreen: View {
         // contact is in the list by construction — this branch only draws when
         // `viewModel.contact(messageId:)` found one.
         let sections = personInfoSections(
-            origin: origin,
             caps: PersonInfoCapabilities(
                 isContact: true,
                 membershipEnded: chat.map { viewModel.membershipEnded(groupIdHex: $0) } ?? false))

@@ -22,33 +22,12 @@ struct ConversationInfoSheet: View {
 
     var body: some View {
         switch destination {
-        case .person(let contactMessageId):
-            if let contactMessageId {
-                ContactDetailScreen(
-                    viewModel: contacts,
-                    messageId: contactMessageId,
-                    // Opened from the chat, so "Message" would lead back to
-                    // the screen this layer sits over (section 2.1). Which
-                    // rows that removes is the shared rule's answer, not a
-                    // flag passed down.
-                    onOpenChat: { _ in },
-                    onCall: onCall,
-                    presentation: .sheet,
-                    origin: .conversation,
-                    onDone: { chat.closeConversationInfo() },
-                    // ADR-0045 UX 6.2.4 — an ended one-to-one used to have no
-                    // exit at all: `Delete this chat` lived in the group panel,
-                    // which a one-to-one stopped opening when this layer split
-                    // by destination. The person layer carries it now, and the
-                    // screen behind it has nothing left to show.
-                    onChatDeleted: {
-                        chat.closeConversationInfo()
-                        onDeleted()
-                    }
-                )
-            } else {
-                UnknownPersonInfo(chat: chat, onCall: onCall, onDeleted: onDeleted)
-            }
+        case .person:
+            // A person with a contact record never reaches this layer any
+            // more: the chat header pushes the one contact card instead
+            // (`docs/ux/conversation-info.md` section 3). What is left is a
+            // roster that cannot be read.
+            UnknownPersonInfo(chat: chat, onCall: onCall, onDeleted: onDeleted)
         case .group:
             MembersSheet(viewModel: chat, onDeleted: onDeleted)
         case .channel:
@@ -93,7 +72,6 @@ private struct UnknownPersonInfo: View {
     /// could name. The rule says `.call`, so it is here now.
     private var sections: [InfoSection] {
         personInfoSections(
-            origin: .conversation,
             caps: PersonInfoCapabilities(
                 isContact: false, membershipEnded: chat.membershipHasEnded))
     }

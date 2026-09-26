@@ -41,6 +41,18 @@ export const paths = {
   newGroup: "/groups/new",
   /** Contact list and add-contact entry point. */
   contacts: "/contacts",
+  /**
+   * One contact's own page - the Contacts route with that person selected
+   * (`docs/ux/conversation-info.md` section 3, "Except a person"). This is
+   * what a one-to-one conversation's header opens, so a person has ONE card
+   * rather than a second one rendered as a layer over the chat. `keyB64Url`
+   * is the `base64UrlEncodeNoPad` of the person's Ed25519 identity key -
+   * the key the contact list addresses them by, made safe for a path
+   * segment (the stored form is standard base64, which carries `/`).
+   */
+  contact(keyB64Url: string): string {
+    return `/contacts/${keyB64Url}`;
+  },
   /** Settings — Profile · Security · Appearance · Media · About · Account. */
   settings: "/settings",
   /** Settings sub-sections; `settings` itself lands on Profile. `recovery`
@@ -157,6 +169,12 @@ export const paths = {
  * sync with `paths.chat(...)`. Used in the route table.
  */
 export const chatRoutePattern = "/chat/:id" as const;
+
+/**
+ * The matchable pattern for the Contacts route, with or without a selected
+ * person - must stay in sync with `paths.contacts` and `paths.contact(...)`.
+ */
+export const contactRoutePattern = "/contacts/:key?" as const;
 
 /**
  * The matchable pattern for a conversation opened from the Groups list —

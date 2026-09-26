@@ -987,7 +987,11 @@ private struct SessionRoot: View, Equatable {
             ChatScreen(
                 viewModel: chatViewModel(for: groupIdHex),
                 contacts: contactsVM,
-                onBack: { pop(route, from: tab) }
+                onBack: { pop(route, from: tab) },
+                // One contact card: the chat's header opens the same pushed
+                // screen the Contacts list does (`docs/ux/conversation-info.md`
+                // section 3, "Except a person").
+                onOpenContact: { messageId in push(.contactDetail(messageId: messageId), on: tab) }
             )
             // UX spec section 5.2 — a pushed chat fills the screen; the tab
             // bar returns with the list.
@@ -1068,7 +1072,9 @@ private struct SessionRoot: View, Equatable {
             ContactDetailScreen(
                 viewModel: contactsVM,
                 messageId: messageId,
-                onOpenChat: { groupIdHex in push(.chat(groupIdHex: groupIdHex), on: tab) },
+                // Message returns to the chat when the card was opened from
+                // it, and opens the chat otherwise: one card, one control.
+                onOpenChat: { groupIdHex in returnToOrPush(.chat(groupIdHex: groupIdHex), on: tab) },
                 onCall: { groupIdHex, video in
                     // The 1x1 entry point the chat header uses
                     // (`docs/ux/calls.md` sections 3.1 and 3.2): the phone
@@ -1216,6 +1222,19 @@ private struct SessionRoot: View, Equatable {
         case .contacts: return $contactsPath
         case .calls: return $callsPath
         case .settings: return $settingsPath
+        }
+    }
+
+    /// Pop back to `route` when it is already on `tab`'s stack, else push it.
+    /// What lets the contact card's Message be the same control wherever the
+    /// card was opened from: reached from the chat it goes back; reached from
+    /// the list it goes forward.
+    private func returnToOrPush(_ route: TabRoute, on tab: SessionTab) {
+        let binding = path(for: tab)
+        if let index = binding.wrappedValue.lastIndex(of: route) {
+            binding.wrappedValue = Array(binding.wrappedValue.prefix(index + 1))
+        } else {
+            push(route, on: tab)
         }
     }
 

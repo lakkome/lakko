@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.ButtonDefaults
@@ -29,43 +30,37 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import me.lakko.app.chat.ConversationInfo
-import me.lakko.app.contacts.ContactsRepository
 import me.lakko.app.ui.components.LakkoAvatar
 import me.lakko.app.ui.contacts.ActionButton
-import me.lakko.app.ui.contacts.ContactDetailScreen
-import me.lakko.app.ui.contacts.ContactsViewModel
-import uniffi.lakko_ffi_uniffi.InfoOrigin
 import uniffi.lakko_ffi_uniffi.InfoSection
 import uniffi.lakko_ffi_uniffi.PersonInfoCapabilities
 import uniffi.lakko_ffi_uniffi.personInfoSections
 
 /**
- * The person a one-to-one conversation opens — docs/ux/conversation-info.md.
+ * The fallback for a one-to-one whose other person this device holds no
+ * contact record for — docs/ux/conversation-info.md section 2.1, "kept only
+ * as a fallback for a roster that cannot be read".
+ *
+ * This is deliberately the ONLY person surface left in this file. A person
+ * who IS a contact has a screen of their own, [me.lakko.app.ui.contacts.ContactDetailScreen],
+ * and the header pushes it exactly as the contacts list does (section 3,
+ * "Except a person"): until 2026-09-26 the header hosted that screen inside
+ * this sheet, without `Message`, and a person looking at the two saw two cards
+ * for one contact. The group's layer is `MembersSheet`.
  *
  * A layer, not a panel (section 3): the conversation stays where it is behind
- * it, and the sheet's handle and its scrim are the one obvious way out. A
- * `ModalBottomSheet` is the idiom the spec names for Android.
- *
- * What it holds is [ContactDetailScreen], the screen that already exists, in
- * its [InfoOrigin.CONVERSATION] presentation. It is deliberately not a second
- * person screen: two screens about a person are two things to keep in step,
- * and the safety number is the one that must never be the stale copy.
+ * it, and the sheet's handle and its scrim are the one obvious way out.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun ConversationPersonSheet(
-    info: ConversationInfo,
-    contactsRepository: ContactsRepository,
-    contactsViewModel: ContactsViewModel,
-    /** The name the chat header shows, for a person with no contact record. */
+internal fun UnknownPersonSheet(
+    /** The name the chat header shows. */
     peerName: String,
     /** Their verified username, without the "@", or `null`. */
     peerUsername: String?,
     avatarSeed: String,
     /** Start a call on this conversation. `null` while a call already holds it. */
     onStartCall: ((video: Boolean) -> Unit)?,
-    onVerifySafetyNumber: (contactKey: String) -> Unit,
     /** ADR-0045 UX 6.2.4 — forget a conversation this device is out of. */
     onDeleteChat: () -> Unit,
     /** Has this device's own membership in the conversation ended? */
@@ -73,16 +68,12 @@ internal fun ConversationPersonSheet(
     onDismiss: () -> Unit,
 ) {
     // Section 2.1 / section 4 — what this holds is asked, never decided here:
-    // `crates/lakko-ui-rules/src/info.rs` is the one copy of that rule, and
-    // the three clients having each answered it themselves is what put a
-    // group's panel in front of a person.
+    // `crates/lakko-ui-rules/src/info.rs` is the one copy of that rule.
     // Remembered because asking now crosses the FFI: the rule is a native
     // call, and its answer changes only when one of its inputs does.
-    val isContact = info is ConversationInfo.Person
-    val sections = remember(isContact, membershipEnded) {
+    val sections = remember(membershipEnded) {
         personInfoSections(
-            InfoOrigin.CONVERSATION,
-            PersonInfoCapabilities(isContact = isContact, membershipEnded = membershipEnded),
+            PersonInfoCapabilities(isContact = false, membershipEnded = membershipEnded),
         )
     }
     val callAction = onStartCall?.takeIf { InfoSection.CALL in sections }
@@ -98,39 +89,15 @@ internal fun ConversationPersonSheet(
         )
     }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
-        when (info) {
-            is ConversationInfo.Person -> ContactDetailScreen(
-                contactKey = info.contactKey,
-                contactsRepository = contactsRepository,
-                viewModel = contactsViewModel,
-                // The contact screen closes itself when the contact goes; here
-                // that means closing the layer, since there is no stack to pop.
-                onBack = onDismiss,
-                // Section 2.1 — no `Message` from the conversation it would
-                // open, so nothing here can be asked to open one.
-                onOpenChat = null,
-                onStartCall = callAction?.let { start -> { _, video -> start(video) } },
-                onVerifySafetyNumber = { key ->
-                    // One safety-number screen, reached from the layer by
-                    // closing it first: the chat is still behind, so Back from
-                    // the number lands on the conversation.
-                    onDismiss()
-                    onVerifySafetyNumber(key)
-                },
-                origin = InfoOrigin.CONVERSATION,
-                membershipEnded = membershipEnded,
-            )
-
-            ConversationInfo.PersonUnknown -> UnknownPersonBody(
-                name = peerName,
-                username = peerUsername,
-                avatarSeed = avatarSeed,
-                onStartCall = callAction,
-            )
-
-            // The group has its own layer; the header never routes a group here.
-            ConversationInfo.Group -> Unit
-        }
+        UnknownPersonBody(
+            name = peerName,
+            username = peerUsername,
+            avatarSeed = avatarSeed,
+            // Section 2.1 — `Message` is always offered; from the conversation
+            // it simply returns to it, which from a layer means closing it.
+            onMessage = onDismiss.takeIf { InfoSection.MESSAGE in sections },
+            onStartCall = callAction,
+        )
         if (InfoSection.DELETE_CHAT in sections) {
             Column(
                 modifier = Modifier
@@ -151,8 +118,7 @@ internal fun ConversationPersonSheet(
 }
 
 /**
- * A person this device holds no contact record for — a chat that outlived its
- * contact, which removing a contact deliberately leaves behind.
+ * A person this device holds no contact record for.
  *
  * It shows what is knowable without that record and says so. It does NOT fall
  * back to the group panel, which is the whole defect this replaced: a
@@ -168,6 +134,7 @@ private fun UnknownPersonBody(
     name: String,
     username: String?,
     avatarSeed: String,
+    onMessage: (() -> Unit)?,
     onStartCall: ((video: Boolean) -> Unit)?,
 ) {
     Column(
@@ -192,6 +159,15 @@ private fun UnknownPersonBody(
         }
         Spacer(Modifier.height(20.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (onMessage != null) {
+                ActionButton(
+                    label = "Message",
+                    icon = Icons.AutoMirrored.Filled.Chat,
+                    enabled = true,
+                    onClick = onMessage,
+                    modifier = Modifier.weight(1f),
+                )
+            }
             ActionButton(
                 label = "Call",
                 icon = Icons.Filled.Call,

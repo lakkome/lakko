@@ -32,7 +32,10 @@
  *     rendering;
  *   - finding the contact record a one-to-one is about ({@link
  *     findPersonRecord}), which is this device's storage and nobody else's
- *     business.
+ *     business;
+ *   - whether the header opens a layer at all or goes to the contact's own
+ *     page ({@link infoOpening}), which is this client's navigation - the
+ *     spec says "the contact's own page on web", and a page is a route.
  *
  * Every entry point takes the rules and answers `[]` (or `null`) when they
  * have not loaded. That is deliberate: a caller that finds nothing renders
@@ -112,14 +115,6 @@ export const GROUP_ONLY_SECTIONS: readonly InfoSection[] = [
   "transfer-ownership",
   "leave-group",
 ];
-
-/**
- * Where the info was opened from. It decides one thing - whether `Message` is
- * offered. Opened from the conversation, a control that opens the conversation
- * you are already looking at is noise; opened from anywhere else it is the
- * point.
- */
-export type InfoOrigin = "conversation" | "elsewhere";
 
 /** What the viewer is to a one-to-one conversation (spec section 2.1). */
 export interface PersonInfoCapabilities {
@@ -237,16 +232,48 @@ export function infoHeading(target: InfoTarget): string {
  */
 export function personInfoSections(
   rules: UiRules | null,
-  origin: InfoOrigin,
   caps: PersonInfoCapabilities,
 ): readonly InfoSection[] {
   if (rules === null) return [];
   return known(
     rules.personInfoSections(
-      origin === "elsewhere" ? rules.InfoOrigin.Elsewhere : rules.InfoOrigin.Conversation,
       new rules.PersonInfoCapabilities(caps.isContact, caps.membershipEnded),
     ),
   );
+}
+
+/**
+ * How a conversation's header opens its info (`docs/ux/conversation-info.md`
+ * section 3).
+ *
+ * - `contact-page`: a person who is a contact has ONE card, the contact
+ *   screen, and the header goes there (`paths.contact`) the way the contact
+ *   list does - Message included, which from the chat is just the way back.
+ *   Until 2026-09-26 the chat rendered a second copy of the card as a layer
+ *   with Message withheld, which needed an "origin" threaded through the
+ *   shared rule and showed the same person twice.
+ * - `layer`: a group's info, which has no screen of its own to reuse; and
+ *   the fallback for a one-to-one whose contact record cannot be found (a
+ *   roster that cannot be read - unreachable in the normal case, since every
+ *   one-to-one peer is derived into the contact list).
+ * - `nothing`: the destination is not yet known (the shared rules have not
+ *   loaded). Opening a layer now would show whatever branch the rules resolve
+ *   to a moment later, which for a contact is the second card again.
+ */
+export type InfoOpening = "contact-page" | "layer" | "nothing";
+
+/**
+ * The header's opening decision. `personRecord` is only consulted for a
+ * person: a group carries a contact record for nobody and still opens the
+ * layer.
+ */
+export function infoOpening(
+  target: InfoTarget | null,
+  personRecord: PersonRecordLike | null,
+): InfoOpening {
+  if (target === null) return "nothing";
+  if (target === "person" && personRecord !== null) return "contact-page";
+  return "layer";
 }
 
 /**

@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -19,6 +18,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material.icons.filled.VerifiedUser
@@ -60,7 +60,6 @@ import me.lakko.app.contacts.AcceptedContact
 import me.lakko.app.contacts.ContactsRepository
 import me.lakko.app.profile.ProfileDirectory
 import me.lakko.app.ui.components.LakkoAvatar
-import uniffi.lakko_ffi_uniffi.InfoOrigin
 import uniffi.lakko_ffi_uniffi.InfoSection
 import uniffi.lakko_ffi_uniffi.PersonInfoCapabilities
 import uniffi.lakko_ffi_uniffi.personInfoSections
@@ -76,13 +75,14 @@ import uniffi.lakko_ffi_uniffi.personInfoSections
  * a rename and removal. No key fingerprint anywhere: the safety number is the
  * verification surface.
  *
- * One screen, two presentations. [InfoOrigin.ELSEWHERE] is the destination the
- * contacts list opens: its own top bar, its own back arrow, and `Message`,
- * because from there the conversation is somewhere to go. [InfoOrigin.CONVERSATION]
- * is the layer a chat's header opens over the conversation: the host supplies
- * the chrome, and `Message` is gone because the conversation is already behind
- * it. Which rows those are is [personInfoSections], not a flag read here — the
- * defect this replaced was exactly a panel reading flags.
+ * ONE screen, one presentation (docs/ux/conversation-info.md section 3, "Except
+ * a person"): the contacts list and a one-to-one's header both push this, with
+ * its own top bar and Back, and with the same controls in the same order.
+ * `Message` is always offered; reached from the chat, it simply returns to it.
+ * Until 2026-09-26 this had a second, sheet-hosted presentation without
+ * `Message`, and a person looking at both saw two cards for one contact.
+ * Which rows this holds is [personInfoSections], not a flag read here — the
+ * defect that replaced was exactly a panel reading flags.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -92,17 +92,19 @@ public fun ContactDetailScreen(
     contactsRepository: ContactsRepository,
     viewModel: ContactsViewModel,
     onBack: () -> Unit,
-    /** Open the contact's chat. Never called when the info opened from it. */
-    onOpenChat: ((groupIdHex: String) -> Unit)?,
+    /** Open the contact's chat. From the chat's own header this is a return
+     *  to it; the host decides whether that is a pop or a push. */
+    onOpenChat: (groupIdHex: String) -> Unit,
     /** Start a 1x1 call on the contact's chat. `null` hides the actions. */
     onStartCall: ((groupIdHex: String, video: Boolean) -> Unit)?,
     onVerifySafetyNumber: (contactKey: String) -> Unit,
-    /** Where this was opened from; see the KDoc above. */
-    origin: InfoOrigin = InfoOrigin.ELSEWHERE,
-    /** Has this device's membership in the conversation ended? Only a layer
-     *  over a conversation can know; a contact opened from the list cannot,
-     *  and has no conversation in question. */
-    membershipEnded: Boolean = false,
+    /** Has this device's membership in the contact's chat ended (ADR-0045 UX
+     *  6.2)? Asked per chat, because the same screen serves a contact with no
+     *  chat on this device yet. The host reads the core's own predicate. */
+    chatMembershipEnded: (groupIdHex: String) -> Boolean,
+    /** ADR-0045 UX 6.2.4 — forget a chat this device is out of. The host owns
+     *  where to land afterwards. */
+    onDeleteChat: (groupIdHex: String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val contactsState by contactsRepository.state.collectAsStateWithLifecycle()
@@ -123,15 +125,23 @@ public fun ContactDetailScreen(
     var renaming by remember { mutableStateOf(false) }
     var draftName by remember { mutableStateOf("") }
     var confirmingRemove by remember { mutableStateOf(false) }
+    var confirmingDelete by remember { mutableStateOf(false) }
+
+    // Section 4 — an ended membership turns the actions over. Read when the
+    // screen opens (and again if the contact's chat link changes): the state
+    // is terminal, so there is nothing to re-check on a timer.
+    val groupIdHex = contact?.groupIdHex
+    val membershipEnded = remember(groupIdHex) {
+        groupIdHex?.let(chatMembershipEnded) ?: false
+    }
 
     // Section 2.1 — which rows this holds is asked, never decided here. The
     // one copy of the rule is `crates/lakko-ui-rules/src/info.rs`; this screen
     // renders whichever blocks it is handed.
     // Remembered because asking now crosses the FFI: the rule is a native
     // call, and its answer changes only when one of its inputs does.
-    val sections = remember(origin, membershipEnded) {
+    val sections = remember(membershipEnded) {
         personInfoSections(
-            origin,
             PersonInfoCapabilities(isContact = true, membershipEnded = membershipEnded),
         )
     }
@@ -155,45 +165,43 @@ public fun ContactDetailScreen(
                     renaming = true
                 },
                 onRemove = { confirmingRemove = true },
+                onDeleteChat = { confirmingDelete = true },
                 modifier = bodyModifier,
             )
         }
     }
 
-    when (origin) {
-        // The layer over a conversation: the sheet that hosts this draws the
-        // handle and the way out, so a second top bar inside it would be a
-        // second way out of one thing.
-        InfoOrigin.CONVERSATION -> body(
+    Scaffold(
+        modifier = modifier,
+        topBar = {
+            TopAppBar(
+                title = {},
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        body(
             Modifier
-                .fillMaxWidth()
+                .fillMaxSize()
+                .padding(padding)
                 .verticalScroll(rememberScrollState()),
         )
-
-        InfoOrigin.ELSEWHERE -> Scaffold(
-            modifier = modifier,
-            topBar = {
-                TopAppBar(
-                    title = {},
-                    navigationIcon = {
-                        IconButton(onClick = onBack) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                        }
-                    },
-                )
-            },
-        ) { padding ->
-            body(
-                Modifier
-                    .fillMaxSize()
-                    .padding(padding)
-                    .verticalScroll(rememberScrollState()),
-            )
-        }
     }
 
-    // Both dialogs belong to the screen rather than to the body, so they are
-    // the same dialog in either presentation.
+    // The dialogs belong to the screen rather than to the body.
+    if (confirmingDelete && groupIdHex != null) {
+        me.lakko.app.ui.chat.DeleteChatDialog(
+            onCancel = { confirmingDelete = false },
+            onDelete = {
+                confirmingDelete = false
+                onDeleteChat(groupIdHex)
+            },
+        )
+    }
     if (contact != null && resolvedName != null) {
         RenameContactDialog(
             open = renaming,
@@ -219,9 +227,8 @@ public fun ContactDetailScreen(
 }
 
 /**
- * The person, as both presentations draw them: identity, then the actions,
- * then the detail — the common shape docs/ux/conversation-info.md section 2
- * asks the three info surfaces to share.
+ * The person: identity, then the actions, then the detail — the common shape
+ * docs/ux/conversation-info.md section 2 asks the three info surfaces to share.
  */
 @Composable
 private fun ContactDetailBody(
@@ -229,11 +236,12 @@ private fun ContactDetailBody(
     name: me.lakko.app.profile.ResolvedName,
     groupIdHex: String?,
     sections: List<InfoSection>,
-    onOpenChat: ((String) -> Unit)?,
+    onOpenChat: (String) -> Unit,
     onStartCall: ((groupIdHex: String, video: Boolean) -> Unit)?,
     onVerifySafetyNumber: (contactKey: String) -> Unit,
     onRename: () -> Unit,
     onRemove: () -> Unit,
+    onDeleteChat: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
         Column(
@@ -275,15 +283,14 @@ private fun ContactDetailBody(
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 modifier = Modifier.padding(horizontal = 16.dp),
             ) {
-                // Opened from the conversation itself, a button that opens the
-                // conversation is noise; opened from the contacts list it is
-                // the point. Section 2.1.
+                // Section 2.1 — always, wherever the card was opened from;
+                // from the conversation itself the host makes this a return.
                 if (InfoSection.MESSAGE in sections) {
                     ActionButton(
                         label = "Message",
                         icon = Icons.AutoMirrored.Filled.Chat,
-                        enabled = groupIdHex != null && onOpenChat != null,
-                        onClick = { if (groupIdHex != null) onOpenChat?.invoke(groupIdHex) },
+                        enabled = groupIdHex != null,
+                        onClick = { if (groupIdHex != null) onOpenChat(groupIdHex) },
                         modifier = Modifier.weight(1f),
                     )
                 }
@@ -348,13 +355,25 @@ private fun ContactDetailBody(
                     danger = true,
                 )
             }
+            // Section 4 — on a one-to-one exactly as on a group: the one thing
+            // still open once this device's membership has ended.
+            if (InfoSection.DELETE_CHAT in sections && groupIdHex != null) {
+                HorizontalDivider()
+                DetailRow(
+                    title = me.lakko.app.chat.DELETE_CHAT_CONTROL,
+                    supporting = null,
+                    icon = Icons.Filled.Delete,
+                    onClick = onDeleteChat,
+                    danger = true,
+                )
+            }
             Spacer(Modifier.height(24.dp))
         }
 }
 
 /**
  * The local rename — the viewer's own name for a contact, which nobody else
- * ever sees. Extracted so both presentations of the screen raise one dialog.
+ * ever sees.
  */
 @Composable
 private fun RenameContactDialog(
@@ -416,7 +435,7 @@ private fun RemoveContactDialog(
     )
 }
 
-/** One action tile. `internal` so the conversation layer draws the same one. */
+/** One action tile. `internal` so the unknown-person layer draws the same one. */
 @Composable
 internal fun ActionButton(
     label: String,

@@ -36,10 +36,15 @@ import {
   Show,
   type JSX,
 } from "solid-js";
-import { useLocation, useNavigate } from "@solidjs/router";
+import { useLocation, useNavigate, useParams } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
-import { base64Decode, base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
+import {
+  base64Decode,
+  base64Encode,
+  base64UrlDecodeNoPad,
+  base64UrlEncodeNoPad,
+} from "../auth/account-id";
 import { useChats } from "../chat/ChatContext";
 import { recordConversationKind } from "../chat/conversation-kind-store";
 import { ContactsClient } from "../contacts/client";
@@ -301,6 +306,30 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   // The add menu's pick: add by username, or the invite links.
   // `null` = nothing open.
   const location = useLocation();
+  // `docs/ux/conversation-info.md` section 3, "Except a person" - a
+  // one-to-one's header opens the contact's OWN page, which is this route
+  // with the person selected: `/contacts/:key` (`paths.contact`). The key in
+  // the path is the base64url form of the stored standard-base64 key.
+  // Picking from the list keeps selecting in place (the URL stays
+  // `/contacts`); the param is how another route addresses a person.
+  const params = useParams<{ readonly key?: string }>();
+  createEffect(() => {
+    const slug = params.key;
+    if (slug === undefined) return;
+    try {
+      setAdding(null);
+      setSelectedKey(base64Encode(base64UrlDecodeNoPad(slug)));
+    } catch {
+      // Not a key at all: nothing is selected, the list shows as it would
+      // at `/contacts`.
+      setSelectedKey(null);
+    }
+  });
+  /** Deselect, and stop the URL naming a person who is no longer shown. */
+  function clearSelection(): void {
+    setSelectedKey(null);
+    if (params.key !== undefined) navigate(paths.contacts, { replace: true });
+  }
   const [adding, setAdding] = createSignal<AddMode | null>(null);
 
   // `docs/ux/navigation.md` section 4 - the Chats search looks a name up in
@@ -391,7 +420,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
         filter={filter}
         onFilter={setFilter}
         onAdd={(mode) => {
-          setSelectedKey(null);
+          clearSelection();
           setAdding(mode);
         }}
         pending={mailbox.pending}
@@ -460,21 +489,20 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
               busy={detailBusy}
               error={detailError}
               myPubkey={() => chats.identity()?.signaturePublicKey ?? null}
-              onBack={() => setSelectedKey(null)}
+              onBack={clearSelection}
               onMessage={() => void onMessage(c())}
               onCall={(withVideo) => onCall(c(), withVideo)}
               onRename={(name) => onRenameAccepted(c(), name)}
               onRemove={() => {
                 onRemoveAccepted(c());
-                setSelectedKey(null);
+                clearSelection();
               }}
               // This screen is about the PERSON, not about a conversation:
-              // reached from the contact list, it is `elsewhere` and there is
-              // no conversation of its own whose membership could have ended,
-              // so `Call` stays and `Delete this chat` never appears. The
-              // route does not track the membership of whatever 1x1 chat
-              // `chatHref` points at; the conversation's OWN header is where
-              // that state is known and rendered.
+              // there is no conversation of its own whose membership could
+              // have ended, so `Call` stays and `Delete this chat` never
+              // appears. The route does not track the membership of whatever
+              // 1x1 chat `chatHref` points at; the conversation's OWN header
+              // is where that state is known and rendered.
               membershipEnded={false}
               onDeleteChat={null}
             />

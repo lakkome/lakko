@@ -26,8 +26,8 @@ use lakko_ui_rules::info::{
     group_info_sections as rust_group_info_sections, info_target as rust_info_target,
     person_info_sections as rust_person_info_sections,
     ChannelInfoCapabilities as RustChannelInfoCapabilities,
-    GroupInfoCapabilities as RustGroupInfoCapabilities, InfoOrigin as RustInfoOrigin,
-    InfoTarget as RustInfoTarget, PersonInfoCapabilities as RustPersonInfoCapabilities,
+    GroupInfoCapabilities as RustGroupInfoCapabilities, InfoTarget as RustInfoTarget,
+    PersonInfoCapabilities as RustPersonInfoCapabilities,
 };
 use lakko_ui_rules::lookup::{
     bare_name as rust_bare_name, looks_like_a_name as rust_looks_like_a_name,
@@ -240,26 +240,6 @@ impl From<RustInfoTarget> for InfoTarget {
     }
 }
 
-/// Where the info was opened from. It decides one thing — whether `Message`
-/// is offered.
-#[wasm_bindgen(js_name = InfoOrigin)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InfoOrigin {
-    /// From the conversation's own header.
-    Conversation = 0,
-    /// From the contact list, a search result, a call record.
-    Elsewhere = 1,
-}
-
-impl From<InfoOrigin> for RustInfoOrigin {
-    fn from(o: InfoOrigin) -> Self {
-        match o {
-            InfoOrigin::Conversation => Self::Conversation,
-            InfoOrigin::Elsewhere => Self::Elsewhere,
-        }
-    }
-}
-
 /// What the viewer is to a one-to-one conversation.
 ///
 /// A constructible class rather than two positional booleans on the call, so
@@ -450,14 +430,11 @@ pub fn info_target(kind: ConversationKind) -> InfoTarget {
 /// Nothing in the result is ever group-shaped, whatever the capabilities.
 #[wasm_bindgen(js_name = personInfoSections)]
 #[must_use]
-pub fn person_info_sections(origin: InfoOrigin, caps: PersonInfoCapabilities) -> Vec<String> {
-    rust_person_info_sections(
-        origin.into(),
-        RustPersonInfoCapabilities {
-            is_contact: caps.is_contact,
-            membership_ended: caps.membership_ended,
-        },
-    )
+pub fn person_info_sections(caps: PersonInfoCapabilities) -> Vec<String> {
+    rust_person_info_sections(RustPersonInfoCapabilities {
+        is_contact: caps.is_contact,
+        membership_ended: caps.membership_ended,
+    })
     .into_iter()
     .map(|s| s.name().to_string())
     .collect()
@@ -665,10 +642,7 @@ mod tests {
 
     #[test]
     fn the_sections_cross_the_boundary_as_the_names_web_already_uses() {
-        let ended = person_info_sections(
-            InfoOrigin::Conversation,
-            PersonInfoCapabilities::new(true, true),
-        );
+        let ended = person_info_sections(PersonInfoCapabilities::new(true, true));
         assert!(ended.contains(&"delete-chat".to_string()));
         assert!(!ended.contains(&"call".to_string()));
         assert!(

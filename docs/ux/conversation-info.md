@@ -78,7 +78,11 @@ contacts" state is therefore unreachable from a one-to-one conversation and is
 kept only as a fallback for a roster that cannot be read.
 
 - Name and `@username`.
-- Call. Message, when the info was opened from somewhere other than the chat.
+- Message, Call, Video - always, wherever the card was opened from. From the
+  conversation, Message simply returns to it. (Until 2026-09-26 Message was
+  withheld when the card was reached from the chat's own header, which needed
+  an "origin" to be threaded through the shared rule and gave the same person
+  two cards; the origin is gone.)
 - **Safety number** - the out-of-band check, which is the one security thing
   a person acts on and so is the one that belongs in front of them
   ([`design-system.md`](design-system.md)).
@@ -141,6 +145,14 @@ width, dimmed behind, dismissed by the backdrop or `Esc`; iOS a sheet;
 Android a `ModalBottomSheet` or a full-screen dialog. What is the same
 everywhere: the conversation is still there behind it, and there is one
 obvious way out.
+
+**Except a person (2026-09-26).** A person's info IS the contact screen, and
+there is one of it: it opens from the conversation exactly the way the contact
+list opens it - pushed with a Back control on iOS and Android, the contact's
+own page on web - with the same controls in the same order. It used to open as
+a layer from the chat and as a screen from the list, with Message on one and
+not the other, and a person looking at both saw two cards for one contact. The
+layer rule above is for a group, whose info has no screen of its own to reuse.
 
 ## 4. States
 

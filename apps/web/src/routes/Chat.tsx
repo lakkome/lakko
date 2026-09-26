@@ -117,6 +117,7 @@ import {
   groupInfoSections,
   infoHeading,
   infoOpenLabel,
+  infoOpening,
   infoTargetForKind,
 } from "../chat/conversation-info";
 import { uiRules } from "../chat/ui-rules";
@@ -476,6 +477,9 @@ function ChatView(props: {
   // always see the current session.
   const auth = useAuth();
   const chats = useChats();
+  // The header's way to a contact's own page (`openInfo`): a one-to-one's
+  // info is the contact screen on the Contacts route, not a layer here.
+  const navigate = useNavigate();
   // ADR-0048 — profile names: the one display resolver, the received-profile
   // store the receive loop feeds, and the publish triggers.
   const profiles = useProfiles();
@@ -807,17 +811,33 @@ function ChatView(props: {
     return `${n} ${n === 1 ? "person" : "people"}`;
   };
   /**
-   * The name at the top opens this conversation's info as a LAYER over it
-   * (`docs/ux/conversation-info.md` section 3): the conversation stays where
-   * it is behind the dim, rather than being pushed sideways by a panel.
+   * The name at the top opens this conversation's info
+   * (`docs/ux/conversation-info.md` section 3).
    *
    * What opens is decided by what the conversation is - a one-to-one opens
    * the person, a group opens the group - so the group's name, invite link,
    * roles, ownership and `Leave group` can no longer surface in a chat
    * between two people, where none of them mean anything.
+   *
+   * A group's info is a LAYER over the conversation, which stays where it is
+   * behind the dim. A person's info IS the contact screen, and there is one
+   * of it: the header goes to the contact's own page (`paths.contact`)
+   * exactly the way the contact list opens it, Message included - from here
+   * Message is just the way back. Until 2026-09-26 the chat rendered a
+   * second copy of that card as a layer, with Message withheld, and the same
+   * person had two cards. The layer survives for a one-to-one only as the
+   * fallback for a contact record that cannot be found (`infoOpening`).
    */
   function openInfo(): void {
     setHeaderMenuOpen(false);
+    const opening = infoOpening(infoTarget(), personRecord());
+    if (opening === "nothing") return;
+    if (opening === "contact-page") {
+      const record = personRecord();
+      if (record === null) return;
+      navigate(paths.contact(base64UrlEncodeNoPad(base64Decode(record.signaturePubkeyB64))));
+      return;
+    }
     setInfoOpen(true);
     setNotice(null);
     setError(null);
@@ -5434,11 +5454,14 @@ function ChatView(props: {
   });
 
   /**
-   * What a one-to-one's header opens: the person screen that already exists
-   * (`contacts/ContactDetailView.tsx`), so there is one of them rather than
-   * a second one to keep in step.
+   * The FALLBACK for a one-to-one's header, reached only when the other
+   * person's contact record cannot be found (`infoOpening` answers `layer`
+   * for a person without one): the person screen that already exists
+   * (`contacts/ContactDetailView.tsx`), rendered here with the two
+   * contact-list blocks absent. With a record the header navigates to the
+   * contact's own page instead and this is never rendered.
    *
-   * `Message` is absent - the conversation is open behind this layer - and
+   * `Message` returns to the conversation, which is open behind this layer;
    * `Call` / `Video` route through the same buttons the header carries, so a
    * call started here is the call started there.
    */
@@ -5467,7 +5490,7 @@ function ChatView(props: {
           error={error}
           myPubkey={() => chats.identity()?.signaturePublicKey ?? null}
           onBack={null}
-          onMessage={null}
+          onMessage={closeInfo}
           onCall={(withVideo) => {
             closeInfo();
             onCallButton(withVideo);
@@ -5621,7 +5644,11 @@ function ChatView(props: {
           class="lk-chat-title"
           title={infoTargetLabel()}
           aria-label={infoTargetLabel()}
-          aria-haspopup="dialog"
+          // A dialog only where one opens: a contact's info is their own
+          // page, and the button is then a plain link-like control.
+          aria-haspopup={
+            infoOpening(infoTarget(), personRecord()) === "layer" ? "dialog" : undefined
+          }
           aria-expanded={infoOpen()}
           onClick={openInfo}
         >

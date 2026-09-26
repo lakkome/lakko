@@ -159,19 +159,6 @@ impl InfoSection {
     }
 }
 
-/// Where the info was opened from.
-///
-/// It decides one thing - whether `Message` is offered. Opened from the
-/// conversation, a control that opens the conversation you are already
-/// looking at is noise; opened from anywhere else it is the point.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InfoOrigin {
-    /// From the conversation's own header.
-    Conversation,
-    /// From the contact list, a search result, a call record.
-    Elsewhere,
-}
-
 /// What the viewer is to a one-to-one conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PersonInfoCapabilities {
@@ -268,16 +255,19 @@ pub const fn info_target(kind: crate::conversation::ConversationKind) -> InfoTar
 /// Nothing in the result is ever [`InfoSection::group_only`]. That is the
 /// whole point of the split, and it is asserted rather than described.
 #[must_use]
-pub fn person_info_sections(origin: InfoOrigin, caps: PersonInfoCapabilities) -> Vec<InfoSection> {
+pub fn person_info_sections(caps: PersonInfoCapabilities) -> Vec<InfoSection> {
     let mut sections = Vec::new();
     if caps.membership_ended {
         sections.push(InfoSection::DeleteChat);
     } else {
         sections.push(InfoSection::Call);
     }
-    if origin == InfoOrigin::Elsewhere {
-        sections.push(InfoSection::Message);
-    }
+    // One card, wherever it was opened from. `Message` used to be withheld
+    // when the card was reached from the conversation's own header, which
+    // needed an origin to be passed in and gave the same person two cards
+    // (seen side by side on 2026-09-26). From the conversation the control
+    // simply returns to it.
+    sections.push(InfoSection::Message);
     if caps.is_contact {
         sections.push(InfoSection::SafetyNumber);
         sections.push(InfoSection::RenameContact);
@@ -386,13 +376,13 @@ mod tests {
     /// it is checked exhaustively.
     #[test]
     fn a_person_never_carries_anything_group_shaped() {
-        for &origin in &[InfoOrigin::Conversation, InfoOrigin::Elsewhere] {
+        {
             for &is_contact in &[false, true] {
                 for &ended in &[false, true] {
-                    let sections = person_info_sections(origin, person(is_contact, ended));
+                    let sections = person_info_sections(person(is_contact, ended));
                     assert!(
                         !sections.iter().any(|s| s.group_only()),
-                        "{origin:?} contact={is_contact} ended={ended} -> {sections:?}"
+                        "contact={is_contact} ended={ended} -> {sections:?}"
                     );
                 }
             }
@@ -401,7 +391,7 @@ mod tests {
 
     #[test]
     fn a_contact_gets_the_number_the_name_and_the_way_out_of_the_list() {
-        let sections = person_info_sections(InfoOrigin::Conversation, person(true, false));
+        let sections = person_info_sections(person(true, false));
         assert!(sections.contains(&InfoSection::SafetyNumber));
         assert!(sections.contains(&InfoSection::RenameContact));
         assert!(sections.contains(&InfoSection::RemoveContact));
@@ -410,23 +400,22 @@ mod tests {
     /// A conversation that outlived its contact record is still a person.
     #[test]
     fn a_person_who_is_not_a_contact_offers_nothing_to_act_on_a_record_with() {
-        let sections = person_info_sections(InfoOrigin::Conversation, person(false, false));
+        let sections = person_info_sections(person(false, false));
         assert!(!sections.contains(&InfoSection::SafetyNumber));
         assert!(!sections.contains(&InfoSection::RenameContact));
         assert!(!sections.contains(&InfoSection::RemoveContact));
         assert!(sections.contains(&InfoSection::Call));
     }
 
+    /// One card wherever it was opened from: `Message` is always there, and
+    /// from the conversation it simply returns to it. Withholding it by origin
+    /// gave the same person two cards.
     #[test]
-    fn message_is_offered_from_anywhere_but_the_conversation_itself() {
-        assert!(
-            !person_info_sections(InfoOrigin::Conversation, person(true, false))
-                .contains(&InfoSection::Message)
-        );
-        assert!(
-            person_info_sections(InfoOrigin::Elsewhere, person(true, false))
-                .contains(&InfoSection::Message)
-        );
+    fn message_is_offered_whatever_the_card_was_opened_from() {
+        for &is_contact in &[false, true] {
+            assert!(person_info_sections(person(is_contact, false)).contains(&InfoSection::Message));
+            assert!(person_info_sections(person(is_contact, true)).contains(&InfoSection::Message));
+        }
     }
 
     /// The divergence that let a one-to-one end with no way to close it: the
@@ -435,8 +424,8 @@ mod tests {
     #[test]
     fn an_ended_conversation_can_always_be_closed_whatever_kind_it_was() {
         for sections in [
-            person_info_sections(InfoOrigin::Conversation, person(true, true)),
-            person_info_sections(InfoOrigin::Elsewhere, person(false, true)),
+            person_info_sections(person(true, true)),
+            person_info_sections(person(false, true)),
             group_info_sections(group(true)),
         ] {
             assert!(sections.contains(&InfoSection::DeleteChat), "{sections:?}");
@@ -447,7 +436,7 @@ mod tests {
     /// comes from a group this device is no longer in.
     #[test]
     fn an_ended_conversation_offers_no_call_and_no_group_action() {
-        let p = person_info_sections(InfoOrigin::Conversation, person(true, true));
+        let p = person_info_sections(person(true, true));
         assert!(!p.contains(&InfoSection::Call));
         let g = group_info_sections(group(true));
         for gone in [
@@ -464,7 +453,7 @@ mod tests {
     /// The person is still the person: what ends is the conversation.
     #[test]
     fn an_ended_conversation_still_shows_everything_about_the_person() {
-        let sections = person_info_sections(InfoOrigin::Conversation, person(true, true));
+        let sections = person_info_sections(person(true, true));
         assert!(sections.contains(&InfoSection::SafetyNumber));
         assert!(sections.contains(&InfoSection::RenameContact));
         assert!(sections.contains(&InfoSection::RemoveContact));
@@ -616,12 +605,12 @@ mod tests {
     /// offers, and it is the one control here that destroys user data.
     #[test]
     fn a_live_conversation_never_offers_to_delete_itself() {
-        for &origin in &[InfoOrigin::Conversation, InfoOrigin::Elsewhere] {
+        {
             for &is_contact in &[false, true] {
-                let sections = person_info_sections(origin, person(is_contact, false));
+                let sections = person_info_sections(person(is_contact, false));
                 assert!(
                     !sections.contains(&InfoSection::DeleteChat),
-                    "{origin:?} contact={is_contact} -> {sections:?}"
+                    "contact={is_contact} -> {sections:?}"
                 );
             }
         }

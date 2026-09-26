@@ -50,6 +50,7 @@ import {
   callJoinRoutePattern,
   callRoutePattern,
   chatRoutePattern,
+  contactRoutePattern,
   groupChatRoutePattern,
   groupJoinRoutePattern,
   inviteRoutePattern,
@@ -135,7 +136,10 @@ export const routes: RouteDefinition[] = [
           { path: groupChatRoutePattern, component: () => <Chat backTo={paths.groups} /> },
         ],
       },
-      { path: paths.contacts, component: Contacts },
+      // `/contacts` and `/contacts/:key` are one route: the second is the
+      // list with a person selected, which is what a one-to-one's header
+      // opens (`docs/ux/conversation-info.md` section 3).
+      { path: contactRoutePattern, component: Contacts },
       // `docs/ux/navigation.md` section 5 - Calls is a destination again, and
       // this time it has the history the redesign removed it for lacking.
       { path: paths.calls, component: Calls },

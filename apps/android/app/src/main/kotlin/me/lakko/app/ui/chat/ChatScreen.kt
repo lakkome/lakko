@@ -177,12 +177,13 @@ import uniffi.lakko_ffi_uniffi.groupInfoSections
 public fun ChatScreen(
     viewModel: ChatViewModel,
     onNavigateBack: () -> Unit,
-    /** docs/ux/conversation-info.md — a one-to-one header opens the person,
-     *  which is the contact screen, which needs these two. */
+    /** docs/ux/conversation-info.md — which person a one-to-one header opens
+     *  is read off this device's contact list. */
     contactsRepository: me.lakko.app.contacts.ContactsRepository,
-    contactsViewModel: me.lakko.app.ui.contacts.ContactsViewModel,
-    /** Open the safety number for a contact, after the layer has closed. */
-    onOpenSafetyNumber: (contactKey: String) -> Unit,
+    /** Section 3, "Except a person" — push the contact screen for a person
+     *  who is a contact, exactly as the contacts list pushes it. The chat stays
+     *  on the back stack, so Back (and the screen's `Message`) return here. */
+    onOpenContact: (contactKey: String) -> Unit,
     modifier: Modifier = Modifier,
     /** The group's title (local name or member-derived) for a group chat;
      *  a 1x1 chat names the other person itself. Never a hex id. */
@@ -573,12 +574,16 @@ public fun ChatScreen(
                 callPermissions.request(video = true) { v -> viewModel.onCallButton(video = v) }
             },
             // Section 1 — the ONE way into this conversation's info. Which
-            // one opens is `conversationInfo`'s answer, never this screen's.
+            // one opens, and how, is `conversationInfo`'s and
+            // `headerInfoPresentation`'s answer, never this screen's.
             onShowInfo = {
-                when (conversationInfo) {
-                    ConversationInfo.Group ->
+                when (val open = me.lakko.app.chat.headerInfoPresentation(conversationInfo)) {
+                    me.lakko.app.chat.HeaderInfoPresentation.GroupLayer ->
                         if (!viewModel.membersPanelOpen.value) viewModel.toggleMembersPanel()
-                    else -> personInfoOpen = true
+                    is me.lakko.app.chat.HeaderInfoPresentation.ContactScreen ->
+                        onOpenContact(open.contactKey)
+                    me.lakko.app.chat.HeaderInfoPresentation.UnknownPersonLayer ->
+                        personInfoOpen = true
                 }
             },
         )
@@ -664,12 +669,13 @@ public fun ChatScreen(
             MembersSheet(viewModel = viewModel, onChatDeleted = onNavigateBack)
         }
 
-        // The PERSON's info: the contact screen, as a layer over the chat.
-        if (personInfoOpen && conversationInfo != ConversationInfo.Group) {
-            ConversationPersonSheet(
-                info = conversationInfo,
-                contactsRepository = contactsRepository,
-                contactsViewModel = contactsViewModel,
+        // The one person left in a layer: somebody this device holds no
+        // contact record for. A contact is pushed as a screen (see
+        // `onOpenContact` above), and the guard on the kind — not the flag
+        // alone — is what keeps this sheet from ever fronting a contact or a
+        // group.
+        if (personInfoOpen && conversationInfo == ConversationInfo.PersonUnknown) {
+            UnknownPersonSheet(
                 peerName = headerTitle,
                 peerUsername = peerUsername,
                 avatarSeed = state.groupIdHex,
@@ -686,7 +692,6 @@ public fun ChatScreen(
                         }
                     }
                 },
-                onVerifySafetyNumber = onOpenSafetyNumber,
                 // ADR-0045 UX 6.2.4 — this lived in the group panel, which a
                 // one-to-one no longer opens, so without it a finished chat
                 // could never be removed from the list.

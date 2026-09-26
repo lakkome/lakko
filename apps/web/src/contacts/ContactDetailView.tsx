@@ -12,17 +12,21 @@
  * shown as something they are not.
  *
  * There is ONE person screen and this is it. It is the main pane on
- * Contacts, and it is what a one-to-one conversation's header opens
- * (`docs/ux/conversation-info.md` section 2.1) - a second one would be a
- * second thing to keep in step, which is how the two drift apart.
+ * Contacts, and a one-to-one conversation's header opens that same page
+ * (`docs/ux/conversation-info.md` sections 2.1 and 3, "Except a person") -
+ * it navigates there rather than rendering a second copy over the chat.
+ * Until 2026-09-26 it did render one, with Message withheld because the
+ * chat was "already open behind it", and a person looking at both saw two
+ * cards for one contact.
  *
- * That second caller is why the props below take a key and a name rather
- * than a contact record, and why Back, Message, Rename and Remove are all
- * nullable. Message is the way INTO the conversation, so it is absent when
- * the conversation is already open behind this screen. The
- * other person in a one-to-one is not necessarily in the viewer's contact
- * list, and a chat with someone who is not still opens a PERSON - with the
- * two contact-list blocks simply absent - never the group panel.
+ * Message, Call and Video are offered wherever the card was opened from;
+ * from the conversation, Message simply returns to it. The one caller that
+ * still renders this view inside the chat is the fallback for a one-to-one
+ * whose contact record cannot be found (a roster that cannot be read), which
+ * is why the props take a key and a name rather than a contact record, and
+ * why Back, Rename and Remove are nullable: a chat with someone who is not
+ * in the contact list still opens a PERSON - with the two contact-list
+ * blocks simply absent - never the group panel.
  *
  * Which blocks appear is NOT decided here and no longer decided on this
  * client at all: it is `lakko_ui_rules::info`, reached through
@@ -63,9 +67,9 @@ export interface ContactDetailViewProps {
   readonly myPubkey: () => Uint8Array | null;
   /** The narrow-screen way back to the list; `null` where there is no list. */
   readonly onBack: (() => void) | null;
-  /** The way INTO the conversation. `null` where the conversation is
-   *  already open behind this screen, and the block is then absent. */
-  readonly onMessage: (() => void) | null;
+  /** Message: open the conversation with this person. Always offered; a
+   *  caller that IS the conversation passes the way back to it. */
+  readonly onMessage: () => void;
   readonly onCall: (withVideo: boolean) => void;
   /** Set the viewer's own name for this person; blank clears it. `null` when
    *  they are not in the contact list, so there is no name to set. */
@@ -98,17 +102,11 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
   //
   // Being in the contact list is what the two editable blocks hang on, and the
   // one signal for it is whether the caller handed over a way to remove them.
-  // The origin is read the same way: `Message` is the way INTO the
-  // conversation, so a caller that handed over no way in IS the conversation.
   const sections = createMemo(() =>
-    personInfoSections(
-      uiRules(),
-      props.onMessage === null ? "conversation" : "elsewhere",
-      {
-        isContact: props.onRemove !== null,
-        membershipEnded: props.membershipEnded,
-      },
-    ),
+    personInfoSections(uiRules(), {
+      isContact: props.onRemove !== null,
+      membershipEnded: props.membershipEnded,
+    }),
   );
   const resolved = (): ReturnType<typeof profiles.resolve> =>
     profiles.resolve(props.personKeyB64);
@@ -190,13 +188,10 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
   }> => {
     const noChat = props.chatHref === null;
     const callTitle = noChat ? "Send a message first to start a call." : undefined;
-    // Message is the way INTO the conversation, so it is absent when the
-    // conversation is already open behind this screen. The rule says so
-    // (`message` is offered from anywhere but the conversation itself); the
-    // null check below is what the handler needs, not a second decision.
-    const open = props.onMessage;
+    // Message is offered wherever the card was opened from (spec section
+    // 2.1); whether it appears at all is the rule's call, not this file's.
     const message =
-      !sections().includes("message") || open === null
+      !sections().includes("message")
         ? []
         : [
             {
@@ -207,7 +202,7 @@ export function ContactDetailView(props: ContactDetailViewProps): JSX.Element {
                 noChat && !props.canStartChat
                   ? "This contact was added before chats could be started from here. Ask them to message you."
                   : undefined,
-              run: open,
+              run: () => props.onMessage(),
             },
           ];
     // ADR-0045 UX 6.2.8 item 4 - gone once this device's membership has

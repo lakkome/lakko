@@ -160,6 +160,35 @@ class ConversationInfoTest {
         assertEquals(ConversationInfo.PersonUnknown, info)
     }
 
+    // ---------------------------------------------------------------------
+    // How the header presents it — section 3, "Except a person"
+    // ---------------------------------------------------------------------
+
+    @Test
+    fun `a person who is a contact is pushed as the contact screen, not a layer`() {
+        // Seen live on 2026-09-26: the header opened the same person in a
+        // sheet, without `Message`, while the contacts list pushed a screen —
+        // two cards for one contact. There is one card, and it is the screen.
+        assertEquals(
+            HeaderInfoPresentation.ContactScreen("anna-key"),
+            headerInfoPresentation(ConversationInfo.Person("anna-key")),
+        )
+    }
+
+    @Test
+    fun `a group is a layer over the conversation`() {
+        assertEquals(HeaderInfoPresentation.GroupLayer, headerInfoPresentation(ConversationInfo.Group))
+    }
+
+    @Test
+    fun `a person with no contact record is the fallback layer`() {
+        // No contact screen exists to push for them, so the layer stays.
+        assertEquals(
+            HeaderInfoPresentation.UnknownPersonLayer,
+            headerInfoPresentation(ConversationInfo.PersonUnknown),
+        )
+    }
+
     @Test
     fun `a conversation whose roster is not readable yet still opens a person`() {
         // The count arrives as 0 before the first roster read; a chat is the

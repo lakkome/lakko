@@ -94,3 +94,35 @@ public fun conversationInfo(
     }
     return ConversationInfo.PersonUnknown
 }
+
+/**
+ * HOW the header presents what [conversationInfo] chose —
+ * `docs/ux/conversation-info.md` section 3.
+ *
+ * A group's info is a layer over the conversation, because it has no screen
+ * of its own to reuse. A person's info IS the contact screen, and there is one
+ * of it: the header pushes the same route the contacts list pushes, with a
+ * Back control and the same controls in the same order. Until 2026-09-26 the
+ * header hosted that screen inside a sheet instead, without `Message`, and a
+ * person looking at both saw two cards for one contact ("Except a person").
+ *
+ * The one person left in a layer is the one with no contact record, because
+ * there is no contact screen to push for them.
+ */
+public sealed interface HeaderInfoPresentation {
+    /** Push the contact screen — the same destination the contacts list opens. */
+    public data class ContactScreen(val contactKey: String) : HeaderInfoPresentation
+
+    /** The group's own layer over the conversation. */
+    public data object GroupLayer : HeaderInfoPresentation
+
+    /** The fallback layer for a person this device holds no contact record for. */
+    public data object UnknownPersonLayer : HeaderInfoPresentation
+}
+
+/** Which presentation the header gives [info]. Total, so a caller cannot forget one. */
+public fun headerInfoPresentation(info: ConversationInfo): HeaderInfoPresentation = when (info) {
+    is ConversationInfo.Person -> HeaderInfoPresentation.ContactScreen(info.contactKey)
+    ConversationInfo.Group -> HeaderInfoPresentation.GroupLayer
+    ConversationInfo.PersonUnknown -> HeaderInfoPresentation.UnknownPersonLayer
+}

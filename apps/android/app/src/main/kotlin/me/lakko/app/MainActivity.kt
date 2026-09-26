@@ -1408,7 +1408,31 @@ private fun SessionRoot(
                         contactsRepository = contactsRepository,
                         viewModel = contactsVm,
                         onBack = { navController.popBackStack() },
-                        onOpenChat = { hex -> navController.navigate(Routes.chat(hex)) },
+                        // docs/ux/conversation-info.md section 3, "Except a
+                        // person" — one contact screen, reached from the list
+                        // AND from the chat's own header. `Message` from the
+                        // chat is a RETURN to it: if that chat is already on
+                        // the back stack, pop back to it (the filled-in route
+                        // matches that entry) rather than push a second copy;
+                        // from the list there is nothing to pop to, so push.
+                        onOpenChat = { hex ->
+                            if (!navController.popBackStack(Routes.chat(hex), inclusive = false)) {
+                                navController.navigate(Routes.chat(hex))
+                            }
+                        },
+                        // ADR-0045 UX 6.2 — the core's own predicate, read the
+                        // way the chat screen reads it: an unreadable handle
+                        // is not evidence of an eviction.
+                        chatMembershipEnded = { hex -> chatRepository.isGroupActive(hex) == false },
+                        // UX 6.2.4 — after the delete, land wherever the chat
+                        // was opened from: pop the deleted chat off the stack
+                        // too when this screen was pushed from it.
+                        onDeleteChat = { hex ->
+                            chatRepository.deleteEndedChat(hex)
+                            if (!navController.popBackStack(Routes.chat(hex), inclusive = true)) {
+                                navController.popBackStack()
+                            }
+                        },
                         onStartCall = { hex, video ->
                             callPermissions.request(video = video) { granted ->
                                 callHost.startOutgoing(
@@ -1522,26 +1546,17 @@ private fun SessionRoot(
                             appContext, chatRepository, profileDirectory, groupIdHex,
                         )
                     }
-                    // docs/ux/conversation-info.md — a one-to-one header opens
-                    // the person, which is the contact screen. Built the same
-                    // way the contact-detail route builds it, so a rename or a
-                    // removal made in the layer is the same one either way.
-                    val chatContactsVm: ContactsViewModel = viewModel(
-                        factory = singletonViewModelFactory {
-                            ContactsViewModel(repo = contactsRepository, chatRepo = chatRepository)
-                        },
-                    )
                     ChatScreen(
                         viewModel = chatVm,
                         // Back returns to wherever the chat was opened from.
                         onNavigateBack = { navController.popBackStack() },
                         contactsRepository = contactsRepository,
-                        contactsViewModel = chatContactsVm,
-                        // The layer closes itself first, so Back from the
-                        // number lands on the conversation.
-                        onOpenSafetyNumber = { key ->
-                            navController.navigate(Routes.safetyNumber(key))
-                        },
+                        // docs/ux/conversation-info.md section 3, "Except a
+                        // person" — a one-to-one header opens the person, which
+                        // is the contact screen, pushed exactly as the contacts
+                        // list pushes it (the same route, above). This chat
+                        // stays beneath it, so Back and `Message` return here.
+                        onOpenContact = { key -> navController.navigate(Routes.contact(key)) },
                         groupTitle = groupTitle,
                     )
                 }

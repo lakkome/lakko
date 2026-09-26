@@ -30,6 +30,10 @@ public struct ChatScreen: View {
     /// and edge swipe; this is only for the case the chat was deleted from
     /// the members sheet, when there is nothing left to show.
     public var onBack: () -> Void
+    /// Open the contact card for the person on the other side, pushed the way
+    /// the Contacts list pushes it: one card (`docs/ux/conversation-info.md`
+    /// section 3, "Except a person").
+    public var onOpenContact: (Int64) -> Void
 
     // 1.19c3 — picker state. Swift's `PhotosPicker` returns
     // `PhotosPickerItem`s asynchronously (we resolve them to
@@ -88,11 +92,13 @@ public struct ChatScreen: View {
     public init(
         viewModel: ChatViewModel,
         contacts: ContactsViewModel,
-        onBack: @escaping () -> Void
+        onBack: @escaping () -> Void,
+        onOpenContact: @escaping (Int64) -> Void = { _ in }
     ) {
         self.viewModel = viewModel
         self.contacts = contacts
         self.onBack = onBack
+        self.onOpenContact = onOpenContact
         _media = StateObject(wrappedValue: ChatMediaController(port: viewModel.mediaPort()))
     }
 
@@ -257,7 +263,14 @@ public struct ChatScreen: View {
                 // ONLY way into this conversation's info, and what opens
                 // follows from what the conversation is.
                 Button {
-                    viewModel.openConversationInfo()
+                    // A person with a contact record opens the one contact
+                    // card, pushed. A group, or a roster that cannot be read,
+                    // opens the layer.
+                    if case .person(let contactMessageId?) = infoDestination {
+                        onOpenContact(contactMessageId)
+                    } else {
+                        viewModel.openConversationInfo()
+                    }
                 } label: {
                     ChatTitleView(title: headline, subtitle: subtitle, identity: viewModel.groupIdHex,
                                   isGroup: viewModel.presentsAsGroup)

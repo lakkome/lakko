@@ -32,7 +32,6 @@ export type UiRules = Pick<
   // What a conversation's name opens, and what is on it
   // (`docs/ux/conversation-info.md`).
   | "InfoTarget"
-  | "InfoOrigin"
   | "PersonInfoCapabilities"
   | "GroupInfoCapabilities"
   | "ChannelInfoCapabilities"
