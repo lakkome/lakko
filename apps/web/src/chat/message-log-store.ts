@@ -68,8 +68,11 @@ const IV_LEN = 12;
  * they can never be decrypted again — so a deleted message came back
  * and stayed back, for good. An older payload reads with all three
  * absent, which is exactly the row as it was written.
+ *
+ * v4 adds [`PersistedMessage.reply`] (ADR-0052). A row without it reads as
+ * a plain message, which is exactly what it was.
  */
-export const MESSAGE_LOG_VERSION = 3;
+export const MESSAGE_LOG_VERSION = 4;
 
 export interface PersistedAttachment {
   /** Base64-encoded 32-byte SHA-256 blob id. */
@@ -166,6 +169,21 @@ export interface PersistedMessage {
    * re-persist of unchanged state produces identical bytes.
    */
   readonly reactions?: readonly PersistedReaction[];
+  /**
+   * ADR-0052 — this message replies to another. The snapshot is stored as
+   * received / as sent and never re-derived from the target: the bubble
+   * draws it the same whether or not the original is still held here.
+   * Absent on a plain message and on a row written before v4.
+   */
+  readonly reply?: PersistedReply;
+}
+
+/** ADR-0052 — a persisted reply reference. */
+export interface PersistedReply {
+  /** The target's DS `messageId`, stringified like `messageId` above. */
+  readonly target: string;
+  readonly author?: string;
+  readonly excerpt?: string;
 }
 
 /** ADR-0023 — one reaction, keyed on the reactor's IDENTITY. */

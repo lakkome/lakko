@@ -40,7 +40,9 @@ public class MediaSendQueue(
         meta: AttachmentMediaMeta,
         onProgress: (Float) -> Unit,
     ) -> AttachmentRef,
-    private val publish: suspend (AttachmentRef) -> Unit,
+    /** Publishes the uploaded ref as its own message, carrying the reply the
+     *  job was armed with (ADR-0052), or `null` for an ordinary send. */
+    private val publish: suspend (AttachmentRef, me.lakko.app.chat.ReplyRef?) -> Unit,
     private val onLog: (String) -> Unit = {},
 ) {
     public class Job(
@@ -56,6 +58,10 @@ public class MediaSendQueue(
         /** Loads the bytes and their MIME type (a GIF's type is only known once
          *  the proxy answered). `null` is a failure. */
         public val loadBytes: suspend () -> Pair<ByteArray, String>?,
+        /** ADR-0052 — the reply armed when this take was handed over. Taken
+         *  at enqueue, so the strip can clear at once and a retry still sends
+         *  the take as the reply it was recorded as. */
+        public val reply: me.lakko.app.chat.ReplyRef? = null,
     ) {
         internal var bytes: ByteArray? = null
         internal var thumb: ThumbRef? = null
@@ -123,7 +129,7 @@ public class MediaSendQueue(
                     }
                 }
                 update(job) { it.copy(progress = 0.95f) }
-                publish(job.uploaded ?: throw MediaSendFailed("no ref"))
+                publish(job.uploaded ?: throw MediaSendFailed("no ref"), job.reply)
                 jobs.remove(job.tempId)
                 mutableRows.update { rows -> rows.filterNot { it.tempId == job.tempId } }
             } catch (e: CancellationException) {

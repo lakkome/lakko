@@ -223,16 +223,33 @@ public fun statusLabel(ack: Ack, time: String?): String? = when (ack) {
 }
 
 /**
- * Fold [messages] (already in journal order) into date separators and rows
+ * The two bookkeeping rows the receive loop files as system rows carry protocol
+ * names and nothing a reader acts on; the timeline does not draw them (UX spec
+ * section 6). The conversation list already skipped them for its preview
+ * (`ChatListScreen.kt`); the timeline kept drawing them in a pill, found live
+ * 2026-09-26. iOS has the same rule in `ChatTimeline.isHiddenSystemRow`. A call
+ * row is a system row too and IS drawn; it is told apart by what it holds.
+ */
+public fun isHiddenSystemRow(message: ChatMessage): Boolean {
+    if (message.direction != Direction.System || message.call != null) return false
+    return message.text == "[mls commit]" || message.text == "[mls external join]"
+}
+
+/**
+ * Fold [allMessages] (already in journal order), less the hidden system rows,
+ * into date separators and rows
  * with run boundaries. Rows without a parseable time never open a separator.
  */
 public fun buildTimeline(
-    messages: List<ChatMessage>,
+    allMessages: List<ChatMessage>,
     nowMs: Long,
     zone: ZoneId,
     use24h: Boolean,
     locale: Locale,
 ): List<TimelineItem> {
+    // Dropped before the fold, so a hidden row neither opens a date separator
+    // nor breaks a run between two messages that read as one.
+    val messages = allMessages.filterNot(::isHiddenSystemRow)
     val out = ArrayList<TimelineItem>(messages.size + 8)
     val times = messages.map { parseMessageTimeMs(it.createdAt) }
     var lastSeparatorDayMs: Long? = null

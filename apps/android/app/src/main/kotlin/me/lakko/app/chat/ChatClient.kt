@@ -836,6 +836,16 @@ internal fun toEvent(
                         senderLeaf = senderLeaf,
                         senderKey = senderKey,
                         createdAt = createdAt,
+                        // ADR-0052 — a chat message that also points somewhere.
+                        // The core sets the three fields only for `CHAT`; the
+                        // snapshot is carried verbatim, never resolved here.
+                        reply = body.replyTo?.let { target ->
+                            ReplyRef(
+                                target = target,
+                                author = body.replyAuthor,
+                                excerpt = body.replyExcerpt,
+                            )
+                        },
                     )
                     MessageBodyKind.EDIT -> IncomingChatEvent.Op(
                         messageId = messageId,
@@ -963,6 +973,9 @@ public sealed interface IncomingChatEvent {
         /** Plain user-visible text from the envelope (empty
          *  string is valid — attachment-only message). */
         val text: String,
+        /** ADR-0052 — the reply reference and quote, when the envelope
+         *  carried `reply_to`; `null` for an ordinary message. */
+        val reply: ReplyRef? = null,
         /** Zero or more attachment refs from the envelope. */
         val attachments: List<AttachmentRef>,
         /** Alias of [text] — kept for the few call sites that

@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -34,6 +35,16 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.text.style.TextOverflow
+import me.lakko.app.chat.ReplyArmed
+import me.lakko.app.chat.ReplyRef
+import me.lakko.app.chat.replyQuoteLines
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -198,6 +209,22 @@ public fun ChatScreen(
     // ADR-0023 — the message being edited (the small pre-filled
     // dialog), or `null` when no edit is in progress.
     var editTarget by remember { mutableStateOf<ChatMessage?>(null) }
+    // ADR-0052 / UX 3.1 — the armed reply (the strip above the composer).
+    // Held by the view model so a rotation keeps it; cleared when this screen
+    // leaves, because "a reply is not a draft that follows the person".
+    val replyingTo by viewModel.replyingTo.collectAsStateWithLifecycle()
+    DisposableEffect(viewModel) {
+        onDispose { viewModel.onCancelReply() }
+    }
+    // UX 3.1 "Tap to jump" — the row a tapped quote scrolled to, lit for about
+    // a second and a half and then back to normal.
+    var highlightedMessageId by remember { mutableStateOf<Long?>(null) }
+    LaunchedEffect(highlightedMessageId) {
+        if (highlightedMessageId != null) {
+            delay(REPLY_HIGHLIGHT_MS)
+            highlightedMessageId = null
+        }
+    }
     // ADR-0023 — our own IDENTITY (signature key) in this chat group, sampled
     // once per composition; the UI marks which reaction chips we contributed
     // (and can toggle off). Never our leaf — see `AuthorIdentity.kt`.
@@ -261,6 +288,19 @@ public fun ChatScreen(
     val use24h = remember(context) { DateFormat.is24HourFormat(context) }
     val timeline = remember(state.messages, zone, use24h) {
         buildTimeline(state.messages, System.currentTimeMillis(), zone, use24h, locale)
+    }
+    // UX 3.1 — the target is found by its id in the timeline THIS device
+    // holds; when it is not there the tap does nothing and nothing is said.
+    // The timeline's rows come first in the lazy list, before the pending
+    // media, so a timeline index is a list index.
+    val jumpToMessage: (Long) -> Unit = { target ->
+        val index = timeline.indexOfFirst { it is TimelineItem.Row && it.message.messageId == target }
+        if (index >= 0) {
+            scope.launch {
+                listState.animateScrollToItem(index)
+                highlightedMessageId = target
+            }
+        }
     }
     val maxBubbleWidth: Dp = (LocalConfiguration.current.screenWidthDp * 0.78f).dp
 
@@ -774,8 +814,30 @@ public fun ChatScreen(
                                 }
                             },
                             // ADR-0023 — open the pre-filled edit dialog.
-                            onEdit = { editTarget = msg },
+                            // UX 3.1 — and drop an armed reply: one thing at
+                            // a time.
+                            onEdit = {
+                                viewModel.onEditStarted()
+                                editTarget = msg
+                            },
                             onDelete = { viewModel.onDeleteMessage(msg.messageId) },
+                            // ADR-0052 / UX 3.1 — Reply ends an open edit
+                            // (its draft is discarded, as Cancel would) and
+                            // arms the strip. The name is what the timeline
+                            // calls the author: "You" for an own message, the
+                            // resolved name otherwise.
+                            onReply = {
+                                editTarget = null
+                                val label = when {
+                                    msg.direction == Direction.Outgoing -> "You"
+                                    !isGroupChat && peerName != null -> peerName
+                                    else -> msg.authorKey?.let(viewModel::nameOf)
+                                        ?: viewModel.nameOfKeyB64(null)
+                                }
+                                viewModel.onReplyToMessage(msg, label)
+                            },
+                            onJumpToReply = jumpToMessage,
+                            highlighted = msg.messageId != 0L && highlightedMessageId == msg.messageId,
                             onReact = { emoji ->
                                 viewModel.onReactToMessage(msg.messageId, emoji)
                             },
@@ -835,6 +897,8 @@ public fun ChatScreen(
                 onDraftChange = viewModel::onDraftChange,
                 onSendClicked = viewModel::onSendClicked,
                 onFocusChanged = viewModel::onComposerFocusChanged,
+                replyStrip = replyingTo,
+                onCancelReply = viewModel::onCancelReply,
                 onPickMedia = {
                     pickVisualLauncher.launch(
                         androidx.activity.result.PickVisualMediaRequest(
@@ -1086,12 +1150,30 @@ private fun MessageRow(
     /** `docs/ux/calls.md` section 6 — tapping a finished call's row calls back,
      *  with the same kind of call the row records. */
     onCallBack: (video: Boolean) -> Unit,
+    /** ADR-0052 / UX 3.1 — Reply was chosen on this message. */
+    onReply: () -> Unit = {},
+    /** UX 3.1 — this row's quote was tapped; the argument is the target id. */
+    onJumpToReply: (Long) -> Unit = {},
+    /** UX 3.1 — this row is the one a tapped quote just scrolled to. */
+    highlighted: Boolean = false,
 ) {
     val gapAbove = if (firstInRun) 8.dp else 2.dp
+    // UX 3.1 — "the surface tint used for the pressed state": Material's
+    // pressed state layer is `onSurface` at 12 percent, so the lit row reads as
+    // a held row rather than a selected one, and it fades back on its own.
+    val highlightTint by animateColorAsState(
+        targetValue = if (highlighted) {
+            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
+        } else {
+            Color.Transparent
+        },
+        label = "reply-jump-highlight",
+    )
     when (msg.direction) {
         Direction.Outgoing -> Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .background(highlightTint)
                 .padding(top = gapAbove),
             horizontalArrangement = Arrangement.End,
         ) {
@@ -1104,6 +1186,8 @@ private fun MessageRow(
                 ownIdentity = ownIdentity,
                 actionsAvailable = actionsAvailable,
                 isOwn = true,
+                onReply = onReply,
+                onJumpToReply = onJumpToReply,
                 // ADR-0024 — own bubble: compute the read tick.
                 readState = ownReadStateFor(
                     messageId = msg.messageId,
@@ -1126,6 +1210,7 @@ private fun MessageRow(
         Direction.Incoming -> Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .background(highlightTint)
                 .padding(top = gapAbove),
             verticalAlignment = Alignment.Bottom,
         ) {
@@ -1163,6 +1248,8 @@ private fun MessageRow(
                     ownIdentity = ownIdentity,
                     actionsAvailable = actionsAvailable,
                     isOwn = false,
+                    onReply = onReply,
+                    onJumpToReply = onJumpToReply,
                     // Incoming bubbles never show our read state.
                     readState = OwnReadState.None,
                     // UX section 4 — incoming on the sunken surface.
@@ -1348,6 +1435,10 @@ internal fun Bubble(
     /** Send this row again, by its client-side id. Only ever reached from a
      *  row whose send failed. */
     onRetrySend: (Long) -> Unit,
+    /** ADR-0052 / UX 3.1 — Reply was chosen on this message. */
+    onReply: () -> Unit = {},
+    /** UX 3.1 — the quote block was tapped; the argument is the target id. */
+    onJumpToReply: (Long) -> Unit = {},
 ) {
     // ADR-0023 — every affordance is gated on the message having a
     // real DS messageId (0 ⇒ a not-yet-acked outgoing row that no
@@ -1371,13 +1462,20 @@ internal fun Bubble(
         // edge, with the time / ticks pill drawn on it.
         // UX spec §2 — a lone voice message is a ROW, and its own time belongs
         // on that row rather than on a line of its own below it.
+        // ADR-0052 — a reply is never "nothing but one piece of media": its
+        // quote block needs the bubble's chrome to sit in, so a quoted photo
+        // or voice message keeps the ordinary bubble around it.
         val soleBubble = remember(msg) {
-            me.lakko.app.media.soleMediaBubble(
-                deleted = msg.deleted,
-                text = msg.text,
-                attachments = msg.attachments,
-                allowlist = mediaHub.allowlist,
-            )
+            if (msg.reply != null) {
+                null
+            } else {
+                me.lakko.app.media.soleMediaBubble(
+                    deleted = msg.deleted,
+                    text = msg.text,
+                    attachments = msg.attachments,
+                    allowlist = mediaHub.allowlist,
+                )
+            }
         }
         // Where this bubble's meta line goes — ONE rule, in the media module,
         // rather than the three conditionals that used to encode it here and
@@ -1441,6 +1539,17 @@ internal fun Bubble(
                             fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
                         )
                     } else {
+                        // ADR-0052 / UX 3.1 — the quote above the message's
+                        // own text, in the bubble's own colours, drawn from
+                        // the snapshot the envelope carried and nothing else.
+                        val reply = msg.reply
+                        if (reply != null) {
+                            ReplyQuote(
+                                reply = reply,
+                                contentColor = contentColor,
+                                onClick = { onJumpToReply(reply.target) },
+                            )
+                        }
                         if (msg.text.isNotEmpty()) {
                             Text(
                                 text = msg.text,
@@ -1555,6 +1664,10 @@ internal fun Bubble(
                         menuOpen = false
                         onOpenReactionPicker()
                     },
+                    onReply = {
+                        menuOpen = false
+                        onReply()
+                    },
                     onCopy = {
                         menuOpen = false
                         copyMessageText(context, msg.text)
@@ -1598,6 +1711,129 @@ internal fun Bubble(
                 readState = if (isOwn) readState else OwnReadState.None,
                 contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 4.dp),
+            )
+        }
+    }
+}
+
+/** UX 3.1 — how long a jumped-to row stays lit: "about a second and a half". */
+internal const val REPLY_HIGHLIGHT_MS: Long = 1_500L
+
+/** The strip's close control, by name, for TalkBack and the UI tests. */
+internal const val CANCEL_REPLY_LABEL: String = "Cancel reply"
+
+/**
+ * ADR-0052 / `docs/ux/message-actions.md` section 3.1 — the strip above the
+ * composer: one line, a vertical rule in the accent colour, the quoted
+ * author's name, the excerpt, and a close control at the trailing end. Both
+ * strings are the snapshot the next send will carry, so what is shown is what
+ * the recipient will see. Theme colours only, so it reads in dark mode too.
+ */
+@Composable
+internal fun ReplyStrip(
+    reply: ReplyRef,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val (name, excerpt) = replyQuoteLines(reply)
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(start = 12.dp, end = 4.dp, top = 6.dp)
+            .height(IntrinsicSize.Min),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .width(3.dp)
+                .fillMaxHeight()
+                .clip(RoundedCornerShape(2.dp))
+                .background(MaterialTheme.colorScheme.primary),
+        )
+        Spacer(Modifier.width(10.dp))
+        if (name.isNotEmpty()) {
+            Text(
+                text = name,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(end = 8.dp),
+            )
+        }
+        Text(
+            text = excerpt,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        IconButton(onClick = onClose) {
+            Icon(
+                imageVector = Icons.Filled.Close,
+                contentDescription = CANCEL_REPLY_LABEL,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/**
+ * UX 3.1 — the quote block inside a reply's bubble, above its own text: the
+ * same rule, the name on the first line, the excerpt on the second, both
+ * single-line and truncated, in the bubble's own colours. Own and incoming
+ * bubbles draw it alike. It is a button named "Reply to <name>"; tapping it
+ * jumps to the quoted message when this device holds it.
+ *
+ * A reply that arrived with no snapshot draws the name line empty and the
+ * excerpt "Message" ([replyQuoteLines]); the name is a claim by the replier,
+ * so nothing here dresses it as verified.
+ */
+@Composable
+internal fun ReplyQuote(
+    reply: ReplyRef,
+    contentColor: Color,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val (name, excerpt) = replyQuoteLines(reply)
+    val label = "Reply to $name"
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(contentColor.copy(alpha = 0.10f))
+            .clickable(onClick = onClick)
+            .semantics {
+                role = Role.Button
+                contentDescription = label
+            }
+            .height(IntrinsicSize.Min),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .width(3.dp)
+                .fillMaxHeight()
+                .background(contentColor),
+        )
+        Column(Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+            // The line is kept even when empty, so a snapshot-less reply keeps
+            // the block's two-line shape rather than collapsing to one word.
+            Text(
+                text = name,
+                style = MaterialTheme.typography.labelMedium,
+                color = contentColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = excerpt,
+                style = MaterialTheme.typography.bodySmall,
+                color = contentColor.copy(alpha = 0.8f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
     }
@@ -1930,6 +2166,10 @@ internal fun Composer(
     onPickMedia: () -> Unit,
     onAttachClicked: () -> Unit,
     onRemoveAttachment: (Int) -> Unit,
+    /** ADR-0052 / UX 3.1 — the armed reply the strip shows, or `null`. */
+    replyStrip: ReplyArmed? = null,
+    /** The strip's close control. */
+    onCancelReply: () -> Unit = {},
 ) {
     // The caret has to be known to insert an emoji AT it (UX spec §4), which a
     // bare `String` value cannot carry. The view model still owns the text;
@@ -1954,6 +2194,16 @@ internal fun Composer(
         field = TextFieldValue(text, TextRange(caret))
         onDraftChange(text)
         onEmojiInserted()
+    }
+
+    // UX 3.1 — "Choosing Reply ... focuses the composer." Keyed on the armed
+    // reply itself, which carries a sequence number so a second Reply on the
+    // same message focuses again.
+    val fieldFocus = remember { FocusRequester() }
+    LaunchedEffect(replyStrip) {
+        if (replyStrip != null) {
+            runCatching { fieldFocus.requestFocus() }
+        }
     }
 
     val recState = recorder.state
@@ -1991,6 +2241,10 @@ internal fun Composer(
                     .padding(horizontal = 16.dp, vertical = 2.dp)
                     .semantics { liveRegion = LiveRegionMode.Polite },
             )
+        }
+        // ADR-0052 / UX 3.1 — the reply strip, above the tray and the field.
+        if (replyStrip != null && !recording) {
+            ReplyStrip(reply = replyStrip.snapshot, onClose = onCancelReply)
         }
         // 1.19c4 — pending-attachments tray. Horizontal scroll
         // of chips above the text field; each chip shows
@@ -2074,6 +2328,7 @@ internal fun Composer(
                     ),
                     modifier = Modifier
                         .weight(1f)
+                        .focusRequester(fieldFocus)
                         // ADR-0024 — surface focus to the ViewModel so a
                         // blur clears any outstanding typing signal.
                         .onFocusChanged { onFocusChanged(it.isFocused) },

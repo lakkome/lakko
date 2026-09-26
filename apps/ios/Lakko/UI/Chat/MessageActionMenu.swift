@@ -53,11 +53,15 @@ public enum MessageLongPress {
 
 /// One row of the action card.
 ///
-/// Section 3 lists nine actions; three of them exist today. Reply, Forward,
-/// Pin, Select and Read by each need wire or storage surface that is not built
+/// Section 3 lists nine actions; four of them exist today. Forward, Pin,
+/// Select and Read by each need wire or storage surface that is not built
 /// (section 6 is the handover to the ADR), so they are deliberately absent
 /// rather than present and dead: a row that cannot work is worse than no row.
 public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
+
+    /// ADR-0052 decision 1 — arms the composer with a quote of this message
+    /// (section 3.1). Any message with an id.
+    case reply
 
     /// Puts the message text on the clipboard. Nothing leaves the device.
     case copy
@@ -72,6 +76,7 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
 
     public var title: String {
         switch self {
+        case .reply: return "Reply"
         case .copy: return "Copy"
         case .edit: return "Edit"
         case .delete: return "Delete"
@@ -80,6 +85,7 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
 
     public var systemImage: String {
         switch self {
+        case .reply: return "arrowshape.turn.up.left"
         case .copy: return "doc.on.doc"
         case .edit: return "pencil"
         case .delete: return "trash"
@@ -93,16 +99,22 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
 
     /// The actions this message offers, in section 2's order.
     ///
-    /// **The order is the rule, not the list.** Section 2: the ones that only
-    /// read come before the ones that change this message, and the destructive
-    /// one comes last and separated. Copy reads, Edit changes, Delete destroys,
-    /// so with today's three the order falls out — and it will keep falling out
-    /// when Reply and Forward arrive ahead of Copy and Pin arrives beside Edit.
+    /// **The order is the rule, not the list.** Section 2: the new-message
+    /// actions come first, then the ones that only read, then the ones that
+    /// change this message, and the destructive one comes last and separated.
+    /// Reply starts a new message, Copy reads, Edit changes, Delete destroys,
+    /// so with today's four the order falls out — and it will keep falling out
+    /// when Forward arrives beside Reply and Pin arrives beside Edit.
     ///
     /// React is NOT in this list, which is the whole point of section 2: it is a
     /// row of its own above the bubble, not an item in this card.
-    public static func offered(canEditOrDelete: Bool, hasText: Bool) -> [MessageMenuAction] {
+    public static func offered(
+        canReply: Bool, canEditOrDelete: Bool, hasText: Bool
+    ) -> [MessageMenuAction] {
         var actions: [MessageMenuAction] = []
+        // Section 3.1 — any message with an id; a tombstone and a row that
+        // has not landed have nothing to point at.
+        if canReply { actions.append(.reply) }
         // Section 3 — "any message with text". A message with only an
         // attachment has nothing to put on the clipboard, and a tombstone has
         // nothing left at all.

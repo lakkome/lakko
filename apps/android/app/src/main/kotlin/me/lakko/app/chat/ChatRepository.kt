@@ -2873,13 +2873,23 @@ public class ChatRepository(
         groupIdHex: String,
         plaintext: String,
         attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef> = emptyList(),
+        /** ADR-0052 — the quote this message carries, when it is a reply. */
+        reply: ReplyRef? = null,
     ): Unit =
-        withContext(mlsDispatcher) { sendMessageOnMlsThread(groupIdHex = groupIdHex, plaintext = plaintext, attachments = attachments) }
+        withContext(mlsDispatcher) {
+            sendMessageOnMlsThread(
+                groupIdHex = groupIdHex,
+                plaintext = plaintext,
+                attachments = attachments,
+                reply = reply,
+            )
+        }
 
     private suspend fun sendMessageOnMlsThread(
         groupIdHex: String,
         plaintext: String,
         attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef> = emptyList(),
+        reply: ReplyRef? = null,
     ): Unit {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException("ChatRepository not bootstrapped")
@@ -2904,6 +2914,7 @@ public class ChatRepository(
             attachments = attachments,
             createdAt = java.time.Instant.now().toString(),
             authorKey = null,
+            reply = reply,
         )
         publishThreadList()
         try {
@@ -2914,6 +2925,7 @@ public class ChatRepository(
                 localId = localId,
                 plaintext = plaintext,
                 attachments = attachments,
+                reply = reply,
             )
         } catch (e: Throwable) {
             record.markFailed(localId)
@@ -2965,6 +2977,9 @@ public class ChatRepository(
                 localId = localId,
                 plaintext = row.text,
                 attachments = row.attachments,
+                // The quote goes again with the words: the row is the only
+                // place either was ever kept.
+                reply = row.reply,
             )
         } catch (e: Throwable) {
             record.markFailed(localId)
@@ -2981,6 +2996,7 @@ public class ChatRepository(
         localId: Long,
         plaintext: String,
         attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef>,
+        reply: ReplyRef? = null,
     ) {
         groupLock(groupIdHex).withLock {
             // 1.19c4: build the JSON envelope before
@@ -2990,11 +3006,24 @@ public class ChatRepository(
             // (defence-in-depth: the UI already validates the
             // AttachmentRefs it builds via
             // `AttachmentBridge.encryptAndUpload`).
+            // ADR-0052 — a reply is the same envelope with `reply_to` and the
+            // snapshot beside the text; the core bounds the excerpt and drops
+            // an empty string, so what is passed is what the spec says.
             val envelopeBytes = try {
-                AttachmentBridge.composeEnvelopeBytes(
-                    text = plaintext,
-                    attachments = attachments,
-                )
+                if (reply != null) {
+                    uniffi.lakko_ffi_uniffi.composeReplyEnvelope(
+                        text = plaintext,
+                        attachments = attachments,
+                        replyTo = reply.target,
+                        replyAuthor = reply.author,
+                        replyExcerpt = reply.excerpt,
+                    )
+                } else {
+                    AttachmentBridge.composeEnvelopeBytes(
+                        text = plaintext,
+                        attachments = attachments,
+                    )
+                }
             } catch (e: Throwable) {
                 throw ChatError("envelope compose failed", e)
             }
@@ -7060,6 +7089,13 @@ public data class ChatMessage(
      * unsent row is not written at all.
      */
     val localId: Long = 0,
+    /**
+     * ADR-0052 — the message this one replies to, with the quote it carries.
+     * `null` for an ordinary message. A reply is an ordinary chat message
+     * that also points somewhere: [text] and [attachments] are its own, and
+     * the quote is drawn from this alone, never from the target.
+     */
+    val reply: ReplyRef? = null,
 ) {
     /**
      * The stable identity of this row.
@@ -7070,6 +7106,21 @@ public data class ChatMessage(
      */
     val rowId: Long get() = if (localId != 0L) localId else messageId
 }
+
+/**
+ * ADR-0052 decision 1 — a reply's reference to its target, as the envelope
+ * carries it: the target's DS `messageId`, plus the quoted author's name and
+ * an excerpt of the target's own text, both a SNAPSHOT taken when the reply
+ * was composed. Either string may be absent (the core drops an empty one),
+ * and the receiver then draws the fallback in `replyQuoteLines`. Neither is
+ * verified: they are what the replier wrote, and the UI must not dress them
+ * as confirmed.
+ */
+public data class ReplyRef(
+    val target: Long,
+    val author: String?,
+    val excerpt: String?,
+)
 
 /** Whether an outgoing row reached the server. */
 public enum class Ack {
@@ -7229,6 +7280,8 @@ private class GroupRecord(
         attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef>,
         createdAt: String,
         authorKey: MemberIdentity?,
+        /** ADR-0052 — carried on the row so the sender sees its own quote. */
+        reply: ReplyRef? = null,
     ) {
         messages.add(
             ChatMessage(
@@ -7240,6 +7293,7 @@ private class GroupRecord(
                 authorKey = authorKey,
                 ack = Ack.PENDING,
                 localId = localId,
+                reply = reply,
             ),
         )
     }
@@ -7401,6 +7455,8 @@ private class GroupRecord(
                         // row is read back it may belong to whoever was added
                         // next.
                         authorKey = event.senderKey,
+                        // ADR-0052 — the quote as the envelope carried it.
+                        reply = event.reply,
                     ),
                 )
                 is IncomingChatEvent.Op -> applyOpInternal(

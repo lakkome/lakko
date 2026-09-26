@@ -187,6 +187,29 @@ describe("eventToPersistedMessage", () => {
     expect(JSON.stringify(row)).not.toContain("senderLeaf");
   });
 
+  it("persists the ADR-0052 reply reference verbatim, and omits it when absent", () => {
+    const base = {
+      kind: "application" as const,
+      messageId: 43,
+      text: "yes",
+      plaintext: "yes",
+      attachments: [],
+      senderLeaf: undefined,
+      senderKey: undefined,
+      createdAt: "t",
+    };
+    const withReply = eventToPersistedMessage({
+      ...base,
+      reply: { target: 42, author: "Anna", excerpt: "at five?" },
+    });
+    expect(withReply.reply).toEqual({ target: "42", author: "Anna", excerpt: "at five?" });
+    const bare = eventToPersistedMessage({ ...base, reply: { target: 42 } });
+    expect(bare.reply).toEqual({ target: "42" });
+    expect(Object.keys(bare.reply ?? {})).toEqual(["target"]);
+    const plain = eventToPersistedMessage(base);
+    expect("reply" in plain).toBe(false);
+  });
+
   it("persists a system row the way the chat view does", () => {
     const row = eventToPersistedMessage({
       kind: "system",

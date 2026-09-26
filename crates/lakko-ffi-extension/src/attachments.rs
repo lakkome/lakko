@@ -124,7 +124,12 @@ pub struct ParsedBody {
 #[must_use]
 pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
     match inner::parse_body(&bytes) {
-        inner::MessageBody::Chat { text, attachments } => ParsedBody {
+        // ADR-0052: a reply's quote is not previewed by a notification, and
+        // this surface stays the smallest that decrypts (C-59), so the reply
+        // is matched away rather than carried.
+        inner::MessageBody::Chat {
+            text, attachments, ..
+        } => ParsedBody {
             kind: MessageBodyKind::Chat,
             text,
             attachments: refs_to_ffi(attachments),

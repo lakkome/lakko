@@ -32,6 +32,7 @@ import type { IncomingChatEvent } from "./client";
 import { attachmentsPreviewLabel } from "./list-preview";
 import type { PersistedGroup, PersistedMessage } from "./message-log-store";
 import { persistedFromAttachmentRef } from "./persisted-attachment";
+import { persistedFromReplyRef } from "./reply-snapshot";
 
 /** Numeric DS id of a persisted row, or `null` when it does not parse. */
 function idOf(m: PersistedMessage): bigint | null {
@@ -243,6 +244,8 @@ export function eventToPersistedMessage(
       // ADR-0023 / C-68 — the author's signature key resolved at receipt, never
       // the leaf, which names somebody else after the next commit.
       authorKeyB64: authorIdentityToPersisted(e.senderKey),
+      // ADR-0052 — the reply reference, verbatim.
+      ...(e.reply === undefined ? {} : { reply: persistedFromReplyRef(e.reply) }),
     };
   }
   return {

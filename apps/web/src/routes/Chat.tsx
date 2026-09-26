@@ -53,6 +53,12 @@ import { quietCallOfferFor, type QuietCallOffer } from "../calls/quiet-call-offe
 import { callOwnsCaptureNow } from "../calls/capture-rule";
 import { useBackgroundReceive } from "../chat/BackgroundReceiveContext";
 import { eventToPersistedMessage, mergeForegroundSlot } from "../chat/background-log";
+import {
+  persistedFromReplyRef,
+  replyRefFromPersisted,
+  replySnapshotFor,
+  type ReplySnapshot,
+} from "../chat/reply-snapshot";
 import { opsFromPersisted, persistedWithOps } from "../chat/message-ops-store";
 import { sendFailureNotice, withSendAck } from "../chat/send-failure";
 import { memberKeysOf, peerName } from "../chat/peer-name";
@@ -139,6 +145,7 @@ import { isSingleEmojiGrapheme } from "../media/emoji/emoji-index";
 import { MAX_GIF_FULL_BYTES, fetchGifMedia, type GifItem } from "../media/gif-client";
 import {
   composeEnvelope,
+  composeReplyEnvelope,
   encryptAndUploadBytes,
   composeEditEnvelope,
   composeDeleteEnvelope,
@@ -148,6 +155,7 @@ import {
   downloadAndDecryptRef,
   encryptAndUploadFile,
   formatAttachmentSize,
+  type ReplyRef,
   saveDecryptedBytes,
   type AttachmentMediaMeta,
   type AttachmentRefBytes,
@@ -635,6 +643,49 @@ function ChatView(props: {
   // edited (or `null`), plus the working text.
   const [editingId, setEditingId] = createSignal<number | null>(null);
   const [editText, setEditText] = createSignal("");
+  // ADR-0052 / message-actions.md section 3.1 — the reply the composer is
+  // armed with: the target's DS id and the snapshot taken when Reply was
+  // chosen. Session-scoped by construction: this view is keyed on the group
+  // id, so switching conversation remounts it and the strip goes with it (a
+  // reply is not a draft that follows the person). Replying and editing are
+  // exclusive - each start clears the other - and a send, Escape and the
+  // strip's close control all clear it.
+  const [replyingTo, setReplyingTo] = createSignal<(ReplySnapshot & { target: number }) | null>(
+    null,
+  );
+  /** Reply was chosen on `messageId`: snapshot the message AS IT IS NOW (the
+   *  edited text of an edited message, the kind of a media message), arm the
+   *  strip, end any open edit, focus the composer. */
+  function onStartReply(messageId: number): void {
+    const row = rows().find((r) => rowMessageId(r) === messageId);
+    if (row === undefined) return;
+    const original = row.kind === "outgoing" ? row.plaintext : row.event.kind === "application" ? row.event.text : "";
+    const attachments = row.kind === "outgoing" ? row.attachments : row.event.kind === "application" ? row.event.attachments : [];
+    const text = msgOps().get(messageId)?.editedText ?? original;
+    // The name is whatever the timeline already calls that person: "You" for
+    // an own message (this device's or this person's other device, ADR-0050),
+    // else the one display resolver, else the same fallback the bubble draws.
+    const own = ownPersonKeyB64(chats.identity());
+    const senderKey = row.kind === "incoming" && row.event.kind === "application" ? row.event.senderKey : undefined;
+    const authorLabel =
+      row.kind === "outgoing" || (senderKey !== undefined && senderKey === own)
+        ? "You"
+        : senderKey !== undefined
+          ? profiles.resolve(senderKey).name
+          : "Unknown sender";
+    const snapshot = replySnapshotFor({ text, attachments }, authorLabel, (a) => hub.decision(a).bubble);
+    setEditingId(null);
+    setReplyingTo({ target: messageId, ...snapshot });
+    composerInput?.focus();
+  }
+  /** Take the armed reply for a send and clear the strip in the same step, so
+   *  two sends can never carry one reply. */
+  function takeArmedReply(): ReplyRef | undefined {
+    const armed = replyingTo();
+    if (armed === null) return undefined;
+    setReplyingTo(null);
+    return { target: armed.target, author: armed.author, excerpt: armed.excerpt };
+  }
   // The quick reaction row moved into the per-message action menu, which owns
   // its own open state (`TimelineBubble.tsx` / `MessageMenu.tsx`): one gesture
   // opens the reactions and the actions together, so the view no longer tracks
@@ -3511,6 +3562,10 @@ function ChatView(props: {
     // indicator immediately rather than waiting for the ~6 s expiry.
     sendTypingStop();
 
+    // ADR-0052 — the reply this message is sent as, if the strip is armed.
+    // Taken here so the optimistic bubble draws the quote at once and the
+    // strip clears with the send.
+    const reply = takeArmedReply();
     // Optimistic outbound bubble.
     const tempId = nextTempId++;
     setRows([
@@ -3525,11 +3580,12 @@ function ChatView(props: {
         // right now — the same "resolve once, carry the key" shape
         // the receive path uses for everyone else.
         authorKey: ownSignatureKeyB64(),
+        ...(reply === undefined ? {} : { reply }),
       },
     ]);
     setInput("");
     setPendingAttachments([]);
-    await publishOutgoing(tempId, text, attached);
+    await publishOutgoing(tempId, text, attached, reply);
   }
 
   /**
@@ -3547,13 +3603,20 @@ function ChatView(props: {
     tempId: number,
     text: string,
     attached: AttachmentRefBytes[],
+    /** ADR-0052 — the reply reference the row carries, re-sent verbatim on
+     *  Retry. */
+    reply: ReplyRef | undefined,
   ): Promise<void> {
     setRows([...withSendAck(rows(), tempId, "pending")]);
     try {
       // 1.19c2: compose the JSON envelope from (text, refs).
       // Empty refs ⇒ pure-text envelope; non-empty ⇒ multi-
-      // attachment envelope via the wasm EnvelopeBuilder.
-      const envelopeBytes = await composeEnvelope(text, attached);
+      // attachment envelope via the wasm EnvelopeBuilder. A reply is the
+      // same envelope plus the reference (ADR-0052).
+      const envelopeBytes =
+        reply === undefined
+          ? await composeEnvelope(text, attached)
+          : await composeReplyEnvelope(text, attached, reply);
       const result = await chat.sendMessage(
         props.requireIdentity(),
         props.entry.group,
@@ -4082,6 +4145,9 @@ function ChatView(props: {
     thumb?: ThumbRefBytes;
     posterTried?: boolean;
     uploaded?: AttachmentRefBytes;
+    /** ADR-0052 — the take was sent as a reply: the reference the row and
+     *  the envelope carry. */
+    reply?: ReplyRef;
   }
   const mediaJobs = new Map<number, MediaSendJob>();
   const [mediaUploads, setMediaUploads] = createSignal<ReadonlyMap<number, number | "failed">>(new Map());
@@ -4123,6 +4189,7 @@ function ChatView(props: {
         ack: "pending",
         mediaLocalKey: job.localKey,
         authorKey: ownSignatureKeyB64(),
+        ...(job.reply === undefined ? {} : { reply: job.reply }),
       },
     ]);
     void runMediaJob(job);
@@ -4183,7 +4250,10 @@ function ChatView(props: {
         );
       }
       const uploaded = job.uploaded;
-      const envelopeBytes = await composeEnvelope("", [uploaded]);
+      const envelopeBytes =
+        job.reply === undefined
+          ? await composeEnvelope("", [uploaded])
+          : await composeReplyEnvelope("", [uploaded], job.reply);
       const result = await chat.sendMessage(props.requireIdentity(), props.entry.group, envelopeBytes);
       // The take's own bytes are already in the hub under the local key; MOVE
       // them to the real blob id before the row flips, so the bubble finds them
@@ -4209,6 +4279,7 @@ function ChatView(props: {
                 messageId: result.messageId,
                 createdAt: result.createdAt,
                 authorKey: r.authorKey,
+                ...(job.reply === undefined ? {} : { reply: job.reply }),
               }
             : r,
         ),
@@ -4254,7 +4325,7 @@ function ChatView(props: {
     const row = rows().find((r) => r.kind === "outgoing" && r.tempId === tempId);
     if (row === undefined || row.kind !== "outgoing") return;
     setError(null);
-    void publishOutgoing(tempId, row.plaintext, row.attachments);
+    void publishOutgoing(tempId, row.plaintext, row.attachments, row.reply);
   }
 
   /** A finished recording the user chose to send. */
@@ -4262,9 +4333,13 @@ function ChatView(props: {
     const tempId = nextTempId++;
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const isVoice = take.kind === "voice";
+    // ADR-0052 — a take recorded with a reply armed is sent as the reply, and
+    // the strip clears the same way a text send clears it.
+    const reply = takeArmedReply();
     startMediaSend({
       tempId,
       localKey: `local:${tempId}`,
+      ...(reply === undefined ? {} : { reply }),
       name: isVoice ? `voice-${stamp}.m4a` : `video-${stamp}.mp4`,
       mime: take.mime,
       meta: {
@@ -4284,9 +4359,13 @@ function ChatView(props: {
    *  recipient only ever fetches the encrypted blob from Lakko storage. */
   function sendGif(item: GifItem): void {
     const tempId = nextTempId++;
+    // ADR-0052 — a GIF is a sent message like any other: it carries the armed
+    // reply and clears the strip.
+    const reply = takeArmedReply();
     startMediaSend({
       tempId,
       localKey: `local:${tempId}`,
+      ...(reply === undefined ? {} : { reply }),
       name: `gif-${item.id}.gif`,
       mime: "image/gif",
       meta: { kind: "gif", width: item.width, height: item.height },
@@ -5424,6 +5503,37 @@ function ChatView(props: {
   // scrolled up to read.
   let scrollEl: HTMLDivElement | undefined;
   let stickToBottom = true;
+  /** ADR-0052 / section 3.1 "Tap to jump" — scroll the timeline to the row
+   *  whose DS id is `messageId` and highlight it for about a second and a
+   *  half. The row is looked up in what this device holds; when it is not
+   *  there (older than what is loaded, never received here) nothing happens
+   *  and nothing is said - a quote is not a promise that the original
+   *  exists. */
+  let highlightTimer: ReturnType<typeof setTimeout> | null = null;
+  function jumpToMessage(messageId: number): void {
+    const root = scrollEl;
+    if (root === undefined) return;
+    const target = root.querySelector<HTMLElement>(
+      `[data-message-id="${String(messageId)}"]`,
+    );
+    if (target === null) return;
+    // The reader is now looking at something older; new rows must not drag
+    // them back down while the highlight is still up.
+    stickToBottom = false;
+    target.scrollIntoView({ block: "center", behavior: "smooth" });
+    for (const el of root.querySelectorAll(".lk-msg-highlight")) {
+      el.classList.remove("lk-msg-highlight");
+    }
+    if (highlightTimer !== null) clearTimeout(highlightTimer);
+    target.classList.add("lk-msg-highlight");
+    highlightTimer = setTimeout(() => {
+      target.classList.remove("lk-msg-highlight");
+      highlightTimer = null;
+    }, 1500);
+  }
+  onCleanup(() => {
+    if (highlightTimer !== null) clearTimeout(highlightTimer);
+  });
   createEffect(() => {
     rows().length;
     const el = scrollEl;
@@ -6943,10 +7053,15 @@ function ChatView(props: {
                 editText={editText()}
                 setEditText={setEditText}
                 onStartEdit={(id, current) => {
+                  // ADR-0052 — replying and editing are exclusive: starting
+                  // an edit drops an armed reply.
+                  setReplyingTo(null);
                   setEditText(current);
                   setEditingId(id);
                 }}
                 onCancelEdit={() => setEditingId(null)}
+                onReply={onStartReply}
+                onJumpTo={jumpToMessage}
                 onSaveEdit={onSaveEdit}
                 onDeleteMessage={onDeleteMessage}
                 onReact={onReact}
@@ -7229,6 +7344,33 @@ function ChatView(props: {
       {/* ADR-0047 UX §6 — the permission-denied card and the short hints. */}
       <RecorderNotices recorder={recorder} />
       <VideoNoteOverlay recorder={recorder} />
+      {/* ADR-0052 / section 3.1 — the reply strip: one line above the
+          composer, a rule in the accent colour, the quoted author, the
+          excerpt, a close control at the trailing end. It shows exactly the
+          snapshot the recipient will see. */}
+      <Show when={replyingTo()}>
+        {(armed) => (
+          <div class="lk-reply-strip" role="status" aria-label={`Replying to ${armed().author}`}>
+            <span class="lk-reply-strip-rule" aria-hidden="true" />
+            <span class="lk-reply-strip-body">
+              <span class="lk-reply-strip-name">{armed().author}</span>
+              <span class="lk-reply-strip-excerpt">{armed().excerpt}</span>
+            </span>
+            <button
+              type="button"
+              class="lk-icon-button lk-reply-strip-close"
+              aria-label="Cancel reply"
+              title="Cancel reply"
+              onClick={() => {
+                setReplyingTo(null);
+                composerInput?.focus();
+              }}
+            >
+              <Icon name="close" size={18} />
+            </button>
+          </div>
+        )}
+      </Show>
       <form onSubmit={onSend} class="lk-composer">
         <Show when={composerPickerOpen() && !recorderBusy(recorder)}>
           <EmojiPicker
@@ -7283,6 +7425,11 @@ function ChatView(props: {
             if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
               e.preventDefault();
               e.currentTarget.form?.requestSubmit();
+            }
+            // ADR-0052 — Escape in the composer drops an armed reply.
+            if (e.key === "Escape" && replyingTo() !== null) {
+              e.preventDefault();
+              setReplyingTo(null);
             }
           }}
           // ADR-0024 — leaving the composer is a typing-stop
@@ -7569,6 +7716,8 @@ function timelineRowToPersisted(
       // store is the record of who wrote this, not a place to
       // re-derive it from whoever is holding the device now.
       authorKeyB64: authorIdentityToPersisted(row.authorKey),
+      // ADR-0052 — the reply reference, so the quote survives a reload.
+      ...(row.reply === undefined ? {} : { reply: persistedFromReplyRef(row.reply) }),
     };
   }
   // Incoming: split application vs system.
@@ -7657,6 +7806,8 @@ function timelineRowToPersisted(
  *  recoverable but the rendered string is the same. */
 function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
   const attachments = m.attachments.map((a) => attachmentRefFromPersisted(a).ref);
+  // ADR-0052 — absent on a plain message and on a row written before v4.
+  const reply = replyRefFromPersisted(m.reply);
   if (m.direction === "outgoing") {
     return {
       kind: "outgoing",
@@ -7666,6 +7817,7 @@ function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
       ack: "sent",
       messageId: Number(m.messageId),
       createdAt: m.createdAt,
+      ...(reply === undefined ? {} : { reply }),
       // Absent on a row written before this field existed, and
       // `null` when it could not be resolved — both restore as
       // `undefined`, which fails the edit/delete gate closed rather
@@ -7696,6 +7848,7 @@ function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
         // behaviour, never a misattribution.
         senderKey: persistedAuthorIdentity(m.authorKeyB64),
         createdAt: m.createdAt,
+        ...(reply === undefined ? {} : { reply }),
       },
     };
   }

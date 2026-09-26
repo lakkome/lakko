@@ -55,6 +55,28 @@ public struct ChatScreen: View {
     /// ADR-0047 §4 — the open picker, if any.
     @State private var picker: PickerRequest?
 
+    /// The composer field's focus. Owned here so the view model can ask for
+    /// the keyboard (choosing Reply focuses the composer,
+    /// `docs/ux/message-actions.md` section 3.1).
+    @FocusState private var composerFocused: Bool
+
+    /// ADR-0052 / section 3.1 "tap to jump" — the row a tapped quote pointed
+    /// at, highlighted for about a second and a half, then `nil`.
+    @State private var highlightedMessageId: Int64?
+
+    /// A quote tap the timeline's `ScrollViewReader` has yet to act on. A
+    /// counter rides along so two taps on the same quote both scroll.
+    @State private var quoteJump: QuoteJump?
+
+    private struct QuoteJump: Equatable {
+        let messageId: Int64
+        let nonce: Int
+    }
+
+    /// How long a jumped-to row stays highlighted (section 3.1: "about a
+    /// second and a half").
+    static let jumpHighlightSeconds: Double = 1.5
+
     /// Which picker is open: the composer's (Emoji + GIF), or the reaction
     /// bar's `+` for one message (Emoji only).
     private struct PickerRequest: Identifiable {
@@ -218,6 +240,10 @@ public struct ChatScreen: View {
         .onDisappear {
             // ADR-0024 — leaving the thread stops advertising typing.
             viewModel.screenVisible = false
+        }
+        .onChange(of: viewModel.composerFocusRequest) { _, _ in
+            // ADR-0052 — choosing Reply puts the keyboard on the composer.
+            composerFocused = true
         }
         .navigationTitle(headline)
         .navigationBarTitleDisplayMode(.inline)
@@ -553,10 +579,22 @@ public struct ChatScreen: View {
                                 // `docs/ux/calls.md` section 6 — tapping a
                                 // call row calls back, the same way the
                                 // header's phone button does.
-                                onCallBack: { viewModel.onCallButton(video: false) }
+                                onCallBack: { viewModel.onCallButton(video: false) },
+                                // ADR-0052 — Reply arms the composer with a
+                                // snapshot of this message.
+                                onReply: { viewModel.beginReply(entry.message) },
+                                // Section 3.1 "tap to jump" — the quote's
+                                // target, by message id.
+                                onQuoteTap: jumpToQuoted
                             )
                             // Tighter inside a run, a clear gap between runs.
                             .padding(.top, entry.startsRun ? 10 : 2)
+                            // Section 3.1 — the jumped-to row is tinted with
+                            // the surface used for a pressed row, briefly.
+                            .background(
+                                highlightedMessageId == entry.message.messageId
+                                    ? Color.lakkoSurfaceSelected : Color.clear
+                            )
                             .id(entry.message.messageId)
                         }
                     }
@@ -612,7 +650,33 @@ public struct ChatScreen: View {
                     scrollProxy.scrollTo("pending-\(last.id)", anchor: .bottom)
                 }
             }
+            .onChange(of: quoteJump) { _, jump in
+                // ADR-0052 / section 3.1 — scroll to the quoted row (the same
+                // anchor ids the list uses to reach the bottom) and highlight
+                // it for about a second and a half.
+                guard let jump else { return }
+                withAnimation {
+                    scrollProxy.scrollTo(jump.messageId, anchor: .center)
+                    highlightedMessageId = jump.messageId
+                }
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(Self.jumpHighlightSeconds))
+                    if highlightedMessageId == jump.messageId {
+                        withAnimation { highlightedMessageId = nil }
+                    }
+                }
+            }
         }
+    }
+
+    /// Section 3.1 "tap to jump" — act only when the quoted message is in the
+    /// timeline this device holds; otherwise do nothing and say nothing ("a
+    /// quote is not a promise that the original exists").
+    private func jumpToQuoted(_ messageId: Int64) {
+        guard viewModel.messages.contains(where: {
+            $0.messageId == messageId && !ChatTimeline.isHiddenSystemRow($0)
+        }) else { return }
+        quoteJump = QuoteJump(messageId: messageId, nonce: (quoteJump?.nonce ?? 0) + 1)
     }
 
     @ViewBuilder
@@ -813,6 +877,11 @@ public struct ChatScreen: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .transition(.opacity)
             }
+            // ADR-0052 / `docs/ux/message-actions.md` section 3.1 — the reply
+            // strip: what the recipient will see, taken when Reply was chosen.
+            if let armed = viewModel.replyingTo {
+                ReplyStrip(reply: armed.snapshot) { viewModel.cancelReply() }
+            }
             // UX spec section 5.2: attach, the growing field, the emoji / GIF
             // picker, then a trailing button that is the microphone with an
             // empty draft and the send arrow otherwise.
@@ -838,7 +907,9 @@ public struct ChatScreen: View {
                     .buttonStyle(.plain)
                     .disabled(viewModel.uploading || viewModel.sending)
                     .accessibilityLabel("Attach")
-                    ComposerTextField(text: $viewModel.draft, caret: caret, disabled: viewModel.sending)
+                    ComposerTextField(
+                        text: $viewModel.draft, caret: caret, disabled: viewModel.sending,
+                        focus: $composerFocused)
                     // ADR-0047 §4 — the smiley opens the picker on Emoji.
                     Button {
                         picker = PickerRequest(mode: .compose, message: nil)
@@ -1214,6 +1285,11 @@ struct MessageRow: View {
     var onMoreReactions: () -> Void = {}
     /// `docs/ux/calls.md` section 6 — tapping a call row calls back.
     var onCallBack: () -> Void = {}
+    /// ADR-0052 — the menu's Reply: arm the composer with this message.
+    var onReply: () -> Void = {}
+    /// ADR-0052 / section 3.1 — the quote block was tapped; the argument is
+    /// the quoted message's id. The screen decides whether it can jump.
+    var onQuoteTap: (Int64) -> Void = { _ in }
 
     /// `docs/ux/message-actions.md` — where the menu goes when it opens, `nil`
     /// outside a ``MessageMenuHost``.
@@ -1233,16 +1309,23 @@ struct MessageRow: View {
 
     /// ADR-0047 §3 — a message that is exactly one video note renders as the
     /// circle itself, with no bubble chrome.
+    ///
+    /// ADR-0052 — never for a reply: the quote block needs a bubble to sit in,
+    /// so a video note sent as a reply draws inside one.
     private var isBareVideoNote: Bool {
-        guard !message.deleted, message.text.isEmpty, message.attachments.count == 1,
+        guard !message.deleted, message.reply == nil, message.text.isEmpty,
+              message.attachments.count == 1,
               let ref = message.attachments.first else { return false }
         return InlineMedia.decision(for: ref).bubble == .videoNote
     }
 
     /// UX spec section 10 — a message that is exactly one photo or video
     /// renders as the media itself, the time in a pill on top of it.
+    ///
+    /// ADR-0052 — never for a reply, for the same reason as ``isBareVideoNote``.
     private var bareVisualMedia: AttachmentRef? {
-        guard !message.deleted, message.text.isEmpty, message.attachments.count == 1,
+        guard !message.deleted, message.reply == nil, message.text.isEmpty,
+              message.attachments.count == 1,
               let ref = message.attachments.first else { return nil }
         switch InlineMedia.decision(for: ref).bubble {
         case .photo, .video: return ref
@@ -1296,6 +1379,11 @@ struct MessageRow: View {
             && message.messageId > 0
             && !message.deleted
     }
+
+    /// ADR-0052 / section 3.1 — Reply is offered on any message with an id,
+    /// which is the same set React is: not a system row, landed, not a
+    /// tombstone, and only while this device can still send.
+    private var canReply: Bool { canReact }
 
     private var isOutgoing: Bool { message.direction == .outgoing }
 
@@ -1444,7 +1532,8 @@ struct MessageRow: View {
 
     /// `docs/ux/message-actions.md` §3 — the card's rows for THIS message.
     private var menuActions: [MessageMenuAction] {
-        MessageMenuAction.offered(canEditOrDelete: canEditOrDelete, hasText: canCopy)
+        MessageMenuAction.offered(
+            canReply: canReply, canEditOrDelete: canEditOrDelete, hasText: canCopy)
     }
 
     /// Make a bubble the thing the menu opens on.
@@ -1505,6 +1594,8 @@ struct MessageRow: View {
                 onMoreReactions: onMoreReactions,
                 perform: { action in
                     switch action {
+                    case .reply:
+                        onReply()
                     case .copy:
                         // Decided here because this is what knows which text the
                         // person can see.
@@ -1537,6 +1628,14 @@ struct MessageRow: View {
                         .font(.body.italic())
                         .opacity(0.7)
                 } else {
+                    // ADR-0052 / section 3.1 — the quote block above the text,
+                    // drawn from the snapshot the envelope carried and never
+                    // from the quoted message itself.
+                    if let reply = message.reply {
+                        ReplyQuoteBlock(reply: reply, outgoing: isOutgoing) {
+                            onQuoteTap(reply.target)
+                        }
+                    }
                     if !message.text.isEmpty {
                         // No `.textSelection(.enabled)`. It installs UIKit's own
                         // long press for a selection loupe over the same pixels

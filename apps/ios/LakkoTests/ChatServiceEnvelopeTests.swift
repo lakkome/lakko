@@ -85,7 +85,7 @@ final class ChatServiceEnvelopeTests: XCTestCase {
     /// The user-visible text an event would put on the timeline, or `nil` for
     /// an event that renders none.
     private func timelineText(_ event: IncomingChatEvent) -> String? {
-        if case .application(_, let text, _, _, _) = event { return text }
+        if case .application(_, let text, _, _, _, _) = event { return text }
         return nil
     }
 
@@ -196,7 +196,7 @@ final class ChatServiceEnvelopeTests: XCTestCase {
     func testARealChatMessageIsStillAChatEvent() throws {
         let event = classify(try chatEnvelope("hello"))
 
-        guard case .application(_, let text, _, _, _) = event else {
+        guard case .application(_, let text, _, _, _, _) = event else {
             return XCTFail("expected .application, got \(event)")
         }
         XCTAssertEqual(text, "hello")

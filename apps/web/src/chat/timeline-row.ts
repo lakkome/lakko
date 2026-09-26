@@ -9,7 +9,7 @@
  * can share it without importing the route.
  */
 import type { MemberIdentity } from "./author-identity";
-import type { AttachmentRefBytes } from "./attachments";
+import type { AttachmentRefBytes, ReplyRef } from "./attachments";
 import type { IncomingChatEvent } from "./client";
 
 /** A timeline entry — verified incoming events PLUS optimistic
@@ -52,6 +52,9 @@ export type TimelineRow =
        *  ours included, can be reassigned to a member added later.
        *  `undefined` (unresolvable) fails the gate closed. */
       authorKey?: MemberIdentity | undefined;
+      /** ADR-0052 — the reply this row was sent as, so the sender's own bubble
+       *  draws the quote it sent and Retry re-sends the same reference. */
+      reply?: ReplyRef;
     };
 
 /** Read the author IDENTITY a displayed row should be gated on:

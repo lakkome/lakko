@@ -46,7 +46,7 @@ class MediaSendQueueTest {
                 progress(0.5f)
                 ref(meta)
             },
-            publish = { published += it },
+            publish = { ref, _ -> published += ref },
         )
         val id = queue.newTempId()
         queue.enqueue(
@@ -77,7 +77,7 @@ class MediaSendQueueTest {
                 uploads += 1
                 ref(meta)
             },
-            publish = {
+            publish = { _, _ ->
                 publishAttempts += 1
                 if (publishAttempts == 1) throw IllegalStateException("DS unreachable")
             },
@@ -113,7 +113,7 @@ class MediaSendQueueTest {
                 gate.await()
                 ref(meta)
             },
-            publish = { published += it },
+            publish = { ref, _ -> published += ref },
         )
         val id = queue.newTempId()
         queue.enqueue(
@@ -147,7 +147,7 @@ class MediaSendQueueTest {
                 names += name
                 ref(meta)
             },
-            publish = {},
+            publish = { _, _ -> },
         )
         val id = queue.newTempId()
         queue.enqueue(
@@ -175,7 +175,7 @@ class MediaSendQueueTest {
             scope = this,
             uploadThumb = { thumb() },
             uploadMain = { _, _, _, _, _ -> throw IllegalStateException("storage down") },
-            publish = {},
+            publish = { _, _ -> },
         )
         val id = queue.newTempId()
         queue.enqueue(

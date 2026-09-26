@@ -78,6 +78,7 @@ class MessageActionMenuTest {
     private val reacted = mutableListOf<String>()
     private var edits = 0
     private var deletes = 0
+    private var replies = 0
     private var pickerOpens = 0
 
     @Before
@@ -126,6 +127,18 @@ class MessageActionMenuTest {
         // reached — the one thing that is allowed to lead somewhere.
         compose.onNodeWithContentDescription(MORE_REACTIONS_LABEL).performClick()
         assertEquals(1, pickerOpens)
+    }
+
+    // ----- 3.1 Reply is offered on any message with an id ------------------
+    @Test
+    fun replyIsOfferedOnSomeoneElsesMessageAndFiresOnce() {
+        compose.setContent { BubbleUnderTest(incoming("Hello there")) }
+        openMenu()
+        // ADR-0052 / §3.1: Reply on any message with an id, own or not; it is
+        // the first row of the card (§2: the action that produces a new
+        // message comes first).
+        compose.onNodeWithText("Reply").performClick()
+        assertEquals(1, replies)
     }
 
     // ----- 2. the card is sized by its own content -------------------------
@@ -335,6 +348,7 @@ class MessageActionMenuTest {
                         onDelete = { deletes += 1 },
                         onReact = { reacted += it },
                         onRetrySend = {},
+                        onReply = { replies += 1 },
                     )
                 }
             }

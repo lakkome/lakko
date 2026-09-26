@@ -60,16 +60,15 @@
  * pointer events, so a press in the gap between the two surfaces reaches the
  * backdrop and closes the menu like any other press outside it.
  *
- * Order within the action card is section 2's: the ones that only read (Copy),
- * then the ones that change this message (Edit), then the destructive one,
- * separated and in the platform's destructive colour. Section 2's first band -
- * the actions that produce a NEW message, Reply and Forward - is empty because
- * neither is built; both need an envelope field (`message-actions.md` section
- * 6), and when they land they go ABOVE Copy rather than beside Edit. The
- * separation of the destructive row is its own element rather than a border hung
- * off `.danger`, because "separated" and "red" are two of the spec's
- * requirements and a selector that conflates them breaks both at once when a
- * second destructive action lands.
+ * Order within the action card is section 2's: the actions that produce a NEW
+ * message first (Reply - ADR-0052 decision 1; Forward is not built), then the
+ * ones that only read (Copy), then the ones that change this message (Edit),
+ * then the destructive one, separated and in the platform's destructive
+ * colour. Reply is offered on any message with an id, which is every message
+ * this menu opens on. The separation of the destructive row is its own element
+ * rather than a border hung off `.danger`, because "separated" and "red" are
+ * two of the spec's requirements and a selector that conflates them breaks
+ * both at once when a second destructive action lands.
  *
  * A full-screen backdrop sits under it. It is what closes the menu on an
  * outside press, and it is also what stops a touch long-press's trailing
@@ -127,6 +126,8 @@ export interface MessageMenuProps {
   copyText: string | null;
   onReact: (emoji: string) => void;
   onMoreReactions: () => void;
+  /** ADR-0052 — arm the composer's reply strip for this message. */
+  onReply: () => void;
   onCopy: (text: string) => void;
   onEdit: () => void;
   onDelete: () => void;
@@ -274,16 +275,19 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
             <Icon name="plus" size={16} />
           </button>
         </div>
-        {/* The second surface. Rendered only when it has a row to hold: on
-            somebody else's media message with no text there is nothing here,
-            and an empty bordered card under the reactions would read as a
-            menu that failed to load. */}
-        <Show when={copyable() !== null || props.canEditDelete}>
-          <div
-            ref={card}
-            class="lk-msg-menu-surface lk-msg-menu-card lk-msg-menu-items"
-            style={offset((l) => l.card)}
-          >
+        {/* The second surface. It always has at least the Reply row now
+            (section 2's first band), so it is always rendered; the `Show`s
+            inside still keep Copy off a message with no text and Edit /
+            Delete off somebody else's message. */}
+        <div
+          ref={card}
+          class="lk-msg-menu-surface lk-msg-menu-card lk-msg-menu-items"
+          style={offset((l) => l.card)}
+        >
+            <button type="button" role="menuitem" onClick={() => run(() => props.onReply())}>
+              <Icon name="reply" size={16} />
+              <span>Reply</span>
+            </button>
             <Show when={copyable()}>
               {(text) => (
                 <button
@@ -313,8 +317,7 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
                 </button>
               </div>
             </Show>
-          </div>
-        </Show>
+        </div>
       </div>
     </Portal>
   );

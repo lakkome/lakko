@@ -341,11 +341,28 @@ public data class PersistedMessage(
      * migration, the same encrypted per-account envelope.
      */
     val call: PersistedCall? = null,
+    /**
+     * ADR-0052 — the reply reference and quote this row carries, when it is a
+     * reply. Nullable with a default: a row written before replies existed
+     * reads back as an ordinary message, and the store already decodes with
+     * `ignoreUnknownKeys`. The quote is stored as it was received, because a
+     * quote is a snapshot the envelope carried, not something re-read from the
+     * target on relaunch.
+     */
+    val reply: PersistedReply? = null,
 ) {
     /** Explicit companion so the conversion helpers below can
      *  attach as `PersistedMessage.Companion.from(msg)`. */
     public companion object
 }
+
+/** ADR-0052 — a stored [ReplyRef]. */
+@Serializable
+public data class PersistedReply(
+    val target: Long,
+    val author: String? = null,
+    val excerpt: String? = null,
+)
 
 /**
  * `docs/ux/calls.md` section 6 — a finished call as the transcript stores it.
@@ -470,6 +487,14 @@ public fun PersistedMessage.Companion.from(msg: ChatMessage): PersistedMessage =
                 durationSecs = it.durationSecs,
             )
         },
+        // ADR-0052 — the quote is content the replier wrote into this row, so
+        // it goes the way the text goes: kept while the row stands, dropped
+        // with the words when the row is deleted.
+        reply = if (msg.deleted) {
+            null
+        } else {
+            msg.reply?.let { PersistedReply(target = it.target, author = it.author, excerpt = it.excerpt) }
+        },
     )
 
 /** Inverse — reconstruct a runtime [ChatMessage] from the JSON
@@ -503,6 +528,7 @@ public fun PersistedMessage.toChatMessage(): ChatMessage? {
         // survives and renders as the plain system pill its stored text already
         // is, rather than being dropped or guessed at.
         call = call?.toTranscriptEntry(),
+        reply = reply?.let { ReplyRef(target = it.target, author = it.author, excerpt = it.excerpt) },
     )
 }
 

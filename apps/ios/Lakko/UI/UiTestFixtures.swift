@@ -203,7 +203,7 @@ private struct VoiceBubbleFixture: View {
         // or the played-marker set of a real install behind it.
         let defaults = UserDefaults(suiteName: "me.lakko.uitest.fixture") ?? .standard
         let controller = ChatMediaController(
-            port: .init(sendAttachment: { _ in }, sessionToken: { nil }),
+            port: .init(sendAttachment: { _, _ in }, sessionToken: { nil }),
             prefs: MediaPrefs(defaults: defaults)
         )
         let ref = AttachmentRef(
@@ -285,7 +285,7 @@ private struct MicrophoneSilenceFixture: View {
     init() {
         let defaults = UserDefaults(suiteName: "me.lakko.uitest.fixture") ?? .standard
         let controller = ChatMediaController(
-            port: .init(sendAttachment: { _ in }, sessionToken: { nil }),
+            port: .init(sendAttachment: { _, _ in }, sessionToken: { nil }),
             prefs: MediaPrefs(defaults: defaults)
         )
         // A voice take, a finger still down. No effect is performed, so no

@@ -321,7 +321,7 @@ final class RecordingMachineTests: XCTestCase {
     private static func controller() -> ChatMediaController {
         let suite = UserDefaults(suiteName: "lakko.tests.recording.\(UUID().uuidString)")
         return ChatMediaController(
-            port: ChatMediaController.Port(sendAttachment: { _ in }, sessionToken: { nil }),
+            port: ChatMediaController.Port(sendAttachment: { _, _ in }, sessionToken: { nil }),
             prefs: MediaPrefs(defaults: suite ?? .standard)
         )
     }

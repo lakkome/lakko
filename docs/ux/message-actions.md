@@ -85,6 +85,52 @@ row of things.
 and because building either of those without it means building their
 one-message form twice.
 
+### 3.1 Reply: the strip and the quote
+
+Reply is the first of the new-message actions to be built (ADR-0052 decision 1);
+this is the flow the three clients implement.
+
+**Choosing Reply** puts a strip above the composer and focuses the composer.
+The strip is one line: a vertical rule in the accent colour, the quoted
+author's name, then the excerpt, and a close control at the trailing end. The
+name is whatever the timeline already calls that person (contact name, profile
+name, the fingerprint fallback, "You" for an own message). The excerpt is the
+message's text, trimmed to one line; a message with no text shows the kind of
+its first attachment instead ("Voice message", "Video message", "Photo",
+"Video", "GIF", "File"). The strip is what the recipient will see, and it is
+taken now: both strings are snapshotted when Reply is chosen and sent as they
+were, so a later edit or deletion of the original changes nothing.
+
+**One thing at a time.** Replying and editing are exclusive: choosing Reply
+while an edit is open ends the edit (the draft is discarded, as Cancel would),
+and choosing Edit while a reply is armed drops the reply. Choosing Reply on
+another message replaces the strip. The close control, Escape on web, and a
+sent message all clear it. Recording a voice message with a reply armed sends
+the take as the reply; the strip clears the same way. Switching conversation
+clears the strip; a reply is not a draft that follows the person.
+
+**The quote in the bubble.** A reply renders a quote block above its own text,
+inside the bubble: the same rule, the name on the first line, the excerpt on the
+second, both single-line and truncated, in the bubble's own colours. Own and
+incoming replies both show it. The block is the snapshot the envelope carries
+and never re-reads the original, so it is drawn exactly the same when the
+original is edited, deleted, or not on this device at all. A reply that arrives
+with no snapshot at all (only the target id) draws the block with the name line
+empty and the excerpt "Message".
+
+**Tap to jump.** Tapping or clicking the quote block scrolls the timeline to
+the quoted message, which is highlighted briefly (about a second and a half,
+the surface tint used for the pressed state) and then returns to normal. The
+target is found by its message id in the timeline this device holds; when it is
+not there (older than what is loaded, or never received here), the tap does
+nothing and nothing is said - a quote is not a promise that the original
+exists. The block is a button for accessibility purposes on every platform,
+named "Reply to <name>".
+
+**Reply to a reply.** The strip and the block quote the message that was chosen,
+one level deep: its own text, never the text it quoted. Nothing about the chain
+is carried or shown.
+
 ## 4. Pin: the person pinning chooses who it is pinned for
 
 A pin is offered as a choice between **pin for me** and **pin for everyone**,

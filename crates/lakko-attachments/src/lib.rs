@@ -70,6 +70,18 @@
 //!   ([`inline_media_type`]), never by `kind`. `kind: voice` with
 //!   `mime: text/html` is a file.
 //! - [`WIRE_VERSION`] stays 1.
+//!
+//! # Reply (ADR-0052)
+//!
+//! `reply_to` / `reply_author` / `reply_excerpt` are v1.x additions in the
+//! same shape as the media metadata: optional, `#[serde(default)]`, dropped
+//! individually when out of bounds, `WIRE_VERSION` still 1. A reply is NOT
+//! one of the mutually exclusive operations (`edit_of` / `delete_of` /
+//! `react_to`): it is an ordinary message that also points at one, so it
+//! rides beside `text` and `attachments` and is surfaced on the `Chat`
+//! classification only. The quote is a snapshot of the target's OWN text,
+//! taken when the reply was composed - one level deep by construction, since
+//! there is one excerpt field and the composer never reads a target's quote.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -113,6 +125,19 @@ pub const WIRE_VERSION: u8 = 1;
 /// sequences run ~25-30 bytes) while bounding the attacker-touchable
 /// parser — anything longer degrades to a plain chat message.
 pub const MAX_EMOJI_BYTES: usize = 64;
+
+/// ADR-0052 — the longest quoted author name a reply may carry, in bytes.
+/// The profile display-name rule already caps a name at 255 bytes
+/// (`lakko-contacts::profile`), so a snapshot of one needs no more; a
+/// longer value is dropped ALONE on parse and truncated on compose.
+pub const MAX_REPLY_AUTHOR_BYTES: usize = 255;
+
+/// ADR-0052 — the longest excerpt of the quoted message a reply may carry,
+/// in bytes. An excerpt, not the message: a few lines is what a quote block
+/// shows, and without a bound a reply is a way to make an arbitrarily large
+/// message out of somebody else's. Over it, the excerpt is dropped ALONE on
+/// parse and truncated on a character boundary on compose.
+pub const MAX_REPLY_EXCERPT_BYTES: usize = 512;
 
 /// ADR-0047 — the wire value of [`AttachmentRef::kind`] for a voice
 /// message.
@@ -919,6 +944,45 @@ pub struct Envelope {
     /// this value. Monotone per sender.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_up_to: Option<i64>,
+    /// ADR-0052 — if set, this message REPLIES to the message whose DS
+    /// `messageId` equals this value. Unlike the op fields above it is
+    /// exclusive with nothing: a reply is an ordinary message that also
+    /// points somewhere, so it rides beside `text` and `attachments` and is
+    /// surfaced only on the [`MessageBody::Chat`] classification. Putting it
+    /// in the op set would make replying and writing text exclusive.
+    ///
+    /// Decoded through the same `lenient` path as the media metadata, so a
+    /// peer that sends the wrong JSON type here loses this field ALONE. On
+    /// the strict path a `"reply_to":"abc"` would fail the whole envelope and
+    /// drop it into the bare-UTF-8 fallback, which renders raw JSON as the
+    /// message - the failure ADR-0047's lenient shape exists to prevent.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient"
+    )]
+    pub reply_to: Option<i64>,
+    /// ADR-0052 — the quoted author's display name, a SNAPSHOT taken when
+    /// the reply was composed: a courtesy label the replier wrote, never a
+    /// verified identity, and unchanged by a later rename. Dropped alone if
+    /// empty or over [`MAX_REPLY_AUTHOR_BYTES`].
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient"
+    )]
+    pub reply_author: Option<String>,
+    /// ADR-0052 — a bounded excerpt of the quoted message's OWN text, one
+    /// level deep by construction. Unchanged if the original is later edited
+    /// or deleted: the maintainer's rule is that a quote does not depend on
+    /// the message it quotes. Dropped alone if empty or over
+    /// [`MAX_REPLY_EXCERPT_BYTES`].
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient"
+    )]
+    pub reply_excerpt: Option<String>,
 }
 
 impl Envelope {
@@ -937,8 +1001,74 @@ impl Envelope {
             emoji: None,
             typing: None,
             read_up_to: None,
+            reply_to: None,
+            reply_author: None,
+            reply_excerpt: None,
         }
     }
+
+    /// The reply this envelope carries, with each snapshot string dropped
+    /// alone when it is empty or over its bound. `None` when `reply_to` is
+    /// absent - a stray author or excerpt with nothing to point at is noise.
+    #[must_use]
+    fn reply(&self) -> Option<Reply> {
+        let target = self.reply_to?;
+        Some(Reply {
+            target,
+            author: bounded_snapshot(self.reply_author.as_deref(), MAX_REPLY_AUTHOR_BYTES),
+            excerpt: bounded_snapshot(self.reply_excerpt.as_deref(), MAX_REPLY_EXCERPT_BYTES),
+        })
+    }
+}
+
+/// A snapshot string as the parser keeps it: present only if non-empty and
+/// within `max` bytes. Not truncated here - a peer that sent an over-long
+/// value did not follow the composer's rule, and guessing where it meant to
+/// stop is a decision the receiver should not make.
+fn bounded_snapshot(value: Option<&str>, max: usize) -> Option<String> {
+    let v = value?;
+    if v.is_empty() || v.len() > max {
+        return None;
+    }
+    Some(v.to_string())
+}
+
+/// The longest prefix of `value` (trimmed) that ends on a character boundary
+/// and fits in `max` bytes; `None` when nothing is left. The COMPOSER's side
+/// of the bound: a reply to a long message must still be possible, so the
+/// excerpt is cut rather than refused.
+fn truncated_snapshot(value: Option<&str>, max: usize) -> Option<String> {
+    let v = value?.trim();
+    if v.is_empty() {
+        return None;
+    }
+    if v.len() <= max {
+        return Some(v.to_string());
+    }
+    let mut end = max;
+    while end > 0 && !v.is_char_boundary(end) {
+        end -= 1;
+    }
+    let cut = v[..end].trim_end();
+    if cut.is_empty() {
+        None
+    } else {
+        Some(cut.to_string())
+    }
+}
+
+/// ADR-0052 — what a reply carries about the message it quotes. `target` is
+/// the DS `messageId`; `author` and `excerpt` are snapshots the replier wrote
+/// (see [`Envelope::reply_author`] / [`Envelope::reply_excerpt`]), either of
+/// which may be absent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reply {
+    /// DS `messageId` of the quoted message.
+    pub target: i64,
+    /// The quoted author's display name at compose time, if carried.
+    pub author: Option<String>,
+    /// An excerpt of the quoted message's own text at compose time, if carried.
+    pub excerpt: Option<String>,
 }
 
 /// The receiver-side classification of a decoded [`Envelope`]
@@ -952,6 +1082,10 @@ pub enum MessageBody {
         text: String,
         /// Attachment references.
         attachments: Vec<AttachmentRef>,
+        /// ADR-0052 — the message this one replies to, if any. On the
+        /// `Chat` classification only: an op that also carried reply fields
+        /// is that op, and the reply is ignored.
+        reply: Option<Reply>,
     },
     /// Replace the target message's body with `text`.
     Edit {
@@ -994,6 +1128,9 @@ impl Envelope {
     /// the same posture the rest of the parser takes).
     #[must_use]
     fn into_body(self) -> MessageBody {
+        // Read before `text` / `attachments` are moved out below; the reply is
+        // exclusive with nothing and is simply carried on the Chat exits.
+        let reply = self.reply();
         let op_count = u8::from(self.edit_of.is_some())
             + u8::from(self.delete_of.is_some())
             + u8::from(self.react_to.is_some())
@@ -1025,12 +1162,14 @@ impl Envelope {
                 return MessageBody::Chat {
                     text: self.text,
                     attachments: self.attachments,
+                    reply,
                 };
             }
         }
         MessageBody::Chat {
             text: self.text,
             attachments: self.attachments,
+            reply,
         }
     }
 }
@@ -1064,6 +1203,37 @@ pub fn compose(text: &str, attachments: Vec<AttachmentRef>) -> Result<Vec<u8>, A
         ..Envelope::base()
     };
     serde_json::to_vec(&envelope).map_err(|e| AttachmentError::WireFormat(format!("compose: {e}")))
+}
+
+/// Encode a REPLY (ADR-0052): an ordinary `(text, attachments)` message that
+/// also points at `reply.target`, carrying the quoted author's name and an
+/// excerpt of the quoted message's OWN text as snapshots. Both snapshots are
+/// trimmed and truncated on a character boundary to their bounds rather than
+/// refused - a reply to a long message must still be possible - and an empty
+/// one is simply not carried. The caller passes the target's text, never its
+/// quote: that is what keeps a quote one level deep.
+///
+/// # Errors
+///
+/// [`AttachmentError::WireFormat`] if serialisation fails.
+pub fn compose_reply(
+    text: &str,
+    attachments: Vec<AttachmentRef>,
+    reply: &Reply,
+) -> Result<Vec<u8>, AttachmentError> {
+    let envelope = Envelope {
+        text: text.to_string(),
+        attachments: attachments
+            .into_iter()
+            .map(AttachmentRef::sanitized)
+            .collect(),
+        reply_to: Some(reply.target),
+        reply_author: truncated_snapshot(reply.author.as_deref(), MAX_REPLY_AUTHOR_BYTES),
+        reply_excerpt: truncated_snapshot(reply.excerpt.as_deref(), MAX_REPLY_EXCERPT_BYTES),
+        ..Envelope::base()
+    };
+    serde_json::to_vec(&envelope)
+        .map_err(|e| AttachmentError::WireFormat(format!("compose_reply: {e}")))
 }
 
 /// Encode an EDIT of the message whose DS `messageId` is `target`,
@@ -1204,10 +1374,12 @@ pub fn parse_body(bytes: &[u8]) -> MessageBody {
         Ok(env) => MessageBody::Chat {
             text: format!("[unsupported v{} message]", env.v),
             attachments: Vec::new(),
+            reply: None,
         },
         Err(_) => MessageBody::Chat {
             text: String::from_utf8_lossy(bytes).into_owned(),
             attachments: Vec::new(),
+            reply: None,
         },
     }
 }
@@ -1247,9 +1419,41 @@ pub enum AttachmentError {
 #[doc(hidden)]
 pub mod fuzz_api {
     use super::{
-        compose, parse, parse_body, AttachmentRef, MediaKind, MessageBody, MAX_MEDIA_DIMENSION,
-        MAX_THUMB_BYTES, MAX_VIDEO_NOTE_DURATION_MS, MAX_VOICE_DURATION_MS, MAX_WAVEFORM_BYTES,
+        compose, compose_reply, parse, parse_body, AttachmentRef, MediaKind, MessageBody,
+        MAX_MEDIA_DIMENSION, MAX_REPLY_AUTHOR_BYTES, MAX_REPLY_EXCERPT_BYTES, MAX_THUMB_BYTES,
+        MAX_VIDEO_NOTE_DURATION_MS, MAX_VOICE_DURATION_MS, MAX_WAVEFORM_BYTES,
     };
+
+    /// ADR-0052 property oracle over attacker-controlled bytes.
+    ///
+    /// Any reply that survives [`parse_body`] carries snapshots that are
+    /// non-empty and within their bounds, and the bound is idempotent:
+    /// re-composing the parsed chat as a reply and parsing again yields the
+    /// same reply. An envelope that is not a reply, or not a chat, passes
+    /// trivially - the oracle is about what the parser lets through.
+    #[must_use]
+    pub fn reply_within_bounds(bytes: &[u8]) -> bool {
+        let MessageBody::Chat {
+            text,
+            attachments,
+            reply: Some(reply),
+        } = parse_body(bytes)
+        else {
+            return true;
+        };
+        let ok = |v: &Option<String>, max: usize| {
+            v.as_ref().map_or(true, |s| !s.is_empty() && s.len() <= max)
+        };
+        if !ok(&reply.author, MAX_REPLY_AUTHOR_BYTES)
+            || !ok(&reply.excerpt, MAX_REPLY_EXCERPT_BYTES)
+        {
+            return false;
+        }
+        let Ok(recomposed) = compose_reply(&text, attachments, &reply) else {
+            return false;
+        };
+        matches!(parse_body(&recomposed), MessageBody::Chat { reply: Some(again), .. } if again == reply)
+    }
 
     /// ADR-0047 property oracle over attacker-controlled bytes.
     ///
@@ -1331,7 +1535,9 @@ pub mod fuzz_api {
         // path all sit on this surface. Touch every variant's fields
         // so the fuzzer explores them.
         match parse_body(bytes) {
-            MessageBody::Chat { text, attachments } => {
+            MessageBody::Chat {
+                text, attachments, ..
+            } => {
                 let _ = (text.len(), attachments.len());
             },
             MessageBody::Edit { target, text } => {
@@ -1470,8 +1676,10 @@ mod tests {
 
     #[test]
     fn parse_tolerates_unknown_fields() {
-        // Forward-compat for v1.x additions like `reply_to`.
-        let json = br#"{"v":1,"text":"hi","attachments":[],"reply_to":"abc"}"#;
+        // The example used to be `reply_to`, until ADR-0052 made that a real
+        // field; the property is about names the parser does NOT know.
+        // Forward-compat for v1.x additions like `not_yet_a_field`.
+        let json = br#"{"v":1,"text":"hi","attachments":[],"not_yet_a_field":"abc"}"#;
         let (text, refs) = parse(json);
         assert_eq!(text, "hi");
         assert!(refs.is_empty());
@@ -1517,6 +1725,7 @@ mod tests {
             MessageBody::Chat {
                 text: "hello".to_string(),
                 attachments: Vec::new(),
+                reply: None,
             }
         );
     }
@@ -1883,7 +2092,7 @@ mod tests {
                 _ => unreachable!(),
             }
             assert!(
-                matches!(parse_body(&bytes), MessageBody::Chat { ref text, ref attachments }
+                matches!(parse_body(&bytes), MessageBody::Chat { ref text, ref attachments, .. }
                     if text == "caption" && attachments.len() == 1),
                 "parse_body fell back on {field}={value}"
             );
@@ -2127,5 +2336,194 @@ mod tests {
                 "{raw:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod reply_tests {
+    use super::{
+        compose, compose_reply, parse_body, MessageBody, Reply, MAX_REPLY_AUTHOR_BYTES,
+        MAX_REPLY_EXCERPT_BYTES,
+    };
+
+    fn reply() -> Reply {
+        Reply {
+            target: 41,
+            author: Some("Anna".to_string()),
+            excerpt: Some("see you at nine".to_string()),
+        }
+    }
+
+    #[test]
+    fn a_reply_round_trips_as_a_chat_that_also_points_somewhere() {
+        let bytes = compose_reply("yes, nine works", Vec::new(), &reply()).unwrap();
+        match parse_body(&bytes) {
+            MessageBody::Chat {
+                text,
+                reply: Some(r),
+                ..
+            } => {
+                assert_eq!(text, "yes, nine works");
+                assert_eq!(r, reply());
+            },
+            other => panic!("a reply must classify as Chat, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_reply_is_not_an_operation_and_never_makes_text_exclusive() {
+        // The whole of decision 1: text and attachments travel with the
+        // reply. Had it joined the op set, this would classify as something
+        // other than Chat and the words would have nowhere to go.
+        let bytes = compose_reply("with words", Vec::new(), &reply()).unwrap();
+        assert!(matches!(
+            parse_body(&bytes),
+            MessageBody::Chat { reply: Some(_), .. }
+        ));
+        let plain = compose("hello", Vec::new()).unwrap();
+        assert!(matches!(
+            parse_body(&plain),
+            MessageBody::Chat { reply: None, .. }
+        ));
+    }
+
+    #[test]
+    fn a_pre_reply_envelope_parses_with_no_reply() {
+        let legacy = br#"{"v":1,"text":"old client"}"#;
+        assert!(matches!(
+            parse_body(legacy),
+            MessageBody::Chat { reply: None, .. }
+        ));
+    }
+
+    #[test]
+    fn reply_to_alone_is_a_reply_with_no_snapshots() {
+        let bytes = br#"{"v":1,"text":"ok","reply_to":7}"#;
+        match parse_body(bytes) {
+            MessageBody::Chat { reply: Some(r), .. } => {
+                assert_eq!(r.target, 7);
+                assert!(r.author.is_none() && r.excerpt.is_none());
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn snapshots_without_a_target_are_noise_and_dropped() {
+        let bytes = br#"{"v":1,"text":"ok","reply_author":"Anna","reply_excerpt":"x"}"#;
+        assert!(matches!(
+            parse_body(bytes),
+            MessageBody::Chat { reply: None, .. }
+        ));
+    }
+
+    #[test]
+    fn an_over_long_excerpt_from_a_peer_is_dropped_alone_on_parse() {
+        let long = "x".repeat(MAX_REPLY_EXCERPT_BYTES + 1);
+        let json = format!(
+            r#"{{"v":1,"text":"ok","reply_to":7,"reply_author":"Anna","reply_excerpt":"{long}"}}"#
+        );
+        match parse_body(json.as_bytes()) {
+            MessageBody::Chat { reply: Some(r), .. } => {
+                assert_eq!(r.author.as_deref(), Some("Anna"));
+                assert!(
+                    r.excerpt.is_none(),
+                    "the excerpt must be dropped, not truncated, on parse"
+                );
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_over_long_author_from_a_peer_is_dropped_alone_on_parse() {
+        let long = "a".repeat(MAX_REPLY_AUTHOR_BYTES + 1);
+        let json = format!(
+            r#"{{"v":1,"text":"ok","reply_to":7,"reply_author":"{long}","reply_excerpt":"fine"}}"#
+        );
+        match parse_body(json.as_bytes()) {
+            MessageBody::Chat { reply: Some(r), .. } => {
+                assert!(r.author.is_none());
+                assert_eq!(r.excerpt.as_deref(), Some("fine"));
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_composer_truncates_on_a_character_boundary_rather_than_refusing() {
+        // Two-byte characters right past the bound: the cut must not split one.
+        let excerpt = "\u{0431}".repeat(MAX_REPLY_EXCERPT_BYTES);
+        let r = Reply {
+            target: 1,
+            author: None,
+            excerpt: Some(excerpt),
+        };
+        let bytes = compose_reply("t", Vec::new(), &r).unwrap();
+        match parse_body(&bytes) {
+            MessageBody::Chat { reply: Some(p), .. } => {
+                let e = p.excerpt.expect("excerpt kept, truncated");
+                assert!(e.len() <= MAX_REPLY_EXCERPT_BYTES);
+                assert_eq!(e.len() % 2, 0, "cut inside a two-byte character");
+                assert!(e.chars().all(|c| c == '\u{0431}'));
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_snapshots_are_not_carried() {
+        let r = Reply {
+            target: 1,
+            author: Some("   ".to_string()),
+            excerpt: Some(String::new()),
+        };
+        let bytes = compose_reply("t", Vec::new(), &r).unwrap();
+        let s = std::str::from_utf8(&bytes).unwrap();
+        assert!(
+            !s.contains("reply_author") && !s.contains("reply_excerpt"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn a_wrong_typed_reply_target_is_dropped_alone_and_the_message_survives() {
+        // What the strict path would have done instead: fail the envelope and
+        // render this JSON as the message text through the legacy fallback.
+        let bytes = br#"{"v":1,"text":"hi","reply_to":"abc","reply_excerpt":"q"}"#;
+        match parse_body(bytes) {
+            MessageBody::Chat { text, reply, .. } => {
+                assert_eq!(text, "hi");
+                assert!(
+                    reply.is_none(),
+                    "no target, so no reply - the excerpt alone is noise"
+                );
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_wrong_typed_excerpt_is_dropped_alone_and_the_reply_survives() {
+        let bytes = br#"{"v":1,"text":"hi","reply_to":7,"reply_author":"Anna","reply_excerpt":5}"#;
+        match parse_body(bytes) {
+            MessageBody::Chat { reply: Some(r), .. } => {
+                assert_eq!(r.target, 7);
+                assert_eq!(r.author.as_deref(), Some("Anna"));
+                assert!(r.excerpt.is_none());
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_op_that_also_carries_reply_fields_is_that_op() {
+        // A reply rides on Chat only. An edit that also names a reply target
+        // is an edit; the reply fields are ignored, not a reason to degrade it.
+        let bytes = br#"{"v":1,"text":"new","edit_of":3,"reply_to":7,"reply_excerpt":"q"}"#;
+        assert!(matches!(
+            parse_body(bytes),
+            MessageBody::Edit { target: 3, .. }
+        ));
     }
 }

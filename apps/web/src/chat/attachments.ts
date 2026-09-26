@@ -322,46 +322,98 @@ export async function composeEnvelope(
   // so a misbehaving caller fails before JSON serialisation.
   const builder = new wasm.EnvelopeBuilder(text);
   try {
-    for (const r of refs) {
-      const wasmRef = new wasm.AttachmentRef(
-        r.blobId,
-        r.key,
-        r.nonce,
-        r.mime,
-        BigInt(r.size),
-        r.name,
-      );
-      let wasmThumb: InstanceType<typeof wasm.ThumbRef> | null = null;
-      try {
-        // ADR-0047 — optional media metadata. Out-of-bound values are not
-        // errors here: `build` drops them exactly as every receiver would.
-        if (r.kind !== undefined) wasmRef.kind = r.kind;
-        if (r.durationMs !== undefined) wasmRef.durationMs = r.durationMs;
-        if (r.waveform !== undefined) wasmRef.waveform = r.waveform;
-        if (r.width !== undefined) wasmRef.width = r.width;
-        if (r.height !== undefined) wasmRef.height = r.height;
-        if (r.thumb !== undefined) {
-          wasmThumb = new wasm.ThumbRef(
-            r.thumb.blobId,
-            r.thumb.key,
-            r.thumb.nonce,
-            r.thumb.mime,
-            BigInt(r.thumb.size),
-            r.thumb.width,
-            r.thumb.height,
-          );
-          wasmRef.setThumb(wasmThumb);
-        }
-        builder.add(wasmRef);
-      } finally {
-        wasmThumb?.free();
-        wasmRef.free();
-      }
-    }
+    addRefsToBuilder(wasm, builder, refs);
     return builder.build();
   } catch (err) {
     builder.free();
     throw err;
+  }
+}
+
+/**
+ * ADR-0052 — the reply reference a chat envelope carries beside its text:
+ * the DS `messageId` it answers plus the snapshot of the quoted message as
+ * the replier saw it. `author` / `excerpt` are absent when the replier
+ * carried none (the bubble then draws the no-snapshot fallback,
+ * `reply-snapshot.ts`). A claim by the replier, never verified against the
+ * original.
+ */
+export interface ReplyRef {
+  readonly target: number;
+  readonly author?: string;
+  readonly excerpt?: string;
+}
+
+/**
+ * ADR-0052 — compose a **reply**: the same chat envelope as
+ * [`composeEnvelope`] (text + refs), also naming the message it answers and
+ * carrying the quoted author + excerpt snapshot. The core truncates an
+ * over-long snapshot on a character boundary and drops an empty one, so the
+ * caller passes what the UX spec says without counting bytes.
+ */
+export async function composeReplyEnvelope(
+  text: string,
+  refs: readonly AttachmentRefBytes[],
+  reply: ReplyRef,
+): Promise<Uint8Array> {
+  const wasm = await loadWasm();
+  const target = BigInt(reply.target);
+  if (refs.length === 0) {
+    return wasm.composeReplyEnvelopeText(text, target, reply.author, reply.excerpt);
+  }
+  const builder = new wasm.EnvelopeBuilder(text);
+  try {
+    addRefsToBuilder(wasm, builder, refs);
+    return builder.buildReply(target, reply.author, reply.excerpt);
+  } catch (err) {
+    builder.free();
+    throw err;
+  }
+}
+
+/** Append every ref to `builder`, ADR-0047 media metadata included. Shared by
+ *  the plain and the reply composers so the two cannot drift on what a ref
+ *  is. Each wasm handle is freed once the builder has copied it. */
+function addRefsToBuilder(
+  wasm: Awaited<ReturnType<typeof loadWasm>>,
+  builder: InstanceType<Awaited<ReturnType<typeof loadWasm>>["EnvelopeBuilder"]>,
+  refs: readonly AttachmentRefBytes[],
+): void {
+  for (const r of refs) {
+    const wasmRef = new wasm.AttachmentRef(
+      r.blobId,
+      r.key,
+      r.nonce,
+      r.mime,
+      BigInt(r.size),
+      r.name,
+    );
+    let wasmThumb: InstanceType<typeof wasm.ThumbRef> | null = null;
+    try {
+      // ADR-0047 — optional media metadata. Out-of-bound values are not
+      // errors here: `build` drops them exactly as every receiver would.
+      if (r.kind !== undefined) wasmRef.kind = r.kind;
+      if (r.durationMs !== undefined) wasmRef.durationMs = r.durationMs;
+      if (r.waveform !== undefined) wasmRef.waveform = r.waveform;
+      if (r.width !== undefined) wasmRef.width = r.width;
+      if (r.height !== undefined) wasmRef.height = r.height;
+      if (r.thumb !== undefined) {
+        wasmThumb = new wasm.ThumbRef(
+          r.thumb.blobId,
+          r.thumb.key,
+          r.thumb.nonce,
+          r.thumb.mime,
+          BigInt(r.thumb.size),
+          r.thumb.width,
+          r.thumb.height,
+        );
+        wasmRef.setThumb(wasmThumb);
+      }
+      builder.add(wasmRef);
+    } finally {
+      wasmThumb?.free();
+      wasmRef.free();
+    }
   }
 }
 
@@ -454,7 +506,15 @@ export async function parseEnvelope(
  * never carry attachments.
  */
 export type ParsedBodyResult =
-  | { kind: "chat"; text: string; attachments: AttachmentRefBytes[] }
+  | {
+      kind: "chat";
+      text: string;
+      attachments: AttachmentRefBytes[];
+      /** ADR-0052 — set when this chat message answers another. A reply is an
+       *  ordinary chat message; `target` stays the op field and is never set
+       *  here. */
+      reply?: ReplyRef;
+    }
   | { kind: "edit"; target: number; text: string }
   | { kind: "delete"; target: number }
   | { kind: "reaction"; target: number; emoji: string }
@@ -523,7 +583,21 @@ export async function parseBodyEnvelope(
         wasmRef.free();
       }
     }
-    return { kind: "chat", text: parsed.text, attachments };
+    // ADR-0052 — the reply reference, only ever present on a chat body. The
+    // author / excerpt are kept out of the object when absent so a reply with
+    // no snapshot and a plain message read the same way everywhere.
+    const replyTo = parsed.replyTo;
+    if (replyTo === undefined) {
+      return { kind: "chat", text: parsed.text, attachments };
+    }
+    const author = parsed.replyAuthor;
+    const excerpt = parsed.replyExcerpt;
+    const reply: ReplyRef = {
+      target: Number(replyTo),
+      ...(author === undefined ? {} : { author }),
+      ...(excerpt === undefined ? {} : { excerpt }),
+    };
+    return { kind: "chat", text: parsed.text, attachments, reply };
   } finally {
     parsed.free();
   }

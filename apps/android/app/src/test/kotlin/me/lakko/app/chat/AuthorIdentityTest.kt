@@ -153,6 +153,10 @@ class AuthorIdentityTest {
         target = target,
         emoji = emoji,
         isTyping = isTyping,
+        // ADR-0052 - a reply is a `CHAT` that also points somewhere; nothing here is one.
+        replyTo = null,
+        replyAuthor = null,
+        replyExcerpt = null,
     )
 
     /**

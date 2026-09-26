@@ -14,6 +14,22 @@
   surfaces, all three clients. **No `lakko-mls` change**, so security invariant
   #3 is not engaged.
 
+## Implementation status
+
+- **Decision 1 (Reply): built 2026-09-26** on the core (`lakko-attachments`
+  `reply_to` / `reply_author` / `reply_excerpt`, `MessageBody::Chat { reply }`,
+  `compose_reply`, the extended `message_body_parse` fuzz oracle), both FFI
+  surfaces and the NSE extension, and all three clients (the Reply row first in
+  the card, the composer strip, the quote block in the bubble, tap-to-jump with a
+  short highlight, persistence of the quote with the message, a voice/video take
+  or a GIF sent as the reply). Flow and copy in
+  [`docs/ux/message-actions.md`](../ux/message-actions.md) section 3.1. Gates
+  observed: `cargo test` on the four crates, web `tsc` + vitest + `vite build`,
+  iOS `xcodebuild` build + 1736 unit tests, Android `compileDebugKotlin` + 2012
+  unit tests. Seen live only in the web Playwright harness (`?case=reply`); not
+  yet walked on two devices, so `docs/PRODUCT-READINESS.md` reads "OK (code)".
+- **Decision 2 (Forward) and Decision 3 (Pin): not built.**
+
 ## Context
 
 The message action menu offers React, Edit and Delete. `client-redesign.md` had
@@ -226,6 +242,4 @@ abuse ever calls for it, which nothing does today.
 
 All three open questions are answered above: OQ1 (re-encrypt), OQ2 (who may
 unpin) and OQ3 (several pins, a bar showing one at a time). Nothing in the
-first implementation wave - Reply and Copy - depended on any of them. Nothing in the first implementation wave -
-Reply and Copy - depends on any of them, so building can start while they are
-answered.
+first implementation wave - Reply and Copy - depended on any of them.

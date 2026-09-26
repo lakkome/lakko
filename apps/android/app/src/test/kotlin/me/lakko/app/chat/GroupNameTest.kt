@@ -144,6 +144,10 @@ class GroupNameTest {
         target = null,
         emoji = null,
         isTyping = null,
+        // ADR-0052 - a reply is a `CHAT` that also points somewhere; nothing here is one.
+        replyTo = null,
+        replyAuthor = null,
+        replyExcerpt = null,
     )
 
     private val decoded = FfiGroupName(name = "Trio", updatedAtMs = 42uL)

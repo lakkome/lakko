@@ -271,7 +271,7 @@ final class ProfileRequestPolicyTests: XCTestCase {
     /// Whatever the classification, no event may carry the domain as visible
     /// text — the defect the arm exists to close.
     func testARequestNeverReachesTheTimelineAsText() {
-        if case .application(_, let text, _, _, _) = classify(composeProfileRequest()) {
+        if case .application(_, let text, _, _, _, _) = classify(composeProfileRequest()) {
             XCTFail("the request rendered as a chat bubble reading '\(text)'")
         }
         XCTAssertTrue(ChatClient.looksLikeProfileRequest(composeProfileRequest()))

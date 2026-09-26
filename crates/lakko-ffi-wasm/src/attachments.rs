@@ -547,6 +547,29 @@ impl EnvelopeBuilder {
     pub fn build(self) -> Result<Vec<u8>, JsError> {
         inner::compose(&self.text, self.refs).map_err(attachment_err)
     }
+
+    /// ADR-0052 — consume the builder + emit a reply envelope: the same
+    /// chat message, also naming the DS `messageId` it answers (`replyTo`,
+    /// a `bigint`) and carrying a snapshot of the quoted message as the
+    /// replier saw it. The snapshot is what every receiver renders - later
+    /// edits or deletion of the original never change the quote - and it
+    /// is one level deep: replying to a reply quotes that reply's own text.
+    /// Over-long snapshots are truncated on a character boundary; empty
+    /// ones are not carried.
+    #[wasm_bindgen(js_name = buildReply)]
+    pub fn build_reply(
+        self,
+        reply_to: i64,
+        reply_author: Option<String>,
+        reply_excerpt: Option<String>,
+    ) -> Result<Vec<u8>, JsError> {
+        let reply = inner::Reply {
+            target: reply_to,
+            author: reply_author,
+            excerpt: reply_excerpt,
+        };
+        inner::compose_reply(&self.text, self.refs, &reply).map_err(attachment_err)
+    }
 }
 
 /// Convenience for the no-attachment case: build a text-only
@@ -554,6 +577,23 @@ impl EnvelopeBuilder {
 #[wasm_bindgen(js_name = composeEnvelopeText)]
 pub fn compose_envelope_text(text: &str) -> Result<Vec<u8>, JsError> {
     inner::compose(text, Vec::new()).map_err(attachment_err)
+}
+
+/// ADR-0052 — the text-only reply: [`EnvelopeBuilder::build_reply`]
+/// without attachments.
+#[wasm_bindgen(js_name = composeReplyEnvelopeText)]
+pub fn compose_reply_envelope_text(
+    text: &str,
+    reply_to: i64,
+    reply_author: Option<String>,
+    reply_excerpt: Option<String>,
+) -> Result<Vec<u8>, JsError> {
+    let reply = inner::Reply {
+        target: reply_to,
+        author: reply_author,
+        excerpt: reply_excerpt,
+    };
+    inner::compose_reply(text, Vec::new(), &reply).map_err(attachment_err)
 }
 
 /// Decode an MLS Application message JSON envelope. Mirror of
@@ -589,10 +629,34 @@ pub struct ParsedBody {
     target: Option<i64>,
     emoji: Option<String>,
     is_typing: Option<bool>,
+    reply_to: Option<i64>,
+    reply_author: Option<String>,
+    reply_excerpt: Option<String>,
 }
 
 #[wasm_bindgen]
 impl ParsedBody {
+    /// ADR-0052 — the DS `messageId` this message replies to, or `undefined`
+    /// (a `bigint`, like `target`). Only ever set on `kind == "chat"`.
+    #[wasm_bindgen(getter, js_name = replyTo)]
+    pub fn reply_to(&self) -> Option<i64> {
+        self.reply_to
+    }
+
+    /// ADR-0052 — the quoted author's name as the replier wrote it: a
+    /// snapshot and a courtesy label, never a verified identity.
+    #[wasm_bindgen(getter, js_name = replyAuthor)]
+    pub fn reply_author(&self) -> Option<String> {
+        self.reply_author.clone()
+    }
+
+    /// ADR-0052 — an excerpt of the quoted message's own text, one level
+    /// deep, unchanged by later edits or deletion of the original.
+    #[wasm_bindgen(getter, js_name = replyExcerpt)]
+    pub fn reply_excerpt(&self) -> Option<String> {
+        self.reply_excerpt.clone()
+    }
+
     /// `"chat" | "edit" | "delete" | "reaction" | "typing" | "read-receipt"`.
     #[wasm_bindgen(getter)]
     pub fn kind(&self) -> String {
@@ -703,13 +767,20 @@ pub fn compose_read_receipt_envelope(up_to: i64) -> Result<Vec<u8>, JsError> {
 #[must_use]
 pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
     match inner::parse_body(bytes) {
-        inner::MessageBody::Chat { text, attachments } => ParsedBody {
+        inner::MessageBody::Chat {
+            text,
+            attachments,
+            reply,
+        } => ParsedBody {
             kind: "chat",
             text,
             attachments: refs_to_wasm(attachments),
             target: None,
             emoji: None,
             is_typing: None,
+            reply_to: reply.as_ref().map(|r| r.target),
+            reply_author: reply.as_ref().and_then(|r| r.author.clone()),
+            reply_excerpt: reply.and_then(|r| r.excerpt),
         },
         inner::MessageBody::Edit { target, text } => ParsedBody {
             kind: "edit",
@@ -718,6 +789,9 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             target: Some(target),
             emoji: None,
             is_typing: None,
+            reply_to: None,
+            reply_author: None,
+            reply_excerpt: None,
         },
         inner::MessageBody::Delete { target } => ParsedBody {
             kind: "delete",
@@ -726,6 +800,9 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             target: Some(target),
             emoji: None,
             is_typing: None,
+            reply_to: None,
+            reply_author: None,
+            reply_excerpt: None,
         },
         inner::MessageBody::Reaction { target, emoji } => ParsedBody {
             kind: "reaction",
@@ -734,6 +811,9 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             target: Some(target),
             emoji: Some(emoji),
             is_typing: None,
+            reply_to: None,
+            reply_author: None,
+            reply_excerpt: None,
         },
         inner::MessageBody::Typing { is_typing } => ParsedBody {
             kind: "typing",
@@ -742,6 +822,9 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             target: None,
             emoji: None,
             is_typing: Some(is_typing),
+            reply_to: None,
+            reply_author: None,
+            reply_excerpt: None,
         },
         inner::MessageBody::ReadReceipt { up_to } => ParsedBody {
             kind: "read-receipt",
@@ -750,6 +833,9 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             target: Some(up_to),
             emoji: None,
             is_typing: None,
+            reply_to: None,
+            reply_author: None,
+            reply_excerpt: None,
         },
     }
 }
@@ -1042,5 +1128,39 @@ mod tests {
             Some(InlineMediaType::Image)
         );
         assert_eq!(inline_media_type("image/svg+xml"), None);
+    }
+
+    #[test]
+    fn reply_round_trips_through_builder_and_text_helper() {
+        let enc = encrypt_attachment(b"voice bytes").unwrap();
+        let r = AttachmentRef::new(
+            enc.blob_id(),
+            enc.key(),
+            enc.nonce(),
+            Some("audio/mp4".to_string()),
+            11,
+            None,
+        );
+        let mut b = EnvelopeBuilder::new("sure".to_string());
+        b.add(&r).unwrap();
+        let wire = b
+            .build_reply(41, Some("Alice".to_string()), Some("lunch?".to_string()))
+            .unwrap();
+        let body = parse_body_envelope(&wire);
+        assert_eq!(body.kind(), "chat");
+        assert_eq!(body.reply_to(), Some(41));
+        assert_eq!(body.reply_author().as_deref(), Some("Alice"));
+        assert_eq!(body.reply_excerpt().as_deref(), Some("lunch?"));
+        assert_eq!(body.target(), None);
+        assert_eq!(body.attachment_count(), 1);
+
+        let wire = compose_reply_envelope_text("ok", 7, None, None).unwrap();
+        let body = parse_body_envelope(&wire);
+        assert_eq!(body.reply_to(), Some(7));
+        assert_eq!(body.reply_author(), None);
+        assert_eq!(body.reply_excerpt(), None);
+
+        let body = parse_body_envelope(&compose_envelope_text("hi").unwrap());
+        assert_eq!(body.reply_to(), None);
     }
 }

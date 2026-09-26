@@ -313,6 +313,8 @@ function host(hub: MediaHub, over: Partial<BubbleHost> = {}): BubbleHost {
     fullReactPickerId: null,
     onOpenFullReactPicker: () => {},
     onCloseFullReactPicker: () => {},
+    onReply: () => {},
+    onJumpTo: () => {},
     ...over,
   };
 }
@@ -553,6 +555,60 @@ function composerFieldCase(): JSX.Element {
   );
 }
 
+/**
+ * A plain message (id 41), then an incoming reply to it and an outgoing reply
+ * to it. The quotes are the snapshots the envelope carries, so the case needs
+ * no resolver: what is drawn is the `reply` on each row and nothing else.
+ */
+function replyCase(): JSX.Element {
+  const hub = createMediaHub({ voiceQueue: () => [] });
+  const original: TimelineRow = {
+    kind: "incoming",
+    event: {
+      kind: "application",
+      messageId: 41,
+      text: "lunch at one?",
+      plaintext: "lunch at one?",
+      attachments: [],
+      senderLeaf: 1,
+      senderKey: "peer-key",
+      createdAt: SENT_AT,
+    },
+  };
+  const incomingReply: TimelineRow = {
+    kind: "incoming",
+    event: {
+      kind: "application",
+      messageId: 42,
+      text: "one works, see you there",
+      plaintext: "one works, see you there",
+      attachments: [],
+      senderLeaf: 1,
+      senderKey: "peer-key",
+      createdAt: SENT_AT,
+      reply: { target: 41, author: "Alice", excerpt: "lunch at one?" },
+    },
+  };
+  const outgoingReply: TimelineRow = {
+    kind: "outgoing",
+    tempId: 1,
+    plaintext: "bringing the notes",
+    attachments: [],
+    ack: "sent",
+    messageId: 43,
+    createdAt: SENT_AT,
+    authorKey: "own-key",
+    reply: { target: 41, author: "Alice", excerpt: "lunch at one?" },
+  };
+  return (
+    <ol class="lk-timeline">
+      <TimelineBubble row={original} isGroup={false} startsRun={true} endsRun={true} {...host(hub)} />
+      <TimelineBubble row={incomingReply} isGroup={false} startsRun={true} endsRun={true} {...host(hub)} />
+      <TimelineBubble row={outgoingReply} isGroup={false} startsRun={true} endsRun={true} {...host(hub)} />
+    </ol>
+  );
+}
+
 // ---------------------------------------------------------------------------
 
 export const cases: Record<string, () => JSX.Element | Promise<JSX.Element>> = {
@@ -570,6 +626,9 @@ export const cases: Record<string, () => JSX.Element | Promise<JSX.Element>> = {
   "outgoing-voice-send": () => outgoingVoiceSendCase(),
   /** The composer's message field, for the five-line cap. */
   "composer-field": () => composerFieldCase(),
+  /** ADR-0052 — an incoming reply and an outgoing reply, each quoting the
+   *  plain message above them, for the quote block and the Reply row. */
+  reply: () => replyCase(),
 };
 
 declare global {

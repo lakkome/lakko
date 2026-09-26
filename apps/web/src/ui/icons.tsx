@@ -45,6 +45,8 @@ const PATHS = {
   archive: `<rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8M10 12h4"/>`,
   link: `<path d="M10 14a3.5 3.5 0 0 0 5 0l3-3a3.5 3.5 0 0 0-5-5l-1 1"/><path d="M14 10a3.5 3.5 0 0 0-5 0l-3 3a3.5 3.5 0 0 0 5 5l1-1"/>`,
   copy: `<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/>`,
+  // ADR-0052 — the Reply row of the message menu: an arrow curving back.
+  reply: `<path d="m9 7-5 5 5 5"/><path d="M4 12h9.5a6 6 0 0 1 6 6v1"/>`,
   close: `<path d="M6 6l12 12M18 6 6 18"/>`,
   incoming: `<path d="M19 5 9 15M9 8v7h7"/>`,
   outgoing: `<path d="M5 19 15 9M15 16V9H8"/>`,

@@ -19,6 +19,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -92,6 +93,7 @@ class ComposerUiTest {
     private var sendClicks = 0
     private var pickerOpens = 0
     private var attachMenuPicks = 0
+    private var cancelReplies = 0
 
     @Before
     fun setUp() {
@@ -121,7 +123,10 @@ class ComposerUiTest {
      * two tests below and an unbounded row would fit every draft on one line.
      */
     @Composable
-    private fun ComposerUnderTest(draft: String) {
+    private fun ComposerUnderTest(
+        draft: String,
+        replyStrip: me.lakko.app.chat.ReplyArmed? = null,
+    ) {
         MaterialTheme {
             Surface {
                 val c = rememberRecordController(hub) { take -> sent += take }
@@ -145,10 +150,41 @@ class ComposerUiTest {
                         onPickMedia = { attachMenuPicks += 1 },
                         onAttachClicked = { attachMenuPicks += 1 },
                         onRemoveAttachment = {},
+                        replyStrip = replyStrip,
+                        onCancelReply = { cancelReplies += 1 },
                     )
                 }
             }
         }
+    }
+
+    // ----- ADR-0052 / message-actions §3.1: the reply strip ---------------
+
+    @Test
+    fun theReplyStripShowsTheSnapshotAndItsCloseControlClearsIt() {
+        val armed = me.lakko.app.chat.ReplyArmed(
+            messageId = 7L,
+            snapshot = me.lakko.app.chat.ReplyRef(target = 7L, author = "Anna", excerpt = "the question"),
+        )
+        compose.setContent { ComposerUnderTest(draft = "", replyStrip = armed) }
+        // What the strip says is what the recipient will see: the name and
+        // the excerpt as they were snapshotted.
+        compose.onNodeWithText("Anna").assertExists()
+        compose.onNodeWithText("the question").assertExists()
+        compose.onNodeWithContentDescription(CANCEL_REPLY_LABEL).performClick()
+        assertEquals(1, cancelReplies)
+    }
+
+    @Test
+    fun aSnapshotLessReplyStripReadsMessage() {
+        val armed = me.lakko.app.chat.ReplyArmed(
+            messageId = 7L,
+            snapshot = me.lakko.app.chat.ReplyRef(target = 7L, author = null, excerpt = null),
+        )
+        compose.setContent { ComposerUnderTest(draft = "", replyStrip = armed) }
+        // The text field's placeholder is the same word, so the strip's line
+        // is the "Message" that is NOT an editable field.
+        compose.onNode(hasText("Message") and !hasSetTextAction()).assertExists()
     }
 
     private fun controller(): RecordController = requireNotNull(controller) {

@@ -410,6 +410,9 @@ public final class ChatViewModel: ObservableObject {
             } else {
                 // Left the thread — stop advertising that we're typing.
                 stopTyping()
+                // ADR-0052 — and drop an armed reply: "a reply is not a draft
+                // that follows the person" (section 3.1).
+                replyingTo = nil
                 // ADR-0045 S4b — and stop announcing that we can sweep: a sweep
                 // runs only at the tail of a poll driven by a visible screen, so
                 // a beacon from here on would be a claim this device cannot back
@@ -2225,12 +2228,17 @@ public final class ChatViewModel: ObservableObject {
         // would leave the same text in two places.
         draft = ""
         pendingAttachments = []
+        // ADR-0052 — the armed reply goes with the message and the strip
+        // clears now, for the same reason the draft does: the row in the
+        // conversation carries the quote from this moment, Retry included.
+        let reply = takeArmedReply()
         Task {
             do {
                 try await repository.sendMessage(
                     groupIdHex: groupIdHex,
                     plaintext: trimmed,
-                    attachments: stagedAttachments
+                    attachments: stagedAttachments,
+                    reply: reply
                 )
                 sending = false
                 sendError = nil
@@ -2279,10 +2287,77 @@ public final class ChatViewModel: ObservableObject {
     /// Working draft for the edit sheet.
     @Published public var editText: String = ""
 
+    // MARK: - ADR-0052 — reply
+
+    /// A reply armed in the composer (`docs/ux/message-actions.md` section
+    /// 3.1): which message, and the snapshot taken when Reply was chosen.
+    /// The snapshot is what the strip shows and what the envelope will carry,
+    /// so a later edit or deletion of the quoted message changes nothing.
+    public struct ReplyArmed: Equatable {
+        public let messageId: Int64
+        public let snapshot: ReplyRef
+    }
+
+    /// The reply currently armed, `nil` when the composer is plain.
+    @Published public private(set) var replyingTo: ReplyArmed?
+
+    /// Bumped every time the composer should take the keyboard (choosing
+    /// Reply focuses the composer). A counter rather than a flag so two
+    /// requests in a row both land; the screen observes changes to it.
+    @Published public private(set) var composerFocusRequest: Int = 0
+
+    /// Arm a reply to `message`.
+    ///
+    /// Section 3.1 — one thing at a time: an open edit ends (its draft is
+    /// discarded, as Cancel would), and Reply on another message replaces the
+    /// strip. A message without a server id has nothing to point at, so it is
+    /// refused here as it is in the menu.
+    func beginReply(_ message: ChatMessage) {
+        guard message.messageId > 0 else { return }
+        if editingMessage != nil { cancelEdit() }
+        replyingTo = ReplyArmed(
+            messageId: message.messageId,
+            snapshot: ReplySnapshot.replySnapshot(
+                for: message, authorLabel: replyAuthorLabel(for: message)))
+        composerFocusRequest += 1
+    }
+
+    /// The strip's close control.
+    func cancelReply() {
+        replyingTo = nil
+    }
+
+    /// The armed reply, taken for a send: the strip clears as the message
+    /// goes. Read by the text send and by the media send queue alike.
+    func takeArmedReply() -> ReplyRef? {
+        defer { replyingTo = nil }
+        return replyingTo?.snapshot
+    }
+
+    /// What the timeline calls the author of `message` (section 3.1): "You"
+    /// for an own message; for anyone else the resolved name, falling back
+    /// to the other person's name in a 1x1 and to the resolver's own
+    /// fallback word in a group.
+    func replyAuthorLabel(for message: ChatMessage) -> String {
+        switch message.direction {
+        case .outgoing:
+            return "You"
+        case .incoming, .system:
+            if let key = message.authorKeyB64, let name = personName(signatureKeyB64: key) {
+                return name
+            }
+            return oneToOnePeerName ?? "Member"
+        }
+    }
+
     /// Open the edit sheet for `message`, pre-filling the field
     /// with the current text. Only offered for own outgoing
     /// messages that carry a messageId.
+    ///
+    /// ADR-0052 — choosing Edit while a reply is armed drops the reply
+    /// (section 3.1, "one thing at a time").
     func beginEdit(_ message: ChatMessage) {
+        replyingTo = nil
         editingMessage = message
         editText = message.text
     }
@@ -2780,14 +2855,19 @@ public final class ChatViewModel: ObservableObject {
         let repository = repository
         let groupIdHex = groupIdHex
         return ChatMediaController.Port(
-            sendAttachment: { ref in
+            sendAttachment: { ref, reply in
                 try await repository.sendMessage(
                     groupIdHex: groupIdHex,
                     plaintext: "",
-                    attachments: [ref]
+                    attachments: [ref],
+                    reply: reply
                 )
             },
-            sessionToken: sessionTokenProvider
+            sessionToken: sessionTokenProvider,
+            // ADR-0052 — a take recorded with a reply armed is sent as the
+            // reply. Weak: the controller must hold nothing that keeps this
+            // view model alive, and a screen that is gone has no strip.
+            takeArmedReply: { [weak self] in self?.takeArmedReply() }
         )
     }
 

@@ -347,6 +347,10 @@ public struct PersistedMessage: Codable, Equatable {
     public let deleted: Bool
     /// ADR-0023 — folded reactions. Empty for older blobs.
     public let reactions: [PersistedReaction]
+    /// ADR-0052 — the reply reference and its snapshot, when this message is
+    /// a reply. Absent on an ordinary message and on a row written before the
+    /// field existed; both read back as `nil`.
+    public let reply: PersistedReply?
 
     public init(
         messageId: Int64,
@@ -357,7 +361,8 @@ public struct PersistedMessage: Codable, Equatable {
         authorKeyB64: String? = nil,
         edited: Bool = false,
         deleted: Bool = false,
-        reactions: [PersistedReaction] = []
+        reactions: [PersistedReaction] = [],
+        reply: PersistedReply? = nil
     ) {
         self.messageId = messageId
         self.direction = direction
@@ -368,6 +373,7 @@ public struct PersistedMessage: Codable, Equatable {
         self.edited = edited
         self.deleted = deleted
         self.reactions = reactions
+        self.reply = reply
     }
 
     // ADR-0023 — custom decoder so a blob written before any of these fields
@@ -375,7 +381,7 @@ public struct PersistedMessage: Codable, Equatable {
     // envelopes loadable.
     enum CodingKeys: String, CodingKey {
         case messageId, direction, text, attachments, createdAt
-        case authorKeyB64, edited, deleted, reactions
+        case authorKeyB64, edited, deleted, reactions, reply
     }
 
     public init(from decoder: Decoder) throws {
@@ -395,6 +401,22 @@ public struct PersistedMessage: Codable, Equatable {
         // dropped rather than resurrected under a stranger's name, and dropping
         // them must not cost the message, the group or the whole transcript.
         self.reactions = (try? c.decode([PersistedReaction].self, forKey: .reactions)) ?? []
+        self.reply = try c.decodeIfPresent(PersistedReply.self, forKey: .reply)
+    }
+}
+
+/// ADR-0052 — JSON projection of a ``ReplyRef``: the target's DS `messageId`
+/// and the snapshot exactly as the envelope carried it. Stored verbatim so the
+/// quote survives a relaunch drawn the same way it was drawn on arrival.
+public struct PersistedReply: Codable, Equatable {
+    public let target: Int64
+    public let author: String?
+    public let excerpt: String?
+
+    public init(target: Int64, author: String?, excerpt: String?) {
+        self.target = target
+        self.author = author
+        self.excerpt = excerpt
     }
 }
 

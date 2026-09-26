@@ -36,7 +36,7 @@ final class MessageActionMenuTests: XCTestCase {
     /// message is an action the author-only receive gate (ADR-0023) would refuse
     /// anyway, so offering it would be a control that silently does nothing.
     func testSomeoneElsesMessageOffersCopyAndNeitherEditNorDelete() {
-        let actions = MessageMenuAction.offered(canEditOrDelete: false, hasText: true)
+        let actions = MessageMenuAction.offered(canReply: false, canEditOrDelete: false, hasText: true)
 
         XCTAssertEqual(actions, [.copy])
         XCTAssertFalse(actions.contains(.delete), "Delete was offered on someone else's message")
@@ -47,8 +47,35 @@ final class MessageActionMenuTests: XCTestCase {
     /// the one that changes the message, then the destructive one last.
     func testOwnMessageOffersCopyEditAndDeleteInThatOrder() {
         XCTAssertEqual(
-            MessageMenuAction.offered(canEditOrDelete: true, hasText: true),
+            MessageMenuAction.offered(canReply: false, canEditOrDelete: true, hasText: true),
             [.copy, .edit, .delete]
+        )
+    }
+
+    /// ADR-0052 / section 2 — a new-message action comes before everything
+    /// else: Reply is the first row, on own and on other people's messages
+    /// alike, and Delete is still last.
+    func testReplyIsOfferedFirstOnAnyMessageWithAnId() {
+        XCTAssertEqual(
+            MessageMenuAction.offered(canReply: true, canEditOrDelete: true, hasText: true),
+            [.reply, .copy, .edit, .delete]
+        )
+        XCTAssertEqual(
+            MessageMenuAction.offered(canReply: true, canEditOrDelete: false, hasText: true),
+            [.reply, .copy]
+        )
+        XCTAssertEqual(
+            MessageMenuAction.offered(canReply: true, canEditOrDelete: false, hasText: false),
+            [.reply]
+        )
+    }
+
+    /// A tombstone and a row that has not landed offer no Reply (the caller
+    /// passes `canReply: false`); with nothing else the card is empty.
+    func testNoReplyMeansNoFirstRow() {
+        XCTAssertEqual(
+            MessageMenuAction.offered(canReply: false, canEditOrDelete: false, hasText: false),
+            []
         )
     }
 
@@ -56,11 +83,11 @@ final class MessageActionMenuTests: XCTestCase {
     /// a photo with no caption and a tombstone have none.
     func testCopyIsOfferedOnlyWhereThereIsText() {
         XCTAssertEqual(
-            MessageMenuAction.offered(canEditOrDelete: true, hasText: false),
+            MessageMenuAction.offered(canReply: false, canEditOrDelete: true, hasText: false),
             [.edit, .delete]
         )
         XCTAssertEqual(
-            MessageMenuAction.offered(canEditOrDelete: false, hasText: false),
+            MessageMenuAction.offered(canReply: false, canEditOrDelete: false, hasText: false),
             [],
             "a message with nothing to copy and nothing to change offered an action anyway"
         )
@@ -74,7 +101,7 @@ final class MessageActionMenuTests: XCTestCase {
     /// in the wrong place.
     func testDeleteIsTheOnlyDestructiveActionAndComesLast() {
         XCTAssertEqual(MessageMenuAction.allCases.filter(\.isDestructive), [.delete])
-        XCTAssertEqual(MessageMenuAction.offered(canEditOrDelete: true, hasText: true).last, .delete)
+        XCTAssertEqual(MessageMenuAction.offered(canReply: false, canEditOrDelete: true, hasText: true).last, .delete)
     }
 
     // MARK: - Section 2: the shape

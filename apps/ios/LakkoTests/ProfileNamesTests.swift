@@ -398,7 +398,7 @@ final class ProfileNamesTests: XCTestCase {
 
     func testAChatEnvelopeStillClassifiesAsChat() throws {
         let event = classify(try composeEnvelope(text: "lunch?", attachments: []))
-        guard case .application(_, let text, _, _, _) = event else {
+        guard case .application(_, let text, _, _, _, _) = event else {
             return XCTFail("a chat message must stay a chat message, got \(event)")
         }
         XCTAssertEqual(text, "lunch?")

@@ -60,7 +60,7 @@ final class MediaBubbleBoxTests: XCTestCase {
         let suite = "me.lakko.tests.media-bubble-box." + UUID().uuidString
         defaultsSuite = UserDefaults(suiteName: suite)
         controller = ChatMediaController(
-            port: .init(sendAttachment: { _ in }, sessionToken: { nil }),
+            port: .init(sendAttachment: { _, _ in }, sessionToken: { nil }),
             prefs: MediaPrefs(defaults: defaultsSuite)
         )
     }

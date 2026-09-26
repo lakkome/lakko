@@ -21,16 +21,26 @@ public final class ChatMediaController: ObservableObject {
     /// objects (the repository), never over the view model, so the controller
     /// holds no reference back to the screen that owns it.
     public struct Port {
-        /// Send one attachment as its own message (empty text).
-        public let sendAttachment: (AttachmentRef) async throws -> Void
+        /// Send one attachment as its own message (empty text), as a reply
+        /// when a ``ReplyRef`` is handed along (ADR-0052).
+        public let sendAttachment: (AttachmentRef, ReplyRef?) async throws -> Void
         public let sessionToken: () -> String?
+        /// `docs/ux/message-actions.md` section 3.1 — "recording a voice
+        /// message with a reply armed sends the take as the reply; the strip
+        /// clears the same way". Called once per media message at the moment
+        /// it is committed to send, so the take carries the reply that was
+        /// armed then and a later retry re-sends the same reply. `nil` when
+        /// nothing is armed.
+        public let takeArmedReply: () -> ReplyRef?
 
         public init(
-            sendAttachment: @escaping (AttachmentRef) async throws -> Void,
-            sessionToken: @escaping () -> String?
+            sendAttachment: @escaping (AttachmentRef, ReplyRef?) async throws -> Void,
+            sessionToken: @escaping () -> String?,
+            takeArmedReply: @escaping () -> ReplyRef? = { nil }
         ) {
             self.sendAttachment = sendAttachment
             self.sessionToken = sessionToken
+            self.takeArmedReply = takeArmedReply
         }
     }
 
@@ -526,6 +536,9 @@ public final class ChatMediaController: ObservableObject {
         var thumb: ThumbRef?
         var posterTried = false
         var uploaded: AttachmentRef?
+        /// ADR-0052 — the reply this media message answers, taken from the
+        /// composer when the job was committed.
+        var reply: ReplyRef?
 
         init(id: Int, localKey: String, name: String, mime: String, meta: MediaAttachmentMeta) {
             self.id = id
@@ -589,6 +602,11 @@ public final class ChatMediaController: ObservableObject {
     }
 
     private func start(_ job: SendJob) {
+        // The reply is taken HERE, when the message is committed, and not
+        // when the upload lands: the strip clears at the moment the person
+        // sent, as it does for a text message, and a retry of a failed
+        // upload keeps quoting what was quoted.
+        job.reply = port.takeArmedReply()
         jobs[job.id] = job
         pendingSends.append(PendingSend(
             id: job.id,
@@ -688,7 +706,7 @@ public final class ChatMediaController: ObservableObject {
                 )
             }
             guard let uploaded = job.uploaded else { return }
-            try await port.sendAttachment(uploaded)
+            try await port.sendAttachment(uploaded, job.reply)
             // File the local bytes under the real blob id before the pending
             // row goes, so the sent bubble plays them without a download.
             temp.alias(Self.key(for: uploaded), to: job.localKey)

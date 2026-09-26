@@ -70,6 +70,14 @@ extension PersistedMessage {
         self.reactions = msg.reactions.map {
             PersistedReaction(reactorKeyB64: $0.reactor, emoji: $0.emoji)
         }
+        // ADR-0052 — a deleted reply is stored without its quote, for the
+        // same reason as the text above: the tombstone draws no quote block,
+        // so the snapshot would be read by nothing and is somebody's words.
+        self.reply = msg.deleted
+            ? nil
+            : msg.reply.map {
+                PersistedReply(target: $0.target, author: $0.author, excerpt: $0.excerpt)
+            }
     }
 
     /// Inverse — reconstruct a runtime ``ChatMessage`` from
@@ -99,6 +107,9 @@ extension PersistedMessage {
             deleted: deleted,
             reactions: reactions.map {
                 Reaction(reactor: $0.reactorKeyB64, emoji: $0.emoji)
+            },
+            reply: reply.map {
+                ReplyRef(target: $0.target, author: $0.author, excerpt: $0.excerpt)
             }
         )
     }

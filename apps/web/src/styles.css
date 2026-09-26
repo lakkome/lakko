@@ -1589,6 +1589,60 @@ a.ghost.small.lk-wide-only {
   outline-offset: 0;
 }
 
+/* ADR-0052 / docs/ux/message-actions.md section 3.1 — the reply strip above
+   the composer: one line, a rule in the accent colour, the quoted author, the
+   excerpt, a close control at the trailing end. It sits on the composer's own
+   surface and shares its top border, so the two read as one block. The
+   theme's `light-dark()` tokens carry it through dark mode unchanged. */
+.lk-reply-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px 0;
+  border-top: 1px solid var(--surface-border);
+  background: var(--surface-elevated);
+  flex: 0 0 auto;
+  min-width: 0;
+}
+.lk-reply-strip + .lk-composer {
+  border-top: none;
+  padding-top: 8px;
+}
+.lk-reply-strip-rule {
+  flex: 0 0 3px;
+  align-self: stretch;
+  min-height: 34px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.lk-reply-strip-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  font-size: 13px;
+  line-height: 17px;
+}
+.lk-reply-strip-name {
+  color: var(--accent);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lk-reply-strip-excerpt {
+  color: var(--surface-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lk-reply-strip .lk-reply-strip-close {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  color: var(--surface-muted);
+}
+
 /* The recovery phrase as 24 numbered slots. */
 .lk-phrase-input {
   display: flex;
@@ -2986,6 +3040,79 @@ a.ghost.small:hover {
 }
 .lk-bubble-text {
   white-space: pre-wrap;
+}
+/* ADR-0052 / section 3.1 — the quote block inside a reply's bubble: the
+   same rule, the name on the first line, the excerpt on the second, both
+   single-line and truncated, in the bubble's own colours. `currentColor`
+   is what makes "the bubble's own colours" hold on both the accent bubble
+   and the sunken one without a second set of rules; only the rule and the
+   name on an incoming bubble take the accent, where it is legible. */
+.lk-reply-quote {
+  display: grid;
+  grid-template-columns: 3px minmax(0, 1fr);
+  column-gap: 8px;
+  align-items: stretch;
+  width: 100%;
+  max-width: 100%;
+  min-height: 0;
+  margin: 0 0 6px;
+  padding: 4px 8px 4px 0;
+  border: none;
+  border-radius: 6px;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  line-height: 17px;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+}
+.lk-reply-quote::before {
+  content: "";
+  grid-row: 1 / span 2;
+  border-radius: 2px;
+  background: currentColor;
+}
+.lk-reply-quote:hover:not(:disabled) {
+  background: color-mix(in srgb, currentColor 16%, transparent);
+}
+.lk-reply-quote:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 1px;
+}
+.lk-reply-quote-name,
+.lk-reply-quote-excerpt {
+  grid-column: 2;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lk-reply-quote-name {
+  font-weight: 600;
+  /* An empty name line (a reply with no snapshot) keeps its height so the
+     block reads as the same shape as every other quote. */
+  min-height: 17px;
+}
+.lk-reply-quote-excerpt {
+  opacity: 0.85;
+}
+/* The rule is drawn in `currentColor`, so one `color` covers both. */
+.lk-bubble.incoming .lk-reply-quote::before,
+.lk-bubble.incoming .lk-reply-quote-name {
+  color: var(--accent);
+}
+/* Section 3.1 "Tap to jump" — the quoted row is highlighted for about a
+   second and a half in the surface tint the pressed / selected state uses,
+   then returns to normal. */
+.lk-bubble-row {
+  border-radius: var(--radius-md);
+  transition: background-color 400ms ease-out;
+}
+.lk-bubble-row.lk-msg-highlight {
+  background-color: var(--surface-selected);
+  transition: background-color 120ms ease-in;
 }
 .lk-bubble-edited {
   font-size: 11px;

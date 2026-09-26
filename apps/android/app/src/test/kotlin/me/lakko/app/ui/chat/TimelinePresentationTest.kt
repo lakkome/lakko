@@ -245,4 +245,33 @@ class TimelinePresentationTest {
         val keys = buildTimeline(messages, now, zone, use24h = true, locale = en).map { it.key }
         assertEquals(keys.size, keys.toSet().size)
     }
+
+    // --- hidden system rows -------------------------------------------------
+
+    @Test
+    fun `a commit row is not drawn and does not break the run around it`() {
+        val messages = listOf(
+            msg(1, createdAt = "2026-09-16T10:00:00Z"),
+            msg(2, direction = Direction.System, author = null, createdAt = "2026-09-16T10:00:30Z", text = "[mls commit]"),
+            msg(3, createdAt = "2026-09-16T10:01:00Z"),
+            msg(4, direction = Direction.System, author = null, createdAt = "2026-09-16T10:01:30Z", text = "[mls external join]"),
+        )
+        val rows = buildTimeline(messages, now, zone, use24h = true, locale = en)
+            .filterIsInstance<TimelineItem.Row>()
+        assertEquals(listOf(1L, 3L), rows.map { it.message.messageId })
+        // One run of two: the hidden row between them never opened a boundary.
+        assertTrue(rows[0].firstInRun)
+        assertFalse(rows[0].lastInRun)
+        assertFalse(rows[1].firstInRun)
+        assertTrue(rows[1].lastInRun)
+    }
+
+    @Test
+    fun `a system row that is not bookkeeping is still drawn`() {
+        val custom = msg(2, direction = Direction.System, author = null, text = "Alice joined")
+        assertFalse(isHiddenSystemRow(custom))
+        assertTrue(isHiddenSystemRow(msg(3, direction = Direction.System, author = null, text = "[mls commit]")))
+        // The marker text on a non-system row is a message someone typed.
+        assertFalse(isHiddenSystemRow(msg(4, text = "[mls commit]")))
+    }
 }

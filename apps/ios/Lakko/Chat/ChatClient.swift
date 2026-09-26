@@ -639,12 +639,21 @@ public final class ChatClient {
             let parsed = AttachmentBridge.parseBodyEnvelopeBytes(data)
             switch parsed.kind {
             case .chat:
+                // ADR-0052 — a reply is a chat body that also names a target;
+                // the parser sets `replyTo` only on `.chat`, and the snapshot
+                // fields ride beside it as the replier wrote them.
                 return .application(
                     messageId: messageId,
                     text: parsed.text,
                     attachments: parsed.attachments,
                     senderKey: senderKey,
-                    createdAt: createdAt
+                    createdAt: createdAt,
+                    reply: parsed.replyTo.map {
+                        ReplyRef(
+                            target: $0,
+                            author: parsed.replyAuthor,
+                            excerpt: parsed.replyExcerpt)
+                    }
                 )
             case .edit:
                 return .op(
@@ -961,12 +970,18 @@ public enum IncomingChatEvent: Equatable {
     /// `nil` for a frame whose sender the client could not resolve (a control
     /// message, an external sender, a torn roster read) — such a message can
     /// never be a valid edit / delete target.
+    ///
+    /// ADR-0052 — `reply` is set when the envelope carried a `reply_to`: the
+    /// target id plus whatever snapshot of the quoted author and excerpt the
+    /// replier sent. Carried as data, never resolved against the timeline
+    /// here; the row draws the quote from it.
     case application(
         messageId: Int64,
         text: String,
         attachments: [AttachmentRef],
         senderKey: MemberIdentity?,
-        createdAt: String
+        createdAt: String,
+        reply: ReplyRef?
     )
     /// ADR-0023 — an edit / delete / reaction op carried in the
     /// same JSON envelope shape as a chat message. The

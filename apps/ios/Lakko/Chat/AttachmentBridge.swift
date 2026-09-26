@@ -300,6 +300,26 @@ public enum AttachmentBridge {
         parseBodyEnvelope(bytes: bytes)
     }
 
+    /// ADR-0052 decision 1 — compose a **reply**: an ordinary chat envelope
+    /// (`text` + `attachments`, exactly as ``composeEnvelopeBytes``) that also
+    /// carries the target's DS `messageId` and the snapshot of the quoted
+    /// author and excerpt taken when Reply was chosen. The core truncates an
+    /// over-long snapshot on a character boundary and drops an empty one, so
+    /// the caller passes what the spec says and nothing is pre-trimmed here.
+    public static func composeReplyBytes(
+        text: String,
+        attachments: [AttachmentRef],
+        reply: ReplyRef
+    ) throws -> Data {
+        try composeReplyEnvelope(
+            text: text,
+            attachments: attachments,
+            replyTo: reply.target,
+            replyAuthor: reply.author,
+            replyExcerpt: reply.excerpt
+        )
+    }
+
     /// ADR-0023 — compose an **edit** op envelope: rewrite the
     /// text of the message identified by the DS `target` id to
     /// `newText`. The result is a normal MLS Application message

@@ -55,15 +55,34 @@ struct ComposerTextField: View {
     @Binding var text: String
     let caret: ComposerCaret
     var disabled: Bool
+    /// The screen's focus for this field, so it can be given the keyboard
+    /// programmatically (choosing Reply focuses the composer,
+    /// `docs/ux/message-actions.md` section 3.1). `nil` leaves focus to the
+    /// platform, which is what every other caller wants.
+    var focus: FocusState<Bool>.Binding? = nil
 
     var body: some View {
         if #available(iOS 18.0, *) {
-            SelectionTrackingField(text: $text, caret: caret, disabled: disabled)
+            SelectionTrackingField(text: $text, caret: caret, disabled: disabled, focus: focus)
         } else {
             TextField("Message", text: $text, axis: .vertical)
                 .lineLimit(1...5)
                 .disabled(disabled)
                 .composerFieldChrome()
+                .composerFocus(focus)
+        }
+    }
+}
+
+extension View {
+    /// `.focused(_:)` when the screen handed a focus binding in, the view
+    /// unchanged otherwise.
+    @ViewBuilder
+    func composerFocus(_ focus: FocusState<Bool>.Binding?) -> some View {
+        if let focus {
+            self.focused(focus)
+        } else {
+            self
         }
     }
 }
@@ -101,6 +120,7 @@ private struct SelectionTrackingField: View {
     @Binding var text: String
     let caret: ComposerCaret
     var disabled: Bool
+    var focus: FocusState<Bool>.Binding?
     @State private var selection: TextSelection?
 
     var body: some View {
@@ -109,5 +129,6 @@ private struct SelectionTrackingField: View {
             .lineLimit(1...5)
             .disabled(disabled)
             .composerFieldChrome()
+            .composerFocus(focus)
     }
 }

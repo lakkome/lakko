@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
@@ -130,9 +131,11 @@ internal data class MessageActions(
     /** Section 3 — Edit and Delete on "own, not deleted". */
     val canEdit: Boolean,
     val canDelete: Boolean,
+    /** Section 3.1 (ADR-0052) — Reply is offered on any message with an id. */
+    val canReply: Boolean = false,
 ) {
     /** Whether the card has anything to draw. */
-    val any: Boolean get() = canCopy || canEdit || canDelete
+    val any: Boolean get() = canCopy || canEdit || canDelete || canReply
 }
 
 /**
@@ -151,6 +154,11 @@ internal fun messageActionsFor(
     canCopy = menuAvailable && text.isNotEmpty(),
     canEdit = menuAvailable && isOwn && !deleted,
     canDelete = menuAvailable && isOwn && !deleted,
+    // Section 3.1 — "any message with an id". `menuAvailable` already carries
+    // the id gate (a row with no DS id has nothing to point at), the deleted
+    // gate and the membership gate: a reply composes an application message,
+    // which the core refuses once membership has ended, like Send.
+    canReply = menuAvailable,
 )
 
 /**
@@ -185,6 +193,7 @@ internal fun MessageActionMenuOverlay(
     reactions: List<String>,
     onReact: (String) -> Unit,
     onOpenReactionPicker: () -> Unit,
+    onReply: () -> Unit,
     onCopy: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
@@ -262,6 +271,7 @@ internal fun MessageActionMenuOverlay(
                     if (actions.any) {
                         MessageActionCard(
                             actions = actions,
+                            onReply = onReply,
                             onCopy = onCopy,
                             onEdit = onEdit,
                             onDelete = onDelete,
@@ -338,11 +348,11 @@ private val REACTION_TAP_SIZE: Dp = 40.dp
 /**
  * Section 2 — the action card, sized by its own content and nothing else.
  *
- * Section 2's order, of what exists today: the reading action first (Copy),
- * then the one that changes this message (Edit), then the destructive one,
- * separated and in the platform's destructive colour. Reply, Forward, Pin,
- * Select and Read by are section 3 rows that nothing has built yet; they slot
- * into that order when they land.
+ * Section 2's order, of what exists today: the action that produces a new
+ * message first (Reply), then the reading action (Copy), then the one that
+ * changes this message (Edit), then the destructive one, separated and in the
+ * platform's destructive colour. Forward, Pin, Select and Read by are section
+ * 3 rows that nothing has built yet; they slot into that order when they land.
  *
  * The look is section 2's shared card, whose reference is web's
  * `.lk-msg-menu-card` / `.lk-msg-menu-items` (`apps/web/src/styles.css`), not
@@ -353,6 +363,7 @@ private val REACTION_TAP_SIZE: Dp = 40.dp
 @Composable
 internal fun MessageActionCard(
     actions: MessageActions,
+    onReply: () -> Unit,
     onCopy: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
@@ -383,6 +394,13 @@ internal fun MessageActionCard(
             // Web's `gap: 2px` between rows.
             verticalArrangement = Arrangement.spacedBy(ROW_GAP),
         ) {
+            if (actions.canReply) {
+                ActionRow(
+                    label = "Reply",
+                    icon = Icons.AutoMirrored.Filled.Reply,
+                    onClick = onReply,
+                )
+            }
             if (actions.canCopy) {
                 ActionRow(
                     label = "Copy",
@@ -409,7 +427,7 @@ internal fun MessageActionCard(
                         // row gap above it.
                         .padding(top = DESTRUCTIVE_GAP),
                 ) {
-                    if (actions.canCopy || actions.canEdit) {
+                    if (actions.canReply || actions.canCopy || actions.canEdit) {
                         HorizontalDivider(
                             thickness = CARD_BORDER_WIDTH,
                             color = MaterialTheme.colorScheme.outlineVariant,

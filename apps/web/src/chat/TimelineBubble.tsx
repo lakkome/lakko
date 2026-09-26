@@ -24,7 +24,7 @@
 import { createSignal, For, Index, onCleanup, Show, type JSX } from "solid-js";
 
 import type { MemberIdentity } from "./author-identity";
-import { formatAttachmentSize, type AttachmentRefBytes } from "./attachments";
+import { formatAttachmentSize, type AttachmentRefBytes, type ReplyRef } from "./attachments";
 import { useChats } from "./ChatContext";
 import { copyMessageText } from "./copy-message";
 import { OWN_REACTION_SENTINEL, type MessageOpState } from "./message-ops";
@@ -35,6 +35,7 @@ import {
   type MenuAnchor,
 } from "./MessageMenu";
 import { ownPersonKeyB64 } from "./person-key";
+import { replyQuoteLabel, replyQuoteLines } from "./reply-snapshot";
 import { NotSent } from "../media/MediaBubbles";
 import { shortTime } from "./timeline-layout";
 import type { TimelineRow } from "./timeline-row";
@@ -78,6 +79,12 @@ export interface BubbleHost {
   onSaveEdit: (messageId: number) => void | Promise<void>;
   onDeleteMessage: (messageId: number) => void | Promise<void>;
   onReact: (messageId: number, emoji: string) => void | Promise<void>;
+  /** ADR-0052 — Reply was chosen on this message: the view snapshots it and
+   *  arms the composer strip. */
+  onReply: (messageId: number) => void;
+  /** ADR-0052 — the quote block was pressed: scroll to the quoted message if
+   *  the timeline holds it, else do nothing. */
+  onJumpTo: (messageId: number) => void;
   /** ADR-0045 UX section 6.2.5 — whether Edit / Delete / React are offered at
    *  all. `false` once this device's membership has ended: all three compose
    *  an application message, so all three are refused by the same core gate
@@ -204,6 +211,7 @@ export function TimelineBubble(
             : null
         }
         tone={own ? "outgoing" : "incoming"}
+        reply={ev.reply}
         {...props}
       />
     );
@@ -238,6 +246,7 @@ export function TimelineBubble(
       avatar={null}
       tone="outgoing"
       mediaLocalKey={live().mediaLocalKey}
+      reply={live().reply}
       {...props}
     />
   );
@@ -271,6 +280,9 @@ function ChatBubbleBody(
     attachments: AttachmentRefBytes[];
     /** ADR-0047 — an outgoing media message's local key before upload. */
     mediaLocalKey?: string | undefined;
+    /** ADR-0052 — the reply reference this message carries, drawn as the
+     *  quote block above the text. The snapshot, never the original. */
+    reply?: ReplyRef | undefined;
     /** The local short time (`17:21`), or the pending / failed word. */
     time: string;
     /** The sender's name above the bubble, or `null` (a 1x1, a run, own). */
@@ -377,20 +389,25 @@ function ChatBubbleBody(
    * under the player, putting the length of the recording and the time it was
    * sent on two different lines. UX spec §2 puts them on one.
    */
+  // ADR-0052 — a reply is never "nothing but media": its quote block needs
+  // the bubble's own surface to sit on, so a voice message or a photo sent as
+  // a reply keeps the ordinary chrome.
   const sole = (): MediaBubble | null =>
-    soleMediaBubble(
-      {
-        // An open edit composer replaces the body, so the message is not
-        // "nothing but media" while it is up.
-        deleted: isDeleted() || isEditing(),
-        text: displayText(),
-        attachments: props.attachments,
-      },
-      // The same module-level allowlist the hub itself is built from
-      // (`media-hub.ts`), so the shape decision and the slot decision can
-      // never be made against two different answers.
-      allowlist,
-    );
+    props.reply !== undefined
+      ? null
+      : soleMediaBubble(
+          {
+            // An open edit composer replaces the body, so the message is not
+            // "nothing but media" while it is up.
+            deleted: isDeleted() || isEditing(),
+            text: displayText(),
+            attachments: props.attachments,
+          },
+          // The same module-level allowlist the hub itself is built from
+          // (`media-hub.ts`), so the shape decision and the slot decision can
+          // never be made against two different answers.
+          allowlist,
+        );
   const metaSlot = (): BubbleMetaSlot => bubbleMetaSlot(sole());
   // UX spec section 3 — a video note is a circle with no bubble chrome.
   // UX spec section 10 — a lone photo or video fills its bubble, and the time
@@ -465,6 +482,9 @@ function ChatBubbleBody(
   return (
     <li
       class="lk-bubble-row"
+      // ADR-0052 — what a quote block's jump looks the row up by. A DS id,
+      // never a tempId: an un-acked outgoing row has nothing to be quoted by.
+      data-message-id={props.messageId}
       classList={{
         incoming: isIncoming,
         outgoing: !isIncoming,
@@ -551,6 +571,29 @@ function ChatBubbleBody(
             when={isEditing()}
             fallback={
               <>
+                {/* ADR-0052 / section 3.1 — the quote block, above the text,
+                    inside the bubble, in the bubble's own colours: the rule,
+                    the name, the excerpt, each line truncated. It draws the
+                    snapshot the envelope carries and never re-reads the
+                    original. A button, named for accessibility, that jumps
+                    to the quoted message when this timeline holds it. */}
+                <Show when={props.reply}>
+                  {(reply) => {
+                    const lines = (): ReturnType<typeof replyQuoteLines> =>
+                      replyQuoteLines(reply());
+                    return (
+                      <button
+                        type="button"
+                        class="lk-reply-quote"
+                        aria-label={replyQuoteLabel(lines())}
+                        onClick={() => props.onJumpTo(reply().target)}
+                      >
+                        <span class="lk-reply-quote-name">{lines().name}</span>
+                        <span class="lk-reply-quote-excerpt">{lines().excerpt}</span>
+                      </button>
+                    );
+                  }}
+                </Show>
                 <Show when={displayText().length > 0}>
                   <div class="lk-bubble-text">
                     {displayText()}
@@ -722,6 +765,9 @@ function ChatBubbleBody(
               }}
               onMoreReactions={() => {
                 if (props.messageId !== undefined) props.onOpenFullReactPicker(props.messageId);
+              }}
+              onReply={() => {
+                if (props.messageId !== undefined) props.onReply(props.messageId);
               }}
               /* Nothing is sent and nothing is stored: the text goes from this
                  device's memory to this device's clipboard. */

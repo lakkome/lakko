@@ -87,6 +87,7 @@ import type { IdentitySecrets } from "../auth/AuthContext";
 import {
   parseBodyEnvelope,
   type AttachmentRefBytes,
+  type ReplyRef,
 } from "./attachments";
 import { tryDecodeSecretEnvelope } from "../push/group-routing";
 import { looksLikeCallSignaling as looksLikeCallSignalingBytes } from "../calls/call-signaling-wake";
@@ -166,6 +167,10 @@ export type IncomingChatEvent =
        *  edit/delete target. */
       senderKey: MemberIdentity | undefined;
       createdAt: string;
+      /** ADR-0052 — set when this message replies to another: the target's
+       *  DS `messageId` plus the quoted author / excerpt snapshot as the
+       *  replier wrote them. Absent on a plain message. */
+      reply?: ReplyRef;
     }
   | {
       /** ADR-0023 / ADR-0024 — an edit / delete / reaction op OR a
@@ -1324,6 +1329,9 @@ export async function toEvent(
         senderLeaf,
         senderKey,
         createdAt,
+        // ADR-0052 — the reply reference rides through unchanged; the
+        // snapshot is the replier's and is never re-read from the target.
+        ...(body.reply === undefined ? {} : { reply: body.reply }),
       };
     }
     return {

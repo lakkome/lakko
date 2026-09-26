@@ -244,7 +244,44 @@ pub fn compose_envelope(
     text: String,
     attachments: Vec<AttachmentRef>,
 ) -> Result<Vec<u8>, FfiError> {
-    let inner_refs: Vec<inner::AttachmentRef> = attachments
+    inner::compose(&text, refs_from_ffi(attachments)?).map_err(Into::into)
+}
+
+/// ADR-0052 — build a reply: an ordinary chat envelope that also names the
+/// DS `messageId` it answers and carries a snapshot of the quoted message
+/// (the author's display name and an excerpt of its text) as the replier
+/// saw it. The snapshot is what every receiver renders — later edits or
+/// deletion of the original never change the quote — and an excerpt is
+/// always one level deep: replying to a reply quotes that reply's own
+/// text, never the text it quoted. Over-long snapshots are truncated on a
+/// character boundary; empty ones are not carried.
+///
+/// # Errors
+///
+/// - [`FfiError::Attachment`] on a wrong-length byte field in any passed
+///   `AttachmentRef` (or on a `serde_json` failure, impossible for valid
+///   inputs).
+#[uniffi::export]
+pub fn compose_reply_envelope(
+    text: String,
+    attachments: Vec<AttachmentRef>,
+    reply_to: i64,
+    reply_author: Option<String>,
+    reply_excerpt: Option<String>,
+) -> Result<Vec<u8>, FfiError> {
+    let reply = inner::Reply {
+        target: reply_to,
+        author: reply_author,
+        excerpt: reply_excerpt,
+    };
+    inner::compose_reply(&text, refs_from_ffi(attachments)?, &reply).map_err(Into::into)
+}
+
+/// Convert FFI attachment refs to the wire shape: byte fields to base64,
+/// lengths checked up front so a wrong-shape input fails fast at the FFI
+/// rather than at JSON parse on the other side.
+fn refs_from_ffi(attachments: Vec<AttachmentRef>) -> Result<Vec<inner::AttachmentRef>, FfiError> {
+    attachments
         .into_iter()
         .map(|r| -> Result<inner::AttachmentRef, FfiError> {
             // Validate field lengths up front so a wrong-shape
@@ -284,8 +321,7 @@ pub fn compose_envelope(
                 thumb,
             })
         })
-        .collect::<Result<_, _>>()?;
-    inner::compose(&text, inner_refs).map_err(Into::into)
+        .collect()
 }
 
 /// ADR-0047 — the inline-playback allowlist: how an attachment with this
@@ -365,6 +401,15 @@ pub struct ParsedBody {
     pub emoji: Option<String>,
     /// ADR-0024 — the typing state (`Some` only for `Typing`).
     pub is_typing: Option<bool>,
+    /// ADR-0052 — the DS `messageId` this message replies to (`Some` only
+    /// for `Chat`, and only when the sender set it).
+    pub reply_to: Option<i64>,
+    /// ADR-0052 — the quoted author's display name as the replier wrote it:
+    /// a snapshot and a courtesy label, never a verified identity.
+    pub reply_author: Option<String>,
+    /// ADR-0052 — an excerpt of the quoted message's own text, one level
+    /// deep, unchanged by later edits or deletion of the original.
+    pub reply_excerpt: Option<String>,
 }
 
 /// Build an EDIT envelope (ADR-0023) replacing the target message's
@@ -427,13 +472,20 @@ pub fn compose_read_receipt_envelope(up_to: i64) -> Result<Vec<u8>, FfiError> {
 #[must_use]
 pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
     match inner::parse_body(&bytes) {
-        inner::MessageBody::Chat { text, attachments } => ParsedBody {
+        inner::MessageBody::Chat {
+            text,
+            attachments,
+            reply,
+        } => ParsedBody {
             kind: MessageBodyKind::Chat,
             text,
             attachments: refs_to_ffi(attachments),
             target: None,
             emoji: None,
             is_typing: None,
+            reply_to: reply.as_ref().map(|r| r.target),
+            reply_author: reply.as_ref().and_then(|r| r.author.clone()),
+            reply_excerpt: reply.and_then(|r| r.excerpt),
         },
         inner::MessageBody::Edit { target, text } => ParsedBody {
             kind: MessageBodyKind::Edit,
@@ -442,6 +494,9 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             target: Some(target),
             emoji: None,
             is_typing: None,
+            reply_to: None,
+            reply_author: None,
+            reply_excerpt: None,
         },
         inner::MessageBody::Delete { target } => ParsedBody {
             kind: MessageBodyKind::Delete,
@@ -450,6 +505,9 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             target: Some(target),
             emoji: None,
             is_typing: None,
+            reply_to: None,
+            reply_author: None,
+            reply_excerpt: None,
         },
         inner::MessageBody::Reaction { target, emoji } => ParsedBody {
             kind: MessageBodyKind::Reaction,
@@ -458,6 +516,9 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             target: Some(target),
             emoji: Some(emoji),
             is_typing: None,
+            reply_to: None,
+            reply_author: None,
+            reply_excerpt: None,
         },
         inner::MessageBody::Typing { is_typing } => ParsedBody {
             kind: MessageBodyKind::Typing,
@@ -466,6 +527,9 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             target: None,
             emoji: None,
             is_typing: Some(is_typing),
+            reply_to: None,
+            reply_author: None,
+            reply_excerpt: None,
         },
         inner::MessageBody::ReadReceipt { up_to } => ParsedBody {
             kind: MessageBodyKind::ReadReceipt,
@@ -474,6 +538,9 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             target: Some(up_to),
             emoji: None,
             is_typing: None,
+            reply_to: None,
+            reply_author: None,
+            reply_excerpt: None,
         },
     }
 }
@@ -847,5 +914,34 @@ mod tests {
         );
         assert_eq!(inline_media_type("image/svg+xml".to_string()), None);
         assert_eq!(inline_media_type("text/html".to_string()), None);
+    }
+
+    #[test]
+    fn reply_round_trips_and_stays_a_chat() {
+        let wire = compose_reply_envelope(
+            "sure".to_string(),
+            vec![],
+            41,
+            Some("Alice".to_string()),
+            Some("lunch?".to_string()),
+        )
+        .unwrap();
+        let body = parse_body_envelope(wire);
+        assert_eq!(body.kind, MessageBodyKind::Chat);
+        assert_eq!(body.text, "sure");
+        assert_eq!(body.reply_to, Some(41));
+        assert_eq!(body.reply_author.as_deref(), Some("Alice"));
+        assert_eq!(body.reply_excerpt.as_deref(), Some("lunch?"));
+        // The reply is not an op: `target` is what edit / delete / react use.
+        assert_eq!(body.target, None);
+    }
+
+    #[test]
+    fn a_plain_chat_carries_no_reply() {
+        let wire = compose_envelope("hi".to_string(), vec![]).unwrap();
+        let body = parse_body_envelope(wire);
+        assert_eq!(body.reply_to, None);
+        assert_eq!(body.reply_author, None);
+        assert_eq!(body.reply_excerpt, None);
     }
 }

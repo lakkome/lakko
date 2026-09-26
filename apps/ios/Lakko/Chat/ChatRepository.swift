@@ -2578,9 +2578,10 @@ public final class ChatRepository: ObservableObject {
         state = state.with(threads: buildThreadList())
         let envelopeBytes: Data
         do {
-            envelopeBytes = try AttachmentBridge.composeEnvelopeBytes(
+            envelopeBytes = try Self.composeChatEnvelope(
                 text: row.text,
-                attachments: row.attachments
+                attachments: row.attachments,
+                reply: row.reply
             )
         } catch {
             record.markFailed(localId: localId)
@@ -2609,10 +2610,36 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
+    /// The chat envelope for a message, a reply or not.
+    ///
+    /// ADR-0052 decision 1 — a reply is an ordinary chat message that also
+    /// points somewhere, so it goes through `composeReplyEnvelope` (the same
+    /// `text` + `attachments`, plus the reference and the snapshot) and never
+    /// through the mutually exclusive op composers. The core truncates an
+    /// over-long snapshot on a character boundary and drops an empty one.
+    static func composeChatEnvelope(
+        text: String,
+        attachments: [AttachmentRef],
+        reply: ReplyRef?
+    ) throws -> Data {
+        if let reply {
+            return try AttachmentBridge.composeReplyBytes(
+                text: text,
+                attachments: attachments,
+                reply: reply
+            )
+        }
+        return try AttachmentBridge.composeEnvelopeBytes(
+            text: text,
+            attachments: attachments
+        )
+    }
+
     public func sendMessage(
         groupIdHex: String,
         plaintext: String,
-        attachments: [AttachmentRef] = []
+        attachments: [AttachmentRef] = [],
+        reply: ReplyRef? = nil
     ) async throws {
         guard canonicalIdentity != nil else {
             throw ChatError.argument("ChatRepository not bootstrapped")
@@ -2626,11 +2653,15 @@ public final class ChatRepository: ObservableObject {
         // fields are rejected there (defence-in-depth: the
         // UI already validates the AttachmentRefs it builds via
         // `AttachmentBridge.encryptAndUpload`).
+        //
+        // ADR-0052 — a reply composes through `composeReplyEnvelope` instead,
+        // carrying the target id and the snapshot beside the same text.
         let envelopeBytes: Data
         do {
-            envelopeBytes = try AttachmentBridge.composeEnvelopeBytes(
+            envelopeBytes = try Self.composeChatEnvelope(
                 text: plaintext,
-                attachments: attachments
+                attachments: attachments,
+                reply: reply
             )
         } catch {
             throw ChatError.wrapped(
@@ -2656,12 +2687,15 @@ public final class ChatRepository: ObservableObject {
         // is what let any leaf, ours included, be reassigned to a member added
         // later.
         let localId = record.nextLocalId()
+        // The reply rides the local row too, so the sender sees its own quote
+        // (it never receives its own application message back).
         record.appendPending(
             localId: localId,
             text: plaintext,
             attachments: attachments,
             createdAt: Self.isoTimestamp(ms: Self.nowMs()),
-            authorKeyB64: AuthorIdentity.own(group: record.group)
+            authorKeyB64: AuthorIdentity.own(group: record.group),
+            reply: reply
         )
         state = state.with(threads: buildThreadList())
         // ADR-0045 — the seal and the publish are SERIALIZED against the
@@ -5704,6 +5738,15 @@ public struct ChatMessage: Equatable, Identifiable {
     /// ``Ack/sent`` so the row is not torn down and rebuilt at the moment it
     /// lands, and it is never persisted: an unsent row is not written at all.
     public let localId: Int64
+    /// ADR-0052 decision 1 — what this message replies to, when it is a
+    /// reply: the target's DS `messageId` plus the snapshot of the quoted
+    /// author and excerpt the replier took when Reply was chosen. `nil` for
+    /// an ordinary message.
+    ///
+    /// The quote is drawn from THIS value and never re-read from the target
+    /// (`docs/ux/message-actions.md` section 3.1), so it renders the same
+    /// whether the original was edited, deleted or never held on this device.
+    public let reply: ReplyRef?
 
     /// Whether an outgoing row reached the server.
     public enum Ack: Equatable {
@@ -5727,7 +5770,8 @@ public struct ChatMessage: Equatable, Identifiable {
         deleted: Bool = false,
         reactions: [Reaction] = [],
         ack: Ack = .sent,
-        localId: Int64 = 0
+        localId: Int64 = 0,
+        reply: ReplyRef? = nil
     ) {
         self.messageId = messageId
         self.direction = direction
@@ -5740,6 +5784,7 @@ public struct ChatMessage: Equatable, Identifiable {
         self.reactions = reactions
         self.ack = ack
         self.localId = localId
+        self.reply = reply
     }
 
     /// `Identifiable` conformance for SwiftUI `ForEach`.
@@ -5777,6 +5822,27 @@ public struct ChatMessage: Equatable, Identifiable {
                 reactedByMe: mine.contains($0)
             )
         }
+    }
+}
+
+/// ADR-0052 decision 1 — a reply's reference to the message it answers.
+///
+/// `target` is the quoted message's DS `messageId`, the same handle
+/// edit / delete / react use. `author` and `excerpt` are the SNAPSHOT the
+/// replier took when Reply was chosen: a claim by the replier, carried in the
+/// envelope so that everyone in the conversation draws the same quote, and
+/// never dressed as verified. Either may be `nil` on a reply that arrived
+/// with only the target id; the quote block then draws an empty name line
+/// and the excerpt "Message" (``replyQuoteLines(_:)``).
+public struct ReplyRef: Equatable, Codable {
+    public let target: Int64
+    public let author: String?
+    public let excerpt: String?
+
+    public init(target: Int64, author: String?, excerpt: String?) {
+        self.target = target
+        self.author = author
+        self.excerpt = excerpt
     }
 }
 
@@ -5890,7 +5956,8 @@ private final class GroupRecord {
         text: String,
         attachments: [AttachmentRef],
         createdAt: String,
-        authorKeyB64: MemberIdentity?
+        authorKeyB64: MemberIdentity?,
+        reply: ReplyRef? = nil
     ) {
         messages.append(
             ChatMessage(
@@ -5901,7 +5968,8 @@ private final class GroupRecord {
                 createdAt: createdAt,
                 authorKeyB64: authorKeyB64,
                 ack: .pending,
-                localId: localId
+                localId: localId,
+                reply: reply
             )
         )
     }
@@ -5922,7 +5990,8 @@ private final class GroupRecord {
             deleted: old.deleted,
             reactions: old.reactions,
             ack: .sent,
-            localId: localId
+            localId: localId,
+            reply: old.reply
         )
     }
 
@@ -6033,7 +6102,8 @@ private final class GroupRecord {
     ) {
         for event in events {
             switch event {
-            case .application(let messageId, let text, let attachments, let senderKey, let createdAt):
+            case .application(
+                let messageId, let text, let attachments, let senderKey, let createdAt, let reply):
                 // ADR-0050 — a message from this PERSON's other device
                 // arrives as an incoming row (another leaf sealed it) but is
                 // ours: same side, no sender name.
@@ -6045,7 +6115,8 @@ private final class GroupRecord {
                         text: text,
                         attachments: attachments,
                         createdAt: createdAt,
-                        authorKeyB64: senderKey
+                        authorKeyB64: senderKey,
+                        reply: reply
                     )
                 )
             case .op(_, let op, let target, let text, let emoji, let senderKey, let createdAt):

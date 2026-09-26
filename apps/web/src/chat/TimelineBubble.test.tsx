@@ -129,6 +129,8 @@ function host(over: Partial<BubbleHost> = {}): BubbleHost {
     onSaveEdit: () => {},
     onDeleteMessage: () => {},
     onReact: () => {},
+    onReply: () => {},
+    onJumpTo: () => {},
     actionsAvailable: true,
     hub,
     mediaUpload: undefined,
@@ -460,9 +462,10 @@ describe("the action card's width", () => {
   it("carries the section 2 order, with Delete separated", () => {
     const { items } = openMenuOn(ownMessage("hello"));
     const labels = all("[role='menuitem'] span", items as HTMLElement).map((s) => s.textContent);
-    // Section 2: the ones that only read (Copy), then the ones that change this
-    // message (Edit), then the destructive one.
-    expect(labels).toEqual(["Copy", "Edit", "Delete"]);
+    // Section 2: the ones that produce a new message (Reply, ADR-0052), then
+    // the ones that only read (Copy), then the ones that change this message
+    // (Edit), then the destructive one.
+    expect(labels).toEqual(["Reply", "Copy", "Edit", "Delete"]);
     // "separated", and structurally so: the divider is a wrapper of its own,
     // not a border hung off the colour class.
     const del = one(".lk-msg-menu-destructive [role='menuitem']");
@@ -496,9 +499,7 @@ describe("Copy", () => {
 
   it("puts the message's text on the clipboard", async () => {
     const { items } = openMenuOn(incoming("the exact words"));
-    // An incoming message's action card has exactly the one row.
-    const copy = one("[role='menuitem']", items as HTMLElement);
-    expect(copy.textContent).toContain("Copy");
+    const copy = itemNamed(items as HTMLElement, "Copy");
     mouse(copy, "click");
     await settle();
     expect(written).toEqual(["the exact words"]);
@@ -508,7 +509,7 @@ describe("Copy", () => {
     const { items } = openMenuOn(incoming("before"), {
       opState: () => ({ editedText: "after", reactions: new Map() }),
     });
-    mouse(one("[role='menuitem']", items as HTMLElement), "click");
+    mouse(itemNamed(items as HTMLElement, "Copy"), "click");
     await settle();
     expect(written).toEqual(["after"]);
   });
@@ -517,8 +518,7 @@ describe("Copy", () => {
     // Not the Edit / Delete predicate: section 3 offers Copy on "any message
     // with text", and an incoming message has no Edit row at all.
     const { items } = openMenuOn(incoming("hello"));
-    expect(all("[role='menuitem']", items as HTMLElement).length).toBe(1);
-    expect((items as HTMLElement).textContent).toContain("Copy");
+    expect(labelsOf(items as HTMLElement)).toEqual(["Reply", "Copy"]);
   });
 
   it("is absent on a message with no text", () => {
@@ -527,17 +527,97 @@ describe("Copy", () => {
     const { items } = openMenuOn(ownMessage("", [voiceRef()]));
     expect(present(".lk-msg-menu-items")).toBe(true);
     expect((items as HTMLElement).textContent).not.toContain("Copy");
-    expect(all("[role='menuitem'] span", items as HTMLElement).map((s) => s.textContent)).toEqual([
-      "Edit",
-      "Delete",
-    ]);
+    expect(labelsOf(items as HTMLElement)).toEqual(["Reply", "Edit", "Delete"]);
   });
 
-  it("leaves an incoming media message no action card at all", () => {
-    // Nothing to copy and nothing to edit, so the second surface is not drawn:
-    // an empty bordered card under the reactions reads as a menu that failed.
+  it("leaves an incoming media message with Reply alone in the card", () => {
+    // Nothing to copy and nothing to edit; Reply is offered on any message
+    // with an id (ADR-0052), so the card is drawn with that one row.
     const { items } = openMenuOn(incoming("", [voiceRef()]));
-    expect(items).toBeNull();
+    expect(labelsOf(items as HTMLElement)).toEqual(["Reply"]);
     expect(present("[role='group'][aria-label='React']")).toBe(true);
+  });
+});
+
+/** The action card's rows, by label, in order. */
+function labelsOf(items: HTMLElement): Array<string | null> {
+  return all("[role='menuitem'] span", items).map((s) => s.textContent);
+}
+
+/** The action-card row whose label is `label`. */
+function itemNamed(items: HTMLElement, label: string): HTMLElement {
+  const row = all<HTMLElement>("[role='menuitem']", items).find((b) => b.textContent?.trim() === label);
+  expect(row, `no ${label} row`).toBeDefined();
+  return row as HTMLElement;
+}
+
+// ---------------------------------------------------------------------------
+// Reply — ADR-0052 decision 1, `message-actions.md` section 3.1.
+// ---------------------------------------------------------------------------
+
+describe("Reply", () => {
+  it("is the FIRST row of the card and hands the view this message's id", () => {
+    const chosen: number[] = [];
+    const { items } = openMenuOn(incoming("hello"), { onReply: (id) => chosen.push(id) });
+    const first = one<HTMLElement>("[role='menuitem']", items as HTMLElement);
+    expect(first.textContent).toContain("Reply");
+    mouse(first, "click");
+    expect(chosen).toEqual([42]);
+    // The menu closed with the action, as every row's does.
+    expect(present("[role='menu']")).toBe(false);
+  });
+
+  function withReply(row: TimelineRow, reply: { target: number; author?: string; excerpt?: string }): TimelineRow {
+    if (row.kind === "outgoing") return { ...row, reply };
+    if (row.event.kind !== "application") return row;
+    return { ...row, event: { ...row.event, reply } };
+  }
+
+  it("draws the carried snapshot as a named button above the text, on both sides", () => {
+    for (const row of [incoming("yes"), ownMessage("yes")]) {
+      document.body.innerHTML = "";
+      const bubble = mount(withReply(row, { target: 41, author: "Anna", excerpt: "at five?" }));
+      const quote = one<HTMLButtonElement>("button.lk-reply-quote", bubble);
+      expect(quote.getAttribute("aria-label")).toBe("Reply to Anna");
+      expect(one(".lk-reply-quote-name", quote).textContent).toBe("Anna");
+      expect(one(".lk-reply-quote-excerpt", quote).textContent).toBe("at five?");
+      // Above the text: the quote precedes the text node in the bubble.
+      const text = one(".lk-bubble-text", bubble);
+      expect(quote.compareDocumentPosition(text) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
+  });
+
+  it("a reply with no snapshot draws an empty name line and the word Message", () => {
+    const bubble = mount(withReply(incoming("ok"), { target: 41 }));
+    const quote = one<HTMLButtonElement>("button.lk-reply-quote", bubble);
+    expect(quote.getAttribute("aria-label")).toBe("Reply");
+    expect(one(".lk-reply-quote-name", quote).textContent).toBe("");
+    expect(one(".lk-reply-quote-excerpt", quote).textContent).toBe("Message");
+  });
+
+  it("pressing the quote asks the view to jump to the quoted id", () => {
+    const jumps: number[] = [];
+    const bubble = mount(withReply(incoming("ok"), { target: 41, author: "A", excerpt: "x" }), {
+      onJumpTo: (id) => jumps.push(id),
+    });
+    mouse(one("button.lk-reply-quote", bubble), "click");
+    expect(jumps).toEqual([41]);
+  });
+
+  it("a plain message draws no quote block", () => {
+    const bubble = mount(incoming("ok"));
+    expect(present(".lk-reply-quote", bubble)).toBe(false);
+  });
+
+  it("the row carries its DS id, which is what a jump looks up", () => {
+    mount(incoming("ok"));
+    expect(one("li.lk-bubble-row").getAttribute("data-message-id")).toBe("42");
+  });
+
+  it("a media message sent as a reply keeps the ordinary bubble, so the quote has a surface", () => {
+    const bubble = mount(withReply(incoming("", [voiceRef()]), { target: 41, author: "A", excerpt: "x" }));
+    expect(present(".lk-reply-quote", bubble)).toBe(true);
+    expect(bubble.classList.contains("chromeless")).toBe(false);
+    expect(bubble.classList.contains("media-only")).toBe(false);
   });
 });

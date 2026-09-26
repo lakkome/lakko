@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
@@ -93,6 +94,60 @@ public class ChatViewModel(
 
     private val composer: MutableStateFlow<ComposerState> =
         MutableStateFlow(ComposerState())
+
+    // -------------------------------------------------------------
+    // ADR-0052 / `docs/ux/message-actions.md` section 3.1 — Reply
+    // -------------------------------------------------------------
+
+    private val mutableReplyingTo: MutableStateFlow<me.lakko.app.chat.ReplyArmed?> =
+        MutableStateFlow(null)
+
+    /**
+     * The reply the composer has armed, or `null`. The strip above the
+     * composer renders it; the next send carries its snapshot. Section 3.1's
+     * exclusivity rules live in the handlers below: choosing Reply on another
+     * message replaces it, starting an edit drops it, the close control, a
+     * send of any kind and leaving the conversation clear it.
+     */
+    public val replyingTo: StateFlow<me.lakko.app.chat.ReplyArmed?> = mutableReplyingTo.asStateFlow()
+
+    /** Counts arms, so arming the same message twice still refocuses the field. */
+    private var replyArmSeq: Long = 0
+
+    /**
+     * Reply was chosen on [message]. [authorLabel] is what the timeline calls
+     * its author ("You" for an own message); the screen resolves it because the
+     * timeline is where that resolution lives. The quote is snapshotted HERE
+     * and never re-read (section 3.1). A row with no DS id has nothing to point
+     * at and is ignored — the menu does not offer Reply on one.
+     */
+    public fun onReplyToMessage(message: me.lakko.app.chat.ChatMessage, authorLabel: String) {
+        if (message.messageId == 0L) return
+        replyArmSeq += 1
+        mutableReplyingTo.value = me.lakko.app.chat.ReplyArmed(
+            messageId = message.messageId,
+            snapshot = me.lakko.app.chat.replySnapshotFor(message, authorLabel),
+            armedSeq = replyArmSeq,
+        )
+    }
+
+    /** The strip's close control, and leaving the conversation. */
+    public fun onCancelReply() {
+        mutableReplyingTo.value = null
+    }
+
+    /** Section 3.1 — choosing Edit while a reply is armed drops the reply. */
+    public fun onEditStarted() {
+        mutableReplyingTo.value = null
+    }
+
+    /**
+     * Takes the armed reply for a send: returns its snapshot and clears the
+     * strip in the same step, so the message that goes out is the only one
+     * that carries it.
+     */
+    private fun takeArmedReply(): me.lakko.app.chat.ReplyRef? =
+        mutableReplyingTo.getAndUpdate { null }?.snapshot
 
     /**
      * ADR-0048 — the one name resolver. Declared ABOVE [derived]: the first
@@ -2377,6 +2432,11 @@ public class ChatViewModel(
         // typing signal (`typing:false` once).
         sendTypingStop()
 
+        // ADR-0052 — the reply goes with this message and the strip clears
+        // now, for the same reason the draft does: the quote lives on the
+        // row from this moment, and a failed send keeps it there with Retry.
+        val reply = takeArmedReply()
+
         // Cleared HERE rather than on success, because the message is now in
         // the conversation from this moment: the words live in the row, which
         // keeps them and offers Retry if the send does not land. They used to
@@ -2398,6 +2458,7 @@ public class ChatViewModel(
                     groupIdHex = groupIdHex,
                     plaintext = trimmed,
                     attachments = stagedAttachments,
+                    reply = reply,
                 )
                 composer.update { it.copy(sending = false, sendError = null) }
             } catch (err: Throwable) {
@@ -2734,8 +2795,13 @@ public class ChatViewModel(
                     onProgress = onProgress,
                 )
             },
-            publish = { ref ->
-                repo.sendMessage(groupIdHex = groupIdHex, plaintext = "", attachments = listOf(ref))
+            publish = { ref, reply ->
+                repo.sendMessage(
+                    groupIdHex = groupIdHex,
+                    plaintext = "",
+                    attachments = listOf(ref),
+                    reply = reply,
+                )
             },
             onLog = { line -> android.util.Log.w("ChatViewModel", line) },
         )
@@ -2769,6 +2835,9 @@ public class ChatViewModel(
                 width = take.width,
                 height = take.height,
                 poster = take.poster,
+                // Section 3.1 — "Recording a voice message with a reply armed
+                // sends the take as the reply; the strip clears the same way."
+                reply = takeArmedReply(),
                 loadBytes = {
                     kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                         try {
@@ -2804,6 +2873,9 @@ public class ChatViewModel(
                 width = item.width,
                 height = item.height,
                 poster = null,
+                // A tapped GIF is a sent message like a take; it goes as the
+                // reply and clears the strip the same way.
+                reply = takeArmedReply(),
                 loadBytes = {
                     when (val r = gifClient.media(item.fullUrl, me.lakko.app.media.MAX_GIF_FULL_BYTES)) {
                         is me.lakko.app.media.GifResult.Ok -> r.value.bytes to r.value.mime
