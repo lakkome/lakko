@@ -108,6 +108,7 @@ import { ContactsClient } from "../contacts/client";
 import {
   loadAccepted,
   removeAccepted,
+  subscribeAcceptedChanged,
   upsertAccepted,
 } from "../contacts/local-store";
 import { ContactDetailView } from "../contacts/ContactDetailView";
@@ -1254,6 +1255,13 @@ function ChatView(props: {
   /** The version of the accepted-contacts list the person info was built
    *  from; bumped by a rename or a remove made inside the layer. */
   const [acceptedVersion, setAcceptedVersion] = createSignal(0);
+  // Also bumped by a write from outside the layer: the one-to-one adoption
+  // rule (`contacts/OneToOneContactAdoption.tsx`) files the peer of this very
+  // conversation as a contact, and the info sheet must read the row.
+  onMount(() => {
+    const unsubscribe = subscribeAcceptedChanged(() => setAcceptedVersion((v) => v + 1));
+    onCleanup(unsubscribe);
+  });
   // ADR-0027 / §7.1 — an external-join request arrived while the quarantine
   // was full, so the core did not keep it. It is in no list and can be
   // approved by nobody; the only honest thing left is to say it happened.

@@ -40,6 +40,7 @@ import {
   MailboxJoinFailureBanner,
   MailboxProvider,
 } from "./contacts/MailboxContext";
+import { OneToOneContactAdoption } from "./contacts/OneToOneContactAdoption";
 import { PowActivityIndicator } from "./ui/PowActivityIndicator";
 import { ProfileProvider } from "./profile/ProfileContext";
 import { GroupNameProvider } from "./chat/GroupNameContext";
@@ -159,6 +160,13 @@ const App: Component = () => (
            * session, and the user is rarely on Contacts when it arrives.
            */}
           <MailboxJoinFailureBanner />
+          {/*
+           * A person this account has a one-to-one conversation with IS a
+           * contact. Whole-session: the conversation arrives on any route (a
+           * Welcome, a second device's admission) and the Contacts list must
+           * hold the person before it is first opened.
+           */}
+          <OneToOneContactAdoption />
           {/*
            * Proof-of-work runs in a Web Worker and can take a long time at the
            * production effort; this says the app is working rather than hung.

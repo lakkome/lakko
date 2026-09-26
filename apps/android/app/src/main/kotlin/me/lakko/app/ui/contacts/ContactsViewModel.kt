@@ -5,9 +5,12 @@ package me.lakko.app.ui.contacts
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import me.lakko.app.chat.ChatRepository
@@ -76,6 +79,58 @@ public class ContactsViewModel(
             }
         }
         return combined.asStateFlow()
+    }
+
+    init {
+        // A one-to-one conversation IS a contact: whenever the set of
+        // conversations this device holds changes (not on every message),
+        // every one-to-one peer without a contact row gets one
+        // ([ContactsRepository.adoptOneToOnePeer]). A StateFlow replays its
+        // current value, so this also runs once at start. Off the main thread
+        // because the roster read is a JNA call into the core
+        // (`MainThreadGuard`).
+        chatRepo?.let { chat ->
+            viewModelScope.launch(Dispatchers.Default) {
+                chat.state
+                    .map { s -> s.threads.map { it.groupIdHex.lowercase() }.toSet() }
+                    .distinctUntilChanged()
+                    .collect { adoptOneToOnePeers() }
+            }
+        }
+    }
+
+    /**
+     * Give every one-to-one peer a contact row (see
+     * [ContactsRepository.adoptOneToOnePeer]). The account id, when a received
+     * profile has carried one (ADR-0048 v2), rides along so the row can name
+     * the person in a group call like an accepted one does.
+     */
+    public fun adoptOneToOnePeers() {
+        val chat = chatRepo ?: return
+        val accountIds = me.lakko.app.profile.ProfileDirectory.get(chat.context).accountIdsByKey()
+        val nowMs = System.currentTimeMillis().toULong()
+        val createdAt = java.time.Instant.now().toString()
+        for (thread in chat.state.value.threads) {
+            // ADR-0050 — `oneToOnePeerKey` counts PEOPLE, not device leaves.
+            val peer = chat.oneToOnePeerKey(thread.groupIdHex) ?: continue
+            val peerB64 = java.util.Base64.getEncoder().encodeToString(peer)
+            repo.adoptOneToOnePeer(
+                signatureKey = peer,
+                accountId = accountIds[peerB64]?.let(::hexToBytes),
+                groupIdHex = thread.groupIdHex,
+                nowMs = nowMs,
+                createdAt = createdAt,
+            )
+        }
+    }
+
+    private fun hexToBytes(hex: String): ByteArray? {
+        if (hex.length % 2 != 0) return null
+        return try {
+            ByteArray(hex.length / 2) { i -> hex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
+        } catch (_: NumberFormatException) {
+            null
+        }
     }
 
     private fun buildUi(repoState: ContactsState, ui: UiSlice): ContactsUiState =

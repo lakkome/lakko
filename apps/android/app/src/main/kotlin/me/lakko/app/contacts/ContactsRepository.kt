@@ -251,6 +251,45 @@ public class ContactsRepository(
     }
 
     // -----------------------------------------------------------------
+    // A one-to-one conversation IS a contact
+    // -----------------------------------------------------------------
+
+    /**
+     * Give the other person of a one-to-one conversation a contact row (see
+     * [adoptingOneToOnePeer] for the rule and the defect it closes). Adds a
+     * row for [signatureKey] when none exists, or completes an existing row's
+     * `groupIdHex` when it was never recorded. Returns whether anything
+     * changed; a changed list is persisted. Never overwrites a recorded chat,
+     * a display name or an account id the row already holds.
+     */
+    public fun adoptOneToOnePeer(
+        signatureKey: ByteArray,
+        accountId: ByteArray?,
+        groupIdHex: String,
+        nowMs: ULong,
+        createdAt: String,
+    ): Boolean {
+        var changed = false
+        mutableState.update { state ->
+            // `update` may re-run the lambda on a lost CAS; the verdict is the
+            // last attempt's, so reset before deciding.
+            changed = false
+            val next = adoptingOneToOnePeer(
+                accepted = state.accepted,
+                signatureKey = signatureKey,
+                accountId = accountId,
+                groupIdHex = groupIdHex,
+                nowMs = nowMs,
+                createdAt = createdAt,
+            ) ?: return@update state
+            changed = true
+            state.copy(accepted = next)
+        }
+        if (changed) persistAccepted()
+        return changed
+    }
+
+    // -----------------------------------------------------------------
     // ADR-0048 — profile names
     // -----------------------------------------------------------------
 

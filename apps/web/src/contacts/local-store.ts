@@ -58,6 +58,8 @@
  *  `cursor` + `accepted`; v2 adds the account-pubkey `pins` map
  *  (G-4, ADR-0016) and migrates the v1 row additively on first
  *  read so existing users keep their contacts. */
+import { adoptOneToOnePeer, type OneToOnePeer } from "./adopt-one-to-one";
+
 const STORAGE_KEY = "lakko.contacts.v2";
 /** Legacy v1 key, read once during migration then left in place
  *  (harmless; we never write it again). */
@@ -406,6 +408,19 @@ export function upsertAccepted(contact: AcceptedContact): AcceptedContact[] {
   save({ ...current, accepted: next });
   notifyAcceptedChanged();
   return next;
+}
+
+/** A person this account has a one-to-one conversation with IS a contact
+ *  (`adopt-one-to-one.ts`): apply the rule for one peer against the
+ *  persisted list, write only when it changes something, and tell the
+ *  listeners. Returns whether a write happened. */
+export function adoptOneToOne(peer: OneToOnePeer): boolean {
+  const current = load();
+  const next = adoptOneToOnePeer(current.accepted, peer);
+  if (next === null) return false;
+  save({ ...current, accepted: next });
+  notifyAcceptedChanged();
+  return true;
 }
 
 /** Remove an accepted contact by its signature pubkey. No-op

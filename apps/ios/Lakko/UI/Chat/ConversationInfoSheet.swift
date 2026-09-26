@@ -155,6 +155,9 @@ private struct UnknownPersonInfo: View {
                             }
                         }
                         .buttonStyle(.borderless)
+                        // The sheet's controls take the Lakko accent, not the
+                        // platform's default blue (seen live 2026-09-26).
+                        .tint(Color.lakkoAccent)
                         .listRowBackground(Color.clear)
                     }
                 }

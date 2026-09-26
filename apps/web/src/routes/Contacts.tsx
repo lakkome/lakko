@@ -26,7 +26,16 @@
  * session, so a `null` here is transient; the fallback panel offers a real
  * way back to the sign-in form.
  */
-import { createEffect, createMemo, createSignal, on, Show, type JSX } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  on,
+  onCleanup,
+  onMount,
+  Show,
+  type JSX,
+} from "solid-js";
 import { useLocation, useNavigate } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
@@ -43,6 +52,7 @@ import { InviteLinksPanel } from "../contacts/InviteLinksPanel";
 import {
   loadAccepted,
   removeAccepted,
+  subscribeAcceptedChanged,
   upsertAccepted,
   type AcceptedContact,
 } from "../contacts/local-store";
@@ -131,6 +141,12 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       { defer: true },
     ),
   );
+  // A row the one-to-one adoption rule wrote while this route was open
+  // (`contacts/OneToOneContactAdoption.tsx`), or any other store write.
+  onMount(() => {
+    const unsubscribe = subscribeAcceptedChanged(() => setAccepted(loadAccepted()));
+    onCleanup(unsubscribe);
+  });
 
   // ---- sent requests --------------------------------------------
   const [sentVersion, setSentVersion] = createSignal(0);

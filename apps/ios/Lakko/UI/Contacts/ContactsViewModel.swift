@@ -91,6 +91,39 @@ public final class ContactsViewModel: ObservableObject {
                 self?.repositoryState = newState
             }
             .store(in: &cancellables)
+        // A one-to-one conversation IS a contact: whenever the set of
+        // conversations this device holds changes, every one-to-one peer
+        // without a contact row gets one (`ContactsRepository.adoptOneToOnePeer`).
+        chatRepository?.$state
+            .map { Set($0.threads.map(\.groupIdHex)) }
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.adoptOneToOnePeers() }
+            .store(in: &cancellables)
+    }
+
+    /// Give every one-to-one peer a contact row (see
+    /// `ContactsRepository.adoptOneToOnePeer`). The account id, when a profile
+    /// has carried one (ADR-0048 v2), rides along so the row can name the
+    /// person in a group call like an accepted one does.
+    public func adoptOneToOnePeers() {
+        guard let chatRepository else { return }
+        var accountIds: [String: Data] = [:]
+        for entry in ProfileDirectory.shared.profilesWithAccountId() {
+            accountIds[entry.signatureKeyB64] = entry.accountId
+        }
+        let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
+        let createdAt = ISO8601DateFormatter().string(from: Date())
+        for groupIdHex in chatRepository.knownGroupIdHexes {
+            guard let peer = chatRepository.oneToOnePeerSignatureKey(groupIdHex: groupIdHex) else { continue }
+            repository.adoptOneToOnePeer(
+                signatureKey: peer,
+                accountId: accountIds[base64Encode(peer)],
+                groupIdHex: groupIdHex,
+                nowMs: nowMs,
+                createdAt: createdAt
+            )
+        }
     }
 
     // MARK: - Actions

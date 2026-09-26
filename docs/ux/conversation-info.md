@@ -64,6 +64,19 @@ then the detail. What differs is what belongs in each.
 
 Reuses the contact screen that already exists.
 
+**A person you have a one-to-one conversation with is a contact, always.** The
+conversation and the contact row used to be written by different events (the
+conversation by the Welcome, the contact by Accept or by the acknowledgement of
+your own request), so a device could hold a named conversation and an empty
+Contacts tab - seen live on 2026-09-26 on a second device, which is admitted to
+the account's conversations without any contact travelling with them. Every
+client now derives the contact from the conversation: whenever the set of
+conversations changes, each one-to-one peer without a row gets one (named by
+the profile they sent, with their account id when a profile carried it), and a
+row that never recorded its conversation is completed. The "not one of your
+contacts" state is therefore unreachable from a one-to-one conversation and is
+kept only as a fallback for a roster that cannot be read.
+
 - Name and `@username`.
 - Call. Message, when the info was opened from somewhere other than the chat.
 - **Safety number** - the out-of-band check, which is the one security thing

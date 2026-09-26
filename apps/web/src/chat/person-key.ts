@@ -61,3 +61,14 @@ export function ownPersonKeyB64(identity: WasmIdentity | null): string | null {
 export function peopleCountOf(group: WasmGroup): number {
   return personKeysOf(group).length;
 }
+
+/** The other PERSON in a two-person roster (a one-to-one), else `null`:
+ *  exactly two people, one of them this device's own account. */
+export function oneToOnePeerKey(
+  memberKeysB64: readonly string[],
+  ownKeyB64: string | null,
+): string | null {
+  if (ownKeyB64 === null || memberKeysB64.length !== 2) return null;
+  const peers = memberKeysB64.filter((k) => k !== ownKeyB64);
+  return peers.length === 1 ? (peers[0] ?? null) : null;
+}

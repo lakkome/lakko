@@ -222,6 +222,10 @@ struct ContactDetailScreen: View {
                     if sections.contains(.removeContact) {
                         Button(role: .destructive) { confirmingRemove = true } label: {
                             Label("Remove contact", systemImage: "person.badge.minus")
+                                // A destructive row is red end to end; the
+                                // symbol used to keep the platform's blue tint
+                                // (seen live 2026-09-26).
+                                .foregroundStyle(Color.lakkoDanger)
                         }
                     }
                     if sections.contains(.deleteChat), chat != nil {

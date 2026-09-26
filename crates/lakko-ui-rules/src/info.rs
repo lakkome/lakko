@@ -176,7 +176,11 @@ pub enum InfoOrigin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PersonInfoCapabilities {
     /// The other person is in this device's contact list, so the contact
-    /// blocks have a record to act on.
+    /// blocks have a record to act on. Since 2026-09-26 every client derives
+    /// the contact row from the one-to-one conversation itself
+    /// (`docs/ux/conversation-info.md` section 2.1), so from a conversation
+    /// this is `true` whenever the roster can be read; `false` survives as
+    /// the fallback for a roster that cannot be.
     pub is_contact: bool,
     /// This device's membership in the conversation is over (ADR-0045 UX
     /// 6.2).

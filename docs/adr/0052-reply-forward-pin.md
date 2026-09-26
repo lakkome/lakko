@@ -26,8 +26,10 @@
   [`docs/ux/message-actions.md`](../ux/message-actions.md) section 3.1. Gates
   observed: `cargo test` on the four crates, web `tsc` + vitest + `vite build`,
   iOS `xcodebuild` build + 1736 unit tests, Android `compileDebugKotlin` + 2012
-  unit tests. Seen live only in the web Playwright harness (`?case=reply`); not
-  yet walked on two devices, so `docs/PRODUCT-READINESS.md` reads "OK (code)".
+  unit tests. Walked live the same day between the iOS simulator and the Android
+  emulator in both directions (quote on both sides, strip cleared by the send,
+  tap-to-jump highlight seen on Android); web seen in the Playwright harness
+  (`?case=reply`) and deployed to `test.lakko.me`.
 - **Decision 2 (Forward) and Decision 3 (Pin): not built.**
 
 ## Context

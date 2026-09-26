@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Combine
+import CryptoKit
 import Foundation
 import LakkoCore
 
@@ -473,6 +474,82 @@ public final class ContactsRepository: ObservableObject {
         guard !fresh.isEmpty else { return 0 }
         state = state.with(accepted: state.accepted + fresh)
         return fresh.count
+    }
+
+    // MARK: - A one-to-one conversation IS a contact
+
+    /// The one rule behind the Contacts tab: a person this account has a
+    /// one-to-one conversation with is a contact, full stop. Until 2026-09-26 a
+    /// contact row was written only by Accept and by an incoming ContactAck,
+    /// while the conversation itself arrives by another event (the Welcome, or
+    /// a second device being admitted to the account's conversations), so any
+    /// path that delivered the conversation without the acknowledgement left a
+    /// named chat and an empty Contacts tab - seen live on a second device.
+    ///
+    /// Adds a row for `signatureKey` when none exists, or completes an existing
+    /// row's `groupIdHex` when it was never recorded. Returns whether anything
+    /// changed. Never overwrites a recorded chat, a display name or an account
+    /// id the row already holds.
+    @discardableResult
+    public func adoptOneToOnePeer(
+        signatureKey: Data,
+        accountId: Data?,
+        groupIdHex: String,
+        nowMs: UInt64,
+        createdAt: String
+    ) -> Bool {
+        guard let next = Self.adopting(
+            state.accepted, signatureKey: signatureKey, accountId: accountId,
+            groupIdHex: groupIdHex, nowMs: nowMs, createdAt: createdAt)
+        else { return false }
+        state = state.with(accepted: next)
+        return true
+    }
+
+    /// The pure half of ``adoptOneToOnePeer(signatureKey:accountId:groupIdHex:nowMs:createdAt:)``:
+    /// the accepted list after adopting the peer, or `nil` when it is already
+    /// complete. A row minted here carries a synthetic request (no mailbox
+    /// message ever existed): the id is derived from the key, negative so it
+    /// can never collide with a mailbox id, and the pseudonym is zero like the
+    /// invite-link path's.
+    nonisolated static func adopting(
+        _ accepted: [AcceptedContact],
+        signatureKey: Data,
+        accountId: Data?,
+        groupIdHex: String,
+        nowMs: UInt64,
+        createdAt: String
+    ) -> [AcceptedContact]? {
+        if let idx = accepted.firstIndex(where: { $0.request.fromPubkey == signatureKey }) {
+            let old = accepted[idx]
+            guard old.groupIdHex == nil else { return nil }
+            var rows = accepted
+            rows[idx] = AcceptedContact(
+                request: old.request, groupIdHex: groupIdHex, displayName: old.displayName)
+            return rows
+        }
+        let synthetic = IncomingContactRequest(
+            messageId: syntheticContactMessageId(signatureKey: signatureKey),
+            fromPubkey: signatureKey,
+            fromAccountId: accountId,
+            fromPseudonym: Data(repeating: 0, count: 32),
+            validAfterMs: nowMs,
+            intro: nil,
+            createdAt: createdAt
+        )
+        return accepted + [AcceptedContact(request: synthetic, groupIdHex: groupIdHex)]
+    }
+
+    /// A stable, negative row id for a contact that has no mailbox message:
+    /// the first eight bytes of SHA-256 over the key, sign-forced negative.
+    /// Negative because the mailbox assigns positive ids, so the two spaces
+    /// never meet, and stable so the row keeps its identity across launches.
+    nonisolated static func syntheticContactMessageId(signatureKey: Data) -> Int64 {
+        let digest = SHA256.hash(data: signatureKey)
+        var value: UInt64 = 0
+        for byte in digest.prefix(8) { value = (value << 8) | UInt64(byte) }
+        let magnitude = Int64(value & 0x7FFF_FFFF_FFFF_FFFF)
+        return magnitude == 0 ? -1 : -magnitude
     }
 
     // MARK: - Accept / decline (local-state mutations)
