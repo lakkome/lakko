@@ -581,6 +581,23 @@ public final class ChatClient {
                     createdAt: createdAt
                 )
             }
+            // ADR-0052 decision 3 — sniff for a shared-pin envelope before the
+            // chat parser, for the same reason as the group-name arm above:
+            // the lossy-UTF-8 fallback would otherwise render it as a bubble
+            // reading `lakko/pin/v1` plus binary. Never a timeline row. It
+            // carries the MLS-authenticated `senderLeaf` onward (not a
+            // resolved key) because the receive side resolves it against the
+            // role table and the people count exactly as the group name does
+            // (owner / admin, any member of a table-less group, either
+            // participant of a one-to-one).
+            if let pin = Self.decodePinIfEnvelope(data) {
+                return .pin(
+                    messageId: messageId,
+                    op: pin,
+                    senderLeaf: senderLeaf,
+                    createdAt: createdAt
+                )
+            }
             // ADR-0023 — the identity that leaf names, resolved HERE because
             // here is where the roster is the one the message was sealed
             // under. Every downstream attribution reads this, never the leaf.
@@ -894,6 +911,25 @@ public final class ChatClient {
     /// `"lakko/group-name/v1"`). Decides nothing on its own.
     private static let groupNameEnvelopeFirstByte: UInt8 = 0x6C
 
+    /// ADR-0052 decision 3 — the shared-pin operation carried by this
+    /// application plaintext, or `nil` when it is not a well-formed pin
+    /// envelope.
+    ///
+    /// The first-byte peek only keeps an FFI call off the path for a chat
+    /// envelope (which opens with `{`); `decodePinEnvelope` is the whole
+    /// verdict — domain, exact length, version and action. An unpin is a
+    /// valid envelope (`pinned == false`) and is returned as such.
+    static func decodePinIfEnvelope(_ bytes: Data) -> FfiPinOp? {
+        guard bytes.first == pinEnvelopeFirstByte,
+              let decoded = try? decodePinEnvelope(plaintext: bytes)
+        else { return nil }
+        return decoded
+    }
+
+    /// First byte of the ADR-0052 pin domain separator (`'l'` of
+    /// `"lakko/pin/v1"`). Decides nothing on its own.
+    private static let pinEnvelopeFirstByte: UInt8 = 0x6C
+
     static func looksLikeCommitterBeacon(_ bytes: Data) -> Bool {
         guard bytes.count == committerBeaconLen,
               bytes.first == committerBeaconFirstByte
@@ -1072,6 +1108,22 @@ public enum IncomingChatEvent: Equatable {
         messageId: Int64,
         name: String,
         updatedAtMs: UInt64,
+        senderLeaf: UInt32?,
+        createdAt: String
+    )
+    /// ADR-0052 decision 3 — a shared pin or unpin of ONE message in this
+    /// conversation. Never a timeline bubble: the receive loop runs the
+    /// standing check against the LIVE group (owner / admin, any member when
+    /// there is no role table, either participant of a one-to-one), then the
+    /// strictly-newer order FOR THAT MESSAGE, and stores the action on accept
+    /// (an unpin is stored, never deleted).
+    ///
+    /// `senderLeaf` is the MLS-authenticated author, resolved against the
+    /// roster + the ADR-0022 role table at receipt; `nil` means unattributable,
+    /// so only a byte-identical re-send is accepted.
+    case pin(
+        messageId: Int64,
+        op: FfiPinOp,
         senderLeaf: UInt32?,
         createdAt: String
     )

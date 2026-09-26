@@ -644,7 +644,9 @@ final class GroupCallRecordTests: XCTestCase {
                     decodesAsGroupName: { _ in false },
                     groupNameEnvelopeLens: 30...285,
                     decodesAsProfileRequest: { _ in false },
-                    profileRequestEnvelopeLen: 26
+                    profileRequestEnvelopeLen: 26,
+                    decodesAsPin: { _ in false },
+                    pinEnvelopeLen: 31
                 ),
                 name
             )

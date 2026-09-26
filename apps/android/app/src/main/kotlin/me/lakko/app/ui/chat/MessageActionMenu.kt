@@ -30,6 +30,7 @@ import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -137,9 +138,15 @@ internal data class MessageActions(
     /** Section 5.1 (ADR-0052 decision 2) — Forward is offered on any message
      *  with an id that is not deleted and whose send is complete. */
     val canForward: Boolean = false,
+    /** Section 4.1 (ADR-0052 decision 3) — Pin sits after Forward on any
+     *  message whose send is complete and that is not deleted. */
+    val canPin: Boolean = false,
+    /** Section 4.1 — what the row reads: `Pin`, or `Unpin` when this device
+     *  can undo a pin in at least one scope. Decided by `pinMenuFor`. */
+    val pinLabel: String = "Pin",
 ) {
     /** Whether the card has anything to draw. */
-    val any: Boolean get() = canCopy || canEdit || canDelete || canReply || canForward
+    val any: Boolean get() = canCopy || canEdit || canDelete || canReply || canForward || canPin
 }
 
 /**
@@ -155,6 +162,8 @@ internal fun messageActionsFor(
      *  or one that failed, has nothing a forward could point at and may hold
      *  attachments that never reached storage; it does not offer Forward. */
     sendComplete: Boolean = true,
+    /** Section 4.1 — the row's word for this message (`Pin` / `Unpin`). */
+    pinLabel: String = "Pin",
 ): MessageActions = MessageActions(
     // Copy reads a string this device already holds and sends nothing, so it is
     // the one action that does NOT die with the membership gate. It is still
@@ -171,6 +180,12 @@ internal fun messageActionsFor(
     // still uploading, or a failed send) does not offer Forward." The id gate
     // and the deleted gate ride in `menuAvailable`, as for Reply.
     canForward = menuAvailable && sendComplete,
+    // Section 4.1 — "on any message whose send is complete and that is not
+    // deleted": the same gates as Forward. A personal pin sends nothing, so
+    // the membership gate inside `menuAvailable` is stricter than a pin
+    // strictly needs; it is kept because the menu is how the row is reached.
+    canPin = menuAvailable && sendComplete,
+    pinLabel = pinLabel,
 )
 
 /**
@@ -212,6 +227,8 @@ internal fun MessageActionMenuOverlay(
     onDismiss: () -> Unit,
     /** Section 5.1 (ADR-0052 decision 2) — Forward was chosen. */
     onForward: () -> Unit = {},
+    /** Section 4.1 (ADR-0052 decision 3) — Pin / Unpin was chosen. */
+    onPin: () -> Unit = {},
 ) {
     Popup(
         popupPositionProvider = WindowOriginProvider,
@@ -287,6 +304,7 @@ internal fun MessageActionMenuOverlay(
                             actions = actions,
                             onReply = onReply,
                             onForward = onForward,
+                            onPin = onPin,
                             onCopy = onCopy,
                             onEdit = onEdit,
                             onDelete = onDelete,
@@ -385,6 +403,7 @@ internal fun MessageActionCard(
     onDelete: () -> Unit,
     modifier: Modifier = Modifier,
     onForward: () -> Unit = {},
+    onPin: () -> Unit = {},
 ) {
     Surface(
         modifier = modifier.testTag(ACTION_CARD_TAG),
@@ -427,6 +446,15 @@ internal fun MessageActionCard(
                     onClick = onForward,
                 )
             }
+            if (actions.canPin) {
+                // Section 4.1 — after Forward: the keep-message action. The
+                // word is decided once by `pinMenuFor` and rendered here.
+                ActionRow(
+                    label = actions.pinLabel,
+                    icon = Icons.Filled.PushPin,
+                    onClick = onPin,
+                )
+            }
             if (actions.canCopy) {
                 ActionRow(
                     label = "Copy",
@@ -453,7 +481,7 @@ internal fun MessageActionCard(
                         // row gap above it.
                         .padding(top = DESTRUCTIVE_GAP),
                 ) {
-                    if (actions.canReply || actions.canForward || actions.canCopy || actions.canEdit) {
+                    if (actions.canReply || actions.canForward || actions.canPin || actions.canCopy || actions.canEdit) {
                         HorizontalDivider(
                             thickness = CARD_BORDER_WIDTH,
                             color = MaterialTheme.colorScheme.outlineVariant,

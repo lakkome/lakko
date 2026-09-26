@@ -212,8 +212,8 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
         // foreground `ChatClient.toEvent` has always run, in the same order.
         // Call-signaling proto bytes, ADR-0042/0044 push-routing-secret
         // envelopes, ADR-0045 committer-liveness beacons, ADR-0048 profile
-        // envelopes and profile requests, and ADR-0051 group names all ride
-        // the SAME
+        // envelopes and profile requests, ADR-0051 group names and ADR-0052
+        // shared pins all ride the SAME
         // group journal as chat; without this, `parseBodyEnvelope`'s deliberate
         // legacy UTF-8 fallback degrades them to a `.chat` body and the NSE
         // renders a notification full of a domain string plus raw binary.
@@ -229,7 +229,9 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
             decodesAsGroupName: Self.decodesAsGroupName,
             groupNameEnvelopeLens: Self.groupNameEnvelopeLengths,
             decodesAsProfileRequest: Self.decodesAsProfileRequest,
-            profileRequestEnvelopeLen: Self.profileRequestEnvelopeLength
+            profileRequestEnvelopeLen: Self.profileRequestEnvelopeLength,
+            decodesAsPin: Self.decodesAsPin,
+            pinEnvelopeLen: Self.pinEnvelopeLength
         ) {
             return nil
         }
@@ -372,6 +374,24 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
     /// silently narrowing this filter.
     private static var profileRequestEnvelopeLength: Int {
         Int(profileRequestEnvelopeLen())
+    }
+
+    /// The AUTHORITATIVE half of the ADR-0052 shared-pin filter: the slim
+    /// FFI's `decodePinEnvelope`. READ-ONLY: a pure decode. The NSE never
+    /// stores a pin (C-59) and holds no role table or people count to gate it
+    /// with; it only needs the yes/no that keeps a pin out of a notification
+    /// body. The foreground app applies it on its own receive path.
+    private static func decodesAsPin(_ bytes: Data) -> Bool {
+        (try? decodePinEnvelope(plaintext: bytes)) != nil
+    }
+
+    /// The exact composed length of an ADR-0052 pin envelope, read from the
+    /// slim FFI's `pinEnvelopeLen()` so the cheap pre-filter carries no
+    /// hand-copied wire number; a Rust golden pins the exported value against
+    /// the composed wire, so a revision fails Rust CI rather than silently
+    /// narrowing this filter.
+    private static var pinEnvelopeLength: Int {
+        Int(pinEnvelopeLen())
     }
 
     /// LOAD-BEARING: this does NOT persist — no `snapshotStorage()` /

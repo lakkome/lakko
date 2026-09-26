@@ -204,6 +204,12 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  *   group name; `wrongDomain` is the only "not a group name" answer. Used
  *   ONLY to classify the row out of the preview path — the SW never stores
  *   a received name (C-59). Optional so an older deps object still loads.
+ * @property {(bytes: Uint8Array) => any} [decodePinEnvelope]
+ *   ADR-0052 decision 3 — the fail-closed shared-pin-envelope codec. THROWS
+ *   an `Error` carrying a `pinError` code when the bytes are not a
+ *   well-formed pin; `wrongDomain` is the only "not a pin" answer. Used ONLY
+ *   to classify the row out of the preview path — the SW never stores a
+ *   received pin (C-59). Optional so an older deps object still loads.
  * @property {(bytes: Uint8Array) => any} [parseCallSignaling]
  *   Phase 3a3 — the prost `CallSignalingPayload` codec. THROWS on bytes that
  *   are not one. Used to tell an OFFER (ring) and an END (stop ringing) apart
@@ -763,10 +769,11 @@ function callNoticeFrom(wasm, processed, message, groupHex, nowMs) {
  * kinds before its chat parse; this is the background mirror of that
  * same two-step peek, in the same order.
  *
- * Six kinds, each its own arm below: call signaling, the ADR-0042 /
+ * Seven kinds, each its own arm below: call signaling, the ADR-0042 /
  * ADR-0044 push-routing secret, the ADR-0045 committer beacon, the
- * ADR-0048 profile, the ADR-0048 profile request and the ADR-0051 group
- * name. Each arm is a cheap byte peek gating an authoritative codec.
+ * ADR-0048 profile, the ADR-0048 profile request, the ADR-0051 group name
+ * and the ADR-0052 shared pin. Each arm is a cheap byte peek gating an
+ * authoritative codec.
  *
  * Classification ONLY — no writes, no cursor advance (C-59 / ADR-0041).
  *
@@ -792,7 +799,44 @@ function isServiceEnvelope(wasm, bytes) {
   if (isGroupNameEnvelope(wasm, bytes)) return true;
   // 6. Profile request (ADR-0048 §2 trigger 4).
   if (isProfileRequestEnvelope(wasm, bytes)) return true;
+  // 7. Shared pin (ADR-0052 decision 3).
+  if (isPinEnvelope(wasm, bytes)) return true;
   return false;
+}
+
+/**
+ * First byte of the ADR-0052 pin domain separator (`'l'` of
+ * `"lakko/pin/v1\0"`). Its own constant, like the ones above.
+ */
+const PIN_ENVELOPE_FIRST_BYTE = 0x6c;
+
+/**
+ * Arm 7 of {@link isServiceEnvelope} — the ADR-0052 shared-pin envelope.
+ *
+ * Unfiltered, a pin would be previewed as a notification body reading
+ * `lakko/pin/v1` plus binary. Same verdict rule as the group-name arm: a
+ * decode that succeeds is a pin; a throw with any `pinError` code but
+ * `wrongDomain` is a domain match refused as a whole, suppressed here too;
+ * `wrongDomain` or a code-less throw falls through to the normal parse.
+ *
+ * The pin is never kept: classification ONLY (C-59).
+ *
+ * @param {DecryptWasm} wasm
+ * @param {Uint8Array} bytes
+ * @returns {boolean}
+ */
+function isPinEnvelope(wasm, bytes) {
+  if (bytes.length === 0 || bytes[0] !== PIN_ENVELOPE_FIRST_BYTE) return false;
+  if (typeof wasm.decodePinEnvelope !== "function") return false;
+  let decoded;
+  try {
+    decoded = wasm.decodePinEnvelope(bytes);
+  } catch (err) {
+    const code = err !== null && typeof err === "object" ? /** @type {any} */ (err).pinError : undefined;
+    return typeof code === "string" && code !== "wrongDomain";
+  }
+  freeQuietly(decoded);
+  return true;
 }
 
 /**

@@ -632,6 +632,11 @@ class MultiJoinerCall private constructor(
             // sealed into the group. A relay payload names no member to answer
             // and a call peer is not a group; dropped, never answered.
             FfiIncomingEnvelopeKind.PROFILE_REQUEST -> Unit
+            // ADR-0052 decision 3 — a shared pin likewise rides the GROUP
+            // JOURNAL, where the chat receive loop checks the sender's standing
+            // under the conversation's lock. A relay payload binds the pin to
+            // no conversation and no member; dropped, never stored.
+            FfiIncomingEnvelopeKind.PIN -> Unit
         }
     }
 

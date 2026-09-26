@@ -251,6 +251,135 @@ final class NseServiceEnvelopeTests: XCTestCase {
         return payload.first == 0x01
     }
 
+    /// The frozen 13-byte ADR-0052 pin domain separator `lakko/pin/v1\0`,
+    /// built from ASCII + an explicit trailing NUL (no raw NUL in this source).
+    private static let pinDomain: Data = {
+        var d = Data("lakko/pin/v1".utf8)
+        d.append(0x00)
+        return d
+    }()
+
+    /// Stand-in for the slim FFI's `pinEnvelopeLen()` (31 — domain 13 +
+    /// version 1 + stamp 8 + action 1 + message id 8). Restated for the same
+    /// reason as ``beaconEnvelopeLen``; the Rust golden in
+    /// `crates/lakko-ffi-extension/src/pin.rs` pins the exported value against
+    /// the composed wire, and ``testPinFixtureMatchesTheAdvertisedLength``
+    /// keeps this fixture honest against the envelope this file builds.
+    private static let pinEnvelopeLen = 31
+
+    /// A well-formed pin envelope:
+    /// `domain(13) || version(1)=0x01 || updated_at_ms(8, BE) || action(1) || message_id(8, BE)`.
+    private func pinEnvelope(
+        version: UInt8 = 0x01, updatedAtMs: UInt64 = 1_700_000_000_000, action: UInt8 = 0x01,
+        messageId: Int64 = 41
+    ) -> Data {
+        var out = Self.pinDomain
+        out.append(version)
+        for shift in stride(from: 56, through: 0, by: -8) {
+            out.append(UInt8((updatedAtMs >> UInt64(shift)) & 0xFF))
+        }
+        out.append(action)
+        let id = UInt64(bitPattern: messageId)
+        for shift in stride(from: 56, through: 0, by: -8) {
+            out.append(UInt8((id >> UInt64(shift)) & 0xFF))
+        }
+        return out
+    }
+
+    /// Test double for the slim FFI's `decodePinEnvelope`, applying the same
+    /// gate `lakko_contacts::pin::decode_pin` does — domain prefix, THEN
+    /// version, THEN exact payload length, THEN a known action byte.
+    private func decodesAsPin(_ bytes: Data) -> Bool {
+        let domain = Self.pinDomain
+        guard bytes.count > domain.count, bytes.prefix(domain.count) == domain else { return false }
+        let payload = Array(bytes.dropFirst(domain.count))
+        guard payload.first == 0x01 else { return false }
+        guard payload.count == 18 else { return false }
+        return payload[9] == 0x01 || payload[9] == 0x02
+    }
+
+    // MARK: - Kind 7: shared pin (ADR-0052 decision 3)
+
+    /// WITHOUT THE ARM a pin reaches `parseBodyEnvelope` and the notification
+    /// body reads `lakko/pin/v1` plus binary — for a pin AND for an unpin.
+    func testPinAndUnpinEnvelopesAreServiceEnvelopes() {
+        for envelope in [pinEnvelope(), pinEnvelope(action: 0x02), pinEnvelope(messageId: -1)] {
+            XCTAssertTrue(
+                nseIsServiceEnvelope(
+                    envelope,
+                    decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
+                    decodesAsCommitterBeacon: decodesAsCommitterBeacon,
+                    committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
+                    decodesAsProfile: decodesAsProfile,
+                    profileEnvelopeLens: Self.profileEnvelopeLens,
+                    decodesAsGroupName: decodesAsGroupName,
+                    groupNameEnvelopeLens: Self.groupNameEnvelopeLens,
+                    decodesAsProfileRequest: decodesAsProfileRequest,
+                    profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
+                    decodesAsPin: decodesAsPin,
+                    pinEnvelopeLen: Self.pinEnvelopeLen
+                ),
+                "a pin envelope must never be rendered"
+            )
+        }
+    }
+
+    func testPinFixtureMatchesTheAdvertisedLength() {
+        XCTAssertEqual(pinEnvelope().count, Self.pinEnvelopeLen)
+    }
+
+    /// The peek accepts the real envelope and rejects the near-misses — a
+    /// beacon, a chat envelope, empty bytes.
+    func testPinPreFilter() {
+        XCTAssertTrue(nseLooksLikePin(pinEnvelope(), envelopeLen: Self.pinEnvelopeLen))
+        XCTAssertFalse(nseLooksLikePin(committerBeacon(), envelopeLen: Self.pinEnvelopeLen))
+        XCTAssertFalse(nseLooksLikePin(chatEnvelope, envelopeLen: Self.pinEnvelopeLen))
+        XCTAssertFalse(nseLooksLikePin(Data(), envelopeLen: Self.pinEnvelopeLen))
+    }
+
+    /// Bytes that PASS the peek but fail the codec are NOT suppressed BY THIS
+    /// ARM: a 31-byte legacy plaintext starting with `l`, a pin of an unknown
+    /// version, and one with an unknown action all still render. A 31-byte
+    /// group-name envelope (same first byte, same length) also clears the pin
+    /// peek and is refused by the pin codec — it is the GROUP-NAME arm that
+    /// suppresses it, which is why it is asserted on the codec and not on the
+    /// whole filter.
+    func testPinPeekAloneDoesNotSuppress() {
+        let oneByteName = groupNameEnvelope(name: "x")
+        XCTAssertEqual(oneByteName.count, Self.pinEnvelopeLen, "the collision this test exists for")
+        XCTAssertTrue(nseLooksLikePin(oneByteName, envelopeLen: Self.pinEnvelopeLen))
+        XCTAssertFalse(decodesAsPin(oneByteName), "the pin codec refuses a group name")
+        for decoy in [Data(repeating: 0x6C, count: 31), pinEnvelope(version: 0x02), pinEnvelope(action: 0x03)] {
+            XCTAssertTrue(nseLooksLikePin(decoy, envelopeLen: Self.pinEnvelopeLen))
+            XCTAssertFalse(
+                nseIsServiceEnvelope(
+                    decoy,
+                    decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
+                    decodesAsCommitterBeacon: decodesAsCommitterBeacon,
+                    committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
+                    decodesAsProfile: decodesAsProfile,
+                    profileEnvelopeLens: Self.profileEnvelopeLens,
+                    decodesAsGroupName: decodesAsGroupName,
+                    groupNameEnvelopeLens: Self.groupNameEnvelopeLens,
+                    decodesAsProfileRequest: decodesAsProfileRequest,
+                    profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
+                    decodesAsPin: decodesAsPin,
+                    pinEnvelopeLen: Self.pinEnvelopeLen
+                ))
+        }
+    }
+
+    /// A pin landing as the newest row falls back to the real chat before it.
+    func testPinAfterAChatFallsBackToTheChat() async {
+        let (result, suppressed) = await preview(rows: [
+            NseFetchedRow(id: 10, payload: Data("real message".utf8)),
+            NseFetchedRow(id: 11, payload: pinEnvelope()),
+            NseFetchedRow(id: 12, payload: pinEnvelope(action: 0x02, messageId: 7)),
+        ])
+        XCTAssertEqual(result?.body, "real message")
+        XCTAssertEqual(suppressed, 2)
+    }
+
     // MARK: - Kind 6: profile request (ADR-0048 §2 trigger 4)
 
     /// WITHOUT THE ARM a newcomer's "introduce yourselves" reaches
@@ -268,7 +397,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsGroupName: decodesAsGroupName,
                 groupNameEnvelopeLens: Self.groupNameEnvelopeLens,
                 decodesAsProfileRequest: decodesAsProfileRequest,
-                profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen
+                profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
+                decodesAsPin: decodesAsPin,
+                pinEnvelopeLen: Self.pinEnvelopeLen
             ),
             "a profile request must never be rendered"
         )
@@ -307,7 +438,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     decodesAsGroupName: decodesAsGroupName,
                     groupNameEnvelopeLens: Self.groupNameEnvelopeLens,
                     decodesAsProfileRequest: decodesAsProfileRequest,
-                    profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen
+                    profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
+                    decodesAsPin: decodesAsPin,
+                    pinEnvelopeLen: Self.pinEnvelopeLen
                 ))
         }
     }
@@ -349,7 +482,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     decodesAsGroupName: decodesAsGroupName,
                     groupNameEnvelopeLens: Self.groupNameEnvelopeLens,
                     decodesAsProfileRequest: decodesAsProfileRequest,
-                    profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen
+                    profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
+                    decodesAsPin: decodesAsPin,
+                    pinEnvelopeLen: Self.pinEnvelopeLen
                 ),
                 "a group-name envelope of \(envelope.count) bytes must never be rendered"
             )
@@ -392,7 +527,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsGroupName: decodesAsGroupName,
                 groupNameEnvelopeLens: Self.groupNameEnvelopeLens,
                 decodesAsProfileRequest: decodesAsProfileRequest,
-                profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen
+                profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
+                decodesAsPin: decodesAsPin,
+                pinEnvelopeLen: Self.pinEnvelopeLen
             ))
     }
 
@@ -429,7 +566,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsGroupName: decodesAsGroupName,
                 groupNameEnvelopeLens: Self.groupNameEnvelopeLens,
                 decodesAsProfileRequest: decodesAsProfileRequest,
-                profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen
+                profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
+                decodesAsPin: decodesAsPin,
+                pinEnvelopeLen: Self.pinEnvelopeLen
             ),
             "a v2 push-routing-secret envelope must never be rendered"
         )
@@ -473,7 +612,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsGroupName: decodesAsGroupName,
                 groupNameEnvelopeLens: Self.groupNameEnvelopeLens,
                 decodesAsProfileRequest: decodesAsProfileRequest,
-                profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen
+                profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
+                decodesAsPin: decodesAsPin,
+                pinEnvelopeLen: Self.pinEnvelopeLen
             ),
             "the codec, not the peek, is the authority"
         )
@@ -498,7 +639,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsGroupName: decodesAsGroupName,
                 groupNameEnvelopeLens: Self.groupNameEnvelopeLens,
                 decodesAsProfileRequest: decodesAsProfileRequest,
-                profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen
+                profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
+                decodesAsPin: decodesAsPin,
+                pinEnvelopeLen: Self.pinEnvelopeLen
             )
         )
     }
@@ -526,7 +669,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     decodesAsGroupName: decodesAsGroupName,
                     groupNameEnvelopeLens: Self.groupNameEnvelopeLens,
                     decodesAsProfileRequest: decodesAsProfileRequest,
-                    profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen
+                    profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
+                    decodesAsPin: decodesAsPin,
+                    pinEnvelopeLen: Self.pinEnvelopeLen
                 ),
                 "call signaling must never be rendered"
             )
@@ -555,7 +700,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsGroupName: decodesAsGroupName,
                 groupNameEnvelopeLens: Self.groupNameEnvelopeLens,
                 decodesAsProfileRequest: decodesAsProfileRequest,
-                profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen
+                profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
+                decodesAsPin: decodesAsPin,
+                pinEnvelopeLen: Self.pinEnvelopeLen
             ),
             "a committer beacon must never be rendered"
         )
@@ -656,7 +803,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsGroupName: decodesAsGroupName,
                 groupNameEnvelopeLens: Self.groupNameEnvelopeLens,
                 decodesAsProfileRequest: decodesAsProfileRequest,
-                profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen
+                profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
+                decodesAsPin: decodesAsPin,
+                pinEnvelopeLen: Self.pinEnvelopeLen
             ),
             "the codec, not the peek, is the authority"
         )
@@ -676,7 +825,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsGroupName: decodesAsGroupName,
                 groupNameEnvelopeLens: Self.groupNameEnvelopeLens,
                 decodesAsProfileRequest: decodesAsProfileRequest,
-                profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen
+                profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
+                decodesAsPin: decodesAsPin,
+                pinEnvelopeLen: Self.pinEnvelopeLen
             )
         )
     }
@@ -710,7 +861,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     decodesAsGroupName: decodesAsGroupName,
                     groupNameEnvelopeLens: Self.groupNameEnvelopeLens,
                     decodesAsProfileRequest: decodesAsProfileRequest,
-                    profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen
+                    profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
+                    decodesAsPin: decodesAsPin,
+                    pinEnvelopeLen: Self.pinEnvelopeLen
                 ),
                 "a \(envelope.count)-byte profile must never be rendered"
             )
@@ -759,7 +912,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsGroupName: decodesAsGroupName,
                 groupNameEnvelopeLens: Self.groupNameEnvelopeLens,
                 decodesAsProfileRequest: decodesAsProfileRequest,
-                profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen
+                profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
+                decodesAsPin: decodesAsPin,
+                pinEnvelopeLen: Self.pinEnvelopeLen
             ),
             "the codec, not the peek, is the authority"
         )
@@ -800,7 +955,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsGroupName: decodesAsGroupName,
                 groupNameEnvelopeLens: Self.groupNameEnvelopeLens,
                 decodesAsProfileRequest: decodesAsProfileRequest,
-                profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen
+                profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
+                decodesAsPin: decodesAsPin,
+                pinEnvelopeLen: Self.pinEnvelopeLen
             ),
             "a chat envelope must still render"
         )
@@ -815,7 +972,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsGroupName: decodesAsGroupName,
                 groupNameEnvelopeLens: Self.groupNameEnvelopeLens,
                 decodesAsProfileRequest: decodesAsProfileRequest,
-                profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen
+                profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
+                decodesAsPin: decodesAsPin,
+                pinEnvelopeLen: Self.pinEnvelopeLen
             ),
             "empty bytes are not a service envelope"
         )
@@ -832,6 +991,7 @@ final class NseServiceEnvelopeTests: XCTestCase {
         private let decodesAsProfile: (Data) -> Bool
         private let decodesAsGroupName: (Data) -> Bool
         private let decodesAsProfileRequest: (Data) -> Bool
+        private let decodesAsPin: (Data) -> Bool
         private let text: (Data) -> String
         private(set) var suppressed = 0
         var closed = false
@@ -842,6 +1002,7 @@ final class NseServiceEnvelopeTests: XCTestCase {
             decodesAsProfile: @escaping (Data) -> Bool,
             decodesAsGroupName: @escaping (Data) -> Bool,
             decodesAsProfileRequest: @escaping (Data) -> Bool,
+            decodesAsPin: @escaping (Data) -> Bool,
             text: @escaping (Data) -> String
         ) {
             self.decodesAsPushRoutingSecret = decodesAsPushRoutingSecret
@@ -849,6 +1010,7 @@ final class NseServiceEnvelopeTests: XCTestCase {
             self.decodesAsProfile = decodesAsProfile
             self.decodesAsGroupName = decodesAsGroupName
             self.decodesAsProfileRequest = decodesAsProfileRequest
+            self.decodesAsPin = decodesAsPin
             self.text = text
         }
 
@@ -863,7 +1025,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsGroupName: decodesAsGroupName,
                 groupNameEnvelopeLens: NseServiceEnvelopeTests.groupNameEnvelopeLens,
                 decodesAsProfileRequest: decodesAsProfileRequest,
-                profileRequestEnvelopeLen: NseServiceEnvelopeTests.profileRequestEnvelopeLen
+                profileRequestEnvelopeLen: NseServiceEnvelopeTests.profileRequestEnvelopeLen,
+                decodesAsPin: decodesAsPin,
+                pinEnvelopeLen: NseServiceEnvelopeTests.pinEnvelopeLen
             ) {
                 suppressed += 1
                 return nil
@@ -904,6 +1068,7 @@ final class NseServiceEnvelopeTests: XCTestCase {
             decodesAsProfile: decodesAsProfile,
             decodesAsGroupName: decodesAsGroupName,
             decodesAsProfileRequest: decodesAsProfileRequest,
+            decodesAsPin: decodesAsPin,
             text: { String(decoding: $0, as: UTF8.self) }
         )
         let result = await decryptPushPreview(

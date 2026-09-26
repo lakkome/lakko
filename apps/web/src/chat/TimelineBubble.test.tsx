@@ -132,6 +132,8 @@ function host(over: Partial<BubbleHost> = {}): BubbleHost {
     onReply: () => {},
     onJumpTo: () => {},
     onForward: () => {},
+    pinLabelOf: () => "Pin",
+    onPin: () => {},
     onOpenForwardOrigin: () => {},
     actionsAvailable: true,
     hub,
@@ -465,9 +467,10 @@ describe("the action card's width", () => {
     const { items } = openMenuOn(ownMessage("hello"));
     const labels = all("[role='menuitem'] span", items as HTMLElement).map((s) => s.textContent);
     // Section 2: the ones that produce a new message (Reply, then Forward -
-    // ADR-0052 decisions 1 and 2), then the ones that only read (Copy), then
-    // the ones that change this message (Edit), then the destructive one.
-    expect(labels).toEqual(["Reply", "Forward", "Copy", "Edit", "Delete"]);
+    // ADR-0052 decisions 1 and 2), then the one that keeps it (Pin, decision
+    // 3, after Forward per section 4.1), then the ones that only read (Copy),
+    // then the ones that change this message (Edit), then the destructive one.
+    expect(labels).toEqual(["Reply", "Forward", "Pin", "Copy", "Edit", "Delete"]);
     // "separated", and structurally so: the divider is a wrapper of its own,
     // not a border hung off the colour class.
     const del = one(".lk-msg-menu-destructive [role='menuitem']");
@@ -520,7 +523,7 @@ describe("Copy", () => {
     // Not the Edit / Delete predicate: section 3 offers Copy on "any message
     // with text", and an incoming message has no Edit row at all.
     const { items } = openMenuOn(incoming("hello"));
-    expect(labelsOf(items as HTMLElement)).toEqual(["Reply", "Forward", "Copy"]);
+    expect(labelsOf(items as HTMLElement)).toEqual(["Reply", "Forward", "Pin", "Copy"]);
   });
 
   it("is absent on a message with no text", () => {
@@ -529,15 +532,15 @@ describe("Copy", () => {
     const { items } = openMenuOn(ownMessage("", [voiceRef()]));
     expect(present(".lk-msg-menu-items")).toBe(true);
     expect((items as HTMLElement).textContent).not.toContain("Copy");
-    expect(labelsOf(items as HTMLElement)).toEqual(["Reply", "Forward", "Edit", "Delete"]);
+    expect(labelsOf(items as HTMLElement)).toEqual(["Reply", "Forward", "Pin", "Edit", "Delete"]);
   });
 
-  it("leaves an incoming media message with Reply and Forward alone in the card", () => {
-    // Nothing to copy and nothing to edit; Reply and Forward are offered on
-    // any complete message with an id (ADR-0052), so the card is drawn with
-    // those two rows.
+  it("leaves an incoming media message with Reply, Forward and Pin alone in the card", () => {
+    // Nothing to copy and nothing to edit; Reply, Forward and Pin are offered
+    // on any complete message with an id (ADR-0052), so the card is drawn
+    // with those three rows.
     const { items } = openMenuOn(incoming("", [voiceRef()]));
-    expect(labelsOf(items as HTMLElement)).toEqual(["Reply", "Forward"]);
+    expect(labelsOf(items as HTMLElement)).toEqual(["Reply", "Forward", "Pin"]);
     expect(present("[role='group'][aria-label='React']")).toBe(true);
   });
 });
@@ -698,5 +701,35 @@ describe("Forward", () => {
     expect(present(".lk-forward-line", bubble)).toBe(true);
     expect(bubble.classList.contains("chromeless")).toBe(false);
     expect(bubble.classList.contains("media-only")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pin — ADR-0052 decision 3, `message-actions.md` sections 4 and 4.1.
+// ---------------------------------------------------------------------------
+
+describe("Pin", () => {
+  it("is the THIRD row of the card, after Forward, and hands the view this message's id", () => {
+    const chosen: number[] = [];
+    const { items } = openMenuOn(incoming("hello"), { onPin: (id) => chosen.push(id) });
+    const rows = all<HTMLElement>("[role='menuitem']", items as HTMLElement);
+    expect(rows[1]?.textContent).toContain("Forward");
+    expect(rows[2]?.textContent).toContain("Pin");
+    mouse(rows[2] as HTMLElement, "click");
+    expect(chosen).toEqual([42]);
+    expect(present("[role='menu']")).toBe(false);
+  });
+
+  it("reads Unpin when the view says the message is pinned, asked about THIS message", () => {
+    const asked: number[] = [];
+    const { items } = openMenuOn(ownMessage("hello"), {
+      pinLabelOf: (id) => {
+        asked.push(id);
+        return "Unpin";
+      },
+    });
+    expect(labelsOf(items as HTMLElement)).toContain("Unpin");
+    expect(labelsOf(items as HTMLElement)).not.toContain("Pin");
+    expect(asked).toContain(42);
   });
 });

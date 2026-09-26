@@ -26,6 +26,7 @@
  *   | pushRoutingSecret     | the gated receive             | no                      |
  *   | committerBeacon       | the beacon observation store  | no                      |
  *   | group-name            | the gated group-name store    | no                      |
+ *   | pin                   | the gated pin store           | no                      |
  *
  * Typing is in-memory state in the chat view, so handing it over matches what
  * the chat would have shown had it been open this session. Read receipts are
@@ -83,6 +84,8 @@ export interface BackgroundEventPlan {
   readonly messageOps: readonly MessageOpEvent[];
   /** ADR-0051 — shared group names, for the role-gated receive. */
   readonly groupNames: readonly Of<"group-name">[];
+  /** ADR-0052 decision 3 — shared pins, for the role-gated receive. */
+  readonly pins: readonly Of<"pin">[];
   /** Proposals the receipt gate STORED; a refused one is a pending request
    *  nowhere. */
   readonly storedProposals: readonly Of<"membershipProposal">[];
@@ -101,6 +104,7 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
   const pushSecrets: Of<"pushRoutingSecret">[] = [];
   const beacons: Of<"committerBeacon">[] = [];
   const groupNames: Of<"group-name">[] = [];
+  const pins: Of<"pin">[] = [];
   const readReceipts: Of<"op">[] = [];
   const messageOps: MessageOpEvent[] = [];
   const storedProposals: Of<"membershipProposal">[] = [];
@@ -153,6 +157,9 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
       case "group-name":
         groupNames.push(e);
         break;
+      case "pin":
+        pins.push(e);
+        break;
       default: {
         const unhandled: never = e;
         throw new Error(
@@ -172,6 +179,7 @@ export function planBackgroundEvents(events: readonly IncomingChatEvent[]): Back
     readReceipts,
     messageOps,
     groupNames,
+    pins,
     storedProposals,
     sawCommit,
   };

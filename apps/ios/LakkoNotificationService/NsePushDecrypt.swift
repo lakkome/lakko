@@ -909,6 +909,24 @@ public func nseLooksLikeGroupName(_ bytes: Data, envelopeLens: ClosedRange<Int>)
     envelopeLens.contains(bytes.count) && bytes.first == groupNameEnvelopeFirstByte
 }
 
+/// First byte of the ADR-0052 pin domain separator `lakko/pin/v1\0` — the
+/// same ASCII `l` as every other in-group envelope domain, kept as its own
+/// constant for the same reason as the others: retiring one wire format must
+/// not re-point another's peek.
+private let pinEnvelopeFirstByte: UInt8 = 0x6C
+
+/// Cheap PRE-FILTER for an ADR-0052 shared-pin envelope: the exact length plus
+/// the first domain byte, the beacon's shape. The envelope has no variable
+/// field (a version, a stamp, an action and a message id), so the length is a
+/// total test of the size; it is injected (the slim FFI's `pinEnvelopeLen()`)
+/// rather than written as `31` because a stale literal fails in the dangerous
+/// direction — a too-narrow peek silently stops suppressing pins and a
+/// notification reads `lakko/pin/v1` plus binary. The peek decides nothing;
+/// `decodePinEnvelope` is the verdict.
+public func nseLooksLikePin(_ bytes: Data, envelopeLen: Int) -> Bool {
+    bytes.count == envelopeLen && bytes.first == pinEnvelopeFirstByte
+}
+
 /// `true` when an already-DECRYPTED MLS application body is an in-group SERVICE
 /// envelope that must NEVER be rendered as a notification.
 ///
@@ -964,6 +982,12 @@ public func nseLooksLikeGroupName(_ bytes: Data, envelopeLens: ClosedRange<Int>)
 /// C-59 forbids this process), so the foreground app answers it on its own
 /// receive path. Like the beacon it is fixed-length, and the length arrives
 /// from the slim FFI (`profileRequestEnvelopeLen()`) for the same reason.
+///
+/// ADR-0052 decision 3 adds a seventh, the shared-pin envelope (a pin or an
+/// unpin of one message), with the group name's treatment: recognised and
+/// suppressed, never stored (the NSE has no role table or people count to
+/// gate it with, and no durable store to write). Fixed-length like the
+/// beacon; the length arrives from the slim FFI (`pinEnvelopeLen()`).
 public func nseIsServiceEnvelope(
     _ bytes: Data,
     decodesAsPushRoutingSecret: (Data) -> Bool,
@@ -974,7 +998,9 @@ public func nseIsServiceEnvelope(
     decodesAsGroupName: (Data) -> Bool,
     groupNameEnvelopeLens: ClosedRange<Int>,
     decodesAsProfileRequest: (Data) -> Bool,
-    profileRequestEnvelopeLen: Int
+    profileRequestEnvelopeLen: Int,
+    decodesAsPin: (Data) -> Bool,
+    pinEnvelopeLen: Int
 ) -> Bool {
     if nseLooksLikeCallSignaling(bytes) { return true }
     if nseLooksLikePushRoutingSecret(bytes), decodesAsPushRoutingSecret(bytes) { return true }
@@ -990,6 +1016,9 @@ public func nseIsServiceEnvelope(
     }
     if nseLooksLikeProfileRequest(bytes, envelopeLen: profileRequestEnvelopeLen),
        decodesAsProfileRequest(bytes) {
+        return true
+    }
+    if nseLooksLikePin(bytes, envelopeLen: pinEnvelopeLen), decodesAsPin(bytes) {
         return true
     }
     return false

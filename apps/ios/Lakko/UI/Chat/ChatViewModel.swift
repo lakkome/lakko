@@ -389,6 +389,13 @@ public final class ChatViewModel: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
+        // ADR-0052 decision 3 — an accepted pin action (received or taken
+        // here) rebuilds the pinned bar in place.
+        repository.$pinRevision
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
     }
 
     /// ADR-0024 — `true` while ``ChatScreen`` is on-screen. The screen
@@ -2447,6 +2454,143 @@ public final class ChatViewModel: ObservableObject {
               })
         else { return nil }
         return (origin, messageId)
+    }
+
+    // MARK: - ADR-0052 decision 3 — pin
+
+    /// The pin sheet that is open, `nil` when none is (UX spec section 4.1
+    /// "The sheet"). Carries the message and the rows already narrowed to it.
+    public struct PinSheetRequest: Identifiable, Equatable {
+        public let message: ChatMessage
+        public let options: [PinSheetOption]
+        public var id: Int64 { message.messageId }
+    }
+
+    @Published public private(set) var pinSheet: PinSheetRequest?
+
+    /// Which pin the bar shows (section 4: one at a time, newest first). An
+    /// index into ``pinnedEntries``; clamped on read so a list that shrank
+    /// under it wraps to the newest rather than pointing past the end.
+    @Published public var pinBarIndex: Int = 0
+
+    /// Whether the bar's list of every pin is open (section 4.1 "a `list`
+    /// control at the far end opens every pin as rows").
+    @Published public var pinListOpen: Bool = false
+
+    /// Section 4 — the bar's entries: shared before personal, newest first,
+    /// only messages this device holds. Derived on every read from the two
+    /// stores and the timeline; ``ChatRepository/pinRevision`` and `messages`
+    /// drive the re-render.
+    var pinnedEntries: [PinnedEntry] {
+        PinnedBar.entries(
+            shared: repository.sharedPins(groupIdHex: groupIdHex),
+            personal: repository.personalPins(groupIdHex: groupIdHex),
+            held: messages)
+    }
+
+    /// The entry the bar shows now, `nil` when there is nothing to show.
+    var pinnedBarEntry: PinnedEntry? {
+        let entries = pinnedEntries
+        guard !entries.isEmpty else { return nil }
+        return entries[PinnedBar.clamped(pinBarIndex, count: entries.count)]
+    }
+
+    /// The two lines the bar and the list draw for one pin: the author (or
+    /// `For you` for a personal pin, so a private bookmark never looks like
+    /// something the room can see) and the excerpt — the text, or the same
+    /// one-word stand-in the reply quote uses for a message without text.
+    func pinnedLines(for entry: PinnedEntry) -> (author: String, excerpt: String) {
+        guard let message = messages.first(where: { $0.messageId == entry.messageId }) else {
+            return (author: "", excerpt: ReplySnapshot.missingExcerpt)
+        }
+        let snapshot = ReplySnapshot.replySnapshot(
+            for: message, authorLabel: replyAuthorLabel(for: message))
+        let lines = ReplySnapshot.replyQuoteLines(snapshot)
+        switch entry.scope {
+        case .personal: return (author: "For you", excerpt: lines.excerpt)
+        case .shared: return (author: lines.name, excerpt: lines.excerpt)
+        }
+    }
+
+    /// Section 4 — a tap on the bar: the message to scroll to (the shown
+    /// pin), after which the bar advances to the next older pin, wrapping past
+    /// the oldest. `nil` when the bar is empty.
+    func tapPinnedBar() -> Int64? {
+        let entries = pinnedEntries
+        guard !entries.isEmpty else { return nil }
+        let index = PinnedBar.clamped(pinBarIndex, count: entries.count)
+        pinBarIndex = PinnedBar.advanced(from: index, count: entries.count)
+        return entries[index].messageId
+    }
+
+    /// Whether this conversation is a one-to-one (two PEOPLE), which is what
+    /// turns `Pin for everyone` into `Pin for both`.
+    var isOneToOneForPins: Bool {
+        repository.memberCount(groupIdHex: groupIdHex) == 2
+    }
+
+    /// Section 4.1 — may this device set or clear a shared pin here? Read from
+    /// the live group on every call, never cached.
+    var maySetSharedPin: Bool {
+        repository.maySetSharedPin(groupIdHex: groupIdHex)
+    }
+
+    /// The word the action card shows for `message`: `Pin`, `Unpin`, or no row
+    /// (a row that has not landed, a tombstone, or a dead membership).
+    func pinMenuState(for message: ChatMessage) -> PinMenuState {
+        guard messageActionsAvailable, PinnedBar.isPinnable(message) else { return .unavailable }
+        let shared = repository.sharedPins(groupIdHex: groupIdHex)[message.messageId]?.pinned == true
+        let personal = repository.personalPins(groupIdHex: groupIdHex)[message.messageId] != nil
+        return PinSheet.menuState(sharedPinned: shared, personalPinned: personal, maySetShared: maySetSharedPin)
+    }
+
+    /// The `Pin` / `Unpin` row was chosen: open the sheet, or — an unpin with
+    /// one way to do it — act at once.
+    func beginPin(_ message: ChatMessage) {
+        guard pinMenuState(for: message) != .unavailable else { return }
+        let shared = repository.sharedPins(groupIdHex: groupIdHex)[message.messageId]?.pinned == true
+        let personal = repository.personalPins(groupIdHex: groupIdHex)[message.messageId] != nil
+        let options = PinSheet.options(
+            sharedPinned: shared, personalPinned: personal,
+            maySetShared: maySetSharedPin, oneToOne: isOneToOneForPins)
+        guard !options.isEmpty else { return }
+        if let atOnce = PinSheet.actsAtOnce(options) {
+            choosePin(atOnce, for: message)
+            return
+        }
+        pinSheet = PinSheetRequest(message: message, options: options)
+    }
+
+    func cancelPinSheet() {
+        pinSheet = nil
+    }
+
+    /// A row of the sheet was tapped. A personal choice is a local flag and
+    /// lands at once; a shared one is sent first and applied only after the
+    /// send succeeded (the sender applies it the way a receiver would). A
+    /// failed send is said once, in the send-error slot, and changes nothing.
+    func choosePin(_ choice: PinChoice, for message: ChatMessage) {
+        pinSheet = nil
+        let target = message.messageId
+        guard target > 0 else { return }
+        switch choice {
+        case .pinForMe:
+            repository.setPersonalPin(groupIdHex: groupIdHex, messageId: target, pinned: true)
+        case .unpinForMe:
+            repository.setPersonalPin(groupIdHex: groupIdHex, messageId: target, pinned: false)
+        case .pinForEveryone, .unpinForEveryone:
+            let pinned = choice == .pinForEveryone
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    try await self.repository.setSharedPin(
+                        groupIdHex: self.groupIdHex, messageId: target, pinned: pinned)
+                } catch {
+                    NSLog("ADR-0052 shared pin failed: \(error)")
+                    self.sendError = pinned ? "Could not pin. Try again." : "Could not unpin. Try again."
+                }
+            }
+        }
     }
 
     /// Ask this conversation's screen to scroll to `messageId` when it is on

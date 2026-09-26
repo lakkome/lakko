@@ -95,6 +95,11 @@ export interface BubbleHost {
   /** ADR-0052 decision 2 — Forward was chosen on this message: the view opens
    *  the "Forward to" picker for it. */
   onForward: (messageId: number) => void;
+  /** ADR-0052 decision 3 — the word the pin row reads for this message
+   *  (`pin-sheet.ts`), reactive: `Pin` or `Unpin`. */
+  pinLabelOf: (messageId: number) => "Pin" | "Unpin";
+  /** ADR-0052 decision 3 — the pin row was chosen on this message. */
+  onPin: (messageId: number) => void;
   /** ADR-0052 decision 2 — the "Forwarded from" line was pressed. The view
    *  goes to the original when it holds the origin conversation, else does
    *  nothing and says nothing; `undefined` when the forward carried no
@@ -193,6 +198,11 @@ export function TimelineBubble(
     }
     if (ev.kind === "group-name") {
       // ADR-0051 — consumed by the group-name gate, never pushed into
+      // `rows()`. Defensive.
+      return null;
+    }
+    if (ev.kind === "pin") {
+      // ADR-0052 decision 3 — consumed by the pin gate, never pushed into
       // `rows()`. Defensive.
       return null;
     }
@@ -816,6 +826,17 @@ function ChatBubbleBody(
               canForward={props.messageId !== undefined && props.ack === "sent"}
               onForward={() => {
                 if (props.messageId !== undefined) props.onForward(props.messageId);
+              }}
+              /* Section 4.1 — offered on "any message whose send is complete
+                 and that is not deleted": the same gate as Forward (the menu
+                 never opens on a deleted message). */
+              pinLabel={
+                props.messageId !== undefined && props.ack === "sent"
+                  ? props.pinLabelOf(props.messageId)
+                  : null
+              }
+              onPin={() => {
+                if (props.messageId !== undefined) props.onPin(props.messageId);
               }}
               /* Nothing is sent and nothing is stored: the text goes from this
                  device's memory to this device's clipboard. */

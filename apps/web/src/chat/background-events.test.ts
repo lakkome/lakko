@@ -82,6 +82,14 @@ const groupName: IncomingChatEvent = {
   createdAt: T,
 };
 const receipt: IncomingChatEvent = { ...edit, messageId: 11, op: "read-receipt", target: 1, text: "" };
+const pin: IncomingChatEvent = {
+  kind: "pin",
+  messageId: 13,
+  pin: { messageId: 1, pinned: true, updatedAtMs: 7n },
+  senderLeaf: 1,
+  senderKey: "k" as never,
+  createdAt: T,
+};
 
 describe("planBackgroundEvents", () => {
   const plan = planBackgroundEvents([
@@ -97,6 +105,7 @@ describe("planBackgroundEvents", () => {
     groupName,
     receipt,
     profileRequest,
+    pin,
   ]);
 
   it("files chat and system rows into the timeline, in journal order", () => {
@@ -137,6 +146,12 @@ describe("planBackgroundEvents", () => {
     expect(plan.groupNames.map((e) => e.messageId)).toEqual([10]);
     expect(plan.toView.some((e) => e.kind === "group-name")).toBe(false);
     expect(plan.timeline.some((e) => (e.messageId as number) === 10)).toBe(false);
+  });
+
+  it("settles a pin where it is received, never in the view (ADR-0052)", () => {
+    expect(plan.pins.map((e) => e.messageId)).toEqual([13]);
+    expect(plan.toView.some((e) => e.kind === "pin")).toBe(false);
+    expect(plan.timeline.some((e) => (e.messageId as number) === 13)).toBe(false);
   });
 
   it("settles a read receipt in the durable store and still hands it to the view (ADR-0024)", () => {

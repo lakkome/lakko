@@ -169,6 +169,90 @@ They belong in the ADR, and the lesson from ADR-0042 through ADR-0044 applies
 directly: *who may write* and *which write survives* are two different questions,
 and answering only the first leaves the second to arrival order.
 
+### 4.1 Pin: the flow
+
+The authority and ordering rules the section above left to the ADR are settled
+there (ADR-0052 decision 3, closed 2026-09-26); this section is what a person
+sees, in the order they see it.
+
+**The row.** `Pin` sits in the action card after `Forward`, on any message
+whose send is complete and that is not deleted. On a message that is already
+pinned in one scope the row reads `Unpin`; on one pinned in both it still reads
+`Unpin` and the sheet below asks which.
+
+**The sheet.** Tapping `Pin` opens a two-row choice:
+
+- `Pin for me` - always offered.
+- `Pin for everyone` - offered only when this device may set a shared pin:
+  the owner or an admin of a group's role table, any member of a group with no
+  table, either participant of a one-to-one. In a one-to-one the row reads
+  `Pin for both`. A plain group member sees a one-row sheet and no explanation;
+  the missing row is the explanation, as it is for `Add members`.
+
+Under each row one line says what it does: "Only on this device" and "Every
+member sees it". `Unpin` on a message pinned in both scopes offers `Unpin for
+me` and `Unpin for everyone` (`Unpin for both`); in one scope it acts at once.
+Unpinning a shared pin needs the same standing as setting one, so a plain
+member holding a message pinned by an admin sees `Unpin for me` only, and only
+when they also pinned it for themselves; otherwise the row is `Pin` and the
+sheet offers `Pin for me` alone.
+
+**The bar.** Section 4 describes it: under the header, one pin at a time,
+author and excerpt on one line, newest first, shared before personal; tap =
+scroll to that message with the short highlight the reply jump uses, then
+advance to the next older pin, wrapping past the oldest; a stacked indicator
+beside the excerpt shows how many and which; a `list` control at the far end
+opens every pin as rows, each row jumping to its message and closing the list.
+A personal pin carries the label `For you` in place of the author, in the bar
+and in the list, so a message pinned only for me never looks like one the room
+can see. The excerpt is the message's text, or the same one-word stand-in the
+reply quote uses for a message without text (`Photo`, `Voice message`, `GIF`,
+`File`). A pinned message this device does not hold (not yet downloaded,
+purged) is not shown in the bar until it is; the pin itself is kept. A pinned
+message that is deleted leaves the bar, shared or personal, and its shared
+pin record is dropped with the message.
+
+**When it is empty.** No pins, no bar. The header does not move.
+
+**What travels** (shared only). One envelope per action - pin or unpin of ONE
+message, stamped with the sender's clock - sent as an ordinary message on the
+conversation's journal and never shown as a bubble. The sender applies it
+locally the same way a receiver would, since it never receives its own message
+back. A re-send (the growth republish below) carries the ORIGINAL stamp.
+
+**What a receiver does**, in this order and under the conversation's own
+serializing lock, because the comparison is only meaningful against current
+state:
+
+1. Resolve the sender to the account key at receipt (C-68) and check standing:
+   owner or admin of the live role table; any member when there is no table;
+   either participant in a one-to-one. Refuse otherwise - drop, no error, no
+   bubble.
+2. Compare the stamp with the stored stamp FOR THAT MESSAGE (`pinIsNewer`,
+   strictly greater). Equal or older is dropped: a re-send is not an update,
+   and a late-arriving pin can never undo a later unpin.
+3. Store `(messageId -> pinned?, stamp)`. An unpin is stored, not deleted:
+   the stamp is what keeps a stale pin of the same message from coming back.
+
+**Growth.** When the conversation grows, whoever may set shared pins re-sends
+the current shared pins verbatim - stamp and all - through the same throttled
+path the group name uses, so a newcomer sees the room's pins. Unpins are not
+re-sent; a newcomer holds nothing to undo.
+
+**Background.** A pin envelope is a service envelope: the web service worker,
+the Android background decrypt and the iOS extension recognise it and show no
+notification for it, as they do for a rename.
+
+**Not in this build, stated rather than hidden:** the channel author's pin (a
+channel post is a different carrier), and a shared pin in the search or the
+conversation list preview. Both are unbuilt; neither is decided against.
+
+**Data each client keeps.** Per device: a set of personal pins keyed on
+`(conversation, messageId)`. Per conversation: the shared pin map
+`messageId -> {pinned, updatedAtMs}`, under the conversation's lock, wiped
+with the conversation. The bar is derived from the two and the held messages,
+never stored.
+
 ## 5. Forward: the original author is a name and nothing more
 
 A forwarded message carries the original author's **display name as
@@ -266,7 +350,8 @@ architecture step; it is not a design.
   answer either way.
 - **Pin (for me)** - per-device storage keyed on conversation and message.
 - **Pin (for everyone)** - a group envelope, an authority rule, an ordering rule
-  and a conflict answer, per §4.
+  and a conflict answer, per §4. Built: `lakko-contacts::pin` (one
+  message per envelope, `pinIsNewer` on both FFI surfaces), §4.1.
 - **Select** - no wire surface; a UI mode plus bulk forms of Delete and Forward.
 - **Read by** - nothing new. `ADR-0024` watermarks are already received and
   already keyed on the sender's signature key; they are simply not rendered.

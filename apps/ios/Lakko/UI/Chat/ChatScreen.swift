@@ -184,6 +184,30 @@ public struct ChatScreen: View {
     @ViewBuilder
     private var chatBody: some View {
         VStack(spacing: 0) {
+            // ADR-0052 decision 3 / `docs/ux/message-actions.md` section 4 —
+            // the pinned bar, under the header: one pin at a time, newest
+            // first, shared before personal. A child of this VStack, so the
+            // list starts lower while there is a pin and nothing is covered.
+            // No pins, no bar; the header does not move.
+            if let entry = viewModel.pinnedBarEntry {
+                let entries = viewModel.pinnedEntries
+                let lines = viewModel.pinnedLines(for: entry)
+                PinnedBarView(
+                    entry: entry,
+                    index: PinnedBar.clamped(viewModel.pinBarIndex, count: entries.count),
+                    count: entries.count,
+                    author: lines.author,
+                    excerpt: lines.excerpt,
+                    onTap: {
+                        // Section 4 — scroll to the shown pin with the reply
+                        // jump's highlight, then advance (wrapping).
+                        if let messageId = viewModel.tapPinnedBar() {
+                            jumpToQuoted(messageId)
+                        }
+                    },
+                    onList: { viewModel.pinListOpen = true }
+                )
+            }
             // `docs/ux/calls.md` section 2.1.1 — the ONE call surface this
             // screen owns: a call arriving in a MUTED conversation, offered
             // here rather than thrown across the screen. It is a child of this
@@ -288,6 +312,36 @@ public struct ChatScreen: View {
                     onCancel: { viewModel.cancelForward() }
                 )
             }
+        }
+        // ADR-0052 decision 3 / section 4.1 — the pin sheet: who is this pin
+        // for. A row acts at once and dismisses; Cancel does nothing.
+        .sheet(
+            item: Binding(
+                get: { viewModel.pinSheet },
+                set: { request in if request == nil { viewModel.cancelPinSheet() } }
+            )
+        ) { request in
+            PinScopeSheet(
+                options: request.options,
+                onChoose: { choice in viewModel.choosePin(choice, for: request.message) },
+                onCancel: { viewModel.cancelPinSheet() }
+            )
+        }
+        // Section 4.1 — every pin as rows; a row jumps to its message and
+        // closes the list.
+        .sheet(isPresented: $viewModel.pinListOpen) {
+            PinnedListSheet(
+                entries: viewModel.pinnedEntries,
+                lines: { viewModel.pinnedLines(for: $0) },
+                onPick: { entry in
+                    viewModel.pinListOpen = false
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(350))
+                        jumpToQuoted(entry.messageId)
+                    }
+                },
+                onClose: { viewModel.pinListOpen = false }
+            )
         }
         .navigationTitle(headline)
         .navigationBarTitleDisplayMode(.inline)
@@ -637,7 +691,12 @@ public struct ChatScreen: View {
                                 // picker; the attribution line leads to the
                                 // original when this device holds it.
                                 onForward: { viewModel.beginForward(entry.message) },
-                                onForwardTap: jumpToForwardOrigin
+                                onForwardTap: jumpToForwardOrigin,
+                                // ADR-0052 decision 3 / section 4.1 — `Pin`
+                                // or `Unpin` after Forward; the sheet decides
+                                // who it is for.
+                                pinState: viewModel.pinMenuState(for: entry.message),
+                                onPin: { viewModel.beginPin(entry.message) }
                             )
                             // Tighter inside a run, a clear gap between runs.
                             .padding(.top, entry.startsRun ? 10 : 2)
@@ -1373,6 +1432,14 @@ struct MessageRow: View {
     /// ADR-0052 decision 2 / section 5.1 — the "Forwarded from" line was
     /// tapped. The screen decides whether it leads anywhere.
     var onForwardTap: (ForwardRef) -> Void = { _ in }
+    /// ADR-0052 decision 3 / section 4.1 — which word the card shows for this
+    /// message (`Pin`, `Unpin`, or no row). Decided by the view model, which
+    /// holds the two pin stores and this device's standing; the row is a pure
+    /// renderer of it.
+    var pinState: PinMenuState = .unavailable
+    /// ADR-0052 decision 3 — the menu's `Pin` / `Unpin`: open the sheet, or
+    /// act at once when there is only one way to unpin.
+    var onPin: () -> Void = {}
 
     /// `docs/ux/message-actions.md` — where the menu goes when it opens, `nil`
     /// outside a ``MessageMenuHost``.
@@ -1626,7 +1693,10 @@ struct MessageRow: View {
     private var menuActions: [MessageMenuAction] {
         MessageMenuAction.offered(
             canReply: canReply, canForward: canForward, canEditOrDelete: canEditOrDelete,
-            hasText: canCopy)
+            hasText: canCopy,
+            // Section 4.1 — on any message whose send is complete and that
+            // is not deleted, which is the set Forward is offered on.
+            pin: canForward ? pinState : .unavailable)
     }
 
     /// Make a bubble the thing the menu opens on.
@@ -1691,6 +1761,8 @@ struct MessageRow: View {
                         onReply()
                     case .forward:
                         onForward()
+                    case .pin, .unpin:
+                        onPin()
                     case .copy:
                         // Decided here because this is what knows which text the
                         // person can see.

@@ -299,6 +299,22 @@ public fun ChatScreen(
     val timeline = remember(state.messages, zone, use24h) {
         buildTimeline(state.messages, System.currentTimeMillis(), zone, use24h, locale)
     }
+    // ADR-0052 decision 3 / UX 4.1 — the pins. The bar is DERIVED from the two
+    // stores and the held messages, never stored: a pin whose message this
+    // device does not hold, or holds deleted, is simply not in the list.
+    val sharedPins by viewModel.sharedPins.collectAsStateWithLifecycle()
+    val personalPins by viewModel.personalPins.collectAsStateWithLifecycle()
+    val mayPinShared by viewModel.mayPinForEveryone.collectAsStateWithLifecycle()
+    val pinEntries = remember(state.messages, sharedPins, personalPins) {
+        me.lakko.app.chat.pinBarEntries(sharedPins, personalPins, state.messages)
+    }
+    // The bar's position: newest first, advanced by a tap, wrapping past the
+    // oldest. A change in WHICH pins exist shows the newest again.
+    var pinCursor by remember { mutableStateOf(0) }
+    LaunchedEffect(pinEntries.map { it.messageId }) { pinCursor = 0 }
+    // The scope sheet for one message (`null` when closed), and the list.
+    var pinSheet by remember { mutableStateOf<Pair<Long, me.lakko.app.chat.PinMenu>?>(null) }
+    var pinListOpen by remember { mutableStateOf(false) }
     // UX 3.1 — the target is found by its id in the timeline THIS device
     // holds; when it is not there the tap does nothing and nothing is said.
     // The timeline's rows come first in the lazy list, before the pending
@@ -684,6 +700,68 @@ public fun ChatScreen(
             )
         }
 
+        // ADR-0052 decision 3 / UX 4.1 — the pinned bar: one pin at a time,
+        // shared before personal, newest first. Tap = jump with the reply
+        // highlight, then advance (wrapping). No pins, no bar.
+        if (pinEntries.isNotEmpty()) {
+            val pinIndex = me.lakko.app.chat.clampPinIndex(pinCursor, pinEntries.size)
+            val pinEntry = pinEntries[pinIndex]
+            val pinnedMessage = state.messages.firstOrNull { it.messageId == pinEntry.messageId }
+            if (pinnedMessage != null) {
+                PinnedBar(
+                    // A personal pin says `For you` in place of the author, so
+                    // a message pinned only for me never looks like one the
+                    // room can see.
+                    author = if (pinEntry.scope == me.lakko.app.chat.PinScope.PERSONAL) {
+                        me.lakko.app.chat.PIN_FOR_YOU_LABEL
+                    } else {
+                        timelineAuthorLabel(pinnedMessage)
+                    },
+                    excerpt = me.lakko.app.chat.pinExcerpt(pinnedMessage),
+                    position = pinIndex,
+                    count = pinEntries.size,
+                    onTap = {
+                        jumpToMessage(pinEntry.messageId)
+                        pinCursor = me.lakko.app.chat.advancePinIndex(pinIndex, pinEntries.size)
+                    },
+                    onOpenList = { pinListOpen = true },
+                )
+            }
+        }
+        if (pinListOpen) {
+            PinListSheet(
+                entries = pinEntries,
+                authorOf = { entry ->
+                    if (entry.scope == me.lakko.app.chat.PinScope.PERSONAL) {
+                        me.lakko.app.chat.PIN_FOR_YOU_LABEL
+                    } else {
+                        state.messages.firstOrNull { it.messageId == entry.messageId }
+                            ?.let(timelineAuthorLabel).orEmpty()
+                    }
+                },
+                excerptOf = { entry ->
+                    state.messages.firstOrNull { it.messageId == entry.messageId }
+                        ?.let { me.lakko.app.chat.pinExcerpt(it) }.orEmpty()
+                },
+                onPick = { entry ->
+                    pinListOpen = false
+                    jumpToMessage(entry.messageId)
+                },
+                onDismiss = { pinListOpen = false },
+            )
+        }
+        pinSheet?.let { (messageId, menu) ->
+            PinScopeSheet(
+                menu = menu,
+                oneToOne = !isGroupChat,
+                onPick = { action ->
+                    pinSheet = null
+                    viewModel.onPinAction(messageId, action)
+                },
+                onDismiss = { pinSheet = null },
+            )
+        }
+
         callNotice?.let { notice ->
             AlertDialog(
                 onDismissRequest = viewModel::dismissCallNotice,
@@ -764,6 +842,11 @@ public fun ChatScreen(
                         }
                         val row = item as TimelineItem.Row
                         val msg = row.message
+                        val pinMenu = me.lakko.app.chat.pinMenuFor(
+                            sharedPinned = sharedPins[msg.messageId]?.pinned == true,
+                            personalPinned = msg.messageId in personalPins,
+                            mayShared = mayPinShared,
+                        )
                         MessageRow(
                             msg = msg,
                             // UX 5.2 — a run's first row gets the wide gap, the
@@ -867,6 +950,22 @@ public fun ChatScreen(
                             },
                             onJumpToForward = jumpToForward,
                             highlighted = msg.messageId != 0L && highlightedMessageId == msg.messageId,
+                            // ADR-0052 decision 3 / UX 4.1 — the row's word
+                            // and the sheet's choices, decided once here from
+                            // the collected stores so a pin arriving from the
+                            // poll re-labels the row in place. Section 4.1: a
+                            // Pin always opens the sheet, even a one-row one (the
+                            // missing row is the explanation); only an Unpin in
+                            // one scope acts at once.
+                            pinLabel = pinMenu.label,
+                            onPin = {
+                                val single = pinMenu.actions.singleOrNull()
+                                if (single != null && pinMenu.label == "Unpin") {
+                                    viewModel.onPinAction(msg.messageId, single)
+                                } else {
+                                    pinSheet = msg.messageId to pinMenu
+                                }
+                            },
                             onReact = { emoji ->
                                 viewModel.onReactToMessage(msg.messageId, emoji)
                             },
@@ -1189,6 +1288,10 @@ private fun MessageRow(
     onForward: () -> Unit = {},
     /** UX 5.1 — this row's "Forwarded from" line was tapped. */
     onJumpToForward: (ForwardRef) -> Unit = {},
+    /** ADR-0052 decision 3 / UX 4.1 — Pin / Unpin was chosen on this message. */
+    onPin: () -> Unit = {},
+    /** UX 4.1 — the row's word, `Pin` or `Unpin`, decided by the caller. */
+    pinLabel: String = "Pin",
 ) {
     val gapAbove = if (firstInRun) 8.dp else 2.dp
     // UX 3.1 — "the surface tint used for the pressed state": Material's
@@ -1223,6 +1326,8 @@ private fun MessageRow(
                 onJumpToReply = onJumpToReply,
                 onForward = onForward,
                 onJumpToForward = onJumpToForward,
+                onPin = onPin,
+                pinLabel = pinLabel,
                 // ADR-0024 — own bubble: compute the read tick.
                 readState = ownReadStateFor(
                     messageId = msg.messageId,
@@ -1287,6 +1392,8 @@ private fun MessageRow(
                     onJumpToReply = onJumpToReply,
                     onForward = onForward,
                     onJumpToForward = onJumpToForward,
+                    onPin = onPin,
+                    pinLabel = pinLabel,
                     // Incoming bubbles never show our read state.
                     readState = OwnReadState.None,
                     // UX section 4 — incoming on the sunken surface.
@@ -1480,6 +1587,10 @@ internal fun Bubble(
     onForward: () -> Unit = {},
     /** UX 5.1 — the "Forwarded from" line was tapped. */
     onJumpToForward: (ForwardRef) -> Unit = {},
+    /** ADR-0052 decision 3 / UX 4.1 — Pin / Unpin was chosen on this message. */
+    onPin: () -> Unit = {},
+    /** UX 4.1 — the row's word, `Pin` or `Unpin`, decided by the caller. */
+    pinLabel: String = "Pin",
 ) {
     // ADR-0023 — every affordance is gated on the message having a
     // real DS messageId (0 ⇒ a not-yet-acked outgoing row that no
@@ -1710,6 +1821,8 @@ internal fun Bubble(
                         // UX 5.1 — no Forward on a row still sending or
                         // one that failed.
                         sendComplete = msg.ack == Ack.SENT,
+                        // UX 4.1 — `Pin` or `Unpin`, decided by the screen.
+                        pinLabel = pinLabel,
                     ),
                     reactions = REACTION_EMOJIS,
                     onReact = { emoji ->
@@ -1729,6 +1842,10 @@ internal fun Bubble(
                     onForward = {
                         menuOpen = false
                         onForward()
+                    },
+                    onPin = {
+                        menuOpen = false
+                        onPin()
                     },
                     onCopy = {
                         menuOpen = false

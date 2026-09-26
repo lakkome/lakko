@@ -5,6 +5,7 @@ package me.lakko.app.push
 
 import me.lakko.app.chat.looksLikeCallSignaling
 import me.lakko.app.chat.looksLikeGroupNameEnvelope
+import me.lakko.app.chat.looksLikePinEnvelope
 import me.lakko.app.chat.looksLikeProfileEnvelope
 import me.lakko.app.profile.looksLikeProfileRequestEnvelope
 
@@ -147,7 +148,8 @@ internal enum class BackgroundPayloadKind {
     /** A call offer / end / answer / candidate. Never rendered; an offer rings. */
     CALL_SIGNALING,
 
-    /** Machine-to-machine: routing secret, committer beacon, profile, group name. */
+    /** Machine-to-machine: routing secret, committer beacon, profile, group
+     *  name, profile request, shared pin. */
     SERVICE_ENVELOPE,
 
     /** Anything else — a real chat envelope, or legacy plain UTF-8 text. */
@@ -225,6 +227,14 @@ private fun isServiceEnvelopeOtherThanCall(
     // the foreground answers when it next reads the journal, which is when
     // the asker's request is actually read.
     if (looksLikeProfileRequestEnvelope(payload)) return true
+
+    // Kind 7 — ADR-0052 decision 3, a shared pin / unpin. The same
+    // NUL-terminated-prefix shape (`lakko/pin/v1`), the same foreground
+    // peek, so the two paths cannot drift. Suppressed only, as a rename is:
+    // applying a pin is a WRITE under the conversation's lock, and this
+    // path is read-only (C-59); the foreground applies it when it next
+    // reads the journal.
+    if (looksLikePinEnvelope(payload)) return true
 
     return false
 }

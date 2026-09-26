@@ -57,6 +57,10 @@ use lakko_contacts::invite::{
 use lakko_contacts::media_state::{
     compose_media_state as rust_compose_media_state, decode_media_state as rust_decode_media_state,
 };
+use lakko_contacts::pin::{
+    compose_pin as rust_compose_pin, decode_pin as rust_decode_pin,
+    pin_is_newer as rust_pin_is_newer, PinAction as RustPinAction, PinError, PinOp as RustPinOp,
+};
 use lakko_contacts::profile::{
     compose_profile as rust_compose_profile, decode_profile as rust_decode_profile,
     normalize_display_name as rust_normalize_display_name,
@@ -122,6 +126,13 @@ fn profile_error_value(e: ProfileError) -> JsValue {
 /// `"name.controlOrFormatCharacter"`, `"truncated"`, …
 fn group_name_error_value(e: GroupNameError) -> JsValue {
     coded_error(&e.to_string(), "groupNameError", &e.code())
+}
+
+/// Thrown for a pin envelope refused by its wire shape: an `Error` with a
+/// `pinError` code — `"wrongDomain"`, `"badLength"`, `"unknownVersion"`,
+/// `"unknownAction"`.
+fn pin_error_value(e: PinError) -> JsValue {
+    coded_error(&e.to_string(), "pinError", e.code())
 }
 
 /// Turn caller-supplied fields into the canonical core profile: trim the
@@ -681,6 +692,102 @@ pub fn decode_group_name_envelope(plaintext: &[u8]) -> Result<WasmGroupName, JsV
 #[must_use]
 pub fn group_name_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u64) -> bool {
     rust_group_name_is_newer(incoming_updated_at_ms, stored_updated_at_ms)
+}
+
+// ============================================================================
+// Shared-pin envelope — ADR-0052 decision 3
+// ============================================================================
+
+/// One shared-pin operation on one message. Mirror of
+/// [`lakko_contacts::pin::PinOp`].
+///
+/// **A pin received from someone else is that person's assertion about the
+/// whole conversation, and the sender's authority is the RECEIVER's check**:
+/// resolve the MLS sender leaf to the account key at receipt (C-68), read the
+/// live role table, accept only from the owner or an admin (any member when
+/// the group carries no role table; either participant of a one-to-one), then
+/// keep it only when `pinIsNewer` than the stored stamp **for that message**,
+/// the whole read-decide-write under the per-group lock. Persist the stamp
+/// and re-emit it VERBATIM on a re-send.
+#[wasm_bindgen(js_name = PinOp)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WasmPinOp {
+    message_id: i64,
+    pinned: bool,
+    updated_at_ms: u64,
+}
+
+impl From<RustPinOp> for WasmPinOp {
+    fn from(op: RustPinOp) -> Self {
+        Self {
+            message_id: op.message_id,
+            pinned: matches!(op.action, RustPinAction::Pin),
+            updated_at_ms: op.updated_at_ms,
+        }
+    }
+}
+
+#[wasm_bindgen(js_class = PinOp)]
+impl WasmPinOp {
+    /// DS `messageId` of the message, as a `bigint`.
+    #[wasm_bindgen(getter, js_name = messageId)]
+    pub fn message_id(&self) -> i64 {
+        self.message_id
+    }
+
+    /// `true` = pinned for everyone; `false` = no longer pinned.
+    #[wasm_bindgen(getter)]
+    pub fn pinned(&self) -> bool {
+        self.pinned
+    }
+
+    /// Sender-clock UNIX milliseconds, as a `bigint`.
+    #[wasm_bindgen(getter, js_name = updatedAtMs)]
+    pub fn updated_at_ms(&self) -> u64 {
+        self.updated_at_ms
+    }
+}
+
+/// Compose a shared-pin envelope (ADR-0052 decision 3) — the inner plaintext
+/// to publish as an MLS application message on the conversation's journal.
+/// Infallible: the envelope has no variable field.
+#[wasm_bindgen(js_name = composePinEnvelope)]
+#[must_use]
+pub fn compose_pin_envelope(message_id: i64, pinned: bool, updated_at_ms: u64) -> Vec<u8> {
+    rust_compose_pin(&RustPinOp {
+        message_id,
+        action: if pinned {
+            RustPinAction::Pin
+        } else {
+            RustPinAction::Unpin
+        },
+        updated_at_ms,
+    })
+}
+
+/// Strictly decode a shared-pin envelope (ADR-0052 decision 3). Fail-closed:
+/// anything malformed is refused as a whole.
+///
+/// Use `dispatchIncomingEnvelope` when the plaintext might be any kind.
+///
+/// # Errors
+///
+/// Throws an `Error` with a `pinError` code (`"wrongDomain"`, `"badLength"`,
+/// `"unknownVersion"`, `"unknownAction"`).
+#[wasm_bindgen(js_name = decodePinEnvelope)]
+pub fn decode_pin_envelope(plaintext: &[u8]) -> Result<WasmPinOp, JsValue> {
+    rust_decode_pin(plaintext)
+        .map(WasmPinOp::from)
+        .map_err(pin_error_value)
+}
+
+/// `true` when a pin action stamped `incomingUpdatedAtMs` must replace the
+/// stored action **for the same message**. Strictly greater wins; equal is
+/// not newer, so a re-send of the stored action is not an update.
+#[wasm_bindgen(js_name = pinIsNewer)]
+#[must_use]
+pub fn pin_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u64) -> bool {
+    rust_pin_is_newer(incoming_updated_at_ms, stored_updated_at_ms)
 }
 
 /// Prepare what a person typed as their display name: trim, `undefined` for
@@ -1549,6 +1656,12 @@ pub enum WasmIncomingEnvelopeKind {
     /// `payload` is empty; answer with the own profile through the throttled
     /// growth path; never render it.
     ProfileRequest = 8,
+    /// A shared pin or unpin of one message (ADR-0052 decision 3). The
+    /// decoded operation rides the `pin` getter of [`WasmIncomingEnvelope`];
+    /// `payload` is empty. Never render it as a chat bubble; the sender's
+    /// authority is the receiver's role-table check, then `pinIsNewer` for
+    /// that message.
+    Pin = 9,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -1563,6 +1676,7 @@ pub struct WasmIncomingEnvelope {
     mint_epoch: Option<u64>,
     profile: Option<WasmProfile>,
     group_name: Option<WasmGroupName>,
+    pin: Option<WasmPinOp>,
 }
 
 #[wasm_bindgen(js_class = IncomingEnvelope)]
@@ -1620,6 +1734,13 @@ impl WasmIncomingEnvelope {
     pub fn group_name(&self) -> Option<WasmGroupName> {
         self.group_name.clone()
     }
+
+    /// Set only for `Pin` (ADR-0052): the decoded pin operation. `undefined`
+    /// for every other kind.
+    #[wasm_bindgen(getter)]
+    pub fn pin(&self) -> Option<WasmPinOp> {
+        self.pin.clone()
+    }
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts
@@ -1648,6 +1769,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             mint_epoch: None,
             profile: None,
             group_name: None,
+            pin: None,
         },
         IncomingEnvelope::CallKeyPackage(p) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::CallKeyPackage,
@@ -1656,6 +1778,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             mint_epoch: None,
             profile: None,
             group_name: None,
+            pin: None,
         },
         IncomingEnvelope::MediaState { camera_on } => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::MediaState,
@@ -1664,6 +1787,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             mint_epoch: None,
             profile: None,
             group_name: None,
+            pin: None,
         },
         IncomingEnvelope::PushRoutingSecret { mint_epoch, secret } => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::PushRoutingSecret,
@@ -1672,6 +1796,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             mint_epoch: Some(mint_epoch),
             profile: None,
             group_name: None,
+            pin: None,
         },
         IncomingEnvelope::CommitterBeacon => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::CommitterBeacon,
@@ -1680,6 +1805,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             mint_epoch: None,
             profile: None,
             group_name: None,
+            pin: None,
         },
         IncomingEnvelope::Profile(p) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::Profile,
@@ -1688,6 +1814,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             mint_epoch: None,
             profile: Some(p.into()),
             group_name: None,
+            pin: None,
         },
         IncomingEnvelope::GroupName(g) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::GroupName,
@@ -1696,6 +1823,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             mint_epoch: None,
             profile: None,
             group_name: Some(g.into()),
+            pin: None,
         },
         IncomingEnvelope::ProfileRequest => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::ProfileRequest,
@@ -1704,6 +1832,16 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             mint_epoch: None,
             profile: None,
             group_name: None,
+            pin: None,
+        },
+        IncomingEnvelope::Pin(op) => WasmIncomingEnvelope {
+            kind: WasmIncomingEnvelopeKind::Pin,
+            payload: Vec::new(),
+            camera_on: None,
+            mint_epoch: None,
+            profile: None,
+            group_name: None,
+            pin: Some(op.into()),
         },
         IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::IntroMessage,
@@ -1712,6 +1850,7 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             mint_epoch: None,
             profile: None,
             group_name: None,
+            pin: None,
         },
     })
 }

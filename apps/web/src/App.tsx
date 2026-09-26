@@ -44,6 +44,7 @@ import { OneToOneContactAdoption } from "./contacts/OneToOneContactAdoption";
 import { PowActivityIndicator } from "./ui/PowActivityIndicator";
 import { ProfileProvider } from "./profile/ProfileContext";
 import { GroupNameProvider } from "./chat/GroupNameContext";
+import { PinProvider } from "./chat/PinContext";
 import { ReadWatermarkProvider } from "./chat/ReadWatermarkContext";
 import { CallLogProvider } from "./calls/CallLogContext";
 import { WakeNavigator } from "./push/WakeNavigator";
@@ -106,6 +107,10 @@ const RootLayout: Component<RouteSectionProps> = (props) => (
  *     the same reasons, and ABOVE the mailbox, whose Welcome joins title
  *     from it.
  *
+ *   <PinProvider> — ADR-0052 decision 3 pinned messages: the per-conversation
+ *     store of shared and personal pins, the role-gated receive and the
+ *     growth re-send. Beside the group-name provider, for the same reasons.
+ *
  *   <MailboxProvider> — the identity-mailbox receive loop (contact
  *     requests, acks, Welcomes) for the whole signed-in session, and
  *     the pending-request list the Contacts route renders. Inside
@@ -139,6 +144,7 @@ const App: Component = () => (
       <DeviceGroupSyncProvider>
         <ProfileProvider>
         <GroupNameProvider>
+        <PinProvider>
         <ReadWatermarkProvider>
         <CallLogProvider>
         <MailboxProvider>
@@ -195,6 +201,7 @@ const App: Component = () => (
         </MailboxProvider>
         </CallLogProvider>
         </ReadWatermarkProvider>
+        </PinProvider>
         </GroupNameProvider>
         </ProfileProvider>
       </DeviceGroupSyncProvider>

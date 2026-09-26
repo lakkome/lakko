@@ -38,7 +38,35 @@
   section 5.1 (the Forward row, the "Forward to" picker, re-encryption of every
   attachment, the attribution line, tap-to-jump across conversations). Walked
   live web -> iOS, iOS -> iOS and Android -> Android; see PRODUCT-READINESS.
-- **Decision 3 (Pin): not built.**
+- **Decision 3 (Pin): built end to end 2026-09-26** - core
+  (`lakko-contacts::pin`: a fixed 31-byte envelope naming ONE message, pin or
+  unpin, stamped by the sender's clock; `pin_is_newer` strictly greater per
+  message; `IncomingEnvelope::Pin`; fuzz `pin_decode`), both FFI surfaces
+  (`composePinEnvelope` / `decodePinEnvelope` / `pinIsNewer` + the `Pin`
+  dispatch kind) and the NSE extension (decode + length only), and all three
+  clients per [`docs/ux/message-actions.md`](../ux/message-actions.md)
+  section 4.1: the `Pin` / `Unpin` row after Forward, the scope sheet (`Pin
+  for me` always, `Pin for everyone` / `Pin for both` only with standing),
+  the personal per-device set and the shared per-conversation map (an unpin
+  stored, never deleted), the receive gate (sender resolved at receipt, owner
+  or admin of the live role table, any member of a table-less group, either
+  participant of a one-to-one, then the per-message order, all under the
+  per-group lock), the growth re-send with the original stamps, the
+  background-filter arms, and the pinned bar (one at a time, shared before
+  personal, `For you` on a personal pin, tap = jump then advance, a list).
+  **Walked live the same day:** the personal pin on web, iOS and Android
+  (the `For you` bar on each); the shared pin in a one-to-one between the
+  iOS simulator and the Android emulator in both directions - `Pin for both`
+  from Android put the bar on iOS within seconds (`Anna Weber` on the
+  Android side, `You` on the iOS side), and `Unpin` from iOS took it down on
+  Android. **Not walked:** a shared pin sent or received by the web client
+  and the owner/admin gate in a group - no account at hand was owner or
+  admin of a group shared with another device, and web had no one-to-one
+  with one; both rest on the unit tests (web drives the real wasm). Two
+  defects found on the walk and closed: the iOS scope sheet's fixed detent
+  clipped its only row (the height now counts the navigation bar), and
+  Android acted at once on a one-row `Pin` where the spec says the one-row
+  sheet is the explanation. Channel pins are unbuilt (section 4.1).
 
 ## Context
 

@@ -53,8 +53,8 @@ public enum MessageLongPress {
 
 /// One row of the action card.
 ///
-/// Section 3 lists nine actions; four of them exist today. Forward, Pin,
-/// Select and Read by each need wire or storage surface that is not built
+/// Section 3 lists nine actions; seven of them exist today (Pin is one word
+/// with two rows). Select and Read by each need surface that is not built
 /// (section 6 is the handover to the ADR), so they are deliberately absent
 /// rather than present and dead: a row that cannot work is worse than no row.
 public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
@@ -68,6 +68,16 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
     /// a tombstone: a row still sending or one that failed has nothing that
     /// can be forwarded yet.
     case forward
+
+    /// ADR-0052 decision 3 — opens the pin sheet (section 4.1): `Pin for me`
+    /// always, `Pin for everyone` when this device has the standing. Any
+    /// landed message that is not a tombstone.
+    case pin
+
+    /// ADR-0052 decision 3 — the same row on a message already pinned in a
+    /// scope this device can clear: acts at once in one scope, asks which in
+    /// two.
+    case unpin
 
     /// Puts the message text on the clipboard. Nothing leaves the device.
     case copy
@@ -84,6 +94,8 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .reply: return "Reply"
         case .forward: return "Forward"
+        case .pin: return "Pin"
+        case .unpin: return "Unpin"
         case .copy: return "Copy"
         case .edit: return "Edit"
         case .delete: return "Delete"
@@ -94,6 +106,8 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .reply: return "arrowshape.turn.up.left"
         case .forward: return "arrowshape.turn.up.right"
+        case .pin: return "pin"
+        case .unpin: return "pin.slash"
         case .copy: return "doc.on.doc"
         case .edit: return "pencil"
         case .delete: return "trash"
@@ -111,13 +125,15 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
     /// actions come first, then the ones that only read, then the ones that
     /// change this message, and the destructive one comes last and separated.
     /// Reply and Forward start a new message, Copy reads, Edit changes, Delete
-    /// destroys, so with today's five the order falls out — and it will keep
-    /// falling out when Pin arrives beside Edit.
+    /// destroys, so the order falls out. Pin is the one placed by a more
+    /// specific sentence: section 4.1 puts it "in the action card after
+    /// Forward", so it sits there rather than beside Edit.
     ///
     /// React is NOT in this list, which is the whole point of section 2: it is a
     /// row of its own above the bubble, not an item in this card.
     public static func offered(
-        canReply: Bool, canForward: Bool, canEditOrDelete: Bool, hasText: Bool
+        canReply: Bool, canForward: Bool, canEditOrDelete: Bool, hasText: Bool,
+        pin: PinMenuState = .unavailable
     ) -> [MessageMenuAction] {
         var actions: [MessageMenuAction] = []
         // Section 3.1 — any message with an id; a tombstone and a row that
@@ -126,6 +142,14 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         // Section 5.1 — any landed message that is not a tombstone; a row
         // still sending, or one whose send failed, cannot be forwarded yet.
         if canForward { actions.append(.forward) }
+        // Section 4.1 — `Pin` after Forward, on any message whose send is
+        // complete and that is not deleted; `Unpin` when it is pinned in a
+        // scope this device can clear.
+        switch pin {
+        case .pin: actions.append(.pin)
+        case .unpin: actions.append(.unpin)
+        case .unavailable: break
+        }
         // Section 3 — "any message with text". A message with only an
         // attachment has nothing to put on the clipboard, and a tombstone has
         // nothing left at all.

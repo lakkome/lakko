@@ -58,6 +58,10 @@
 //!   for the ADR-0051 group-name envelope. Decode returns the name (it is
 //!   not personal data and may title a preview) but nothing here composes,
 //!   orders or persists one: acceptance stays the app's decision (C-59).
+//! - [`pin::decode_pin_envelope`] + [`pin::pin_envelope_len`] — the same
+//!   filter question for the ADR-0052 shared-pin envelope. Decode returns the
+//!   operation (to word a preview); nothing here composes, orders or persists
+//!   one (C-59).
 //!
 //! There is deliberately **no compose / send / call / channel / transport
 //! surface**: the NSE only reads and decrypts, then discards. It NEVER writes
@@ -78,6 +82,7 @@ pub mod attachments;
 pub mod call_signaling;
 pub mod committer_beacon;
 pub mod group_name;
+pub mod pin;
 pub mod profile;
 pub mod profile_request;
 pub mod push_routing;

@@ -1643,6 +1643,118 @@ a.ghost.small.lk-wide-only {
   color: var(--surface-muted);
 }
 
+/* ADR-0052 decision 3 / docs/ux/message-actions.md section 4 — the pinned
+   bar under the chat header: one pin at a time, a thin stacked indicator
+   (how many, which one) at the leading edge, the author or `For you` and the
+   excerpt on one line, and a list control at the trailing end. It shares the
+   header's surface and bottom border so it reads as part of the header
+   rather than as a banner over the timeline. */
+.lk-pinned-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px 4px 16px;
+  background: var(--surface-elevated);
+  border-bottom: 1px solid var(--surface-border);
+  flex: 0 0 auto;
+  min-width: 0;
+}
+@media (max-width: 720px) {
+  .lk-pinned-bar {
+    padding-left: 8px;
+  }
+}
+.lk-pinned-bar-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 8px 4px 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.lk-pinned-bar-main:hover,
+.lk-pinned-bar-main:focus-visible {
+  background: var(--surface-hover);
+}
+.lk-pinned-bar-stack {
+  flex: 0 0 3px;
+  align-self: stretch;
+  min-height: 34px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.lk-pinned-bar-seg {
+  flex: 1;
+  border-radius: 2px;
+  background: var(--surface-border);
+}
+.lk-pinned-bar-seg.lit {
+  background: var(--accent);
+}
+.lk-pinned-bar-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  font-size: 13px;
+  line-height: 17px;
+}
+.lk-pinned-bar-name {
+  color: var(--accent);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A personal pin is labelled `For you`, in the muted colour rather than the
+   accent, so it never looks like something the room can see. */
+.lk-pinned-bar-name.personal,
+.lk-pinned-row .lk-row-title.personal {
+  color: var(--surface-muted);
+  font-weight: 500;
+}
+.lk-pinned-bar-excerpt {
+  color: var(--surface-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lk-pinned-bar .lk-pinned-bar-list {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  color: var(--surface-muted);
+}
+/* The rows of the pin list and the pin sheet: real buttons in the list's
+   row idiom, text on the left. */
+.lk-pinned-row,
+.lk-pin-option {
+  width: 100%;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.lk-pinned-row .lk-row-body,
+.lk-pin-option .lk-row-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
 /* The recovery phrase as 24 numbered slots. */
 .lk-phrase-input {
   display: flex;

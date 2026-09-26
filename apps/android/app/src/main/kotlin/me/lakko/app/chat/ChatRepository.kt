@@ -3219,6 +3219,8 @@ public class ChatRepository(
                 emoji = null,
                 ownKey = ownKey,
             )
+            // ADR-0052 decision 3 — the deleted message's pins go with it.
+            dropPinsOfDeletedMessages(groupIdHex, record)
             persistMessageLogBestEffort()
             publishThreadList()
         }
@@ -3748,6 +3750,205 @@ public class ChatRepository(
             // an owner / admin holding the name re-sends it (original stamp),
             // on the same throttled + jittered schedule.
             groupNameRepublish.onGrowth(groupIdHex)
+            // ADR-0052 decision 3 — and the shared pins, verbatim with their
+            // original stamps, on the same schedule.
+            pinRepublish.onGrowth(groupIdHex)
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0052 decision 3 — shared and personal pins
+    // -----------------------------------------------------------------
+
+    /** The growth re-send scheduler for the shared pins (the group-name shape). */
+    private val pinRepublish: me.lakko.app.profile.ProfileRepublishScheduler =
+        me.lakko.app.profile.ProfileRepublishScheduler(
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+            publish = { groupIdHex -> republishPinsIfHolder(groupIdHex) },
+        )
+
+    /** The conversation's shared pin map as this device holds it (unpins included). */
+    public fun sharedPins(groupIdHex: String): Map<Long, StoredPin> =
+        PinStore.loadShared(applicationContext, currentAccountIdB64.get(), groupIdHex)
+
+    /** This device's personal pins in the conversation, `messageId -> pinnedAtMs`. */
+    public fun personalPins(groupIdHex: String): Map<Long, ULong> =
+        PinStore.loadPersonal(applicationContext, currentAccountIdB64.get(), groupIdHex)
+
+    /** Two PEOPLE in the conversation (ADR-0050 — devices do not count). */
+    private fun isOneToOne(group: Group): Boolean =
+        try {
+            personKeysOf(group.members()).size == 2
+        } catch (_: Throwable) {
+            false
+        }
+
+    /**
+     * Whether this device may set or clear a shared pin in [groupIdHex]: the
+     * local half of the receive gate ([mayPinForEveryone]). Fails closed when
+     * the role cannot be read in a role-table group.
+     */
+    public fun mayPinForEveryone(groupIdHex: String): Boolean {
+        val identity = canonicalIdentity.get() ?: return false
+        val record = groups[groupIdHex] ?: return false
+        val oneToOne = isOneToOne(record.group)
+        val hasTable = try {
+            record.group.groupRoles() != null
+        } catch (_: Throwable) {
+            true // unreadable: treat as a table this device cannot see through
+        }
+        val role = try {
+            record.group.ownRole(identity)
+        } catch (_: Throwable) {
+            null
+        }
+        return mayPinForEveryone(ownRole = role, hasRoleTable = hasTable, isOneToOne = oneToOne)
+    }
+
+    /**
+     * ADR-0052 decision 3 — the receive gate. Called from the poll's locked
+     * apply region (per-group lock + provider lock held), so the standing
+     * read, the stored-row read, the verdict and the write are one serialized
+     * read-decide-write against CURRENT state. Never touches the timeline.
+     * An unpin is stored, not deleted.
+     */
+    private fun receivePin(
+        group: Group,
+        groupIdHex: String,
+        senderKey: MemberIdentity?,
+        incoming: uniffi.lakko_ffi_uniffi.FfiPinOp,
+    ) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val senderBytes = senderKey?.let {
+            try {
+                java.util.Base64.getDecoder().decode(it)
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+        }
+        val shared = PinStore.loadShared(applicationContext, accountIdB64, groupIdHex)
+        val verdict = pinVerdict(
+            senderSignatureKey = senderBytes,
+            owner = roleTableOwner(group),
+            isOneToOne = isOneToOne(group),
+            incomingUpdatedAtMs = incoming.updatedAtMs,
+            stored = shared[incoming.messageId],
+            isNewer = { a, b -> uniffi.lakko_ffi_uniffi.pinIsNewer(a, b) },
+        )
+        if (!verdict.accepts) {
+            android.util.Log.i("ChatRepository", "ADR-0052 pin refused: $verdict")
+            return
+        }
+        try {
+            val next = LinkedHashMap(shared)
+            next[incoming.messageId] = StoredPin(pinned = incoming.pinned, updatedAtMs = incoming.updatedAtMs)
+            PinStore.saveShared(applicationContext, accountIdB64, groupIdHex, next)
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0052 pin not stored", cause)
+        }
+    }
+
+    /** Pin or unpin [messageId] for this device only. Nothing is sent. */
+    public fun setPersonalPin(groupIdHex: String, messageId: Long, pinned: Boolean) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val next = LinkedHashMap(PinStore.loadPersonal(applicationContext, accountIdB64, groupIdHex))
+        if (pinned) next[messageId] = System.currentTimeMillis().toULong() else next.remove(messageId)
+        PinStore.savePersonal(applicationContext, accountIdB64, groupIdHex, next)
+    }
+
+    /**
+     * Pin or unpin [messageId] for everyone: compose the envelope with this
+     * device's clock, publish it into the group, then apply it locally the
+     * way a receiver would (the sender never receives its own message back).
+     * Throws on a failed send; the caller shows the error.
+     */
+    public suspend fun setSharedPin(groupIdHex: String, messageId: Long, pinned: Boolean) {
+        val identity = canonicalIdentity.get() ?: throw IllegalStateException("not bootstrapped")
+        val record = groups[groupIdHex] ?: throw IllegalStateException("unknown group")
+        val accountIdB64 = currentAccountIdB64.get() ?: throw IllegalStateException("no session")
+        val stamp = System.currentTimeMillis().toULong()
+        val op = uniffi.lakko_ffi_uniffi.FfiPinOp(messageId = messageId, pinned = pinned, updatedAtMs = stamp)
+        val envelope = withContext(mlsDispatcher) { uniffi.lakko_ffi_uniffi.composePinEnvelope(op) }
+        withContext(mlsDispatcher) {
+            broadcastControlToGroup(
+                identity = identity,
+                groupIdHex = groupIdHex,
+                group = record.group,
+                envelope = envelope,
+            )
+        }
+        // The local apply, under the same per-group lock a receiver holds, so
+        // the stamp is compared against the current stored row (C-62).
+        groupLock(groupIdHex).withLock {
+            val shared = PinStore.loadShared(applicationContext, accountIdB64, groupIdHex)
+            val stored = shared[messageId]
+            if (stored == null || uniffi.lakko_ffi_uniffi.pinIsNewer(stamp, stored.updatedAtMs)) {
+                val next = LinkedHashMap(shared)
+                next[messageId] = StoredPin(pinned = pinned, updatedAtMs = stamp)
+                PinStore.saveShared(applicationContext, accountIdB64, groupIdHex, next)
+            }
+        }
+    }
+
+    /**
+     * ADR-0052 decision 3 — the growth re-send: a device with the standing to
+     * set shared pins re-sends the current PINNED records verbatim (original
+     * stamps, never a fresh clock read, so a re-send can never clobber a later
+     * action). Unpins are not re-sent; a newcomer holds nothing to undo.
+     */
+    private suspend fun republishPinsIfHolder(groupIdHex: String): Boolean {
+        val identity = canonicalIdentity.get() ?: return false
+        val record = groups[groupIdHex] ?: return false
+        if (readIsActive { record.group.isActive() } == false) return false
+        val pinned = sharedPins(groupIdHex).filterValues { it.pinned }
+        if (pinned.isEmpty()) return false
+        if (!mayPinForEveryone(groupIdHex)) return false
+        var sent = false
+        for ((messageId, pin) in pinned) {
+            val envelope = try {
+                uniffi.lakko_ffi_uniffi.composePinEnvelope(
+                    uniffi.lakko_ffi_uniffi.FfiPinOp(messageId = messageId, pinned = true, updatedAtMs = pin.updatedAtMs),
+                )
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0052 stored pin refused by the composer", cause)
+                continue
+            }
+            try {
+                broadcastControlToGroup(
+                    identity = identity,
+                    groupIdHex = groupIdHex,
+                    group = record.group,
+                    envelope = envelope,
+                )
+                sent = true
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0052 pin not re-sent", cause)
+            }
+        }
+        return sent
+    }
+
+    /**
+     * Section 4.1 — a pinned message that is deleted leaves the bar and its
+     * pin records go with it. Called after a batch that applied a delete, and
+     * after this device's own delete; a store with no pins costs one read.
+     */
+    private fun dropPinsOfDeletedMessages(groupIdHex: String, record: GroupRecord) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        try {
+            val shared = PinStore.loadShared(applicationContext, accountIdB64, groupIdHex)
+            val personal = PinStore.loadPersonal(applicationContext, accountIdB64, groupIdHex)
+            if (shared.isEmpty() && personal.isEmpty()) return
+            val deleted = record.snapshot().asSequence().filter { it.deleted && it.messageId != 0L }.map { it.messageId }.toHashSet()
+            if (deleted.isEmpty()) return
+            if (shared.keys.any { it in deleted }) {
+                PinStore.saveShared(applicationContext, accountIdB64, groupIdHex, shared.filterKeys { it !in deleted })
+            }
+            if (personal.keys.any { it in deleted }) {
+                PinStore.savePersonal(applicationContext, accountIdB64, groupIdHex, personal.filterKeys { it !in deleted })
+            }
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0052 pins of deleted messages not dropped", cause)
         }
     }
 
@@ -4452,6 +4653,12 @@ public class ChatRepository(
                     // per group (C-62 sub-invariant 5).
                     receiveGroupName(record.group, groupIdHex, senderKey, name)
                 },
+                pinSink = { senderKey, op ->
+                    // ADR-0052 decision 3 — same critical section as the group
+                    // name: the standing read, the stored-row read, the verdict
+                    // and the write are one serialized read-decide-write.
+                    receivePin(record.group, groupIdHex, senderKey, op)
+                },
                 profileRequestSink = { senderKey ->
                     // ADR-0048 trigger 4 — inside the poll's provider critical
                     // section, where the own-identity read is safe; the answer
@@ -4497,6 +4704,11 @@ public class ChatRepository(
                     )
                 },
             )
+            // ADR-0052 decision 3 — a delete that landed takes its message's
+            // pins with it (section 4.1: no tombstone in the bar).
+            if (result.events.any { it is IncomingChatEvent.Op && it.op == MessageOp.Delete }) {
+                dropPinsOfDeletedMessages(groupIdHex, record)
+            }
             // ADR-0024 — a receipt advanced the watermark: persist it off the lock.
             persistReadWatermarksIfReceipts(groupIdHex, record, result.events)
             // The chat list's unread badge: incoming chat messages applied
@@ -5080,6 +5292,8 @@ public class ChatRepository(
             // ADR-0051 — the shared group names held for this account go too.
             if (accountIdB64 != null) {
                 GroupNameStore.deleteAccount(applicationContext, accountIdB64)
+                // ADR-0052 decision 3 — and every pin, shared or personal.
+                PinStore.deleteAccount(applicationContext, accountIdB64)
                 // ADR-0048 trigger 4 — and when this device last asked each
                 // group for names: a fresh install asks again.
                 profileRequestStore.deleteAccount(accountIdB64)
@@ -5223,6 +5437,8 @@ public class ChatRepository(
         profileRepublish.reset()
         // ADR-0051 — and the group-name re-send timing with it.
         groupNameRepublish.reset()
+        // ADR-0052 decision 3 — and the pin re-send timing.
+        pinRepublish.reset()
         // A previous session's group-call records name calls in groups this
         // account may not be in.
         mutableGroupCalls.value = emptyMap()
@@ -5903,6 +6119,12 @@ public class ChatRepository(
         } catch (cause: Throwable) {
             android.util.Log.w("ChatRepository", "ADR-0045 delete chat: known groups", cause)
         }
+        // ADR-0052 decision 3 — the pins are wiped with the conversation.
+        try {
+            PinStore.deleteGroup(applicationContext, accountIdB64, groupIdHex)
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0052 delete chat: pins", cause)
+        }
         // LAST, and only after everything above had its chance: dropping the
         // registry row is what makes the chat unreachable, so it must not
         // happen while a transcript is still behind it.
@@ -6378,6 +6600,9 @@ public class ChatRepository(
                             },
                             groupNameSink = { senderKey, name ->
                                 receiveGroupName(record.group, groupIdHex, senderKey, name)
+                            },
+                            pinSink = { senderKey, op ->
+                                receivePin(record.group, groupIdHex, senderKey, op)
                             },
                             membershipProposalSink = { proposal, createdAt ->
                                 // The sweep's own apply pass consumes rows the
@@ -7500,6 +7725,7 @@ private class GroupRecord(
         profileSink: ((MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiProfile) -> Unit)? = null,
         groupNameSink: ((MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiGroupName) -> Unit)? = null,
         profileRequestSink: ((MemberIdentity?) -> Unit)? = null,
+        pinSink: ((MemberIdentity?, uniffi.lakko_ffi_uniffi.FfiPinOp) -> Unit)? = null,
     ) {
         // ADR-0050 — a message this PERSON sent from another device arrives as an
         // incoming row (another leaf sealed it) but is ours: it renders on our
@@ -7586,6 +7812,15 @@ private class GroupRecord(
                     // writes the store only on accept.
                     val name = event.groupName
                     if (name != null) groupNameSink?.invoke(event.senderKey, name)
+                }
+                is IncomingChatEvent.Pin -> {
+                    // ADR-0052 decision 3 — a shared pin / unpin. Not a
+                    // timeline row. A malformed envelope (`pin == null`) is
+                    // consumed as a no-op; the sink runs the standing gate +
+                    // the per-message stamp order and writes the store only on
+                    // accept.
+                    val op = event.pin
+                    if (op != null) pinSink?.invoke(event.senderKey, op)
                 }
                 is IncomingChatEvent.ProfileRequest -> {
                     // ADR-0048 trigger 4 — a member asking for everyone's

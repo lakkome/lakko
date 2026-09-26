@@ -257,6 +257,14 @@ public final class ChatRepository: ObservableObject {
     /// the title through it (``groupName(groupIdHex:)``).
     public let groupNameStore: GroupNameStore
 
+    /// ADR-0052 decision 3 — the per-account, per-conversation shared pin map
+    /// `messageId -> { pinned, updatedAtMs }`, wiped with the conversation.
+    public let sharedPinStore: SharedPinStore
+
+    /// ADR-0052 decision 3 — "Pin for me": this device's own bookmarks,
+    /// keyed on the conversation and the message. Nothing about them is sent.
+    public let personalPinStore: PersonalPinStore
+
     /// ADR-0024 — the per-account, per-group durable read watermarks
     /// (`senderSignatureKeyB64 -> upTo`). Fed here, at receipt, for EVERY group
     /// whether or not its chat is open, so a receipt applied by the session
@@ -278,6 +286,40 @@ public final class ChatRepository: ObservableObject {
     /// chat list and the open chat re-title in place. The title itself is read
     /// from ``groupNameStore`` on demand; this only says "read it again".
     @Published public private(set) var groupNameRevision: Int = 0
+
+    /// ADR-0052 decision 3 — bumped on every accepted pin action (received or
+    /// taken here, shared or personal), so the open chat rebuilds its pinned
+    /// bar in place. The pins themselves are read from the two stores on
+    /// demand; this only says "read them again".
+    @Published public private(set) var pinRevision: Int = 0
+
+    /// ADR-0052 decision 3 — the per-group serializing chain the pin receive
+    /// runs under, for the reason ``groupNameLock`` gives (C-62 sub-invariant
+    /// 5: the per-message stamp comparison is only meaningful against CURRENT
+    /// stored state). Its own chain, never ``commitLock``: the sink is called
+    /// from inside the poll's commit-locked apply region.
+    private let pinLock = GroupMlsLock()
+
+    /// ADR-0052 decision 3 — the growth re-send: a device that may set shared
+    /// pins re-sends the current pinned set (original stamps) when the roster
+    /// grows, throttled and jittered like the group name.
+    private lazy var pinPublisher = PinPublisher(
+        ports: PinPublisher.Ports(
+            send: { [weak self] groupIdHex, bytes in
+                guard let self else { return }
+                try await self.publishApplicationMessage(
+                    groupIdHex: groupIdHex, plaintextBytes: bytes)
+            },
+            envelopes: { [weak self] groupIdHex in
+                self?.pinEnvelopesForResend(groupIdHex: groupIdHex) ?? []
+            },
+            nowMs: { Self.nowMs() },
+            jitterMs: { Int64.random(in: 0...ProfilePublisher.maxJitterMs) },
+            sleep: { ms in
+                try? await Task.sleep(nanoseconds: UInt64(max(0, ms)) * 1_000_000)
+            }
+        )
+    )
 
     /// ADR-0051 §2 — the per-group serializing chain the name receive runs
     /// under (C-62 sub-invariant 5: the gate must read CURRENT stored state, and
@@ -390,12 +432,16 @@ public final class ChatRepository: ObservableObject {
         leaveRequestStore: LeaveRequestStore = LeaveRequestStore(),
         conversationKindStore: ConversationKindStore = ConversationKindStore(),
         groupNameStore: GroupNameStore = GroupNameStore(),
+        sharedPinStore: SharedPinStore = SharedPinStore(),
+        personalPinStore: PersonalPinStore = PersonalPinStore(),
         readWatermarkStore: ReadWatermarkStore = ReadWatermarkStore(),
         groupCallStore: GroupCallStore = GroupCallStore()
     ) {
         self.groupCallStore = groupCallStore
         self.conversationKindStore = conversationKindStore
         self.groupNameStore = groupNameStore
+        self.sharedPinStore = sharedPinStore
+        self.personalPinStore = personalPinStore
         self.readWatermarkStore = readWatermarkStore
         self.chatClient = chatClient
         self.dsClient = dsClient
@@ -640,6 +686,8 @@ public final class ChatRepository: ObservableObject {
         profilePublisher.reset()
         // ADR-0051 — same for a scheduled group-name re-send.
         groupNamePublisher.reset()
+        // ADR-0052 — and for a scheduled shared-pin re-send.
+        pinPublisher.reset()
         // The commit chain (``GroupMlsLock``) is deliberately NOT cleared. Dropping a tail does not
         // stop the section behind it — it only makes the next caller start
         // BESIDE that section, which is the race the chain exists to close.
@@ -1211,6 +1259,182 @@ public final class ChatRepository: ObservableObject {
             groupName: FfiGroupName(name: stored.name, updatedAtMs: stored.updatedAtMs))
     }
 
+    // MARK: - ADR-0052 decision 3 — pins
+
+    /// The conversation's shared pin map this device holds, pinned and
+    /// unpinned rows alike (the bar filters; the gate needs both).
+    public func sharedPins(groupIdHex: String) -> [Int64: StoredSharedPin] {
+        guard let accountIdB64 = currentAccountIdB64 else { return [:] }
+        return sharedPinStore.load(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+    }
+
+    /// This device's own pins in the conversation, `messageId -> pinnedAtMs`.
+    public func personalPins(groupIdHex: String) -> [Int64: UInt64] {
+        guard let accountIdB64 = currentAccountIdB64 else { return [:] }
+        return personalPinStore.load(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+    }
+
+    /// UX spec section 4.1 "The sheet" — may this device pin for everyone
+    /// here? Either participant of a one-to-one; the owner or an admin of a
+    /// role-table group; anyone in a group with no table; nobody once their
+    /// membership ended. Read from the LIVE group, never a cached role. The
+    /// receivers run the same rule against their own live group; this only
+    /// decides what the sheet offers.
+    public func maySetSharedPin(groupIdHex: String) -> Bool {
+        guard groups[groupIdHex] != nil else { return false }
+        return PinGate.maySetShared(
+            peopleCount: memberCount(groupIdHex: groupIdHex),
+            ownRole: ownRole(groupIdHex: groupIdHex),
+            membershipEnded: membershipEnded(membershipStateNow(groupIdHex: groupIdHex)))
+    }
+
+    /// "Pin for me" / "Unpin for me": a flag on this device. Nothing is sent.
+    public func setPersonalPin(groupIdHex: String, messageId: Int64, pinned: Bool) {
+        guard let accountIdB64 = currentAccountIdB64 else { return }
+        if pinned {
+            personalPinStore.set(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex, messageId: messageId,
+                pinnedAtMs: UInt64(max(0, Self.nowMs())))
+        } else {
+            personalPinStore.remove(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex, messageId: messageId)
+        }
+        pinRevision &+= 1
+    }
+
+    /// "Pin for everyone" / "Unpin for everyone": compose ONE envelope for ONE
+    /// message stamped with this device's clock, send it through the locked
+    /// application path, and only THEN apply it locally exactly as a receiver
+    /// would — the sender never receives its own message back (UX spec
+    /// section 4.1 "What travels"). A failed send changes nothing locally and
+    /// throws what the send threw.
+    ///
+    /// The standing check is the receivers' (every peer runs ``PinGate``
+    /// against its live group); locally the sheet only offers the row when
+    /// ``maySetSharedPin(groupIdHex:)`` says so.
+    public func setSharedPin(groupIdHex: String, messageId: Int64, pinned: Bool) async throws {
+        guard let accountIdB64 = currentAccountIdB64, groups[groupIdHex] != nil else {
+            throw ChatError.argument("no live Group handle for \(groupIdHex)")
+        }
+        let stamp = UInt64(max(0, Self.nowMs()))
+        let op = FfiPinOp(messageId: messageId, pinned: pinned, updatedAtMs: stamp)
+        let bytes = composePinEnvelope(op: op)
+        try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bytes)
+        // Under the pin chain so a concurrent receive cannot interleave its
+        // read-decide-write with this write.
+        try await pinLock.run(groupIdHex: groupIdHex) { [self] in
+            let stored = sharedPinStore.load(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex)[messageId]
+            // The same order a receiver applies: a stamp that is not newer
+            // than what landed meanwhile (another admin's action) does not win
+            // here either, so this device never disagrees with the room.
+            if let stored, !pinIsNewer(incomingUpdatedAtMs: stamp, storedUpdatedAtMs: stored.updatedAtMs) {
+                return
+            }
+            sharedPinStore.record(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex, messageId: messageId,
+                value: StoredSharedPin(pinned: pinned, updatedAtMs: stamp))
+            pinPublisher.notePublished(groupIdHex: groupIdHex)
+            pinRevision &+= 1
+        }
+    }
+
+    /// A pin envelope arrived on the conversation's journal: run the standing
+    /// check against the LIVE group, then the strictly-newer order for that
+    /// message, then (on accept) store it. Fire-and-forget; the whole
+    /// read-decide-write runs under the per-group pin chain.
+    public func receivePin(groupIdHex: String, op: FfiPinOp, senderLeaf: UInt32?) {
+        guard currentAccountIdB64 != nil, groups[groupIdHex] != nil else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await self.pinLock.run(groupIdHex: groupIdHex) { [weak self] in
+                self?.performReceivePin(groupIdHex: groupIdHex, op: op, senderLeaf: senderLeaf)
+            }
+        }
+    }
+
+    /// The locked body of ``receivePin(groupIdHex:op:senderLeaf:)``. Reads the
+    /// live `Group` on the actor (roster + role table + people count are the
+    /// ONLY authority for who the sender is and what they may do), then the
+    /// CURRENT stored row for that message, and decides through ``PinGate``.
+    private func performReceivePin(groupIdHex: String, op: FfiPinOp, senderLeaf: UInt32?) {
+        guard let accountIdB64 = currentAccountIdB64, let record = groups[groupIdHex] else { return }
+        // A pin of a message this device holds as a tombstone is dropped
+        // outright: the record was dropped with the message and must not come
+        // back through a late envelope.
+        if record.messages.contains(where: { $0.messageId == op.messageId && $0.deleted }) {
+            return
+        }
+        let resolved = PushGroupRouting.resolveSenderAuthority(
+            group: record.group, senderLeaf: senderLeaf)
+        let stored = sharedPinStore.load(
+            accountIdB64: accountIdB64, groupIdHex: groupIdHex)[op.messageId]
+        let verdict = PinGate.classify(
+            incomingPinned: op.pinned,
+            incomingUpdatedAtMs: op.updatedAtMs,
+            stored: stored,
+            senderKey: resolved.senderKey,
+            authority: resolved.authority,
+            peopleCount: memberCount(groupIdHex: groupIdHex)
+        )
+        switch verdict {
+        case .acceptIdentical:
+            return
+        case .accept:
+            sharedPinStore.record(
+                accountIdB64: accountIdB64, groupIdHex: groupIdHex, messageId: op.messageId,
+                value: StoredSharedPin(pinned: op.pinned, updatedAtMs: op.updatedAtMs))
+            pinRevision &+= 1
+        case .rejectNotAuthorized, .rejectStale, .rejectUnverifiable:
+            NSLog("ADR-0052 pin for \(groupIdHex) dropped: \(verdict)")
+        }
+    }
+
+    /// UX spec section 4.1 — a deleted message leaves the bar and its shared
+    /// pin record is dropped with it. Runs under the pin chain so it cannot
+    /// race a receive; the receive path independently refuses a pin of a
+    /// tombstone, so the two agree whichever runs first.
+    private func dropSharedPinsOfDeletedMessages(groupIdHex: String) {
+        guard let accountIdB64 = currentAccountIdB64, let record = groups[groupIdHex] else { return }
+        let held = record.messages
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await self.pinLock.run(groupIdHex: groupIdHex) { [weak self] in
+                guard let self else { return }
+                let shared = self.sharedPinStore.load(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+                let doomed = PinnedBar.recordsToDrop(shared: shared, held: held)
+                guard !doomed.isEmpty else { return }
+                for messageId in doomed {
+                    self.sharedPinStore.remove(
+                        accountIdB64: accountIdB64, groupIdHex: groupIdHex, messageId: messageId)
+                    // The personal bookmark of a deleted message goes too: the
+                    // bar could never show it again.
+                    self.personalPinStore.remove(
+                        accountIdB64: accountIdB64, groupIdHex: groupIdHex, messageId: messageId)
+                }
+                self.pinRevision &+= 1
+            }
+        }
+    }
+
+    /// The envelopes the growth re-send carries: every CURRENTLY PINNED shared
+    /// row with its STORED stamp, verbatim, newest first. Empty when this
+    /// device holds none, may not set shared pins here (its re-send would be
+    /// refused by every peer), or can no longer send into the group. Unpins
+    /// are not re-sent: a newcomer holds nothing to undo.
+    private func pinEnvelopesForResend(groupIdHex: String) -> [Data] {
+        guard let accountIdB64 = currentAccountIdB64, groups[groupIdHex] != nil,
+              maySetSharedPin(groupIdHex: groupIdHex)
+        else { return [] }
+        return sharedPinStore.load(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+            .filter { $0.value.pinned }
+            .sorted { $0.value.updatedAtMs > $1.value.updatedAtMs }
+            .map {
+                composePinEnvelope(
+                    op: FfiPinOp(messageId: $0.key, pinned: true, updatedAtMs: $0.value.updatedAtMs))
+            }
+    }
+
     /// ADR-0048 §2 — the own profile changed: publish it into every group.
     public func publishOwnProfileToAllGroups() async {
         await profilePublisher.publishToAll(groupIdHexes: Array(groups.keys).sorted())
@@ -1231,6 +1455,8 @@ public final class ChatRepository: ObservableObject {
         // ADR-0051 §3 — the newcomer cannot read the epoch the group name was
         // sent in either; an owner / admin holding one re-sends it.
         groupNamePublisher.noteGrowth(groupIdHex: groupIdHex)
+        // ADR-0052 decision 3 — nor the epochs the shared pins were sent in.
+        pinPublisher.noteGrowth(groupIdHex: groupIdHex)
     }
 
     /// ADR-0028 (G-3) — joiner step 1: request to join a group from a `/g/`
@@ -1566,6 +1792,11 @@ public final class ChatRepository: ObservableObject {
         leaveRequestStore.clear(accountIdB64: accountIdB64, groupIdB64: groupIdB64)
         readWatermarkStore.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         readWatermarksByGroup.removeValue(forKey: groupIdHex)
+        // ADR-0052 decision 3 — the pins are wiped with the conversation, both
+        // scopes: a bookmark of a chat that no longer exists here points at
+        // nothing.
+        sharedPinStore.removeGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        personalPinStore.removeGroup(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
         if groupCalls.removeValue(forKey: groupIdHex) != nil {
             groupCallStore.save(accountIdB64: accountIdB64, records: groupCalls)
         }
@@ -2082,6 +2313,8 @@ public final class ChatRepository: ObservableObject {
         profilePublisher.noteGrowth(groupIdHex: groupIdHex)
         // ADR-0051 §3 — same for the group name. Only schedules.
         groupNamePublisher.noteGrowth(groupIdHex: groupIdHex)
+        // ADR-0052 decision 3 — and for the shared pins. Only schedules.
+        pinPublisher.noteGrowth(groupIdHex: groupIdHex)
         return commitPublish.id
     }
 
@@ -2891,6 +3124,9 @@ public final class ChatRepository: ObservableObject {
         }
         persistSnapshotBestEffort()
         state = state.with(threads: buildThreadList())
+        // ADR-0052 decision 3 — our own delete drops the message's shared pin
+        // record, as a received one does. Only spawns a `Task`.
+        dropSharedPinsOfDeletedMessages(groupIdHex: groupIdHex)
     }
 
     /// Phase 3a9 — publish raw plaintext bytes as an MLS
@@ -3641,6 +3877,13 @@ public final class ChatRepository: ObservableObject {
             // the lock held here is never awaited against itself.
             profileRequestSink: { [weak self] in
                 self?.answerProfileRequest(groupIdHex: groupIdHex)
+            },
+            // ADR-0052 decision 3 — standing check against the live group, the
+            // per-message order, store. Fire-and-forget (it only spawns a
+            // `Task`), so the pin chain it takes is never awaited while the
+            // commit chain is held.
+            pinSink: { [weak self] op, senderLeaf in
+                self?.receivePin(groupIdHex: groupIdHex, op: op, senderLeaf: senderLeaf)
             }
         )
         // THE ORDERING RULE — persist first, advance the cursor second, and hold
@@ -3669,6 +3912,9 @@ public final class ChatRepository: ObservableObject {
         // idle long poll still writes no file.
         if !result.events.isEmpty { persistMessageLogBestEffort() }
         state = state.with(threads: buildThreadList())
+        // ADR-0052 decision 3 — a delete that landed in this batch takes its
+        // shared pin record with it. Only spawns a `Task` on the pin chain.
+        if !result.events.isEmpty { dropSharedPinsOfDeletedMessages(groupIdHex: groupIdHex) }
         // ADR-0043 — did someone else's Remove commit just land? Then the
         // evicted member still holds this group's push_routing_secret and
         // push-gw is still waking it. Driven off an ACTUAL before/after
@@ -4671,6 +4917,10 @@ public final class ChatRepository: ObservableObject {
                         },
                         profileRequestSink: { [weak self] in
                             self?.answerProfileRequest(groupIdHex: groupIdHex)
+                        },
+                        pinSink: { [weak self] op, senderLeaf in
+                            self?.receivePin(
+                                groupIdHex: groupIdHex, op: op, senderLeaf: senderLeaf)
                         }
                     )
                     // Per row, and deliberately not deferred to the end of the
@@ -4683,6 +4933,9 @@ public final class ChatRepository: ObservableObject {
                     // to read them. Cheap because the window this loop consumes is
                     // narrow by construction.
                     self.state = self.state.with(threads: self.buildThreadList())
+                    // ADR-0052 decision 3 — a delete applied here drops its
+                    // shared pin record. Only spawns a `Task`.
+                    self.dropSharedPinsOfDeletedMessages(groupIdHex: groupIdHex)
                 }
             ),
             actingCommitter: { [weak self] ownRank in
@@ -6160,7 +6413,8 @@ private final class GroupRecord {
         membershipProposalSink: ((ProposalRecord, String) -> Void)? = nil,
         profileSink: ((ProfileClaim, MemberIdentity?) -> Void)? = nil,
         groupNameSink: ((String, UInt64, UInt32?) -> Void)? = nil,
-        profileRequestSink: (() -> Void)? = nil
+        profileRequestSink: (() -> Void)? = nil,
+        pinSink: ((FfiPinOp, UInt32?) -> Void)? = nil
     ) {
         for event in events {
             switch event {
@@ -6308,6 +6562,14 @@ private final class GroupRecord {
                 // never answered — the fail-closed side, as for the beacon.
                 guard let senderKey, senderKey != ownAuthorKey else { continue }
                 profileRequestSink?()
+            case .pin(_, let op, let senderLeaf, _):
+                // ADR-0052 decision 3 — a shared pin / unpin of one message.
+                // Not a timeline row: routed out to the repository, which owns
+                // the pin store AND the live `Group` handle the standing check
+                // needs. The MLS-authenticated `senderLeaf` rides along so only
+                // someone with standing can pin for everyone; the stamp so the
+                // strictly-newer order can refuse a stale re-send.
+                pinSink?(op, senderLeaf)
             }
         }
     }

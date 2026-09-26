@@ -178,6 +178,11 @@ import { useChats, type ActiveGroup } from "../chat/ChatContext";
 import { recordRemovedDevices } from "../chat/device-readmission";
 import { useProfiles } from "../profile/ProfileContext";
 import { useGroupNames } from "../chat/GroupNameContext";
+import { usePins } from "../chat/PinContext";
+import { clampPinIndex, nextPinIndex, pinBarItems, type HeldForPin } from "../chat/pin-bar";
+import { pinRowDecision, type PinOption, type PinState } from "../chat/pin-sheet";
+import { PinList, PinnedBar, type PinBarEntry } from "../chat/PinnedBar";
+import { PinSheet } from "../chat/PinSheet";
 import { useReadWatermarks } from "../chat/ReadWatermarkContext";
 import { useCallLog } from "../calls/CallLogContext";
 import { callBackKind, type CallLogEntry } from "../calls/call-log";
@@ -490,6 +495,7 @@ function ChatView(props: {
   // store the receive loop feeds, and the publish triggers.
   const profiles = useProfiles();
   const groupNames = useGroupNames();
+  const pins = usePins();
   // ADR-0024 — the durable read watermarks both receive paths feed.
   const readWatermarkStore = useReadWatermarks();
   const callLog = useCallLog();
@@ -1568,6 +1574,8 @@ function ChatView(props: {
       // ADR-0051 §3 — an owner / admin holding a name re-sends it (original
       // stamp) so the newcomer learns it; same throttle + jitter.
       groupNames.groupGrew(props.entry.groupIdB64);
+      // ADR-0052 decision 3 — and the room's shared pins, original stamps.
+      pins.groupGrew(props.entry.groupIdB64);
     }
   });
 
@@ -2620,6 +2628,13 @@ function ChatView(props: {
         groupIdHex: groupIdHexForLog(),
         chats,
       });
+      // ADR-0052 decision 3 — the pins are wiped with the conversation.
+      // Best-effort after the delete itself succeeded.
+      try {
+        await pins.forgetConversation(props.entry.groupIdB64);
+      } catch {
+        // best-effort
+      }
       props.onLeave();
     } catch (err) {
       setError(formatError(err));
@@ -3182,6 +3197,9 @@ function ChatView(props: {
     if (e.op === "edit") {
       return applyOp(prev, { op: "edit", target: e.target, text: e.text });
     }
+    // Section 4.1 — an author-gated delete takes the message's pin records
+    // with it (shared and personal).
+    void pins.messageDeleted(props.entry.groupIdB64, e.target);
     return applyOp(prev, { op: "delete", target: e.target });
   }
 
@@ -3393,6 +3411,16 @@ function ChatView(props: {
         void groupNames.receive(props.entry, e).catch((err) => {
           // eslint-disable-next-line no-console
           console.warn("group name receive failed", err);
+        });
+        continue;
+      }
+      // ADR-0052 decision 3 — a shared pin or unpin of one message. Through
+      // the role-gated verdict under the per-group lock; on accept the store
+      // changes and the pinned bar re-derives. Never a timeline row.
+      if (e.kind === "pin") {
+        void pins.receive(props.entry, e).catch((err) => {
+          // eslint-disable-next-line no-console
+          console.warn("pin receive failed", err);
         });
         continue;
       }
@@ -3900,6 +3928,9 @@ function ChatView(props: {
         envelopeBytes,
       );
       setMsgOps(applyOp(msgOps(), { op: "delete", target: messageId }));
+      // Section 4.1 — a deleted message leaves the bar and its pin records
+      // go with it.
+      void pins.messageDeleted(props.entry.groupIdB64, messageId);
     } catch (err) {
       setError(formatError(err));
     }
@@ -5671,6 +5702,111 @@ function ChatView(props: {
   onCleanup(() => {
     if (highlightTimer !== null) clearTimeout(highlightTimer);
   });
+
+  // ADR-0052 decision 3 / message-actions.md section 4 — pins. The store is
+  // the session-wide `PinContext`; what this view adds is the LOCAL half of
+  // the authority rule (which rows the sheet offers), the bar derived from
+  // the store and the rows this device holds, and the tap.
+  const pinsOneToOne = (): boolean => memberCount() === 2;
+  /** Whether this device may set or clear a shared pin here: either
+   *  participant of a one-to-one, else the ADR-0022 owner / admin, else any
+   *  member of a table-less group (`ownRole() === null`); nobody once the
+   *  membership has ended. UX only — the receive-side gate on every peer is
+   *  the boundary, so a stale answer here costs a refused envelope, never a
+   *  pin nobody agreed to. */
+  const maySetSharedPin = (): boolean =>
+    !membershipEnded() && (pinsOneToOne() || ownRole() !== "member");
+  const pinStateOf = (messageId: number): PinState => ({
+    pinnedShared: pins.shared(props.entry.groupIdB64).get(messageId)?.pinned === true,
+    pinnedPersonal: pins.personal(props.entry.groupIdB64).has(messageId),
+    maySetShared: maySetSharedPin(),
+    oneToOne: pinsOneToOne(),
+  });
+  /** Section 4.1 "The row" — `Pin` or `Unpin`, for the action card. */
+  const pinLabelOf = (messageId: number): "Pin" | "Unpin" =>
+    pinRowDecision(pinStateOf(messageId)).row;
+  /** The sheet, when open: the message it is about and the rows it offers. */
+  const [pinSheet, setPinSheet] = createSignal<{
+    messageId: number;
+    title: string;
+    options: readonly PinOption[];
+  } | null>(null);
+  async function runPinOption(messageId: number, option: PinOption): Promise<void> {
+    setError(null);
+    try {
+      if (option.scope === "shared") {
+        await pins.setShared(props.entry, messageId, option.pinned);
+      } else {
+        await pins.setPersonal(props.entry.groupIdB64, messageId, option.pinned);
+      }
+    } catch (err) {
+      setError(formatError(err));
+    }
+  }
+  /** The `Pin` / `Unpin` row was chosen: act at once, or open the sheet. */
+  function onPinRow(messageId: number): void {
+    const decision = pinRowDecision(pinStateOf(messageId));
+    if (decision.action.kind === "immediate") {
+      void runPinOption(messageId, decision.action.option);
+      return;
+    }
+    setPinSheet({ messageId, title: decision.action.title, options: decision.action.options });
+  }
+  /** What the bar needs about a held message, or `null` when this device
+   *  does not hold it (not yet downloaded, older than what is loaded). */
+  function heldForPin(messageId: number): HeldForPin | null {
+    const row = rows().find((r) => rowMessageId(r) === messageId);
+    if (row === undefined) return null;
+    return { deleted: msgOps().get(messageId)?.deleted === true };
+  }
+  /** Section 4 — the bar's entries, in its order, with the author and the
+   *  excerpt resolved the way the reply quote resolves them (the edited
+   *  text of an edited message, the one-word stand-in for a media message). */
+  const pinEntries = createMemo((): PinBarEntry[] => {
+    const gid = props.entry.groupIdB64;
+    const items = pinBarItems({
+      shared: pins.shared(gid),
+      personal: pins.personal(gid),
+      held: heldForPin,
+    });
+    const out: PinBarEntry[] = [];
+    for (const item of items) {
+      const row = rows().find((r) => rowMessageId(r) === item.messageId);
+      if (row === undefined) continue;
+      const original =
+        row.kind === "outgoing" ? row.plaintext : row.event.kind === "application" ? row.event.text : "";
+      const attachments =
+        row.kind === "outgoing"
+          ? row.attachments
+          : row.event.kind === "application"
+            ? row.event.attachments
+            : [];
+      const text = msgOps().get(item.messageId)?.editedText ?? original;
+      const snapshot = replySnapshotFor(
+        { text, attachments },
+        authorLabelOf(row),
+        (a) => hub.decision(a).bubble,
+      );
+      out.push({ ...item, author: snapshot.author, excerpt: snapshot.excerpt });
+    }
+    return out;
+  });
+  /** Which pin the bar shows; newest first, moved by the tap. */
+  const [pinIndex, setPinIndex] = createSignal(0);
+  createEffect(() => {
+    const n = pinEntries().length;
+    setPinIndex((i) => clampPinIndex(i, n));
+  });
+  const [pinListOpen, setPinListOpen] = createSignal(false);
+  /** Section 4 — the tap: scroll to the shown pin with the reply highlight,
+   *  then advance to the next older one, wrapping past the oldest. */
+  function onPinBarTap(): void {
+    const entries = pinEntries();
+    const entry = entries[pinIndex()];
+    if (entry === undefined) return;
+    jumpToMessage(entry.messageId);
+    setPinIndex(nextPinIndex(pinIndex(), entries.length));
+  }
   createEffect(() => {
     rows().length;
     const el = scrollEl;
@@ -5863,6 +5999,37 @@ function ChatView(props: {
           </div>
         </div>
       </header>
+
+      {/* ADR-0052 decision 3 / message-actions.md section 4 — the pinned bar,
+          under the header, one pin at a time. No pins, no bar: the header
+          does not move. */}
+      <Show when={pinEntries().length > 0}>
+        <PinnedBar
+          entries={pinEntries()}
+          index={pinIndex()}
+          onTap={onPinBarTap}
+          onOpenList={() => setPinListOpen(true)}
+        />
+      </Show>
+      <PinList
+        open={pinListOpen()}
+        entries={pinEntries()}
+        onPick={(id) => {
+          setPinListOpen(false);
+          jumpToMessage(id);
+        }}
+        onClose={() => setPinListOpen(false)}
+      />
+      <PinSheet
+        open={pinSheet() !== null}
+        title={pinSheet()?.title ?? ""}
+        options={pinSheet()?.options ?? []}
+        onPick={(option) => {
+          const sheet = pinSheet();
+          if (sheet !== null) void runPinOption(sheet.messageId, option);
+        }}
+        onClose={() => setPinSheet(null)}
+      />
 
       {/* `docs/ux/calls.md` section 2.1.1 — a call from a MUTED conversation is
           offered here, quietly, instead of taking the screen over. It is
@@ -7211,6 +7378,8 @@ function ChatView(props: {
                 onReply={onStartReply}
                 onJumpTo={jumpToMessage}
                 onForward={(id) => setForwardingId(id)}
+                pinLabelOf={pinLabelOf}
+                onPin={onPinRow}
                 onOpenForwardOrigin={onOpenForwardOrigin}
                 onSaveEdit={onSaveEdit}
                 onDeleteMessage={onDeleteMessage}
@@ -7928,6 +8097,12 @@ function timelineRowToPersisted(
   if (row.event.kind === "group-name") {
     // ADR-0051 — consumed by the group-name gate, never a timeline row (no
     // "renamed the group" transcript row in this version). Never persist it.
+    return null;
+  }
+  if (row.event.kind === "pin") {
+    // ADR-0052 decision 3 — consumed by the pin gate, never a timeline row
+    // (no "pinned a message" transcript row in this version). Never persist
+    // it.
     return null;
   }
   if (row.event.kind === "membershipProposal") {

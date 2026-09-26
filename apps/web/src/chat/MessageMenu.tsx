@@ -136,6 +136,13 @@ export interface MessageMenuProps {
   canForward: boolean;
   /** ADR-0052 decision 2 — open the "Forward to" picker for this message. */
   onForward: () => void;
+  /** ADR-0052 decision 3 / section 4.1 — the `Pin` / `Unpin` row after
+   *  Forward, or `null` when the message offers neither (its send is not
+   *  complete). Which word is `pin-sheet.ts`'s decision, not the menu's. */
+  pinLabel: "Pin" | "Unpin" | null;
+  /** The pin row was chosen: the view runs `pinRowDecision` and either acts
+   *  at once or opens the sheet. */
+  onPin: () => void;
   onCopy: (text: string) => void;
   onEdit: () => void;
   onDelete: () => void;
@@ -301,6 +308,14 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
                 <Icon name="forward" size={16} />
                 <span>Forward</span>
               </button>
+            </Show>
+            <Show when={props.pinLabel}>
+              {(label) => (
+                <button type="button" role="menuitem" onClick={() => run(() => props.onPin())}>
+                  <Icon name="pin" size={16} />
+                  <span>{label()}</span>
+                </button>
+              )}
             </Show>
             <Show when={copyable()}>
               {(text) => (

@@ -102,6 +102,8 @@ import { sniffProfile, type ReceivedProfile } from "../profile/profile-envelope"
 import { sniffProfileRequest } from "../profile/profile-request";
 import { sniffGroupName } from "./group-name-envelope";
 import type { StoredGroupName } from "./group-name-store";
+import { sniffPin } from "./pin-envelope";
+import type { IncomingPin } from "./pin-store";
 import {
   resolveLeafSignatureKey,
   resolveMemberIdentity,
@@ -431,6 +433,26 @@ export type IncomingChatEvent =
       senderLeaf: number | undefined;
       /** The sender's ACCOUNT key resolved at receipt (C-68), the key the
        *  ADR-0022 role table names. `undefined` ⇒ unverifiable, dropped. */
+      senderKey: MemberIdentity | undefined;
+      createdAt: string;
+    }
+  | {
+      /** ADR-0052 decision 3 — a shared pin or unpin of ONE message. Never a
+       *  timeline bubble: the receive loop runs it through the role-gated
+       *  verdict (`chat/pin-store.ts`) under the per-group lock and the
+       *  pinned bar re-derives.
+       *
+       *  `pin` is `undefined` when the domain matched but the envelope
+       *  failed its bounds — the core refuses it as a whole, so the row is
+       *  dropped rather than stored or rendered. */
+      kind: "pin";
+      messageId: number;
+      pin: IncomingPin | undefined;
+      /** Diagnostic only. */
+      senderLeaf: number | undefined;
+      /** The sender's ACCOUNT key resolved at receipt (C-68), the key the
+       *  ADR-0022 role table names. `undefined` ⇒ unverifiable in a group
+       *  with a role table, dropped. */
       senderKey: MemberIdentity | undefined;
       createdAt: string;
     };
@@ -1308,6 +1330,23 @@ export async function toEvent(
           kind: "group-name",
           messageId,
           groupName: sniff.kind === "name" ? sniff.value : undefined,
+          senderLeaf,
+          senderKey,
+          createdAt,
+        };
+      }
+    }
+    // ADR-0052 decision 3 — a shared pin, before the chat parser for the
+    // same reason: the lossy-UTF-8 fallback would render it as a bubble
+    // reading the domain string plus binary. A domain match that fails its
+    // bounds is dropped here too (`pin: undefined`), never parsed as chat.
+    {
+      const sniff = sniffPin(await loadWasm(), bytes);
+      if (sniff.kind !== "none") {
+        return {
+          kind: "pin",
+          messageId,
+          pin: sniff.kind === "pin" ? sniff.value : undefined,
           senderLeaf,
           senderKey,
           createdAt,

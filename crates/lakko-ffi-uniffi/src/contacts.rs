@@ -82,6 +82,10 @@ use lakko_contacts::invite::{
 use lakko_contacts::media_state::{
     compose_media_state as rust_compose_media_state, decode_media_state as rust_decode_media_state,
 };
+use lakko_contacts::pin::{
+    compose_pin as rust_compose_pin, decode_pin as rust_decode_pin,
+    pin_is_newer as rust_pin_is_newer, PinAction as RustPinAction, PinOp as RustPinOp,
+};
 use lakko_contacts::profile::{
     compose_profile as rust_compose_profile, decode_profile as rust_decode_profile,
     normalize_display_name as rust_normalize_display_name,
@@ -608,6 +612,91 @@ pub fn profile_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u64) 
 #[uniffi::export]
 pub fn normalize_display_name(input: String) -> Result<Option<String>, FfiError> {
     rust_normalize_display_name(&input).map_err(Into::into)
+}
+
+// ============================================================================
+// Shared-pin envelope — ADR-0052 decision 3
+// ============================================================================
+
+/// One shared-pin operation on one message (ADR-0052 decision 3). Mirror of
+/// [`lakko_contacts::pin::PinOp`].
+///
+/// **A pin received from someone else is that person's assertion about the
+/// whole conversation, and the sender's authority is the RECEIVER's check**:
+/// resolve the MLS sender leaf to the account key at receipt (C-68), read the
+/// live role table, accept only from the owner or an admin (any member when
+/// the group carries no role table; either participant of a one-to-one), then
+/// keep it only when [`pin_is_newer`] than the stored stamp **for that
+/// message** — the whole read-decide-write under the per-group lock (C-62
+/// sub-invariant 5). Persist the stamp and re-emit it VERBATIM on a re-send.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct FfiPinOp {
+    /// DS `messageId` of the message in this conversation.
+    pub message_id: i64,
+    /// `true` = pinned for everyone; `false` = no longer pinned.
+    pub pinned: bool,
+    /// Sender-clock UNIX milliseconds at which the action was taken.
+    pub updated_at_ms: u64,
+}
+
+impl From<RustPinOp> for FfiPinOp {
+    fn from(op: RustPinOp) -> Self {
+        Self {
+            message_id: op.message_id,
+            pinned: matches!(op.action, RustPinAction::Pin),
+            updated_at_ms: op.updated_at_ms,
+        }
+    }
+}
+
+impl From<FfiPinOp> for RustPinOp {
+    fn from(op: FfiPinOp) -> Self {
+        Self {
+            message_id: op.message_id,
+            action: if op.pinned {
+                RustPinAction::Pin
+            } else {
+                RustPinAction::Unpin
+            },
+            updated_at_ms: op.updated_at_ms,
+        }
+    }
+}
+
+/// Compose a shared-pin envelope (ADR-0052 decision 3) — the inner plaintext
+/// to publish as an MLS application message on the conversation's journal.
+/// Infallible: the envelope has no variable field.
+#[uniffi::export]
+#[must_use]
+pub fn compose_pin_envelope(op: FfiPinOp) -> Vec<u8> {
+    rust_compose_pin(&op.into())
+}
+
+/// Strictly decode a shared-pin envelope (ADR-0052 decision 3). Fail-closed:
+/// a plaintext without the pin domain separator, of the wrong length, with an
+/// unknown version or an unknown action is refused as a whole.
+///
+/// Use [`dispatch_incoming_envelope`] when the plaintext might be any
+/// in-group envelope kind.
+///
+/// # Errors
+///
+/// * [`FfiError::Contacts`] for a wrong domain / bad length / unknown
+///   version / unknown action.
+#[uniffi::export]
+pub fn decode_pin_envelope(plaintext: Vec<u8>) -> Result<FfiPinOp, FfiError> {
+    rust_decode_pin(&plaintext)
+        .map(Into::into)
+        .map_err(|e| FfiError::Contacts(e.to_string()))
+}
+
+/// `true` when a pin action stamped `incoming_updated_at_ms` must replace the
+/// stored action **for the same message**. Strictly greater wins; equal is
+/// not newer, so a re-send of the stored action is not an update.
+#[uniffi::export]
+#[must_use]
+pub fn pin_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u64) -> bool {
+    rust_pin_is_newer(incoming_updated_at_ms, stored_updated_at_ms)
 }
 
 // ============================================================================
@@ -1646,6 +1735,17 @@ pub enum FfiIncomingEnvelopeKind {
     /// throttled growth path; never render it. Appended last so every
     /// earlier variant keeps its ordinal.
     ProfileRequest,
+    /// A shared pin or unpin of one message (ADR-0052 decision 3). The
+    /// decoded operation rides the `pin` field of [`FfiIncomingEnvelope`];
+    /// `payload` is empty. Never render it as a chat bubble. Appended last
+    /// so every earlier variant keeps its ordinal.
+    ///
+    /// The sender's authority is the receiver's check: resolve the sender
+    /// leaf to the account key (C-68), consult the live role table (owner /
+    /// admin, or any member when there is no table, or either participant
+    /// of a one-to-one), then keep it only when [`pin_is_newer`] for that
+    /// message.
+    Pin,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -1683,6 +1783,9 @@ pub struct FfiIncomingEnvelope {
     /// Set only for `GroupName` (ADR-0051): the decoded group name. `None`
     /// for every other kind.
     pub group_name: Option<FfiGroupName>,
+    /// Set only for `Pin` (ADR-0052): the decoded pin operation. `None` for
+    /// every other kind.
+    pub pin: Option<FfiPinOp>,
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts.
@@ -1705,6 +1808,7 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
         .map_err(|err| FfiError::Contacts(err.to_string()))?;
     let mut profile = None;
     let mut group_name = None;
+    let mut pin = None;
     let (kind, payload, camera_on, mint_epoch) = match parsed {
         IncomingEnvelope::CallWelcome(p) => {
             (FfiIncomingEnvelopeKind::CallWelcome, p.to_vec(), None, None)
@@ -1747,6 +1851,10 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
             None,
             None,
         ),
+        IncomingEnvelope::Pin(op) => {
+            pin = Some(op.into());
+            (FfiIncomingEnvelopeKind::Pin, Vec::new(), None, None)
+        },
         IncomingEnvelope::IntroMessage(p) => (
             FfiIncomingEnvelopeKind::IntroMessage,
             p.to_vec(),
@@ -1761,6 +1869,7 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
         mint_epoch,
         profile,
         group_name,
+        pin,
     })
 }
 
@@ -3683,6 +3792,30 @@ mod tests {
         let dispatched = dispatch_incoming_envelope(clear).expect("dispatch clear");
         assert_eq!(dispatched.kind, FfiIncomingEnvelopeKind::GroupName);
         assert_eq!(dispatched.group_name.map(|g| g.name), Some(String::new()));
+    }
+
+    #[test]
+    fn pin_envelope_round_trips_and_dispatches() {
+        for pinned in [true, false] {
+            let op = FfiPinOp {
+                message_id: 41,
+                pinned,
+                updated_at_ms: 1_700_000_000_000,
+            };
+            let wire = compose_pin_envelope(op.clone());
+            assert_eq!(decode_pin_envelope(wire.clone()).expect("decode"), op);
+            let dispatched = dispatch_incoming_envelope(wire).expect("dispatch");
+            assert_eq!(dispatched.kind, FfiIncomingEnvelopeKind::Pin);
+            assert!(dispatched.payload.is_empty());
+            assert_eq!(dispatched.pin, Some(op));
+            assert_eq!(dispatched.group_name, None);
+        }
+        assert!(matches!(
+            decode_pin_envelope(b"hi".to_vec()),
+            Err(FfiError::Contacts(_))
+        ));
+        assert!(pin_is_newer(2, 1));
+        assert!(!pin_is_newer(1, 1));
     }
 
     #[test]

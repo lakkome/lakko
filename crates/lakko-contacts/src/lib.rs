@@ -34,6 +34,10 @@
 //!   template reused, bounded, fail-closed, classified by
 //!   [`incoming_envelope`]; the sender's authority is the receiver's
 //!   role-table check, not this crate's.
+//! - [`pin`] — the ADR-0052 shared-pin envelope (pin / unpin one message
+//!   for everyone, `updated_at_ms`): fixed-length, fail-closed, classified
+//!   by [`incoming_envelope`]; the order is [`pin::pin_is_newer`], the
+//!   authority is the receiver's role-table check.
 //!
 //! ## What's NOT here (1.9b and later)
 //!
@@ -76,6 +80,7 @@ pub mod group_name;
 pub mod incoming_envelope;
 pub mod invite;
 pub mod media_state;
+pub mod pin;
 pub mod profile;
 pub mod profile_request;
 pub mod pseudonym;
@@ -132,6 +137,10 @@ pub use invite::{
 pub use media_state::{
     compose_media_state, decode_media_state, try_unwrap_media_state, MediaState, MediaStateError,
     MEDIA_STATE_ENVELOPE_DOMAIN_V1, MEDIA_STATE_PAYLOAD_LEN, MEDIA_STATE_VERSION_V1,
+};
+pub use pin::{
+    compose_pin, decode_pin, pin_is_newer, try_unwrap_pin, PinAction, PinError, PinOp,
+    PIN_ENVELOPE_DOMAIN_V1, PIN_ENVELOPE_LEN, PIN_VERSION_V1,
 };
 pub use profile::{
     check_display_name, compose_profile, decode_profile, is_format_char, normalize_display_name,

@@ -122,3 +122,10 @@ path = "fuzz_targets/group_name_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "pin_decode"
+path = "fuzz_targets/pin_decode.rs"
+test = false
+doc = false
+bench = false

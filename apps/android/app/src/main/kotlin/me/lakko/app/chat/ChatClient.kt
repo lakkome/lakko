@@ -15,6 +15,7 @@ import me.lakko.app.push.GroupPushRouting
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.FfiGroupName
+import uniffi.lakko_ffi_uniffi.FfiPinOp
 import uniffi.lakko_ffi_uniffi.FfiProfile
 import uniffi.lakko_ffi_uniffi.FfiPushRoutingSecret
 import uniffi.lakko_ffi_uniffi.Group
@@ -597,6 +598,15 @@ private fun decodeGroupNameOrNull(bytes: ByteArray): FfiGroupName? =
         null
     }
 
+/** ADR-0052 decision 3 — the authoritative, fail-closed pin decode: the
+ *  operation, or `null` for a malformed envelope (dropped, never rendered). */
+private fun decodePinOrNull(bytes: ByteArray): FfiPinOp? =
+    try {
+        uniffi.lakko_ffi_uniffi.decodePinEnvelope(bytes)
+    } catch (_: Throwable) {
+        null
+    }
+
 /** ADR-0048 trigger 4 — the authoritative, fail-closed profile-request decode,
  *  reported as a boolean because the request carries nothing to hand back: a
  *  clean return IS the verdict. A bad length or an unknown schema version
@@ -657,6 +667,7 @@ internal fun toEvent(
     decodeProfile: (ByteArray) -> FfiProfile? = ::decodeProfileOrNull,
     decodeGroupName: (ByteArray) -> FfiGroupName? = ::decodeGroupNameOrNull,
     isProfileRequest: (ByteArray) -> Boolean = ::decodesAsProfileRequest,
+    decodePin: (ByteArray) -> FfiPinOp? = ::decodePinOrNull,
 ): IncomingChatEvent =
     when (processed) {
         is ProcessedMessage.Application -> {
@@ -784,6 +795,21 @@ internal fun toEvent(
                 IncomingChatEvent.GroupName(
                     messageId = messageId,
                     groupName = decodeGroupName(processed.data),
+                    senderKey = processed.senderLeaf?.let(resolveSender),
+                    createdAt = createdAt,
+                )
+            } else if (looksLikePinEnvelope(processed.data)) {
+                // ADR-0052 decision 3 — a shared pin or unpin of one message.
+                // Never a timeline bubble. Same shape as the group-name arm:
+                // the sender is resolved to its account KEY here (C-68),
+                // because the repository's gate judges the sender's standing
+                // at the moment of receipt and orders the action by its stamp
+                // against what is stored for that message. A malformed
+                // envelope arrives as `pin = null` and is consumed as a no-op;
+                // the chat parser never sees it.
+                IncomingChatEvent.Pin(
+                    messageId = messageId,
+                    pin = decodePin(processed.data),
                     senderKey = processed.senderLeaf?.let(resolveSender),
                     createdAt = createdAt,
                 )
@@ -1335,6 +1361,22 @@ public sealed interface IncomingChatEvent {
     public data class GroupName(
         val messageId: Long,
         val groupName: FfiGroupName?,
+        val senderKey: MemberIdentity?,
+        val createdAt: String,
+    ) : IncomingChatEvent
+
+    /** ADR-0052 decision 3 — a shared pin / unpin envelope. Never a timeline
+     *  bubble.
+     *
+     *  [pin] is `null` when the envelope matched the pin domain but was
+     *  malformed; it is consumed as a no-op.
+     *
+     *  [senderKey] is the sender's account key resolved from the MLS sender
+     *  leaf at receipt (C-68), `null` when unresolvable — the repository's gate
+     *  then refuses it wherever the sender's identity decides. */
+    public data class Pin(
+        val messageId: Long,
+        val pin: FfiPinOp?,
         val senderKey: MemberIdentity?,
         val createdAt: String,
     ) : IncomingChatEvent

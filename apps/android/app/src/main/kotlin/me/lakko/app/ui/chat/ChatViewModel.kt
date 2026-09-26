@@ -293,6 +293,11 @@ public class ChatViewModel(
         viewModelScope.launch {
             me.lakko.app.chat.GroupNameStore.version.collect { refreshGroupName() }
         }
+        // ADR-0052 decision 3 — a pin accepted by the poll, or set here, bumps
+        // the store version; the bar re-derives in place.
+        viewModelScope.launch {
+            me.lakko.app.chat.PinStore.version.collect { refreshPins() }
+        }
         viewModelScope.launch {
             repo.state.collect { repoState ->
                 // The live roster reads below are synchronous Rust calls that
@@ -308,6 +313,12 @@ public class ChatViewModel(
                 lastTypingText = live.typingText
                 derived.value = buildState(repoState, composer.value, live.typingText)
                 mutableOtherMemberIdentities.value = live.otherIdentities
+                // ADR-0052 decision 3 — the local half of the shared-pin
+                // standing, re-read with the roster (a role change or a
+                // membership change moves it). Same off-main-thread rule.
+                mutablePinAuthority.value = withContext(kotlinx.coroutines.Dispatchers.Default) {
+                    repo.mayPinForEveryone(groupIdHex)
+                }
                 // ADR-0045 UX §6.2 — re-read the core's own membership
                 // predicate after every repository emission. Nothing in the
                 // receive path announces the transition
@@ -699,6 +710,60 @@ public class ChatViewModel(
     /** Update the add-member text field. */
     public fun setAddMemberInput(value: String) {
         mutableAddMemberInput.value = value
+    }
+
+    // --- ADR-0052 decision 3 — pins ------------------------------------------
+
+    private val mutableSharedPins: MutableStateFlow<Map<Long, me.lakko.app.chat.StoredPin>> =
+        MutableStateFlow(emptyMap())
+
+    /** The conversation's shared pin map as this device holds it (unpins included). */
+    public val sharedPins: StateFlow<Map<Long, me.lakko.app.chat.StoredPin>> = mutableSharedPins.asStateFlow()
+
+    private val mutablePersonalPins: MutableStateFlow<Map<Long, ULong>> = MutableStateFlow(emptyMap())
+
+    /** This device's personal pins here, `messageId -> pinnedAtMs`. */
+    public val personalPins: StateFlow<Map<Long, ULong>> = mutablePersonalPins.asStateFlow()
+
+    private val mutablePinAuthority: MutableStateFlow<Boolean> = MutableStateFlow(false)
+
+    /** Whether this device may set or clear a shared pin (section 4.1's
+     *  second row). Re-read off the main thread after every repository
+     *  emission, so the sheet never pays a Rust call per bubble. */
+    public val mayPinForEveryone: StateFlow<Boolean> = mutablePinAuthority.asStateFlow()
+
+    /** Re-read both pin stores. */
+    private fun refreshPins() {
+        mutableSharedPins.value = repo.sharedPins(groupIdHex)
+        mutablePersonalPins.value = repo.personalPins(groupIdHex)
+    }
+
+    /** Section 4.1 — the row's word and the sheet's choices for [messageId]. */
+    public fun pinMenuFor(messageId: Long): me.lakko.app.chat.PinMenu =
+        me.lakko.app.chat.pinMenuFor(
+            sharedPinned = mutableSharedPins.value[messageId]?.pinned == true,
+            personalPinned = messageId in mutablePersonalPins.value,
+            mayShared = mutablePinAuthority.value,
+        )
+
+    /** Perform one pin action on [messageId]. A personal action is local and
+     *  immediate; a shared one is sent, and applied locally once it went out. */
+    public fun onPinAction(messageId: Long, action: me.lakko.app.chat.PinAction) {
+        when (action) {
+            me.lakko.app.chat.PinAction.PIN_ME -> repo.setPersonalPin(groupIdHex, messageId, pinned = true)
+            me.lakko.app.chat.PinAction.UNPIN_ME -> repo.setPersonalPin(groupIdHex, messageId, pinned = false)
+            me.lakko.app.chat.PinAction.PIN_EVERYONE, me.lakko.app.chat.PinAction.UNPIN_EVERYONE -> {
+                val pinned = action == me.lakko.app.chat.PinAction.PIN_EVERYONE
+                viewModelScope.launch {
+                    try {
+                        repo.setSharedPin(groupIdHex, messageId, pinned)
+                    } catch (err: Throwable) {
+                        composer.update { it.copy(sendError = err.message ?: me.lakko.app.chat.PIN_SEND_FAILED) }
+                        android.util.Log.w("ChatViewModel", "onPinAction failed", err)
+                    }
+                }
+            }
+        }
     }
 
     // --- ADR-0051 — the shared group name -----------------------------------

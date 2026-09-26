@@ -87,6 +87,7 @@ use crate::call_welcome::{try_unwrap_call_welcome, CallWelcomeError};
 use crate::committer_beacon::{try_unwrap_committer_beacon, CommitterBeaconError};
 use crate::group_name::{try_unwrap_group_name, GroupName, GroupNameError};
 use crate::media_state::{try_unwrap_media_state, MediaStateError};
+use crate::pin::{try_unwrap_pin, PinError, PinOp};
 use crate::profile::{try_unwrap_profile, Profile, ProfileError};
 use crate::profile_request::{try_unwrap_profile_request, ProfileRequestError};
 use crate::push_routing::{try_unwrap_push_routing_secret, PushRoutingSecretError};
@@ -191,6 +192,15 @@ pub enum IncomingEnvelope<'a> {
     /// trigger 4). Carries nothing; the receiver answers with its own
     /// profile through the throttled growth path. Never a chat bubble.
     ProfileRequest,
+    /// A shared pin or unpin of one message (ADR-0052 decision 3). Never a
+    /// chat bubble. **The caller must not store this unconditionally:**
+    /// resolve the MLS sender to the account key at receipt (C-68), accept
+    /// only from the owner or an admin of the live role table (any member
+    /// of a table-less group; either participant of a one-to-one), then
+    /// keep it only when [`crate::pin::pin_is_newer`] than the stored stamp
+    /// for that message — the whole read-decide-write under the per-group
+    /// lock (C-62 sub-invariant 5).
+    Pin(PinOp),
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -237,6 +247,9 @@ pub enum DispatchError {
     /// The profile-request domain with a malformed payload.
     #[error(transparent)]
     ProfileRequest(#[from] ProfileRequestError),
+    /// The pin domain (ADR-0052) with a malformed payload.
+    #[error(transparent)]
+    Pin(#[from] PinError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -294,6 +307,10 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     // 7b. Profile request — ADR-0048 §2 trigger 4.
     if try_unwrap_profile_request(plaintext)?.is_some() {
         return Ok(IncomingEnvelope::ProfileRequest);
+    }
+    // 7c. Shared pin — ADR-0052 decision 3.
+    if let Some(op) = try_unwrap_pin(plaintext)? {
+        return Ok(IncomingEnvelope::Pin(op));
     }
     // 8. Plain intro message — ADR-0005 scenario A.
     Ok(IncomingEnvelope::IntroMessage(plaintext))

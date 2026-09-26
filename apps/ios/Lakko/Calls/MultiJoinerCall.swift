@@ -653,6 +653,11 @@ final class MultiJoinerCall {
             // in `ChatRepository.answerProfileRequest`), never the SFU
             // signal-relay. Out of place here — drop.
             break
+        case .pin:
+            // ADR-0052 decision 3 — a shared-pin envelope rides the GROUP
+            // JOURNAL (standing-gated in `ChatRepository.receivePin`), never
+            // the SFU signal-relay. Out of place here — drop.
+            break
         }
     }
 

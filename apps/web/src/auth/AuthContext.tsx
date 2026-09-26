@@ -135,6 +135,7 @@ import { wipeChannelsForAccount } from "../state/channels-state";
 import { clearConversationKinds } from "../chat/conversation-kind-store";
 import { deleteProfileRow } from "../profile/profile-idb";
 import { deleteGroupNameRow } from "../chat/group-name-idb";
+import { deletePinRow } from "../chat/pin-idb";
 import { deleteReadWatermarkRow } from "../chat/read-watermark-idb";
 import { deleteCallLogRow } from "../calls/call-log-idb";
 import { clearOwnProfile } from "../profile/own-profile";
@@ -3278,6 +3279,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // ADR-0051 — the encrypted shared-group-name row, same contract.
         try {
           await deleteGroupNameRow(cached.accountIdB64);
+        } catch {
+          // best-effort
+        }
+        // ADR-0052 decision 3 — the encrypted pin row, same contract.
+        try {
+          await deletePinRow(cached.accountIdB64);
         } catch {
           // best-effort
         }

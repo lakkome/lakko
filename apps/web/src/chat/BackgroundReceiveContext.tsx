@@ -94,6 +94,7 @@ import {
   type ActingCommitter,
 } from "./committer-beacon";
 import { useGroupNames } from "./GroupNameContext";
+import { usePins } from "./PinContext";
 import { useReadWatermarks } from "./ReadWatermarkContext";
 import { readIsActive } from "./membership-ended";
 import {
@@ -189,6 +190,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
   const chats = useChats();
   const profiles = useProfiles();
   const groupNames = useGroupNames();
+  const pins = usePins();
   const readWatermarks = useReadWatermarks();
   const callHost = useCallHost();
 
@@ -714,6 +716,14 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
         console.warn("background receive: group name receive failed", err);
       });
     }
+    // ADR-0052 decision 3 — a shared pin, through the same gate and lock;
+    // the bar re-derives when the chat is next opened.
+    for (const p of plan.pins) {
+      void pins.receive(entry, p).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn("background receive: pin receive failed", err);
+      });
+    }
     for (const secret of plan.pushSecrets) {
       void receivePushRoutingSecretGated(
         account,
@@ -769,6 +779,7 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     if (observeMembers(account, groupIdB64, new Set(personKeysOf(entry.group)))) {
       profiles.groupGrew(groupIdB64);
       groupNames.groupGrew(groupIdB64);
+      pins.groupGrew(groupIdB64);
     }
 
     // The chat view gets the rest, now or when it next mounts.
@@ -800,10 +811,24 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
       if (deviceKey === null) return;
       const hex = hexOf(entry);
       const cursor = coordinator.cursor(entry.groupIdB64) ?? 0;
+      // ADR-0052 decision 3 — a message deleted while its chat was closed
+      // takes its pin records with it (section 4.1). Which deletes the
+      // author gate accepted is read off the fold's result, not off the ops.
+      const newlyDeleted: number[] = [];
       await updateMessageLog(account, deviceKey, (current) => {
         const groups = current?.groups ?? {};
         const appended = appendToGroupSlot(groups[hex], messages, cursor);
         const folded = foldOpsIntoStored(appended.messages, ops);
+        newlyDeleted.length = 0;
+        if (folded !== appended.messages) {
+          const before = new Set(
+            appended.messages.filter((m) => m.deleted === true).map((m) => Number(m.messageId)),
+          );
+          for (const m of folded) {
+            const id = Number(m.messageId);
+            if (m.deleted === true && Number.isFinite(id) && !before.has(id)) newlyDeleted.push(id);
+          }
+        }
         return {
           version: MESSAGE_LOG_VERSION,
           groups: {
@@ -813,6 +838,12 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
           },
         };
       });
+      for (const id of newlyDeleted) {
+        void pins.messageDeleted(entry.groupIdB64, id).catch((err) => {
+          // eslint-disable-next-line no-console
+          console.warn("background receive: dropping pins of a deleted message failed", err);
+        });
+      }
     } catch (err) {
       // The rows still reach the chat view through the coordinator for this
       // session; only their survival across a reload is lost.
