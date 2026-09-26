@@ -3,7 +3,7 @@
 
 # ADR-0052: Reply, forward and pin
 
-- **Status:** Proposed
+- **Status:** Accepted (maintainer, 2026-09-26)
 - **Date:** 2026-09-25
 - **UX spec:** [`docs/ux/message-actions.md`](../ux/message-actions.md)
 - **Extends:** [ADR-0023](0023-message-edit-delete-reactions.md) (the chat
@@ -101,14 +101,26 @@ conversation a route to somebody who never agreed to be reached by them, which
 is a way around the capability-based contact model of
 [ADR-0005](0005-contact-invitations.md).
 
-**Attachments are re-sent by reference.** An `AttachmentRef` carries its own
-decryption key, so forwarding the reference gives the new conversation access to
-the same stored blob without re-uploading or re-encrypting it. The cost is
-stated rather than hidden: the two conversations then share one ciphertext
-object, so the storage tier can see that the same blob was fetched by members of
-both. Re-encrypting per forward would cost an upload per forward and remove that
-signal. **Open question OQ1** - the cheap answer is proposed here; the private
-answer is defensible and the maintainer has not been asked.
+**Attachments are re-encrypted, not re-sent by reference** (OQ1, closed by the
+maintainer 2026-09-26). An `AttachmentRef` carries its own decryption key, so
+forwarding the reference would have given the new conversation the same stored
+blob for free - and left the two conversations sharing one ciphertext object,
+which the storage tier could see fetched by members of both. The maintainer
+chose the private answer: a forward downloads, re-encrypts under a fresh key
+and uploads its own blob, so nothing on the server ties the two conversations
+together. The cost is an upload per forwarded attachment; it is paid.
+
+**A forward carries where it came from, for one purpose.** Inside the sealed
+envelope, beside the name, rides a reference to the original message - its
+conversation id and its DS `messageId`. It exists so that a recipient who is
+ALSO a member of that conversation can tap the attribution and be taken to the
+original, the way Telegram does. Two rules make it safe. The reference travels
+only inside the encrypted payload and is never sent to any server, so the
+server learns nothing about which message became which (the maintainer's
+condition, stated as such). And a recipient who is not in that conversation
+sees the name only: tapping does nothing, and it does not say why, because an
+answer would confirm the conversation exists. What the recipient does learn is
+an opaque conversation id they cannot open; that is the whole disclosure.
 
 A message forwarded onward keeps the original name rather than the forwarder's,
 so a chain does not rewrite its own history.
@@ -166,9 +178,13 @@ this ADR first left open):
   no role table in a one-to-one and inventing an asymmetry there would mean one
   of two people could pin something the other could not remove.
 
-**Open question OQ3 - how many pins a conversation may hold.** One is simplest
-and makes "pin" mean "replace"; several need an order and a list surface. Not
-decided here.
+**Several pins, no product limit** (OQ3, closed by the maintainer 2026-09-26).
+A conversation holds as many shared pins as people set, ordered newest first,
+and the UI shows them through a pinned bar that displays ONE at a time with a
+way to move between them; the bar's behaviour is UX spec section 4. "No limit"
+is a product statement, not a codec one: the envelope stays bounded like every
+other envelope in `lakko-contacts`, and a per-conversation cap is added only if
+abuse ever calls for it, which nothing does today.
 
 ## Alternatives considered
 
@@ -208,7 +224,8 @@ decided here.
 
 ## Status of the open questions
 
-OQ2 (who may unpin) is answered above. OQ1 (forward re-encryption) and OQ3 (how
-many pins a conversation may hold) are open and are the maintainer's calls. Nothing in the first implementation wave -
+All three open questions are answered above: OQ1 (re-encrypt), OQ2 (who may
+unpin) and OQ3 (several pins, a bar showing one at a time). Nothing in the
+first implementation wave - Reply and Copy - depended on any of them. Nothing in the first implementation wave -
 Reply and Copy - depends on any of them, so building can start while they are
 answered.

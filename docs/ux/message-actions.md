@@ -104,6 +104,20 @@ private bookmark impossible, and offering only the private one makes "look at
 this" impossible. The UI must make which one happened obvious afterwards - a
 message pinned only for me must not look like one the whole group can see.
 
+**The pinned bar** (the maintainer's shape, 2026-09-26: several pins, one shown
+at a time, with a way to move between them). When a conversation has at least
+one pin, a bar sits under the header showing ONE pinned message - author and
+excerpt - the newest first, with a thin stacked indicator beside it that says
+how many there are and which one this is, the way Telegram's does. Tapping the
+bar scrolls the conversation to the message it shows and advances the bar to
+the next older pin; past the oldest it wraps to the newest. That single gesture
+is the navigation: every pin is reachable by tapping the bar repeatedly, and
+nothing else needs to exist for the common case. A second affordance on the bar
+opens all pins as a list, each row jumping to its message, for the person who
+wants to scan rather than cycle. Shared pins come before personal ones in the
+order, since a shared pin outranks a personal one (above). A pinned message
+that is later deleted leaves the bar; it is not shown as a tombstone.
+
 The authority and ordering rules for the shared pin are **not settled here**.
 They belong in the ADR, and the lesson from ADR-0042 through ADR-0044 applies
 directly: *who may write* and *which write survives* are two different questions,
@@ -134,6 +148,15 @@ Three consequences, all of which must be stated rather than discovered:
 
 A message forwarded onward keeps the ORIGINAL author's name rather than the name
 of whoever forwarded it, so a chain does not rewrite its own history.
+
+**Tapping the attribution goes to the original - when the device can.** The
+maintainer asked for Telegram's behaviour with one condition, that the server
+learn nothing about the link. So the forward carries, inside its encrypted
+payload, a reference to the original message, and a recipient who is also in
+that conversation is taken to it on tap. A recipient who is not sees the name
+only; tapping does nothing and does not explain, because explaining would
+confirm that the conversation exists. The reference points at a message, never
+at a person - the author stays unreachable as above.
 
 ## 6. Data the UI needs (input to the ADR)
 
