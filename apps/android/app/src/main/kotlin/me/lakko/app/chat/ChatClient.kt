@@ -242,7 +242,8 @@ public class ChatClient(
         } catch (e: DsClientArgError) {
             throw ChatError("DS publish failed", e)
         } catch (e: DsHttpError) {
-            throw ChatError("DS publish failed", e)
+            // ADR-0053 — a refusal the device clock explains says so.
+            throw ChatError(dsErrorMessage(e, "DS publish failed"), e)
         } catch (e: DsNetworkError) {
             throw ChatError("DS publish failed", e)
         }
@@ -334,7 +335,7 @@ public class ChatClient(
         } catch (e: DsClientArgError) {
             throw ChatError("DS fetch failed", e)
         } catch (e: DsHttpError) {
-            throw ChatError("DS fetch failed", e)
+            throw ChatError(dsErrorMessage(e, "DS fetch failed"), e)
         } catch (e: DsNetworkError) {
             throw ChatError("DS fetch failed", e)
         }
@@ -465,6 +466,12 @@ public class ChatClient(
  *  exactly one definition, and a second copy would drift silently
  *  the next time a field number moves. This is the same predicate
  *  it always was — "is this call signaling at all". */
+/** ADR-0053 client contract point 5 — the user-facing sentence of a DS
+ *  failure: "Check this device's date and time." when a proof refusal is
+ *  explained by the device clock, [fallback] otherwise. */
+internal fun dsErrorMessage(error: Throwable, fallback: String): String =
+    (error as? me.lakko.app.ds.DsProofRefusedError)?.userMessage ?: fallback
+
 internal fun looksLikeCallSignaling(bytes: ByteArray): Boolean =
     me.lakko.app.calls.callSignalingBodyKind(bytes) != null
 

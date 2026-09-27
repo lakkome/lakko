@@ -26,7 +26,12 @@
  * `BLAKE3("lakko-device-group/v1" || account_id)` value the
  * server already accepts as opaque bytes.
  */
-import { ensureDeviceGroup, persistDeviceGroupSnapshot } from "./lifecycle";
+import {
+  ensureDeviceGroup,
+  persistDeviceGroupSnapshot,
+  registerDeviceGroupEpochOrThrow,
+} from "./lifecycle";
+import { takeSigner } from "../ds/access";
 import { encodeJournalEntry } from "./journal-envelope";
 import { DsClient } from "../ds/client";
 
@@ -150,19 +155,27 @@ export async function removeDeviceAt(args: {
   );
   seed.fill(0);
 
+  // ADR-0053 — the key of the epoch the removal leaves, taken BEFORE the
+  // create call.
+  const signerN = takeSigner(() => ensured.group.dsAccessSigner(ensured.identity));
   try {
     const commitBytes = ensured.group.removeDeviceAt(
       ensured.identity,
       args.leafIndex,
     );
+    const ds = new DsClient();
+    // ADR-0053 contract point 3 — register the new epoch's key before the
+    // publish; a refusal throws with nothing published or persisted.
+    await registerDeviceGroupEpochOrThrow(ds, ensured.group, ensured.identity, signerN);
     // Broadcast to the DeviceGroup journal. The wasm `groupId`
     // accessor returns the deterministic 32-byte
     // BLAKE3-domain-tagged value; the DS treats it as opaque
     // bytes. G-13 (ADR-0015): wrap the commit + removal attestation in the
     // journal envelope so peers can verify the removal under the policy.
     const groupId = ensured.group.groupId();
-    const ds = new DsClient();
-    await ds.publishGroup(groupId, encodeJournalEntry(commitBytes, args.attestation ?? null));
+    await ds.publishGroup(groupId, encodeJournalEntry(commitBytes, args.attestation ?? null), {
+      signer: signerN,
+    });
 
     await persistDeviceGroupSnapshot(
       ensured.identity,
@@ -173,6 +186,7 @@ export async function removeDeviceAt(args: {
       remainingCount: ensured.group.devices().length,
     };
   } finally {
+    signerN?.free();
     ensured.group.free();
     ensured.identity.free();
   }

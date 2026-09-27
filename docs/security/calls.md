@@ -4514,3 +4514,16 @@ envelope kind), **#3** (no `lakko-mls` change; this is client seam placement), *
 (unchanged), **#5** (S7's fan-out puts a raw signature key on the journal where an
 ordinary add puts a hash on a mailbox — recorded in ADR-0045 rather than here, since it
 is a property of the fan-out and not of the rule).
+
+**Amended by [ADR-0053](../adr/0053-ds-journal-authorisation.md) (2026-09-27): the rule
+stands, instance 2's carrier changed.** The rendezvous went to the group journal because
+the journal was the only place a non-member could read. ADR-0053 closes the journal to
+non-members, so the sweep now delivers the Welcome for every added key to the **mailbox**
+named by that key - the same path a direct add uses - and writes no
+`WelcomeRendezvous` to a journal at all. The origin-blind fan-out survives unchanged: the
+sweep still cannot tell which adds came from a `/g/` link and still delivers for every
+one. The #5 note above is retired with it - a mailbox Welcome puts a hash on a mailbox, as
+an ordinary add does. The co-publisher approve (ADR-0028 OQ3) follows: its Welcome goes
+to the joiner's account mailbox wrapped as `KIND_WELCOME`, on all three clients. Pinned by
+each platform's committer-sweep tests, rewritten from rendezvous-for-every-add to
+mailbox-only.

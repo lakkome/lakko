@@ -35,8 +35,8 @@ pub use device_binding::{account_key_of_credential, DeviceBinding, DEVICE_BINDIN
 pub use device_group::{AccountId, DeviceGroup};
 pub use error::{Error, Result};
 pub use group::{
-    epoch_after_message, epoch_of_message, Group, Incoming, MemberAddition, MemberRecord,
-    ProposalCommit, GROUP_ID_LEN,
+    epoch_after_message, epoch_of_message, is_external_join_proposal_for, Group, Incoming,
+    MemberAddition, MemberRecord, ProposalCommit, GROUP_ID_LEN,
 };
 pub use group_proposals::{ProposalKind, ProposalRecord};
 pub use group_roles::{committer_rank, OutgoingOwner, Role, RoleTable};

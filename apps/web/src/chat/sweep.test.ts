@@ -207,6 +207,10 @@ interface Model {
   /** Flip to make the verdict apply's FAIL-CLOSED snapshot write fail — the
    *  swallowed-IndexedDB-error shape that used to strand the device. */
   failPersistApplied: (fail: boolean) => void;
+  /** ADR-0053 — flip to make the staged epoch's registration be refused. */
+  failRegister: (fail: boolean) => void;
+  /** ADR-0053 — each `beginApply` completion: `release`, or `heal@N->M`. */
+  readonly heals: string[];
 }
 
 function model(opts: {
@@ -243,6 +247,8 @@ function model(opts: {
   let welcomePublishFails = false;
   let markWelcomesOwedFails = false;
   let persistAppliedFails = false;
+  let registerFails = false;
+  const heals: string[] = [];
 
   const ports: SweepPorts = {
     actingCommitter: async (ownRank) => {
@@ -312,17 +318,11 @@ function model(opts: {
         return journal.filter((r) => r.id > after);
       },
       publishGroup: async (bytes) => {
-        // 0xcc is what the model's `wrapRendezvous` stamps; byte 1 is the key
-        // it was addressed to, so the assertions can name WHICH joiner each
-        // envelope is for rather than only counting them.
-        const label =
-          bytes[0] === COMMIT
-            ? "commit"
-            : bytes[0] === 0xcc
-              ? `rendezvous:${(bytes[1] ?? 0).toString(16)}`
-              : "other";
+        // ADR-0053 contract point 8 — the sweep writes only its commit to the
+        // journal; anything else here is a defect the assertions will show.
+        const label = bytes[0] === COMMIT ? "commit" : "other";
         published.push(`group:${label}`);
-        order.push(label === "commit" ? "publish" : "publish-rendezvous");
+        order.push(label === "commit" ? "publish" : "publish-other");
         const id = (nextId += 1);
         journal.push({ id, payload: bytes, createdAt: `t-${id}` });
         // Splice the racing rows in at ids BELOW ours, the way the DS would
@@ -380,7 +380,18 @@ function model(opts: {
     },
     welcomeMailbox: (k) => new Uint8Array([0xbb, k[0] ?? 0]),
     wrapWelcome: (w) => new Uint8Array([0xee, ...w]),
-    wrapRendezvous: (k, w) => new Uint8Array([0xcc, k[0] ?? 0, ...w]),
+    // ADR-0053 contract point 3, the staged half.
+    registerStagedEpoch: async () => {
+      if (registerFails) throw new Error("ds access: 401 proof required");
+      order.push("register");
+    },
+    // ADR-0053 contract point 4 — records whether the sweep asked to heal.
+    beginApply: () => {
+      const epochAtBegin = epoch;
+      return async (heal) => {
+        heals.push(heal ? `heal@${epochAtBegin}->${epoch}` : "release");
+      };
+    },
     markOwnPublished: (id) => order.push(`own:${id}`),
     persist: async () => {
       order.push("persist");
@@ -417,6 +428,10 @@ function model(opts: {
     failPersistApplied: (fail) => {
       persistAppliedFails = fail;
     },
+    failRegister: (fail) => {
+      registerFails = fail;
+    },
+    heals,
   };
 }
 
@@ -532,6 +547,7 @@ describe("ADR-0045 — obligation 4: record before publish, verdict before merge
       "acting?0", // S4b — the fold runs first, and the owner always acts
       "fetch>0", // the stand-down re-read — STILL required after S4b
       "stage",
+      "register", // ADR-0053 — the staged epoch's key, before anything durable
       "record", // BEFORE any publish (ADR-0040)
       "publish",
       "own:101",
@@ -600,7 +616,6 @@ describe("ADR-0045 — obligation 2: the Welcome waits for the verdict", () => {
     expect(m.published).toEqual([
       "group:commit",
       "mailbox:welcome",
-      "group:rendezvous:a1",
     ]);
   });
 
@@ -660,9 +675,6 @@ describe("ADR-0045 — obligation 1: a restart finishes an owed verdict", () => 
     commitB64: Buffer.from(frame(COMMIT, 6, 0x5e)).toString("base64"),
     welcomeEnvelopeB64: Buffer.from([0xee, 0x01]).toString("base64"),
     welcomeMailboxesB64: [Buffer.from([0xbb, 0xa1]).toString("base64")],
-    // ADR-0045 S7 — a real entry always carries this (it is computed and
-    // recorded with the mailboxes, before any publish), so the fixture does too.
-    welcomeRendezvousB64: [Buffer.from([0xcc, 0xa1, 0x01]).toString("base64")],
   };
 
   it("re-publishes idempotently, re-adjudicates, and merges when it won", async () => {
@@ -678,7 +690,6 @@ describe("ADR-0045 — obligation 1: a restart finishes an owed verdict", () => 
     expect(m.published).toEqual([
       "group:commit",
       "mailbox:welcome",
-      "group:rendezvous:a1",
     ]);
   });
 
@@ -787,7 +798,6 @@ describe("ADR-0045 — a Welcome that failed AFTER the merge is still owed", () 
     expect(m.published).toEqual([
       "group:commit",
       "mailbox:welcome",
-      "group:rendezvous:a1",
     ]);
     // Acked, so nothing is owed any more.
     expect(m.entries().size).toBe(0);
@@ -807,13 +817,11 @@ describe("ADR-0045 — a Welcome that failed AFTER the merge is still owed", () 
     expect(m.published).toEqual([
       "group:commit",
       "mailbox:welcome",
-      "group:rendezvous:a1",
     ]);
     // The verdict is already known — the retry must not stage, publish a
     // second commit, or apply another row to re-read the journal order.
     expect(m.order.slice(before)).toEqual([
       "publish-welcome",
-      "publish-rendezvous",
       "ack",
     ]);
     expect(m.published.filter((p) => p === "group:commit")).toHaveLength(1);
@@ -867,7 +875,6 @@ describe("ADR-0045 — a Welcome that failed AFTER the merge is still owed", () 
           commitB64: Buffer.from(frame(COMMIT, 6, 0x5e)).toString("base64"),
           welcomeEnvelopeB64: Buffer.from([0xee, 0x01]).toString("base64"),
           welcomeMailboxesB64: [Buffer.from([0xbb, 0xa1]).toString("base64")],
-          welcomeRendezvousB64: [Buffer.from([0xcc, 0xa1, 0x01]).toString("base64")],
         },
       },
     });
@@ -918,7 +925,6 @@ describe("ADR-0045 — a Welcome that failed AFTER the merge is still owed", () 
     expect(m.published).toEqual([
       "group:commit",
       "mailbox:welcome",
-      "group:rendezvous:a1",
     ]);
     expect(m.order).toContain("ack");
     // Acked in the same run, so the marker never survives a healthy sweep.
@@ -939,7 +945,6 @@ describe("ADR-0045 — a Welcome that failed AFTER the merge is still owed", () 
     expect(m.published).toEqual([
       "group:commit",
       "mailbox:welcome",
-      "group:rendezvous:a1",
     ]);
   });
 });
@@ -1126,7 +1131,6 @@ describe("ADR-0045 — the verdict apply must not swallow the rows it consumes",
       commitB64: Buffer.from(frame(COMMIT, 6, 0x5e)).toString("base64"),
       welcomeEnvelopeB64: undefined,
       welcomeMailboxesB64: [],
-      welcomeRendezvousB64: [],
     };
     const m = model({
       rank: 0,
@@ -1143,39 +1147,25 @@ describe("ADR-0045 — the verdict apply must not swallow the rows it consumes",
   });
 });
 
-describe("ADR-0045 S7 — the sweep owes a WelcomeRendezvous per added key", () => {
-  // S7 moved the external-join approve off its own direct commit and onto the
-  // proposal path, which moved the `/g/` joiner's rendezvous with it. The
-  // joiner is not a member and never polls a mailbox it was told about
-  // out-of-band — it polls the GROUP JOURNAL, matching a rendezvous envelope
-  // against its own signature key — so a sweep that publishes only the mailbox
-  // fan-out leaves an approved joiner permanently unable to join, with the
-  // group already holding it as a member.
+describe("ADR-0053 contract point 8 — the sweep delivers every Welcome to a mailbox", () => {
+  // ADR-0045 S7 posted a `WelcomeRendezvous` to the group journal for every
+  // added key, because a `/g/` joiner could only read the journal. A claimed
+  // journal answers only its members, so the joiner now waits on its own
+  // device mailbox like every other added member and the journal copy is gone.
   const A1 = new Uint8Array(32).fill(0xa1);
   const A2 = new Uint8Array(32).fill(0xa2);
 
-  it("posts one rendezvous to the group journal for EVERY add, alongside the mailboxes", async () => {
+  it("posts one mailbox Welcome per add and NOTHING but the commit to the journal", async () => {
     const m = model({ rank: 0, pending: 2, epoch: 6, adds: [A1, A2] });
 
     const out = await runCommitterSweep(m.ports);
 
     expect(out.kind).toBe("committed");
-    // Two adds -> two mailbox welcomes AND two journal rendezvous. The sweep
-    // cannot tell which add came from a `/g/` link — that indistinguishability
-    // is what makes S7 sound — so it posts for both, origin-blind.
-    expect(m.published).toEqual([
-      "group:commit",
-      "mailbox:welcome",
-      "mailbox:welcome",
-      "group:rendezvous:a1",
-      "group:rendezvous:a2",
-    ]);
+    expect(m.published).toEqual(["group:commit", "mailbox:welcome", "mailbox:welcome"]);
+    expect(m.published.filter((p) => p.startsWith("group:"))).toEqual(["group:commit"]);
   });
 
-  it("holds the rendezvous back until the verdict, exactly like the Welcome", async () => {
-    // A rendezvous published on a commit that then LOSES would let a joiner
-    // open into a state no other member holds — the three-party fork ADR-0045
-    // names as strictly worse than the two-party one.
+  it("holds the mailbox Welcome back until the verdict", async () => {
     const m = model({ rank: 0, pending: 1, epoch: 6, adds: [A1] });
     m.raceRows.push(row(50, COMMIT, 6, 0xfa));
 
@@ -1185,31 +1175,78 @@ describe("ADR-0045 S7 — the sweep owes a WelcomeRendezvous per added key", () 
     expect(m.published).toEqual(["group:commit"]);
   });
 
-  it("a restart that owes the fan-out re-publishes the rendezvous too", async () => {
-    // The rendezvous is durably recorded WITH the Welcome, so the retry
-    // publishes the very bytes the first attempt computed — nothing is
-    // recomputed from a roster that has since moved on.
-    const m = model({ rank: 0, pending: 1, epoch: 6, adds: [A1] });
-    m.failWelcomePublish(true);
-    await expect(runCommitterSweep(m.ports)).rejects.toThrow(/DS unreachable/);
-    expect(m.published).toEqual(["group:commit"]);
-
-    m.failWelcomePublish(false);
-    const out = await resolveOwedWelcomes(m.ports);
-
-    expect(out.kind).toBe("welcomes-republished");
-    expect(m.published).toEqual([
-      "group:commit",
-      "mailbox:welcome",
-      "group:rendezvous:a1",
-    ]);
-  });
-
-  it("a sweep carrying no add posts no rendezvous at all", async () => {
+  it("a sweep carrying no add posts nothing but the commit", async () => {
     const m = model({ rank: 0, pending: 1, epoch: 6, adds: [] });
 
     await runCommitterSweep(m.ports);
 
     expect(m.published).toEqual(["group:commit"]);
+  });
+});
+
+describe("ADR-0053 contract point 3 — the staged epoch is registered before the sweep is published", () => {
+  it("registers after staging, before the outbox record and the publish", async () => {
+    const m = model({ rank: 0, pending: 1, epoch: 6 });
+
+    await runCommitterSweep(m.ports);
+
+    const register = m.order.indexOf("register");
+    expect(register).toBeGreaterThan(m.order.indexOf("stage"));
+    expect(register).toBeLessThan(m.order.indexOf("record"));
+    expect(register).toBeLessThan(m.order.indexOf("publish"));
+  });
+
+  it("a refused registration abandons the stage, records nothing and publishes nothing", async () => {
+    const m = model({ rank: 0, pending: 1, epoch: 6 });
+    m.failRegister(true);
+
+    await expect(runCommitterSweep(m.ports)).rejects.toThrow(/proof required/);
+
+    expect(m.published).toEqual([]);
+    expect(m.order).not.toContain("record");
+    expect(m.order).toContain("abandon");
+    expect(m.staged()).toBe(false);
+    expect(m.epoch()).toBe(6n);
+    // The proposals survive for the next attempt.
+    expect(m.pending()).toBe(1);
+  });
+
+  it("the restart path re-sends the registration and still re-publishes when it is refused", async () => {
+    const OWED: SweepDurableEntry = {
+      id: "entry-owed",
+      commitB64: Buffer.from(frame(COMMIT, 6, 0x5e)).toString("base64"),
+      welcomeEnvelopeB64: undefined,
+      welcomeMailboxesB64: [],
+    };
+    const m = model({ rank: 0, pending: 1, epoch: 6, owed: { entry: OWED } });
+    m.failRegister(true);
+
+    const out = await resolveOwedVerdict(m.ports);
+
+    // The commit may already be on the wire from the first run: the verdict,
+    // not a refused re-registration, decides what happens to it.
+    expect(out.kind).toBe("committed");
+    expect(m.published).toEqual(["group:commit"]);
+  });
+});
+
+describe("ADR-0053 contract point 4 — heal after the verdict apply", () => {
+  it("a LOST sweep asks to heal: the winner's commit moved the epoch in the verdict read", async () => {
+    const m = model({ rank: 0, pending: 1, epoch: 6 });
+    m.raceRows.push(row(50, COMMIT, 6, 0xfa));
+
+    const out = await runCommitterSweep(m.ports);
+
+    expect(out.kind).toBe("lost");
+    expect(m.heals).toEqual(["heal@6->7"]);
+  });
+
+  it("a WON sweep only releases what it captured: its own key was registered before the publish", async () => {
+    const m = model({ rank: 0, pending: 1, epoch: 6 });
+
+    const out = await runCommitterSweep(m.ports);
+
+    expect(out.kind).toBe("committed");
+    expect(m.heals).toEqual(["release"]);
   });
 });

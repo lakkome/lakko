@@ -108,12 +108,19 @@ struct NseRealDecryptDeps: NsePushDecryptDeps {
         return NseRealThrowawayGroup(identity: identity, group: group)
     }
 
-    func dsFetch(groupIdBytes: Data, afterId: Int64) async throws -> [NseFetchedRow] {
+    func dsFetch(
+        groupIdBytes: Data,
+        afterId: Int64,
+        group: NseThrowawayGroup
+    ) async throws -> [NseFetchedRow] {
         try await NseDsFetch.fetchGroup(
             baseURL: dsBaseURL,
             session: session,
             groupId: groupIdBytes,
-            after: afterId
+            after: afterId,
+            proof: { path, query in
+                group.dsProofHeader(method: "GET", path: path, query: query, body: Data())
+            }
         )
     }
 
@@ -184,6 +191,13 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
     init(identity: Identity, group: Group) {
         self.identity = identity
         self.group = group
+    }
+
+    /// ADR-0053 point 9 — the throwaway group's access signer at its restored
+    /// epoch. An exporter read over the throwaway provider, never persisted.
+    func dsProofHeader(method: String, path: String, query: String, body: Data) -> String? {
+        guard let signer = try? group.dsAccessSigner(identity: identity) else { return nil }
+        return signer.sign(method: method, path: path, query: query, body: body)
     }
 
     func process(_ payload: Data) -> NseProcessedRow? {
@@ -470,10 +484,14 @@ enum NseDsFetch {
         baseURL: String,
         session: URLSession,
         groupId: Data,
-        after: Int64
+        after: Int64,
+        proof: (_ path: String, _ query: String) -> String?
     ) async throws -> [NseFetchedRow] {
         let hex = hexString(groupId)
-        guard var components = URLComponents(string: baseURL + "/ds/group/\(hex)/messages") else {
+        // ADR-0053 — the proof covers the SERVICE path (never the base URL's
+        // nginx prefix) and the query exactly as `components.url` sends it.
+        let path = "/ds/group/\(hex)/messages"
+        guard var components = URLComponents(string: baseURL + path) else {
             throw NseDsFetchError.badURL
         }
         components.queryItems = [
@@ -484,6 +502,9 @@ enum NseDsFetch {
 
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
+        if let header = proof(path, components.percentEncodedQuery ?? "") {
+            request.setValue(header, forHTTPHeaderField: dsProofHeaderName())
+        }
         // Keep well inside the NSE wall-clock budget (the handler also runs a
         // shorter overall deadline).
         request.timeoutInterval = 15

@@ -38,7 +38,7 @@ final class ForwardPayloadTests: XCTestCase {
 
     func testAForwardCarriesTheTextTheAuthorsLabelAndThisMessageAsTheOrigin() {
         let sent = ForwardPayload.forwardPayload(
-            of: message("see you at 5"), authorLabel: " Anna ", originGroupIdHex: origin)
+            of: message("see you at 5"), authorLabel: " Anna ", originGroupIdHex: origin, sourceIsOneToOne: false)
         XCTAssertEqual(sent.text, "see you at 5")
         XCTAssertEqual(sent.forward.author, "Anna")
         XCTAssertEqual(sent.forward.originGroupIdHex, origin)
@@ -50,7 +50,7 @@ final class ForwardPayloadTests: XCTestCase {
     /// edited)". After an edit lands `text` IS the edited text.
     func testAnEditedMessageForwardsItsEditedText() {
         let sent = ForwardPayload.forwardPayload(
-            of: message("corrected", edited: true), authorLabel: "Anna", originGroupIdHex: origin)
+            of: message("corrected", edited: true), authorLabel: "Anna", originGroupIdHex: origin, sourceIsOneToOne: false)
         XCTAssertEqual(sent.text, "corrected")
     }
 
@@ -62,7 +62,7 @@ final class ForwardPayloadTests: XCTestCase {
         let sent = ForwardPayload.forwardPayload(
             of: message(
                 "agreed", reply: quoted, reactions: [Reaction(reactor: "x", emoji: "👍")]),
-            authorLabel: "Anna", originGroupIdHex: origin)
+            authorLabel: "Anna", originGroupIdHex: origin, sourceIsOneToOne: false)
         XCTAssertEqual(sent.text, "agreed")
         XCTAssertEqual(sent.forward.author, "Anna")
         XCTAssertFalse(sent.text.contains("the plan"))
@@ -72,11 +72,11 @@ final class ForwardPayloadTests: XCTestCase {
     func testABlankAuthorLabelMeansNoName() {
         XCTAssertNil(
             ForwardPayload.forwardPayload(
-                of: message("hi"), authorLabel: "  ", originGroupIdHex: origin
+                of: message("hi"), authorLabel: "  ", originGroupIdHex: origin, sourceIsOneToOne: false
             ).forward.author)
         XCTAssertNil(
             ForwardPayload.forwardPayload(
-                of: message("hi"), authorLabel: nil, originGroupIdHex: origin
+                of: message("hi"), authorLabel: nil, originGroupIdHex: origin, sourceIsOneToOne: false
             ).forward.author)
     }
 
@@ -84,9 +84,37 @@ final class ForwardPayloadTests: XCTestCase {
     /// never half of one.
     func testARowWithoutAnIdCarriesNoOrigin() {
         let sent = ForwardPayload.forwardPayload(
-            of: message("hi", id: 0), authorLabel: "Anna", originGroupIdHex: origin)
+            of: message("hi", id: 0), authorLabel: "Anna", originGroupIdHex: origin, sourceIsOneToOne: false)
         XCTAssertNil(sent.forward.originGroupIdHex)
         XCTAssertNil(sent.forward.originMessageId)
+        XCTAssertFalse(sent.forward.hasOrigin)
+    }
+
+    // MARK: - ADR-0053 section 6: a forward out of a one-to-one
+
+    /// A forward whose source is a one-to-one carries no origin: the only
+    /// other holder of that conversation is its other participant.
+    func testAForwardFromAOneToOneCarriesNoOrigin() {
+        let sent = ForwardPayload.forwardPayload(
+            of: message("see you at 5"), authorLabel: "Anna", originGroupIdHex: origin,
+            sourceIsOneToOne: true)
+        XCTAssertEqual(sent.text, "see you at 5")
+        XCTAssertEqual(sent.forward.author, "Anna", "the name is still carried")
+        XCTAssertNil(sent.forward.originGroupIdHex)
+        XCTAssertNil(sent.forward.originMessageId)
+        XCTAssertFalse(sent.forward.hasOrigin)
+    }
+
+    /// ...nor an origin the message carried in: the rule is about the source
+    /// conversation, and it drops the whole pair.
+    func testAForwardOfAForwardOutOfAOneToOneDropsTheCarriedOriginToo() {
+        let carried = ForwardRef(author: "Zoe", originGroupIdHex: "ffee", originMessageId: 3)
+        let sent = ForwardPayload.forwardPayload(
+            of: message("hello", id: 90, forward: carried),
+            authorLabel: "Anna",
+            originGroupIdHex: origin,
+            sourceIsOneToOne: true)
+        XCTAssertEqual(sent.forward.author, "Zoe")
         XCTAssertFalse(sent.forward.hasOrigin)
     }
 
@@ -100,7 +128,7 @@ final class ForwardPayloadTests: XCTestCase {
         let sent = ForwardPayload.forwardPayload(
             of: message("hello", id: 90, forward: carried),
             authorLabel: "Anna",
-            originGroupIdHex: origin)
+            originGroupIdHex: origin, sourceIsOneToOne: false)
         XCTAssertEqual(sent.text, "hello")
         XCTAssertEqual(sent.forward.author, "Zoe")
         XCTAssertEqual(sent.forward.originGroupIdHex, "ffee")
@@ -115,7 +143,7 @@ final class ForwardPayloadTests: XCTestCase {
         let sent = ForwardPayload.forwardPayload(
             of: message("hello", id: 90, forward: carried),
             authorLabel: "Anna",
-            originGroupIdHex: origin)
+            originGroupIdHex: origin, sourceIsOneToOne: false)
         XCTAssertNil(sent.forward.author)
         XCTAssertFalse(sent.forward.hasOrigin)
     }

@@ -2071,6 +2071,19 @@ impl Group {
         ds_proof::group_signer(&g, &identity.inner)
     }
 
+    /// The ADR-0053 access signer for the epoch a staged sweep moves to
+    /// (N+1), while this group still sits at N; `None` when nothing is
+    /// staged. Register its key, proven under the current signer, BEFORE
+    /// publishing the sweep, so no peer that applies the commit ever holds an
+    /// epoch the Delivery Service does not know.
+    pub fn ds_staged_access_signer(
+        &self,
+        identity: &Identity,
+    ) -> Result<Option<Arc<ds_proof::DsProofSigner>>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        ds_proof::staged_group_signer(&g, &identity.inner)
+    }
+
     /// Derive a `length`-byte secret bound to the current epoch.
     pub fn export_secret(
         &self,
@@ -2184,6 +2197,28 @@ impl Group {
         let table = role_table_from_parts(owner, admins)?;
         let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         Ok(g.set_group_roles(&identity.inner, &table)?)
+    }
+
+    /// Process one row read from this journal's **knock** queue (ADR-0053).
+    /// Anything that is not a stranger's external-join proposal for this group
+    /// is refused BEFORE it is processed - a knock row is an unauthenticated
+    /// write, and applying a commit or message someone posted there instead of
+    /// the journal would fork the admins who read knocks from everyone else.
+    /// A row that passes is processed exactly like `processIncomingVerifyingRoles`.
+    pub fn process_knock(
+        &self,
+        identity: &Identity,
+        bytes: Vec<u8>,
+    ) -> Result<ProcessedMessage, FfiError> {
+        {
+            let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+            if !lakko_mls::is_external_join_proposal_for(&bytes, &g.group_id()) {
+                return Err(FfiError::Message(
+                    "knock row is not an external-join proposal for this group".to_string(),
+                ));
+            }
+        }
+        self.process_incoming_verifying_roles(identity, bytes)
     }
 
     /// Apply an incoming commit ENFORCING the ADR-0022 role policy — a commit
@@ -2409,6 +2444,28 @@ impl PublisherGroup {
     pub fn group_id(&self) -> Result<Vec<u8>, FfiError> {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         Ok(g.group_id())
+    }
+
+    /// Process one row read from this journal's **knock** queue (ADR-0053).
+    /// Anything that is not a stranger's external-join proposal for this group
+    /// is refused BEFORE it is processed - a knock row is an unauthenticated
+    /// write, and applying a commit or message someone posted there instead of
+    /// the journal would fork the admins who read knocks from everyone else.
+    /// A row that passes is processed exactly like `processIncomingVerifyingRoles`.
+    pub fn process_knock(
+        &self,
+        identity: &Identity,
+        bytes: Vec<u8>,
+    ) -> Result<ProcessedMessage, FfiError> {
+        {
+            let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+            if !lakko_mls::is_external_join_proposal_for(&bytes, &g.group_id()) {
+                return Err(FfiError::Message(
+                    "knock row is not an external-join proposal for this group".to_string(),
+                ));
+            }
+        }
+        self.process_incoming_verifying_roles(identity, bytes)
     }
 
     /// ADR-0028 OQ3 — process an incoming MLS message on the publisher tier,

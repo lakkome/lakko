@@ -152,7 +152,27 @@ public actor RotationCron {
         //    from the new local state, and the server's
         //    atomic-rotation guarantee means no partial
         //    landings are observable.
+        let signerBefore = try? context.publisherGroup.dsAccessSigner(identity: context.identity)
         _ = try context.publisherGroup.rotate(identity: context.identity)
+        // ADR-0053 — a rotation moves the PublisherGroup epoch, so the journal's
+        // access key moves with it: register the new key proven under the old
+        // one, or this device's own later journal reads would be refused. The
+        // rotation commit is not published to the journal, so no peer can hold
+        // an unregistered epoch; best effort, and the co-publisher panel's
+        // claim-on-open is not a repair for a missed one.
+        if let signerBefore,
+           let signerAfter = try? context.publisherGroup.dsAccessSigner(identity: context.identity),
+           let groupId = try? context.publisherGroup.groupId() {
+            do {
+                try await DsClient().claimGroup(
+                    groupId: groupId,
+                    bodyJson: signerAfter.groupClaimBodyJson(),
+                    provenBy: signerBefore)
+            } catch {
+                NSLog("ADR-0053: PublisherGroup rotation epoch not registered: %@",
+                      String(describing: error))
+            }
+        }
         let newSeed = try context.publisherGroup.channelSeed(identity: context.identity)
         let channelIdBytes = try context.publisherGroup.channelId()
 

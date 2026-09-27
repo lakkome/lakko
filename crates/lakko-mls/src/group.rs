@@ -2537,6 +2537,45 @@ impl Group {
         self.inner.pending_commit().is_some()
     }
 
+    /// Export a secret from the epoch a staged sweep **moves to** (N+1), while
+    /// this device still sits at N. `Ok(None)` when nothing is staged.
+    ///
+    /// Read-only: it derives from the staged commit's own epoch secrets and
+    /// changes nothing in the group or the provider. What it exists for is
+    /// [ADR-0053]: a committer must register the Delivery Service access key
+    /// of epoch N+1 **before** publishing the commit that reaches it (proven
+    /// under the key of N, which it still holds), so no peer that applies the
+    /// commit is ever left holding an epoch the server does not know. On an
+    /// eager-merge path the same key comes from [`Group::export_secret`] after
+    /// the create call; only the staged path needed this.
+    ///
+    /// The bytes equal what [`Group::export_secret`] returns for the same
+    /// arguments after [`Group::merge_staged_sweep`], which the property test
+    /// pins; if the sweep is abandoned they name an epoch that never existed,
+    /// and ADR-0053's replace rule lets the real N+1 overwrite the registration.
+    ///
+    /// [ADR-0053]: ../../../docs/adr/0053-ds-journal-authorisation.md
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Exporter`] on an OpenMLS exporter failure (a staged commit that
+    /// removes this device, or a zero / oversized length).
+    pub fn staged_export_secret(
+        &self,
+        identity: &Identity,
+        label: &str,
+        context: &[u8],
+        length: usize,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        let Some(staged) = self.inner.pending_commit() else {
+            return Ok(None);
+        };
+        let secret = staged
+            .export_secret(identity.provider.crypto(), label, context, length)
+            .map_err(|e| Error::Exporter(format!("{e:?}")))?;
+        Ok(Some(Zeroizing::new(secret)))
+    }
+
     /// **Won.** Merge the sweep staged by
     /// [`Group::stage_pending_proposals`], advancing this device to N+1 — the
     /// same state the peers who applied the published commit reached.
@@ -2600,6 +2639,39 @@ impl Group {
             ));
         }
         Ok(true)
+    }
+
+    /// Process one row read from this group's **knock** queue ([ADR-0053]).
+    ///
+    /// The knock is the one unauthenticated write to a claimed group - anyone
+    /// who pays the proof of work can put bytes there, a member included - so
+    /// a knock row may be anything. The only thing that belongs there is a
+    /// non-member's external-join proposal for this group: a `PublicMessage`
+    /// whose content is a proposal and whose sender is `NewMemberProposal`.
+    /// Everything else is refused **before** OpenMLS processes it. Without the
+    /// gate a member could post a genuine commit or application message to
+    /// the knocks instead of the journal; the admins, who read knocks, would
+    /// apply it and every other member would not - a fork chosen by whoever
+    /// wrote the row. Written once here so three clients cannot filter three
+    /// ways.
+    ///
+    /// A row that passes goes through [`Group::process_incoming_verifying_roles`]
+    /// unchanged, so the ADR-0027 quarantine and its role gate apply as for a
+    /// journal row.
+    ///
+    /// [ADR-0053]: ../../../docs/adr/0053-ds-journal-authorisation.md
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Message`] for a row that is not an external-join proposal for
+    /// this group (the caller drops it), plus whatever processing returns.
+    pub fn process_knock(&mut self, identity: &Identity, bytes: &[u8]) -> Result<Incoming> {
+        if !is_external_join_proposal_for(bytes, self.inner.group_id().as_slice()) {
+            return Err(Error::Message(
+                "knock row is not an external-join proposal for this group".to_string(),
+            ));
+        }
+        self.process_incoming_verifying_roles(identity, bytes)
     }
 
     /// Apply an incoming conversation-group commit, **enforcing the ADR-0022
@@ -3995,6 +4067,32 @@ pub fn epoch_after_message(bytes: &[u8]) -> Option<u64> {
             epoch
         },
     )
+}
+
+/// Whether `bytes` are an external-join proposal for `group_id`: a
+/// `PublicMessage` carrying a proposal from a `NewMemberProposal` sender,
+/// framed for that group. Reads only the cleartext framing, like
+/// [`epoch_of_message`]; the gate [`Group::process_knock`] uses.
+#[must_use]
+pub fn is_external_join_proposal_for(bytes: &[u8], group_id: &[u8]) -> bool {
+    let mut slice = bytes;
+    let Ok(msg) = MlsMessageIn::tls_deserialize(&mut slice) else {
+        return false;
+    };
+    let Ok(proto) = msg.try_into_protocol_message() else {
+        return false;
+    };
+    if proto.group_id().as_slice() != group_id
+        || proto.content_type() != openmls::framing::ContentType::Proposal
+    {
+        return false;
+    }
+    match proto {
+        openmls::framing::ProtocolMessage::PublicMessage(public) => {
+            matches!(public.sender(), Sender::NewMemberProposal)
+        },
+        openmls::framing::ProtocolMessage::PrivateMessage(_) => false,
+    }
 }
 
 // ============================================================================

@@ -20,6 +20,15 @@
  *   - `pendingCoPublishers` — the retained external-join proposals.
  *   - `approveCoPublisher` / `rejectCoPublisher` — the role-gated decision.
  *
+ * **ADR-0053.** The PublisherGroup journal is claimed like every group journal:
+ * `registerPublisherGroupAccess` gives the DS client the group's access key for
+ * as long as a panel holds the handle, the approve registers the next epoch's
+ * key before its commit is published, a joiner asks through the knock (it
+ * cannot read the journal) and the owner reads the knock queue, and the
+ * co-publisher's Welcome goes to the joiner's own mailbox (its ACCOUNT mailbox:
+ * the PublisherGroup lives in the account identity's provider), never to the
+ * journal.
+ *
  * **Reseal-after-add (load-bearing).** `approveExternalJoin` commits the Add,
  * which advances the PublisherGroup MLS epoch — so the channel content-key seed
  * (the epoch-keyed exporter output) CHANGES. Every existing subscriber holds the
@@ -40,7 +49,16 @@
 import type { Wasm } from "../wasm";
 import { loadWasm } from "../wasm";
 import { DsClient } from "../ds/client";
-import { journalHeadEpoch, scanJournal } from "../chat/journal-head-epoch";
+import { scanJournal } from "../chat/journal-head-epoch";
+import {
+  dsAccess,
+  healAfterApply,
+  knockToJoin,
+  registerBeforePublish,
+  takeSigner,
+} from "../ds/access";
+import { solvePow } from "../auth/pow";
+import { KIND_WELCOME, parseEnvelope, wrapEnvelope } from "../contacts/envelope";
 import { base64Encode } from "../auth/account-id";
 import { withGroupMlsLock } from "../mls/group-lock";
 import {
@@ -87,6 +105,25 @@ export async function openPublisherGroup(
   }
 }
 
+/**
+ * ADR-0053 contract points 1 + 2 — let the DS client prove requests to this
+ * PublisherGroup's journal under the group's current access key, for as long
+ * as the caller holds the handle (the DS client claims the journal on the
+ * first request it sees for it in a session). Returns the function that
+ * withdraws it; call that BEFORE freeing the handle.
+ */
+export function registerPublisherGroupAccess(
+  identity: Identity,
+  publisherGroup: PublisherGroup,
+): () => void {
+  const own = publisherGroup.groupId();
+  return dsAccess.registerGroupSource((groupId) => {
+    if (groupId.length !== own.length) return null;
+    for (let i = 0; i < own.length; i++) if (groupId[i] !== own[i]) return null;
+    return publisherGroup.dsAccessSigner(identity);
+  });
+}
+
 /** Mint a co-publisher invite link over the PublisherGroup's MLS `group_id`. A
  *  non-member opens it, requests to join, and the owner approves (reusing the
  *  ADR-0027/0028 external-join machinery). Inline link — the channel owner
@@ -105,9 +142,12 @@ export async function createCoPublisherLink(
 /** Poll the PublisherGroup's DS journal and apply incoming MLS messages
  *  (external-join proposals from prospective co-publishers + any co-publisher
  *  commits) via the role-gated path. Surfaces external-join proposals into the
- *  PublisherGroup's retained pending set. Non-MLS entries (Welcome rendezvous)
- *  and our own already-applied commits throw on `processIncomingVerifyingRoles`
- *  and are skipped. Returns the number of pending requests after the poll.
+ *  PublisherGroup's retained pending set. Since ADR-0053 the external-join
+ *  proposals arrive in the group's KNOCK queue (a non-member cannot write the
+ *  journal), read here beside the journal with its own cursor. Our own
+ *  already-applied commits and non-MLS rows throw on
+ *  `processIncomingVerifyingRoles` and are skipped. Returns the number of
+ *  pending requests after the poll.
  *
  *  G-38 residual 3 — `CoPublishersPanel` drives this from a 5 s `setInterval`
  *  CONCURRENTLY with its own `approveCoPublisher`, which eagerly merges an Add
@@ -126,19 +166,59 @@ export async function pollCoPublisherJournal(
   publisherGroup: PublisherGroup,
 ): Promise<number> {
   const groupId = publisherGroup.groupId();
+  const groupIdB64 = base64Encode(groupId);
   // The FETCH — deliberately outside the lock.
   const raw = await ds.fetchGroup(groupId, { after: 0, waitSecs: 0 });
+  // ADR-0053 contract point 7 — a prospective co-publisher cannot write the
+  // journal of a claimed group, so its external-join proposal arrives as a
+  // KNOCK. Read from the start every tick, exactly like the journal above and
+  // for the same reason: this poll holds no durable position, and the
+  // retained request it surfaces reaches disk only on the caller's next
+  // channel-log flush, so a cursor moved past a knock could lose the request
+  // to a reload. A re-applied knock is deduped by the quarantine; a stale-epoch
+  // one fails and is skipped. Knocks are pruned after seven days, so the
+  // re-read stays small. A failed read is retried next tick.
+  let knocks: Awaited<ReturnType<DsClient["fetchKnocks"]>> | null = null;
+  try {
+    knocks = await ds.fetchKnocks(groupId, { after: 0, waitSecs: 0 });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("co-publisher: knock read failed; retried next tick", err);
+  }
   // The APPLY — inside it.
-  return withGroupMlsLock(base64Encode(groupId), async () => {
+  return withGroupMlsLock(groupIdB64, async () => {
+    // ADR-0053 contract point 4 — the key of the epoch before the apply.
+    const before = takeSigner(() => publisherGroup.dsAccessSigner(identity));
     for (const m of raw.messages) {
       try {
         publisherGroup.processIncomingVerifyingRoles(identity, m.payload);
       } catch {
-        // Non-MLS entry (a Welcome rendezvous) or a commit we have already
-        // merged (epoch mismatch) — skip, the FIFO journal lets the next poll
-        // catch up on any genuinely-new commit.
+        // A commit we have already merged (epoch mismatch) or a non-MLS entry
+        // — skip, the FIFO journal lets the next poll catch up on any
+        // genuinely-new commit.
       }
     }
+    if (knocks !== null) {
+      for (const k of knocks.messages) {
+        try {
+          // Surfaces an external-join proposal into the retained pending set.
+          // `processKnock`, never `processIncomingVerifyingRoles`: the knock
+          // queue is an unauthenticated write, and the core refuses anything
+          // but a stranger's external-join proposal for this group before
+          // processing it (a member's commit posted here would otherwise be
+          // applied by this owner alone). A refused row, an attribution or a
+          // stale-epoch proposal throws and is skipped.
+          publisherGroup.processKnock(identity, k.payload);
+        } catch {
+          // skip
+        }
+      }
+    }
+    const after = takeSigner(() => publisherGroup.dsAccessSigner(identity));
+    void healAfterApply(ds, groupId, before, after).finally(() => {
+      before?.free();
+      after?.free();
+    });
     return pendingCoPublishers(publisherGroup).length;
   });
 }
@@ -155,10 +235,16 @@ export function pendingCoPublishers(publisherGroup: PublisherGroup): Uint8Array[
 }
 
 /** Approve a pending co-publisher. Commits the Add (advances the PublisherGroup
- *  epoch), broadcasts the commit + a `WelcomeRendezvous` to the journal (the
- *  not-yet-member joiner polls for it), then RESEALS the new-epoch channel seed
- *  to all subscribers — the Add changed the exporter output, so existing
- *  subscribers must get the new seed or they break (see the module docs). */
+ *  epoch), registers the new epoch's DS access key and broadcasts the commit to
+ *  the journal (ADR-0053: register before publish), delivers the Welcome to the
+ *  joiner's own mailbox, then RESEALS the new-epoch channel seed to all
+ *  subscribers — the Add changed the exporter output, so existing subscribers
+ *  must get the new seed or they break (see the module docs).
+ *
+ *  A refused registration throws before anything is published. There is no
+ *  durable rollback for a PublisherGroup commit (it has no ADR-0040 outbox),
+ *  so the in-memory group stays at the unpublished epoch until the page is
+ *  reloaded from the last channel-log snapshot; the caller shows the error. */
 export async function approveCoPublisher(
   ds: DsClient,
   identity: Identity,
@@ -175,10 +261,25 @@ export async function approveCoPublisher(
   // is inside the region because it reads the POST-approve `channelSeed`, which
   // another applied commit would move under it.
   await withGroupMlsLock(base64Encode(groupId), async () => {
-    const added = publisherGroup.approveExternalJoin(identity, proposalRef);
-    await ds.publishGroup(groupId, added.commit);
-    const rendezvous = wasm.wrapWelcomeRendezvous(proposalRef, added.welcome);
-    await ds.publishGroup(groupId, rendezvous);
+    // ADR-0053 — the key of the epoch the Add leaves, taken BEFORE the create.
+    const signerN = takeSigner(() => publisherGroup.dsAccessSigner(identity));
+    try {
+      const added = publisherGroup.approveExternalJoin(identity, proposalRef);
+      const signerN1 = takeSigner(() => publisherGroup.dsAccessSigner(identity));
+      try {
+        await registerBeforePublish(ds, groupId, signerN, signerN1);
+      } finally {
+        signerN1?.free();
+      }
+      await ds.publishGroup(groupId, added.commit, { signer: signerN });
+      // ADR-0053 contract point 8 — the Welcome goes to the joiner's own
+      // mailbox (named after the joiner's signature key, `proposalRef`), the
+      // way a direct add delivers one; never to the journal.
+      const mailbox = wasm.IdentityPseudonym.fromIdentity(proposalRef).asBytes();
+      await ds.publishMailbox(mailbox, wrapEnvelope(KIND_WELCOME, added.welcome));
+    } finally {
+      signerN?.free();
+    }
     await resealSubscribers(publisherGroup, identity, channelIdHex, apiBase);
   });
 }
@@ -202,10 +303,11 @@ export function rejectCoPublisher(
 /** ADR-0028 OQ3 — joiner side: request to become a co-publisher of a channel
  *  from a `/g/` co-publisher link. Decodes + verifies the capability, recovers
  *  the channel id from the PublisherGroup `group_id` (the link conveys only the
- *  `group_id`), reads the group's current epoch from its DS journal, crafts an
- *  external-join proposal (ADR-0027), and posts it + a self-signed
- *  join-attribution (OQ2) to the journal. Returns the handles the caller polls
- *  with via `pollForCoPublishWelcome`. */
+ *  `group_id`), and knocks (ADR-0053 contract point 6): a PoW-gated probe
+ *  returns the group's epoch, the external-join proposal (ADR-0027) is built
+ *  for it, and a second knock carries a self-signed join-attribution (OQ2) and
+ *  the proposal. No journal read. Returns the handles the caller polls with
+ *  via `pollForCoPublishWelcome`. */
 export async function requestToCoPublish(
   ds: DsClient,
   identity: Identity,
@@ -232,37 +334,36 @@ export async function requestToCoPublish(
     throw new Error("co-publisher link does not target a channel PublisherGroup");
   }
   const channelIdHex = bytesToHex(channelIdBytes);
-  // Read the current epoch from the PublisherGroup journal head (public framing;
-  // a non-member can do this). Empty / unreachable journal => epoch 0.
-  // Paged to the head and read with `epochAfterMessage`: see
-  // `journalHeadEpoch` for the two ways the single-page read went stale.
-  let epoch = 0n;
-  try {
-    epoch = await journalHeadEpoch(
-      (after, limit) => ds.fetchGroup(groupId, { after, limit, waitSecs: 0 }),
-      (payload) => wasm.epochAfterMessage(payload),
-    );
-  } catch {
-    // keep epoch 0
-  }
-  const proposal = identity.createExternalJoinProposal(groupId, epoch);
-  await ds.publishGroup(groupId, proposal);
-  // Self-signed join attribution (OQ2) — advisory; best-effort.
-  try {
-    const attribution = wasm.composeGroupJoinAttribution(identity.ed25519Seed, wire);
-    await ds.publishGroup(groupId, attribution);
-  } catch {
-    // advisory only — ignore
-  }
+  await knockToJoin({
+    challenge: () => ds.powChallenge(),
+    solve: (seed, effortBits) => solvePow(seed, effortBits),
+    knock: (pow, payloads) => ds.knock(groupId, pow, payloads),
+    buildProposal: (epoch) => identity.createExternalJoinProposal(groupId, epoch),
+    // Self-signed join attribution (OQ2) — advisory; a failure to build it
+    // never blocks the request.
+    buildAttribution: () => {
+      try {
+        return wasm.composeGroupJoinAttribution(identity.ed25519Seed, wire);
+      } catch {
+        return null;
+      }
+    },
+  });
   return { groupId, channelIdHex, joinerKey: identity.signaturePublicKey };
 }
 
-/** ADR-0028 OQ3 — joiner side: poll the PublisherGroup journal for the Welcome
- *  the owner posted after approving, join from it, and mint local publisher keys
- *  so this device can now publish to the channel. The joined group lands at the
- *  post-approve epoch — the same one the subscribers were resealed to — so the
- *  derived `channelSeed` matches. Returns the keys on success, or `null` if no
- *  Welcome has arrived yet (keep polling). */
+/** ADR-0028 OQ3 — joiner side: look in this identity's own mailbox for the
+ *  Welcome the owner sent after approving, join from it, and mint local
+ *  publisher keys so this device can now publish to the channel. The joined
+ *  group lands at the post-approve epoch — the same one the subscribers were
+ *  resealed to — so the derived `channelSeed` matches. Returns the keys on
+ *  success, or `null` if no Welcome has arrived yet (keep polling).
+ *
+ *  ADR-0053 — the Welcome is in the mailbox named after `joinerKey` (the
+ *  account identity's key: the PublisherGroup lives in its provider), read
+ *  under that identity's proof. Both carriers a sending client may use are
+ *  accepted: the ordinary Welcome envelope a direct add sends, and a
+ *  `WelcomeRendezvous` bound to this joiner's key. */
 export async function pollForCoPublishWelcome(
   ds: DsClient,
   identity: Identity,
@@ -272,23 +373,36 @@ export async function pollForCoPublishWelcome(
   existingSigningSeed?: Uint8Array,
 ): Promise<ChannelPublisherKeys | null> {
   const wasm = await loadWasm();
-  // Paged to the end: the Welcome is the newest row, and a single-page read
-  // never reached it on a journal longer than one page (see `scanJournal`).
+  const mailbox = wasm.IdentityPseudonym.fromIdentity(joinerKey).asBytes();
+  // Paged to the end: the Welcome is among the newest rows.
   const candidates: Uint8Array[] = [];
   await scanJournal<never>(
-    (after, limit) => ds.fetchGroup(groupId, { after, limit, waitSecs: 0 }),
+    (after, limit) => ds.fetchMailbox(mailbox, { after, limit, waitSecs: 0 }),
     (m) => {
-      const welcome = wasm.welcomeRendezvousFor(m.payload, joinerKey);
-      if (welcome !== undefined) candidates.push(welcome);
+      const rendezvous = wasm.welcomeRendezvousFor(m.payload, joinerKey);
+      if (rendezvous !== undefined) {
+        candidates.push(rendezvous);
+        return undefined;
+      }
+      const env = parseEnvelope(m.payload);
+      if (env.kind === KIND_WELCOME) candidates.push(env.body);
       return undefined;
     },
   );
   // Newest first, and a Welcome sealed to a KeyPackage this device no longer
-  // holds is skipped rather than ending the wait.
+  // holds (or a Welcome for another group) is skipped rather than ending the
+  // wait.
   let group: InstanceType<typeof wasm.Group> | null = null;
   for (const welcome of candidates.reverse()) {
     try {
-      group = wasm.Group.joinFromWelcome(welcome, identity);
+      const joined = wasm.Group.joinFromWelcome(welcome, identity);
+      // The mailbox is the account's and may hold a Welcome for another
+      // channel this identity was invited to; only this group ends the wait.
+      if (base64Encode(joined.groupId) !== base64Encode(groupId)) {
+        joined.free();
+        continue;
+      }
+      group = joined;
       break;
     } catch (err) {
       // eslint-disable-next-line no-console

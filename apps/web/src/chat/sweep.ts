@@ -206,20 +206,6 @@ export interface SweepDurableEntry {
   readonly welcomeEnvelopeB64: string | undefined;
   readonly welcomeMailboxesB64: readonly string[];
   /**
-   * ADR-0045 S7 — the wrapped `WelcomeRendezvous` bytes, one per member this
-   * sweep adds, to publish to the GROUP JOURNAL.
-   *
-   * A list of whole envelopes rather than a list of addresses, because unlike
-   * the mailbox fan-out — one Welcome envelope sent to N pseudonyms — a
-   * rendezvous BINDS the added member's signature key into its own bytes, so
-   * every recipient gets different bytes.
-   *
-   * Recorded here, before any publish, for the same reason the mailboxes are:
-   * a restart must re-publish the very bytes this sweep computed rather than
-   * recompute them from a roster that has since moved on.
-   */
-  readonly welcomeRendezvousB64: readonly string[];
-  /**
    * The DS id of the published commit, recorded alongside the welcomes-owed
    * marker. Diagnostics only — it is carried so the eventual ack can name the
    * commit it belongs to rather than inventing one. Absent until the verdict
@@ -311,22 +297,37 @@ export interface SweepPorts {
   /** Derive a member's mailbox pseudonym from their 32-byte signature key. */
   welcomeMailbox(signatureKey: Uint8Array): Uint8Array;
   /** Wrap the raw Welcome in the stranger-inbox envelope the recipient's
-   *  mailbox poll expects (`wrapEnvelope(KIND_WELCOME, welcome)`). */
+   *  mailbox poll expects (`wrapEnvelope(KIND_WELCOME, welcome)`).
+   *
+   *  ADR-0053 contract point 8: this is the ONLY Welcome delivery. The
+   *  `WelcomeRendezvous` the sweep used to post to the group journal for every
+   *  added key (C-69) existed because the journal was the one place a `/g/`
+   *  link joiner could read; a claimed journal answers only its members, and
+   *  the link joiner now waits on its own device mailbox like every other
+   *  added member. */
   wrapWelcome(welcome: Uint8Array): Uint8Array;
   /**
-   * ADR-0045 S7 — wrap the raw Welcome into the `WelcomeRendezvous` envelope
-   * the group journal carries (`wrapWelcomeRendezvous(signatureKey, welcome)`).
+   * ADR-0053 contract point 3, the staged half — register the key of the
+   * epoch the staged sweep moves to (`dsStagedAccessSigner`), proven under the
+   * key of the epoch the group still sits at (`dsAccessSigner`). THROWS when
+   * the registration is refused; the sweep then abandons before publishing, so
+   * a commit is never on the wire before the server knows its epoch.
    *
-   * Needed because an added member may have arrived through a `/g/` invite
-   * link, and such a joiner polls the GROUP JOURNAL for a rendezvous matching
-   * its own signature key — it has no mailbox relationship with this group and
-   * never looks at one. Since S7 the approve is an ordinary `Add` proposal,
-   * indistinguishable on the wire from adding a contact, the sweep CANNOT tell
-   * which of its adds came from a link, and making them distinguishable would
-   * undo the property that makes S7 sound. So it wraps one per added key,
-   * origin-blind.
+   * Optional only so a port set built for a test that is not about ADR-0053
+   * need not stub it; the production adapter always supplies it.
    */
-  wrapRendezvous(signatureKey: Uint8Array, welcome: Uint8Array): Uint8Array;
+  registerStagedEpoch?(): Promise<void>;
+  /**
+   * ADR-0053 contract point 4 — capture the group's current access key before
+   * rows are applied; the returned function, called with `true`, registers the
+   * key of the epoch the apply reached, proven under the captured one, when the
+   * epoch moved, and with `false` only releases what it captured. Best effort:
+   * it never throws. It is called exactly once. The verdict apply below is an apply like the
+   * poll's, and a sweep that LOST applied the winner's commit in it, so this is
+   * how the loser puts the winner's key back if its own registration replaced
+   * it.
+   */
+  beginApply?(): (heal: boolean) => Promise<void>;
   /** Echo-suppress a row this device published, so its own next poll drops it
    *  instead of hitting `CannotDecryptOwnMessage`. */
   markOwnPublished(messageId: number): void;
@@ -673,23 +674,17 @@ async function publishAndAdjudicate(
     );
     const wrapped =
       staged.welcome === undefined ? undefined : ports.wrapWelcome(staged.welcome);
-    // ADR-0045 S7 — one rendezvous per added key, from the SAME Welcome. The
-    // keys come from `swept()`, which reports what the staged commit really
-    // carries, so this addresses exactly the members the commit adds.
-    const rendezvous =
-      staged.welcome === undefined
-        ? []
-        : staged.addedSignatureKeys.map((k) =>
-            ports.encodeB64(ports.wrapRendezvous(k, staged.welcome as Uint8Array)),
-          );
     entry = {
       id: ports.outbox.newEntryId(),
       commitB64: ports.encodeB64(staged.commit),
       welcomeEnvelopeB64: wrapped === undefined ? undefined : ports.encodeB64(wrapped),
       welcomeMailboxesB64: mailboxes,
-      welcomeRendezvousB64: rendezvous,
     };
     try {
+      // ADR-0053 contract point 3 — the server learns the staged epoch's key
+      // before anything durable says the commit exists, and long before it is
+      // on the wire. A refusal lands in the catch: abandon, no publish.
+      await ports.registerStagedEpoch?.();
       await ports.outbox.record(entry);
     } catch (err) {
       // FAIL-CLOSED. Nothing was published, so the group must look as though
@@ -702,6 +697,15 @@ async function publishAndAdjudicate(
     }
   } else {
     entry = owed;
+    // The restart half: the registration landed before the entry was written,
+    // so this is normally a no-op the server answers without a proof. It is
+    // re-sent in case the key was since replaced by a racing committer, and a
+    // refusal does not stop the re-publish - the verdict below decides.
+    try {
+      await ports.registerStagedEpoch?.();
+    } catch {
+      /* the verdict decides; a lost sweep is healed after it abandons */
+    }
   }
 
   const commitMessageId = await ports.journal.publishGroup(
@@ -709,11 +713,22 @@ async function publishAndAdjudicate(
   );
   ports.markOwnPublished(commitMessageId);
 
-  const verdict = await adjudicate(ports, cursorBefore, commitMessageId);
+  const finishApply = ports.beginApply?.();
+  let verdict: "won" | "lost";
+  try {
+    verdict = await adjudicate(ports, cursorBefore, commitMessageId);
+  } catch (err) {
+    await finishApply?.(false);
+    throw err;
+  }
 
   if (verdict === "lost") {
     group.abandonStagedSweep();
     await ports.persist();
+    // ADR-0053 contract point 4 — the winner's commit was applied in the
+    // verdict read; if this device's registration replaced the winner's key,
+    // put it back. Best effort.
+    await finishApply?.(true);
     // A commit that lost must never be re-published: the restart sweep would
     // re-adjudicate a commit whose proposals the winner has already swept.
     // Discarding is safe because abandoning kept the proposals pending, so
@@ -722,6 +737,9 @@ async function publishAndAdjudicate(
     return { kind: "lost", commitMessageId };
   }
 
+  // Won: the apply did not move the epoch (only the merge below does, to the
+  // key registered before the publish), so there is nothing to heal.
+  await finishApply?.(false);
   group.mergeStagedSweep();
   await ports.persist();
 
@@ -738,7 +756,7 @@ async function publishAndAdjudicate(
   // publishing now is correct with or without it, and refusing to publish
   // because a bookkeeping write failed would manufacture the very ghost member
   // this records against.
-  if (entry.welcomeEnvelopeB64 !== undefined || entry.welcomeRendezvousB64.length > 0) {
+  if (entry.welcomeEnvelopeB64 !== undefined) {
     try {
       await ports.outbox.markWelcomesOwed(entry.id, commitMessageId);
     } catch (err) {
@@ -863,11 +881,8 @@ async function publishWelcomes(
       ids.push(await ports.journal.publishMailbox(ports.decodeB64(mailboxB64), bytes));
     }
   }
-  // ADR-0045 S7 — then the group-journal rendezvous, one per added key. A
-  // `/g/` joiner reads only this; a contact added the ordinary way reads only
-  // the mailbox. The sweep publishes both because it cannot tell them apart.
-  for (const rendezvousB64 of entry.welcomeRendezvousB64) {
-    ids.push(await ports.journal.publishGroup(ports.decodeB64(rendezvousB64)));
-  }
+  // ADR-0053 contract point 8 — no `WelcomeRendezvous` is written to the
+  // group journal any more: the `/g/` joiner's Welcome is the mailbox copy
+  // above, like every other added member's.
   return ids;
 }

@@ -619,3 +619,29 @@ public object CommitOutboxStore {
         File(dir, id + JSON_SUFFIX).delete()
     }
 }
+
+/**
+ * ADR-0053 client contract point 3 — run the pre-publish registration of a
+ * direct (eager-merged) commit, and on ANY failure reset the group to its
+ * durable snapshot before re-throwing: the in-memory group already sits at the
+ * un-published N+1, and a registration that did not land means the commit
+ * must never reach the wire — the same abort a failed outbox write takes.
+ *
+ * Called AFTER the create-commit and BEFORE the outbox entry is written, so a
+ * refused registration leaves no entry for the restart sweep to re-publish.
+ * If [reset] itself throws, THAT is the error (a poisoned group), with the
+ * registration failure attached.
+ */
+internal suspend fun <T> registerOrReset(reset: () -> Unit, register: suspend () -> T): T {
+    return try {
+        register()
+    } catch (registrationFailure: Throwable) {
+        try {
+            reset()
+        } catch (resetFailure: Throwable) {
+            resetFailure.addSuppressed(registrationFailure)
+            throw resetFailure
+        }
+        throw registrationFailure
+    }
+}

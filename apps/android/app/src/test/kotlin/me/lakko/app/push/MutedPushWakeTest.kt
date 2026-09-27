@@ -60,7 +60,11 @@ class MutedPushWakeTest {
             groupIdBytes: ByteArray,
         ): ThrowawayGroup = group
 
-        override suspend fun dsFetch(groupIdBytes: ByteArray, afterId: Long): List<FetchedRow> = rows
+        override suspend fun dsFetch(
+            groupIdBytes: ByteArray,
+            afterId: Long,
+            signer: me.lakko.app.ds.DsJournalSigner?,
+        ): List<FetchedRow> = rows
         override fun startCursor(accountIdB64: String, groupHex: String): Long? = null
 
         override fun isMuted(accountIdB64: String, groupHex: String): Boolean {

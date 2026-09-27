@@ -799,7 +799,8 @@ public final class ContactsClient {
         mySignaturePubkey: Data,
         myX25519Secret: Data,
         after: Int64 = 0,
-        waitSecs: Int = 0
+        waitSecs: Int = 0,
+        mailboxSigner: DsRequestSigner? = nil
     ) async throws -> PollResult {
         let myPseudonym: Data
         do {
@@ -811,10 +812,13 @@ public final class ContactsClient {
 
         let raw: FetchResult
         do {
+            // ADR-0053 point 1 — reading a claimed mailbox needs a proof under
+            // the identity key it is named after.
             raw = try await ds.fetchMailbox(
                 pseudonym: myPseudonym,
                 after: after,
-                waitSecs: waitSecs
+                waitSecs: waitSecs,
+                auth: mailboxSigner.map { DsAuth(signer: $0) }
             )
         } catch {
             throw ContactsError.wrap(error)

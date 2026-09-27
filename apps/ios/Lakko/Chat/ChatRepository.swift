@@ -64,10 +64,6 @@ public final class ChatRepository: ObservableObject {
 
     private let chatClient: ChatClient
     private let dsClient: DsClient
-    /// Journal rows holding a Welcome addressed to this device that it could
-    /// not open (sealed to a KeyPackage a re-request replaced). Skipped on
-    /// later polls so the wait goes on for a newer Welcome.
-    private var unopenableWelcomeRows = Set<Int64>()
     private let discovery: DiscoveryClient
     private let snapshotStore: IdentitySnapshotStore
     /// ADR-0050 — which leaf identity the on-disk snapshot belongs to.
@@ -244,6 +240,13 @@ public final class ChatRepository: ObservableObject {
     /// the first ``pollGroup(groupIdHex:waitSecs:)`` for that group). Reset by
     /// ``wipeInMemoryState()`` on a logout / account switch.
     private var sweptGroupsThisSession: Set<String> = []
+
+    /// ADR-0053 — per group journal, the newest access signer this device
+    /// derived and the one before it (contract points 2 and 5).
+    private let dsSigners = DsSignerMemory()
+    /// ADR-0053 point 2 — groups already claimed this session (claim-on-open
+    /// runs on the first poll of each group per session).
+    private var claimedGroupsThisSession: Set<String> = []
 
     /// ADR-0048 — where a received in-group profile goes: the shared profile
     /// directory in production. A seam so a test can capture what the receive
@@ -472,6 +475,12 @@ public final class ChatRepository: ObservableObject {
             }
             try await self.persistSnapshotDurableOrThrow()
         }
+        // ADR-0053 — every publish ChatClient makes to a group journal is
+        // signed with this repository's signer, previous-epoch fallback and
+        // claim-on-open retry included.
+        self.chatClient.dsAuthProvider = { [weak self] groupIdHex in
+            self?.dsAuth(groupIdHex: groupIdHex)
+        }
     }
 
     // MARK: - Lifecycle
@@ -677,6 +686,9 @@ public final class ChatRepository: ObservableObject {
         // ADR-0040 (G-35) — a new session must re-sweep the outbox for every
         // group on its first poll.
         sweptGroupsThisSession.removeAll()
+        // ADR-0053 — the signers belong to the identity of the closing session.
+        dsSigners.reset()
+        claimedGroupsThisSession.removeAll()
         // ADR-0045 — a new session re-establishes its own beacon cadence; a
         // carried-over stamp would suppress the first beacon of that session,
         // which the core deliberately makes immediate.
@@ -786,8 +798,12 @@ public final class ChatRepository: ObservableObject {
 
         let group: Group
         let addResult: AddMember
+        let foundingSigner: DsProofSigner
+        let joinSigner: DsProofSigner
         do {
             group = try Group.create(identity: identity)
+            // ADR-0053 — the epoch-0 key, taken before the add moves past it.
+            foundingSigner = try group.dsAccessSigner(identity: identity)
             // ONE commit for every device (ADR-0050 2.6): we are the only
             // member, so the commit fans out to nobody and is dropped; the ONE
             // Welcome carries every added leaf's secrets and goes,
@@ -798,11 +814,29 @@ public final class ChatRepository: ObservableObject {
                 identity: identity,
                 keyPackages: devices.map { $0.keyPackage }
             )
+            joinSigner = try group.dsAccessSigner(identity: identity)
         } catch {
             throw ChatError.wrapped(
                 "addMembersFromWire failed",
                 underlying: error
             )
+        }
+        // ADR-0053 points 2 + 3 — claim the journal at creation (epoch 0,
+        // unsigned: the journal is unclaimed) and register the epoch the
+        // Welcome lands its members at, proven under epoch 0, BEFORE any
+        // Welcome goes out: a member must never hold an epoch the server
+        // refuses. A failure aborts the creation (nothing was published).
+        do {
+            try await dsClient.claimGroup(
+                groupId: try group.groupId(),
+                bodyJson: foundingSigner.groupClaimBodyJson(),
+                provenBy: nil)
+            try await dsClient.claimGroup(
+                groupId: try group.groupId(),
+                bodyJson: joinSigner.groupClaimBodyJson(),
+                provenBy: foundingSigner)
+        } catch {
+            throw ChatError.wrapped("DS journal claim failed", underlying: error)
         }
 
         let welcomeEnvelope = wrapEnvelope(kind: .welcome, body: addResult.welcome)
@@ -834,6 +868,9 @@ public final class ChatRepository: ObservableObject {
         let groupId = try group.groupId()
         let groupIdHex = DsClient.pseudonymHex(groupId)
         groups[groupIdHex] = GroupRecord(group: group, groupId: groupId)
+        dsSigners.observe(journal: groupIdHex, signer: foundingSigner)
+        dsSigners.observe(journal: groupIdHex, signer: joinSigner)
+        claimedGroupsThisSession.insert(groupIdHex)
         persistKnownGroupBestEffort(groupIdHex: groupIdHex)
         // UX spec section 5.1 — founded with one other person: a chat. The
         // new-group path and the first add promote it to a group.
@@ -893,6 +930,11 @@ public final class ChatRepository: ObservableObject {
         persistKnownGroupBestEffort(groupIdHex: groupIdHex)
         persistSnapshotBestEffort()
         state = state.with(threads: buildThreadList())
+        // ADR-0053 point 2 — claim-on-open. The committer registered the epoch
+        // this Welcome lands at before publishing it, so this is normally the
+        // idempotent no-op; it repairs a registration a peer lost.
+        claimedGroupsThisSession.insert(groupIdHex)
+        Task { [weak self] in await self?.claimGroupJournal(groupIdHex: groupIdHex) }
         // ADR-0042 — subscribe under `push_gid` (defers until the joiner
         // receives the group's `push_routing_secret` over the distribution
         // envelope on its next poll; never subscribes under `group_id`).
@@ -1461,12 +1503,12 @@ public final class ChatRepository: ObservableObject {
 
     /// ADR-0028 (G-3) — joiner step 1: request to join a group from a `/g/`
     /// link capability (the wire bytes the slug base64url-decodes to). Decodes
-    /// + verifies the capability fail-closed (before any post), reads the
-    /// group's current epoch from the journal head's public MLS framing
-    /// (`epochAfterMessage` over the paged journal, no group secret), crafts an external-join proposal
-    /// (ADR-0027) for that epoch, and posts it to the group journal. Returns the
-    /// group id + the joiner's signature key — the caller drives
-    /// `pollForJoinWelcome` until an admin approves and the Welcome arrives.
+    /// + verifies the capability fail-closed (before any post), then knocks
+    /// (ADR-0053 point 6): a probe knock returns the group's registered epoch,
+    /// an external-join proposal (ADR-0027) is built for it, and a second
+    /// knock carries it with the join attribution. Returns the group id + the
+    /// joiner's signature key — the caller waits with `pollForJoinWelcome`
+    /// until an admin approves and the Welcome reaches this device's mailbox.
     public func requestToJoinFromLink(
         capabilityWire: Data,
         nowMs: UInt64,
@@ -1512,95 +1554,45 @@ public final class ChatRepository: ObservableObject {
             }
         }
         let groupId = cap.groupId()
-        // Read the current epoch from the journal head (public framing; a
-        // non-member can do this). Empty / unreachable journal ⇒ epoch 0.
-        // Paged to the head and read with `epochAfterMessage`: see
-        // `JournalHeadEpoch` for the two ways the single-page read went stale.
-        let epoch = (try? await JournalHeadEpoch.read(
-            fetchPage: { after, limit in
-                let raw = try await dsClient.fetchGroup(
-                    groupId: groupId, after: after, limit: limit, waitSecs: 0)
-                return .init(
-                    rows: raw.messages.map { .init(id: $0.id, payload: $0.payload) },
-                    hasMore: raw.hasMore)
-            },
-            epochAfter: { epochAfterMessage(bytes: $0) }
-        )) ?? 0
-        let proposal: Data
+        // ADR-0053 point 6 — the knock. A probe learns the epoch the group's
+        // access key is registered at (no journal read: a non-member cannot
+        // read a claimed journal, and paging one it is not in was the old
+        // shape), the proposal is built for that epoch, and a second knock
+        // carries the attribution and the proposal. Each knock pays its own
+        // proof of work.
+        let client = dsClient
         do {
-            proposal = try identity.createExternalJoinProposal(groupId: groupId, epoch: epoch)
+            try await DsKnockJoin(
+                solvePow: {
+                    let challenge = try await client.powChallenge()
+                    return try await solvePow(
+                        seedB64: challenge.seed, effortBits: challenge.effortBits)
+                },
+                knock: { pow, payloads in
+                    try await client.knock(groupId: groupId, pow: pow, payloads: payloads).epoch
+                },
+                createProposal: { epoch in
+                    try identity.createExternalJoinProposal(groupId: groupId, epoch: epoch)
+                },
+                // ADR-0028 OQ2 — which member's link this request arrived on.
+                // Advisory: the admin approval gate is the security boundary,
+                // so a failure to compose it does not block the join.
+                attribution: {
+                    try? composeGroupJoinAttribution(
+                        joinerSigningSeed: identity.ed25519Seed(),
+                        capabilityBytes: capabilityWire)
+                }
+            ).run()
+        } catch let error as DsKnockJoinError {
+            throw error
         } catch {
-            throw ChatError.wrapped("createExternalJoinProposal failed", underlying: error)
-        }
-        do {
-            _ = try await dsClient.publishGroup(groupId: groupId, payload: proposal)
-        } catch {
-            throw ChatError.wrapped(
-                "DS publishGroup (external-join proposal) failed", underlying: error)
+            throw ChatError.wrapped("DS knock (external-join request) failed", underlying: error)
         }
         // The proposal's KeyPackage private key is the only thing that can open
-        // the Welcome the admin will post later; persist it now rather than
+        // the Welcome the committer will send later; persist it now rather than
         // losing it to a relaunch before then.
         persistSnapshotBestEffort()
-        // ADR-0028 OQ2 — post a join-attribution envelope so the approving admin
-        // can see which member's link this request arrived on. Best-effort +
-        // advisory: a failure must not block the join (the admin approval gate is
-        // the security boundary).
-        if let attribution = try? composeGroupJoinAttribution(
-            joinerSigningSeed: identity.ed25519Seed(),
-            capabilityBytes: capabilityWire
-        ) {
-            _ = try? await dsClient.publishGroup(groupId: groupId, payload: attribution)
-        }
         return (groupId, identity.signaturePublicKey())
-    }
-
-    /// ADR-0028 (G-3) — joiner step 2: poll the group journal for the
-    /// rendezvous Welcome an admin posted after approving our request, and join
-    /// from it. Run on a poll loop after `requestToJoinFromLink`. Returns the
-    /// joined group's hex id on the first rendezvous addressed to our signature
-    /// key, or `nil` if no Welcome has arrived yet (keep polling).
-    public func pollForJoinWelcome(
-        groupId: Data,
-        joinerSignatureKey: Data
-    ) async throws -> String? {
-        // Paged to the end: the Welcome is the newest row, and a single-page
-        // read never reached it on a journal longer than one page (see
-        // `JournalHeadEpoch.scan`).
-        var candidates: [(id: Int64, welcome: Data)] = []
-        do {
-            let _: Never? = try await JournalHeadEpoch.scan(
-                fetchPage: { after, limit in
-                    let raw = try await dsClient.fetchGroup(
-                        groupId: groupId, after: after, limit: limit, waitSecs: 0)
-                    return .init(
-                        rows: raw.messages.map { .init(id: $0.id, payload: $0.payload) },
-                        hasMore: raw.hasMore)
-                },
-                visit: { row in
-                    guard !unopenableWelcomeRows.contains(row.id),
-                          let rendezvous = try? parseWelcomeRendezvous(bytes: row.payload),
-                          rendezvous.joinerSignatureKey == joinerSignatureKey else { return nil }
-                    candidates.append((id: row.id, welcome: rendezvous.welcome))
-                    return nil
-                }
-            )
-        } catch {
-            throw ChatError.wrapped("DS fetchGroup (join poll) failed", underlying: error)
-        }
-        // Newest first: after a re-request only the latest Welcome is sealed to
-        // the KeyPackage this device still holds. One that will not open is
-        // remembered and skipped, and the wait goes on for a newer one.
-        for candidate in candidates.reversed() {
-            do {
-                return try await joinGroupFromWelcome(welcomeBytes: candidate.welcome)
-            } catch {
-                unopenableWelcomeRows.insert(candidate.id)
-                NSLog("join: Welcome row %lld could not be opened; waiting for a newer one: %@",
-                      candidate.id, String(describing: error))
-            }
-        }
-        return nil
     }
 
     /// Compose `(plaintext, attachments)` into the canonical
@@ -2200,106 +2192,131 @@ public final class ChatRepository: ObservableObject {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
         }
 
-        let addResult: AddMember
-        do {
-            addResult = try record.group.addMemberFromWire(
-                identity: identity,
-                keyPackage: keyPackageBytes
-            )
-        } catch {
-            throw ChatError.wrapped("addMemberFromWire failed", underlying: error)
+        struct Prepared {
+            let entryId: String
+            let commit: Data
+            let welcomeEnvelope: Data
+            let recipientPseudonym: Data
         }
 
-        // ADR-0040 (G-35) F1 — the core `addMemberFromWire` above eager-merged
-        // epoch N -> N+1. EVERYTHING from here through the FAIL-CLOSED persist runs
-        // INSIDE the reset-guarded `do` below — INCLUDING the second-artifact
-        // compute — because ANY throw after the eager merge and before publish must
-        // roll the in-memory group back to the durable N. A Welcome-envelope /
-        // pseudonym compute that threw OUTSIDE this guard would leave the group at
-        // the un-published N+1, so a later same-session commit builds on N+1 and
-        // publishes commit(N+1 -> N+2), which peers still at N drop as wrong-epoch,
-        // stranding the WHOLE group (the "device-ahead" hazard). `entryId` is
-        // minted before the guard (non-throwing) so the post-publish ack can
-        // reference it; the Welcome + pseudonym are deferred lets assigned inside
-        // the guard and consumed after it at publish (the reset-`catch` always
-        // throws, so reaching the publish implies both were assigned).
-        let entryId = newOutboxEntryId()
-        let welcomeEnvelope: Data
-        let recipientPseudonym: Data
-        do {
-            // Compute the second artifact (the Welcome envelope) + its mailbox
-            // destination so the outbox entry holds the EXACT bytes the restart
-            // sweep will re-publish (no drift). The Welcome ships to the new
-            // member's stranger inbox, addressed by their pubkey pseudonym.
-            welcomeEnvelope = wrapEnvelope(kind: .welcome, body: addResult.welcome)
-            do {
-                // ADR-0050 — the Welcome is sealed to THIS leaf's KeyPackage,
-                // so it is addressed to the leaf's own mailbox.
-                recipientPseudonym = try IdentityPseudonym
-                    .fromIdentity(pubkey: keyPackageSignatureKey(keyPackage: keyPackageBytes))
-                    .asBytes()
-            } catch {
-                throw ChatError.wrapped("IdentityPseudonym derivation failed", underlying: error)
-            }
-            // Persist the outbox entry (commit + Welcome, BOTH artifacts) + the N+1
-            // snapshot BEFORE any publish, FAIL-CLOSED. A throw ABORTS the op (no
-            // publish); the sweep re-publishes both artifacts on restart so a crash
-            // between the two publishes never strands the new member without a
-            // Welcome.
-            try persistCommitEntryThenSnapshotOrThrow(
-                NewCommitEntry(
-                    id: entryId,
-                    groupId: base64Encode(record.groupId),
-                    targetEpoch: String(try record.group.epoch()),
-                    commitB64: base64Encode(addResult.commit),
-                    secondArtifactB64: base64Encode(welcomeEnvelope),
-                    secondArtifactKind: .welcome,
-                    secondArtifactMailboxB64: base64Encode(recipientPseudonym)
+        // ADR-0053 point 3 over the ADR-0040 F1 discipline: the epoch-N signer
+        // is taken before the core `addMemberFromWire` eager-merges N -> N+1;
+        // after it, the N+1 key is REGISTERED (proven under N) and only then is
+        // the outbox entry written and the commit published under N.
+        //
+        // EVERYTHING after the eager merge and before the publish — the
+        // registration, the second-artifact compute, the FAIL-CLOSED persist —
+        // runs inside the rollback guard of `DirectCommitSteps.run`: ANY throw
+        // there must roll the in-memory group back to the durable N. A Welcome /
+        // pseudonym compute or a registration that threw OUTSIDE it would leave
+        // the group at the un-published N+1, so a later same-session commit
+        // would build on N+1 and publish commit(N+1 -> N+2), which peers still
+        // at N drop as wrong-epoch, stranding the WHOLE group (the
+        // "device-ahead" hazard).
+        let commitPublish: PublishResult = try await DirectCommitSteps(
+            currentSigner: { try record.group.dsAccessSigner(identity: identity) },
+            create: { () throws -> AddMember in
+                do {
+                    return try record.group.addMemberFromWire(
+                        identity: identity,
+                        keyPackage: keyPackageBytes
+                    )
+                } catch {
+                    throw ChatError.wrapped("addMemberFromWire failed", underlying: error)
+                }
+            },
+            register: { [self] next, provenBy in
+                do {
+                    try await registerNextEpoch(
+                        groupId: record.groupId, groupIdHex: groupIdHex,
+                        next: next, provenBy: provenBy)
+                } catch {
+                    throw ChatError.wrapped("DS access registration (add-member) failed", underlying: error)
+                }
+            },
+            prepare: { [self] addResult in
+                // Compute the second artifact (the Welcome envelope) + its mailbox
+                // destination so the outbox entry holds the EXACT bytes the
+                // restart sweep will re-publish (no drift). The Welcome ships to
+                // the new member's stranger inbox, addressed by their pubkey
+                // pseudonym.
+                let entryId = newOutboxEntryId()
+                let welcomeEnvelope = wrapEnvelope(kind: .welcome, body: addResult.welcome)
+                let recipientPseudonym: Data
+                do {
+                    // ADR-0050 — the Welcome is sealed to THIS leaf's KeyPackage,
+                    // so it is addressed to the leaf's own mailbox.
+                    recipientPseudonym = try IdentityPseudonym
+                        .fromIdentity(pubkey: keyPackageSignatureKey(keyPackage: keyPackageBytes))
+                        .asBytes()
+                } catch {
+                    throw ChatError.wrapped("IdentityPseudonym derivation failed", underlying: error)
+                }
+                // Persist the outbox entry (commit + Welcome, BOTH artifacts) +
+                // the N+1 snapshot BEFORE any publish, FAIL-CLOSED. A throw
+                // ABORTS the op (no publish); the sweep re-publishes both
+                // artifacts on restart so a crash between the two publishes
+                // never strands the new member without a Welcome.
+                try persistCommitEntryThenSnapshotOrThrow(
+                    NewCommitEntry(
+                        id: entryId,
+                        groupId: base64Encode(record.groupId),
+                        targetEpoch: String(try record.group.epoch()),
+                        commitB64: base64Encode(addResult.commit),
+                        secondArtifactB64: base64Encode(welcomeEnvelope),
+                        secondArtifactKind: .welcome,
+                        secondArtifactMailboxB64: base64Encode(recipientPseudonym)
+                    )
                 )
-            )
-        } catch {
-            // ADR-0040 (G-35) F1 — the artifact compute OR the FAIL-CLOSED persist
-            // aborted AFTER the core `addMemberFromWire` eager-merged epoch
-            // N -> N+1 in memory. Roll the in-memory group back to the durable
-            // snapshot (still N) so this abort is "as if the op never happened" in
-            // memory too, then re-throw so the UI sees the failure. Without the
-            // reset a second same-session commit would build on the un-published
-            // N+1 and strand the whole group. See
+                return Prepared(
+                    entryId: entryId,
+                    commit: addResult.commit,
+                    welcomeEnvelope: welcomeEnvelope,
+                    recipientPseudonym: recipientPseudonym)
+            },
+            // ADR-0040 (G-35) F1 — the registration, the artifact compute OR the
+            // FAIL-CLOSED persist aborted AFTER the eager merge. Roll the
+            // in-memory group back to the durable snapshot (still N) so this
+            // abort is "as if the op never happened" in memory too. See
             // ``resetGroupToDurableSnapshot(groupIdHex:)``.
-            try resetGroupToDurableSnapshot(groupIdHex: groupIdHex)
-            throw error
-        }
+            rollback: { [self] in try resetGroupToDurableSnapshot(groupIdHex: groupIdHex) },
+            publish: { [self] prepared, signerN in
+                // Publish artifact 1 — the commit to the group journal so
+                // existing members advance their epoch, signed under N.
+                let commitPublish: PublishResult
+                do {
+                    commitPublish = try await dsClient.publishGroup(
+                        groupId: record.groupId,
+                        payload: prepared.commit,
+                        auth: DsAuth(signer: signerN)
+                    )
+                } catch {
+                    throw ChatError.wrapped("DS publishGroup (add-member commit) failed", underlying: error)
+                }
+                chatClient.markOwnPublishedCommit(groupIdHex: groupIdHex, messageId: commitPublish.id)
 
-        // Publish artifact 1 — the commit to the group journal so existing
-        // members advance their epoch.
-        let commitPublish: PublishResult
-        do {
-            commitPublish = try await dsClient.publishGroup(
-                groupId: record.groupId,
-                payload: addResult.commit
-            )
-        } catch {
-            throw ChatError.wrapped("DS publishGroup (add-member commit) failed", underlying: error)
-        }
-        chatClient.markOwnPublishedCommit(groupIdHex: groupIdHex, messageId: commitPublish.id)
+                // Publish artifact 2 — the Welcome to the new member's mailbox
+                // (the SAME bytes stored in the outbox entry). A mailbox is open
+                // for writes: unsigned.
+                let welcomePublish: PublishResult
+                do {
+                    welcomePublish = try await dsClient.publishMailbox(
+                        pseudonym: prepared.recipientPseudonym,
+                        payload: prepared.welcomeEnvelope
+                    )
+                } catch {
+                    throw ChatError.wrapped("DS publishMailbox (Welcome) failed", underlying: error)
+                }
 
-        // Publish artifact 2 — the Welcome to the new member's mailbox (the SAME
-        // bytes stored in the outbox entry).
-        let welcomePublish: PublishResult
-        do {
-            welcomePublish = try await dsClient.publishMailbox(
-                pseudonym: recipientPseudonym,
-                payload: welcomeEnvelope
-            )
-        } catch {
-            throw ChatError.wrapped("DS publishMailbox (Welcome) failed", underlying: error)
-        }
+                ackCommitBestEffort(
+                    entryId: prepared.entryId,
+                    commitMessageId: commitPublish.id,
+                    secondMessageId: welcomePublish.id
+                )
+                return commitPublish
+            }
+        ).run()
 
-        ackCommitBestEffort(
-            entryId: entryId,
-            commitMessageId: commitPublish.id,
-            secondMessageId: welcomePublish.id
-        )
         state = state.with(threads: buildThreadList())
         // ADR-0042 — re-broadcast the CURRENT push-routing secret so the
         // newly-added member learns it on their next poll (no-op if this
@@ -2442,55 +2459,65 @@ public final class ChatRepository: ObservableObject {
         guard let record = groups[groupIdHex] else {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
         }
-        let commitBytes: Data
-        do {
-            commitBytes = try record.group.removeMember(
-                identity: identity,
-                leafIndex: leafIndex
-            )
-        } catch {
-            throw ChatError.wrapped("removeMember failed", underlying: error)
-        }
-        // ADR-0040 (G-35) F1 — the core `removeMember` above eager-merged epoch
-        // N -> N+1. Persist the outbox entry (commit only; a remove has no
-        // Welcome) + the N+1 snapshot BEFORE the publish, FAIL-CLOSED. A throw
-        // ABORTS the op (no publish). There is NO pre-persist artifact compute here
-        // (a remove has no Welcome), so the reset-guarded `do` below trivially
-        // covers every post-merge statement — the same F1 invariant the add /
-        // approve paths enforce by widening the guard over their second-artifact
-        // compute.
-        let entryId = newOutboxEntryId()
-        do {
-            try persistCommitEntryThenSnapshotOrThrow(
-                NewCommitEntry(
-                    id: entryId,
-                    groupId: base64Encode(record.groupId),
-                    targetEpoch: String(try record.group.epoch()),
-                    commitB64: base64Encode(commitBytes)
+        // ADR-0053 point 3 — signer N before the eager merge, register N+1
+        // proven under N, THEN the ADR-0040 persist, THEN the publish under N.
+        // A remove has no Welcome, so the rollback guard of
+        // `DirectCommitSteps.run` covers the registration and the FAIL-CLOSED
+        // persist — the same F1 invariant the add path enforces.
+        let commitPublish: PublishResult = try await DirectCommitSteps(
+            currentSigner: { try record.group.dsAccessSigner(identity: identity) },
+            create: { () throws -> Data in
+                do {
+                    return try record.group.removeMember(
+                        identity: identity,
+                        leafIndex: leafIndex
+                    )
+                } catch {
+                    throw ChatError.wrapped("removeMember failed", underlying: error)
+                }
+            },
+            register: { [self] next, provenBy in
+                do {
+                    try await registerNextEpoch(
+                        groupId: record.groupId, groupIdHex: groupIdHex,
+                        next: next, provenBy: provenBy)
+                } catch {
+                    throw ChatError.wrapped("DS access registration (remove-member) failed", underlying: error)
+                }
+            },
+            prepare: { [self] commitBytes in
+                // Persist the outbox entry (commit only) + the N+1 snapshot
+                // BEFORE the publish, FAIL-CLOSED. A throw ABORTS the op.
+                let entryId = newOutboxEntryId()
+                try persistCommitEntryThenSnapshotOrThrow(
+                    NewCommitEntry(
+                        id: entryId,
+                        groupId: base64Encode(record.groupId),
+                        targetEpoch: String(try record.group.epoch()),
+                        commitB64: base64Encode(commitBytes)
+                    )
                 )
-            )
-        } catch {
-            // ADR-0040 (G-35) F1 — the FAIL-CLOSED persist aborted AFTER the core
-            // `removeMember` eager-merged epoch N -> N+1 in memory. Roll the
-            // in-memory group back to the durable snapshot (still N) so this abort
-            // is "as if the op never happened" in memory too, then re-throw so the
-            // UI sees the failure. Without the reset a second same-session commit
-            // would build on the un-published N+1 and strand the whole group. See
-            // ``resetGroupToDurableSnapshot(groupIdHex:)``.
-            try resetGroupToDurableSnapshot(groupIdHex: groupIdHex)
-            throw error
-        }
-        let commitPublish: PublishResult
-        do {
-            commitPublish = try await dsClient.publishGroup(
-                groupId: record.groupId,
-                payload: commitBytes
-            )
-        } catch {
-            throw ChatError.wrapped("DS publishGroup (remove-member commit) failed", underlying: error)
-        }
-        chatClient.markOwnPublishedCommit(groupIdHex: groupIdHex, messageId: commitPublish.id)
-        ackCommitBestEffort(entryId: entryId, commitMessageId: commitPublish.id)
+                return (entryId: entryId, commit: commitBytes)
+            },
+            // ADR-0040 (G-35) F1 — roll the in-memory group back to the durable
+            // snapshot (still N). See ``resetGroupToDurableSnapshot(groupIdHex:)``.
+            rollback: { [self] in try resetGroupToDurableSnapshot(groupIdHex: groupIdHex) },
+            publish: { [self] prepared, signerN in
+                let commitPublish: PublishResult
+                do {
+                    commitPublish = try await dsClient.publishGroup(
+                        groupId: record.groupId,
+                        payload: prepared.commit,
+                        auth: DsAuth(signer: signerN)
+                    )
+                } catch {
+                    throw ChatError.wrapped("DS publishGroup (remove-member commit) failed", underlying: error)
+                }
+                chatClient.markOwnPublishedCommit(groupIdHex: groupIdHex, messageId: commitPublish.id)
+                ackCommitBestEffort(entryId: prepared.entryId, commitMessageId: commitPublish.id)
+                return commitPublish
+            }
+        ).run()
         state = state.with(threads: buildThreadList())
         return commitPublish.id
     }
@@ -2532,7 +2559,7 @@ public final class ChatRepository: ObservableObject {
     }
 
     /// ADR-0028 OQ2 (G-3) — read the join-attribution envelopes from this group's
-    /// journal so the admin UI can show which member's `/g/` link each pending
+    /// knocks (ADR-0053) so the admin UI can show which member's `/g/` link each pending
     /// request arrived on. For every valid attribution targeting this group
     /// (the embedded capability re-verified via `parseGroupJoinAttribution`),
     /// returns the joiner signature key, the issuer fingerprint, and whether the
@@ -2545,7 +2572,10 @@ public final class ChatRepository: ObservableObject {
         guard let groupId = try? record.group.groupId() else { return [] }
         // ADR-0050 — the capability issuer is an ACCOUNT key.
         let rosterKeys = Set(PersonKey.people((try? record.group.members()) ?? []))
-        guard let raw = try? await dsClient.fetchGroup(groupId: groupId, after: 0, waitSecs: 0)
+        // ADR-0053 point 6 — a joiner's attribution rides its knock, not the
+        // journal: read the knocks, signed like a group read.
+        guard let raw = try? await dsClient.fetchKnocks(
+            groupId: groupId, after: 0, waitSecs: 0, auth: dsAuth(groupIdHex: groupIdHex))
         else { return [] }
         var out: [(Data, String, Bool)] = []
         for m in raw.messages {
@@ -2572,10 +2602,10 @@ public final class ChatRepository: ObservableObject {
     /// here, no `WelcomeRendezvous` to post here, and no ADR-0040 outbox entry,
     /// because a proposal makes nothing durable that a crash could strand.
     ///
-    /// The joiner's Welcome — and its `WelcomeRendezvous` — is produced by
-    /// whichever device later sweeps this proposal into a commit. See
-    /// `Chat/CommitterSweep.swift`: that sweep posts one rendezvous per added
-    /// key, blind to which of them came from a link.
+    /// The joiner's Welcome is produced by whichever device later sweeps this
+    /// proposal into a commit. See `Chat/CommitterSweep.swift`: that sweep sends
+    /// it to every added leaf's own mailbox (ADR-0053 point 8), blind to which
+    /// of them came from a link.
     ///
     /// ## No pre-drain, and no pending-set refusal
     ///
@@ -2637,7 +2667,8 @@ public final class ChatRepository: ObservableObject {
         do {
             publish = try await dsClient.publishGroup(
                 groupId: record.groupId,
-                payload: proposalBytes
+                payload: proposalBytes,
+                auth: dsAuth(groupIdHex: groupIdHex)
             )
         } catch {
             throw ChatError.wrapped("DS publishGroup (approve proposal) failed", underlying: error)
@@ -3770,12 +3801,25 @@ public final class ChatRepository: ObservableObject {
         // G-38 step 2 — the NETWORK half, outside the lock. Both values are read
         // here and re-validated under the lock; `groupId` is the record's cached
         // copy, so the fetch reads no `Group` handle at all.
+        // ADR-0053 point 2 — claim-on-open, once per group per session, before
+        // the first read. Idempotent, and a failure never blocks the poll.
+        if !claimedGroupsThisSession.contains(groupIdHex) {
+            claimedGroupsThisSession.insert(groupIdHex)
+            await claimGroupJournal(groupIdHex: groupIdHex)
+        }
         let after = record.cursor
         let groupId = record.groupId
+        // ADR-0053 point 7 — an owner / admin device reads what non-members
+        // knocked, next to the journal and on its own cursor. Not awaited with
+        // the long poll: a knock waiting for approval must not sit behind 30 s
+        // of an idle journal.
+        Task { @MainActor [weak self] in await self?.pollKnocks(groupIdHex: groupIdHex) }
+        // ADR-0053 point 1 — the read is signed with the group's access key.
         let raw = try await chatClient.fetchGroupJournal(
             groupId: groupId,
             after: after,
-            waitSecs: waitSecs
+            waitSecs: waitSecs,
+            auth: dsAuth(groupIdHex: groupIdHex)
         )
         // G-38 steps 3+4 — the MLS half, inside the per-group commit chain.
         try await withCommitLock(groupIdHex: groupIdHex) { [self] in
@@ -3845,6 +3889,9 @@ public final class ChatRepository: ObservableObject {
         // against any commit landing in the fetch window.
         let membersBeforePoll = PushGroupRouting.memberSignatureKeys(group: record.group)
         let leafKeysBeforePoll = Self.leafKeysB64(group: record.group)
+        // ADR-0053 point 4 — the access signer BEFORE the batch, so a batch
+        // that moves the epoch can register the new key proven under it.
+        let signerBeforeBatch = try? record.group.dsAccessSigner(identity: identity)
         let result = chatClient.applyFetchedMessages(
             identity: identity,
             group: record.group,
@@ -3943,6 +3990,13 @@ public final class ChatRepository: ObservableObject {
         // idle long poll still writes no file.
         if !result.events.isEmpty { persistMessageLogBestEffort() }
         state = state.with(threads: buildThreadList())
+        // ADR-0053 point 4 — heal on apply. Only spawns a `Task`, so the apply
+        // region stays non-suspending.
+        healRegistration(
+            groupIdHex: groupIdHex,
+            groupId: record.groupId,
+            before: signerBeforeBatch,
+            after: try? record.group.dsAccessSigner(identity: identity))
         // ADR-0052 decision 3 — a delete that landed in this batch takes its
         // shared pin record with it. Only spawns a `Task` on the pin chain.
         if !result.events.isEmpty { dropSharedPinsOfDeletedMessages(groupIdHex: groupIdHex) }
@@ -4724,7 +4778,8 @@ public final class ChatRepository: ObservableObject {
         do {
             publish = try await dsClient.publishGroup(
                 groupId: record.groupId,
-                payload: proposalBytes
+                payload: proposalBytes,
+                auth: dsAuth(groupIdHex: groupIdHex)
             )
         } catch {
             throw ChatError.wrapped("DS publishGroup (membership proposal) failed", underlying: error)
@@ -4793,8 +4848,21 @@ public final class ChatRepository: ObservableObject {
         let outcome: SweepOutcome
         do {
             outcome = try await withCommitLock(groupIdHex: groupIdHex) { [self] in
-                guard let record = groups[groupIdHex] else { return .notCommitter(rank: nil) }
-                return try await runCommitterSweep(sweepPorts(record: record, groupIdHex: groupIdHex))
+                guard let record = groups[groupIdHex], let identity = canonicalIdentity else {
+                    return .notCommitter(rank: nil)
+                }
+                let signerBefore = try? record.group.dsAccessSigner(identity: identity)
+                let outcome = try await runCommitterSweep(sweepPorts(record: record, groupIdHex: groupIdHex))
+                // ADR-0053 point 4 — a LOST sweep applied the winner's commit in
+                // its verdict read; put the winner's key back over the one this
+                // device registered for its own losing commit. A won sweep
+                // re-sends its own registration, which is an idempotent no-op.
+                healRegistration(
+                    groupIdHex: groupIdHex,
+                    groupId: record.groupId,
+                    before: signerBefore,
+                    after: try? record.group.dsAccessSigner(identity: identity))
+                return outcome
             }
         } catch {
             // A verdict this device could not read leaves the sweep staged for
@@ -4983,22 +5051,41 @@ public final class ChatRepository: ObservableObject {
                 fetch: { [weak self] after in
                     guard let self else { throw ChatError.argument("ChatRepository deallocated") }
                     let raw = try await self.dsClient.fetchGroup(
-                        groupId: record.groupId, after: after, waitSecs: 0)
+                        groupId: record.groupId, after: after, waitSecs: 0,
+                        auth: self.dsAuth(groupIdHex: groupIdHex))
                     // ADR-0045 — `createdAt` carried so an applied row can become
                     // a timeline event.
                     return raw.messages.map {
                         SweepJournalRow(id: $0.id, payload: $0.payload, createdAt: $0.createdAt)
                     }
                 },
+                // A staged sweep leaves the group at N, so this signs under N —
+                // one of the two write epochs once N+1 is registered.
                 publishGroup: { [weak self] bytes in
                     guard let self else { throw ChatError.argument("ChatRepository deallocated") }
                     return try await self.dsClient.publishGroup(
-                        groupId: record.groupId, payload: bytes).id
+                        groupId: record.groupId, payload: bytes,
+                        auth: self.dsAuth(groupIdHex: groupIdHex)).id
                 },
                 publishMailbox: { [weak self] pseudonym, bytes in
                     guard let self else { throw ChatError.argument("ChatRepository deallocated") }
                     return try await self.dsClient.publishMailbox(
                         pseudonym: pseudonym, payload: bytes).id
+                },
+                // ADR-0053 point 3, staged shape — register the epoch the staged
+                // sweep moves to (`dsStagedAccessSigner`), proven under the
+                // epoch the group still sits at, before the commit is published.
+                registerStagedEpoch: { [weak self] in
+                    guard let self, let identity = self.canonicalIdentity else {
+                        throw ChatError.argument("ChatRepository not bootstrapped — cannot register")
+                    }
+                    let signerN = try record.group.dsAccessSigner(identity: identity)
+                    guard let signerN1 = try record.group.dsStagedAccessSigner(identity: identity) else {
+                        throw ChatError.argument("no staged sweep to register an epoch for")
+                    }
+                    try await self.registerNextEpoch(
+                        groupId: record.groupId, groupIdHex: groupIdHex,
+                        next: signerN1, provenBy: signerN)
                 }
             ),
             outbox: SweepOutboxPort(
@@ -5018,8 +5105,7 @@ public final class ChatRepository: ObservableObject {
                         targetEpoch: String((try? record.group.epoch()) ?? 0),
                         commitB64: entry.commitB64,
                         sweepVerdictPending: true,
-                        welcomeMailboxesB64: entry.welcomeMailboxesB64,
-                        welcomeRendezvousB64: entry.welcomeRendezvousB64
+                        welcomeMailboxesB64: entry.welcomeMailboxesB64
                     )
                     if let welcome = entry.welcomeEnvelopeB64 {
                         next.secondArtifactB64 = welcome
@@ -5042,7 +5128,6 @@ public final class ChatRepository: ObservableObject {
                         commitB64: row.commitB64,
                         welcomeEnvelopeB64: row.secondArtifactB64,
                         welcomeMailboxesB64: row.welcomeMailboxesB64 ?? [],
-                        welcomeRendezvousB64: row.welcomeRendezvousB64 ?? [],
                         commitMessageId: row.commitMessageId
                     )
                 },
@@ -5070,7 +5155,6 @@ public final class ChatRepository: ObservableObject {
                         commitB64: row.commitB64,
                         welcomeEnvelopeB64: row.secondArtifactB64,
                         welcomeMailboxesB64: row.welcomeMailboxesB64 ?? [],
-                        welcomeRendezvousB64: row.welcomeRendezvousB64 ?? [],
                         commitMessageId: row.commitMessageId
                     )
                 },
@@ -5093,14 +5177,10 @@ public final class ChatRepository: ObservableObject {
             welcomeMailbox: { key in
                 try IdentityPseudonym.fromIdentity(pubkey: key).asBytes()
             },
+            // ADR-0053 point 8 — every added leaf, a `/g/` joiner included, gets
+            // its Welcome in its own mailbox; no `WelcomeRendezvous` is written
+            // to the group journal any more.
             wrapWelcome: { welcome in wrapEnvelope(kind: .welcome, body: welcome) },
-            // ADR-0045 S7 — the group-journal half of the fan-out. An external
-            // joiner approved through a `/g/` link polls the journal for this
-            // and nothing else; the sweep cannot tell which adds those are, so
-            // it wraps one per added key.
-            wrapRendezvous: { key, welcome in
-                try wrapWelcomeRendezvous(joinerSignatureKey: key, welcome: welcome)
-            },
             markOwnPublished: { [weak self] id in
                 self?.chatClient.markOwnPublishedCommit(groupIdHex: groupIdHex, messageId: id)
             },
@@ -5496,6 +5576,186 @@ public final class ChatRepository: ObservableObject {
         commitLock.removeIdleObserver(token)
     }
 
+    // MARK: - ADR-0053 DS journal access
+
+    /// The current-epoch access signer of a live group, recorded in
+    /// ``dsSigners`` so the epoch before it stays available for a retry.
+    /// `nil` before bootstrap or when the exporter refuses (an inactive group).
+    private func currentDsSigner(record: GroupRecord, groupIdHex: String) -> DsProofSigner? {
+        guard let identity = canonicalIdentity,
+              let signer = try? record.group.dsAccessSigner(identity: identity) else { return nil }
+        dsSigners.observe(journal: groupIdHex, signer: signer)
+        return signer
+    }
+
+    /// ADR-0053 client contract points 1 and 5 — the auth for a request to
+    /// this group's journal: the current-epoch signer, the previous one when
+    /// this device still holds it, and a claim-on-open as the last retry.
+    /// `nil` when the group is unknown here (the request goes unsigned, which
+    /// only an unclaimed journal accepts).
+    func dsAuth(groupIdHex: String) -> DsAuth? {
+        guard let record = groups[groupIdHex],
+              let signer = currentDsSigner(record: record, groupIdHex: groupIdHex) else { return nil }
+        return DsAuth(
+            signer: signer,
+            previous: dsSigners.previousSigner(journal: groupIdHex, before: signer.epoch()),
+            reclaim: { [weak self] in await self?.claimGroupJournal(groupIdHex: groupIdHex) }
+        )
+    }
+
+    /// ADR-0053 client contract point 2 — claim-on-open. Registers the
+    /// current epoch's key; idempotent (a key already registered at its epoch
+    /// is a `204` with no proof). Proven under the older signer when this
+    /// device holds one, unsigned otherwise. A failure is logged and retried
+    /// on the next open; it never blocks anything. Returns the current signer.
+    @discardableResult
+    func claimGroupJournal(groupIdHex: String) async -> DsRequestSigner? {
+        guard let record = groups[groupIdHex],
+              let signer = currentDsSigner(record: record, groupIdHex: groupIdHex) else { return nil }
+        let older = dsSigners.previousSigner(journal: groupIdHex, before: signer.epoch())
+        do {
+            try await dsClient.claimGroup(
+                groupId: record.groupId,
+                bodyJson: signer.groupClaimBodyJson(),
+                provenBy: older
+            )
+        } catch {
+            NSLog("ADR-0053: group journal claim failed, retried on the next open: \(error)")
+        }
+        return signer
+    }
+
+    /// ADR-0053 point 3 — register `next` (the epoch a commit moves to) proven
+    /// under `provenBy` (the epoch it moves from), BEFORE the commit is
+    /// published. Throws: a failed registration aborts the commit.
+    private func registerNextEpoch(
+        groupId: Data,
+        groupIdHex: String,
+        next: DsGroupSigner,
+        provenBy: DsGroupSigner
+    ) async throws {
+        try await dsClient.claimGroup(
+            groupId: groupId,
+            bodyJson: next.groupClaimBodyJson(),
+            provenBy: provenBy
+        )
+        dsSigners.observe(journal: groupIdHex, signer: provenBy)
+        dsSigners.observe(journal: groupIdHex, signer: next)
+    }
+
+    /// ADR-0053 point 4 — heal on apply. A batch that moved the epoch
+    /// registers the new epoch's key, proven under the signer taken before the
+    /// batch. Best effort: a refusal is expected and ignored (someone else
+    /// registered first, or this device was too far behind). This is what puts
+    /// the winning key back after a losing committer registered its own.
+    private func healRegistration(
+        groupIdHex: String,
+        groupId: Data,
+        before: DsProofSigner?,
+        after: DsProofSigner?
+    ) {
+        guard let before, let after, after.epoch() > before.epoch() else { return }
+        dsSigners.observe(journal: groupIdHex, signer: before)
+        dsSigners.observe(journal: groupIdHex, signer: after)
+        let client = dsClient
+        Task { await dsHealRegistration(ds: client, groupId: groupId, before: before, after: after) }
+    }
+
+    /// ADR-0053 point 2 — claim this device's two mailboxes: the account
+    /// mailbox (contact requests and acks) and the device mailbox (Welcomes
+    /// sealed to this device's KeyPackages). Unsigned: the identity key is
+    /// public and a claim grants nothing. Every session start, i.e. after
+    /// every login, restore and signup. Best effort.
+    public func claimOwnMailboxes() {
+        var signers: [DsProofSigner] = []
+        if let account = accountIdentity { signers.append(dsMailboxSigner(identity: account)) }
+        if let device = canonicalIdentity, device !== accountIdentity {
+            signers.append(dsMailboxSigner(identity: device))
+        }
+        let client = dsClient
+        Task {
+            for signer in signers {
+                do {
+                    try await client.claimMailbox(
+                        pseudonym: signer.mailboxPseudonym(),
+                        bodyJson: signer.mailboxClaimBodyJson())
+                } catch {
+                    NSLog("ADR-0053: mailbox claim failed, retried on the next session: \(error)")
+                }
+            }
+        }
+    }
+
+    /// ADR-0053 point 1 — the signer of this device's DEVICE mailbox (named by
+    /// ``ownDeviceLeafKey``), for the Welcome poll. `nil` before bootstrap.
+    public var ownDeviceMailboxSigner: DsProofSigner? {
+        canonicalIdentity.map { dsMailboxSigner(identity: $0) }
+    }
+
+    /// ADR-0053 point 7 — read what non-members knocked on `groupIdHex` and
+    /// feed the external-join proposals to the group, under the commit lock.
+    /// Owner / admin devices only (the ones that can approve), on their own
+    /// cursor. Every row goes through the core's knock gate,
+    /// `Group.processKnock`, NEVER `processIncomingVerifyingRoles`: it refuses,
+    /// before any processing, anything that is not a stranger's external-join
+    /// proposal for this group, so a member's commit or application message
+    /// replayed into the unauthenticated knock queue cannot fork the admins
+    /// who read it from everyone else. A refused row (an attribution, which
+    /// ``fetchJoinAttributions(groupIdHex:)`` parses on its own, or anything
+    /// else) is dropped and the cursor still advances.
+    private func pollKnocks(groupIdHex: String) async {
+        guard let record = groups[groupIdHex], let identity = canonicalIdentity,
+              (try? record.group.ownCommitterRank(identity: identity)) != nil else { return }
+        // The cursor survives a relaunch: a request rejected here must not be
+        // read back into the quarantine from the knock queue on the next start.
+        let cursorKey = currentAccountIdB64.map {
+            "me.lakko.chat.knock-cursor.v1.\($0).\(groupIdHex)"
+        }
+        if record.knockCursor == 0, let cursorKey {
+            record.knockCursor = Int64(UserDefaults.standard.integer(forKey: cursorKey))
+        }
+        let after = record.knockCursor
+        let raw: FetchResult
+        do {
+            raw = try await dsClient.fetchKnocks(
+                groupId: record.groupId, after: after, waitSecs: 0,
+                auth: dsAuth(groupIdHex: groupIdHex))
+        } catch {
+            NSLog("ADR-0053: knock fetch failed: \(error)")
+            return
+        }
+        guard !raw.messages.isEmpty else { return }
+        try? await withCommitLock(groupIdHex: groupIdHex) { [self] in
+            guard let identity = canonicalIdentity, let record = groups[groupIdHex],
+                  record.knockCursor == after else { return }
+            for row in raw.messages {
+                record.knockCursor = max(record.knockCursor, row.id)
+                guard let processed = try? record.group.processKnock(
+                    identity: identity, bytes: row.payload) else { continue }
+                if case .externalJoinProposal(_, let retained) = processed,
+                   case .informational = externalJoinAffordance(retained: retained) {
+                    record.sawUnkeptExternalJoin = true
+                }
+            }
+            // An accepted proposal enters the retained request set, which lives
+            // in the MLS storage snapshot, so the cursor may move past these rows
+            // only once it is durable — it may lag the durable state, never lead
+            // it (`Chat/DurableCursor.swift`). A failed write re-reads them.
+            // Written for every non-empty batch rather than only when a row was
+            // accepted: conservative, and the batch is small.
+            do {
+                try persistSnapshotDurableOrThrow()
+            } catch {
+                record.knockCursor = after
+                return
+            }
+            state = state.with(threads: buildThreadList())
+            if let cursorKey {
+                UserDefaults.standard.set(Int(record.knockCursor), forKey: cursorKey)
+            }
+        }
+    }
+
     // MARK: - ADR-0040 (G-35) durable pending-commit outbox
 
     /// Persist the pending-commit outbox entry AND the N+1 MLS snapshot durably,
@@ -5784,20 +6044,22 @@ public final class ChatRepository: ObservableObject {
             return
         }
         do {
+            // ADR-0053 — the device is durably at N+1, whose key was registered
+            // before the entry was written; sign under it (with the usual
+            // retries).
             let commitPub = try await dsClient.publishGroup(
                 groupId: record.groupId,
-                payload: commitBytes
+                payload: commitBytes,
+                auth: dsAuth(groupIdHex: groupIdHex)
             )
             // Echo re-arm: the device is durably at N+1, so feeding its own
             // re-fetched commit into `processIncoming` would raise
             // `CannotDecryptOwnMessage`. Suppress it on the very next poll.
             chatClient.markOwnPublishedCommit(groupIdHex: groupIdHex, messageId: commitPub.id)
 
-            // ADR-0045 S7 — a direct-path second artifact is now ALWAYS a
-            // mailbox Welcome. The rendezvous arm this loop used to carry
-            // belonged to the external-join approve, which no longer commits and
-            // therefore writes no entry at all; the sweep owns every rendezvous
-            // now (`Chat/CommitterSweep.swift`, one per added key).
+            // ADR-0045 S7 — a direct-path second artifact is ALWAYS a mailbox
+            // Welcome; since ADR-0053 no `WelcomeRendezvous` is written to a
+            // group journal by any path.
             var secondId: Int64?
             if let secondB64 = entry.secondArtifactB64,
                let secondBytes = base64Decode(secondB64),
@@ -6253,6 +6515,10 @@ private final class GroupRecord {
     /// Read by the sheet on its next refresh and cleared when an admin acts on
     /// the queue, which is what may have made room.
     var sawUnkeptExternalJoin: Bool = false
+    /// ADR-0053 point 7 — how far this device has read the group's knocks. Its
+    /// own id space, never mixed with ``cursor``. Seeded from, and written back
+    /// to, a per-account `UserDefaults` key by the knock poll.
+    var knockCursor: Int64 = 0
 
     init(group: Group, groupId: Data) {
         self.group = group

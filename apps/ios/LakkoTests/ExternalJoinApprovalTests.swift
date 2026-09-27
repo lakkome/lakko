@@ -104,8 +104,22 @@ final class ScriptedDsURLProtocol: URLProtocol {
             return
         }
         let scope = Self.scope(of: url)
+        // ADR-0053 — the access registration and the knock queue are separate
+        // DS routes; a registration is accepted (204, nothing stored) and the
+        // knock queue is empty, so neither leaks into the journal this stub
+        // models. The proof header is not checked here: these fixtures
+        // exercise membership, not the server's gate.
+        if url.path.hasSuffix("/access") {
+            let response = HTTPURLResponse(
+                url: url, statusCode: 204, httpVersion: "HTTP/1.1", headerFields: [:])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
         let body: Data
-        if request.httpMethod == "POST" {
+        if url.path.hasSuffix("/knocks") {
+            body = Data(#"{"messages":[],"has_more":false}"#.utf8)
+        } else if request.httpMethod == "POST" {
             // `URLProtocol` strips `httpBody` for a body set on the request when
             // it came through `URLSession`; the stream is the reliable source.
             let payload = Self.bodyData(of: request)

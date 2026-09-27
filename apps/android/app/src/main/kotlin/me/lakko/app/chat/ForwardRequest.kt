@@ -22,6 +22,14 @@ public data class ForwardRequest(
     val sourceGroupIdHex: String,
     val message: ChatMessage,
     val authorLabel: String?,
+    /**
+     * ADR-0053 section 6 / client contract point 10 — the source conversation
+     * is a one-to-one. A forward out of one carries NO origin reference: the
+     * only other holder of that conversation is its other participant, so the
+     * id would tell every recipient something about two people and help
+     * nobody jump anywhere.
+     */
+    val sourceIsOneToOne: Boolean = false,
 )
 
 /**

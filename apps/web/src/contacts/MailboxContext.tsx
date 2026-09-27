@@ -179,7 +179,11 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
             joinedGroupIds.push(active.groupIdB64);
             joined = true;
           } catch (err) {
-            failed = true;
+            // ADR-0053 — an account-mailbox Welcome is a channel co-publisher's,
+            // opened by the co-publisher flow under the account identity; this
+            // handler's device-identity join cannot open it, and that is not a
+            // failed join the user needs to hear about.
+            if (ev.welcome.fromAccountMailbox !== true) failed = true;
             // eslint-disable-next-line no-console
             console.warn("joinGroupFromWelcome failed", ev.welcome.messageId, err);
           }

@@ -70,6 +70,7 @@ public class ForwardSender(
             message = request.message,
             authorLabel = request.authorLabel,
             originGroupIdHex = request.sourceGroupIdHex,
+            sourceIsOneToOne = request.sourceIsOneToOne,
         )
         val attachments = request.message.attachments.map { reEncrypt(it) }
         send(targetGroupIdHex, text, attachments, ref)

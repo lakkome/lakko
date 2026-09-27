@@ -2870,8 +2870,9 @@ struct MembersSheet: View {
                 }
                 // ADR-0027 (G-3) — pending external-join requests. Owner/admin
                 // only (same gate as add/remove); hidden when there are none.
-                // Approve drives the role-gated MLS approve + posts the commit
-                // & Welcome rendezvous; Reject drops the retained proposal.
+                // Approve publishes the role-gated `Add` proposal (the sweep then
+                // sends the Welcome to the joiner's mailbox); Reject drops the
+                // retained proposal. Requests arrive as knocks (ADR-0053).
                 if viewModel.canManageMembers,
                     !viewModel.pendingJoins.isEmpty || viewModel.unkeptJoinRequest
                 {

@@ -109,7 +109,15 @@ import type { ActingCommitter } from "../chat/committer-beacon";
 // never fetch again, so it has to build events for them, and it has to build
 // them the same way the poll does.
 import { rosterOf, toEvent } from "../chat/client";
-import { journalHeadEpoch, scanJournal } from "../chat/journal-head-epoch";
+import { scanJournal } from "../chat/journal-head-epoch";
+import {
+  healAfterApply,
+  knockToJoin,
+  registerBeforePublish,
+  takeSigner,
+  type ProofSigner,
+} from "../ds/access";
+import { solvePow } from "../auth/pow";
 import { resolveLeafSignatureKey, resolveMemberIdentity } from "../chat/author-identity";
 import type { IncomingChatEvent } from "../chat/client";
 // ADR-0045 UX §6 — the seventh refusal string, defined ONCE beside the rest of
@@ -247,6 +255,14 @@ export interface IncomingWelcome {
    *  `Group.joinFromWelcome(identity, ...)`. */
   welcomeBytes: Uint8Array;
   createdAt: string;
+  /** ADR-0053 — the Welcome arrived in the ACCOUNT mailbox rather than the
+   *  device mailbox. Since ADR-0050 a conversation Welcome is addressed to a
+   *  device leaf, so the one Welcome still addressed to the account key is a
+   *  channel co-publisher's (the PublisherGroup lives in the account
+   *  identity's provider), which the co-publisher flow opens itself. The
+   *  mailbox handler, whose join uses the device identity, cannot open it and
+   *  must not report that as a failed join. */
+  fromAccountMailbox?: boolean;
 }
 
 /** A verified incoming `ContactAck` (Phase 1.9b1) — the
@@ -714,7 +730,6 @@ function sweepPortsFor(
           commitB64: entry.commitB64,
           sweepVerdictPending: true,
           welcomeMailboxesB64: [...entry.welcomeMailboxesB64],
-          welcomeRendezvousB64: [...entry.welcomeRendezvousB64],
         };
         if (entry.welcomeEnvelopeB64 !== undefined) {
           next.secondArtifactB64 = entry.welcomeEnvelopeB64;
@@ -771,12 +786,39 @@ function sweepPortsFor(
     welcomeMailbox: (signatureKey) =>
       wasm.IdentityPseudonym.fromIdentity(signatureKey).asBytes(),
     wrapWelcome: (welcome) => wrapEnvelope(KIND_WELCOME, welcome),
-    // ADR-0045 S7 — the group-journal half of the fan-out. An external joiner
-    // approved through a `/g/` link polls the journal for this and nothing
-    // else; the sweep cannot tell which adds those are, so it wraps one per
-    // added key.
-    wrapRendezvous: (signatureKey, welcome) =>
-      wasm.wrapWelcomeRendezvous(signatureKey, welcome),
+    // ADR-0053 contract point 3 — the staged epoch's key, proven under the
+    // current one, registered before the sweep is published.
+    registerStagedEpoch: async () => {
+      const signerN = takeSigner(() => group.dsAccessSigner(identity));
+      const staged = takeSigner(() => {
+        const next = group.dsStagedAccessSigner(identity);
+        if (next === undefined) throw new Error("no staged sweep");
+        return next;
+      });
+      try {
+        await registerBeforePublish(ds, groupIdBytes, signerN, staged);
+      } finally {
+        signerN?.free();
+        staged?.free();
+      }
+    },
+    // ADR-0053 contract point 4 — heal after the verdict apply.
+    beginApply: () => {
+      const before = takeSigner(() => group.dsAccessSigner(identity));
+      return async (heal: boolean) => {
+        if (!heal) {
+          before?.free();
+          return;
+        }
+        const after = takeSigner(() => group.dsAccessSigner(identity));
+        try {
+          await healAfterApply(ds, groupIdBytes, before, after);
+        } finally {
+          before?.free();
+          after?.free();
+        }
+      };
+    },
     markOwnPublished,
     persist,
     persistApplied,
@@ -810,7 +852,6 @@ function toSweepEntry(row: PendingCommitEntry): SweepDurableEntry {
     commitB64: row.commitB64,
     welcomeEnvelopeB64: row.secondArtifactB64,
     welcomeMailboxesB64: row.welcomeMailboxesB64 ?? [],
-    welcomeRendezvousB64: row.welcomeRendezvousB64 ?? [],
   };
   // Built without assigning `undefined` (exactOptionalPropertyTypes).
   if (row.commitMessageId !== undefined) {
@@ -821,12 +862,6 @@ function toSweepEntry(row: PendingCommitEntry): SweepDurableEntry {
 
 export class ContactsClient {
   private readonly identityProvider: (() => WasmIdentity | null) | undefined;
-  /** Journal rows holding a Welcome addressed to this device that it could not
-   *  open (the KeyPackage it was sealed to is gone: a reload before the fix in
-   *  `requestToJoinFromLink` persisted it, or a re-request minted a newer one).
-   *  Skipped on later polls so the wait goes on for a newer Welcome instead of
-   *  failing on the stale one every three seconds. */
-  private readonly unopenableWelcomes = new Set<number>();
   private readonly accountIdentityProvider: (() => WasmIdentity | null) | undefined;
   private readonly onPersist: (() => Promise<void>) | undefined;
   private readonly onPersistWithCommit:
@@ -1045,6 +1080,27 @@ export class ContactsClient {
    *  published. Best-effort: a failure here just leaves an acked-worthy entry
    *  un-acked, so the next restart sweep re-publishes it idempotently (peers
    *  drop the wrong-epoch duplicate; the committer's echo filter is re-armed). */
+  /**
+   * ADR-0053 contract point 3 — register the key of the epoch a direct commit
+   * just moved this group to, proven under `signerN` (the key of the epoch it
+   * left, taken BEFORE the create call). Called inside each commit path's
+   * fail-closed region, before the ADR-0040 outbox write: a refusal throws, and
+   * the caller resets the group to N exactly as for a failed outbox write, so a
+   * commit is never on the wire before the server knows its epoch.
+   */
+  private async registerNextEpochOrThrow(
+    group: WasmGroup,
+    myIdentity: WasmIdentity,
+    signerN: ProofSigner | null,
+  ): Promise<void> {
+    const signerN1 = takeSigner(() => group.dsAccessSigner(myIdentity));
+    try {
+      await registerBeforePublish(this.ds, group.groupId, signerN, signerN1);
+    } finally {
+      signerN1?.free();
+    }
+  }
+
   private async ackCommitBestEffort(
     id: string,
     commitMessageId?: number,
@@ -1254,11 +1310,13 @@ export class ContactsClient {
         // CannotDecryptOwnMessage. Suppress it on the very next poll.
         markOwnPublished(commitPub.id);
 
-        // ADR-0045 S7 — a direct-path second artifact is now ALWAYS a mailbox
+        // ADR-0045 S7 — a direct-path second artifact is ALWAYS a mailbox
         // Welcome. The rendezvous arm this loop used to carry belonged to the
-        // external-join approve, which no longer commits and therefore writes
-        // no entry at all; the sweep owns every rendezvous now
-        // (`chat/sweep.ts`, one per added key).
+        // external-join approve, which no longer commits; and since ADR-0053
+        // no Welcome goes to a group journal at all (contract point 8). The
+        // commit re-publish below is proven under whatever access key the
+        // group holds now: its epoch was registered before the entry was
+        // written, so that key is one the server knows.
         let secondMessageId: number | undefined;
         if (
           entry.secondArtifactB64 !== undefined &&
@@ -2141,6 +2199,7 @@ export class ContactsClient {
             messageId: message.id,
             welcomeBytes: env.body,
             createdAt: message.createdAt,
+            fromAccountMailbox: true,
           },
         });
         continue;
@@ -2310,6 +2369,24 @@ export class ContactsClient {
       throw ContactsError.wrap(err);
     }
     void added.commit;
+    // ADR-0053 contract point 2 — claim the journal at creation, at the epoch
+    // the one commit above moved it to (nobody ever holds epoch 0: the commit
+    // fans out to nobody). Unsigned: this is the first registration of an
+    // unclaimed journal. Best effort — a failure leaves the journal unclaimed,
+    // which behaves as before, and the first open claims it.
+    {
+      const founding = takeSigner(() => group.dsAccessSigner(myIdentity));
+      if (founding !== null) {
+        try {
+          await this.ds.claimGroupWith(group.groupId, founding, null);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("ds: claim at group creation failed; claimed on first open", err);
+        } finally {
+          founding.free();
+        }
+      }
+    }
     let firstWelcomeMessageId = 0;
     for (const dev of devices) {
       let publish;
@@ -2572,10 +2649,14 @@ export class ContactsClient {
     //    commit is the wire bytes existing members process to
     //    advance their tree; the welcome is what the new member
     //    decodes via `joinFromWelcome`.
+    // ADR-0053 — the key of the epoch this commit leaves, taken BEFORE the
+    // create call eager-merges N -> N+1.
+    const signerN = takeSigner(() => group.dsAccessSigner(myIdentity));
     let added;
     try {
       added = group.addMember(myIdentity, keyPackageBytes);
     } catch (err) {
+      signerN?.free();
       throw ContactsError.wrap(err);
     }
     const commitBytes = added.commit;
@@ -2610,6 +2691,9 @@ export class ContactsClient {
         wasm.keyPackageSignatureKey(keyPackageBytes),
       ).asBytes();
       welcomeEnvelope = wrapEnvelope(KIND_WELCOME, welcomeBytes);
+      // ADR-0053 contract point 3 — register N+1 before anything durable says
+      // the commit exists. A refusal lands in the catch below: reset, no publish.
+      await this.registerNextEpochOrThrow(group, myIdentity, signerN);
       entryId = newOutboxEntryId();
       await this.persistCommitOrThrow({
         id: entryId,
@@ -2623,6 +2707,8 @@ export class ContactsClient {
     } catch (err) {
       await this.resetGroupAfterPersistAbort(group);
       throw ContactsError.wrap(err);
+    } finally {
+      signerN?.free();
     }
 
     // 6. Publish artifact 1 — the commit to the DS group journal. Without it the
@@ -2808,10 +2894,14 @@ export class ContactsClient {
     group: WasmGroup,
     leafIndex: number,
   ): Promise<MembershipOutcome> {
+    // ADR-0053 — the key of the epoch this commit leaves, taken BEFORE the
+    // create call eager-merges N -> N+1.
+    const signerN = takeSigner(() => group.dsAccessSigner(myIdentity));
     let commitBytes: Uint8Array;
     try {
       commitBytes = group.removeMember(myIdentity, leafIndex);
     } catch (err) {
+      signerN?.free();
       throw ContactsError.wrap(err);
     }
     // ADR-0040 (G-35) + F1 — from just after the eager-merge above through the
@@ -2830,6 +2920,9 @@ export class ContactsClient {
     let entryId: string;
     try {
       groupIdBytes = group.groupId;
+      // ADR-0053 contract point 3 — register N+1 before the outbox write; a
+      // refusal lands in the catch below: reset, no publish.
+      await this.registerNextEpochOrThrow(group, myIdentity, signerN);
       entryId = newOutboxEntryId();
       await this.persistCommitOrThrow({
         id: entryId,
@@ -2840,6 +2933,8 @@ export class ContactsClient {
     } catch (err) {
       await this.resetGroupAfterPersistAbort(group);
       throw ContactsError.wrap(err);
+    } finally {
+      signerN?.free();
     }
 
     let commitPublish;
@@ -2980,10 +3075,14 @@ export class ContactsClient {
       return { kind: "proposed", proposalMessageId: publish.id };
     }
 
+    // ADR-0053 — the key of the epoch this commit leaves, taken BEFORE the
+    // create call eager-merges N -> N+1.
+    const signerN = takeSigner(() => group.dsAccessSigner(myIdentity));
     let commitBytes: Uint8Array;
     try {
       commitBytes = group.setGroupRoles(myIdentity, owner, adminsFlat);
     } catch (err) {
+      signerN?.free();
       throw ContactsError.wrap(err);
     }
     // ADR-0040 (G-35) + F1 — from just after the eager-merge above through the
@@ -3001,6 +3100,9 @@ export class ContactsClient {
     let entryId: string;
     try {
       groupIdBytes = group.groupId;
+      // ADR-0053 contract point 3 — register N+1 before the outbox write; a
+      // refusal lands in the catch below: reset, no publish.
+      await this.registerNextEpochOrThrow(group, myIdentity, signerN);
       entryId = newOutboxEntryId();
       await this.persistCommitOrThrow({
         id: entryId,
@@ -3011,6 +3113,8 @@ export class ContactsClient {
     } catch (err) {
       await this.resetGroupAfterPersistAbort(group);
       throw ContactsError.wrap(err);
+    } finally {
+      signerN?.free();
     }
 
     let commitPublish;
@@ -3216,9 +3320,19 @@ export class ContactsClient {
     }>
   > {
     const wasm = await loadWasm();
-    let raw;
+    // ADR-0053 — a joiner posts its attribution as a KNOCK, never to the
+    // journal (which it cannot read or write), so the attributions live in the
+    // group's knock queue. Paged: knocks are pruned after seven days, but a
+    // popular link can still outgrow one page.
+    const raw: { messages: Array<{ id: number; payload: Uint8Array }> } = { messages: [] };
     try {
-      raw = await this.ds.fetchGroup(groupId, { after: 0, waitSecs: 0 });
+      await scanJournal<never>(
+        (after, limit) => this.ds.fetchKnocks(groupId, { after, limit, waitSecs: 0 }),
+        (m) => {
+          raw.messages.push(m);
+          return undefined;
+        },
+      );
     } catch (err) {
       throw ContactsError.wrap(err);
     }
@@ -3432,96 +3546,40 @@ export class ContactsClient {
       }
     }
     const groupId = cap.groupId;
-    // Read the group's current epoch from the journal head. A non-member can
-    // do this — the epoch rides the public MLS framing, not the encrypted body.
-    // An empty / unreachable journal ⇒ epoch 0 (a freshly-created group).
-    // Paged to the head and read with `epochAfterMessage`: see
-    // `journalHeadEpoch` for the two ways the single-page read went stale.
-    let epoch = 0n;
+    // ADR-0053 contract point 6 — the knock. A claimed journal answers only
+    // its members, so the joiner never reads it: a PoW-gated probe knock
+    // returns the group's latest registered epoch, the proposal is built for
+    // that epoch, and a second knock carries the attribution and the proposal
+    // into the group's knock queue, which the owner and admins read.
     try {
-      epoch = await journalHeadEpoch(
-        (after, limit) => this.ds.fetchGroup(groupId, { after, limit, waitSecs: 0 }),
-        (payload) => wasm.epochAfterMessage(payload),
-      );
-    } catch {
-      // keep epoch 0
-    }
-    let proposal: Uint8Array;
-    try {
-      proposal = myIdentity.createExternalJoinProposal(groupId, epoch);
+      await knockToJoin({
+        challenge: () => this.ds.powChallenge(),
+        solve: (seed, effortBits) => solvePow(seed, effortBits),
+        knock: (pow, payloads) => this.ds.knock(groupId, pow, payloads),
+        buildProposal: (epoch) => myIdentity.createExternalJoinProposal(groupId, epoch),
+        // ADR-0028 OQ2 — the self-signed join attribution tells the approving
+        // admin which member's link this request arrived on. Advisory: a
+        // failure to build it must not block the join, the admin approval gate
+        // (ADR-0027) is the boundary.
+        buildAttribution: () => {
+          try {
+            return wasm.composeGroupJoinAttribution(myIdentity.ed25519Seed, capabilityWire);
+          } catch {
+            return null;
+          }
+        },
+      });
     } catch (err) {
-      throw ContactsError.wrap(err);
-    }
-    try {
-      await this.ds.publishGroup(groupId, proposal);
-    } catch (err) {
+      // `GroupNotClaimedError` carries readable copy of its own: nobody in
+      // the group has opened it since the update, so no epoch is registered.
       throw ContactsError.wrap(err);
     }
     // The proposal's KeyPackage private key lives in the provider and is the
-    // only thing that can open the Welcome the admin will post, minutes or
+    // only thing that can open the Welcome the committer will send, minutes or
     // hours from now. Persist it now: a reload before then used to lose it,
     // and the Welcome then failed with `NoMatchingKeyPackage`, unrecoverably.
     await this.persistBestEffort();
-    // ADR-0028 OQ2 — post a join-attribution envelope so the approving admin can
-    // see *which member's* link this request arrived on. It binds our signature
-    // key to the capability (whose embedded issuer pubkey the admin checks
-    // against the roster). Best-effort + advisory: a failure here must not block
-    // the join — the admin approval gate (ADR-0027) is the security boundary.
-    try {
-      const attribution = wasm.composeGroupJoinAttribution(
-        myIdentity.ed25519Seed,
-        capabilityWire,
-      );
-      await this.ds.publishGroup(groupId, attribution);
-    } catch {
-      // advisory only — ignore
-    }
     return { groupId, joinerSignatureKey: myIdentity.signaturePublicKey };
-  }
-
-  /** ADR-0028 (G-3) — joiner step 2: poll the group journal for the rendezvous
-   *  Welcome an admin posted after approving our request, and join from it. Run
-   *  on a poll loop after `requestToJoinFromLink`. Returns the joined `Group`
-   *  on the first rendezvous envelope addressed to our signature key, or `null`
-   *  if no Welcome has arrived yet (keep polling). The non-MLS rendezvous
-   *  entries that don't match us are skipped (`welcomeRendezvousFor` returns
-   *  `undefined`). */
-  async pollForJoinWelcome(
-    identity: IdentitySecrets | null,
-    groupId: Uint8Array,
-    joinerSignatureKey: Uint8Array,
-  ): Promise<WasmGroup | null> {
-    const wasm = await loadWasm();
-    // Paged to the end: the Welcome is the newest row, and a single-page read
-    // never reached it on a journal longer than one page (see `scanJournal`).
-    const candidates: Array<{ id: number; welcome: Uint8Array }> = [];
-    try {
-      await scanJournal<never>(
-        (after, limit) => this.ds.fetchGroup(groupId, { after, limit, waitSecs: 0 }),
-        (m) => {
-          if (this.unopenableWelcomes.has(m.id)) return undefined;
-          const welcome = wasm.welcomeRendezvousFor(m.payload, joinerSignatureKey);
-          if (welcome !== undefined) candidates.push({ id: m.id, welcome });
-          return undefined;
-        },
-      );
-    } catch (err) {
-      throw ContactsError.wrap(err);
-    }
-    // Newest first: after a re-request only the latest Welcome is sealed to
-    // the KeyPackage this device still holds. One that will not open is
-    // remembered and skipped, and the wait goes on for a newer one; it must
-    // not end the poll, which is what a thrown error does.
-    for (const candidate of candidates.reverse()) {
-      try {
-        return await this.joinGroupFromWelcome(identity, candidate.welcome);
-      } catch (err) {
-        this.unopenableWelcomes.add(candidate.id);
-        // eslint-disable-next-line no-console
-        console.warn(`join: Welcome row ${candidate.id} could not be opened; waiting for a newer one`, err);
-      }
-    }
-    return null;
   }
 
   /** Convenience wrapper around [`addMemberToGroup`] that

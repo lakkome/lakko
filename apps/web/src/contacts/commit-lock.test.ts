@@ -48,6 +48,7 @@
  * The remaining cases are guards, not discriminators, and say so where they sit.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { fakeAccessSigner } from "../ds/access-test-doubles";
 
 // No IndexedDB in the node test env; the store round-trip is covered by
 // `src/chat/commit-outbox.test.ts`.
@@ -106,6 +107,7 @@ function statefulGroup(
     get epoch(): bigint {
       return epoch;
     },
+    dsAccessSigner: fakeAccessSigner(() => epoch),
     removeMember: vi.fn((_id: unknown, leaf: number) => {
       epoch += 1n; // the eager merge
       order.push(`create:${label}${leaf}`);
@@ -140,7 +142,7 @@ describe("ADR-0040 — the commit region is serialized per group", () => {
 
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup } as unknown as DsClient,
+      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async (e) => {
@@ -192,7 +194,7 @@ describe("ADR-0040 — the commit region is serialized per group", () => {
 
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup } as unknown as DsClient,
+      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {},
@@ -232,7 +234,7 @@ describe("ADR-0040 — the commit region is serialized per group", () => {
 
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup } as unknown as DsClient,
+      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {},
@@ -263,7 +265,7 @@ describe("ADR-0040 — the commit region is serialized per group", () => {
 
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup } as unknown as DsClient,
+      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {
@@ -345,6 +347,7 @@ describe("ADR-0045 — a second role change is refused while one is pending", ()
       get epoch(): bigint {
         return epoch;
       },
+      dsAccessSigner: fakeAccessSigner(() => epoch),
       roleTableOwner: vi.fn(() => OWNER),
       roleTableAdmins: vi.fn(() => adminsFlat),
       pendingProposals: vi.fn(() => [...pending]),
@@ -371,7 +374,7 @@ describe("ADR-0045 — a second role change is refused while one is pending", ()
 
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup } as unknown as DsClient,
+      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {},
@@ -403,7 +406,7 @@ describe("ADR-0045 — a second role change is refused while one is pending", ()
     const publishGroup = vi.fn(async () => ({ id: 1, createdAt: "t" }));
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup } as unknown as DsClient,
+      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {},

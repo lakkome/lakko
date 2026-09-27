@@ -275,6 +275,14 @@ public protocol NseThrowawayGroup: AnyObject {
     /// guess). MUST NOT persist any MLS state.
     func process(_ payload: Data) -> NseProcessedRow?
 
+    /// ADR-0053 client contract point 9 — the `x-lakko-ds-proof` header for
+    /// one read of this group's journal, signed with the access key the
+    /// throwaway group derives at its restored epoch (`dsAccessSigner`), or
+    /// `nil` when it cannot be derived (the read then goes unsigned and a
+    /// claimed journal refuses it — the generic banner). Signing is not a
+    /// write to group state: no claim, no registration (C-59).
+    func dsProofHeader(method: String, path: String, query: String, body: Data) -> String?
+
     /// Discard the throwaway handles. MUST NOT persist / snapshot.
     func close()
 }
@@ -314,8 +322,13 @@ public protocol NsePushDecryptDeps {
     ) throws -> NseThrowawayGroup?
 
     /// READ-ONLY DS group-journal fetch of rows strictly after `afterId`
-    /// (ascending id order).
-    func dsFetch(groupIdBytes: Data, afterId: Int64) async throws -> [NseFetchedRow]
+    /// (ascending id order), signed through `group` (ADR-0053 point 9). A
+    /// refused proof throws, which the caller turns into the generic banner.
+    func dsFetch(
+        groupIdBytes: Data,
+        afterId: Int64,
+        group: NseThrowawayGroup
+    ) async throws -> [NseFetchedRow]
 
     /// The app's last-persisted per-group cursor (READ-ONLY), or `nil`. Used
     /// as the fetch start so intervening commits replay and the epoch stays
@@ -490,7 +503,8 @@ public func decryptPushOutcome(
 
     let rows: [NseFetchedRow]
     do {
-        rows = try await deps.dsFetch(groupIdBytes: account.groupIdBytes, afterId: after)
+        rows = try await deps.dsFetch(
+            groupIdBytes: account.groupIdBytes, afterId: after, group: group)
     } catch {
         return .none
     }

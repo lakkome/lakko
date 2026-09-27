@@ -121,6 +121,7 @@ import {
 } from "../auth/account-id";
 import { ChatClient, type PollMessagesResult } from "../chat/client";
 import { isDsNetworkFailure } from "../ds/client";
+import { dsClockSkewNotice } from "../ds/access";
 import {
   createWakeLatch,
   LONG_POLL_WAIT_SECS,
@@ -902,6 +903,9 @@ function ChatView(props: {
       },
       forwardAuthorLabelOf(row),
       props.entry.groupIdB64,
+      // ADR-0053 contract point 10 — a forward out of a one-to-one carries no
+      // origin.
+      conversationKind() === "chat",
     );
     // Sequential, not `Promise.all`: one failure must not leave the others
     // uploaded and orphaned, and a forward is rarely more than a few files.
@@ -912,7 +916,10 @@ function ChatView(props: {
     try {
       result = await chat.sendMessage(props.requireIdentity(), entry.group, bytes);
     } catch (err) {
-      throw new Error(sendFailureNotice(membershipRefusalOf(err, membershipRetryMaySucceed)));
+      throw new Error(
+        dsClockSkewNotice(err) ??
+          sendFailureNotice(membershipRefusalOf(err, membershipRetryMaySucceed)),
+      );
     }
     // This device's signature key: one key for the device across every group
     // it is a leaf of (ADR-0050), so the key read off this roster names this
@@ -3981,7 +3988,12 @@ function ChatView(props: {
       );
     } catch (err) {
       setRows([...withSendAck(rows(), tempId, "failed")]);
-      setError(sendFailureNotice(membershipRefusalOf(err, membershipRetryMaySucceed)));
+      // ADR-0053 contract point 5 — a proof refused because this device's
+      // clock is wrong says so; anything else keeps the ordinary copy.
+      setError(
+        dsClockSkewNotice(err) ??
+          sendFailureNotice(membershipRefusalOf(err, membershipRetryMaySucceed)),
+      );
     }
   }
 

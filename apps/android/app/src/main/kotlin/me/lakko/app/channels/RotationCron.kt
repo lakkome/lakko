@@ -92,6 +92,16 @@ public class RotationCron(
     private val channelsClient: ChannelsClient,
     private val saveState: suspend (ChannelRotationState) -> Unit,
     private val onRotated: ((UInt) -> Unit)? = null,
+    /** ADR-0053 — registers the rotated epoch's journal key. Tests pass a
+     *  no-op; production builds a DS client per registration. */
+    private val registerRotatedEpoch: suspend (groupId: ByteArray, before: me.lakko.app.ds.DsJournalSigner?, after: me.lakko.app.ds.DsJournalSigner?) -> Unit =
+        { groupId, before, after ->
+            me.lakko.app.ds.DsClient().use { ds ->
+                me.lakko.app.ds.registerBeforePublish(before, after) { next, current ->
+                    ds.registerNextEpoch(groupId, next, current)
+                }
+            }
+        },
 ) {
 
     /** Result of one single-pass rotation attempt. */
@@ -145,7 +155,24 @@ public class RotationCron(
         //    from the new local state, and the server's
         //    atomic-rotation guarantee means no partial
         //    landings are observable.
+        val signerBeforeRotate = CoPublisher.signerOf(publisherGroup, identity)
         publisherGroup.rotate(identity)
+        // ADR-0053 — the rotation advanced the PublisherGroup epoch, so its
+        // journal's key must be registered or every later journal request of
+        // this owner (the co-publisher panel's poll and approve) is refused.
+        // The rotation commit itself is never published, so this is best
+        // effort: a refusal is logged and the next claim-on-open retries.
+        try {
+            registerRotatedEpoch(
+                publisherGroup.groupId(),
+                signerBeforeRotate,
+                CoPublisher.signerOf(publisherGroup, identity),
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            android.util.Log.w("RotationCron", "ADR-0053: rotated epoch not registered", e)
+        }
         val newSeed = publisherGroup.channelSeed(identity)
         val channelIdBytes = publisherGroup.channelId()
 

@@ -1454,7 +1454,13 @@ public fun ChannelManageScreen(
         try {
             val pub = publisher ?: throw IllegalStateException("channel publisher identity not available")
             // Open-or-create: persisted so a group minted here is not lost.
-            pubGroup = pub.withIdentity { id -> CoPublisher.openPublisherGroup(id, channelId) }
+            val opened = pub.withIdentity { id -> CoPublisher.openPublisherGroup(id, channelId) }
+            pubGroup = opened
+            // ADR-0053 — claim the publisher journal (at creation the first
+            // registration, afterwards an idempotent re-send). Best effort.
+            pub.withIdentity(persist = false) { id ->
+                DsClient().use { ds -> CoPublisher.claimJournal(ds, id, opened) }
+            }
         } catch (e: Throwable) {
             Log.w(TAG, "open publisher group failed", e)
             openError = LegacyChannelV1.describe(e) { "Could not open this channel's keys on this device." }
@@ -2099,6 +2105,10 @@ public fun JoinCoPublisherScreen(
                             onJoined(request.channelIdHex)
                         } catch (e: LegacyChannelException) {
                             error = e.message
+                        } catch (e: me.lakko.app.chat.GroupNotAcceptingRequests) {
+                            // ADR-0053 — the owner has not claimed the channel's
+                            // journal yet; nothing was sent.
+                            error = me.lakko.app.chat.GROUP_NOT_ACCEPTING_REQUESTS
                         } catch (e: Throwable) {
                             Log.w(TAG, "co-publish request failed", e)
                             error = "Could not send the request. Check the link and try again."

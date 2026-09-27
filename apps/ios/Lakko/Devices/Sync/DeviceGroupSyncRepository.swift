@@ -142,6 +142,11 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             return
         }
         pollTask = Task { [weak self] in
+            // ADR-0053 point 2 — claim-on-open before the first read (also the
+            // claim of a DeviceGroup this bootstrap just founded).
+            if let group = self?.group, let identity = self?.identity {
+                await DeviceGroupDsAccess.claim(group: group, identity: identity, ds: DsClient())
+            }
             await self?.runPollLoop(
                 accountIdB64: accountIdB64,
                 groupId: groupId
@@ -339,7 +344,11 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             message: wireBytes,
             attestation: nil
         )
-        _ = try await ds.publishGroup(groupId: groupId, payload: envelope)
+        _ = try await ds.publishGroup(
+            groupId: groupId,
+            payload: envelope,
+            auth: DeviceGroupDsAccess.auth(group: group, identity: identity, ds: ds)
+        )
         DeviceGroupLifecycle.persistSnapshot(
             identity: identity,
             accountIdB64: accountIdB64
@@ -353,12 +362,18 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         var cursor: Int64 = 0
         while !Task.isCancelled {
             let result: FetchResult
+            // ADR-0053 point 1 — the read is signed under the DeviceGroup's
+            // current epoch.
+            let auth = group.flatMap { g in
+                identity.flatMap { DeviceGroupDsAccess.auth(group: g, identity: $0, ds: ds) }
+            }
             do {
                 result = try await ds.fetchGroup(
                     groupId: groupId,
                     after: cursor,
                     limit: nil,
-                    waitSecs: 25
+                    waitSecs: 25,
+                    auth: auth
                 )
             } catch DsClientError.http(let status, _, _) where status == 404 {
                 continue
@@ -390,6 +405,11 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 attestVk = Data(count: 32)
             }
 
+            // ADR-0053 point 4 — the signer before the batch, for heal-on-apply.
+            let signerBefore: DsProofSigner? = {
+                guard let g = group, let id = identity else { return nil }
+                return try? g.dsAccessSigner(identity: id)
+            }()
             var mutated = false
             for message in result.messages {
                 cursor = message.id
@@ -442,6 +462,13 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                         identity: id,
                         accountIdB64: accountIdB64
                     )
+                    if let g = group {
+                        await DeviceGroupDsAccess.heal(
+                            groupId: groupId,
+                            before: signerBefore,
+                            after: try? g.dsAccessSigner(identity: id),
+                            ds: ds)
+                    }
                 }
             }
         }

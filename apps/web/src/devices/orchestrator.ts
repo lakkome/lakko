@@ -40,7 +40,12 @@ import {
 } from "./pairing";
 import { DsClient } from "../ds/client";
 import { encodeJournalEntry } from "./journal-envelope";
-import { ensureDeviceGroup, persistDeviceGroupSnapshot } from "./lifecycle";
+import {
+  ensureDeviceGroup,
+  persistDeviceGroupSnapshot,
+  registerDeviceGroupEpochOrThrow,
+} from "./lifecycle";
+import { takeSigner } from "../ds/access";
 import {
   publishWelcome,
   pollForWelcome,
@@ -675,11 +680,21 @@ export async function runScanFlow(args: {
   );
   seed.fill(0);
 
+  // ADR-0053 — the DeviceGroup journal key of the epoch the add leaves, taken
+  // BEFORE the create call. Freed with the ephemeral group below.
+  const signerN = takeSigner(() => ensured.group.dsAccessSigner(ensured.identity));
   try {
     const addition = ensured.group.addDeviceFromWire(
       ensured.identity,
       decoded.keyPackage,
     );
+
+    // ADR-0053 contract point 3 — register the new epoch's key, proven under
+    // the old one, BEFORE the advanced snapshot is persisted or anything is
+    // published. A refusal throws out of here with nothing written: the
+    // ephemeral group is freed and the durable DeviceGroup stays at N.
+    const ds = new DsClient();
+    await registerDeviceGroupEpochOrThrow(ds, ensured.group, ensured.identity, signerN);
 
     // G-7 — persist the advanced DeviceGroup snapshot BEFORE any
     // publish. `addDeviceFromWire` already merged the pending
@@ -709,12 +724,13 @@ export async function runScanFlow(args: {
     // harmless no-op (the joiner ratchets forward from the Welcome,
     // not this journal entry). Mirrors the `removeDeviceAt`
     // broadcast in `remove.ts`.
-    const ds = new DsClient();
     // G-13 (ADR-0015): every DeviceGroup journal entry is wrapped; an
-    // add-device commit carries no attestation.
+    // add-device commit carries no attestation. ADR-0053: proven under the
+    // key of the epoch the commit leaves, which the other devices still hold.
     await ds.publishGroup(
       ensured.group.groupId(),
       encodeJournalEntry(addition.commit, null),
+      { signer: signerN },
     );
 
     // Phase 2a3d8-ui — best-effort history catch-up bundle.
@@ -817,6 +833,7 @@ export async function runScanFlow(args: {
       newDeviceKey: wasm.keyPackageSignatureKey(decoded.keyPackage),
     };
   } finally {
+    signerN?.free();
     ensured.group.free();
     ensured.identity.free();
   }

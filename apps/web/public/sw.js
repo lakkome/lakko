@@ -651,10 +651,24 @@ function buildDecryptDeps(wasm, core) {
     },
     wasm,
     // READ-ONLY DS group-journal fetch of rows strictly after `afterId`.
-    dsFetchGroup: async (groupIdBytes, afterId) => {
+    //
+    // The service path is `/ds/group/<hex>/messages` and the web prefix is
+    // `/api/ds` (nginx and the Vite proxy strip it), so the URL is
+    // `/api/ds/ds/group/...` exactly as `DsClient` builds it. This used to
+    // request `/api/ds/group/...`, a route the DS does not have, so every
+    // wake fell back to the generic notification.
+    //
+    // ADR-0053 — signed over the SERVICE path and the exact query string sent.
+    dsFetchGroup: async (groupIdBytes, afterId, signProof) => {
       const hex = bytesToHex(groupIdBytes);
-      const url = `/api/ds/group/${hex}/messages?after=${afterId}&wait=0`;
-      const resp = await fetch(url, { method: "GET" });
+      const path = `/ds/group/${hex}/messages`;
+      const query = `after=${afterId}&wait=0`;
+      const headers = {};
+      if (typeof signProof === "function") {
+        headers["x-lakko-ds-proof"] = signProof("GET", path, query);
+      }
+      const url = `/api/ds${path}?${query}`;
+      const resp = await fetch(url, { method: "GET", headers });
       if (!resp.ok) throw new Error(`ds fetch ${resp.status}`);
       const json = await resp.json();
       const messages = (json?.messages ?? []).map((m) => ({

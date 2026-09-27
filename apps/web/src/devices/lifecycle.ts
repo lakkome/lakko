@@ -36,6 +36,8 @@
  * through this DeviceIdentity provider's storage only.
  */
 import { loadWasm } from "../wasm";
+import { DsClient } from "../ds/client";
+import { registerBeforePublish, takeSigner, type ProofSigner } from "../ds/access";
 import type {
   DeviceGroup as WasmDeviceGroup,
   Identity as WasmIdentity,
@@ -131,6 +133,21 @@ export async function ensureDeviceGroup(
   const group = wasm.DeviceGroup.createFounder(identity, accountIdBytes);
   const fresh = identity.snapshotStorage();
   await putDeviceGroupSnapshot(accountIdB64, fresh, deviceKey);
+  // ADR-0053 contract point 2 — claim the DeviceGroup journal at founding.
+  // Unsigned: the first registration of an unclaimed journal. Best effort: a
+  // failure leaves it unclaimed (today's behaviour) and the sync provider's
+  // first request claims it.
+  const founding = takeSigner(() => group.dsAccessSigner(identity));
+  if (founding !== null) {
+    try {
+      await new DsClient().claimGroupWith(group.groupId(), founding, null);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("ds: DeviceGroup claim at founding failed; claimed on first open", err);
+    } finally {
+      founding.free();
+    }
+  }
   return { identity, group, bootstrapped: true };
 }
 
@@ -177,4 +194,26 @@ export async function persistDeviceGroupSnapshotWithCursor(
 ): Promise<void> {
   const snapshot = identity.snapshotStorage();
   await putDeviceGroupSnapshot(accountIdB64, snapshot, deviceKey, journalCursor);
+}
+
+/**
+ * ADR-0053 contract point 3 for a one-shot DeviceGroup commit (add device,
+ * remove device, the attested-removal policy): register the key of the epoch
+ * the commit just moved `group` to, proven under `signerN` - the key taken
+ * BEFORE the create call. THROWS on a refusal; the caller then aborts before
+ * persisting or publishing, which leaves the durable DeviceGroup at N (these
+ * paths hold an ephemeral group that is freed without being written).
+ */
+export async function registerDeviceGroupEpochOrThrow(
+  ds: DsClient,
+  group: WasmDeviceGroup,
+  identity: WasmIdentity,
+  signerN: ProofSigner | null,
+): Promise<void> {
+  const signerN1 = takeSigner(() => group.dsAccessSigner(identity));
+  try {
+    await registerBeforePublish(ds, group.groupId(), signerN, signerN1);
+  } finally {
+    signerN1?.free();
+  }
 }

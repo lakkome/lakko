@@ -10,7 +10,11 @@
  * external-join proposal (ADR-0027) to the group journal; an owner/admin
  * approves it from their members panel; and — since ADR-0045 S7 — whichever
  * device is the acting committer then sweeps that approval into a commit and
- * posts the `WelcomeRendezvous` this page polls for and opens.
+ * sends the Welcome to this device's own mailbox, where the mailbox receive
+ * loop joins it; this page waits for the group to appear. Since ADR-0053 the
+ * request travels as a PoW-gated knock (the journal of a claimed group answers
+ * only its members), and the knock's response is what tells the joiner the
+ * epoch its proposal must target.
  *
  * That last step is why the wait is TWO-stage and the copy says so. Approval no
  * longer admits anyone by itself: it publishes an `Add` proposal, and ADR-0045
@@ -36,12 +40,12 @@
  * drops whatever refuses to build, and the commonest cause needs no adversary
  * at all (an expired KeyPackage, reachable because a request has no deadline).
  * This page is never told when that happens, and the reason is structural
- * rather than an omission: there is no artifact addressed to a non-member, and
- * the journal is unauthenticated — the DS pseudonym IS the `group_id` and there
- * is no auth on it — so any "your request was not carried" envelope would be a
- * forgeable denial primitive. Inference does not work either: an epoch
- * advancing with no rendezvous for us is byte-for-byte what *no admin has
- * approved yet* looks like, which is the ordinary state.
+ * rather than an omission: the only place a non-member can be reached is its
+ * own mailbox, whose writes are open to anyone (the cold inbox, ADR-0053
+ * section 2), so any "your request was not carried" envelope would be a
+ * forgeable denial primitive. Inference does not work either: since ADR-0053
+ * this side does not read the group at all, and silence is byte-for-byte what
+ * *no admin has approved yet* looks like, which is the ordinary state.
  *
  * So the wait copy states the truth about the wait, and the page offers the one
  * repair this side has: `Request again`, user-driven, which mints a fresh
@@ -51,7 +55,6 @@ import { Show, createMemo, createResource, createSignal, onCleanup } from "solid
 import { A, useLocation, useNavigate, useParams } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
-import { useProfiles } from "../profile/ProfileContext";
 import { ContactsClient } from "../contacts/client";
 import { loadWasm } from "../wasm";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
@@ -122,7 +125,6 @@ export default function JoinGroup() {
   const location = useLocation();
   const auth = useAuth();
   const chats = useChats();
-  const profiles = useProfiles();
   const navigate = useNavigate();
 
   // Canonical identity provider — the same wasm Identity every Group on this
@@ -184,7 +186,7 @@ export default function JoinGroup() {
     // A re-request replaces the poll rather than adding a second one.
     if (pollTimer !== undefined) clearInterval(pollTimer);
     try {
-      const { groupId, joinerSignatureKey } = await client.requestToJoinFromLink(
+      const { groupId } = await client.requestToJoinFromLink(
         auth.identitySecrets(),
         ticket.wire,
         Date.now(),
@@ -194,10 +196,15 @@ export default function JoinGroup() {
         },
       );
       setPhase("waiting");
-      // Poll the journal for the rendezvous. ADR-0045 S7: an admin's approve
-      // publishes a proposal, and the rendezvous appears only once a committer
-      // sweeps it — so this poll spans both stages and keeps running until a
-      // Welcome arrives or the page unmounts.
+      // ADR-0053 contract point 6 — wait for the group to APPEAR. The Welcome
+      // arrives in this device's own mailbox (the committer's sweep delivers
+      // it there like any other added member's), and the mailbox receive loop
+      // (`MailboxContext`) joins it and registers the group. A claimed journal
+      // answers only its members, so there is nothing to read on the group
+      // side. ADR-0045 S7: an admin's approve publishes a proposal and the
+      // Welcome exists only once a committer sweeps it, so this wait spans
+      // both stages and keeps running until the group lands or the page
+      // unmounts.
       const groupIdB64 = base64Encode(groupId);
       const finish = (active: { groupIdB64: string }): void => {
         if (pollTimer !== undefined) clearInterval(pollTimer);
@@ -211,41 +218,13 @@ export default function JoinGroup() {
         navigate(paths.chat(base64UrlEncodeNoPad(groupId)));
       };
       pollTimer = window.setInterval(() => {
-        void (async () => {
-          try {
-            // The sweep publishes the Welcome twice: to the group journal as
-            // a rendezvous, which this poll reads, and to the joiner's
-            // mailbox, which the inbox poll reads (the sweep cannot tell a
-            // link joiner from a contact). When the mailbox copy lands
-            // first, the group is already ours and the rendezvous can never
-            // open again - its KeyPackage is spent - so without this check
-            // the page waited forever on a join that had happened.
-            const landed = chats.get(groupIdB64);
-            if (landed !== undefined) {
-              finish(landed);
-              return;
-            }
-            const group = await client.pollForJoinWelcome(
-              auth.identitySecrets(),
-              groupId,
-              joinerSignatureKey,
-            );
-            if (group !== null) {
-              // Register the joined group so the chat route can find it, and
-              // ADR-0048 §2 — publish this device's profile into it: the
-              // members already there cannot learn the newcomer's name any
-              // other way.
-              const active = chats.add({ label: "Group", group });
-              profiles.groupJoined(active.groupIdB64);
-              finish(active);
-            }
-          } catch (err) {
-            if (pollTimer !== undefined) clearInterval(pollTimer);
-            setError(String(err));
-            setPhase("error");
-          }
-        })();
-      }, 3000);
+        const landed = chats.get(groupIdB64);
+        if (landed === undefined) return;
+        // ADR-0048 §2 — the mailbox loop already announced this device's
+        // profile into the group it joined; recording the kind and opening
+        // the chat is what is left.
+        finish(landed);
+      }, 1000);
     } catch (err) {
       setError(String(err));
       setPhase("error");

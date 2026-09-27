@@ -76,6 +76,24 @@ public final class ChatClient {
     /// (``ChatRepository``) always wires it, so the gate is live there.
     public var ratchetPersister: (() async throws -> Void)?
 
+    /// ADR-0053 — how a publish to a group journal is signed, wired by
+    /// ``ChatRepository`` so the request carries the previous-epoch signer and
+    /// the claim-on-open retry the repository holds. Keyed by the journal's
+    /// hex id. `nil` (tests, standalone callers) or a `nil` answer falls back
+    /// to signing with the group's own current-epoch signer.
+    public var dsAuthProvider: (@MainActor (_ groupIdHex: String) -> DsAuth?)?
+
+    /// The auth for a publish to `group`'s journal: the repository's when it
+    /// has one, else the group's current-epoch signer, else unsigned (an
+    /// unclaimed journal still accepts that).
+    func dsAuth(identity: Identity, group: Group, groupId: Data) async -> DsAuth? {
+        if let provider = dsAuthProvider,
+           let provided = await provider(DsClient.pseudonymHex(groupId)) {
+            return provided
+        }
+        return (try? group.dsAccessSigner(identity: identity)).map { DsAuth(signer: $0) }
+    }
+
     public init(ds: DsClient = DsClient()) {
         self.ds = ds
     }
@@ -162,7 +180,8 @@ public final class ChatClient {
         do {
             publish = try await ds.publishGroup(
                 groupId: groupId,
-                payload: wireBytes
+                payload: wireBytes,
+                auth: await dsAuth(identity: identity, group: group, groupId: groupId)
             )
         } catch {
             throw ChatError.wrapped("DS publish failed", underlying: error)
@@ -266,7 +285,11 @@ public final class ChatClient {
 
         let publish: PublishResult
         do {
-            publish = try await ds.publishGroup(groupId: groupId, payload: wireBytes)
+            publish = try await ds.publishGroup(
+                groupId: groupId,
+                payload: wireBytes,
+                auth: await dsAuth(identity: identity, group: group, groupId: groupId)
+            )
         } catch {
             throw ChatError.wrapped("DS publishGroup (control) failed", underlying: error)
         }
@@ -313,7 +336,8 @@ public final class ChatClient {
         let raw = try await fetchGroupJournal(
             groupId: groupId,
             after: after,
-            waitSecs: waitSecs
+            waitSecs: waitSecs,
+            auth: await dsAuth(identity: identity, group: group, groupId: groupId)
         )
         return applyFetchedMessages(
             identity: identity,
@@ -345,13 +369,15 @@ public final class ChatClient {
     public func fetchGroupJournal(
         groupId: Data,
         after: Int64 = 0,
-        waitSecs: Int = 0
+        waitSecs: Int = 0,
+        auth: DsAuth? = nil
     ) async throws -> FetchResult {
         do {
             return try await ds.fetchGroup(
                 groupId: groupId,
                 after: after,
-                waitSecs: waitSecs
+                waitSecs: waitSecs,
+                auth: auth
             )
         } catch {
             throw ChatError.wrapped("DS fetch failed", underlying: error)
@@ -1319,6 +1345,9 @@ extension ChatError: LocalizedError {
         case .argument(let message):
             return message
         case .wrapped(let message, let underlying):
+            // ADR-0053 — a refused proof with the device clock off says so in
+            // words a person can act on, not as a transport dump.
+            if let copy = DsClientError.clockSkewCopy(in: underlying) { return copy }
             return "\(message): \(underlying)"
         case .membershipChangesPending:
             return ChatError.membershipChangesPendingCopy

@@ -36,10 +36,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const sealSubscriberSeedEnvelope = vi.fn(() => new Uint8Array([0xaa]));
-const wrapWelcomeRendezvous = vi.fn(() => new Uint8Array([0xbb]));
+// ADR-0053 — the Welcome goes to the joiner's mailbox, addressed by the
+// pseudonym of its signature key.
+const IdentityPseudonym = {
+  fromIdentity: vi.fn(() => ({ asBytes: () => new Uint8Array(32).fill(0x3d) })),
+};
 
 vi.mock("../wasm", () => ({
-  loadWasm: async () => ({ sealSubscriberSeedEnvelope, wrapWelcomeRendezvous }),
+  loadWasm: async () => ({ sealSubscriberSeedEnvelope, IdentityPseudonym }),
 }));
 
 const fetchEpoch = vi.fn(async () => ({ epoch: 1 }));
@@ -53,6 +57,7 @@ vi.mock("./api", () => ({
 }));
 
 import { approveCoPublisher, pollCoPublisherJournal } from "./copublisher";
+import { fakeAccessSigner } from "../ds/access-test-doubles";
 import type { DsClient } from "../ds/client";
 
 interface Deferred<T> {
@@ -103,6 +108,7 @@ function statefulPublisherGroup(
   let epoch = 5;
   const group = {
     groupId: () => groupId,
+    dsAccessSigner: fakeAccessSigner(() => BigInt(epoch)),
     channelId: () => new Uint8Array([7, 7]),
     channelSeed: vi.fn(() => {
       order.push(`seed@${epoch}`);
@@ -142,12 +148,19 @@ describe("G-38 residual 3 — the co-publisher poll is serialized against approv
 
     let publishes = 0;
     const ds = {
+      registerGroupEpoch: vi.fn(async () => {}),
       publishGroup: vi.fn(async () => {
         publishes += 1;
-        order.push(publishes === 1 ? "publish-commit" : "publish-rendezvous");
+        order.push("publish-commit");
         if (publishes === 1) await publishGate.promise;
         return { id: publishes, createdAt: "t" };
       }),
+      // ADR-0053 contract point 8 — the Welcome, to the joiner's mailbox.
+      publishMailbox: vi.fn(async () => {
+        order.push("publish-welcome");
+        return { id: 99, createdAt: "t" };
+      }),
+      fetchKnocks: vi.fn(async () => ({ messages: [], hasMore: false })),
       fetchGroup: vi.fn(async () => {
         order.push("fetch");
         return {
@@ -187,7 +200,7 @@ describe("G-38 residual 3 — the co-publisher poll is serialized against approv
       "fetch",
       "approve-merge",
       "publish-commit",
-      "publish-rendezvous",
+      "publish-welcome",
       "seed@6",
       "apply:#7",
     ]);
@@ -202,11 +215,14 @@ describe("G-38 residual 3 — the co-publisher poll is serialized against approv
 
     let publishes = 0;
     const ds = {
+      registerGroupEpoch: vi.fn(async () => {}),
       publishGroup: vi.fn(async () => {
         publishes += 1;
         if (publishes === 1) await publishGate.promise;
         return { id: publishes, createdAt: "t" };
       }),
+      publishMailbox: vi.fn(async () => ({ id: 99, createdAt: "t" })),
+      fetchKnocks: vi.fn(async () => ({ messages: [], hasMore: false })),
       fetchGroup: vi.fn(async () => ({
         // Two more commits waiting on the journal — each would advance the
         // epoch out from under an unserialized reseal.

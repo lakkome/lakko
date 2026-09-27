@@ -886,6 +886,9 @@ private struct SessionRoot: View, Equatable {
                 // filing before the first one ends.
                 CallHistoryStore.shared.bind(accountIdB64: account.accountIdB64)
                 chatRepository.bootstrap(secrets: secrets)
+                // ADR-0053 point 2 — claim the account and device mailboxes on
+                // every session start (signup, login, restore). Fire and forget.
+                chatRepository.claimOwnMailboxes()
                 // `docs/ux/calls.md` section 2.1 — the names a background
                 // process may have to show on a ringing lock screen.
                 chatRepository.mirrorCallPeerNames()

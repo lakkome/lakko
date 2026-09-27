@@ -152,6 +152,26 @@ pub(crate) fn group_signer(
     })
 }
 
+/// The access signer for the epoch a staged sweep moves to (N+1) while the
+/// group still sits at N, or `None` when nothing is staged.
+pub(crate) fn staged_group_signer(
+    group: &MlsGroup,
+    identity: &MlsIdentity,
+) -> Result<Option<DsProofSigner>, JsValue> {
+    let group_id = group.group_id();
+    let Some(secret) = group
+        .staged_export_secret(identity, ACCESS_KEY_LABEL, &group_id, 32)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?
+    else {
+        return Ok(None);
+    };
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&secret);
+    Ok(Some(DsProofSigner {
+        inner: Inner::for_group(group.epoch().saturating_add(1), &seed),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

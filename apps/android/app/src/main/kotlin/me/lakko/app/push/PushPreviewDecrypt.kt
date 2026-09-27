@@ -179,6 +179,16 @@ public interface ThrowawayGroup : AutoCloseable {
      * any MLS state.
      */
     public fun process(payload: ByteArray): ProcessedRow?
+
+    /**
+     * ADR-0053 client contract point 9 — the signer of this group's journal at
+     * the snapshot's epoch, so the read-only fetch carries the proof a claimed
+     * journal requires. Deriving it is an exporter call on the throwaway group,
+     * not a write (C-59). `null` when it cannot be derived: the fetch then goes
+     * unsigned, and a claimed journal's refusal falls back to the generic
+     * notification.
+     */
+    public fun dsSigner(): me.lakko.app.ds.DsJournalSigner? = null
 }
 
 /**
@@ -218,8 +228,14 @@ public interface PushDecryptDeps {
     ): ThrowawayGroup?
 
     /** READ-ONLY DS group-journal fetch of rows strictly after
-     *  `afterId` (ascending id order). */
-    public suspend fun dsFetch(groupIdBytes: ByteArray, afterId: Long): List<FetchedRow>
+     *  `afterId` (ascending id order), signed with [signer] (ADR-0053). Never
+     *  claims or registers anything on a refusal: a background reader writes
+     *  nothing (C-59). */
+    public suspend fun dsFetch(
+        groupIdBytes: ByteArray,
+        afterId: Long,
+        signer: me.lakko.app.ds.DsJournalSigner?,
+    ): List<FetchedRow>
 
     /** The app's last-persisted per-group cursor (READ-ONLY), or
      *  `null`. Used as the fetch start so intervening commits replay
@@ -385,7 +401,7 @@ public suspend fun decryptPushWake(
         if (after < 0) after = 0
 
         val rows = try {
-            deps.dsFetch(account.groupIdBytes, after)
+            deps.dsFetch(account.groupIdBytes, after, group.dsSigner())
         } catch (_: Throwable) {
             return PushWakeOutcome.EMPTY
         }

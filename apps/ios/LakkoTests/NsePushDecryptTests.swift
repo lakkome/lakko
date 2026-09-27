@@ -58,6 +58,13 @@ final class NsePushDecryptTests: XCTestCase {
             return decode(payload)
         }
 
+        /// ADR-0053 point 9 — records what the fetch asked it to sign.
+        var signed: [(method: String, path: String, query: String, body: Data)] = []
+        func dsProofHeader(method: String, path: String, query: String, body: Data) -> String? {
+            signed.append((method, path, query, body))
+            return "v1.fake"
+        }
+
         func close() { closed = true }
     }
 
@@ -86,6 +93,8 @@ final class NsePushDecryptTests: XCTestCase {
         var lastLookupPushGid: String?
         var lastFetchGroupIdBytes: Data?
         var lastCursorGroupHex: String?
+        /// ADR-0053 — the group the fetch was handed to sign with.
+        var lastFetchGroup: NseThrowawayGroup?
 
         init(
             account: NseResolvedAccount?,
@@ -136,7 +145,12 @@ final class NsePushDecryptTests: XCTestCase {
             return group
         }
 
-        func dsFetch(groupIdBytes: Data, afterId: Int64) async throws -> [NseFetchedRow] {
+        func dsFetch(
+            groupIdBytes: Data,
+            afterId: Int64,
+            group: NseThrowawayGroup
+        ) async throws -> [NseFetchedRow] {
+            lastFetchGroup = group
             dsFetchCount += 1
             lastAfterId = afterId
             lastFetchGroupIdBytes = groupIdBytes
@@ -184,6 +198,17 @@ final class NsePushDecryptTests: XCTestCase {
         XCTAssertEqual(preview?.tag, groupHex)
         XCTAssertTrue(group.closed, "throwaway group must be closed")
         XCTAssertFalse(group.persistAttempted, "no persist entry point may be reached")
+    }
+
+    /// ADR-0053 point 9 — the journal read is signed through the THROWAWAY
+    /// group the wake opened (its access key at the restored epoch), never
+    /// through anything that persists.
+    func testTheJournalReadIsSignedThroughTheThrowawayGroup() async {
+        let group = FakeThrowawayGroup(decode: { _ in self.chat("hi") })
+        let deps = FakeDeps(account: okAccount(), group: group, rows: [row(10, 1)])
+        _ = await decryptPushPreview(NsePushWake(groupHex: groupHex, pointer: 10), deps)
+        XCTAssertTrue(deps.lastFetchGroup === group, "the fetch is handed the opened group to sign with")
+        XCTAssertFalse(group.persistAttempted)
     }
 
     func testAttachmentOnlyChatRendersHint() async {

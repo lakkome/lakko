@@ -15,9 +15,9 @@ import LakkoCore
 /// Hoisting `publishWelcomes` from the merge branch to just after
 /// `journal.publishGroup`, i.e. publishing the Welcome before the verdict:
 ///   - `testWelcomeIsPublishedOnlyAfterTheVerdict` FAILS with
-///     `XCTAssertEqual failed: ("["fetch", "stage", "record", "publish:commit",
+///     `XCTAssertEqual failed: ("["fetch", "stage", "register", "record", "publish:commit",
 ///     "publish:welcome", "fetch", "merge", "ack"]") is not equal to
-///     ("["fetch", "stage", "record", "publish:commit", "fetch", "merge",
+///     ("["fetch", "stage", "register", "record", "publish:commit", "fetch", "merge",
 ///     "publish:welcome", "ack"]")`;
 ///   - `testALostSweepPublishesNoWelcome` FAILS with
 ///     `XCTAssertEqual failed: ("1") is not equal to ("0") - a lost sweep must
@@ -88,6 +88,9 @@ final class CommitterSweepTests: XCTestCase {
         var welcomePublishThrows: Error?
         var nextId: Int64 = 70
         var published: [(kind: String, bytes: Data)] = []
+        /// ADR-0053 — set to make the next-epoch registration fail.
+        var registerThrows: Error?
+        var registrations = 0
     }
 
     private final class FakeOutbox {
@@ -170,16 +173,9 @@ final class CommitterSweepTests: XCTestCase {
                     return journal.rowsAfter[after] ?? []
                 },
                 publishGroup: { bytes in
-                    // 0xCE is what the model's `wrapRendezvous` stamps; the next
-                    // byte is the key it was addressed to, so an assertion can
-                    // name WHICH joiner each envelope is for.
-                    let isRendezvous = bytes.first == 0xCE
-                    let kind = isRendezvous
-                        ? "rendezvous:\(String(format: "%02x", bytes.dropFirst().first ?? 0))"
-                        : "commit"
-                    group.log.append("publish:\(isRendezvous ? "rendezvous" : "commit")")
+                    group.log.append("publish:commit")
                     if let err = journal.publishThrows { throw err }
-                    journal.published.append((kind, bytes))
+                    journal.published.append(("commit", bytes))
                     journal.nextId += 1
                     return journal.nextId
                 },
@@ -189,6 +185,11 @@ final class CommitterSweepTests: XCTestCase {
                     journal.published.append(("welcome", bytes))
                     journal.nextId += 1
                     return journal.nextId
+                },
+                registerStagedEpoch: {
+                    group.log.append("register")
+                    journal.registrations += 1
+                    if let err = journal.registerThrows { throw err }
                 }
             ),
             outbox: SweepOutboxPort(
@@ -231,9 +232,6 @@ final class CommitterSweepTests: XCTestCase {
             ),
             welcomeMailbox: { key in key.prefix(8) },
             wrapWelcome: { Data([0xE0]) + $0 },
-            wrapRendezvous: { key, welcome in
-                Data([0xCE, key.first ?? 0]) + welcome
-            },
             markOwnPublished: { _ in },
             persist: {},
             // The FAIL-CLOSED persist the verdict apply runs before it advances
@@ -257,9 +255,9 @@ final class CommitterSweepTests: XCTestCase {
             return XCTFail("rank 0 with a pending proposal and an empty journal must sweep, got \(outcome)")
         }
         XCTAssertEqual(addedCount, 1)
-        // ADR-0045 S7 — two ids per added member: the mailbox Welcome AND the
-        // group-journal `WelcomeRendezvous` a `/g/` joiner polls for.
-        XCTAssertEqual(welcomeIds.count, 2)
+        // ADR-0053 point 8 — one id per added member: the mailbox Welcome. No
+        // `WelcomeRendezvous` goes to the group journal any more.
+        XCTAssertEqual(welcomeIds.count, 1)
         XCTAssertEqual(h.group.epoch, 6, "a merged sweep lands at the epoch the peers reached")
         XCTAssertFalse(h.group.staged, "no verdict may be left owed")
         XCTAssertEqual(h.outbox.acked, ["entry-1"])
@@ -277,9 +275,8 @@ final class CommitterSweepTests: XCTestCase {
         // than the two-party one this mechanism exists to close.
         XCTAssertEqual(
             h.log,
-            ["fetch", "stage", "record", "publish:commit", "fetch",
-             "merge", "welcomes-owed", "publish:welcome",
-             "publish:rendezvous", "ack"],
+            ["fetch", "stage", "register", "record", "publish:commit", "fetch",
+             "merge", "welcomes-owed", "publish:welcome", "ack"],
             "obligation 4 orders record -> publish -> verdict -> merge, and obligation 2 puts "
             + "the Welcome strictly after the merge — with the durable welcomes-owed marker "
             + "in between, so a fan-out that fails is still retryable"
@@ -316,7 +313,7 @@ final class CommitterSweepTests: XCTestCase {
             // consumed, so it must durably write them first (see
             // `Chat/DurableCursor.swift`).
             [
-                "fetch", "stage", "record", "publish:commit", "fetch", "apply",
+                "fetch", "stage", "register", "record", "publish:commit", "fetch", "apply",
                 "persist-applied", "abandon", "discard",
             ],
             "a lost sweep abandons and DISCARDS its entry — re-publishing a commit whose "
@@ -361,10 +358,7 @@ final class CommitterSweepTests: XCTestCase {
             id: "owed-1",
             commitB64: base64Encode(Data([0xC0, 0x05])),
             welcomeEnvelopeB64: base64Encode(Data([0xE0, 0x11])),
-            welcomeMailboxesB64: [base64Encode(Data([0x09]))],
-            // ADR-0045 S7 — a real entry always carries this (it is computed and
-            // recorded with the mailboxes, before any publish), so the fixture does too.
-            welcomeRendezvousB64: [base64Encode(Data([0xCE, 0xAA, 0x11]))]
+            welcomeMailboxesB64: [base64Encode(Data([0x09]))]
         )
 
         let outcome = try await resolveOwedVerdict(h.ports)
@@ -379,8 +373,8 @@ final class CommitterSweepTests: XCTestCase {
         )
         XCTAssertEqual(
             h.log,
-            ["publish:commit", "fetch", "merge", "welcomes-owed", "publish:welcome",
-             "publish:rendezvous", "ack"],
+            ["register", "publish:commit", "fetch", "merge", "welcomes-owed",
+             "publish:welcome", "ack"],
             "the re-publish is idempotent (peers at N+1 drop the duplicate as wrong-epoch) and "
             + "NO second durable record is written — the entry already exists"
         )
@@ -461,7 +455,7 @@ final class CommitterSweepTests: XCTestCase {
             // expected
         }
         XCTAssertEqual(
-            h.log, ["fetch", "stage", "record", "abandon"],
+            h.log, ["fetch", "stage", "register", "record", "abandon"],
             "nothing was published, so the group must look as though the sweep never happened"
         )
         XCTAssertFalse(h.group.staged)
@@ -842,7 +836,7 @@ final class CommitterSweepTests: XCTestCase {
         guard case .welcomesRepublished(let ids, let addedCount) = outcome else {
             return XCTFail("a settled verdict still owing its Welcome must retry it, got \(outcome)")
         }
-        XCTAssertEqual(ids.count, 2, "the mailbox Welcome AND the journal rendezvous")
+        XCTAssertEqual(ids.count, 1, "the mailbox Welcome, and nothing to the journal (ADR-0053)")
         XCTAssertEqual(addedCount, 1)
         XCTAssertEqual(h.journal.published.filter { $0.kind == "welcome" }.count, 1)
         XCTAssertEqual(h.outbox.acked, ["entry-1"], "acked, so nothing is owed any more")
@@ -863,7 +857,7 @@ final class CommitterSweepTests: XCTestCase {
         // second commit, or apply another row to re-read the journal order.
         XCTAssertEqual(
             Array(h.log.dropFirst(before)),
-            ["publish:welcome", "publish:rendezvous", "ack"])
+            ["publish:welcome", "ack"])
         XCTAssertEqual(h.journal.published.filter { $0.kind == "commit" }.count, 1)
     }
 
@@ -891,9 +885,8 @@ final class CommitterSweepTests: XCTestCase {
 
         XCTAssertEqual(
             h.log,
-            ["fetch", "stage", "record", "publish:commit", "fetch",
-             "merge", "welcomes-owed", "publish:welcome",
-             "publish:rendezvous", "ack"]
+            ["fetch", "stage", "register", "record", "publish:commit", "fetch",
+             "merge", "welcomes-owed", "publish:welcome", "ack"]
         )
     }
 
@@ -985,19 +978,17 @@ final class CommitterSweepTests: XCTestCase {
                 return try await fetch(after)
             },
             publishGroup: inner.publishGroup,
-            publishMailbox: inner.publishMailbox
+            publishMailbox: inner.publishMailbox,
+            registerStagedEpoch: inner.registerStagedEpoch
         )
         return ports
     }
-    // MARK: - ADR-0045 S7: a WelcomeRendezvous per added key
+    // MARK: - ADR-0053 point 8: Welcomes go to mailboxes only
 
-    /// S7 moved the external-join approve onto the proposal path, and the
-    /// `/g/` joiner's rendezvous moved with it. That joiner is not a member
-    /// and never reads a mailbox — it polls the GROUP JOURNAL, matching a
-    /// rendezvous envelope against its own signature key — so a sweep that
-    /// publishes only the mailbox fan-out leaves an approved joiner
-    /// permanently unable to join a group that already holds it as a member.
-    func testTheSweepPostsARendezvousForEveryAdd() async throws {
+    /// Two adds -> two mailbox Welcomes and NOTHING to the group journal but
+    /// the commit. The `/g/` joiner cannot read a claimed journal; its Welcome
+    /// is in its own mailbox like every other added member's.
+    func testTheSweepPostsNoRendezvousToTheJournal() async throws {
         let h = makeHarness()
         h.group.addedKeys = [
             Data(repeating: 0xA1, count: 32),
@@ -1006,46 +997,12 @@ final class CommitterSweepTests: XCTestCase {
 
         _ = try await runCommitterSweep(h.ports)
 
-        // Two adds -> two mailbox welcomes AND two journal rendezvous. The
-        // sweep cannot tell which add came from a `/g/` link — that
-        // indistinguishability is what makes S7 sound — so it posts for both,
-        // origin-blind.
-        XCTAssertEqual(
-            h.journal.published.map(\.kind),
-            ["commit", "welcome", "welcome", "rendezvous:a1", "rendezvous:a2"]
-        )
+        XCTAssertEqual(h.journal.published.map(\.kind), ["commit", "welcome", "welcome"])
     }
 
-    /// A rendezvous published on a commit that then LOSES would let a joiner
-    /// open into a state no other member holds — the three-party fork ADR-0045
-    /// names as strictly worse than the two-party one.
-    func testTheRendezvousWaitsForTheVerdictExactlyLikeTheWelcome() async throws {
-        let h = makeHarness()
-        // The stand-down re-read (before staging) must see an EMPTY journal or
-        // the sweep never stages; the verdict read (after publishing) carries
-        // the foreign commit that takes the order from us.
-        var call = 0
-        let ports = swapFetch(h) { _ in
-            call += 1
-            if call == 1 { return [] }
-            return [
-                SweepJournalRow(
-                    id: 50, payload: Data([FakeGroup.foreignCommitTag]), createdAt: "t-50")
-            ]
-        }
-
-        let outcome = try await runCommitterSweep(ports)
-
-        guard case .lost = outcome else {
-            return XCTFail("a foreign commit below ours must lose the order, got \(outcome)")
-        }
-        XCTAssertEqual(h.journal.published.map(\.kind), ["commit"])
-    }
-
-    /// The rendezvous is recorded durably WITH the Welcome, so a restart
-    /// publishes the very bytes the first attempt computed rather than
-    /// recomputing them from a roster that has since moved on.
-    func testARestartRepublishesTheRendezvousToo() async throws {
+    /// A restart re-publishes the owed mailbox Welcome and nothing to the
+    /// journal.
+    func testARestartRepublishesOnlyTheMailboxWelcome() async throws {
         let h = makeHarness()
         h.journal.welcomePublishThrows = StubError()
         do {
@@ -1060,20 +1017,60 @@ final class CommitterSweepTests: XCTestCase {
         guard case .welcomesRepublished = outcome else {
             return XCTFail("the fan-out was owed, got \(outcome)")
         }
-        XCTAssertEqual(
-            h.journal.published.map(\.kind),
-            ["commit", "welcome", "rendezvous:aa"]
-        )
+        XCTAssertEqual(h.journal.published.map(\.kind), ["commit", "welcome"])
     }
 
-    /// A remove / role sweep carries no add, so it must post no rendezvous.
-    func testASweepWithNoAddPostsNoRendezvous() async throws {
-        let h = makeHarness()
-        h.group.welcome = nil
+    // MARK: - ADR-0053 point 3: register the staged epoch before publishing
 
+    /// The next epoch's key is registered after the stage and before anything
+    /// is recorded or published: a commit is never on the wire before the
+    /// server knows its epoch.
+    func testTheStagedEpochIsRegisteredBeforeTheRecordAndThePublish() async throws {
+        let h = makeHarness()
         _ = try await runCommitterSweep(h.ports)
 
-        XCTAssertEqual(h.journal.published.map(\.kind), ["commit"])
+        let log = h.log
+        let register = try XCTUnwrap(log.firstIndex(of: "register"))
+        XCTAssertLessThan(try XCTUnwrap(log.firstIndex(of: "stage")), register)
+        XCTAssertLessThan(register, try XCTUnwrap(log.firstIndex(of: "record")))
+        XCTAssertLessThan(register, try XCTUnwrap(log.firstIndex(of: "publish:commit")))
+        XCTAssertEqual(h.journal.registrations, 1)
+    }
+
+    /// A failed registration abandons the sweep before publishing — the
+    /// group looks as though the sweep never happened.
+    func testAFailedRegistrationAbandonsBeforePublishing() async throws {
+        let h = makeHarness()
+        h.journal.registerThrows = StubError()
+
+        do {
+            _ = try await runCommitterSweep(h.ports)
+            XCTFail("a failed registration must abort the sweep")
+        } catch is StubError {
+            // expected
+        }
+        XCTAssertEqual(h.log, ["fetch", "stage", "register", "abandon"])
+        XCTAssertFalse(h.group.staged)
+        XCTAssertTrue(h.outbox.recorded.isEmpty, "nothing may be recorded")
+        XCTAssertEqual(h.journal.published.count, 0, "nothing may be published")
+    }
+
+    /// On the restart path the commit may already be on the wire, so a failed
+    /// re-registration must NOT abandon — that would strand this device behind
+    /// its own commit. The re-publish and the verdict proceed.
+    func testAFailedReRegistrationOnTheRestartPathDoesNotAbandon() async throws {
+        let h = makeHarness()
+        h.group.staged = true
+        h.outbox.owed = SweepDurableEntry(id: "owed-1", commitB64: base64Encode(Data([0xC0, 0x05])))
+        h.journal.registerThrows = StubError()
+
+        let outcome = try await resolveOwedVerdict(h.ports)
+
+        guard case .committed = outcome else {
+            return XCTFail("the owed verdict must still be read, got \(outcome)")
+        }
+        XCTAssertFalse(h.log.contains("abandon"))
+        XCTAssertEqual(Array(h.log.prefix(2)), ["register", "publish:commit"])
     }
 
 }

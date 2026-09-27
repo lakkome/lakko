@@ -1620,6 +1620,32 @@ impl Group {
             .map_err(MlsFailure::into_js)
     }
 
+    /// Process one row read from this journal's **knock** queue (ADR-0053).
+    /// Anything that is not a stranger's external-join proposal for this group
+    /// is refused BEFORE it is processed - a knock row is an unauthenticated
+    /// write, and applying a commit or message someone posted there instead of
+    /// the journal would fork the admins who read knocks from everyone else.
+    /// A row that passes is processed exactly like `processIncomingVerifyingRoles`.
+    #[wasm_bindgen(js_name = processKnock)]
+    pub fn process_knock(
+        &self,
+        identity: &Identity,
+        bytes: &[u8],
+    ) -> Result<ProcessedMessage, JsValue> {
+        {
+            let g = self
+                .inner
+                .lock()
+                .map_err(|_| js_error("internal lock poisoned"))?;
+            if !lakko_mls::is_external_join_proposal_for(bytes, &g.group_id()) {
+                return Err(js_error(
+                    "knock row is not an external-join proposal for this group",
+                ));
+            }
+        }
+        self.process_incoming_verifying_roles(identity, bytes)
+    }
+
     /// Apply an incoming commit ENFORCING the ADR-0022 role policy — a commit
     /// whose committer's role does not authorise its effect is REFUSED (not
     /// merged), fail-closed. A group with no role table behaves like
@@ -1650,6 +1676,22 @@ impl Group {
             .lock()
             .map_err(|_| js_error("internal lock poisoned"))?;
         crate::ds_proof::group_signer(&g, &identity.inner)
+    }
+
+    /// The ADR-0053 access signer for the epoch a staged sweep moves to
+    /// (N+1), while this group still sits at N; `undefined` when nothing is
+    /// staged. Register its key, proven under the current signer, BEFORE
+    /// publishing the sweep.
+    #[wasm_bindgen(js_name = dsStagedAccessSigner)]
+    pub fn ds_staged_access_signer(
+        &self,
+        identity: &Identity,
+    ) -> Result<Option<crate::ds_proof::DsProofSigner>, JsValue> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        crate::ds_proof::staged_group_signer(&g, &identity.inner)
     }
 
     /// Derive a `length`-byte secret bound to the current epoch.
@@ -2169,6 +2211,32 @@ impl PublisherGroup {
             .lock()
             .map_err(|_| js_error("internal lock poisoned"))?;
         Ok(g.group_id())
+    }
+
+    /// Process one row read from this journal's **knock** queue (ADR-0053).
+    /// Anything that is not a stranger's external-join proposal for this group
+    /// is refused BEFORE it is processed - a knock row is an unauthenticated
+    /// write, and applying a commit or message someone posted there instead of
+    /// the journal would fork the admins who read knocks from everyone else.
+    /// A row that passes is processed exactly like `processIncomingVerifyingRoles`.
+    #[wasm_bindgen(js_name = processKnock)]
+    pub fn process_knock(
+        &self,
+        identity: &Identity,
+        bytes: &[u8],
+    ) -> Result<ProcessedMessage, JsValue> {
+        {
+            let g = self
+                .inner
+                .lock()
+                .map_err(|_| js_error("internal lock poisoned"))?;
+            if !lakko_mls::is_external_join_proposal_for(bytes, &g.group_id()) {
+                return Err(js_error(
+                    "knock row is not an external-join proposal for this group",
+                ));
+            }
+        }
+        self.process_incoming_verifying_roles(identity, bytes)
     }
 
     /// ADR-0028 OQ3 — process an incoming MLS message on the publisher tier,

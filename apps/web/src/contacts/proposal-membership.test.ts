@@ -79,6 +79,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { fakeAccessSigner } from "../ds/access-test-doubles";
 
 // No IndexedDB in the node test env; the store round-trip is covered by
 // `src/chat/commit-outbox.test.ts`.
@@ -174,6 +175,7 @@ function fakeGroup(opts: {
     get epoch(): bigint {
       return epoch;
     },
+    dsAccessSigner: fakeAccessSigner(() => epoch),
     get memberCount(): number {
       return 3;
     },
@@ -229,6 +231,9 @@ function fakeGroup(opts: {
       pendingExternalJoins: vi.fn(() => new Uint8Array(0)),
       ownCommitterRank: () => opts.rank,
       hasStagedSweep: () => staged,
+      // ADR-0053 — the signer of the epoch a staged sweep moves to.
+      dsStagedAccessSigner: (_id: unknown) =>
+        staged ? fakeAccessSigner(() => epoch + 1n)(undefined) : undefined,
       stagePendingProposals: vi.fn(() => {
         if (pending === 0) return undefined;
         order.push("stage");
@@ -300,6 +305,10 @@ function client(
 function ds(order: string[], journal: unknown[] = []): Partial<DsClient> {
   let id = 100;
   return {
+    // ADR-0053 — the epoch registration a commit and a sweep run before they
+    // publish. Accepted, and deliberately not logged into `order`: the
+    // ordering is pinned in `contacts/ds-access-commit.test.ts`.
+    registerGroupEpoch: vi.fn(async () => {}),
     publishGroup: vi.fn(async () => {
       order.push("publish");
       return { id: (id += 1), createdAt: "t" };
@@ -578,6 +587,7 @@ describe("ADR-0045 — the verdict apply surfaces the rows it consumes", () => {
     let id = 100;
     let fetches = 0;
     return {
+      registerGroupEpoch: vi.fn(async () => {}),
       publishGroup: vi.fn(async () => {
         order.push("publish");
         return { id: (id += 1), createdAt: "t" };

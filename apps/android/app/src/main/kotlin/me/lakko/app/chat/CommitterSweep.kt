@@ -273,20 +273,6 @@ internal data class SweepDurableEntry(
     val welcomeEnvelopeB64: String?,
     val welcomeMailboxesB64: List<String>,
     /**
-     * ADR-0045 S7 — the wrapped `WelcomeRendezvous` bytes, one per member this
-     * sweep adds, to publish to the GROUP JOURNAL.
-     *
-     * A list of whole envelopes rather than a list of addresses, because unlike
-     * the mailbox fan-out — one Welcome envelope sent to N pseudonyms — a
-     * rendezvous BINDS the added member's signature key into its own bytes, so
-     * every recipient gets different bytes.
-     *
-     * Recorded here, before any publish, for the same reason the mailboxes are:
-     * a restart must re-publish the very bytes this sweep computed rather than
-     * recompute them from a roster that has since moved on.
-     */
-    val welcomeRendezvousB64: List<String> = emptyList(),
-    /**
      * The DS id of the published commit, recorded alongside the welcomes-owed
      * marker. Diagnostics only — it is carried so the eventual ack can name the
      * commit it belongs to rather than inventing one. `null` until the verdict
@@ -386,20 +372,6 @@ internal class SweepPorts(
     /** Wrap the raw Welcome in the stranger-inbox envelope the recipient's
      *  mailbox poll expects (`wrapEnvelope(KIND_WELCOME, welcome)`). */
     val wrapWelcome: (ByteArray) -> ByteArray,
-    /**
-     * ADR-0045 S7 — wrap the raw Welcome into the `WelcomeRendezvous` envelope
-     * the group journal carries (`wrapWelcomeRendezvous(joinerKey, welcome)`).
-     *
-     * Needed because an added member may have arrived through a `/g/` invite
-     * link, and such a joiner polls the GROUP JOURNAL for a rendezvous matching
-     * its own signature key — it has no mailbox relationship with this group and
-     * never looks at one. Since S7 the approve is an ordinary `Add` proposal,
-     * indistinguishable on the wire from adding a contact, so the sweep CANNOT
-     * tell which of its adds came from a link — and making them distinguishable
-     * would undo the property that makes S7 sound. It therefore wraps one per
-     * added key, origin-blind.
-     */
-    val wrapRendezvous: (ByteArray, ByteArray) -> ByteArray,
     /** Echo-suppress a row this device published, so its own next poll drops it
      *  instead of hitting `CannotDecryptOwnMessage`. */
     val markOwnPublished: (Long) -> Unit,
@@ -425,6 +397,15 @@ internal class SweepPorts(
     val persistApplied: () -> Unit,
     val encodeB64: (ByteArray) -> String,
     val decodeB64: (String) -> ByteArray,
+    /**
+     * ADR-0053 client contract point 3 — register the access key of the epoch
+     * the STAGED sweep moves to (`dsStagedAccessSigner`), proven under the
+     * current epoch's key, BEFORE the sweep is durably recorded or published.
+     * THROWS when the Delivery Service does not take it; the sweep is then
+     * abandoned exactly as a failed outbox write abandons it, so no peer ever
+     * applies a commit whose epoch the server does not know.
+     */
+    val registerStagedEpoch: suspend () -> Unit = {},
 )
 
 /** What one sweep attempt did. */
@@ -758,23 +739,33 @@ private suspend fun publishAndAdjudicate(
 
     val entry: SweepDurableEntry
     if (owed == null) {
+        // ADR-0053 client contract point 3 — the Delivery Service learns the
+        // key of the epoch this sweep moves to BEFORE anything about the sweep
+        // is durable or on the wire. A refusal abandons the staged sweep (the
+        // per-group rollback) and nothing is published: a commit whose epoch
+        // the server does not know would leave every peer that applies it
+        // refused on its next request.
+        try {
+            ports.registerStagedEpoch()
+        } catch (cause: Throwable) {
+            group.exclusiveProvider { group.abandonStagedSweep() }
+            throw cause
+        }
         // Obligation 4 — durably record BOTH artifacts before ANY publish. The
         // Welcome is wrapped and addressed HERE, so the bytes the restart sweep
         // would publish are the very bytes computed now; nothing can drift.
+        //
+        // ADR-0053 §4 / client contract point 8 — the Welcome goes to each
+        // added member's mailbox and nowhere else. A `/g/` joiner now waits on
+        // its own device mailbox, so no `WelcomeRendezvous` is written to the
+        // group journal any more (C-69 amended).
         val mailboxes = staged.addedSignatureKeys.map { ports.encodeB64(ports.welcomeMailbox(it)) }
         val wrapped = staged.welcome?.let(ports.wrapWelcome)
-        // ADR-0045 S7 — one rendezvous per added key, from the SAME Welcome. The
-        // keys come from the staged commit's own `swept()`, so this addresses
-        // exactly the members the commit adds.
-        val rendezvous = staged.welcome?.let { welcome ->
-            staged.addedSignatureKeys.map { ports.encodeB64(ports.wrapRendezvous(it, welcome)) }
-        } ?: emptyList()
         entry = SweepDurableEntry(
             id = ports.outbox.newEntryId(),
             commitB64 = ports.encodeB64(staged.commit),
             welcomeEnvelopeB64 = wrapped?.let(ports.encodeB64),
             welcomeMailboxesB64 = mailboxes,
-            welcomeRendezvousB64 = rendezvous,
         )
         try {
             ports.outbox.record(entry)
@@ -829,7 +820,7 @@ private suspend fun publishAndAdjudicate(
     // mocked there — a call would turn every unit test that reaches this line
     // into a `RuntimeException`. The adapter that owns the store logs it before
     // re-throwing, which is where the diagnostic belongs anyway.
-    if (entry.welcomeEnvelopeB64 != null || entry.welcomeRendezvousB64.isNotEmpty()) {
+    if (entry.welcomeEnvelopeB64 != null) {
         try {
             ports.outbox.markWelcomesOwed(entry.id, commitMessageId)
         } catch (_: Throwable) {
@@ -962,12 +953,6 @@ private suspend fun publishWelcomes(
         for (mailboxB64 in entry.welcomeMailboxesB64) {
             ids.add(ports.journal.publishMailbox(ports.decodeB64(mailboxB64), bytes))
         }
-    }
-    // ADR-0045 S7 — then the group-journal rendezvous, one per added key. A
-    // `/g/` joiner reads only this; a contact added the ordinary way reads only
-    // the mailbox. The sweep publishes both because it cannot tell them apart.
-    for (rendezvousB64 in entry.welcomeRendezvousB64) {
-        ids.add(ports.journal.publishGroup(ports.decodeB64(rendezvousB64)))
     }
     return ids
 }

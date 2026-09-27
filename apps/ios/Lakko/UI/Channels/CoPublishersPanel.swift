@@ -25,6 +25,8 @@ struct CoPublishersPanel: View {
     @State private var error: String?
     @State private var copied = false
     @State private var pollTask: Task<Void, Never>?
+    /// ADR-0053 — how far the knocks have been read (their own id space).
+    @State private var knockCursor: Int64 = 0
 
     private let ds = DsClient()
 
@@ -131,6 +133,8 @@ struct CoPublishersPanel: View {
             let pg = try CoPublisher.openPublisherGroup(identity: id, channelIdHex: channelId)
             identity = id
             publisherGroup = pg
+            // ADR-0053 point 2 — claim-on-open (the claim at creation included).
+            await CoPublisher.claimJournal(ds: ds, identity: id, publisherGroup: pg)
         } catch {
             NSLog("Channels: open publisher group failed: %@", String(describing: error))
             self.error = LegacyChannelV1.describe(error) { _ in
@@ -159,8 +163,10 @@ struct CoPublishersPanel: View {
     private func refreshPending() async {
         guard let identity, let publisherGroup else { return }
         do {
-            _ = try await CoPublisher.pollJournal(
-                ds: ds, identity: identity, publisherGroup: publisherGroup)
+            let outcome = try await CoPublisher.pollJournal(
+                ds: ds, identity: identity, publisherGroup: publisherGroup,
+                knockAfter: knockCursor)
+            knockCursor = outcome.knockCursor
             pending = try CoPublisher.pending(publisherGroup: publisherGroup)
         } catch {
             // Best-effort — keep the last good pending list.

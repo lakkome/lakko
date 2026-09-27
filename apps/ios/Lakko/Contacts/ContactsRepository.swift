@@ -297,7 +297,9 @@ public final class ContactsRepository: ObservableObject {
                 mySignaturePubkey: identity.signaturePublicKey(),
                 myX25519Secret: identity.x25519SecretKey(),
                 after: state.cursor,
-                waitSecs: waitSecs
+                waitSecs: waitSecs,
+                // ADR-0053 — the account mailbox is named by the account key.
+                mailboxSigner: dsMailboxSigner(identity: identity)
             )
             var newPending: [IncomingContactRequest] = []
             for event in pollResult.events {
@@ -439,7 +441,9 @@ public final class ContactsRepository: ObservableObject {
     /// cannot be opened again. Any failure yields no Welcomes (the next poll
     /// retries from the same cursor).
     private func pollDeviceMailboxWelcomes(accountIdB64: String, waitSecs: Int) async -> [Data] {
-        guard let deviceKey = chatRepository?.ownDeviceLeafKey else { return [] }
+        guard let deviceKey = chatRepository?.ownDeviceLeafKey,
+              // ADR-0053 — the device mailbox is named by the device leaf key.
+              let deviceSigner = chatRepository?.ownDeviceMailboxSigner else { return [] }
         let cursorKey = "me.lakko.contacts.device-mailbox-cursor.v1." + accountIdB64
         let after = Int64(UserDefaults.standard.integer(forKey: cursorKey))
         do {
@@ -450,7 +454,8 @@ public final class ContactsRepository: ObservableObject {
                 // open and is dropped.
                 myX25519Secret: Data(count: 32),
                 after: after,
-                waitSecs: waitSecs
+                waitSecs: waitSecs,
+                mailboxSigner: deviceSigner
             )
             if result.cursor > after {
                 UserDefaults.standard.set(Int(result.cursor), forKey: cursorKey)

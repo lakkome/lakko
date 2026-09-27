@@ -117,6 +117,36 @@ class ForwardPayloadTest {
         assertNull(ref.originMessageId)
     }
 
+    // ----- ADR-0053 section 6: nothing out of a one-to-one -------------------
+
+    @Test
+    fun `a forward out of a one-to-one carries no origin but keeps the name`() {
+        val (text, ref) = forwardPayloadOf(
+            message(),
+            authorLabel = "Anna",
+            originGroupIdHex = origin,
+            sourceIsOneToOne = true,
+        )
+        assertEquals("the words", text)
+        assertEquals(ForwardRef(author = "Anna", originGroupIdHex = null, originMessageId = null), ref)
+    }
+
+    @Test
+    fun `a forwarded forward out of a one-to-one drops the origin it brought along`() {
+        val source = message(
+            forward = ForwardRef(author = "Maria", originGroupIdHex = "cd".repeat(16), originMessageId = 12L),
+        )
+        val (_, ref) = forwardPayloadOf(source, authorLabel = "Anna", originGroupIdHex = origin, sourceIsOneToOne = true)
+        assertEquals(ForwardRef(author = "Maria", originGroupIdHex = null, originMessageId = null), ref)
+    }
+
+    @Test
+    fun `a forward out of a group still carries its origin`() {
+        val (_, ref) = forwardPayloadOf(message(), authorLabel = "Anna", originGroupIdHex = origin, sourceIsOneToOne = false)
+        assertEquals(origin, ref.originGroupIdHex)
+        assertEquals(7L, ref.originMessageId)
+    }
+
     // ----- the parsed envelope ---------------------------------------------
 
     @Test

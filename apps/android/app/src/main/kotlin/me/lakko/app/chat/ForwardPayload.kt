@@ -47,6 +47,10 @@ public fun forwardLineLabel(forward: ForwardRef): String {
  * - Otherwise the origin is this conversation and this message's DS id. A row
  *   with no id (never acked) has no origin to name; the menu does not offer
  *   Forward on one, so this is defence in depth.
+ * - ADR-0053 section 6 — when the SOURCE conversation is a one-to-one
+ *   ([sourceIsOneToOne]) no origin is carried at all, neither this
+ *   conversation's nor one a forwarded forward brought along. The author's
+ *   name is kept.
  *
  * The attachments are not here: they are re-encrypted and re-uploaded by the
  * sender (ADR-0052 OQ1), which is I/O, not a rule.
@@ -55,6 +59,7 @@ public fun forwardPayloadOf(
     message: ChatMessage,
     authorLabel: String?,
     originGroupIdHex: String,
+    sourceIsOneToOne: Boolean = false,
 ): Pair<String, ForwardRef> {
     val source = message.forward
     val ref = if (source != null) {
@@ -70,6 +75,9 @@ public fun forwardPayloadOf(
             originGroupIdHex = if (hasId) originGroupIdHex else null,
             originMessageId = if (hasId) message.messageId else null,
         )
+    }
+    if (sourceIsOneToOne) {
+        return message.text to ref.copy(originGroupIdHex = null, originMessageId = null)
     }
     return message.text to ref
 }

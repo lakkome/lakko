@@ -137,17 +137,6 @@ export interface PendingCommitEntry {
    * under a single Welcome. Empty when the sweep carried no add.
    */
   welcomeMailboxesB64?: string[];
-  /**
-   * ADR-0045 S7 — the sweep's group-journal `WelcomeRendezvous` envelopes, one
-   * per member the sweep adds.
-   *
-   * Whole envelopes rather than addresses, because a rendezvous binds the added
-   * member's signature key into its own bytes — so unlike the single Welcome
-   * envelope fanned out to N mailboxes above, every recipient gets different
-   * bytes. Recorded before any publish so a restart re-publishes exactly what
-   * this sweep computed. Empty when the sweep carried no add.
-   */
-  welcomeRendezvousB64?: string[];
   /** `false` until BOTH artifacts have (re)published. An un-acked entry is swept
    *  on restart / group-open. */
   acked: boolean;

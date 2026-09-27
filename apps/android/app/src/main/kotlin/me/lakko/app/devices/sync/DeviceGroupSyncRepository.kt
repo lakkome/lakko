@@ -26,7 +26,13 @@ import me.lakko.app.devices.DeviceAttestKey
 import me.lakko.app.devices.DeviceGroupJournalEnvelope
 import me.lakko.app.devices.DeviceGroupLifecycle
 import me.lakko.app.devices.DeviceGroupSnapshotStore
+import me.lakko.app.devices.DeviceGroupJournalAccess
 import me.lakko.app.ds.DsClient
+import me.lakko.app.ds.DsJournalSigner
+import me.lakko.app.ds.DsSignerRegistry
+import me.lakko.app.ds.DsSignerSource
+import me.lakko.app.ds.dsGroupKey
+import me.lakko.app.ds.healRegistration
 import me.lakko.app.ds.DsHttpError
 import me.lakko.app.ds.DsNetworkError
 import uniffi.lakko_ffi_uniffi.DeviceGroup
@@ -184,7 +190,13 @@ public class DeviceGroupSyncRepository(
             Log.w(LOG_TAG, "DeviceGroup.groupId failed", cause)
             return
         }
+        // ADR-0053 — sign this journal's requests from every DsClient in the
+        // process (the poll below, the send paths, the pairing / removal
+        // publishes) and claim it: at founding this is the first registration,
+        // on every later open an idempotent re-send.
+        installJournalSigner(groupId)
         pollJob = scope.launch {
+            claimJournalBestEffort(groupId)
             runPollLoop(
                 accountIdB64 = accountIdB64,
                 groupId = groupId,
@@ -428,6 +440,8 @@ public class DeviceGroupSyncRepository(
                     ByteArray(32)
                 }
 
+                // ADR-0053 — the signer as it stood before this batch.
+                val signerBeforeBatch = DsSignerRegistry.shared.current(dsGroupKey(groupId))
                 var mutated = false
                 for (message in result.messages) {
                     cursor = message.id
@@ -478,6 +492,7 @@ public class DeviceGroupSyncRepository(
                             accountIdB64 = accountIdB64,
                         )
                     }
+                    healJournalRegistration(ds, groupId, signerBeforeBatch)
                 }
             }
         }
@@ -541,6 +556,55 @@ public class DeviceGroupSyncRepository(
         }
     }
 
+    /** ADR-0053 — install the DeviceGroup journal's signer source: derived
+     *  from whatever handle this repository holds now. */
+    private fun installJournalSigner(groupId: ByteArray) {
+        DsSignerRegistry.shared.install(
+            dsGroupKey(groupId),
+            object : DsSignerSource {
+                // The FFI DeviceGroup has no epoch read: derive every time.
+                override fun epoch(): ULong? = null
+
+                override val epochReadable: Boolean get() = false
+
+                override fun derive(): DsJournalSigner? {
+                    val g = group.get() ?: return null
+                    val id = identity.get() ?: return null
+                    return DeviceGroupJournalAccess.signerOf(g, id)
+                }
+            },
+            owner = DeviceGroupJournalAccess.REGISTRY_OWNER,
+        )
+    }
+
+    /** ADR-0053 client contract point 2 — claim-on-open, best effort. */
+    private suspend fun claimJournalBestEffort(groupId: ByteArray) {
+        val key = dsGroupKey(groupId)
+        val signer = DsSignerRegistry.shared.current(key) ?: return
+        try {
+            DsClient().use { ds ->
+                ds.claimGroup(groupId, signer, provenBy = DsSignerRegistry.shared.previous(key))
+            }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (cause: Throwable) {
+            Log.w(LOG_TAG, "DeviceGroup journal claim did not land", cause)
+        }
+    }
+
+    /** ADR-0053 client contract point 4 — heal on apply, best effort. */
+    private suspend fun healJournalRegistration(ds: DsClient, groupId: ByteArray, before: DsJournalSigner?) {
+        val (next, current) =
+            healRegistration(before, DsSignerRegistry.shared.current(dsGroupKey(groupId))) ?: return
+        try {
+            ds.claimGroup(groupId, next, provenBy = current)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (cause: Throwable) {
+            Log.i(LOG_TAG, "DeviceGroup heal registration not taken: ${cause.javaClass.simpleName}")
+        }
+    }
+
     private fun cancelPollAndDropHandles() {
         persistJob?.cancel()
         persistJob = null
@@ -553,6 +617,7 @@ public class DeviceGroupSyncRepository(
         // JNA finalizer reclaims the Rust-side Arc.
         identity.set(null)
         group.set(null)
+        DsSignerRegistry.shared.clearOwner(DeviceGroupJournalAccess.REGISTRY_OWNER)
     }
 
     private companion object {

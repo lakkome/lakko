@@ -25,6 +25,7 @@ describe("forwardPayloadOf (section 5.1, what is sent)", () => {
       { text: "see you at 5?", attachments: [PHOTO], messageId: 41 },
       "Anna",
       ORIGIN,
+      false,
     );
     expect(p).toEqual({
       text: "see you at 5?",
@@ -38,12 +39,13 @@ describe("forwardPayloadOf (section 5.1, what is sent)", () => {
       { text: "before", editedText: "after", attachments: [], messageId: 1 },
       "You",
       ORIGIN,
+      false,
     );
     expect(p.text).toBe("after");
   });
 
   it("names an own message the way the timeline does, You", () => {
-    expect(forwardPayloadOf({ text: "hi", attachments: [], messageId: 1 }, "You", ORIGIN).forward.author).toBe(
+    expect(forwardPayloadOf({ text: "hi", attachments: [], messageId: 1 }, "You", ORIGIN, false).forward.author).toBe(
       "You",
     );
   });
@@ -59,6 +61,7 @@ describe("forwardPayloadOf (section 5.1, what is sent)", () => {
       },
       "Boris", // the forwarder, as the second timeline names them
       "c2Vjb25k",
+      false,
     );
     expect(p.forward).toEqual({ author: "Anna", origin: first });
   });
@@ -68,6 +71,7 @@ describe("forwardPayloadOf (section 5.1, what is sent)", () => {
       { text: "hi", attachments: [], messageId: 99, forward: {} },
       "Boris",
       "c2Vjb25k",
+      false,
     );
     expect(p.forward).toEqual({});
     expect("author" in p.forward).toBe(false);
@@ -86,9 +90,45 @@ describe("forwardPayloadOf (section 5.1, what is sent)", () => {
       },
       "You",
       ORIGIN,
+      false,
     );
     expect(Object.keys(p).sort()).toEqual(["attachments", "forward", "text"]);
     expect(JSON.stringify(p)).not.toContain("at five?");
+  });
+});
+
+describe("forwardPayloadOf — ADR-0053 contract point 10, a one-to-one source", () => {
+  it("a first forward out of a one-to-one carries the name and NO origin", () => {
+    const p = forwardPayloadOf(
+      { text: "see you at 5?", attachments: [PHOTO], messageId: 41 },
+      "Anna",
+      ORIGIN,
+      true,
+    );
+    expect(p.forward).toEqual({ author: "Anna" });
+    expect("origin" in p.forward).toBe(false);
+    expect(JSON.stringify(p)).not.toContain(ORIGIN);
+  });
+
+  it("a forward of a forward out of a one-to-one drops the carried origin too", () => {
+    const first = { groupIdB64: "Zmlyc3Q=", messageId: 7 };
+    const p = forwardPayloadOf(
+      { text: "hi", attachments: [], messageId: 99, forward: { author: "Anna", origin: first } },
+      "Boris",
+      "c2Vjb25k",
+      true,
+    );
+    expect(p.forward).toEqual({ author: "Anna" });
+  });
+
+  it("the same source out of a group keeps its origin", () => {
+    const p = forwardPayloadOf(
+      { text: "hi", attachments: [], messageId: 41 },
+      "Anna",
+      ORIGIN,
+      false,
+    );
+    expect(p.forward.origin).toEqual({ groupIdB64: ORIGIN, messageId: 41 });
   });
 });
 

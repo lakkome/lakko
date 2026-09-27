@@ -57,6 +57,7 @@
 import {
   createContext,
   createSignal,
+  onCleanup,
   type Accessor,
   type JSX,
   useContext,
@@ -68,6 +69,8 @@ import type {
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
 import { loadWasm } from "../wasm";
+import { dsAccess } from "../ds/access";
+import { clearDsAccess, installMailboxAccess } from "../ds/session-access";
 import {
   loadMlsSnapshot,
   saveMlsSnapshot,
@@ -209,6 +212,8 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
       }
     }
     setAccountIdentitySig(next);
+    // ADR-0053 — the account mailbox is read under this identity's key.
+    installMailboxAccess("account", next);
   }
 
   function replaceIdentity(next: WasmIdentity | null): void {
@@ -229,7 +234,25 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
       }
     }
     setIdentitySig(next);
+    // ADR-0053 — the device mailbox (where Welcomes land) is read under the
+    // device identity's key.
+    installMailboxAccess("device", next);
   }
+
+  // ADR-0053 contract point 1 — every request to a conversation group's
+  // journal is proven under the access key of the epoch that group is at.
+  // The DS client resolves the signer through this source at the moment of
+  // each request, so a group reloaded by `resetGroupToDurableSnapshot` or
+  // replaced by an upsert is picked up without re-registering.
+  const unregisterSource = dsAccess.registerGroupSource((groupId) => {
+    const id = identity();
+    if (id === null) return null;
+    const groupIdB64 = base64Encode(groupId);
+    const entry = groups().find((g) => g.groupIdB64 === groupIdB64);
+    if (entry === undefined) return null;
+    return entry.group.dsAccessSigner(id);
+  });
+  onCleanup(unregisterSource);
 
   const api: ChatApi = {
     groups,
@@ -422,6 +445,7 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
       setGroups([]);
       replaceIdentity(null);
       replaceAccountIdentity(null);
+      clearDsAccess();
     },
   };
 

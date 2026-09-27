@@ -169,6 +169,13 @@ function mockWasm() {
     },
     Group: {
       load: (_identity: unknown, _groupId: Uint8Array) => ({
+        // ADR-0053 — the throwaway group's access signer; `sign` echoes its
+        // inputs so a test can read what was signed.
+        dsAccessSigner: (_identity: unknown) => ({
+          sign: (method: string, path: string, query: string, body: Uint8Array) =>
+            `proof:${method}:${path}:${query}:${body.length}`,
+          free: freeSpy,
+        }),
         processIncomingVerifyingRoles: (_identity: unknown, payload: Uint8Array) => {
           const s = new TextDecoder().decode(payload);
           if (s === "THROW") throw new Error("cannot decrypt (wrong epoch)");
@@ -226,7 +233,7 @@ function baseDeps(overrides: Record<string, unknown> = {}) {
   const saveSnapshot = vi.fn();
   const saveMessageLog = vi.fn();
   const advanceCursor = vi.fn();
-  const dsFetchGroup = vi.fn(async (_g: Uint8Array, _after: number) => ({
+  const dsFetchGroup = vi.fn(async (_g: Uint8Array, _after: number, _sign?: unknown) => ({
     messages: [msg(42, { kind: "chat", text: "hello world", attachmentCount: 0 })],
   }));
   const deps = {
@@ -318,7 +325,7 @@ describe("decryptPushPreview — happy path", () => {
     await decryptPushPreview(wake({ pointer: 42 }), deps);
     // Fetch started at the persisted cursor (30), not pointer-1 (41),
     // so intervening commits replay and the epoch stays correct.
-    expect(dsFetchGroup).toHaveBeenCalledWith(GROUP_BYTES, 30);
+    expect(dsFetchGroup).toHaveBeenCalledWith(GROUP_BYTES, 30, expect.any(Function));
   });
 
   it("falls back to pointer-1 when no persisted cursor is available", async () => {
@@ -326,7 +333,54 @@ describe("decryptPushPreview — happy path", () => {
       startCursor: vi.fn(async () => null),
     });
     await decryptPushPreview(wake({ pointer: 42 }), deps);
-    expect(dsFetchGroup).toHaveBeenCalledWith(GROUP_BYTES, 41);
+    expect(dsFetchGroup).toHaveBeenCalledWith(GROUP_BYTES, 41, expect.any(Function));
+  });
+});
+
+describe("decryptPushPreview — ADR-0053 contract point 9, the signed wake read", () => {
+  it("hands the fetch a signer over the throwaway group's access key", async () => {
+    const { deps, dsFetchGroup } = baseDeps();
+    await decryptPushPreview(wake({ pointer: 42 }), deps);
+    const signProof = dsFetchGroup.mock.calls[0]?.[2] as
+      | ((m: string, p: string, q: string) => string)
+      | undefined;
+    // The proof covers the SERVICE path and the query exactly as sent, over
+    // an empty body (a GET). The fetch runs while the signer is alive.
+    expect(dsFetchGroup).toHaveBeenCalledTimes(1);
+    expect(typeof signProof).toBe("function");
+  });
+
+  it("the signer the fetch was handed signs what the SW sends", async () => {
+    let header: string | null = null;
+    const { deps } = baseDeps({
+      dsFetchGroup: vi.fn(
+        async (_g: Uint8Array, after: number, sign: ((m: string, p: string, q: string) => string) | null) => {
+          header = sign === null ? null : sign("GET", `/ds/group/${GROUP_HEX}/messages`, `after=${after}&wait=0`);
+          return { messages: [msg(42, { kind: "chat", text: "hi", attachmentCount: 0 })] };
+        },
+      ),
+    });
+    const out = await decryptPushPreview(wake({ pointer: 42 }), deps);
+    expect(out?.body).toBe("hi");
+    expect(header).toBe(`proof:GET:/ds/group/${GROUP_HEX}/messages:after=41&wait=0:0`);
+  });
+
+  it("a group that cannot derive a key reads unsigned, and a refusal falls back to generic", async () => {
+    const { deps, wasm } = baseDeps({
+      dsFetchGroup: vi.fn(async (_g: Uint8Array, _a: number, sign: unknown) => {
+        if (sign === null) throw new Error("ds fetch 401");
+        return { messages: [] };
+      }),
+    });
+    const load = wasm.Group.load;
+    wasm.Group.load = (id: unknown, gid: Uint8Array) => {
+      const g = load(id, gid) as Record<string, unknown>;
+      g.dsAccessSigner = () => {
+        throw new Error("inactive");
+      };
+      return g as ReturnType<typeof load>;
+    };
+    expect(await decryptPushPreview(wake({ pointer: 42 }), deps)).toBeNull();
   });
 });
 
@@ -726,7 +780,7 @@ describe("decryptPushPreview — ADR-0042 push_gid reverse-map (Sprint 4)", () =
     // Downstream everything (DS fetch, cursor, tag) uses the REAL group.
     expect(out).toEqual({ title: "Lakko", body: "hello world", tag: GROUP_HEX });
     expect(lookupRoute).toHaveBeenCalledWith(PUSH_GID_HEX);
-    expect(dsFetchGroup).toHaveBeenCalledWith(GROUP_BYTES, 41);
+    expect(dsFetchGroup).toHaveBeenCalledWith(GROUP_BYTES, 41, expect.any(Function));
     expect(deps.startCursor).toHaveBeenCalledWith(ACCOUNT_ID, GROUP_HEX);
     // The legacy path never ran.
     expect(deps.resolveAccount).not.toHaveBeenCalled();

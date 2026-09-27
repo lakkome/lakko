@@ -4,7 +4,20 @@
 package me.lakko.app.channels
 
 import android.util.Base64
+import me.lakko.app.chat.GroupNotAcceptingRequests
+import me.lakko.app.chat.JournalHeadEpoch
+import me.lakko.app.chat.runLinkJoinKnock
+import me.lakko.app.contacts.KIND_WELCOME
+import me.lakko.app.contacts.ParsedEnvelope
+import me.lakko.app.contacts.parseEnvelope
+import me.lakko.app.contacts.wrapEnvelope
 import me.lakko.app.ds.DsClient
+import me.lakko.app.ds.DsJournalSigner
+import me.lakko.app.ds.FfiDsJournalSigner
+import me.lakko.app.ds.healRegistration
+import me.lakko.app.ds.registerBeforePublish
+import uniffi.lakko_ffi_uniffi.IdentityPseudonym
+import uniffi.lakko_ffi_uniffi.dsMailboxSigner
 import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.GroupInviteCapability
 import uniffi.lakko_ffi_uniffi.Identity
@@ -12,11 +25,8 @@ import uniffi.lakko_ffi_uniffi.PublisherGroup
 import uniffi.lakko_ffi_uniffi.channelIdFromPublisherGroupId
 import uniffi.lakko_ffi_uniffi.composeGroupInviteCapability
 import uniffi.lakko_ffi_uniffi.composeGroupJoinAttribution
-import uniffi.lakko_ffi_uniffi.epochAfterMessage
-import uniffi.lakko_ffi_uniffi.parseWelcomeRendezvous
 import uniffi.lakko_ffi_uniffi.publisherGroupOpenOrCreate
 import uniffi.lakko_ffi_uniffi.sealSubscriberSeedEnvelope
-import uniffi.lakko_ffi_uniffi.wrapWelcomeRendezvous
 
 /**
  * ADR-0028 OQ3 — channel co-publisher management (owner + joiner side, Android).
@@ -102,8 +112,9 @@ public object CoPublisher {
     /** Poll the PublisherGroup's DS journal and apply incoming MLS messages
      *  (external-join proposals from prospective co-publishers + any co-publisher
      *  commits) via the role-gated path. Surfaces external-join proposals into
-     *  the PublisherGroup's retained pending set. Non-MLS entries (a Welcome
-     *  rendezvous) and our own already-merged commits throw and are skipped.
+     *  the PublisherGroup's retained pending set, reading both the journal and
+     *  (ADR-0053) the knock queue. Non-MLS rows and our own already-merged
+     *  commits throw and are skipped.
      *  Returns how many entries were applied (the caller snapshots the
      *  provider when that is non-zero — an applied commit advanced the
      *  group's epoch) and the number of pending requests after the poll. */
@@ -113,19 +124,79 @@ public object CoPublisher {
         publisherGroup: PublisherGroup,
     ): JournalPoll {
         val groupId = publisherGroup.groupId()
-        val raw = ds.fetchGroup(groupId, after = 0L, waitSecs = 0)
+        // ADR-0053 — the journal is claimed: every read carries a proof under
+        // the current epoch's key, and a poll that advanced the epoch
+        // re-registers the reached key (heal on apply).
+        val signerBefore = signerOf(publisherGroup, identity)
+        val raw = ds.fetchGroup(groupId, after = 0L, waitSecs = 0, signer = signerBefore)
         var applied = 0
         for (m in raw.messages) {
             try {
                 publisherGroup.processIncomingVerifyingRoles(identity, m.payload)
                 applied += 1
             } catch (_: Throwable) {
-                // Non-MLS entry (a Welcome rendezvous) or a commit we have already
-                // merged (epoch mismatch) — skip; the FIFO journal catches up on
-                // any genuinely-new commit on the next poll.
+                // A commit we have already merged (epoch mismatch) or a non-MLS
+                // row — skip; the FIFO journal catches up on any genuinely-new
+                // commit on the next poll.
             }
         }
+        healRegistration(signerBefore, signerOf(publisherGroup, identity))?.let { (next, current) ->
+            try {
+                ds.claimGroup(groupId, next, provenBy = current)
+            } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                // Best effort: someone registered first, or this device lags.
+            }
+        }
+        // ADR-0053 client contract point 7 — what prospective co-publishers
+        // knocked: their external-join proposal (and attribution) never enter
+        // the journal. Read from the start: the quarantine de-duplicates, and a
+        // proposal for a past epoch is refused by the epoch check.
+        try {
+            val knocks = ds.fetchKnocks(groupId, after = 0L, waitSecs = 0, signer = signerOf(publisherGroup, identity))
+            // Through the core's knock gate only (see `KnockGate.kt`): a
+            // knock is an unauthenticated write, so a knocked commit or app
+            // message must be refused before it is processed, never applied.
+            // Attribution rows, stale proposals and garbage are refused too.
+            val drained = me.lakko.app.chat.drainKnockRows(knocks.messages, 0L) { bytes ->
+                publisherGroup.processKnock(identity, bytes)
+            }
+            applied += drained.accepted.count {
+                it.second is uniffi.lakko_ffi_uniffi.ProcessedMessage.ExternalJoinProposal
+            }
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            // The knock read is best effort; the next poll retries.
+        }
         return JournalPoll(applied = applied, pending = publisherGroup.pendingExternalJoins().size)
+    }
+
+    /** ADR-0053 — the PublisherGroup journal's signer at its current epoch,
+     *  or `null` when the handle cannot derive one. */
+    public fun signerOf(publisherGroup: PublisherGroup, identity: Identity): DsJournalSigner? =
+        try {
+            FfiDsJournalSigner(publisherGroup.dsAccessSigner(identity))
+        } catch (_: Throwable) {
+            null
+        }
+
+    /**
+     * ADR-0053 client contract point 2 — claim the PublisherGroup journal at
+     * its current epoch (at creation this is the first registration; on every
+     * later open an idempotent re-send). Best effort: a failure is logged and
+     * the next open retries.
+     */
+    public suspend fun claimJournal(ds: DsClient, identity: Identity, publisherGroup: PublisherGroup) {
+        val signer = signerOf(publisherGroup, identity) ?: return
+        try {
+            ds.claimGroup(publisherGroup.groupId(), signer)
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            android.util.Log.w("CoPublisher", "ADR-0053: publisher journal claim did not land", e)
+        }
     }
 
     /** What one [pollJournal] pass did. */
@@ -142,8 +213,9 @@ public object CoPublisher {
         publisherGroup.pendingExternalJoins()
 
     /** Approve a pending co-publisher. Commits the Add (advances the
-     *  PublisherGroup epoch), broadcasts the commit + a `WelcomeRendezvous` to
-     *  the journal (the not-yet-member joiner polls for it), then RESEALS the
+     *  PublisherGroup epoch), registers the new epoch's journal key and
+     *  broadcasts the commit (ADR-0053), sends the Welcome to the joiner's own
+     *  mailbox (the not-yet-member joiner polls it), then RESEALS the
      *  new-epoch channel seed to all subscribers — the Add changed the exporter
      *  output, so existing subscribers must get the new seed or they break. */
     public suspend fun approve(
@@ -155,10 +227,23 @@ public object CoPublisher {
         channelIdHex: String,
     ) {
         val groupId = publisherGroup.groupId()
+        val signerBeforeCommit = signerOf(publisherGroup, identity)
         val added = publisherGroup.approveExternalJoin(identity, proposalRef)
-        ds.publishGroup(groupId, added.commit)
-        val rendezvous = wrapWelcomeRendezvous(proposalRef, added.welcome)
-        ds.publishGroup(groupId, rendezvous)
+        // ADR-0053 client contract point 3 — register epoch N+1's key proven
+        // under N's before the commit is published. A refusal throws: the
+        // caller's `withIdentity` then persists nothing, so the durable group
+        // stays at N and nothing reached the wire.
+        val commitSigner = registerBeforePublish(
+            before = signerBeforeCommit,
+            after = signerOf(publisherGroup, identity),
+        ) { next, current -> ds.registerNextEpoch(groupId, next, current) }
+        ds.publishGroup(groupId, added.commit, signer = commitSigner)
+        // ADR-0053 client contract point 8 — the Welcome goes to the joiner's
+        // own mailbox (the pseudonym of the key its proposal carried), in the
+        // same envelope a direct add uses; nothing is written to the journal
+        // for a non-member to read.
+        val joinerMailbox = IdentityPseudonym.fromIdentity(proposalRef).use { it.asBytes() }
+        ds.publishMailbox(joinerMailbox, wrapEnvelope(KIND_WELCOME, added.welcome))
         resealSubscribers(channelsClient, identity, publisherGroup, channelIdHex)
     }
 
@@ -175,6 +260,22 @@ public object CoPublisher {
     // Joiner side — a prospective co-publisher requests + joins
     // -----------------------------------------------------------------
 
+    /** When this process last sent a co-publisher request, or `0`. */
+    @Volatile
+    private var lastCoPublishRequestMs: Long = 0L
+
+    /**
+     * ADR-0053 — a co-publisher's Welcome now lands in the account mailbox
+     * the contacts inbox also reads, and the inbox cannot open it (it is sealed
+     * to the channel identity's KeyPackage, not a chat one). While a request
+     * is recent the inbox therefore stays quiet about a Welcome it could not
+     * join, instead of telling the user a chat failed to open.
+     */
+    public fun awaitingCoPublishWelcome(nowMs: Long = System.currentTimeMillis()): Boolean =
+        lastCoPublishRequestMs != 0L && nowMs - lastCoPublishRequestMs < CO_PUBLISH_WELCOME_WINDOW_MS
+
+    private const val CO_PUBLISH_WELCOME_WINDOW_MS: Long = 60L * 60L * 1000L
+
     /** Handles a [requestToCoPublish] returns so the caller can drive the poll
      *  loop ([pollForCoPublishWelcome]). */
     public data class CoPublishRequest(
@@ -182,18 +283,18 @@ public object CoPublisher {
         val groupId: ByteArray,
         /** The 32-char lowercase-hex channel id recovered from the `group_id`. */
         val channelIdHex: String,
-        /** This device's leaf signature key — matches the `WelcomeRendezvous`
-         *  the owner posts after approving. */
+        /** This identity's signature key — the one its proposal carried, whose
+         *  mailbox the owner's Welcome is sent to. */
         val joinerKey: ByteArray,
     )
 
     /** ADR-0028 OQ3 — joiner side: request to become a co-publisher of a channel
      *  from a `/g/` co-publisher link. Decodes + verifies the capability,
-     *  recovers the channel id from the PublisherGroup `group_id`, reads the
-     *  group's current epoch from its DS journal head's public framing
-     *  (`epochAfterMessage` over the paged journal, no group secret), crafts an external-join proposal
-     *  (ADR-0027), and posts it + a self-signed join-attribution (OQ2) to the
-     *  journal. The caller then polls with [pollForCoPublishWelcome]. */
+     *  recovers the channel id from the PublisherGroup `group_id`, and knocks
+     *  (ADR-0053 §4): an empty knock learns the epoch, a second carries a
+     *  self-signed join-attribution (OQ2) and the external-join proposal
+     *  (ADR-0027) for it. The journal is never read. The caller then polls
+     *  with [pollForCoPublishWelcome]. */
     public suspend fun requestToCoPublish(
         ds: DsClient,
         identity: Identity,
@@ -220,33 +321,23 @@ public object CoPublisher {
                 CoPublisherException.NotAChannelGroup
             }
         val channelIdHex = ChannelsComposer.bytesToHex(channelIdBytes)
-        // Read the current epoch from the journal head (public framing; a
-        // non-member can do this). Empty / unreachable journal => epoch 0.
-        // Paged to the head and read with `epochAfterMessage`: see
-        // `JournalHeadEpoch` for the two ways the single-page read went stale.
-        val epoch: ULong = try {
-            me.lakko.app.chat.JournalHeadEpoch.read(
-                fetchPage = { after, limit ->
-                    val raw = ds.fetchGroup(groupId, after = after, limit = limit, waitSecs = 0)
-                    me.lakko.app.chat.JournalHeadEpoch.Page(
-                        rows = raw.messages.map { me.lakko.app.chat.JournalHeadEpoch.Row(it.id, it.payload) },
-                        hasMore = raw.hasMore,
-                    )
-                },
-                epochAfter = { epochAfterMessage(it) },
-            )
-        } catch (_: Throwable) {
-            0uL // keep epoch 0
-        }
-        val proposal = identity.createExternalJoinProposal(groupId, epoch)
-        ds.publishGroup(groupId, proposal)
-        // Self-signed join attribution (OQ2) — advisory; best-effort.
-        try {
-            val attribution = composeGroupJoinAttribution(identity.ed25519Seed(), wire)
-            ds.publishGroup(groupId, attribution)
-        } catch (_: Throwable) {
-            // advisory only — ignore
-        }
+        // ADR-0053 client contract point 6 — the PublisherGroup journal is
+        // claimed, so a prospective co-publisher never reads it: an empty knock
+        // learns the epoch, a second knock carries the self-signed attribution
+        // (OQ2, advisory) and the proposal built for that epoch. The Welcome
+        // arrives in this identity's own mailbox ([pollForCoPublishWelcome]).
+        // A group whose owner has not claimed it yet refuses with
+        // [GroupNotAcceptingRequests]; nothing was stored.
+        runLinkJoinKnock(
+            knock = { payloads ->
+                ds.knockWithPow(groupId, payloads) { seed, bits ->
+                    me.lakko.app.auth.solvePow(seed, bits)
+                }.epoch
+            },
+            buildProposal = { epoch -> identity.createExternalJoinProposal(groupId, epoch) },
+            buildAttribution = { composeGroupJoinAttribution(identity.ed25519Seed(), wire) },
+        )
+        lastCoPublishRequestMs = System.currentTimeMillis()
         return CoPublishRequest(
             groupId = groupId,
             channelIdHex = channelIdHex,
@@ -254,8 +345,8 @@ public object CoPublisher {
         )
     }
 
-    /** ADR-0028 OQ3 — joiner side: poll the PublisherGroup journal for the
-     *  Welcome the owner posted after approving, join from it, and mint local
+    /** ADR-0028 OQ3 — joiner side: read this identity's own mailbox (ADR-0053)
+     *  for the Welcome the owner sent after approving, join from it, and mint local
      *  publisher keys so this device can now publish to the channel. The joined
      *  group lands at the post-approve epoch — the same one the subscribers were
      *  resealed to — so the derived `channelSeed` matches. Returns the keys on
@@ -270,27 +361,26 @@ public object CoPublisher {
         // has co-published to the channel before (null on a first join).
         existingSigningSeed: ByteArray? = null,
     ): ChannelPublisherKeys? {
-        // Paged to the end: the Welcome is the newest row, and a single-page
-        // read never reached it on a journal longer than one page (see
-        // `JournalHeadEpoch.scan`).
+        // ADR-0053 client contract point 8 — the owner's approve sends the
+        // Welcome to THIS identity's mailbox (the pseudonym of the key the
+        // proposal carried), never to the journal. The mailbox is claimed, so
+        // the read is signed under the identity key. Paged to the end: the
+        // Welcome is among the newest rows.
+        val mailboxSigner = dsMailboxSigner(identity)
+        val pseudonym = mailboxSigner.mailboxPseudonym()
+        val signer = FfiDsJournalSigner(mailboxSigner)
         val candidates = ArrayList<ByteArray>()
-        me.lakko.app.chat.JournalHeadEpoch.scan<Unit>(
+        JournalHeadEpoch.scan<Unit>(
             fetchPage = { after, limit ->
-                val raw = ds.fetchGroup(groupId, after = after, limit = limit, waitSecs = 0)
-                me.lakko.app.chat.JournalHeadEpoch.Page(
-                    rows = raw.messages.map { me.lakko.app.chat.JournalHeadEpoch.Row(it.id, it.payload) },
+                val raw = ds.fetchMailbox(pseudonym, after = after, limit = limit, waitSecs = 0, signer = signer)
+                JournalHeadEpoch.Page(
+                    rows = raw.messages.map { JournalHeadEpoch.Row(it.id, it.payload) },
                     hasMore = raw.hasMore,
                 )
             },
             visit = { row ->
-                val rendezvous = try {
-                    parseWelcomeRendezvous(row.payload)
-                } catch (_: Throwable) {
-                    null
-                }
-                if (rendezvous != null && rendezvous.joinerSignatureKey.contentEquals(joinerKey)) {
-                    candidates += rendezvous.welcome
-                }
+                val env = parseEnvelope(row.payload)
+                if (env is ParsedEnvelope.Welcome) candidates += env.body
                 null
             },
         )
@@ -300,7 +390,8 @@ public object CoPublisher {
         // freshPublisherKeys re-opens the now-joined PublisherGroup by
         // channel id and derives the shared content-key seed + a fresh
         // per-device signing key so this device can publish. Newest first,
-        // and a Welcome sealed to a KeyPackage this device no longer holds is
+        // and a Welcome this identity cannot open (a chat Welcome sharing
+        // the mailbox, or one sealed to a KeyPackage it no longer holds) is
         // skipped rather than ending the wait.
         var joined = false
         for (welcome in candidates.asReversed()) {

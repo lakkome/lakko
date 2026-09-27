@@ -63,23 +63,35 @@ export interface ForwardPayload<A = AttachmentRefBytes> {
  * forward both are ignored in favour of what the source already carries,
  * including when the source carries no name or no origin: inventing either
  * would rewrite the chain.
+ *
+ * ADR-0053 section 6 / contract point 10: `sourceIsOneToOne` — a forward out
+ * of a ONE-TO-ONE carries no origin at all, the chain's included. The only
+ * other holder of a one-to-one is its other participant, so the origin could
+ * never serve a jump for anyone the forward reaches, and it would carry the
+ * conversation's id to people who were never in it. The name still travels.
  */
 export function forwardPayloadOf<A>(
   source: ForwardSource<A>,
   authorLabel: string | undefined,
   originGroupIdB64: string,
+  sourceIsOneToOne: boolean,
 ): ForwardPayload<A> {
   const text = source.editedText ?? source.text;
-  const forward: ForwardRef =
+  const origin: ForwardOrigin | undefined = sourceIsOneToOne
+    ? undefined
+    : source.forward !== undefined
+      ? source.forward.origin
+      : { groupIdB64: originGroupIdB64, messageId: source.messageId };
+  const author =
     source.forward !== undefined
-      ? {
-          ...(source.forward.author === undefined ? {} : { author: source.forward.author }),
-          ...(source.forward.origin === undefined ? {} : { origin: source.forward.origin }),
-        }
-      : {
-          ...(authorLabel === undefined || authorLabel.trim() === "" ? {} : { author: authorLabel }),
-          origin: { groupIdB64: originGroupIdB64, messageId: source.messageId },
-        };
+      ? source.forward.author
+      : authorLabel === undefined || authorLabel.trim() === ""
+        ? undefined
+        : authorLabel;
+  const forward: ForwardRef = {
+    ...(author === undefined ? {} : { author }),
+    ...(origin === undefined ? {} : { origin }),
+  };
   return { text, attachments: source.attachments, forward };
 }
 

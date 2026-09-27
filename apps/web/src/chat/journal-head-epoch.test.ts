@@ -5,32 +5,34 @@ import { describe, expect, it } from "vitest";
 
 import {
   JOURNAL_HEAD_PAGE_SIZE,
-  journalHeadEpoch,
   scanJournal,
   type JournalHeadPage,
 } from "./journal-head-epoch";
 
-// A "payload" here is one byte: 0 = not MLS, n = a row after which the group
-// is at epoch n. That is exactly the contract of `epochAfterMessage`.
-const row = (id: number, epoch: number) => ({ id, payload: new Uint8Array([epoch]) });
-const epochAfter = (p: Uint8Array): bigint | undefined => {
-  const b = p[0];
-  return b === undefined || b === 0 ? undefined : BigInt(b);
-};
+// A row's payload is one marker byte the visitor can match on.
+const row = (id: number, marker: number) => ({ id, payload: new Uint8Array([marker]) });
 
-describe("journalHeadEpoch", () => {
-  it("pages to the head instead of trusting the first page", async () => {
+describe("scanJournal", () => {
+  it("pages to the end, moving the cursor to each page's last id", async () => {
     const pages: JournalHeadPage[] = [
       { messages: [row(1, 1), row(2, 0), row(3, 2)], hasMore: true },
       { messages: [row(4, 2), row(5, 0)], hasMore: true },
       { messages: [row(6, 7)], hasMore: false },
     ];
     const calls: Array<[number, number]> = [];
-    const epoch = await journalHeadEpoch(async (after, limit) => {
-      calls.push([after, limit]);
-      return pages.shift() ?? { messages: [], hasMore: false };
-    }, epochAfter);
-    expect(epoch).toBe(7n);
+    const seen: number[] = [];
+    const hit = await scanJournal<never>(
+      async (after, limit) => {
+        calls.push([after, limit]);
+        return pages.shift() ?? { messages: [], hasMore: false };
+      },
+      (m) => {
+        seen.push(m.id);
+        return undefined;
+      },
+    );
+    expect(hit).toBeUndefined();
+    expect(seen).toEqual([1, 2, 3, 4, 5, 6]);
     expect(calls).toEqual([
       [0, JOURNAL_HEAD_PAGE_SIZE],
       [3, JOURNAL_HEAD_PAGE_SIZE],
@@ -38,33 +40,23 @@ describe("journalHeadEpoch", () => {
     ]);
   });
 
-  it("keeps the last MLS epoch when the head rows are not MLS", async () => {
-    const epoch = await journalHeadEpoch(
-      async () => ({ messages: [row(1, 4), row(2, 0), row(3, 0)], hasMore: false }),
-      epochAfter,
-    );
-    expect(epoch).toBe(4n);
-  });
-
-  it("reads an empty journal as epoch 0", async () => {
-    expect(await journalHeadEpoch(async () => ({ messages: [], hasMore: false }), epochAfter)).toBe(0n);
-  });
-
-  it("stops when a page does not move the cursor", async () => {
+  it("stops on a page that does not move the cursor", async () => {
     let calls = 0;
-    const epoch = await journalHeadEpoch(async () => {
-      calls += 1;
-      return { messages: [row(5, 3)], hasMore: true };
-    }, epochAfter);
-    expect(epoch).toBe(3n);
+    await scanJournal<never>(
+      async () => {
+        calls += 1;
+        return { messages: [row(4, 1)], hasMore: true };
+      },
+      () => undefined,
+    );
     expect(calls).toBe(2);
   });
 
-  it("propagates a fetch failure instead of answering with a stale epoch", async () => {
+  it("propagates a fetch failure", async () => {
     await expect(
-      journalHeadEpoch(async () => {
+      scanJournal(async () => {
         throw new Error("offline");
-      }, epochAfter),
+      }, () => undefined),
     ).rejects.toThrow("offline");
   });
 

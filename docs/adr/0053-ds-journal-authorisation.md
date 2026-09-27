@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0053: A journal on the Delivery Service is opened by a key, not by its name
 
-- **Status:** Accepted (2026-09-27, the maintainer's call; S1 and S2 built the same day, S3 next)
+- **Status:** Accepted (2026-09-27, the maintainer's call; S1-S4 built the same day and host-tested; not yet deployed or walked live; S5 open)
 - **Date:** 2026-09-27
 - **Context:** Phase 3 (product hardening), closes G-42
 - **Supersedes:** the "no authentication" posture of `services/ds` (Phase 1.3), and
@@ -343,6 +343,161 @@ rather than engineered around.
   tables, the wire of `messages` and the long-poll are untouched; the
   unclaimed posture is byte-for-byte Phase 1.3, which is what lets the flag
   day proceed client by client (S2-S4) with the server already deployed.
+
+## The client contract (S3 + S4)
+
+Written before the three clients were built, so they build one protocol. It
+amends sections 2, 4 and open question 1 where S2 and S3 found them short.
+
+**Server amendments made with it (S1 revision, 2026-09-27).**
+
+- **Open question 1 is resolved: two write epochs, a read-only tail.** The two
+  newest registered epochs may write (publish, knock-read, register the next
+  epoch); every older registered epoch still **reads**, for the journal's own
+  retention window and at most 64 epochs. As first written, a device offline
+  across two commits held a key the server had dropped, could not fetch the
+  commits that would bring it forward, and was stranded for good - with a
+  commit on every member add, that is an ordinary week, not an edge. The cost:
+  an evicted member keeps reading ciphertext it cannot decrypt (sizes, timing)
+  until its epoch ages out. It cannot write.
+- **Re-sending an already-registered `(epoch, key)` needs no proof** and is a
+  no-op: it is what claim-on-open sends, and it grants nothing.
+- **The knock takes `payloads_b64: [..]`** (at most 4 rows, 16 KiB in total,
+  one PoW), and **an empty list is a probe**: nothing is stored, the response
+  carries the epoch. The joiner probes, builds its proposal for that epoch,
+  then knocks with the attribution and the proposal. The response is
+  `{ ids: [..], epoch }`.
+- **`Group.dsStagedAccessSigner(identity)`** (UniFFI and wasm) returns the
+  signer of the epoch a staged sweep moves to, while the group still sits at N
+  (`lakko-mls` `Group::staged_export_secret`, a read-only accessor over
+  OpenMLS's own staged-commit exporter, pinned by
+  `a_staged_sweep_exports_the_secret_of_the_epoch_it_moves_to`).
+
+**1. Every DS request to a claimed journal carries the proof.** The DS client
+signs `(method, service path, raw query, exact body bytes)` with the signer of
+the journal: `group.dsAccessSigner(identity)` for a conversation group,
+DeviceGroup or PublisherGroup journal, `dsMailboxSigner(identity)` for the
+device's own identity mailbox. The path is the service path
+(`/ds/group/<hex>/messages`), never the nginx prefix. Posting to **another**
+account's mailbox and every **rendezvous** mailbox (pairing, recovery payload,
+welcome courier, state bundle, history bundle, contact-invite reply) stays
+unsigned - those are unclaimed or open for writes by design.
+
+**2. Claim.** `PUT /ds/group/<hex>/access` with the signer's
+`groupClaimBodyJson()`: at `Group.create` (and DeviceGroup founding and
+PublisherGroup creation), and on every open of a group (idempotent). Unsigned
+when the device holds no older signer for that group; signed with the older
+signer when it does. `PUT /ds/mailbox/<hex>/access` with
+`mailboxClaimBodyJson()` after signup and after every login and restore. A
+failed claim is logged and retried on the next open; it never blocks the UI.
+
+**3. Register before publish.** Every epoch-advancing commit is preceded by
+registering the next epoch's key, proven under the current one:
+
+- *direct (eager-merge) commit* (add, remove, role change, self-update,
+  PublisherGroup approve): take `signerN = dsAccessSigner()` **before** the
+  create call, create (the group is now at N+1), take `signerN1 =
+  dsAccessSigner()`, `PUT access` with `signerN1.groupClaimBodyJson()` signed by
+  `signerN`, and only then persist the ADR-0040 outbox entry and publish (the
+  commit POST is signed by `signerN`). A failed registration aborts exactly as
+  a failed outbox write does - roll back, no publish.
+- *staged sweep*: stage, `signerN1 = dsStagedAccessSigner()`, register signed by
+  `signerN = dsAccessSigner()`, then publish and adjudicate as today. A failed
+  registration abandons the sweep before publishing.
+
+A commit is never on the wire before the server knows its epoch, so no peer
+that applies it holds an epoch the server refuses.
+
+**4. Heal on apply.** The receive loop takes the current signer before
+applying a batch; when the batch advanced the epoch it registers the new key,
+signed by that pre-batch signer, best effort (a refusal is expected and
+ignored - someone else registered first, or the device was too far behind).
+This is what repairs the one race left: a losing committer that registered its
+own N+1 before learning it lost; the replace rule lets any member who applied
+the winning commit put the real key back, and the loser does so itself after
+abandoning.
+
+**5. Retry on 401.** A signed group request refused with `401` is retried once
+signed by the previous epoch's signer when the device still holds it (a read,
+before a lagging registration landed), and once after a claim-on-open. A
+second refusal surfaces: if the response `Date` header is more than 60 seconds
+from the device clock, the copy is "Check this device's date and time";
+otherwise the ordinary delivery error.
+
+**6. The link joiner goes through the knock.** `POST /pow/challenge` on the DS,
+solve with the client's existing PoW solver, `POST /ds/group/<hex>/knock` with
+`payloads_b64: []` to learn the epoch, build the external-join proposal for it,
+solve a second challenge, knock with `[attribution, proposal]`. No journal read.
+The joiner's Welcome arrives in its **identity mailbox**, so the joiner's
+wait is on its own mailbox receive path, not on the group journal. The
+co-publisher joiner does the same against the PublisherGroup journal.
+
+**7. Members read knocks.** Next to the group journal poll, an owner or admin
+client polls `GET /ds/group/<hex>/knocks?after=` (signed, its own cursor) and
+feeds each row to the same classifier the journal rows use for an attribution
+and an external-join proposal. The ADR-0027 quarantine and the sweep are
+unchanged.
+
+**8. The sweep delivers Welcomes to mailboxes.** Where the sweep posted a
+`WelcomeRendezvous` to the group journal for every added key (C-69), it now
+delivers the Welcome to each added member's identity mailbox, the same way a
+direct add already does. No `WelcomeRendezvous` is written to a group journal.
+
+**9. Background readers** sign their read: the web service worker, the iOS NSE
+and the Android background decrypt call `dsAccessSigner` on the throwaway
+group (the extension surface has it) or `dsMailboxSigner` for a mailbox wake. A
+refusal falls back to the generic notification. No claim, no registration: a
+background process writes nothing (C-59).
+
+**10. Forward from a one-to-one carries no origin** (section 6).
+
+## What S3 and S4 found
+
+Built the same day on all three clients against the contract above (web S3, iOS and
+Android S4), host-tested only: web vitest, iOS XCTest and Android JUnit suites green,
+nothing yet run against a deployed DS.
+
+- **The knock queue needed a gate in the core, not three filters.** A knock row is an
+  unauthenticated write, so a member can post a genuine commit or application message
+  there instead of the journal; the admins read knocks and would apply it, every other
+  member would not, and the group forks along the line of who reads knocks. Two
+  clients first filtered **after** processing (keeping only the external-join event),
+  which is too late - the commit was already applied. Closed by
+  `lakko_mls::Group::process_knock` over `is_external_join_proposal_for` (a
+  `PublicMessage` proposal from a `NewMemberProposal` sender, framed for this group,
+  refused before OpenMLS sees it), exposed as `processKnock` on `Group` and
+  `PublisherGroup` on both FFI surfaces and used by all three knock readers. Pinned by
+  `a_knock_row_is_processed_only_when_it_is_an_external_join_proposal`.
+- **The co-publisher's Welcome lands in the account mailbox**, because a channel runs
+  on the account identity, wrapped as `KIND_WELCOME` on all three clients. The contacts
+  inbox reads the same mailbox and cannot open that Welcome with the device identity;
+  each client suppresses the resulting join-failure copy (web by marking account-mailbox
+  Welcomes, Android for an hour after a co-publish request). iOS still shows it -
+  recorded, not fixed.
+- **Channel rotation registers an epoch nobody else reaches.** `RotationCron` advances
+  the owner's PublisherGroup with a commit that is never published (pre-existing, and
+  already a divergence from co-publishers). All three clients now register the rotated
+  epoch so the owner's own journal reads keep working; after two rotations a
+  co-publisher's key leaves the write tier. The divergence is older than this ADR and
+  is not solved here.
+- **Android holds the provider lock across the registration of a direct commit.**
+  Releasing it between the create call and the outbox write would let another group's
+  whole-provider snapshot capture the unpublished epoch (the ADR-0040 hazard), so all
+  MLS work waits for up to one DS request timeout during a direct membership commit - a
+  partial reversal of the G-37 fix, reachable only in groups with no role table, where
+  direct commits still exist.
+- **"Claim on every open" became "claim on the first request per session"** on web and
+  iOS: the claim is idempotent and cheap to repeat, but opening a chat is not a
+  meaningful boundary on every client, and per session is what each could place without
+  a new hook.
+- **The web service worker's DS URL had never worked.** It requested
+  `/api/ds/group/...`, which nginx and the Vite proxy strip to a path the DS does not
+  route, so every web push preview fell back to the generic text. Fixed in the same
+  change (`/api/ds/ds/group/...`).
+- **The link joiner no longer reads any journal.** `journalHeadEpoch` is deleted from
+  the joiner on all three clients (the 2026-09-19 paging defect goes with it); the probe
+  knock returns the epoch, and the joiner waits for its group to appear through the
+  ordinary device-mailbox Welcome path.
 
 ## References
 

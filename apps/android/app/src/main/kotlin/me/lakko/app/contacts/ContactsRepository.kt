@@ -494,7 +494,12 @@ public class ContactsRepository(
                                     "joining a group from a Welcome failed",
                                     e,
                                 )
-                                joinFailure = WELCOME_JOIN_FAILED_MESSAGE
+                                // ADR-0053 — unless it is a co-publisher's
+                                // Welcome, which shares this mailbox and is
+                                // opened by the channel screen instead.
+                                if (!me.lakko.app.channels.CoPublisher.awaitingCoPublishWelcome()) {
+                                    joinFailure = WELCOME_JOIN_FAILED_MESSAGE
+                                }
                             }
                         }
                     }

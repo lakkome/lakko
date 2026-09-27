@@ -131,22 +131,34 @@ public enum DeviceRemoval {
             deviceIdentitySeed: seed
         )
 
-        let commitBytes = try ensured.group.removeDeviceAt(
-            identity: ensured.identity,
-            leafIndex: leafIndex
-        )
         let groupId = try ensured.group.groupId()
+        let ds = DsClient()
+        await DeviceGroupDsAccess.claim(group: ensured.group, identity: ensured.identity, ds: ds)
 
+        // ADR-0053 point 3 — register N+1 proven under N before the publish.
         // Broadcast to the DeviceGroup journal. The DS treats the
         // deterministic 32-byte group_id as opaque bytes. G-13 (ADR-0015):
         // wrap the commit + removal attestation in the journal envelope so
         // peers can verify the removal under the policy.
-        let ds = DsClient()
-        let envelope = DeviceGroupJournalEnvelope.encode(
-            message: commitBytes,
-            attestation: attestation
+        _ = try await DeviceGroupDsAccess.directCommit(
+            group: ensured.group,
+            identity: ensured.identity,
+            ds: ds,
+            create: {
+                try ensured.group.removeDeviceAt(
+                    identity: ensured.identity,
+                    leafIndex: leafIndex
+                )
+            },
+            prepare: { commitBytes in commitBytes },
+            publish: { commitBytes, auth in
+                let envelope = DeviceGroupJournalEnvelope.encode(
+                    message: commitBytes,
+                    attestation: attestation
+                )
+                return try await ds.publishGroup(groupId: groupId, payload: envelope, auth: auth)
+            }
         )
-        _ = try await ds.publishGroup(groupId: groupId, payload: envelope)
 
         DeviceGroupLifecycle.persistSnapshot(
             identity: ensured.identity,
@@ -174,14 +186,22 @@ public enum DeviceRemoval {
         if try ensured.group.requireAttestedRemovals() {
             return
         }
-        let commit = try ensured.group.setRequireAttestedRemovals(
-            identity: ensured.identity
-        )
         let groupId = try ensured.group.groupId()
-        // The policy commit removes nothing, so it carries no attestation.
-        let envelope = DeviceGroupJournalEnvelope.encode(message: commit, attestation: nil)
         let ds = DsClient()
-        _ = try await ds.publishGroup(groupId: groupId, payload: envelope)
+        await DeviceGroupDsAccess.claim(group: ensured.group, identity: ensured.identity, ds: ds)
+        // ADR-0053 point 3 — register N+1 proven under N before the publish.
+        _ = try await DeviceGroupDsAccess.directCommit(
+            group: ensured.group,
+            identity: ensured.identity,
+            ds: ds,
+            create: { try ensured.group.setRequireAttestedRemovals(identity: ensured.identity) },
+            prepare: { commit in commit },
+            publish: { commit, auth in
+                // The policy commit removes nothing, so it carries no attestation.
+                let envelope = DeviceGroupJournalEnvelope.encode(message: commit, attestation: nil)
+                return try await ds.publishGroup(groupId: groupId, payload: envelope, auth: auth)
+            }
+        )
         DeviceGroupLifecycle.persistSnapshot(
             identity: ensured.identity,
             accountIdB64: accountIdB64

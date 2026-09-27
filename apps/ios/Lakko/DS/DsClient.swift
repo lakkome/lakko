@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import LakkoCore
 
 /// URLSession-based client for `lakko-svc-ds`.
 ///
@@ -33,12 +34,17 @@ import Foundation
 ///     `payload_b64` strings; we decode to raw bytes before handing
 ///     back.
 ///
-/// ## Auth posture
+/// ## Auth posture (ADR-0053)
 ///
-/// The DS does NOT require PoW or auth tokens in Phase 1 — every
-/// write is open to anyone who can reach the URL. Production
-/// deployments gate writes on auth-issued tokens (Phase 1.5b+);
-/// the client signature stays the same.
+/// A CLAIMED journal answers only a request carrying an
+/// `x-lakko-ds-proof` header signed with a key the journal was claimed
+/// under: a per-epoch access key every member derives from the MLS group
+/// for a group journal, the identity key for a mailbox read. The caller
+/// passes a ``DsAuth``; the client signs the service path, the raw query
+/// and the exact body, and retries a `401` once under the previous epoch
+/// and once after a claim-on-open. Writing to another account's mailbox
+/// and every rendezvous mailbox stay unsigned. No session token is ever
+/// sent here (invariant #5).
 ///
 /// ## Default base URL
 ///
@@ -66,7 +72,8 @@ public final class DsClient {
 
     // MARK: - Publish
 
-    /// `POST /ds/mailbox/{pseudonym_hex}/messages`.
+    /// `POST /ds/mailbox/{pseudonym_hex}/messages`. Unsigned: a mailbox is
+    /// open for writes (the cold inbox of ADR-0005), claimed or not.
     public func publishMailbox(
         pseudonym: Data,
         payload: Data
@@ -81,15 +88,20 @@ public final class DsClient {
         }
         return try await doPublish(
             endpoint: "/ds/mailbox/\(Self.pseudonymHex(pseudonym))/messages",
-            payload: payload
+            payload: payload,
+            auth: nil
         )
     }
 
     /// `POST /ds/group/{group_id_hex}/messages`. `groupId` is not
     /// constrained to 32 bytes (MLS group ids can be longer).
+    ///
+    /// ADR-0053 — `auth` signs the request for a claimed journal. `nil` sends
+    /// it unsigned, which only an unclaimed journal accepts.
     public func publishGroup(
         groupId: Data,
-        payload: Data
+        payload: Data,
+        auth: DsAuth? = nil
     ) async throws -> PublishResult {
         guard !groupId.isEmpty else {
             throw DsClientError.argument("groupId must be non-empty")
@@ -99,22 +111,22 @@ public final class DsClient {
         }
         return try await doPublish(
             endpoint: "/ds/group/\(Self.pseudonymHex(groupId))/messages",
-            payload: payload
+            payload: payload,
+            auth: auth
         )
     }
 
     private func doPublish(
         endpoint: String,
-        payload: Data
+        payload: Data,
+        auth: DsAuth?
     ) async throws -> PublishResult {
-        let url = try buildURL(endpoint: endpoint)
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-        request.httpBody = payload
-        let parsed: PublishWireResponse = try await execute(
+        let parsed: PublishWireResponse = try await sendDecoding(
+            method: "POST",
             endpoint: endpoint,
-            request: request
+            body: payload,
+            contentType: "application/octet-stream",
+            auth: auth
         )
         return PublishResult(id: parsed.id, createdAt: parsed.createdAt)
     }
@@ -122,11 +134,17 @@ public final class DsClient {
     // MARK: - Fetch
 
     /// `GET /ds/mailbox/{pseudonym_hex}/messages?...`.
+    ///
+    /// ADR-0053 — reading a claimed mailbox needs a proof under the identity
+    /// key the mailbox is named after (`dsMailboxSigner(identity:)`). Only
+    /// this device's own mailboxes are ever read signed; a rendezvous mailbox
+    /// stays unclaimed and is read with `auth == nil`.
     public func fetchMailbox(
         pseudonym: Data,
         after: Int64? = nil,
         limit: Int? = nil,
-        waitSecs: Int? = nil
+        waitSecs: Int? = nil,
+        auth: DsAuth? = nil
     ) async throws -> FetchResult {
         guard pseudonym.count == Self.pseudonymLength else {
             throw DsClientError.argument(
@@ -137,7 +155,8 @@ public final class DsClient {
             endpoint: "/ds/mailbox/\(Self.pseudonymHex(pseudonym))/messages",
             after: after,
             limit: limit,
-            waitSecs: waitSecs
+            waitSecs: waitSecs,
+            auth: auth
         )
     }
 
@@ -146,7 +165,8 @@ public final class DsClient {
         groupId: Data,
         after: Int64? = nil,
         limit: Int? = nil,
-        waitSecs: Int? = nil
+        waitSecs: Int? = nil,
+        auth: DsAuth? = nil
     ) async throws -> FetchResult {
         guard !groupId.isEmpty else {
             throw DsClientError.argument("groupId must be non-empty")
@@ -155,7 +175,30 @@ public final class DsClient {
             endpoint: "/ds/group/\(Self.pseudonymHex(groupId))/messages",
             after: after,
             limit: limit,
-            waitSecs: waitSecs
+            waitSecs: waitSecs,
+            auth: auth
+        )
+    }
+
+    /// ADR-0053 — `GET /ds/group/{group_id_hex}/knocks?...`: what non-members
+    /// knocked on this group. Signed exactly like a group read; the response
+    /// has the shape of a journal fetch with its own id space.
+    public func fetchKnocks(
+        groupId: Data,
+        after: Int64? = nil,
+        limit: Int? = nil,
+        waitSecs: Int? = nil,
+        auth: DsAuth? = nil
+    ) async throws -> FetchResult {
+        guard !groupId.isEmpty else {
+            throw DsClientError.argument("groupId must be non-empty")
+        }
+        return try await doFetch(
+            endpoint: "/ds/group/\(Self.pseudonymHex(groupId))/knocks",
+            after: after,
+            limit: limit,
+            waitSecs: waitSecs,
+            auth: auth
         )
     }
 
@@ -163,13 +206,9 @@ public final class DsClient {
         endpoint: String,
         after: Int64?,
         limit: Int?,
-        waitSecs: Int?
+        waitSecs: Int?,
+        auth: DsAuth?
     ) async throws -> FetchResult {
-        guard var components = URLComponents(string: baseURL + endpoint) else {
-            throw DsClientError.argument(
-                "invalid baseURL '\(baseURL)' or endpoint '\(endpoint)'"
-            )
-        }
         var query: [URLQueryItem] = []
         if let after = after {
             query.append(URLQueryItem(name: "after", value: String(after)))
@@ -180,28 +219,22 @@ public final class DsClient {
         if let waitSecs = waitSecs {
             query.append(URLQueryItem(name: "wait", value: String(waitSecs)))
         }
-        if !query.isEmpty {
-            components.queryItems = query
-        }
-        guard let url = components.url else {
-            throw DsClientError.argument("failed to build URL for \(endpoint)")
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-
         // Long-poll budget translates to a generous URLSession
         // timeout: the server clamps to its `MAX_WAIT_SECS`; on
         // the client side we add a few seconds of slack so the
         // round-trip + server's clamp can complete without
         // URLSession timing out first.
+        var timeout: TimeInterval?
         if let waitSecs = waitSecs, waitSecs > 0 {
-            request.timeoutInterval = TimeInterval(waitSecs + 10)
+            timeout = TimeInterval(waitSecs + 10)
         }
 
-        let parsed: FetchWireResponse = try await execute(
+        let parsed: FetchWireResponse = try await sendDecoding(
+            method: "GET",
             endpoint: endpoint,
-            request: request
+            queryItems: query,
+            timeout: timeout,
+            auth: auth
         )
         let messages: [MailboxMessage] = parsed.messages.compactMap { msg in
             guard let payload = base64Decode(msg.payloadB64) else {
@@ -216,45 +249,223 @@ public final class DsClient {
         return FetchResult(messages: messages, hasMore: parsed.hasMore)
     }
 
+    // MARK: - ADR-0053 claim, knock, PoW
+
+    /// `PUT /ds/group/{group_id_hex}/access` — register the access key of one
+    /// epoch. `bodyJson` is the signer's `groupClaimBodyJson()` verbatim.
+    ///
+    /// `provenBy` signs the registration under an already-registered epoch
+    /// (register-before-publish, heal-on-apply, a claim with an older signer
+    /// in hand). `nil` sends it unsigned, which the server accepts for the
+    /// first registration of an unclaimed journal and for re-sending a key
+    /// already registered at that epoch.
+    public func claimGroup(
+        groupId: Data,
+        bodyJson: String,
+        provenBy: DsRequestSigner?
+    ) async throws {
+        guard !groupId.isEmpty else {
+            throw DsClientError.argument("groupId must be non-empty")
+        }
+        _ = try await send(
+            method: "PUT",
+            endpoint: "/ds/group/\(Self.pseudonymHex(groupId))/access",
+            body: Data(bodyJson.utf8),
+            contentType: "application/json",
+            auth: provenBy.map { DsAuth(signer: $0) }
+        )
+    }
+
+    /// `PUT /ds/mailbox/{pseudonym_hex}/access` — claim a mailbox under the
+    /// identity key it is named after. `bodyJson` is the mailbox signer's
+    /// `mailboxClaimBodyJson()`. Unsigned: the key is public and the claim
+    /// grants the claimant nothing.
+    public func claimMailbox(pseudonym: Data, bodyJson: String) async throws {
+        guard pseudonym.count == Self.pseudonymLength else {
+            throw DsClientError.argument(
+                "pseudonym must be \(Self.pseudonymLength) bytes"
+            )
+        }
+        _ = try await send(
+            method: "PUT",
+            endpoint: "/ds/mailbox/\(Self.pseudonymHex(pseudonym))/access",
+            body: Data(bodyJson.utf8),
+            contentType: "application/json",
+            auth: nil
+        )
+    }
+
+    /// `POST /ds/group/{group_id_hex}/knock` — a non-member's request, PoW
+    /// gated. An empty `payloads` list is a PROBE: nothing is stored and the
+    /// response carries the group's latest registered epoch.
+    public func knock(
+        groupId: Data,
+        pow: PowProofPayload,
+        payloads: [Data]
+    ) async throws -> KnockResult {
+        guard !groupId.isEmpty else {
+            throw DsClientError.argument("groupId must be non-empty")
+        }
+        let body = try encoder.encode(
+            KnockWireRequest(pow: pow, payloadsB64: payloads.map { base64Encode($0) })
+        )
+        let parsed: KnockWireResponse = try await sendDecoding(
+            method: "POST",
+            endpoint: "/ds/group/\(Self.pseudonymHex(groupId))/knock",
+            body: body,
+            contentType: "application/json",
+            auth: nil
+        )
+        return KnockResult(ids: parsed.ids, epoch: parsed.epoch)
+    }
+
+    /// `POST /pow/challenge` on the DS — a fresh challenge for one knock.
+    public func powChallenge() async throws -> PowChallengeResponse {
+        try await sendDecoding(
+            method: "POST",
+            endpoint: "/pow/challenge",
+            body: Data(),
+            contentType: nil,
+            auth: nil
+        )
+    }
+
     // MARK: - Internal HTTP
 
-    private func buildURL(endpoint: String) throws -> URL {
-        guard let url = URL(string: baseURL + endpoint) else {
+    /// Build the request URL and the exact `(path, query)` a proof signs.
+    ///
+    /// The proof covers the SERVICE path — `endpoint`, never the nginx prefix
+    /// `baseURL` carries — and the query string exactly as it goes on the
+    /// wire, which is `URLComponents.percentEncodedQuery` because that is what
+    /// `components.url` sends. Static and pure so a test pins that the two
+    /// agree byte for byte.
+    static func requestTarget(
+        baseURL: String,
+        endpoint: String,
+        queryItems: [URLQueryItem]
+    ) throws -> (url: URL, path: String, query: String) {
+        guard var components = URLComponents(string: baseURL + endpoint) else {
             throw DsClientError.argument(
                 "invalid baseURL '\(baseURL)' or endpoint '\(endpoint)'"
             )
         }
-        return url
+        if !queryItems.isEmpty {
+            components.queryItems = queryItems
+        }
+        guard let url = components.url else {
+            throw DsClientError.argument("failed to build URL for \(endpoint)")
+        }
+        return (url, endpoint, components.percentEncodedQuery ?? "")
     }
 
-    private func execute<Res: Decodable>(
+    /// One request, signed when `auth` is present, with the contract-point-5
+    /// retries on a `401`: once under the previous epoch's signer, once after
+    /// a claim-on-open; a refusal that survives both surfaces, as the clock
+    /// copy when the server's `Date` is more than a minute off.
+    private func send(
+        method: String,
         endpoint: String,
-        request: URLRequest
-    ) async throws -> Res {
-        let raw: (Data, URLResponse)
-        do {
-            raw = try await AntiCensorshipTransport.perform(request, session: session, config: .current)
-        } catch {
-            throw DsClientError.network(endpoint: endpoint, underlying: error)
+        queryItems: [URLQueryItem] = [],
+        body: Data = Data(),
+        contentType: String? = nil,
+        timeout: TimeInterval? = nil,
+        auth: DsAuth?
+    ) async throws -> (Data, HTTPURLResponse) {
+        let target = try Self.requestTarget(
+            baseURL: baseURL, endpoint: endpoint, queryItems: queryItems)
+
+        func attempt(_ signer: DsRequestSigner?) async throws -> (Data, HTTPURLResponse) {
+            var request = URLRequest(url: target.url)
+            request.httpMethod = method
+            if let contentType {
+                request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+            }
+            if method != "GET" {
+                request.httpBody = body
+            }
+            if let timeout {
+                request.timeoutInterval = timeout
+            }
+            if let signer {
+                let header = signer.sign(
+                    method: method,
+                    path: target.path,
+                    query: target.query,
+                    body: method == "GET" ? Data() : body
+                )
+                request.setValue(header, forHTTPHeaderField: Self.proofHeaderName)
+            }
+            let raw: (Data, URLResponse)
+            do {
+                raw = try await AntiCensorshipTransport.perform(request, session: session, config: .current)
+            } catch {
+                throw DsClientError.network(endpoint: endpoint, underlying: error)
+            }
+            guard let http = raw.1 as? HTTPURLResponse else {
+                throw DsClientError.http(
+                    status: 0,
+                    endpoint: endpoint,
+                    body: "non-HTTP response"
+                )
+            }
+            return (raw.0, http)
         }
-        let (data, response) = raw
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw DsClientError.http(
-                status: 0,
-                endpoint: endpoint,
-                body: "non-HTTP response"
-            )
+
+        var result = try await attempt(auth?.signer)
+        if result.1.statusCode == 401, let auth {
+            for step in DsUnauthorizedRetry.plan(
+                hasPrevious: auth.previous != nil, hasReclaim: auth.reclaim != nil
+            ) {
+                let retrySigner: DsRequestSigner?
+                switch step {
+                case .previousEpoch:
+                    retrySigner = auth.previous
+                case .reclaim:
+                    retrySigner = await auth.reclaim?()
+                }
+                guard let retrySigner else { continue }
+                result = try await attempt(retrySigner)
+                if result.1.statusCode != 401 { break }
+            }
         }
-        guard (200..<300).contains(httpResponse.statusCode) else {
+
+        let (data, http) = result
+        guard (200..<300).contains(http.statusCode) else {
+            if http.statusCode == 401, auth != nil,
+               DsClockSkew.isSkewed(
+                   serverDateHeader: http.value(forHTTPHeaderField: "Date"), now: Date()) {
+                throw DsClientError.clockSkew(endpoint: endpoint)
+            }
             let bodyText = Self.truncate(
                 String(data: data, encoding: .utf8) ?? "<binary>"
             )
             throw DsClientError.http(
-                status: httpResponse.statusCode,
+                status: http.statusCode,
                 endpoint: endpoint,
                 body: bodyText
             )
         }
+        return (data, http)
+    }
+
+    private func sendDecoding<Res: Decodable>(
+        method: String,
+        endpoint: String,
+        queryItems: [URLQueryItem] = [],
+        body: Data = Data(),
+        contentType: String? = nil,
+        timeout: TimeInterval? = nil,
+        auth: DsAuth?
+    ) async throws -> Res {
+        let (data, http) = try await send(
+            method: method,
+            endpoint: endpoint,
+            queryItems: queryItems,
+            body: body,
+            contentType: contentType,
+            timeout: timeout,
+            auth: auth
+        )
         do {
             return try decoder.decode(Res.self, from: data)
         } catch {
@@ -262,12 +473,15 @@ public final class DsClient {
                 String(data: data, encoding: .utf8) ?? "<binary>"
             )
             throw DsClientError.http(
-                status: httpResponse.statusCode,
+                status: http.statusCode,
                 endpoint: endpoint,
                 body: "decode failed: \(error) [body=\(bodyText)]"
             )
         }
     }
+
+    /// The proof header's name, from the core (`x-lakko-ds-proof`).
+    static let proofHeaderName: String = dsProofHeaderName()
 
     private static func truncate(_ s: String, max: Int = 512) -> String {
         if s.count > max {
@@ -335,7 +549,36 @@ private struct FetchWireMessage: Decodable {
     }
 }
 
+private struct KnockWireRequest: Encodable {
+    let pow: PowProofPayload
+    let payloadsB64: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case pow
+        case payloadsB64 = "payloads_b64"
+    }
+}
+
+private struct KnockWireResponse: Decodable {
+    let ids: [Int64]
+    let epoch: UInt64?
+}
+
 // MARK: - Public result types
+
+/// Result of ``DsClient/knock(groupId:pow:payloads:)``.
+public struct KnockResult: Equatable {
+    /// The ids of the stored knock rows (empty for a probe).
+    public let ids: [Int64]
+    /// The group's latest registered access epoch, or `nil` for an unclaimed
+    /// group.
+    public let epoch: UInt64?
+
+    public init(ids: [Int64], epoch: UInt64?) {
+        self.ids = ids
+        self.epoch = epoch
+    }
+}
 
 /// Result of ``DsClient/publishMailbox(pseudonym:payload:)`` /
 /// ``DsClient/publishGroup(groupId:payload:)``.
@@ -386,6 +629,19 @@ public enum DsClientError: Error {
     case argument(String)
     case http(status: Int, endpoint: String, body: String)
     case network(endpoint: String, underlying: Error)
+    /// ADR-0053 — a signed request was refused (`401`) after every retry, and
+    /// the server's clock is more than a minute from this device's: the proof
+    /// window is two minutes, so the device clock is the likely cause.
+    case clockSkew(endpoint: String)
+
+    /// The clock copy when `error` is, or wraps, ``clockSkew(endpoint:)``.
+    public static func clockSkewCopy(in error: Error) -> String? {
+        if let ds = error as? DsClientError, case .clockSkew = ds { return DsClockSkew.copy }
+        if let chat = error as? ChatError, case .wrapped(_, let underlying) = chat {
+            return clockSkewCopy(in: underlying)
+        }
+        return nil
+    }
 }
 
 extension DsClientError: LocalizedError {
@@ -394,6 +650,7 @@ extension DsClientError: LocalizedError {
         case .argument(let m): return m
         case .http(let s, let e, let b): return "ds \(e) → \(s): \(b)"
         case .network(let e, let u): return "ds \(e) network error: \(u)"
+        case .clockSkew: return DsClockSkew.copy
         }
     }
 }

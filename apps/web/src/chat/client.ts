@@ -77,6 +77,8 @@ import { DsClient } from "../ds/client";
 import type { FetchResult } from "../ds/client";
 import { base64Encode } from "../auth/account-id";
 import { withGroupMlsLock } from "../mls/group-lock";
+import { healAfterApply, takeSigner } from "../ds/access";
+import { readKnockCursor, writeKnockCursor } from "./knock-cursor";
 import { PushClient } from "../push/client";
 import { loadWasm } from "../wasm";
 import type {
@@ -1048,10 +1050,99 @@ export class ChatClient {
       throw new ChatError("DS fetch failed", err);
     }
 
+    // ADR-0053 contract point 7 — an owner or admin also reads the group's
+    // KNOCK queue, where a `/g/` joiner's external-join proposal and its
+    // attribution now arrive (a non-member can no longer write the journal).
+    // Read after the journal returns, never long-polled: a knock costs one
+    // poll period of latency, which the approval it waits on dwarfs. A failed
+    // read is logged and retried next poll; it never fails the journal poll.
+    const groupIdB64 = base64Encode(groupId);
+    let knocks: { after: number; rows: FetchResult } | null = null;
+    if (readsKnocks(group, myIdentity)) {
+      const knockAfter = readKnockCursor(groupIdB64);
+      try {
+        knocks = {
+          after: knockAfter,
+          rows: await this.ds.fetchKnocks(groupId, { after: knockAfter, waitSecs: 0 }),
+        };
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("ChatClient: knock read failed; retried next poll", err);
+      }
+    }
+
     // The APPLY + the cursor advance — inside the lock, atomic together.
-    return withGroupMlsLock(base64Encode(groupId), async () =>
-      this.applyPolledBatch(myIdentity, group, after, raw, cursorRef),
-    );
+    return withGroupMlsLock(groupIdB64, async () => {
+      const result = await this.applyPolledBatch(myIdentity, group, after, raw, cursorRef);
+      if (knocks === null || result.outcome !== "applied") return result;
+      const knockEvents = await this.applyKnocks(myIdentity, group, knocks.after, knocks.rows);
+      return knockEvents.length === 0
+        ? result
+        : { ...result, events: [...result.events, ...knockEvents] };
+    });
+  }
+
+  /**
+   * ADR-0053 contract point 7 — feed knock rows to the SAME receive path the
+   * journal rows use, under the lock the caller holds. Only an external-join
+   * request can come out of a knock (a non-member cannot encrypt anything
+   * else); an attribution is not an MLS message and is skipped here, and read
+   * by `ContactsClient.fetchJoinAttributions` instead. Anything else a knock
+   * row decodes to is dropped rather than rendered: the queue is written by
+   * strangers.
+   */
+  private async applyKnocks(
+    myIdentity: WasmIdentity,
+    group: WasmGroup,
+    after: number,
+    raw: FetchResult,
+  ): Promise<IncomingChatEvent[]> {
+    const groupIdB64 = base64Encode(group.groupId);
+    // A concurrent poll consumed this batch already.
+    if (readKnockCursor(groupIdB64) !== after) return [];
+    const events: IncomingChatEvent[] = [];
+    let last = after;
+    for (const row of raw.messages) {
+      last = row.id;
+      let processed;
+      try {
+        // `processKnock`, never `processIncomingVerifyingRoles`: a knock row is
+        // an unauthenticated write, so a MEMBER can post a real commit or an
+        // application message there. The core refuses anything that is not a
+        // stranger's external-join proposal for this group BEFORE processing
+        // it; applying such a row here would move only the admins who read
+        // knocks and fork them from everyone else.
+        processed = group.processKnock(myIdentity, row.payload);
+      } catch (err) {
+        // A refused row (a member's commit or message, a proposal for another
+        // group), an attribution (not MLS), a stale-epoch proposal, garbage.
+        // Dropped; the knock cursor still moves past it.
+        // eslint-disable-next-line no-console
+        console.warn("ChatClient: knock row dropped", row.id, err);
+        continue;
+      }
+      if (processed.kind !== "ExternalJoinProposal") continue;
+      const event = await toEvent(
+        row.id,
+        row.createdAt,
+        processed,
+        (leaf) => resolveMemberIdentity(rosterOf(group), leaf),
+        (leaf) => resolveLeafSignatureKey(rosterOf(group), leaf),
+      );
+      if (event.kind === "externalJoinRequest") events.push(event);
+    }
+    if (last === after) return events;
+    // The retained request lives in the provider (ADR-0027), so it must be
+    // durable before the cursor moves past the knock that carried it.
+    try {
+      await this.persistDurableOrThrow();
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("ChatClient: knock batch not persisted; cursor held", err);
+      return events;
+    }
+    writeKnockCursor(groupIdB64, last);
+    return events;
   }
 
   /** The serialized half of {@link pollMessages}: everything that touches MLS
@@ -1077,6 +1168,28 @@ export class ChatClient {
       cursorRef.beforeApply?.();
     }
 
+    // ADR-0053 contract point 4 — the access key of the epoch the group is at
+    // BEFORE this batch, so a commit in it can be followed by registering the
+    // new epoch's key proven under this one.
+    const signerBefore = takeSigner(() => group.dsAccessSigner(myIdentity));
+    try {
+      return await this.applyPolledRows(myIdentity, group, after, raw, cursorRef, signerBefore);
+    } catch (err) {
+      signerBefore?.free();
+      throw err;
+    }
+  }
+
+  /** The row loop and the cursor gate of {@link applyPolledBatch}; owns
+   *  `signerBefore` from here on (freed once the heal settles). */
+  private async applyPolledRows(
+    myIdentity: WasmIdentity,
+    group: WasmGroup,
+    after: number,
+    raw: FetchResult,
+    cursorRef: PollCursorRef | undefined,
+    signerBefore: ReturnType<typeof takeSigner>,
+  ): Promise<PollMessagesResult> {
     const events: IncomingChatEvent[] = [];
     let cursor = after;
     // Echo ids matched in this batch, CONSUMED only once the cursor actually
@@ -1152,12 +1265,34 @@ export class ChatClient {
         for (const id of matchedEchoes) consumeOwnPublished(groupIdB64, id);
       },
     );
+    // ADR-0053 contract point 4 — heal on apply. Fired, not awaited: it is a
+    // network call and this region holds the group lock. The helper signs
+    // synchronously when called, so the signers can be freed once it settles.
+    const signerAfter = takeSigner(() => group.dsAccessSigner(myIdentity));
+    void healAfterApply(this.ds, group.groupId, signerBefore, signerAfter).finally(() => {
+      signerBefore?.free();
+      signerAfter?.free();
+    });
     if (verdict === "held") {
       // Report `after`, never the un-committed `cursor`: a caller that ignores
       // `outcome` and writes `result.cursor` back must still not lead.
       return { events, cursor: after, hasMore: false, outcome: "persist-held" };
     }
     return { events, cursor, hasMore: raw.hasMore, outcome: "applied" };
+  }
+}
+
+/**
+ * ADR-0053 contract point 7 — does this device read the group's knock queue?
+ * An owner or admin (the ADR-0045 committer set, the same set ADR-0027 lets
+ * approve an external join). A plain member never acts on a join request, so
+ * reading strangers' rows would only cost it bandwidth. A torn read is `false`.
+ */
+export function readsKnocks(group: WasmGroup, identity: WasmIdentity): boolean {
+  try {
+    return group.ownCommitterRank(identity) !== undefined;
+  } catch {
+    return false;
   }
 }
 

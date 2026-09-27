@@ -37,7 +37,7 @@ import {
   publishChannelMeta,
 } from "./channel-meta";
 import { apiError, channelErrorText } from "./api";
-import { openPublisherGroup } from "./copublisher";
+import { openPublisherGroup, registerPublisherGroupAccess } from "./copublisher";
 import type { WasmIdentity } from "./composer";
 import { channelErrorMessage } from "./legacy-v1";
 import type { PublisherGroupHandle } from "./publisher-group-handle";
@@ -182,6 +182,7 @@ export function ManagePanel(props: { readonly channelIdHex: string }): JSX.Eleme
   const [group, setGroup] = createSignal<PublisherGroupHandle | null>(null);
   const [openError, setOpenError] = createSignal<string | null>(null);
 
+  let unregisterDsAccess: (() => void) | null = null;
   onMount(() => {
     // The SESSION-LONG account identity, not a throwaway `Identity.fromSeed`:
     // the PublisherGroup lives in this identity's provider, which the channel
@@ -197,6 +198,9 @@ export function ManagePanel(props: { readonly channelIdHex: string }): JSX.Eleme
         // create a second, forked group.
         await awaitChannelsHydration();
         const pg = await openPublisherGroup(id, props.channelIdHex);
+        // ADR-0053 — the DS client proves this journal's requests under the
+        // group's access key while the panel holds the handle.
+        unregisterDsAccess = registerPublisherGroupAccess(id, pg);
         setIdentity(id);
         setGroup(pg);
       } catch (err) {
@@ -212,6 +216,9 @@ export function ManagePanel(props: { readonly channelIdHex: string }): JSX.Eleme
   // in-flight callback touches a freed handle on unmount. The identity is
   // the session's; it is NOT freed here.
   onCleanup(() => {
+    // Withdraw the DS access source BEFORE the handle it reads is freed.
+    unregisterDsAccess?.();
+    unregisterDsAccess = null;
     try {
       group()?.free();
     } catch {

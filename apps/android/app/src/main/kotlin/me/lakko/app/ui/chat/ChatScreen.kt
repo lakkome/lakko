@@ -1005,6 +1005,9 @@ public fun ChatScreen(
                                         sourceGroupIdHex = state.groupIdHex,
                                         message = msg,
                                         authorLabel = timelineAuthorLabel(msg),
+                                        // ADR-0053 section 6 — no origin out of a one-to-one.
+                                        sourceIsOneToOne = viewModel.conversationKind() ==
+                                            me.lakko.app.chat.ConversationKind.Chat,
                                     ),
                                 )
                             },
@@ -1088,6 +1091,9 @@ public fun ChatScreen(
                             sourceGroupIdHex = state.groupIdHex,
                             message = msg,
                             authorLabel = timelineAuthorLabel(msg),
+                            // ADR-0053 section 6 — no origin out of a one-to-one.
+                            sourceIsOneToOne = viewModel.conversationKind() ==
+                                me.lakko.app.chat.ConversationKind.Chat,
                         )
                     }
                     if (requests.isNotEmpty()) onForwardSelection(requests)

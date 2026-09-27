@@ -35,6 +35,14 @@ import me.lakko.app.contacts.wrapEnvelope
 import me.lakko.app.discovery.ConsumeInviteResult
 import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.ds.DsClient
+import me.lakko.app.ds.DsJournalSigner
+import me.lakko.app.ds.DsSignerRegistry
+import me.lakko.app.ds.DsSignerSource
+import me.lakko.app.ds.FfiDsJournalSigner
+import me.lakko.app.ds.dsGroupKeyHex
+import me.lakko.app.ds.dsMailboxKey
+import me.lakko.app.ds.healRegistration
+import me.lakko.app.ds.registerBeforePublish
 import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.GroupMember
@@ -103,6 +111,13 @@ private const val ADMIT_DEVICE_POLL_MS: Long = 3_000L
 
 /** SharedPreferences file holding the ADR-0050 device-mailbox cursor. */
 private const val DEVICE_MAILBOX_PREFS: String = "lakko-device-mailbox"
+
+/** ADR-0053 — at most one knock-queue read per group in this window. */
+private const val KNOCK_POLL_MIN_INTERVAL_MS: Long = 10_000L
+
+/** ADR-0053 — the [DsSignerRegistry] owner tag of the journals this repository
+ *  installs, so a session wipe drops exactly those. */
+private const val DS_SIGNER_OWNER: String = "chat"
 
 /**
  * In-memory + on-disk state holder for the user's MLS chats.
@@ -522,7 +537,12 @@ public class ChatRepository(
             ),
         )
         val existing = currentAccountIdB64.get()
-        if (existing == newAccountIdB64) return
+        if (existing == newAccountIdB64) {
+            // ADR-0053 — a re-authentication of the same account still claims
+            // both mailboxes ("after every login").
+            claimOwnMailboxesBestEffort()
+            return
+        }
         if (existing != null) {
             // Different account — wipe in-memory state before
             // attaching the new Identity.
@@ -635,6 +655,9 @@ public class ChatRepository(
                         val record = GroupRecord(group = group, groupId = groupId)
                         persistedWatermarks[groupIdHex.lowercase()]?.let(record::seedReadWatermarks)
                         groups[groupIdHex] = record
+                        // ADR-0053 — sign this journal's requests, and claim it
+                        // (idempotent; launched, never awaited).
+                        openJournal(groupIdHex)
                         // ADR-0042 legacy-sweep — provision opaque push routing for
                         // each rehydrated group: OWNER + no secret -> mint + persist
                         // + distribute the envelope + subscribe under push_gid; a
@@ -666,6 +689,8 @@ public class ChatRepository(
 
             mutableState.update { it.copy(bootstrapped = true) }
         }
+        // ADR-0053 — sign reads of both own mailboxes and claim them.
+        claimOwnMailboxesBestEffort()
 
         // Every session start — a password / passkey / recovery landing AND
         // the silent cold-start restore — publishes a KeyPackage minted from
@@ -819,7 +844,29 @@ public class ChatRepository(
                 groupId = group.groupId(),
                 recipientPseudonyms = pseudonyms,
                 welcomeEnvelope = welcomeEnvelope,
+                // ADR-0053 — the founder claims the journal at the epoch the
+                // invitees' Welcome lands them at.
+                accessSigner = try {
+                    FfiDsJournalSigner(group.dsAccessSigner(identity))
+                } catch (e: Throwable) {
+                    null
+                },
             )
+        }
+
+        // ADR-0053 client contract point 2 — claim at creation, BEFORE the
+        // Welcome goes out, so no invitee ever reaches an unclaimed journal it
+        // then finds claimed under a key it does not know. Best effort: an
+        // unclaimed journal still works (it is Phase 1.3's open journal), and
+        // claim-on-open retries at the next launch.
+        created.accessSigner?.let { signer ->
+            try {
+                dsClient.claimGroup(created.groupId, signer)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0053: claim at creation did not land", e)
+            }
         }
 
         // G-37 — the DS mailbox publishes run OUTSIDE the provider lock. A
@@ -829,7 +876,7 @@ public class ChatRepository(
             try {
                 dsClient.publishMailbox(pseudonym, created.welcomeEnvelope)
             } catch (e: Throwable) {
-                throw ChatError("DS publishMailbox (Welcome) failed", e)
+                throw ChatError(dsErrorMessage(e, "DS publishMailbox (Welcome) failed"), e)
             }
         }
 
@@ -838,6 +885,8 @@ public class ChatRepository(
             providerLock.withLock {
                 groups[groupIdHex] =
                     GroupRecord(group = created.group, groupId = created.groupId)
+                // Claimed above; only the signer is installed here.
+                installJournalSigner(groupIdHex)
                 persistKnownGroupBestEffort(groupIdHex)
                 persistSnapshotBestEffort()
                 // ADR-0042 — the founder is the OWNER: mint the push-routing
@@ -881,6 +930,7 @@ public class ChatRepository(
         val groupId: ByteArray,
         val recipientPseudonyms: List<ByteArray>,
         val welcomeEnvelope: ByteArray,
+        val accessSigner: DsJournalSigner?,
     )
 
     /**
@@ -950,6 +1000,9 @@ public class ChatRepository(
             val groupId = group.groupId()
             val groupIdHex = DsClient.pseudonymHex(groupId)
             groups[groupIdHex] = GroupRecord(group = group, groupId = groupId)
+            // ADR-0053 — sign this journal's requests from now on, and claim it
+            // at the epoch the Welcome brought us to (idempotent).
+            openJournal(groupIdHex)
             persistKnownGroupBestEffort(groupIdHex)
             persistSnapshotBestEffort()
             // ADR-0042 — a joiner is not the owner: `ensure` defers the
@@ -1619,18 +1672,28 @@ public class ChatRepository(
                         val publish = try {
                             dsClient.publishGroup(record.groupId, proposalBytes)
                         } catch (e: Throwable) {
-                            throw ChatError("DS publishGroup (role-change proposal) failed", e)
+                            throw ChatError(dsErrorMessage(e, "DS publishGroup (role-change proposal) failed"), e)
                         }
                         noteOwnRequestBestEffort(groupIdHex, "role-change")
                         publishThreadList()
                         MembershipOutcome.Proposed(publish.id) as MembershipOutcome
                     }
                 }
+                val signerBeforeCommit = currentJournalSigner(groupIdHex)
                 val commitBytes = try {
                     record.group.setGroupRoles(identity, table.owner, admins)
                 } catch (e: FfiException) {
                     throw ChatError("setGroupRoles failed", e)
                 }
+                // ADR-0053 client contract point 3 — the Delivery Service learns the
+                // key of epoch N+1, proven under N's, BEFORE the outbox entry is
+                // written or the commit published. Held inside the provider lock on
+                // purpose: the group is eager-merged to an UN-published N+1, and
+                // releasing the lock here would let a sibling group's whole-provider
+                // snapshot capture it (the ADR-0040 hazard). The PUT is bounded by
+                // the DS client's request timeout; a refusal resets the group to the
+                // durable N and aborts, exactly as a failed outbox write does.
+                val commitSigner = registerNextEpochOrReset(groupIdHex, record.groupId, signerBeforeCommit)
                 // ADR-0040 (G-35) — durable pending-commit outbox: persist the entry
                 // (commit only; a role change has no Welcome) THEN the N+1 snapshot,
                 // BOTH fail-closed, BEFORE any publish. A throw aborts the op (no
@@ -1669,9 +1732,9 @@ public class ChatRepository(
                 // unchanged, just expressed across the lock release.
                 suspend {
                     val commitPublish = try {
-                        dsClient.publishGroup(record.groupId, commitBytes)
+                        dsClient.publishGroup(record.groupId, commitBytes, signer = commitSigner)
                     } catch (e: Throwable) {
-                        throw ChatError("DS publishGroup (role change) failed", e)
+                        throw ChatError(dsErrorMessage(e, "DS publishGroup (role change) failed"), e)
                     }
                     chatClient.markOwnPublishedCommit(groupIdHex, commitPublish.id)
                     ackCommitBestEffort(entry.id, commitPublish.id, null)
@@ -1793,7 +1856,7 @@ public class ChatRepository(
                     val publish = try {
                         dsClient.publishGroup(record.groupId, proposalBytes)
                     } catch (e: Throwable) {
-                        throw ChatError("DS publishGroup (ownership-transfer proposal) failed", e)
+                        throw ChatError(dsErrorMessage(e, "DS publishGroup (ownership-transfer proposal) failed"), e)
                     }
                     noteOwnRequestBestEffort(
                         groupIdHex,
@@ -1943,7 +2006,7 @@ public class ChatRepository(
                         val publish = try {
                             dsClient.publishGroup(record.groupId, proposalBytes)
                         } catch (e: Throwable) {
-                            throw ChatError("DS publishGroup (add-member proposal) failed", e)
+                            throw ChatError(dsErrorMessage(e, "DS publishGroup (add-member proposal) failed"), e)
                         }
                         noteOwnRequestBestEffort(groupIdHex, "add:" + outboxB64(deviceKey))
                         publishThreadList()
@@ -1951,11 +2014,21 @@ public class ChatRepository(
                     }
                 }
                 // 1. create-commit — eager-merges epoch N -> N+1 in the in-memory provider.
+                val signerBeforeCommit = currentJournalSigner(groupIdHex)
                 val addResult = try {
                     record.group.addMemberFromWire(identity, keyPackageBytes)
                 } catch (e: FfiException) {
                     throw ChatError("addMemberFromWire failed", e)
                 }
+                // ADR-0053 client contract point 3 — the Delivery Service learns the
+                // key of epoch N+1, proven under N's, BEFORE the outbox entry is
+                // written or the commit published. Held inside the provider lock on
+                // purpose: the group is eager-merged to an UN-published N+1, and
+                // releasing the lock here would let a sibling group's whole-provider
+                // snapshot capture it (the ADR-0040 hazard). The PUT is bounded by
+                // the DS client's request timeout; a refusal resets the group to the
+                // durable N and aborts, exactly as a failed outbox write does.
+                val commitSigner = registerNextEpochOrReset(groupIdHex, record.groupId, signerBeforeCommit)
                 // Compute the second artifact (Welcome) + its mailbox destination
                 // UP-FRONT so the outbox entry holds the EXACT bytes the restart
                 // sweep will re-publish (no drift). The Welcome ships to the new
@@ -2012,15 +2085,15 @@ public class ChatRepository(
                 suspend {
                     // 3. publish artifact 1 (commit) then artifact 2 (Welcome).
                     val commitPublish = try {
-                        dsClient.publishGroup(record.groupId, addResult.commit)
+                        dsClient.publishGroup(record.groupId, addResult.commit, signer = commitSigner)
                     } catch (e: Throwable) {
-                        throw ChatError("DS publishGroup (add-member commit) failed", e)
+                        throw ChatError(dsErrorMessage(e, "DS publishGroup (add-member commit) failed"), e)
                     }
                     chatClient.markOwnPublishedCommit(groupIdHex, commitPublish.id)
                     val welcomePublish = try {
                         dsClient.publishMailbox(recipientPseudonym, welcomeEnvelope)
                     } catch (e: Throwable) {
-                        throw ChatError("DS publishMailbox (Welcome) failed", e)
+                        throw ChatError(dsErrorMessage(e, "DS publishMailbox (Welcome) failed"), e)
                     }
                     // 4. both artifacts on the wire -> ack (best-effort).
                     ackCommitBestEffort(entry.id, commitPublish.id, welcomePublish.id)
@@ -2183,18 +2256,28 @@ public class ChatRepository(
                         val publish = try {
                             dsClient.publishGroup(record.groupId, proposalBytes)
                         } catch (e: Throwable) {
-                            throw ChatError("DS publishGroup (remove-member proposal) failed", e)
+                            throw ChatError(dsErrorMessage(e, "DS publishGroup (remove-member proposal) failed"), e)
                         }
                         noteOwnRequestBestEffort(groupIdHex, "remove:$leafIndex")
                         publishThreadList()
                         MembershipOutcome.Proposed(publish.id) as MembershipOutcome
                     }
                 }
+                val signerBeforeCommit = currentJournalSigner(groupIdHex)
                 val commitBytes = try {
                     record.group.removeMember(identity, leafIndex)
                 } catch (e: FfiException) {
                     throw ChatError("removeMember failed", e)
                 }
+                // ADR-0053 client contract point 3 — the Delivery Service learns the
+                // key of epoch N+1, proven under N's, BEFORE the outbox entry is
+                // written or the commit published. Held inside the provider lock on
+                // purpose: the group is eager-merged to an UN-published N+1, and
+                // releasing the lock here would let a sibling group's whole-provider
+                // snapshot capture it (the ADR-0040 hazard). The PUT is bounded by
+                // the DS client's request timeout; a refusal resets the group to the
+                // durable N and aborts, exactly as a failed outbox write does.
+                val commitSigner = registerNextEpochOrReset(groupIdHex, record.groupId, signerBeforeCommit)
                 // ADR-0040 (G-35) — durable pending-commit outbox: persist the entry
                 // (commit only; a remove has no Welcome) THEN the N+1 snapshot, BOTH
                 // fail-closed, BEFORE the publish. A throw aborts the op (no publish);
@@ -2235,9 +2318,9 @@ public class ChatRepository(
                 // function returns, i.e. still strictly after the publish.
                 suspend {
                     val commitPublish = try {
-                        dsClient.publishGroup(record.groupId, commitBytes)
+                        dsClient.publishGroup(record.groupId, commitBytes, signer = commitSigner)
                     } catch (e: Throwable) {
-                        throw ChatError("DS publishGroup (remove-member commit) failed", e)
+                        throw ChatError(dsErrorMessage(e, "DS publishGroup (remove-member commit) failed"), e)
                     }
                     chatClient.markOwnPublishedCommit(groupIdHex, commitPublish.id)
                     ackCommitBestEffort(entry.id, commitPublish.id, null)
@@ -2336,8 +2419,10 @@ public class ChatRepository(
         } catch (e: Throwable) {
             emptyList()
         }
+        // ADR-0053 section 4 — an attribution arrives with its proposal in a
+        // knock, never in the journal.
         val raw = try {
-            dsClient.fetchGroup(groupId, after = 0L, waitSecs = 0)
+            dsClient.fetchKnocks(groupId, after = 0L, waitSecs = 0)
         } catch (e: Throwable) {
             return emptyList()
         }
@@ -2376,10 +2461,10 @@ public class ChatRepository(
      * `WelcomeRendezvous` to post here, and no ADR-0040 outbox entry, because a
      * proposal makes nothing durable that a crash could strand.
      *
-     * The joiner's Welcome — and its `WelcomeRendezvous` — is produced by
-     * whichever device later sweeps this proposal into a commit. See
-     * [runCommitterSweep]: that sweep posts one rendezvous per added key, blind
-     * to which of them came from a link.
+     * The joiner's Welcome is produced by whichever device later sweeps this
+     * proposal into a commit. See [runCommitterSweep]: since ADR-0053 that
+     * sweep sends it to each added key's mailbox only, blind to which of them
+     * came from a link.
      *
      * ## No pre-drain, and no pending-set refusal
      *
@@ -2434,7 +2519,7 @@ public class ChatRepository(
             val publish = try {
                 dsClient.publishGroup(groupId, proposalBytes)
             } catch (e: Throwable) {
-                throw ChatError("DS publishGroup (approve proposal) failed", e)
+                throw ChatError(dsErrorMessage(e, "DS publishGroup (approve proposal) failed"), e)
             }
             chatClient.markOwnPublishedCommit(groupIdHex, publish.id)
             // ADR-0045 S7 residual 1 — record the approval as OUR OWN request,
@@ -2703,10 +2788,10 @@ public class ChatRepository(
     /**
      * ADR-0028 (G-3) — joiner step 1: request to join a group from a `/g/` link
      * capability (the wire bytes the slug base64url-decodes to). Decodes +
-     * verifies the capability fail-closed (before any post), reads the group's
-     * current epoch from the journal head's public MLS framing
-     * (`epochAfterMessage` over the paged journal, no group secret), crafts an external-join proposal
-     * (ADR-0027), and posts it to the group journal. Returns the group id + the
+     * verifies the capability fail-closed (before any post), then knocks
+     * (ADR-0053 §4): an empty knock learns the group's epoch, a second one
+     * carries the attribution and the external-join proposal (ADR-0027) built
+     * for it. The journal is never read. Returns the group id + the
      * joiner's signature key — the caller drives [pollForJoinWelcome] until an
      * admin approves and the Welcome arrives.
      */
@@ -2777,113 +2862,80 @@ public class ChatRepository(
                 is ConsumeInviteResult.AlreadyConsumed -> Unit // proceed
             }
         }
-        // Read the current epoch from the journal head (public framing; a
-        // non-member can do this). Empty / unreachable journal => epoch 0.
-        // Paged to the head and read with `epochAfterMessage`: see
-        // `JournalHeadEpoch` for the two ways the single-page read went stale.
-        val epoch: ULong = try {
-            JournalHeadEpoch.read(
-                fetchPage = { after, limit ->
-                    val raw = dsClient.fetchGroup(groupId, after = after, limit = limit, waitSecs = 0)
-                    JournalHeadEpoch.Page(
-                        rows = raw.messages.map { JournalHeadEpoch.Row(it.id, it.payload) },
-                        hasMore = raw.hasMore,
+        // ADR-0053 section 4 / client contract point 6 — a claimed journal
+        // answers only its members, so the joiner never reads it: an empty
+        // knock learns the epoch, and a second knock carries the attribution
+        // (advisory, ADR-0028 OQ2) and the proposal built for that epoch. Each
+        // knock pays its own proof of work.
+        try {
+            runLinkJoinKnock(
+                knock = { payloads ->
+                    dsClient.knockWithPow(groupId, payloads) { seed, bits ->
+                        me.lakko.app.auth.solvePow(seed, bits)
+                    }.epoch
+                },
+                buildProposal = { epoch ->
+                    providerLock.withLock {
+                        val proposal = identity.createExternalJoinProposal(groupId, epoch)
+                        // The proposal's KeyPackage private key is the only thing
+                        // that can open the Welcome the sweep will send later;
+                        // persist it now rather than losing it to a process death.
+                        persistSnapshotBestEffort()
+                        proposal
+                    }
+                },
+                buildAttribution = {
+                    uniffi.lakko_ffi_uniffi.composeGroupJoinAttribution(
+                        identity.ed25519Seed(),
+                        capabilityWire,
                     )
                 },
-                epochAfter = { uniffi.lakko_ffi_uniffi.epochAfterMessage(it) },
             )
-        } catch (e: Throwable) {
-            0u // keep epoch 0
-        }
-        val proposal = try {
-            identity.createExternalJoinProposal(groupId, epoch)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: GroupNotAcceptingRequests) {
+            throw ChatError(GROUP_NOT_ACCEPTING_REQUESTS, e)
         } catch (e: FfiException) {
             throw ChatError("createExternalJoinProposal failed", e)
-        }
-        try {
-            dsClient.publishGroup(groupId, proposal)
         } catch (e: Throwable) {
-            throw ChatError("DS publishGroup (external-join proposal) failed", e)
-        }
-        // The proposal's KeyPackage private key is the only thing that can open
-        // the Welcome the admin will post later; persist it now rather than
-        // losing it to a process death before then.
-        persistSnapshotBestEffort()
-        // ADR-0028 OQ2 — post a join-attribution envelope so the approving admin
-        // can see which member's link this request arrived on. Best-effort +
-        // advisory: a failure must not block the join (the admin approval gate is
-        // the security boundary).
-        try {
-            val attribution = uniffi.lakko_ffi_uniffi.composeGroupJoinAttribution(
-                identity.ed25519Seed(),
-                capabilityWire,
-            )
-            dsClient.publishGroup(groupId, attribution)
-        } catch (e: Throwable) {
-            // advisory only — ignore
+            throw ChatError(dsErrorMessage(e, "DS knock (external-join request) failed"), e)
         }
         return Pair(groupId, identity.signaturePublicKey())
     }
 
     /**
-     * ADR-0028 (G-3) — joiner step 2: poll the group journal for the rendezvous
-     * Welcome an admin posted after approving our request, and join from it. Run
-     * on a poll loop after [requestToJoinFromLink]. Returns the joined group's
-     * hex id on the first rendezvous addressed to our signature key, or `null`
-     * if no Welcome has arrived yet (keep polling).
+     * ADR-0028 (G-3) joiner step 2, on the ADR-0053 route: the Welcome the
+     * committer sweep sends after an admin approves arrives in THIS device's
+     * mailbox (the pseudonym of the leaf key the proposal carried), where the
+     * ordinary device-mailbox handler joins it. So the wait is for the group to
+     * appear, driven by one mailbox pass; the group journal is never read.
+     * Returns the joined group's hex id, or `null` while nothing has arrived
+     * (keep polling). [joinerSignatureKey] is kept for the caller's shape; the
+     * mailbox is addressed by this device's own key.
      */
     public suspend fun pollForJoinWelcome(
         groupId: ByteArray,
         joinerSignatureKey: ByteArray,
     ): String? =
-        withContext(mlsDispatcher) { pollForJoinWelcomeOnMlsThread(groupId = groupId, joinerSignatureKey = joinerSignatureKey) }
+        withContext(mlsDispatcher) { pollForJoinWelcomeOnMlsThread(groupId = groupId) }
 
-    private suspend fun pollForJoinWelcomeOnMlsThread(
-        groupId: ByteArray,
-        joinerSignatureKey: ByteArray,
-    ): String? {
-        // Paged to the end: the Welcome is the newest row, and a single-page
-        // read never reached it on a journal longer than one page (see
-        // `JournalHeadEpoch.scan`).
-        val candidates = ArrayList<Pair<Long, ByteArray>>()
-        try {
-            JournalHeadEpoch.scan<Unit>(
-                fetchPage = { after, limit ->
-                    val raw = dsClient.fetchGroup(groupId, after = after, limit = limit, waitSecs = 0)
-                    JournalHeadEpoch.Page(
-                        rows = raw.messages.map { JournalHeadEpoch.Row(it.id, it.payload) },
-                        hasMore = raw.hasMore,
-                    )
-                },
-                visit = { row ->
-                    if (row.id !in unopenableWelcomeRows) {
-                        val rendezvous = try {
-                            uniffi.lakko_ffi_uniffi.parseWelcomeRendezvous(row.payload)
-                        } catch (e: FfiException) {
-                            null
-                        }
-                        if (rendezvous != null && rendezvous.joinerSignatureKey.contentEquals(joinerSignatureKey)) {
-                            candidates += row.id to rendezvous.welcome
-                        }
-                    }
-                    null
-                },
-            )
-        } catch (e: Throwable) {
-            throw ChatError("DS fetchGroup (join poll) failed", e)
-        }
-        // Newest first: after a re-request only the latest Welcome is sealed to
-        // the KeyPackage this device still holds. One that will not open is
-        // remembered and skipped, and the wait goes on for a newer one.
-        for ((id, welcome) in candidates.asReversed()) {
+    private suspend fun pollForJoinWelcomeOnMlsThread(groupId: ByteArray): String? {
+        val groupIdHex = DsClient.pseudonymHex(groupId)
+        if (groups.containsKey(groupIdHex)) return groupIdHex
+        // A pass is already running (the app-wide long poll): it joins the
+        // Welcome itself, so waiting behind it would only stall this loop.
+        if (deviceMailboxLock.tryLock()) {
             try {
-                return joinGroupFromWelcome(welcome)
+                pollDeviceMailboxLocked(waitSecs = 0)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Throwable) {
-                unopenableWelcomeRows += id
-                android.util.Log.w("ChatRepository", "join: Welcome row $id could not be opened; waiting for a newer one", e)
+                throw ChatError(dsErrorMessage(e, "DS fetchMailbox (join poll) failed"), e)
+            } finally {
+                deviceMailboxLock.unlock()
             }
         }
-        return null
+        return if (groups.containsKey(groupIdHex)) groupIdHex else null
     }
 
     /**
@@ -4691,6 +4743,10 @@ public class ChatRepository(
         // guards the shared OpenMLS provider (against every OTHER group's MLS
         // work). Deliberately NOT held across the fetch, so a 30 s long poll
         // still blocks neither.
+        // ADR-0053 client contract point 4 — the journal signer as it stood
+        // before this batch applied, so a batch that advanced the epoch can
+        // register the reached epoch's key proven by it (heal on apply).
+        var signerBeforeBatch: DsJournalSigner? = null
         val outcome = runSplitPoll(
             inFlight = record.pollInFlight,
             joinInFlight = joinInFlight,
@@ -4721,6 +4777,7 @@ public class ChatRepository(
             // apply. Hoisting it out to where the fetch now runs would race the
             // shrink diff against any commit landing in the fetch window.
             val membersBeforePoll = memberSignatureKeysOrNull(record.group)
+            signerBeforeBatch = currentJournalSigner(groupIdHex)
             val result = chatClient.applyFetchedMessages(
                 identity = identity,
                 group = record.group,
@@ -4898,6 +4955,8 @@ public class ChatRepository(
         // sweep prelude and the re-admission check here would only burn the
         // provider lock and FFI reads on a result that cannot have changed.
         if (outcome != SplitPollOutcome.APPLIED) return outcome.toGroupPollOutcome()
+        // ADR-0053 — outside both locks; launched, best effort.
+        healJournalRegistrationBestEffort(groupIdHex, record.groupId, signerBeforeBatch)
         // ADR-0045 — the committer sweep runs at the TAIL of every poll, AFTER
         // [runSplitPoll] has released the per-group lock: the sweep takes that
         // same lock itself and holds it across its own two DS round-trips, and
@@ -4910,6 +4969,15 @@ public class ChatRepository(
         // role table, and for a candidate with nothing pending, so the common
         // case costs one short provider region.
         sweepIfCommitter(groupIdHex)
+        // ADR-0053 client contract point 7 — an owner / admin also reads what
+        // non-members knocked, into the same classifier. Best effort.
+        try {
+            pollKnocksIfCommitter(groupIdHex)
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "ADR-0053 knock poll failed", cause)
+        }
         // ADR-0050 section 2.4 — the scheduled re-admission check, at most once
         // per [DeviceReadmission.INTERVAL_MS] per chat. Best-effort: a failure
         // is not a poll failure.
@@ -4921,6 +4989,66 @@ public class ChatRepository(
             android.util.Log.w("ChatRepository", "ADR-0050 re-admission check failed", cause)
         }
         return GroupPollOutcome.APPLIED
+    }
+
+    /**
+     * ADR-0053 client contract point 7 — an owner or admin reads the group's
+     * knock queue (`GET .../knocks`, signed, its own cursor) and feeds each
+     * row through the core's knock gate (`Group.processKnock`), which admits
+     * only a stranger's external-join proposal for this group and refuses
+     * anything else before processing it. Never the ordinary receive path.
+     *
+     * Throttled per group ([KNOCK_POLL_MIN_INTERVAL_MS]); a plain member never
+     * reads knocks. The cursor lives in memory: after a restart the retained
+     * knocks (seven days) are re-read and fall to the quarantine's dedup or to
+     * the epoch check.
+     */
+    private suspend fun pollKnocksIfCommitter(groupIdHex: String) {
+        val identity = canonicalIdentity.get() ?: return
+        val record = groups[groupIdHex] ?: return
+        val now = System.currentTimeMillis()
+        if (now - record.lastKnockPollMs < KNOCK_POLL_MIN_INTERVAL_MS) return
+        val committer = providerLock.withLock {
+            try {
+                record.group.ownCommitterRank(identity) != null
+            } catch (_: Throwable) {
+                false
+            }
+        }
+        if (!committer) return
+        record.lastKnockPollMs = now
+        val after = record.knockCursor
+        val raw = dsClient.fetchKnocks(record.groupId, after = after, waitSecs = 0)
+        if (raw.messages.isEmpty()) return
+        groupLock(groupIdHex).withLock {
+            providerLock.withLock {
+                // Another pass moved the cursor while this one fetched.
+                if (record.knockCursor != after) return@withLock
+                // Every row through the core's knock gate and never through
+                // the ordinary receive path: a knock is an unauthenticated
+                // write, and a member could knock a real commit (see
+                // `KnockGate.kt`). A refused row is dropped, the cursor moves.
+                val drained = drainKnockRows(raw.messages, after) { bytes ->
+                    record.group.processKnock(identity, bytes)
+                }
+                val events = drained.accepted.mapNotNull { (row, processed) ->
+                    if (processed !is uniffi.lakko_ffi_uniffi.ProcessedMessage.ExternalJoinProposal) {
+                        return@mapNotNull null
+                    }
+                    IncomingChatEvent.ExternalJoinRequest(
+                        messageId = row.id,
+                        joinerSignatureKey = processed.joinerSignatureKey,
+                        retained = processed.retained,
+                        createdAt = row.createdAt,
+                    )
+                }
+                record.consumeEvents(events = events)
+                // The retained request set lives in the provider (ADR-0027).
+                if (drained.accepted.isNotEmpty()) persistSnapshotBestEffort()
+                record.knockCursor = drained.cursor
+            }
+        }
+        publishThreadList()
     }
 
     // -----------------------------------------------------------------
@@ -5507,6 +5635,7 @@ public class ChatRepository(
             for (rec in groups.values) rec.group.close()
             groups.clear()
         }
+        dsSigners.clearOwner(DS_SIGNER_OWNER)
     }
 
     // -----------------------------------------------------------------
@@ -5525,6 +5654,8 @@ public class ChatRepository(
         // that somehow still held one would simply hold the last reference to
         // an orphaned Mutex, never a lock a NEW operation could also acquire.
         groupLocks.clear()
+        // ADR-0053 — the journal and mailbox signers belong to the session.
+        dsSigners.clearOwner(DS_SIGNER_OWNER)
         // ADR-0048 — per-group republish timing belongs to the session.
         profileRepublish.reset()
         // ADR-0051 — and the group-name re-send timing with it.
@@ -5576,10 +5707,6 @@ public class ChatRepository(
      */
     private val cursorGate = DurableCursorGate()
 
-    /** Journal rows holding a Welcome addressed to this device that it could
-     *  not open (sealed to a KeyPackage a re-request replaced). Skipped on
-     *  later polls so the wait goes on for a newer Welcome. */
-    private val unopenableWelcomeRows = HashSet<Long>()
 
     private fun persistSnapshotBestEffort() {
         MainThreadGuard.assertOffMain("persistSnapshotBestEffort")
@@ -5828,6 +5955,154 @@ public class ChatRepository(
      *
      * MUST be called on the [providerLock] critical path.
      */
+    // -----------------------------------------------------------------
+    // ADR-0053 — the conversation journals and the two own mailboxes are
+    // claimed; every request to them carries a proof.
+    // -----------------------------------------------------------------
+
+    /** Where [DsClient] finds the signer of each journal this repository owns. */
+    private val dsSigners: DsSignerRegistry = DsSignerRegistry.shared
+
+    /**
+     * Teach the shared registry how to sign for [groupIdHex]'s journal: the
+     * signer is derived from whatever [Group] handle the record holds NOW (an
+     * ADR-0040 reset swaps the handle, and the lookup follows it) at the
+     * identity of this session. Every `DsClient` in the process then signs
+     * this journal's requests without the call site passing anything.
+     */
+    private fun installJournalSigner(groupIdHex: String) {
+        dsSigners.install(
+            dsGroupKeyHex(groupIdHex),
+            object : DsSignerSource {
+                override fun epoch(): ULong? = groups[groupIdHex]?.group?.epoch()
+
+                override fun derive(): DsJournalSigner? {
+                    val identity = canonicalIdentity.get() ?: return null
+                    val group = groups[groupIdHex]?.group ?: return null
+                    return FfiDsJournalSigner(group.dsAccessSigner(identity))
+                }
+            },
+            owner = DS_SIGNER_OWNER,
+        )
+    }
+
+    /** The signer of [groupIdHex]'s journal at the epoch its handle holds now. */
+    private fun currentJournalSigner(groupIdHex: String): DsJournalSigner? =
+        dsSigners.current(dsGroupKeyHex(groupIdHex))
+
+    /**
+     * ADR-0053 client contract point 2 — claim-on-open: register the current
+     * epoch's key, proven by the previous epoch's when this device holds it
+     * (unsigned otherwise: the first claim of an unclaimed journal and a
+     * re-send of an already-registered key both need none). Launched, never
+     * awaited, never surfaced: a failed claim is retried on the next open.
+     */
+    private fun claimJournalBestEffort(groupIdHex: String) {
+        val record = groups[groupIdHex] ?: return
+        pushScope.launch {
+            try {
+                val key = dsGroupKeyHex(groupIdHex)
+                val signer = dsSigners.current(key) ?: return@launch
+                dsClient.claimGroup(record.groupId, signer, provenBy = dsSigners.previous(key))
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0053: claim of a group journal did not land", cause)
+            }
+        }
+    }
+
+    /** The registration half of [installJournalSigner] + [claimJournalBestEffort]:
+     *  what every site that puts a record into [groups] does next. */
+    private fun openJournal(groupIdHex: String) {
+        installJournalSigner(groupIdHex)
+        claimJournalBestEffort(groupIdHex)
+    }
+
+    /**
+     * ADR-0053 client contract point 3 for a DIRECT (eager-merged) commit:
+     * register epoch N+1's key proven under [before] (N's, taken before the
+     * create call), and return the signer the commit POST is signed with. On
+     * any failure the group is reset to its durable snapshot and the commit
+     * aborts — no outbox entry, no publish.
+     *
+     * MUST run inside the provider lock, between the create-commit and the
+     * outbox write.
+     */
+    private suspend fun registerNextEpochOrReset(
+        groupIdHex: String,
+        groupId: ByteArray,
+        before: DsJournalSigner?,
+    ): DsJournalSigner =
+        try {
+            registerOrReset(reset = { resetGroupToDurableSnapshotOrThrow(groupIdHex) }) {
+                registerBeforePublish(
+                    before = before,
+                    after = currentJournalSigner(groupIdHex),
+                    register = { next, current -> dsClient.registerNextEpoch(groupId, next, current) },
+                )
+            }
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: ChatError) {
+            throw cause
+        } catch (cause: Throwable) {
+            throw ChatError(
+                dsErrorMessage(cause, "The server did not accept the group change. Nothing was sent."),
+                cause,
+            )
+        }
+
+    /**
+     * ADR-0053 client contract point 4 — heal on apply. [before] is the
+     * signer taken before a batch (or a sweep) applied; when the group's epoch
+     * moved past it, register the reached epoch's key proven by it. Best
+     * effort and off every lock: a refusal is expected (someone registered
+     * first, or this device was too far behind) and ignored.
+     */
+    private fun healJournalRegistrationBestEffort(groupIdHex: String, groupId: ByteArray, before: DsJournalSigner?) {
+        val (next, current) = healRegistration(before, currentJournalSigner(groupIdHex)) ?: return
+        pushScope.launch {
+            try {
+                dsClient.claimGroup(groupId, next, provenBy = current)
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                android.util.Log.i("ChatRepository", "ADR-0053: heal registration not taken: ${cause.javaClass.simpleName}")
+            }
+        }
+    }
+
+    /**
+     * ADR-0053 client contract point 2 — the two mailboxes this session owns:
+     * the ACCOUNT identity's (the stranger inbox contact requests arrive in)
+     * and this DEVICE's (where Welcomes sealed to its KeyPackages arrive).
+     * Installs their signers so every read is signed, and claims both. Called
+     * at every bootstrap, i.e. after every signup, login and restore.
+     */
+    private fun claimOwnMailboxesBestEffort() {
+        val identities = listOfNotNull(accountIdentity.get(), canonicalIdentity.get())
+        for (identity in identities) {
+            val (pseudonym, signer) = try {
+                val ffi = uniffi.lakko_ffi_uniffi.dsMailboxSigner(identity)
+                ffi.mailboxPseudonym() to FfiDsJournalSigner(ffi)
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatRepository", "ADR-0053: mailbox signer unavailable", cause)
+                continue
+            }
+            dsSigners.installStatic(dsMailboxKey(pseudonym), signer, owner = DS_SIGNER_OWNER)
+            pushScope.launch {
+                try {
+                    dsClient.claimMailbox(pseudonym, signer)
+                } catch (cause: kotlinx.coroutines.CancellationException) {
+                    throw cause
+                } catch (cause: Throwable) {
+                    android.util.Log.w("ChatRepository", "ADR-0053: mailbox claim did not land", cause)
+                }
+            }
+        }
+    }
+
     private fun usesProposalPath(group: Group): Boolean = try {
         group.groupRoles() != null
     } catch (_: Throwable) {
@@ -6221,6 +6496,7 @@ public class ChatRepository(
         // registry row is what makes the chat unreachable, so it must not
         // happen while a transcript is still behind it.
         val removed = synchronized(groups) { groups.remove(groupIdHex) }
+        dsSigners.remove(dsGroupKeyHex(groupIdHex))
         try {
             removed?.group?.close()
         } catch (_: Throwable) {
@@ -6545,10 +6821,14 @@ public class ChatRepository(
         // window cannot race the shrink diff. Lock order is always group first,
         // provider second.
         var membersBefore: List<String>? = null
+        var signerBeforeSweep: DsJournalSigner? = null
         val outcome = try {
             groupLock(groupIdHex).withLock {
                 MainThreadGuard.assertOffMain("sweepIfCommitter")
-                membersBefore = providerLock.withLock { memberSignatureKeysOrNull(record.group) }
+                membersBefore = providerLock.withLock {
+                    signerBeforeSweep = currentJournalSigner(groupIdHex)
+                    memberSignatureKeysOrNull(record.group)
+                }
                 runCommitterSweep(sweepPortsFor(record, identity, groupIdHex))
             }
         } catch (cause: Throwable) {
@@ -6559,6 +6839,11 @@ public class ChatRepository(
             android.util.Log.w("ChatRepository", "ADR-0045 sweep did not complete", cause)
             return null
         }
+        // ADR-0053 client contract point 4 — whatever the verdict, a sweep that
+        // moved the epoch (our own merge, or the winner's commit applied during
+        // the verdict read) re-registers the reached epoch's key. This is what
+        // puts the real key back after a losing committer registered its own.
+        healJournalRegistrationBestEffort(groupIdHex, record.groupId, signerBeforeSweep)
         if (outcome !is SweepOutcome.Committed) return outcome
         publishThreadList()
         // ADR-0043 / C-61 — the sweep just landed a membership change, and a
@@ -6805,7 +7090,6 @@ public class ChatRepository(
                                         ?.let { SecondArtifactKind.WELCOME },
                                     isSweep = true,
                                     sweepWelcomeMailboxesB64 = entry.welcomeMailboxesB64,
-                                    sweepWelcomeRendezvousB64 = entry.welcomeRendezvousB64,
                                 ),
                             )
                         },
@@ -6862,7 +7146,6 @@ public class ChatRepository(
                                     commitB64 = it.commitB64,
                                     welcomeEnvelopeB64 = it.secondArtifactB64,
                                     welcomeMailboxesB64 = it.sweepWelcomeMailboxesB64,
-                                    welcomeRendezvousB64 = it.sweepWelcomeRendezvousB64,
                                     commitMessageId = it.commitMessageId,
                                 )
                             }
@@ -6902,13 +7185,6 @@ public class ChatRepository(
                     .use { it.asBytes() }
             },
             wrapWelcome = { welcome -> wrapEnvelope(KIND_WELCOME, welcome) },
-            // ADR-0045 S7 — the group-journal half of the fan-out. An external
-            // joiner approved through a `/g/` link polls the journal for this and
-            // nothing else; the sweep cannot tell which adds those are, so it
-            // wraps one per added key.
-            wrapRendezvous = { key, welcome ->
-                uniffi.lakko_ffi_uniffi.wrapWelcomeRendezvous(key, welcome)
-            },
             markOwnPublished = { id -> chatClient.markOwnPublishedCommit(groupIdHex, id) },
             // `persistSnapshotBestEffort` calls `Identity.snapshotStorage()`,
             // which serialises the WHOLE provider — every group at once — so it
@@ -6939,6 +7215,22 @@ public class ChatRepository(
             },
             encodeB64 = ::outboxB64,
             decodeB64 = ::outboxUnb64,
+            // ADR-0053 client contract point 3 — register the staged epoch's
+            // key, proven under the current epoch's, before the sweep is
+            // recorded or published. The signers are derived under the
+            // provider lock; the PUT runs outside it (the sweep holds only the
+            // per-group lock here, and nothing is eager-merged).
+            registerStagedEpoch = {
+                val (next, current) = providerLock.withLock {
+                    val staged = record.group.dsStagedAccessSigner(identity)?.let(::FfiDsJournalSigner)
+                    staged to currentJournalSigner(groupIdHex)
+                }
+                registerBeforePublish(
+                    before = current,
+                    after = next,
+                    register = { n, c -> dsClient.registerNextEpoch(record.groupId, n, c) },
+                )
+            },
         )
     }
 
@@ -7560,6 +7852,14 @@ private class GroupRecord(
      * the queue, which is what may have made room.
      */
     var sawUnkeptExternalJoin: Boolean = false
+
+    /** ADR-0053 — the knock queue's cursor (its own id space) and when it was
+     *  last read. In memory: see `pollKnocksIfCommitter`. */
+    @Volatile
+    var knockCursor: Long = 0L
+
+    @Volatile
+    var lastKnockPollMs: Long = 0L
 
     /**
      * ADR-0040 F1 (lakko-security) — swap in a freshly-[loadGroup]ed handle after a

@@ -175,6 +175,21 @@ final class SplitPollURLProtocol: URLProtocol {
 
     override func startLoading() {
         let url = request.url ?? URL(fileURLWithPath: "/")
+        // ADR-0053 — the access registration and the knock read are side
+        // routes of the journal: answered at once and kept out of the log, so
+        // the orderings below stay about the journal fetch and the commit
+        // publish they were written for.
+        if url.path.hasSuffix("/access") || url.path.hasSuffix("/knocks") {
+            let status = url.path.hasSuffix("/access") ? 204 : 200
+            let body = status == 204 ? Data() : Data(#"{"messages":[],"has_more":false}"#.utf8)
+            let response = HTTPURLResponse(
+                url: url, statusCode: status, httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: body)
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
         let isPublish = (request.httpMethod ?? "GET").uppercased() == "POST"
         if isPublish {
             let id = Self.notePublishEnter()

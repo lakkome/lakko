@@ -7,6 +7,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.fail
 import org.junit.Assert.assertTrue
@@ -199,15 +200,7 @@ class CommitterSweepTest {
         }
 
         override suspend fun publishGroup(bytes: ByteArray): Long {
-            // 0xCE is what the model's `wrapRendezvous` stamps; the next byte is
-            // the key it was addressed to, so an assertion can name WHICH joiner
-            // each envelope is for rather than only counting them.
-            val label = if (bytes[0] == 0xCE.toByte()) {
-                "rendezvous@${bytes[1].toInt()}"
-            } else {
-                "commit@${bytes[0].toInt()}"
-            }
-            published.add(label)
+            published.add("commit@${bytes[0].toInt()}")
             return nextId++
         }
 
@@ -306,7 +299,6 @@ class CommitterSweepTest {
         actingCommitter = { acting },
         welcomeMailbox = { key -> key },
         wrapWelcome = { welcome -> welcome },
-        wrapRendezvous = { key, welcome -> byteArrayOf(0xCE.toByte(), key[0]) + welcome },
         markOwnPublished = {},
         persist = { persisted.add(Unit) },
         // The FAIL-CLOSED persist the verdict apply runs before it advances the
@@ -336,7 +328,7 @@ class CommitterSweepTest {
         assertEquals(1, group.merged)
         assertEquals(0, group.abandoned)
         assertFalse("no sweep may be left staged", group.hasStagedSweep())
-        assertEquals(listOf("commit@1", "mailbox@2", "rendezvous@9"), journal.published)
+        assertEquals(listOf("commit@1", "mailbox@2"), journal.published)
         assertEquals(listOf("entry-1"), outbox.acked)
         assertEquals(1, (outcome as SweepOutcome.Committed).addedCount)
     }
@@ -368,7 +360,6 @@ class CommitterSweepTest {
                 actingCommitter = { ActingCommitter.Act },
                 welcomeMailbox = { it },
                 wrapWelcome = { it },
-                wrapRendezvous = { key, welcome -> byteArrayOf(0xCE.toByte(), key[0]) + welcome },
                 markOwnPublished = {},
                 persist = {},
                 persistApplied = {},
@@ -376,10 +367,9 @@ class CommitterSweepTest {
                 decodeB64 = { s -> s.split(",").map { it.toByte() }.toByteArray() },
             ),
         )
-        // ADR-0045 S7 — the second `publish` is the group-journal rendezvous,
-        // which rides the same port as the commit. The property under test is
-        // unchanged: `record` comes first.
-        assertEquals(listOf("record", "publish", "publish"), order)
+        // ADR-0053 — the commit is the only group-journal publish now (no
+        // rendezvous); the property under test is unchanged: `record` first.
+        assertEquals(listOf("record", "publish"), order)
     }
 
     /** Obligation 4, fail-closed half: a failed durable write ABORTS with nothing
@@ -458,10 +448,6 @@ class CommitterSweepTest {
                 commitB64 = "1",
                 welcomeEnvelopeB64 = "2",
                 welcomeMailboxesB64 = listOf("9"),
-                // ADR-0045 S7 — a real entry always carries this (it is computed
-                // and recorded with the mailboxes, before any publish), so the
-                // fixture does too. `-50` is 0xCE as a signed byte.
-                welcomeRendezvousB64 = listOf("-50,9,2"),
             ),
         )
 
@@ -470,7 +456,7 @@ class CommitterSweepTest {
         assertTrue("outcome was $outcome", outcome is SweepOutcome.Committed)
         assertEquals(1, group.merged)
         assertFalse("the freeze must be lifted", group.hasStagedSweep())
-        assertEquals(listOf("commit@1", "mailbox@2", "rendezvous@9"), journal.published)
+        assertEquals(listOf("commit@1", "mailbox@2"), journal.published)
         assertEquals(listOf("entry-restart"), outbox.acked)
     }
 
@@ -577,7 +563,6 @@ class CommitterSweepTest {
                 actingCommitter = { throw IllegalStateException("store unreadable") },
                 welcomeMailbox = { it },
                 wrapWelcome = { it },
-                wrapRendezvous = { key, welcome -> byteArrayOf(0xCE.toByte(), key[0]) + welcome },
                 markOwnPublished = {},
                 persist = {},
                 persistApplied = {},
@@ -620,9 +605,6 @@ class CommitterSweepTest {
                     actingCommitter = { ActingCommitter.Act },
                     welcomeMailbox = { it },
                     wrapWelcome = { it },
-                    wrapRendezvous = { key, welcome ->
-                        byteArrayOf(0xCE.toByte(), key[0]) + welcome
-                    },
                     markOwnPublished = {},
                     persist = {},
                 persistApplied = {},
@@ -1023,7 +1005,7 @@ class CommitterSweepTest {
 
         assertTrue("outcome was $outcome", outcome is SweepOutcome.WelcomesRepublished)
         assertEquals(1, (outcome as SweepOutcome.WelcomesRepublished).addedCount)
-        assertEquals(listOf("commit@1", "mailbox@2", "rendezvous@9"), journal.published)
+        assertEquals(listOf("commit@1", "mailbox@2"), journal.published)
         assertEquals("acked, so nothing is owed any more", listOf("entry-1"), outbox.acked)
     }
 
@@ -1040,7 +1022,7 @@ class CommitterSweepTest {
         assertTrue("outcome was $outcome", outcome is SweepOutcome.WelcomesRepublished)
         // The verdict is already known — the retry must not stage, re-publish the
         // commit, or read the journal order again.
-        assertEquals(listOf("commit@1", "mailbox@2", "rendezvous@9"), journal.published)
+        assertEquals(listOf("commit@1", "mailbox@2"), journal.published)
         assertEquals("no journal read: the order was already decided", fetchesBefore, journal.fetches)
         assertEquals(0, group.abandoned)
     }
@@ -1101,7 +1083,6 @@ class CommitterSweepTest {
                 actingCommitter = { ActingCommitter.Act },
                 welcomeMailbox = { it },
                 wrapWelcome = { it },
-                wrapRendezvous = { key, welcome -> byteArrayOf(0xCE.toByte(), key[0]) + welcome },
                 markOwnPublished = {},
                 persist = {},
                 persistApplied = {},
@@ -1202,20 +1183,18 @@ class CommitterSweepTest {
         val outcome = runCommitterSweep(ports(group, journal, outbox))
 
         assertTrue("outcome was $outcome", outcome is SweepOutcome.Committed)
-        assertEquals(listOf("commit@1", "mailbox@2", "rendezvous@9"), journal.published)
+        assertEquals(listOf("commit@1", "mailbox@2"), journal.published)
     }
-    // ---------------------------------------------- ADR-0045 S7: rendezvous
+    // ------------------------------- ADR-0053: mailbox-only Welcome + register
 
     /**
-     * S7 moved the external-join approve onto the proposal path, and the `/g/`
-     * joiner's rendezvous moved with it. That joiner is not a member and never
-     * reads a mailbox — it polls the GROUP JOURNAL, matching a rendezvous
-     * envelope against its own signature key — so a sweep that publishes only
-     * the mailbox fan-out leaves an approved joiner permanently unable to join
-     * a group that already holds it as a member.
+     * ADR-0053 client contract point 8 — the Welcome goes to every added
+     * member's mailbox and nowhere else. The ADR-0045 S7 group-journal
+     * rendezvous is gone: a `/g/` joiner now waits on its own device mailbox,
+     * and a claimed journal is not something a non-member could read anyway.
      */
     @Test
-    fun `ADR-0045 S7 — the sweep posts a rendezvous for EVERY add`() = runTest {
+    fun `ADR-0053 — the sweep sends the Welcome to each added mailbox and writes no rendezvous`() = runTest {
         val journal = FakeJournal()
         val group = FakeGroup(
             staged = StagedSweepArtifacts(
@@ -1227,29 +1206,14 @@ class CommitterSweepTest {
 
         runCommitterSweep(ports(group = group, journal = journal))
 
-        // Two adds -> two mailbox welcomes AND two journal rendezvous. The sweep
-        // cannot tell which add came from a `/g/` link — that
-        // indistinguishability is what makes S7 sound — so it posts for both,
-        // origin-blind.
-        assertEquals(
-            listOf(
-                "commit@1",
-                "mailbox@2",
-                "mailbox@2",
-                "rendezvous@${0xA1.toByte().toInt()}",
-                "rendezvous@${0xA2.toByte().toInt()}",
-            ),
-            journal.published,
-        )
+        assertEquals(listOf("commit@1", "mailbox@2", "mailbox@2"), journal.published)
     }
 
-    /**
-     * A rendezvous published on a commit that then LOSES would let a joiner
-     * open into a state no other member holds — the three-party fork ADR-0045
-     * names as strictly worse than the two-party one.
-     */
+    /** A Welcome published on a commit that then LOSES would let a joiner
+     *  open into a state no other member holds; the mailbox fan-out still
+     *  waits for the verdict. */
     @Test
-    fun `ADR-0045 S7 — the rendezvous waits for the verdict like the Welcome`() = runTest {
+    fun `ADR-0053 — the mailbox Welcome waits for the verdict`() = runTest {
         val group = FakeGroup(rank = 0u, pending = 1)
         group.foreignCommits.add(42)
         val journal = FakeJournal(
@@ -1268,40 +1232,92 @@ class CommitterSweepTest {
     }
 
     /**
-     * The rendezvous is recorded durably WITH the Welcome, so a restart
-     * publishes the very bytes the first attempt computed rather than
-     * recomputing them from a roster that has since moved on.
+     * ADR-0053 client contract point 3 — the staged epoch's key is registered
+     * BEFORE the sweep is durably recorded or published.
      */
     @Test
-    fun `ADR-0045 S7 — a restart owing the fan-out republishes the rendezvous too`() = runTest {
+    fun `ADR-0053 — the staged epoch is registered before the record and the publish`() = runTest {
         val journal = FakeJournal()
         val outbox = FakeOutbox()
-        val p = ports(journal = journal, outbox = outbox)
-        journal.welcomePublishThrows = IllegalStateException("DS unreachable")
-        try {
-            runCommitterSweep(p)
-            fail("the mailbox fan-out was set to fail")
-        } catch (e: IllegalStateException) {
-            // expected
+        val order = mutableListOf<String>()
+        val recordingOutbox = object : SweepOutboxPort by outbox {
+            override suspend fun record(entry: SweepDurableEntry) {
+                order.add("record")
+                outbox.record(entry)
+            }
         }
-        assertEquals(listOf("commit@1"), journal.published)
-
-        journal.welcomePublishThrows = null
-        val outcome = resolveOwedWelcomes(p)
-
-        assertTrue(
-            "the fan-out was owed",
-            outcome is SweepOutcome.WelcomesRepublished,
+        val recordingJournal = object : SweepJournalPort by journal {
+            override suspend fun publishGroup(bytes: ByteArray): Long {
+                order.add("publish")
+                return journal.publishGroup(bytes)
+            }
+        }
+        val base = ports(journal = journal, outbox = outbox)
+        runCommitterSweep(
+            SweepPorts(
+                group = base.group,
+                journal = recordingJournal,
+                outbox = recordingOutbox,
+                cursor = base.cursor,
+                actingCommitter = base.actingCommitter,
+                welcomeMailbox = base.welcomeMailbox,
+                wrapWelcome = base.wrapWelcome,
+                markOwnPublished = base.markOwnPublished,
+                persist = base.persist,
+                persistApplied = base.persistApplied,
+                encodeB64 = base.encodeB64,
+                decodeB64 = base.decodeB64,
+                registerStagedEpoch = { order.add("register") },
+            ),
         )
-        assertEquals(
-            listOf("commit@1", "mailbox@2", "rendezvous@9"),
-            journal.published,
-        )
+        assertEquals(listOf("register", "record", "publish"), order)
     }
 
-    /** A remove / role sweep carries no add, so it must post no rendezvous. */
+    /**
+     * ADR-0053 client contract point 3, fail-closed half — a refused
+     * registration abandons the staged sweep with nothing recorded and nothing
+     * on the wire, exactly as a failed durable record does.
+     */
     @Test
-    fun `ADR-0045 S7 — a sweep with no add posts no rendezvous`() = runTest {
+    fun `ADR-0053 — a refused registration abandons the sweep before any record or publish`() = runTest {
+        val group = FakeGroup(rank = 0u, pending = 1)
+        val journal = FakeJournal()
+        val outbox = FakeOutbox()
+        val base = ports(group = group, journal = journal, outbox = outbox)
+        val refused = IllegalStateException("401 proof required")
+        val thrown = try {
+            runCommitterSweep(
+                SweepPorts(
+                    group = base.group,
+                    journal = base.journal,
+                    outbox = base.outbox,
+                    cursor = base.cursor,
+                    actingCommitter = base.actingCommitter,
+                    welcomeMailbox = base.welcomeMailbox,
+                    wrapWelcome = base.wrapWelcome,
+                    markOwnPublished = base.markOwnPublished,
+                    persist = base.persist,
+                    persistApplied = base.persistApplied,
+                    encodeB64 = base.encodeB64,
+                    decodeB64 = base.decodeB64,
+                    registerStagedEpoch = { throw refused },
+                ),
+            )
+            null
+        } catch (e: IllegalStateException) {
+            e
+        }
+        assertSame(refused, thrown)
+        assertEquals(1, group.abandoned)
+        assertEquals(0, group.merged)
+        assertFalse("nothing may be left staged", group.hasStagedSweep())
+        assertEquals(emptyList<String>(), journal.published)
+        assertTrue("nothing may be recorded", outbox.recorded.isEmpty())
+    }
+
+    /** A remove / role sweep carries no add, so it sends no Welcome at all. */
+    @Test
+    fun `ADR-0053 — a sweep with no add publishes only the commit`() = runTest {
         val journal = FakeJournal()
         val group = FakeGroup(
             staged = StagedSweepArtifacts(

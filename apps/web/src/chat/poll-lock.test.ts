@@ -60,6 +60,7 @@
  * The remaining cases are guards, not discriminators, and say so where they sit.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { fakeAccessSigner } from "../ds/access-test-doubles";
 
 // No IndexedDB in the node test env; the store round-trip is covered by
 // `commit-outbox.test.ts`.
@@ -133,6 +134,7 @@ function statefulGroup(
     get epoch(): bigint {
       return epoch;
     },
+    dsAccessSigner: fakeAccessSigner(() => epoch),
     removeMember: vi.fn((_id: unknown, leaf: number) => {
       epoch += 1n; // the eager merge
       order.push(`create:${label}${leaf}`);
@@ -203,7 +205,7 @@ describe("G-38 — the poll's apply half is serialized against commits", () => {
 
     const contacts = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup } as unknown as DsClient,
+      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {
@@ -225,10 +227,13 @@ describe("G-38 — the poll's apply half is serialized against commits", () => {
     // THE load-bearing assertion. The commit's eager merge has run and it is
     // parked in `publish`; the poll has FETCHED (the network half is outside
     // the lock, deliberately) but has applied NOTHING.
-    // `fetch` lands before `publish`: the commit awaits its persist first, and
-    // the poll's network half is outside the lock so it proceeds meanwhile —
-    // which is the split working as designed.
-    expect(order).toEqual(["create:g1", "persist", "fetch", "publish"]);
+    // `fetch` lands before `publish`: the commit awaits its ADR-0053 epoch
+    // registration and its persist first, and the poll's network half is
+    // outside the lock so it proceeds meanwhile — which is the split working
+    // as designed. (Since ADR-0053 the registration's await lets the fetch in
+    // ahead of the persist too; where exactly it lands is not what this test
+    // is about.)
+    expect(order).toEqual(["create:g1", "fetch", "persist", "publish"]);
     expect(g.epoch()).toBe(6n);
     expect(g.group.processIncomingVerifyingRoles).not.toHaveBeenCalled();
 
@@ -239,8 +244,8 @@ describe("G-38 — the poll's apply half is serialized against commits", () => {
     // The apply ran only after the commit's publish returned.
     expect(order).toEqual([
       "create:g1",
-      "persist",
       "fetch",
+      "persist",
       "publish",
       "apply:g#1",
       "apply:g#2",
@@ -260,6 +265,7 @@ describe("G-38 — the poll's apply half is serialized against commits", () => {
     const contacts = new ContactsClient(
       {} as unknown as DiscoveryClient,
       {
+        registerGroupEpoch: async () => {},
         publishGroup: vi.fn(async () => {
           order.push("publish");
           await publishGate.promise;
@@ -451,6 +457,7 @@ describe("G-38 — the poll's apply half is serialized against commits", () => {
     const contacts = new ContactsClient(
       {} as unknown as DiscoveryClient,
       {
+        registerGroupEpoch: async () => {},
         publishGroup: vi.fn(async () => {
           order.push("publish");
           return { id: 1, createdAt: "t" };

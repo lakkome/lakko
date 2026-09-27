@@ -1035,6 +1035,7 @@ final class NseServiceEnvelopeTests: XCTestCase {
             return NseProcessedRow(kind: .chat, text: text(payload), attachmentCount: 0)
         }
 
+        func dsProofHeader(method: String, path: String, query: String, body: Data) -> String? { nil }
         func close() { closed = true }
     }
 
@@ -1054,7 +1055,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
             snapshot: Data,
             groupIdBytes: Data
         ) throws -> NseThrowawayGroup? { group }
-        func dsFetch(groupIdBytes: Data, afterId: Int64) async throws -> [NseFetchedRow] { rows }
+        func dsFetch(
+            groupIdBytes: Data, afterId: Int64, group: NseThrowawayGroup
+        ) async throws -> [NseFetchedRow] { rows }
         func startCursor(accountIdB64: String, groupHex: String) -> Int64? { nil }
         func isAntiCensorshipArmed() -> Bool { false }
     }

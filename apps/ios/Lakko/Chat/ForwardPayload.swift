@@ -35,22 +35,28 @@ public enum ForwardPayload {
     ///
     /// Nothing is length-bounded here: the core truncates an over-long name
     /// and drops an over-long origin when the envelope is composed.
+    /// - ADR-0053 section 6: a forward whose SOURCE conversation is a
+    ///   one-to-one carries NO origin at all — neither this conversation's id
+    ///   nor one the message carried in. The only other holder of a
+    ///   one-to-one is its other participant, so the reference would reach
+    ///   people with no way to use it.
     public static func forwardPayload(
         of message: ChatMessage,
         authorLabel: String?,
-        originGroupIdHex: String
+        originGroupIdHex: String,
+        sourceIsOneToOne: Bool
     ) -> (text: String, forward: ForwardRef) {
         if let carried = message.forward {
             return (
                 text: message.text,
                 forward: ForwardRef(
                     author: carried.author,
-                    originGroupIdHex: carried.originGroupIdHex,
-                    originMessageId: carried.originMessageId)
+                    originGroupIdHex: sourceIsOneToOne ? nil : carried.originGroupIdHex,
+                    originMessageId: sourceIsOneToOne ? nil : carried.originMessageId)
             )
         }
         let author = (authorLabel ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let hasId = message.messageId > 0
+        let hasId = message.messageId > 0 && !sourceIsOneToOne
         return (
             text: message.text,
             forward: ForwardRef(

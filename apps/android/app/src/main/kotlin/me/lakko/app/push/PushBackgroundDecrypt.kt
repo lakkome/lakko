@@ -173,10 +173,23 @@ internal fun buildBackgroundDecryptDeps(
             }
         }
 
-        override suspend fun dsFetch(groupIdBytes: ByteArray, afterId: Long): List<FetchedRow> {
+        override suspend fun dsFetch(
+            groupIdBytes: ByteArray,
+            afterId: Long,
+            signer: me.lakko.app.ds.DsJournalSigner?,
+        ): List<FetchedRow> {
             // wait=0 — a catch-up fetch, never a long-poll (the FMS
             // budget is short). Ascending id order from the DS.
-            val res = ds.fetchGroup(groupIdBytes, after = afterId, waitSecs = 0)
+            // ADR-0053 — signed with the throwaway group's signer; a refusal
+            // throws (the caller falls back to the generic notification) and
+            // is never answered with a claim: nothing here writes (C-59).
+            val res = ds.fetchGroup(
+                groupIdBytes,
+                after = afterId,
+                waitSecs = 0,
+                signer = signer,
+                reclaimOnRefusal = false,
+            )
             return res.messages.map { FetchedRow(id = it.id, payload = it.payload) }
         }
 
@@ -223,6 +236,14 @@ private class RealThrowawayGroup(
     /** ADR-0048 — read-only name lookup, or `null`. */
     private val names: me.lakko.app.profile.ProfileNameSnapshot?,
 ) : ThrowawayGroup {
+
+    // ADR-0053 — an exporter read on the throwaway group; no state is written.
+    override fun dsSigner(): me.lakko.app.ds.DsJournalSigner? =
+        try {
+            me.lakko.app.ds.FfiDsJournalSigner(group.dsAccessSigner(identity))
+        } catch (_: Throwable) {
+            null
+        }
 
     override fun process(payload: ByteArray): ProcessedRow? {
         // ADR-0022 — the same role-verifying receive path the live poll

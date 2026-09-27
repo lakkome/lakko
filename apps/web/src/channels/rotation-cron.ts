@@ -65,6 +65,8 @@
 
 import type { Wasm } from "../wasm";
 import { loadWasm } from "../wasm";
+import { DsClient } from "../ds/client";
+import { registerBeforePublish, takeSigner } from "../ds/access";
 
 type Identity = InstanceType<Wasm["Identity"]>;
 type PublisherGroup = InstanceType<Wasm["PublisherGroup"]>;
@@ -152,7 +154,31 @@ export async function runRotationOnce(
   //    next tick retries from the new local state, and the
   //    server's atomic-rotation guarantee means no partial
   //    landings are observable.
+  // ADR-0053 — the rotation is a self-update commit, so the PublisherGroup's
+  // DS access key moves with it. Take the old epoch's key before, register the
+  // new one proven under it after. Best effort, unlike a published commit:
+  // the rotation commit is not published and cannot be rolled back here, so a
+  // refused registration is logged, and the journal's read tier plus the
+  // next claim on open cover the gap.
+  const signerN = takeSigner(() => ctx.publisherGroup.dsAccessSigner(ctx.identity));
   ctx.publisherGroup.rotate(ctx.identity);
+  {
+    const signerN1 = takeSigner(() => ctx.publisherGroup.dsAccessSigner(ctx.identity));
+    try {
+      await registerBeforePublish(
+        new DsClient(),
+        ctx.publisherGroup.groupId(),
+        signerN,
+        signerN1,
+      );
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("ds: PublisherGroup epoch registration after rotation failed", err);
+    } finally {
+      signerN?.free();
+      signerN1?.free();
+    }
+  }
   const newSeed = ctx.publisherGroup.channelSeed(ctx.identity);
   const channelIdBytes = ctx.publisherGroup.channelId();
 

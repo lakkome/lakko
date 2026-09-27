@@ -12,7 +12,12 @@
  * Idempotent: a no-op when the policy is already on. Called after a successful
  * passkey registration (`PasskeysSection`).
  */
-import { ensureDeviceGroup, persistDeviceGroupSnapshot } from "./lifecycle";
+import {
+  ensureDeviceGroup,
+  persistDeviceGroupSnapshot,
+  registerDeviceGroupEpochOrThrow,
+} from "./lifecycle";
+import { takeSigner } from "../ds/access";
 import { encodeJournalEntry } from "./journal-envelope";
 import { DsClient } from "../ds/client";
 
@@ -42,11 +47,19 @@ export async function enableAttestedRemovalsIfNeeded(args: {
     if (ensured.group.requireAttestedRemovals()) {
       return; // already on — nothing to do.
     }
-    const commit = ensured.group.setRequireAttestedRemovals(ensured.identity);
-    const groupId = ensured.group.groupId();
-    const ds = new DsClient();
-    // The policy commit removes nothing, so it carries no attestation.
-    await ds.publishGroup(groupId, encodeJournalEntry(commit, null));
+    // ADR-0053 — the key of the epoch the policy commit leaves.
+    const signerN = takeSigner(() => ensured.group.dsAccessSigner(ensured.identity));
+    try {
+      const commit = ensured.group.setRequireAttestedRemovals(ensured.identity);
+      const groupId = ensured.group.groupId();
+      const ds = new DsClient();
+      // ADR-0053 contract point 3 — register before the publish.
+      await registerDeviceGroupEpochOrThrow(ds, ensured.group, ensured.identity, signerN);
+      // The policy commit removes nothing, so it carries no attestation.
+      await ds.publishGroup(groupId, encodeJournalEntry(commit, null), { signer: signerN });
+    } finally {
+      signerN?.free();
+    }
     await persistDeviceGroupSnapshot(ensured.identity, args.accountIdB64, args.deviceKey);
   } finally {
     ensured.group.free();

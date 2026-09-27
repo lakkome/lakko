@@ -66,30 +66,96 @@ public enum CoPublisher {
         return "\(origin)\(urlPrefix)\(Self.base64UrlEncode(wire))"
     }
 
-    /// Poll the PublisherGroup's DS journal and apply incoming MLS messages
-    /// (external-join proposals from prospective co-publishers + any co-publisher
-    /// commits) via the role-gated path. Surfaces external-join proposals into
-    /// the PublisherGroup's retained pending set. Non-MLS entries (a Welcome
-    /// rendezvous) and our own already-merged commits throw and are skipped.
-    /// Returns the number of pending requests after the poll.
-    public static func pollJournal(
+    // MARK: - ADR-0053 journal access
+
+    /// The auth for a request to the PublisherGroup's journal (contract point
+    /// 1): its current-epoch access signer, and a claim-on-open as the retry.
+    public static func auth(
         ds: DsClient,
         identity: Identity,
         publisherGroup: PublisherGroup
-    ) async throws -> Int {
+    ) -> DsAuth? {
+        guard let signer = try? publisherGroup.dsAccessSigner(identity: identity) else { return nil }
+        return DsAuth(
+            signer: signer,
+            reclaim: { await claimJournal(ds: ds, identity: identity, publisherGroup: publisherGroup) }
+        )
+    }
+
+    /// Claim-on-open (contract point 2) — register the current epoch's access
+    /// key; the first open after `publisherGroupOpenOrCreate` is the claim at
+    /// creation. Idempotent and unsigned; a failure is logged and retried on
+    /// the next open.
+    @discardableResult
+    public static func claimJournal(
+        ds: DsClient,
+        identity: Identity,
+        publisherGroup: PublisherGroup
+    ) async -> DsRequestSigner? {
+        guard let signer = try? publisherGroup.dsAccessSigner(identity: identity),
+              let groupId = try? publisherGroup.groupId() else { return nil }
+        do {
+            try await ds.claimGroup(
+                groupId: groupId, bodyJson: signer.groupClaimBodyJson(), provenBy: nil)
+        } catch {
+            NSLog("ADR-0053: PublisherGroup journal claim failed, retried on the next open: %@",
+                  String(describing: error))
+        }
+        return signer
+    }
+
+    /// What one ``pollJournal(ds:identity:publisherGroup:knockAfter:)`` did.
+    public struct PollOutcome: Equatable {
+        /// Pending co-publisher requests after the poll.
+        public let pendingCount: Int
+        /// Where the next knock read starts.
+        public let knockCursor: Int64
+    }
+
+    /// Poll the PublisherGroup's DS journal (co-publisher commits) and its
+    /// KNOCKS (external-join proposals from prospective co-publishers, ADR-0053
+    /// point 7). Both reads are signed. Journal rows go through the role-gated
+    /// path; knock rows go through the core's knock gate
+    /// (`PublisherGroup.processKnock`), which refuses anything that is not a
+    /// stranger's external-join proposal for this group before processing it —
+    /// a refused row is dropped and the cursor still advances. Our own
+    /// already-merged commits throw and are skipped. A batch that moved the epoch re-registers the new key
+    /// (heal-on-apply, point 4).
+    public static func pollJournal(
+        ds: DsClient,
+        identity: Identity,
+        publisherGroup: PublisherGroup,
+        knockAfter: Int64 = 0
+    ) async throws -> PollOutcome {
         let groupId = try publisherGroup.groupId()
-        let raw = try await ds.fetchGroup(groupId: groupId, after: 0, waitSecs: 0)
+        let signerBefore = try? publisherGroup.dsAccessSigner(identity: identity)
+        let raw = try await ds.fetchGroup(
+            groupId: groupId, after: 0, waitSecs: 0,
+            auth: auth(ds: ds, identity: identity, publisherGroup: publisherGroup))
         for m in raw.messages {
             do {
                 _ = try publisherGroup.processIncomingVerifyingRoles(
                     identity: identity, bytes: m.payload)
             } catch {
-                // Non-MLS entry (a Welcome rendezvous) or a commit we have already
-                // merged (epoch mismatch) — skip; the FIFO journal catches up on
-                // any genuinely-new commit on the next poll.
+                // A commit we have already merged (epoch mismatch) — skip; the
+                // FIFO journal catches up on any genuinely-new commit on the next
+                // poll.
             }
         }
-        return try publisherGroup.pendingExternalJoins().count
+        var knockCursor = knockAfter
+        let knocks = try await ds.fetchKnocks(
+            groupId: groupId, after: knockAfter, waitSecs: 0,
+            auth: auth(ds: ds, identity: identity, publisherGroup: publisherGroup))
+        for row in knocks.messages {
+            knockCursor = max(knockCursor, row.id)
+            _ = try? publisherGroup.processKnock(identity: identity, bytes: row.payload)
+        }
+        await dsHealRegistration(
+            ds: ds, groupId: groupId, before: signerBefore,
+            after: try? publisherGroup.dsAccessSigner(identity: identity))
+        return PollOutcome(
+            pendingCount: try publisherGroup.pendingExternalJoins().count,
+            knockCursor: knockCursor)
     }
 
     /// The pending co-publisher external-join requests — each a 32-byte joiner
@@ -99,10 +165,17 @@ public enum CoPublisher {
     }
 
     /// Approve a pending co-publisher. Commits the Add (advances the
-    /// PublisherGroup epoch), broadcasts the commit + a `WelcomeRendezvous` to the
-    /// journal (the not-yet-member joiner polls for it), then RESEALS the
-    /// new-epoch channel seed to all subscribers — the Add changed the exporter
-    /// output, so existing subscribers must get the new seed or they break.
+    /// PublisherGroup epoch) after registering the new epoch's access key
+    /// (ADR-0053 point 3), broadcasts the commit to the journal, sends the
+    /// Welcome to the joiner's own mailbox (point 8: a non-member cannot read
+    /// the claimed journal), then RESEALS the new-epoch channel seed to all
+    /// subscribers — the Add changed the exporter output, so existing
+    /// subscribers must get the new seed or they break.
+    ///
+    /// The PublisherGroup approve is a direct eager-merge commit with no
+    /// ADR-0040 outbox and no reset path: a failed registration throws after
+    /// the merge exactly as a failed publish always did, leaving the handle
+    /// ahead of the journal until the panel is reopened.
     public static func approve(
         ds: DsClient,
         channelsClient: ChannelsClient,
@@ -112,12 +185,29 @@ public enum CoPublisher {
         channelIdHex: String
     ) async throws {
         let groupId = try publisherGroup.groupId()
-        let added = try publisherGroup.approveExternalJoin(
-            identity: identity, proposalRef: proposalRef)
-        _ = try await ds.publishGroup(groupId: groupId, payload: added.commit)
-        let rendezvous = try wrapWelcomeRendezvous(
-            joinerSignatureKey: proposalRef, welcome: added.welcome)
-        _ = try await ds.publishGroup(groupId: groupId, payload: rendezvous)
+        try await DirectCommitSteps(
+            currentSigner: { try publisherGroup.dsAccessSigner(identity: identity) },
+            create: {
+                try publisherGroup.approveExternalJoin(identity: identity, proposalRef: proposalRef)
+            },
+            register: { next, provenBy in
+                try await ds.claimGroup(
+                    groupId: groupId, bodyJson: next.groupClaimBodyJson(), provenBy: provenBy)
+            },
+            prepare: { added in added },
+            rollback: {},
+            publish: { added, signerN in
+                _ = try await ds.publishGroup(
+                    groupId: groupId, payload: added.commit, auth: DsAuth(signer: signerN))
+                // The joiner's external-join proposal carried a KeyPackage under
+                // `proposalRef` (its leaf signature key), so its mailbox is the
+                // pseudonym of that key. Unsigned: a mailbox is open for writes.
+                let mailbox = try IdentityPseudonym.fromIdentity(pubkey: proposalRef).asBytes()
+                _ = try await ds.publishMailbox(
+                    pseudonym: mailbox,
+                    payload: wrapEnvelope(kind: .welcome, body: added.welcome))
+            }
+        ).run()
         try await resealSubscribers(
             channelsClient: channelsClient,
             identity: identity,
@@ -147,19 +237,18 @@ public enum CoPublisher {
         public let groupId: Data
         /// The 32-char lowercase-hex channel id recovered from the `group_id`.
         public let channelIdHex: String
-        /// This device's leaf signature key — matches the `WelcomeRendezvous`
-        /// the owner posts after approving.
+        /// This device's leaf signature key — names the mailbox the owner sends
+        /// the Welcome to after approving (ADR-0053).
         public let joinerKey: Data
     }
 
     /// ADR-0028 OQ3 — joiner side: request to become a co-publisher of a channel
     /// from a `/g/` co-publisher link. Decodes + verifies the capability,
     /// recovers the channel id from the PublisherGroup `group_id` (the link
-    /// conveys only the `group_id`), reads the group's current epoch from its DS
-    /// journal head's public framing (`epochAfterMessage` over the paged journal, no group secret), crafts
-    /// an external-join proposal (ADR-0027), and posts it + a self-signed
-    /// join-attribution (OQ2) to the journal. The caller then polls with
-    /// `pollForCoPublishWelcome`.
+    /// conveys only the `group_id`), then knocks (ADR-0053): a probe learns the
+    /// registered epoch, an external-join proposal (ADR-0027) is built for it,
+    /// and a second knock carries it with a self-signed join-attribution (OQ2).
+    /// The caller then polls with `pollForCoPublishWelcome`.
     public static func requestToCoPublish(
         ds: DsClient,
         identity: Identity,
@@ -184,29 +273,26 @@ public enum CoPublisher {
             throw CoPublisherError.notAChannelGroup
         }
         let channelIdHex = ChannelsComposer.bytesToHex(channelIdBytes)
-        // Read the current epoch from the journal head (public framing; a
-        // non-member can do this). Empty / unreachable journal => epoch 0.
-        // Paged to the head and read with `epochAfterMessage`: see
-        // `JournalHeadEpoch` for the two ways the single-page read went stale.
-        let epoch = (try? await JournalHeadEpoch.read(
-            fetchPage: { after, limit in
-                let raw = try await ds.fetchGroup(
-                    groupId: groupId, after: after, limit: limit, waitSecs: 0)
-                return .init(
-                    rows: raw.messages.map { .init(id: $0.id, payload: $0.payload) },
-                    hasMore: raw.hasMore)
+        // ADR-0053 point 6 — the knock: a probe learns the registered epoch,
+        // the proposal is built for it, a second knock carries the self-signed
+        // attribution (OQ2, advisory) and the proposal. No journal read.
+        try await DsKnockJoin(
+            solvePow: {
+                let challenge = try await ds.powChallenge()
+                return try await solvePow(seedB64: challenge.seed, effortBits: challenge.effortBits)
             },
-            epochAfter: { epochAfterMessage(bytes: $0) }
-        )) ?? 0
-        let proposal = try identity.createExternalJoinProposal(groupId: groupId, epoch: epoch)
-        _ = try await ds.publishGroup(groupId: groupId, payload: proposal)
-        // Self-signed join attribution (OQ2) — advisory; best-effort.
-        if let attribution = try? composeGroupJoinAttribution(
-            joinerSigningSeed: identity.ed25519Seed(),
-            capabilityBytes: wire
-        ) {
-            _ = try? await ds.publishGroup(groupId: groupId, payload: attribution)
-        }
+            knock: { pow, payloads in
+                try await ds.knock(groupId: groupId, pow: pow, payloads: payloads).epoch
+            },
+            createProposal: { epoch in
+                try identity.createExternalJoinProposal(groupId: groupId, epoch: epoch)
+            },
+            attribution: {
+                try? composeGroupJoinAttribution(
+                    joinerSigningSeed: identity.ed25519Seed(),
+                    capabilityBytes: wire)
+            }
+        ).run()
         return CoPublishRequest(
             groupId: groupId,
             channelIdHex: channelIdHex,
@@ -214,12 +300,18 @@ public enum CoPublisher {
         )
     }
 
-    /// ADR-0028 OQ3 — joiner side: poll the PublisherGroup journal for the
-    /// Welcome the owner posted after approving, join from it, and mint local
-    /// publisher keys so this device can now publish to the channel. The joined
-    /// group lands at the post-approve epoch — the same one the subscribers were
-    /// resealed to — so the derived `channelSeed` matches. Returns the keys on
-    /// success, or `nil` if no Welcome has arrived yet (keep polling).
+    /// ADR-0028 OQ3 — joiner side: look for the Welcome the owner sent after
+    /// approving, join from it, and mint local publisher keys so this device
+    /// can now publish to the channel. The joined group lands at the
+    /// post-approve epoch — the same one the subscribers were resealed to — so
+    /// the derived `channelSeed` matches. Returns the keys on success, or `nil`
+    /// if no Welcome has arrived yet (keep polling).
+    ///
+    /// ADR-0053 point 8 — the owner sends the Welcome to the mailbox named by
+    /// this device's `joinerKey`, which it reads signed under `identity` (the
+    /// key the mailbox is named after). The whole mailbox is scanned on each
+    /// attempt: other Welcomes there (chat adds) do not open under this
+    /// identity's co-publisher KeyPackage and are skipped.
     public static func pollForCoPublishWelcome(
         ds: DsClient,
         identity: Identity,
@@ -230,32 +322,27 @@ public enum CoPublisher {
         // has co-published to the channel before (nil on a first join).
         existingSigningSeed: Data? = nil
     ) async throws -> ChannelPublisherKeys? {
-        // Paged to the end: the Welcome is the newest row, and a single-page
-        // read never reached it on a journal longer than one page (see
-        // `JournalHeadEpoch.scan`).
+        _ = groupId
+        let mailbox = try IdentityPseudonym.fromIdentity(pubkey: joinerKey).asBytes()
+        let signer = dsMailboxSigner(identity: identity)
         var candidates: [Data] = []
-        let _: Never? = try await JournalHeadEpoch.scan(
-            fetchPage: { after, limit in
-                let raw = try await ds.fetchGroup(
-                    groupId: groupId, after: after, limit: limit, waitSecs: 0)
-                return .init(
-                    rows: raw.messages.map { .init(id: $0.id, payload: $0.payload) },
-                    hasMore: raw.hasMore)
-            },
-            visit: { row in
-                guard let rendezvous = try? parseWelcomeRendezvous(bytes: row.payload),
-                      rendezvous.joinerSignatureKey == joinerKey else { return nil }
-                candidates.append(rendezvous.welcome)
-                return nil
+        var after: Int64 = 0
+        for _ in 0..<Self.maxMailboxPages {
+            let page = try await ds.fetchMailbox(
+                pseudonym: mailbox, after: after, waitSecs: 0, auth: DsAuth(signer: signer))
+            for row in page.messages {
+                if case .welcome(let body) = parseEnvelope(row.payload) { candidates.append(body) }
             }
-        )
+            guard let last = page.messages.last, page.hasMore, last.id > after else { break }
+            after = last.id
+        }
         // Join the PublisherGroup from the Welcome — this persists the joined
         // MLS state under the deterministic PublisherGroup `group_id` in the
         // identity's provider. The handle itself is throwaway (ARC frees it);
         // `freshPublisherKeys` re-opens the now-joined PublisherGroup by
         // channel id and derives the shared content-key seed + a fresh
         // per-device signing key so this device can publish. Newest first,
-        // and a Welcome sealed to a KeyPackage this device no longer holds is
+        // and a Welcome sealed to a KeyPackage this identity does not hold is
         // skipped rather than ending the wait.
         var joined = false
         for welcome in candidates.reversed() {
@@ -270,6 +357,9 @@ public enum CoPublisher {
             channelIdHex: channelIdHex,
             existingSigningSeed: existingSigningSeed)
     }
+
+    /// Bound on the mailbox pages one Welcome look-up reads.
+    static let maxMailboxPages = 50
 
     /// Reseal the CURRENT (post-approve) channel seed to all subscribers — the
     /// `RotationCron` fanout WITHOUT advancing the MLS epoch (the Add already

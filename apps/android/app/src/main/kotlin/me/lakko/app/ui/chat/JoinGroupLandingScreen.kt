@@ -213,14 +213,10 @@ public class JoinGroupLandingViewModel(
             mutableRequesting.value = false
             val groupIdHex = me.lakko.app.ds.DsClient.pseudonymHex(groupId)
             while (isActive) {
-                // The sweep publishes the Welcome twice: to the group journal
-                // as a rendezvous, which the poll below reads, and to the
-                // joiner's mailbox, which the inbox poll reads (the sweep
-                // cannot tell a link joiner from a contact). When the mailbox
-                // copy lands first, the group is already ours and the
-                // rendezvous can never open again - its KeyPackage is spent -
-                // so without this check the landing waited forever on a join
-                // that had happened.
+                // ADR-0053 — the sweep delivers the Welcome to this device's
+                // mailbox only; the app-wide mailbox poll may join it before
+                // the poll below runs, so the group already being ours is the
+                // first thing checked.
                 if (repository.state.value.threads.any { it.groupIdHex.equals(groupIdHex, ignoreCase = true) }) {
                     mutableState.value = State.Joined(groupIdHex)
                     return@launch
@@ -231,9 +227,13 @@ public class JoinGroupLandingViewModel(
                         mutableState.value = State.Joined(hex)
                         return@launch
                     }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
                 } catch (e: Throwable) {
-                    mutableState.value = State.Failed(e.message ?: e.toString())
-                    return@launch
+                    // One missed mailbox pass is not a failed join: the
+                    // request is on the server and the next pass (or the
+                    // app-wide mailbox poll) still joins the Welcome.
+                    android.util.Log.w("JoinGroupLanding", "mailbox pass failed; waiting on", e)
                 }
                 delay(3_000)
             }

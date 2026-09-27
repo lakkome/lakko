@@ -354,47 +354,67 @@ public enum PairingOrchestrator {
             deviceIdentitySeed: seed
         )
 
-        let addition = try ensured.group.addDeviceFromWire(
-            identity: ensured.identity,
-            keyPackage: decoded.keyPackage
-        )
-
-        // G-7 — persist the advanced DeviceGroup snapshot BEFORE
-        // any publish. addDeviceFromWire already merged the pending
-        // commit, so the in-memory view is one epoch ahead; writing
-        // it to disk first closes the window where a crash between
-        // the publishes and the persist leaves the on-disk envelope
-        // an epoch behind (which would make the next launch try to
-        // add the same device twice).
-        DeviceGroupLifecycle.persistSnapshot(
-            identity: ensured.identity,
-            accountIdB64: accountIdB64
-        )
-
-        try await WelcomeCourier.publishWelcome(
-            rendezvousPseudonym: decoded.rendezvousPseudonym,
-            welcomeBytes: addition.welcome
-        )
-
-        // G-5 — broadcast the Commit to the DeviceGroup DS journal
-        // so any OTHER already-paired devices on this account
-        // advance to the new epoch; their DeviceGroup poll loop runs
-        // processIncoming on this row. MLS requires in-order epoch
-        // processing, so this is on the critical path (not
-        // best-effort) — a missed commit would permanently strand a
-        // third device. For the founder + first-pair case there is
-        // no other member, so the row is a harmless no-op (the
-        // joiner ratchets forward from the Welcome). Mirrors the
-        // DeviceRemoval.removeDeviceAt broadcast.
         let groupId = try ensured.group.groupId()
         let ds = DsClient()
-        // G-13 (ADR-0015): every DeviceGroup journal entry is wrapped; an
-        // add-device commit carries no attestation.
-        let envelope = DeviceGroupJournalEnvelope.encode(
-            message: addition.commit,
-            attestation: nil
+        // ADR-0053 point 2 — claim-on-open (idempotent; also the claim of a
+        // DeviceGroup this flow just founded).
+        await DeviceGroupDsAccess.claim(group: ensured.group, identity: ensured.identity, ds: ds)
+
+        // ADR-0053 point 3 — the N+1 key is registered, proven under N, before
+        // the snapshot is written and anything is published; the commit then
+        // goes out signed under N.
+        _ = try await DeviceGroupDsAccess.directCommit(
+            group: ensured.group,
+            identity: ensured.identity,
+            ds: ds,
+            create: {
+                try ensured.group.addDeviceFromWire(
+                    identity: ensured.identity,
+                    keyPackage: decoded.keyPackage
+                )
+            },
+            prepare: { addition in
+                // G-7 — persist the advanced DeviceGroup snapshot BEFORE
+                // any publish. addDeviceFromWire already merged the pending
+                // commit, so the in-memory view is one epoch ahead; writing
+                // it to disk first closes the window where a crash between
+                // the publishes and the persist leaves the on-disk envelope
+                // an epoch behind (which would make the next launch try to
+                // add the same device twice).
+                DeviceGroupLifecycle.persistSnapshot(
+                    identity: ensured.identity,
+                    accountIdB64: accountIdB64
+                )
+                return addition
+            },
+            publish: { addition, auth in
+                // The Welcome rides the pairing RENDEZVOUS mailbox, which stays
+                // unclaimed by design (ADR-0053 section 2): unsigned.
+                try await WelcomeCourier.publishWelcome(
+                    rendezvousPseudonym: decoded.rendezvousPseudonym,
+                    welcomeBytes: addition.welcome
+                )
+
+                // G-5 — broadcast the Commit to the DeviceGroup DS journal
+                // so any OTHER already-paired devices on this account
+                // advance to the new epoch; their DeviceGroup poll loop runs
+                // processIncoming on this row. MLS requires in-order epoch
+                // processing, so this is on the critical path (not
+                // best-effort) — a missed commit would permanently strand a
+                // third device. For the founder + first-pair case there is
+                // no other member, so the row is a harmless no-op (the
+                // joiner ratchets forward from the Welcome). Mirrors the
+                // DeviceRemoval.removeDeviceAt broadcast.
+                // G-13 (ADR-0015): every DeviceGroup journal entry is wrapped; an
+                // add-device commit carries no attestation.
+                let envelope = DeviceGroupJournalEnvelope.encode(
+                    message: addition.commit,
+                    attestation: nil
+                )
+                _ = try await ds.publishGroup(groupId: groupId, payload: envelope, auth: auth)
+                return addition
+            }
         )
-        _ = try await ds.publishGroup(groupId: groupId, payload: envelope)
 
         // Phase 2a3d8-ui — best-effort history catch-up bundle.
         // Read the local message log, derive the post-add

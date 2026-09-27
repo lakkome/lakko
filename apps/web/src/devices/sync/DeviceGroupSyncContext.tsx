@@ -53,6 +53,7 @@ import { ensureDeviceIdentitySeed } from "../../auth/device-identity-store";
 import { getDeviceKey } from "../../auth/key-store";
 import { deleteSyncState, loadSyncState, saveSyncState } from "./sync-state-idb";
 import { DsClient, DsHttpError, DsNetworkError } from "../../ds/client";
+import { dsAccess, healAfterApply, takeSigner } from "../../ds/access";
 import { loadWasm } from "../../wasm";
 import type {
   DeviceGroup as WasmDeviceGroup,
@@ -185,6 +186,19 @@ export function DeviceGroupSyncProvider(props: {
    *  other device's row can carry an id this device got from its own publish.
    *  See `sync/journal-batch.ts`. */
   const ownPublishedIds = new Set<number>();
+
+  // ADR-0053 contract point 1 — every request to the DeviceGroup journal is
+  // proven under the access key of the epoch this device's DeviceGroup is at.
+  // The DS client asks at the moment of each request, and claims the journal
+  // the first time it sees it in a session (contract point 2, claim on open).
+  const unregisterDsSource = dsAccess.registerGroupSource((groupId) => {
+    if (group === null || identity === null) return null;
+    const own = group.groupId();
+    if (own.length !== groupId.length) return null;
+    for (let i = 0; i < own.length; i++) if (own[i] !== groupId[i]) return null;
+    return group.dsAccessSigner(identity);
+  });
+  onCleanup(unregisterDsSource);
 
   // ----- Lifecycle: session ↔ anon transitions --------------------
 
@@ -424,6 +438,8 @@ export function DeviceGroupSyncProvider(props: {
         attestVk = new Uint8Array(32);
       }
 
+      // ADR-0053 contract point 4 — the key of the epoch before this batch.
+      const signerBefore = takeSigner(() => g.dsAccessSigner(id));
       const batch = await applyDeviceJournalBatch(raw.messages, cursor, {
         isOwnEcho: (rowId) => ownPublishedIds.has(rowId),
         apply: async (message) => {
@@ -472,6 +488,13 @@ export function DeviceGroupSyncProvider(props: {
             err,
           );
         },
+      });
+      // Heal on apply: when the batch moved the epoch, register the new key
+      // proven under the old one. Best effort, not awaited.
+      const signerAfter = takeSigner(() => g.dsAccessSigner(id));
+      void healAfterApply(ds, groupId, signerBefore, signerAfter).finally(() => {
+        signerBefore?.free();
+        signerAfter?.free();
       });
       if (batch.persisted) {
         cursor = batch.nextCursor;

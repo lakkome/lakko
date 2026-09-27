@@ -409,7 +409,16 @@ pub(crate) async fn post_group(
 ) -> Result<Response, (StatusCode, String)> {
     let owner = decode_pseudonym(&group_hex)?;
     // ADR-0053: a claimed group takes a publish only from a member.
-    crate::access::gate_group(&state, &owner, &method, &uri, &headers, &body).await?;
+    crate::access::gate_group(
+        &state,
+        &owner,
+        crate::access::Access::Write,
+        &method,
+        &uri,
+        &headers,
+        &body,
+    )
+    .await?;
     let resp = publish(&state.db, &state.notifiers, Queue::Group, &owner, &body).await?;
     Ok((StatusCode::CREATED, resp).into_response())
 }
@@ -424,7 +433,16 @@ pub(crate) async fn get_group(
 ) -> Result<Response, (StatusCode, String)> {
     let owner = decode_pseudonym(&group_hex)?;
     // ADR-0053: a claimed group's journal is read by members only.
-    crate::access::gate_group(&state, &owner, &method, &uri, &headers, &[]).await?;
+    crate::access::gate_group(
+        &state,
+        &owner,
+        crate::access::Access::Read,
+        &method,
+        &uri,
+        &headers,
+        &[],
+    )
+    .await?;
     let limit = q.limit.unwrap_or(DEFAULT_LIMIT);
     let wait = q.wait.unwrap_or(0);
     let resp = fetch_with_wait(
@@ -504,6 +522,7 @@ pub(crate) fn spawn_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()> {
         loop {
             interval.tick().await;
             crate::access::prune_nonces(&pool).await;
+            crate::access::prune_group_access(&pool, RETENTION_SECS).await;
             for queue in [Queue::Group, Queue::Mailbox, Queue::Knock] {
                 let retention = match queue {
                     Queue::Knock => crate::access::KNOCK_RETENTION_SECS,

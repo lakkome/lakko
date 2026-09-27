@@ -7,6 +7,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -40,9 +41,13 @@ class PushPreviewDecryptTest {
     private class FakeThrowawayGroup(
         private val decode: (ByteArray) -> ProcessedRow?,
         private val throwOn: Set<Int> = emptySet(),
+        /** ADR-0053 — the signer the throwaway group hands the fetch. */
+        private val signer: me.lakko.app.ds.DsJournalSigner? = null,
     ) : ThrowawayGroup {
         var closed = false
         var processCount = 0
+
+        override fun dsSigner(): me.lakko.app.ds.DsJournalSigner? = signer
 
         /** Stays false forever — there is no persist entry point on the
          *  interface. The test asserts it, mirroring the web
@@ -114,9 +119,16 @@ class PushPreviewDecryptTest {
             return group
         }
 
-        override suspend fun dsFetch(groupIdBytes: ByteArray, afterId: Long): List<FetchedRow> {
+        var lastSigner: me.lakko.app.ds.DsJournalSigner? = null
+
+        override suspend fun dsFetch(
+            groupIdBytes: ByteArray,
+            afterId: Long,
+            signer: me.lakko.app.ds.DsJournalSigner?,
+        ): List<FetchedRow> {
             dsFetchCount++
             lastAfterId = afterId
+            lastSigner = signer
             lastFetchGroupBytes = groupIdBytes
             if (dsThrows) throw RuntimeException("ds failure")
             return rows
@@ -162,6 +174,38 @@ class PushPreviewDecryptTest {
         // Throwaway discarded; never persisted.
         assertTrue("throwaway group must be closed", group.closed)
         assertFalse("no persist entry point may be reached", group.persistAttempted)
+    }
+
+    /** ADR-0053 client contract point 9 — the background read is signed with
+     *  the throwaway group's own signer. */
+    @Test
+    fun `the background fetch is signed with the throwaway group's signer`() = runTest {
+        val signer = object : me.lakko.app.ds.DsJournalSigner {
+            override val epoch: ULong = 7uL
+            override fun sign(method: String, path: String, query: String, body: ByteArray) = "v1.proof"
+            override fun groupClaimBody() = "{}"
+            override fun mailboxClaimBody() = "{}"
+        }
+        val group = FakeThrowawayGroup(decode = { chat("hello") }, signer = signer)
+        val deps = FakeDeps(account = okAccount(), group = group, rows = listOf(row(10, 1)))
+
+        val preview = decryptPushPreview(PushWake(groupHex, pointer = 11), deps)
+
+        assertEquals("hello", preview?.body)
+        assertSame(signer, deps.lastSigner)
+    }
+
+    /** ADR-0053 client contract point 9 — a refused read (the fetch throws)
+     *  falls back to the generic notification: no preview, nothing written. */
+    @Test
+    fun `a refused background read yields the generic notification`() = runTest {
+        val group = FakeThrowawayGroup(decode = { chat("hello") })
+        val deps = FakeDeps(account = okAccount(), group = group, rows = listOf(row(10, 1)), dsThrows = true)
+
+        val preview = decryptPushPreview(PushWake(groupHex, pointer = 11), deps)
+
+        assertEquals(null, preview)
+        assertTrue("throwaway group must be closed", group.closed)
     }
 
     @Test

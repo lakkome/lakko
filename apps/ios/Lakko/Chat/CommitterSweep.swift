@@ -144,18 +144,6 @@ public struct SweepDurableEntry: Equatable {
     public var commitB64: String
     public var welcomeEnvelopeB64: String?
     public var welcomeMailboxesB64: [String]
-    /// ADR-0045 S7 — the wrapped `WelcomeRendezvous` bytes, one per member this
-    /// sweep adds, to publish to the GROUP JOURNAL.
-    ///
-    /// A list of whole envelopes rather than a list of addresses, because
-    /// unlike the mailbox fan-out — one Welcome envelope sent to N pseudonyms —
-    /// a rendezvous BINDS the added member's signature key into its own bytes,
-    /// so every recipient gets different bytes.
-    ///
-    /// Recorded here, before any publish, for the same reason the mailboxes
-    /// are: a restart must re-publish the very bytes this sweep computed rather
-    /// than recompute them from a roster that has since moved on.
-    public var welcomeRendezvousB64: [String]
     /// The DS id of the published commit, recorded alongside the welcomes-owed
     /// marker. Diagnostics only — it is carried so the eventual ack can name the
     /// commit it belongs to rather than inventing one. `nil` until the verdict
@@ -167,14 +155,12 @@ public struct SweepDurableEntry: Equatable {
         commitB64: String,
         welcomeEnvelopeB64: String? = nil,
         welcomeMailboxesB64: [String] = [],
-        welcomeRendezvousB64: [String] = [],
         commitMessageId: Int64? = nil
     ) {
         self.id = id
         self.commitB64 = commitB64
         self.welcomeEnvelopeB64 = welcomeEnvelopeB64
         self.welcomeMailboxesB64 = welcomeMailboxesB64
-        self.welcomeRendezvousB64 = welcomeRendezvousB64
         self.commitMessageId = commitMessageId
     }
 }
@@ -275,15 +261,23 @@ public struct SweepJournalPort {
     public var publishGroup: (Data) async throws -> Int64
     /// Publish to a member's mailbox pseudonym; resolves to the DS id.
     public var publishMailbox: (Data, Data) async throws -> Int64
+    /// ADR-0053 client contract point 3, staged shape — register the access key
+    /// of the epoch the staged sweep moves to (`dsStagedAccessSigner`), proven
+    /// under the epoch the group still sits at. Runs after the stage and before
+    /// anything is recorded or published: a commit is never on the wire before
+    /// the server knows its epoch. A throw on the first run abandons the sweep.
+    public var registerStagedEpoch: () async throws -> Void
 
     public init(
         fetch: @escaping (Int64) async throws -> [SweepJournalRow],
         publishGroup: @escaping (Data) async throws -> Int64,
-        publishMailbox: @escaping (Data, Data) async throws -> Int64
+        publishMailbox: @escaping (Data, Data) async throws -> Int64,
+        registerStagedEpoch: @escaping () async throws -> Void
     ) {
         self.fetch = fetch
         self.publishGroup = publishGroup
         self.publishMailbox = publishMailbox
+        self.registerStagedEpoch = registerStagedEpoch
     }
 }
 
@@ -385,18 +379,6 @@ public struct SweepPorts {
     /// Wrap the raw Welcome in the stranger-inbox envelope the recipient's
     /// mailbox poll expects (`wrapEnvelope(kind: .welcome, body:)`).
     public var wrapWelcome: (Data) -> Data
-    /// ADR-0045 S7 — wrap the raw Welcome into the `WelcomeRendezvous` envelope
-    /// the group journal carries (`wrapWelcomeRendezvous(joinerSignatureKey:welcome:)`).
-    ///
-    /// Needed because an added member may have arrived through a `/g/` invite
-    /// link, and such a joiner polls the GROUP JOURNAL for a rendezvous matching
-    /// its own signature key — it has no mailbox relationship with this group
-    /// and never looks at one. Since S7 the approve is an ordinary `Add`
-    /// proposal, indistinguishable on the wire from adding a contact, so the
-    /// sweep CANNOT tell which of its adds came from a link — and making them
-    /// distinguishable would undo the property that makes S7 sound. It
-    /// therefore wraps one per added key, origin-blind.
-    public var wrapRendezvous: (Data, Data) throws -> Data
     /// Echo-suppress a row this device published, so its own next poll drops it
     /// instead of hitting `CannotDecryptOwnMessage`.
     ///
@@ -427,7 +409,6 @@ public struct SweepPorts {
         cursor: SweepCursorRef,
         welcomeMailbox: @escaping (Data) throws -> Data,
         wrapWelcome: @escaping (Data) -> Data,
-        wrapRendezvous: @escaping (Data, Data) throws -> Data,
         markOwnPublished: @escaping (Int64) -> Void,
         persist: @escaping () -> Void,
         persistApplied: @escaping () throws -> Void
@@ -439,7 +420,6 @@ public struct SweepPorts {
         self.cursor = cursor
         self.welcomeMailbox = welcomeMailbox
         self.wrapWelcome = wrapWelcome
-        self.wrapRendezvous = wrapRendezvous
         self.markOwnPublished = markOwnPublished
         self.persist = persist
         self.persistApplied = persistApplied
@@ -773,31 +753,34 @@ private func publishAndAdjudicate(
     let entry: SweepDurableEntry
     if let owed {
         entry = owed
-    } else {
-        // Obligation 4 — durably record BOTH artifacts before ANY publish. The
-        // Welcome is wrapped and addressed HERE, so the bytes the restart sweep
-        // would publish are the very bytes computed now; nothing can drift.
+        // ADR-0053 — the first run registered the next epoch before it wrote
+        // this entry, so re-sending the registration is normally the
+        // idempotent no-op. Best effort: the commit is (probably) already on
+        // the wire, so abandoning here on a transient DS failure would strand
+        // this device behind its own commit.
         do {
+            try await ports.journal.registerStagedEpoch()
+        } catch {
+            NSLog("ADR-0053: re-registration of an owed sweep's epoch not accepted: %@",
+                  String(describing: error))
+        }
+    } else {
+        // ADR-0053 point 3 — register the next epoch, then obligation 4 —
+        // durably record the artifacts before ANY publish. The Welcome is
+        // wrapped and addressed HERE, so the bytes the restart sweep would
+        // publish are the very bytes computed now; nothing can drift.
+        do {
+            try await ports.journal.registerStagedEpoch()
             var mailboxes: [String] = []
             for key in staged.addedSignatureKeys {
                 mailboxes.append(base64Encode(try ports.welcomeMailbox(key)))
-            }
-            // ADR-0045 S7 — one rendezvous per added key, from the SAME Welcome.
-            // The keys come from the staged commit's own `swept()`, so this
-            // addresses exactly the members the commit adds.
-            var rendezvous: [String] = []
-            if let welcome = staged.welcome {
-                for key in staged.addedSignatureKeys {
-                    rendezvous.append(base64Encode(try ports.wrapRendezvous(key, welcome)))
-                }
             }
             let wrapped = staged.welcome.map { ports.wrapWelcome($0) }
             let fresh = SweepDurableEntry(
                 id: ports.outbox.newEntryId(),
                 commitB64: base64Encode(staged.commit),
                 welcomeEnvelopeB64: wrapped.map { base64Encode($0) },
-                welcomeMailboxesB64: mailboxes,
-                welcomeRendezvousB64: rendezvous
+                welcomeMailboxesB64: mailboxes
             )
             try ports.outbox.record(fresh)
             entry = fresh
@@ -858,7 +841,7 @@ private func publishAndAdjudicate(
     // publishing now is correct with or without it, and refusing to publish
     // because a bookkeeping write failed would manufacture the very ghost member
     // this records against.
-    if entry.welcomeEnvelopeB64 != nil || !entry.welcomeRendezvousB64.isEmpty {
+    if entry.welcomeEnvelopeB64 != nil {
         do {
             try ports.outbox.markWelcomesOwed(entry.id, commitMessageId)
         } catch {
@@ -992,12 +975,8 @@ private func publishWelcomes(
             ids.append(try await ports.journal.publishMailbox(pseudonym, bytes))
         }
     }
-    // ADR-0045 S7 — then the group-journal rendezvous, one per added key. A
-    // `/g/` joiner reads only this; a contact added the ordinary way reads only
-    // the mailbox. The sweep publishes both because it cannot tell them apart.
-    for rendezvousB64 in entry.welcomeRendezvousB64 {
-        guard let bytes = base64Decode(rendezvousB64) else { continue }
-        ids.append(try await ports.journal.publishGroup(bytes))
-    }
+    // ADR-0053 point 8 — nothing goes to the group journal. A `/g/` joiner
+    // cannot read a claimed journal, and it does not need to: its Welcome is
+    // in its own mailbox like every other added member's.
     return ids
 }

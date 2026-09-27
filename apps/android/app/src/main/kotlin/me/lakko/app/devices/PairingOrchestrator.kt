@@ -406,10 +406,23 @@ public object PairingOrchestrator {
         seed.fill(0)
 
         try {
+            val signerBeforeCommit = DeviceGroupJournalAccess.signerOf(ensured.group, ensured.identity)
             val addition = ensured.group.addDeviceFromWire(
                 identity = ensured.identity,
                 keyPackage = decoded.keyPackage,
             )
+            // ADR-0053 client contract point 3 — register epoch N+1 BEFORE the
+            // snapshot is persisted or anything published. A refusal throws out
+            // of here with nothing durable and nothing on the wire: this handle
+            // is throwaway, so the durable DeviceGroup stays at N.
+            val commitSigner = DsClient().use { ds ->
+                DeviceGroupJournalAccess.registerNext(
+                    ds = ds,
+                    groupId = ensured.group.groupId(),
+                    before = signerBeforeCommit,
+                    after = DeviceGroupJournalAccess.signerOf(ensured.group, ensured.identity),
+                )
+            }
 
             // G-7 — persist the advanced DeviceGroup snapshot
             // BEFORE any publish. addDeviceFromWire already merged
@@ -448,6 +461,7 @@ public object PairingOrchestrator {
                 ds.publishGroup(
                     groupId = ensured.group.groupId(),
                     payload = envelope,
+                    signer = commitSigner,
                 )
             }
 

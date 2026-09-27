@@ -17,6 +17,7 @@
 
 import { loadWasm, type Wasm } from "../wasm";
 import { rethrowAsLegacyChannel } from "./legacy-v1";
+import { DsClient } from "../ds/client";
 
 /** wasm-bindgen-generated Identity handle. Re-exported
  *  here as a type-only alias so caller signatures stay
@@ -162,6 +163,24 @@ export async function freshPublisherKeys(
   let seed: Uint8Array;
   try {
     seed = publisher.channelSeed(identity);
+    // ADR-0053 contract point 2 — claim the PublisherGroup journal at
+    // creation (and idempotently on every later open). Unsigned: the first
+    // registration of an unclaimed journal; re-sending a key the journal
+    // already holds is answered without a proof. Fired, not awaited, and
+    // logged on failure: channel publishing never waits on the DS.
+    try {
+      const claimSigner = publisher.dsAccessSigner(identity);
+      void new DsClient()
+        .claimGroupWith(publisher.groupId(), claimSigner, null)
+        .catch((err: unknown) => {
+          // eslint-disable-next-line no-console
+          console.warn("ds: PublisherGroup claim failed; retried on the next open", err);
+        })
+        .finally(() => claimSigner.free());
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("ds: PublisherGroup access key unavailable; not claimed", err);
+    }
   } finally {
     publisher.free();
   }

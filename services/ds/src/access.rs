@@ -22,9 +22,18 @@
 //! `401` reveals is nothing a caller does not already know).
 //!
 //! The server holds public keys only: one Ed25519 verifying key per registered
-//! epoch of a group (the two newest are kept, which is the grace between a
-//! committer registering `e+1` and its peers applying the commit), and the
-//! identity key a mailbox's pseudonym is the hash of.
+//! epoch of a group, and the identity key a mailbox's pseudonym is the hash of.
+//!
+//! **Two tiers of epoch key** (ADR-0053 open question 1, resolved in S3):
+//! the two newest registered epochs may write (publish, register the next
+//! epoch); every retained older epoch may still **read**. Without the read
+//! tier a device offline across two commits would hold only a key the server
+//! had dropped, could not fetch the commits that would bring it forward, and
+//! would be stranded for good. Old keys are kept for the journal's own
+//! retention window - a row older than that is pruned anyway, so a device
+//! that far behind is lost regardless - and at most [`MAX_RETAINED_EPOCHS`].
+//! The cost, stated: an evicted member can still read ciphertext it cannot
+//! decrypt (sizes and timing) until its epoch ages out; it cannot write.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -55,6 +64,26 @@ pub(crate) const NONCE_RETENTION_SECS: i64 = {
     let secs = 2 * window_secs as i64;
     secs
 };
+/// The most epoch keys a group keeps (the two write-capable newest plus the
+/// read-only tail). A bound on the rows one group can hold, not a policy
+/// knob: the retention window prunes first in any group that commits less
+/// than this many times a month.
+pub(crate) const MAX_RETAINED_EPOCHS: u64 = 64;
+/// The two newest registered epochs are the write tier.
+const WRITE_EPOCHS: usize = 2;
+/// At most this many payloads in one knock (the attribution and the proposal
+/// fit in two; the rest is headroom).
+pub(crate) const MAX_KNOCK_PAYLOADS: usize = 4;
+
+/// What a gated request is allowed to do with the epoch key it presents.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Access {
+    /// A read: any retained epoch key opens it.
+    Read,
+    /// A write: only the two newest epochs.
+    Write,
+}
+
 /// Effort env var for the knock's proof of work.
 const EFFORT_VAR: &str = "LAKKO_DS_POW_EFFORT_BITS";
 
@@ -87,13 +116,13 @@ fn now_ms() -> u64 {
 // ============================================================================
 
 /// The registered access keys of a group, newest epoch first. Empty means
-/// unclaimed.
+/// unclaimed. The first [`WRITE_EPOCHS`] are the write tier.
 async fn group_keys(
     pool: &MySqlPool,
     group_id: &[u8; PSEUDONYM_LEN],
 ) -> Result<Vec<(u64, VerifyingKey)>, HandlerError> {
     let rows: Vec<(u64, Vec<u8>)> = sqlx::query_as(
-        "SELECT epoch, access_pk FROM ds_group_access WHERE group_id = ? ORDER BY epoch DESC LIMIT 2",
+        "SELECT epoch, access_pk FROM ds_group_access WHERE group_id = ? ORDER BY epoch DESC LIMIT 64",
     )
     .bind(&group_id[..])
     .fetch_all(pool)
@@ -169,10 +198,12 @@ fn parts<'a>(method: &'a Method, uri: &'a Uri, body: &'a [u8]) -> RequestParts<'
 }
 
 /// Gate a group-journal request: open when the group is unclaimed, else a
-/// valid proof under one of the two newest registered epochs.
+/// valid proof under a registered epoch of the tier `access` allows - any
+/// retained epoch for a read, one of the two newest for a write.
 pub(crate) async fn gate_group(
     state: &AppState,
     group_id: &[u8; PSEUDONYM_LEN],
+    access: Access,
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
@@ -182,9 +213,14 @@ pub(crate) async fn gate_group(
     if keys.is_empty() {
         return Ok(());
     }
+    let tier = match access {
+        Access::Read => keys.len(),
+        Access::Write => WRITE_EPOCHS.min(keys.len()),
+    };
+    let usable = &keys[..tier];
     let req = parts(method, uri, body);
     check_proof(&state.db, group_id, headers, &req, |epoch| {
-        keys.iter().find(|(e, _)| *e == epoch).map(|(_, k)| *k)
+        usable.iter().find(|(e, _)| *e == epoch).map(|(_, k)| *k)
     })
     .await
 }
@@ -236,11 +272,14 @@ fn decode_pk(b64: &str) -> Result<VerifyingKey, HandlerError> {
 
 /// `PUT /ds/group/{hex}/access` - register the access key of an epoch.
 ///
-/// The first registration of an unclaimed journal needs no proof. Every later
-/// one must be proven under a registered key and must name either the next
-/// epoch (`latest + 1`, proven under `latest` or the one before) or the latest
-/// epoch again (a replacement, proven under the epoch before it - the shape an
-/// abandoned staged sweep leaves behind). The two newest epochs are kept.
+/// The first registration of an unclaimed journal needs no proof, and neither
+/// does re-sending a key already registered for that epoch (it changes
+/// nothing, and it is what a client's claim-on-open sends). Every other
+/// registration must be proven under a write-tier key and must name either the
+/// next epoch (`latest + 1`, proven under either of the two newest) or the
+/// latest epoch again (a replacement, proven under the epoch before it - the
+/// shape an abandoned staged sweep leaves behind). Older epochs stay as the
+/// read tier, up to [`MAX_RETAINED_EPOCHS`] and the journal retention window.
 pub(crate) async fn put_group_access(
     State(state): State<AppState>,
     AxumPath(group_hex): AxumPath<String>,
@@ -254,15 +293,23 @@ pub(crate) async fn put_group_access(
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("bad json: {e}")))?;
     let new_key = decode_pk(&parsed.access_pk_b64)?;
     let keys = group_keys(&state.db, &group_id).await?;
+    if keys
+        .iter()
+        .any(|(e, k)| *e == parsed.epoch && k.to_bytes() == new_key.to_bytes())
+    {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+    let write_tier = &keys[..WRITE_EPOCHS.min(keys.len())];
 
     if let Some((latest, _)) = keys.first() {
         let latest = *latest;
         let req = parts(&method, &uri, &body);
         // Which registered epochs may vouch for this registration.
         let allowed: Vec<u64> = if parsed.epoch == latest.saturating_add(1) {
-            keys.iter().map(|(e, _)| *e).collect()
+            write_tier.iter().map(|(e, _)| *e).collect()
         } else if parsed.epoch == latest {
-            keys.iter()
+            write_tier
+                .iter()
                 .map(|(e, _)| *e)
                 .filter(|e| *e < latest)
                 .collect()
@@ -291,9 +338,10 @@ pub(crate) async fn put_group_access(
     .execute(&state.db)
     .await
     .map_err(db_error("register group access key"))?;
-    // Keep the two newest epochs.
-    sqlx::query("DELETE FROM ds_group_access WHERE group_id = ? AND epoch + 1 < ?")
+    // Bound the read tier; age-based pruning is the journal pruner's.
+    sqlx::query("DELETE FROM ds_group_access WHERE group_id = ? AND epoch + ? <= ?")
         .bind(&group_id[..])
+        .bind(MAX_RETAINED_EPOCHS)
         .bind(parsed.epoch)
         .execute(&state.db)
         .await
@@ -340,14 +388,19 @@ pub(crate) async fn put_mailbox_access(
 #[derive(Deserialize)]
 pub(crate) struct KnockBody {
     pub(crate) pow: lakko_pow_server::PowProof,
-    /// Standard base64 of the knock payload (an external-join proposal plus
-    /// its attribution), at most `MAX_KNOCK_BYTES` decoded.
-    pub(crate) payload_b64: String,
+    /// Standard base64 of each knock row - typically the joiner's attribution
+    /// and its external-join proposal - at most [`MAX_KNOCK_PAYLOADS`] and
+    /// `MAX_KNOCK_BYTES` decoded in total. **Empty is a probe:** nothing is
+    /// stored and the response carries only the epoch, which is how a joiner
+    /// learns the epoch its proposal must target before it can build one.
+    #[serde(default)]
+    pub(crate) payloads_b64: Vec<String>,
 }
 
 #[derive(Serialize)]
 pub(crate) struct KnockResponse {
-    pub(crate) id: u64,
+    /// The ids of the stored rows, in order (empty for a probe).
+    pub(crate) ids: Vec<u64>,
     /// The group's latest registered access epoch - the epoch a joiner must
     /// target - or `null` for an unclaimed group.
     pub(crate) epoch: Option<u64>,
@@ -360,41 +413,52 @@ pub(crate) async fn post_knock(
     Json(body): Json<KnockBody>,
 ) -> Result<Response, HandlerError> {
     let group_id = journal::decode_pseudonym(&group_hex)?;
-    let payload = B64.decode(&body.payload_b64).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            "payload_b64: bad base64".to_string(),
-        )
-    })?;
-    if payload.is_empty() || payload.len() > MAX_KNOCK_BYTES {
+    if body.payloads_b64.len() > MAX_KNOCK_PAYLOADS {
         return Err((
             StatusCode::PAYLOAD_TOO_LARGE,
-            format!("knock payload must be 1..={MAX_KNOCK_BYTES} bytes"),
+            format!("at most {MAX_KNOCK_PAYLOADS} knock payloads"),
         ));
+    }
+    let mut payloads = Vec::with_capacity(body.payloads_b64.len());
+    let mut total = 0usize;
+    for b64 in &body.payloads_b64 {
+        let payload = B64.decode(b64).map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "payloads_b64: bad base64".to_string(),
+            )
+        })?;
+        total = total.saturating_add(payload.len());
+        if payload.is_empty() || total > MAX_KNOCK_BYTES {
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "knock payloads must be non-empty and total at most {MAX_KNOCK_BYTES} bytes"
+                ),
+            ));
+        }
+        payloads.push(payload);
     }
     lakko_pow_server::verify_proof(&state.db, &body.pow)
         .await
         .map_err(HandlerError::from)?;
-    let published = journal::publish(
-        &state.db,
-        &state.notifiers,
-        Queue::Knock,
-        &group_id,
-        &payload,
-    )
-    .await?;
+    let mut ids = Vec::with_capacity(payloads.len());
+    for payload in &payloads {
+        let published = journal::publish(
+            &state.db,
+            &state.notifiers,
+            Queue::Knock,
+            &group_id,
+            payload,
+        )
+        .await?;
+        ids.push(published.id);
+    }
     let epoch = group_keys(&state.db, &group_id)
         .await?
         .first()
         .map(|(e, _)| *e);
-    Ok((
-        StatusCode::CREATED,
-        Json(KnockResponse {
-            id: published.id,
-            epoch,
-        }),
-    )
-        .into_response())
+    Ok((StatusCode::CREATED, Json(KnockResponse { ids, epoch })).into_response())
 }
 
 /// `GET /ds/group/{hex}/knocks` - the members read what was knocked; gated
@@ -408,7 +472,16 @@ pub(crate) async fn get_knocks(
     Query(q): Query<journal::FetchQuery>,
 ) -> Result<Response, HandlerError> {
     let group_id = journal::decode_pseudonym(&group_hex)?;
-    gate_group(&state, &group_id, &method, &uri, &headers, &[]).await?;
+    gate_group(
+        &state,
+        &group_id,
+        Access::Read,
+        &method,
+        &uri,
+        &headers,
+        &[],
+    )
+    .await?;
     let resp = journal::fetch_with_wait(
         &state.db,
         &state.notifiers,
@@ -436,6 +509,25 @@ pub(crate) async fn issue_pow_challenge(
         .await
         .map(Json)
         .map_err(Into::into)
+}
+
+/// Age out read-tier epoch keys older than the journal's retention window,
+/// never touching a group's two newest epochs (a quiet group that has not
+/// committed in a month must stay openable). Runs on the journal pruner's tick.
+pub(crate) async fn prune_group_access(pool: &MySqlPool, retention_secs: i64) {
+    // MariaDB refuses a DELETE whose subquery reads the same table unless the
+    // subquery is materialised, hence the derived table.
+    let sql = "DELETE a FROM ds_group_access a \
+               JOIN (SELECT group_id, MAX(epoch) AS latest FROM ds_group_access GROUP BY group_id) m \
+                 ON m.group_id = a.group_id \
+               WHERE a.created_at < NOW(3) - INTERVAL ? SECOND AND a.epoch + 1 < m.latest";
+    match sqlx::query(sql).bind(retention_secs).execute(pool).await {
+        Ok(r) if r.rows_affected() > 0 => {
+            tracing::debug!(rows = r.rows_affected(), "pruned read-tier epoch keys");
+        },
+        Ok(_) => {},
+        Err(e) => tracing::warn!(error = %e, "epoch key prune failed"),
+    }
 }
 
 /// Delete nonce rows past their usefulness. Runs on the journal pruner's tick.
@@ -779,7 +871,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registration_rotates_and_keeps_two_epochs() {
+    async fn registration_rotates_with_a_two_epoch_write_tier() {
         let Some((app, pool)) = app().await else {
             return;
         };
@@ -795,6 +887,12 @@ mod tests {
             claim_group(&app, &gid, 2, &k2, None).await,
             StatusCode::UNAUTHORIZED
         );
+        // Re-sending the registered key is a no-op that needs no proof (the
+        // client's claim-on-open).
+        assert_eq!(
+            claim_group(&app, &gid, 1, &k1, None).await,
+            StatusCode::NO_CONTENT
+        );
         // Epoch 2 proven under epoch 1.
         assert_eq!(
             claim_group(&app, &gid, 2, &k2, Some((&k1, 1))).await,
@@ -805,15 +903,16 @@ mod tests {
             claim_group(&app, &gid, 3, &k3, Some((&k1, 1))).await,
             StatusCode::NO_CONTENT
         );
-        // Epoch 1 is now gone: two newest kept.
+        // Epoch 1 is kept as the read tier.
         let epochs: Vec<(u64,)> =
             sqlx::query_as("SELECT epoch FROM ds_group_access WHERE group_id = ? ORDER BY epoch")
                 .bind(&gid[..])
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(epochs, vec![(2,), (3,)]);
-        // A proof under epoch 1 no longer opens the journal.
+        assert_eq!(epochs, vec![(1,), (2,), (3,)]);
+        // A device still at epoch 1 (offline across two commits) can READ the
+        // journal to catch up, but can no longer write or vouch.
         let uri = messages_uri("group", &gid);
         let (status, _) = send(
             &app,
@@ -825,7 +924,22 @@ mod tests {
             },
         )
         .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(
+            &app,
+            Req {
+                method: "POST",
+                uri: &uri,
+                body: b"stale".to_vec(),
+                proof: Some((&k1, 1)),
+            },
+        )
+        .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            claim_group(&app, &gid, 4, &key(15), Some((&k1, 1))).await,
+            StatusCode::UNAUTHORIZED
+        );
         // A skip (epoch 5) is a conflict even with a valid proof.
         assert_eq!(
             claim_group(&app, &gid, 5, &k3b, Some((&k3, 3))).await,
@@ -869,7 +983,9 @@ mod tests {
         let Some((app, _pool)) = app().await else {
             return;
         };
-        let identity = key(21);
+        // A fresh identity per run: the mailbox name derives from it, and a
+        // fixed key would find the previous run's rows in a reused test DB.
+        let identity = SigningKey::from_seed(&fresh_name(21));
         let device = lakko_ds_proof::mailbox_pseudonym(&identity.verifying_key());
         let access_uri = format!("/ds/mailbox/{}/access", hex::encode(device));
         // A key that is not the one the name is derived from is refused.
@@ -953,6 +1069,78 @@ mod tests {
         assert_eq!(parsed["messages"].as_array().map(Vec::len), Some(1));
     }
 
+    async fn fresh_pow(pool: &MySqlPool) -> serde_json::Value {
+        let challenge = lakko_pow_server::issue_challenge(pool, 0).await.unwrap();
+        let seed: [u8; 16] = B64.decode(&challenge.seed).unwrap().try_into().unwrap();
+        let solved = lakko_pow::solve(&seed, 0).unwrap();
+        serde_json::json!({
+            "seed": challenge.seed,
+            "nonce": B64.encode(solved.nonce),
+            "solution": B64.encode(solved.solution),
+        })
+    }
+
+    #[tokio::test]
+    async fn an_empty_knock_is_a_probe_that_stores_nothing() {
+        let Some((app, pool)) = app().await else {
+            return;
+        };
+        let gid = fresh_name(8);
+        let k = key(41);
+        assert_eq!(
+            claim_group(&app, &gid, 7, &k, None).await,
+            StatusCode::NO_CONTENT
+        );
+        let knock_uri = format!("/ds/group/{}/knock", hex::encode(gid));
+        let body = serde_json::json!({ "pow": fresh_pow(&pool).await, "payloads_b64": [] })
+            .to_string()
+            .into_bytes();
+        let (status, resp) = send(
+            &app,
+            Req {
+                method: "POST",
+                uri: &knock_uri,
+                body,
+                proof: None,
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let parsed: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(parsed["epoch"], 7);
+        assert_eq!(parsed["ids"].as_array().map(Vec::len), Some(0));
+        let read_uri = format!("/ds/group/{}/knocks?after=0", hex::encode(gid));
+        let (status, body) = send(
+            &app,
+            Req {
+                method: "GET",
+                uri: &read_uri,
+                body: vec![],
+                proof: Some((&k, 7)),
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["messages"].as_array().map(Vec::len), Some(0));
+        // Too many payloads is refused before any PoW is spent.
+        let many: Vec<String> = (0..5).map(|_| B64.encode(b"x")).collect();
+        let body = serde_json::json!({ "pow": fresh_pow(&pool).await, "payloads_b64": many })
+            .to_string()
+            .into_bytes();
+        let (status, _) = send(
+            &app,
+            Req {
+                method: "POST",
+                uri: &knock_uri,
+                body,
+                proof: None,
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
     #[tokio::test]
     async fn a_knock_pays_proof_of_work_and_learns_the_epoch() {
         let Some((app, pool)) = app().await else {
@@ -975,7 +1163,7 @@ mod tests {
             "nonce": B64.encode(solved.nonce),
             "solution": B64.encode(solved.solution),
         });
-        let body = serde_json::json!({ "pow": pow, "payload_b64": B64.encode(b"join me") })
+        let body = serde_json::json!({ "pow": pow, "payloads_b64": [B64.encode(b"join me")] })
             .to_string()
             .into_bytes();
         let (status, resp) = send(

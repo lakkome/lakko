@@ -2,18 +2,14 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * The epoch a non-member must target to join a group, read from the journal
- * HEAD's public framing (ADR-0028 section 3) after paging to the end.
+ * A paged walk over a DS journal (a group journal, a knock queue, a mailbox).
  *
- * Two things went wrong live on 2026-09-19 and this closes both. The joiner
- * fetched the journal once with `after=0` and took the last row of that
- * page, but the DS pages at 100 rows by default and the group had 370, so the
- * "head" was a row from the morning and the epoch was many commits stale:
- * every member refused the proposal as the wrong epoch and nobody told the
- * joiner (the page even said `hasMore`). And a Commit row is framed at the
- * epoch it was created in while the group it leaves behind is one higher, so
- * a journal whose head IS a Commit needs `epochAfterMessage`, not
- * `epochOfMessage`.
+ * This module used to carry `journalHeadEpoch`, the reading of a group's epoch
+ * off the journal head's public framing that the `/g/` joiner needed (ADR-0028
+ * section 3; the 2026-09-19 single-page defect it closed is why the walk below
+ * pages to the end). ADR-0053 removed that read: a claimed journal answers only
+ * its members, and the joiner learns the epoch from the knock's response
+ * instead. What is left is the one paging loop every multi-page read shares.
  */
 export interface JournalHeadRow {
   readonly id: number;
@@ -28,17 +24,15 @@ export interface JournalHeadPage {
 /** Rows per page: the DS maximum, so a long journal costs few round trips. */
 export const JOURNAL_HEAD_PAGE_SIZE = 1000;
 /** A bound on the walk, so a server that always says `hasMore` cannot hang
- *  the joiner. */
+ *  the caller. */
 export const JOURNAL_HEAD_MAX_PAGES = 1000;
 
 /**
  * Walk the whole journal from its first row, page by page, handing every row
  * to `visit`; the first defined value `visit` returns ends the walk and is
- * the result. `undefined` when the journal ends first. This is the one
- * paging loop every non-member read of a journal goes through: reading the
- * head epoch, and waiting for the Welcome an admin posts after approving a
- * join, which had the same single-page defect and so never saw a Welcome on
- * a journal longer than one page. Errors from `fetchPage` propagate.
+ * the result. `undefined` when the journal ends first. Used by the join
+ * attribution read over a group's knock queue and by the co-publisher's wait
+ * for its Welcome in its own mailbox. Errors from `fetchPage` propagate.
  */
 export async function scanJournal<T>(
   fetchPage: (after: number, limit: number) => Promise<JournalHeadPage>,
@@ -58,24 +52,4 @@ export async function scanJournal<T>(
     after = last.id;
   }
   return undefined;
-}
-
-/**
- * Walk the journal to its head and return the epoch the group is in after the
- * last MLS row, or `0n` for an empty journal (a fresh group). `epochAfter` is
- * `epochAfterMessage`: `undefined` for a non-MLS row, which is skipped.
- * Errors from `fetchPage` propagate; the caller decides what a failed read
- * means.
- */
-export async function journalHeadEpoch(
-  fetchPage: (after: number, limit: number) => Promise<JournalHeadPage>,
-  epochAfter: (payload: Uint8Array) => bigint | undefined,
-): Promise<bigint> {
-  let epoch = 0n;
-  await scanJournal<never>(fetchPage, (m) => {
-    const e = epochAfter(m.payload);
-    if (e !== undefined) epoch = e;
-    return undefined;
-  });
-  return epoch;
 }

@@ -2350,3 +2350,132 @@ fn a_landed_joiner_is_reaped_from_every_admins_queue() {
     );
     assert!(s.bob_g.pending_proposals().is_empty());
 }
+
+// ============================================================================
+// ADR-0053: the committer registers the Delivery Service access key of the
+// epoch its sweep moves to BEFORE publishing the commit, so it needs that
+// epoch's exporter while still sitting at N. `staged_export_secret` is that
+// read. The property: what it returns is exactly what every member derives at
+// N+1 once the commit lands, and it changes nothing about the staged group.
+// ============================================================================
+
+#[test]
+fn a_staged_sweep_exports_the_secret_of_the_epoch_it_moves_to() {
+    let mut s = scene(0x53);
+    let dave = Identity::from_seed(&[0xD5u8; 64]).expect("dave");
+    let epoch = s.alice_g.epoch();
+
+    // Nothing staged: no secret, and no error.
+    assert!(s
+        .alice_g
+        .staged_export_secret(&s.alice, "lakko/test/v1", b"ctx", 32)
+        .expect("read")
+        .is_none());
+
+    let proposal = s
+        .alice_g
+        .propose_add_member_from_wire(&s.alice, &kp_wire(&dave))
+        .expect("alice proposes add-dave");
+    s.bob_g
+        .process_incoming_verifying_roles(&s.bob, &proposal)
+        .expect("bob stores the proposal");
+    let sweep = s
+        .alice_g
+        .stage_pending_proposals(&s.alice)
+        .expect("alice stages")
+        .expect("one commit");
+
+    let at_n = exporter(&s.alice_g, &s.alice);
+    let staged = s
+        .alice_g
+        .staged_export_secret(&s.alice, "lakko/test/v1", b"ctx", 32)
+        .expect("staged read")
+        .expect("a sweep is staged")
+        .to_vec();
+    assert_ne!(staged, at_n, "the staged secret belongs to N+1, not N");
+    // A read, not a transition.
+    assert_eq!(s.alice_g.epoch(), epoch);
+    assert!(s.alice_g.has_staged_sweep());
+    assert_eq!(exporter(&s.alice_g, &s.alice), at_n);
+
+    // The committer merges; a peer applies the published commit. Both now
+    // derive exactly what the staged read promised.
+    assert!(s.alice_g.merge_staged_sweep(&s.alice).expect("merge"));
+    s.bob_g
+        .process_incoming_verifying_roles(&s.bob, &wire(sweep.commit))
+        .expect("bob applies the sweep");
+    assert_eq!(s.alice_g.epoch(), epoch + 1);
+    assert_eq!(s.bob_g.epoch(), epoch + 1);
+    assert_eq!(exporter(&s.alice_g, &s.alice), staged);
+    assert_eq!(exporter(&s.bob_g, &s.bob), staged);
+}
+
+// ============================================================================
+// ADR-0053: the knock queue is an unauthenticated write, so a row there may
+// be anything a PoW-paying writer chose - a member included. Only a stranger's
+// external-join proposal for THIS group belongs there. `process_knock` is the
+// one gate every client runs a knock row through; the property is that
+// anything else is refused before it can touch group state, so a member
+// cannot fork the admins (who read knocks) from everyone else by posting a
+// real commit to the knocks instead of the journal.
+// ============================================================================
+
+#[test]
+fn a_knock_row_is_processed_only_when_it_is_an_external_join_proposal() {
+    let mut s = scene(0x5A);
+    let stranger = Identity::from_seed(&[0x5Bu8; 64]).expect("stranger");
+    let epoch = s.alice_g.epoch();
+
+    // A member's genuine commit, posted to the knocks instead of the journal.
+    let dave = Identity::from_seed(&[0x5Cu8; 64]).expect("dave");
+    let member_proposal = s
+        .bob_g
+        .propose_add_member_from_wire(&s.bob, &kp_wire(&dave))
+        .expect("bob proposes");
+    let application = s
+        .bob_g
+        .create_application_message(&s.bob, b"hello")
+        .expect("bob seals a message");
+    let application = wire(application);
+    // Another group's external-join proposal.
+    let other = Group::create(&stranger).expect("another group");
+    let foreign = Identity::from_seed(&[0x5Du8; 64])
+        .expect("foreign")
+        .create_external_join_proposal(&other.group_id(), other.epoch())
+        .expect("proposal for another group");
+
+    for (what, row) in [
+        ("a member proposal", member_proposal.clone()),
+        ("an application message", application.clone()),
+        ("another group's external proposal", foreign.clone()),
+        ("garbage", vec![0u8; 40]),
+    ] {
+        assert!(
+            !group::is_external_join_proposal_for(&row, &s.alice_g.group_id()),
+            "{what} must not classify as a knock",
+        );
+        assert!(
+            s.alice_g.process_knock(&s.alice, &row).is_err(),
+            "{what} must be refused from the knocks",
+        );
+        assert_eq!(s.alice_g.epoch(), epoch, "{what} changed nothing");
+        assert!(
+            s.alice_g.pending_proposals().is_empty(),
+            "{what} stored nothing"
+        );
+    }
+
+    // The one thing that belongs there passes and reaches the ADR-0027 queue.
+    let external = stranger
+        .create_external_join_proposal(&s.alice_g.group_id(), epoch)
+        .expect("stranger crafts an external-join proposal");
+    assert!(group::is_external_join_proposal_for(
+        &external,
+        &s.alice_g.group_id()
+    ));
+    assert!(matches!(
+        s.alice_g.process_knock(&s.alice, &external),
+        Ok(Incoming::ExternalJoinProposal { .. })
+    ));
+    assert_eq!(s.alice_g.pending_external_joins().len(), 1);
+}

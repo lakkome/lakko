@@ -64,6 +64,7 @@
  * blocked", which fails with `DEADLOCK` if the lock is re-keyed globally.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { fakeAccessSigner } from "../ds/access-test-doubles";
 
 vi.mock("./commit-outbox", () => ({
   markAcked: async () => {},
@@ -146,6 +147,7 @@ function stampingGroup(
     get epoch(): bigint {
       return BigInt(epoch);
     },
+    dsAccessSigner: fakeAccessSigner(() => BigInt(epoch)),
     removeMember: vi.fn((_id: unknown, _leaf: number) => {
       const builtOn = epoch;
       epoch += 1; // the eager merge, inside the create
@@ -178,6 +180,7 @@ function journalDs(): { ds: DsClient; journal: Uint8Array[] } {
       journal.push(bytes);
       return { id: journal.length, createdAt: "t" };
     }),
+    registerGroupEpoch: vi.fn(async () => {}),
   } as unknown as DsClient;
   return { ds, journal };
 }
@@ -237,6 +240,7 @@ describe("the send path never straddles an epoch change", () => {
           journal.push(bytes);
           return { id: journal.length, createdAt: "t" };
         }),
+        registerGroupEpoch: vi.fn(async () => {}),
       } as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
@@ -303,6 +307,7 @@ describe("the send path never straddles an epoch change", () => {
           journal.push(bytes);
           return { id: journal.length, createdAt: "t" };
         }),
+        registerGroupEpoch: vi.fn(async () => {}),
       } as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,

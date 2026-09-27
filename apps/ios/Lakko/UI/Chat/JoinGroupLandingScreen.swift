@@ -9,9 +9,11 @@ import SwiftUI
 /// A non-member opens an owner's `https://lakko.me/g/<slug>#<key>` link; this
 /// screen decodes + verifies the `GroupInviteCapability`, opens its sealed
 /// preview with the key from the URL fragment (ADR-0028 v2), shows the card of
-/// `docs/ux/group-invite-page.md` section 3, and on `Request to join` posts an
-/// external-join proposal (ADR-0027) to the group journal, then polls until the
-/// rendezvous Welcome lands and surfaces "Joined". The link conveys the
+/// `docs/ux/group-invite-page.md` section 3, and on `Request to join` KNOCKS
+/// (ADR-0053): a probe learns the group's epoch and a second knock carries the
+/// external-join proposal (ADR-0027). The Welcome then reaches this device's
+/// own mailbox, the session inbox poll joins it, and this screen surfaces
+/// "Joined" once the group appears. The link conveys the
 /// `group_id` and a claim about who is inviting to what; the admin approval
 /// gate is the security boundary.
 ///
@@ -23,7 +25,7 @@ import SwiftUI
 ///
 /// **The wait is TWO-stage since ADR-0045 S7, and the copy says so.** An
 /// admin's approve no longer admits anyone by itself: it publishes an `Add`
-/// proposal, and the rendezvous appears only once a committer sweeps that
+/// proposal, and the Welcome is sent only once a committer sweeps that
 /// proposal into a commit — a step ADR-0045 decision 2 gives no deadline. So
 /// this poll spans both stages, and promising immediacy here would be the
 /// optimistic-update lie the UX spec forbids.
@@ -34,12 +36,12 @@ import SwiftUI
 /// drops whatever refuses to build, and the commonest cause needs no adversary
 /// at all (an expired KeyPackage, reachable because a request has no deadline).
 /// This screen is never told when that happens, and the reason is structural
-/// rather than an omission: there is no artifact addressed to a non-member, and
-/// the journal is unauthenticated — the DS pseudonym IS the `group_id` and there
-/// is no auth on it — so any "your request was not carried" envelope would be a
-/// forgeable denial primitive. Inference does not work either: an epoch
-/// advancing with no rendezvous for us is byte-for-byte what *no admin has
-/// approved yet* looks like, which is the ordinary state.
+/// rather than an omission: nothing addressed to a non-member says "not
+/// carried", and the joiner's mailbox is open for writes by anyone, so such a
+/// notice would be a forgeable denial primitive. Inference does not work
+/// either: the joiner cannot read the claimed journal (ADR-0053), and no
+/// Welcome arriving is byte-for-byte what *no admin has approved yet* looks
+/// like, which is the ordinary state.
 ///
 /// So the wait copy states the truth about the wait, and the screen offers the
 /// one repair this side has: `Request again`, user-driven, which mints a fresh
@@ -176,39 +178,24 @@ public final class JoinGroupLandingViewModel: ObservableObject {
                 blobId: resolved.blobId
             )
             state = .waiting
-            startPolling(groupId: result.groupId, joinerKey: result.joinerSignatureKey)
+            startPolling(groupId: result.groupId)
         } catch {
             state = .failed(error.localizedDescription)
         }
     }
 
-    private func startPolling(groupId: Data, joinerKey: Data) {
+    private func startPolling(groupId: Data) {
         let repo = repository
         let groupIdHex = DsClient.pseudonymHex(groupId)
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
-                // The sweep publishes the Welcome twice: to the group journal
-                // as a rendezvous, which the poll below reads, and to the
-                // joiner's mailbox, which the inbox poll reads (the sweep
-                // cannot tell a link joiner from a contact). When the mailbox
-                // copy lands first, the group is already ours and the
-                // rendezvous can never open again - its KeyPackage is spent -
-                // so without this check the landing waited forever on a join
-                // that had happened.
+                // ADR-0053 point 6 — the Welcome reaches this device's own
+                // mailbox (the sweep addresses every add there, a link joiner
+                // included), and the session-wide inbox poll joins it. So the
+                // wait is on the group appearing, never on the group journal,
+                // which a non-member cannot read.
                 if await repo.hasGroup(groupIdHex: groupIdHex) {
                     self?.state = .joined(groupIdHex: groupIdHex)
-                    return
-                }
-                do {
-                    if let hex = try await repo.pollForJoinWelcome(
-                        groupId: groupId,
-                        joinerSignatureKey: joinerKey
-                    ) {
-                        self?.state = .joined(groupIdHex: hex)
-                        return
-                    }
-                } catch {
-                    self?.state = .failed(error.localizedDescription)
                     return
                 }
                 try? await Task.sleep(nanoseconds: 3_000_000_000)

@@ -249,8 +249,11 @@ function ringVerdict(wasm, muted, offerAgeMs) {
  *   The decrypted MLS provider snapshot + knownGroupIds, or null.
  * @property {DecryptWasm} wasm
  *   The loaded wasm core (or a mock).
- * @property {(groupIdBytes: Uint8Array, afterId: number) => Promise<{ messages: Array<{ id: number, payload: Uint8Array, createdAt: string }> }>} dsFetchGroup
+ * @property {(groupIdBytes: Uint8Array, afterId: number, signProof: ((method: string, path: string, query: string) => string) | null) => Promise<{ messages: Array<{ id: number, payload: Uint8Array, createdAt: string }> }>} dsFetchGroup
  *   READ-ONLY DS group-journal fetch of rows strictly after `afterId`.
+ *   ADR-0053 — `signProof`, when present, returns the `x-lakko-ds-proof` header
+ *   value for the request (service path + exact query, empty body), signed with
+ *   the throwaway group's access key; a claimed journal answers nothing else.
  * @property {(accountId: string, groupHex: string) => Promise<number | null>} [startCursor]
  *   The app's last-persisted per-group cursor (READ-ONLY), if available. Used as
  *   the fetch start so intervening commits are replayed and the epoch stays right.
@@ -449,11 +452,30 @@ export async function decryptPushPreview(wake, deps) {
     }
     if (after < 0) after = 0;
 
+    // ADR-0053 contract point 9 — a claimed journal answers only a request
+    // proven under the group's access key. Deriving it is one exporter read on
+    // the same throwaway group, and signing a GET writes nothing (C-59): no
+    // claim, no registration from here. No key (an inactive group, a mock) ->
+    // an unsigned read, which an unclaimed journal still answers and a claimed
+    // one refuses -> the generic notification below.
+    let signer = null;
+    try {
+      signer =
+        typeof group.dsAccessSigner === "function" ? group.dsAccessSigner(identity) : null;
+    } catch {
+      signer = null;
+    }
+    const signProof =
+      signer === null
+        ? null
+        : (method, path, query) => signer.sign(method, path, query, new Uint8Array(0));
     let fetched;
     try {
-      fetched = await deps.dsFetchGroup(groupIdBytes, after);
+      fetched = await deps.dsFetchGroup(groupIdBytes, after, signProof);
     } catch {
       return null;
+    } finally {
+      freeQuietly(signer);
     }
     const messages = fetched?.messages ?? [];
 

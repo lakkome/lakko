@@ -20,6 +20,7 @@
  * commit. The outbox store + DS are mocked so no wasm / IndexedDB is needed.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { fakeAccessSigner } from "../ds/access-test-doubles";
 
 // The outbox helpers the client imports (markAcked / loadUnacked) are stubbed so
 // the tests need no IndexedDB. The store round-trip itself is covered by
@@ -91,6 +92,7 @@ function mockGroup(order: string[], opts: { roleTable?: boolean } = {}): WasmGro
     get epoch(): bigint {
       return 5n;
     },
+    dsAccessSigner: fakeAccessSigner(() => 5n),
     removeMember: vi.fn((_id: unknown, _leaf: number) => {
       order.push("create");
       return new Uint8Array([1, 2, 3]);
@@ -127,7 +129,7 @@ function makeClient(
 ): ContactsClient {
   return new ContactsClient(
     {} as unknown as DiscoveryClient,
-    ds as unknown as DsClient,
+    { registerGroupEpoch: async () => {}, ...ds } as unknown as DsClient,
     {
       identityProvider: () => IDENTITY_TOKEN,
       onPersistWithCommit: (e) => {
@@ -267,7 +269,7 @@ describe("ADR-0040 — restart sweep re-publishes + re-arms the echo filter", ()
     }));
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup, publishMailbox } as unknown as DsClient,
+      { publishGroup, publishMailbox, registerGroupEpoch: async () => {} } as unknown as DsClient,
       {},
     );
     const rearmed: number[] = [];
@@ -314,7 +316,7 @@ describe("ADR-0040 — restart sweep re-publishes + re-arms the echo filter", ()
     }));
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup, publishMailbox } as unknown as DsClient,
+      { publishGroup, publishMailbox, registerGroupEpoch: async () => {} } as unknown as DsClient,
       {},
     );
     const rearmed: number[] = [];
@@ -350,7 +352,7 @@ describe("ADR-0040 — restart sweep re-publishes + re-arms the echo filter", ()
     });
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup, publishMailbox: vi.fn() } as unknown as DsClient,
+      { publishGroup, publishMailbox: vi.fn(), registerGroupEpoch: async () => {} } as unknown as DsClient,
       {},
     );
 
@@ -385,6 +387,7 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
       get epoch(): bigint {
         return epoch;
       },
+      dsAccessSigner: fakeAccessSigner(() => epoch),
       removeMember: vi.fn((_id: unknown, _leaf: number) => {
         epoch += 1n; // eager merge N -> N+1
         return new Uint8Array([1, 2, 3]);
@@ -410,7 +413,7 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
 
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup } as unknown as DsClient,
+      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async (e) => {
@@ -461,7 +464,7 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
     const abortHook = vi.fn(async () => {});
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup } as unknown as DsClient,
+      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {},
@@ -482,7 +485,7 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
     const publishGroup = vi.fn(async () => ({ id: 1, createdAt: "t" }));
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup } as unknown as DsClient,
+      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {
@@ -508,7 +511,7 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
     const publishGroup = vi.fn(async () => ({ id: 1, createdAt: "t" }));
     const client = new ContactsClient(
       {} as unknown as DiscoveryClient,
-      { publishGroup } as unknown as DsClient,
+      { publishGroup, registerGroupEpoch: async () => {} } as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {
@@ -544,6 +547,7 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
       get epoch(): bigint {
         return epoch;
       },
+      dsAccessSigner: fakeAccessSigner(() => epoch),
       addMember: vi.fn((_id: unknown, _kp: Uint8Array) => {
         epoch += 1n; // eager merge N -> N+1
         return {
@@ -564,7 +568,7 @@ describe("ADR-0040 F1 — reset the in-memory group on a commit persist-abort", 
           { deviceId: new Uint8Array(32).fill(9), keyPackage: new Uint8Array([9, 9, 9]) },
         ],
       } as unknown as DiscoveryClient,
-      { publishGroup, publishMailbox } as unknown as DsClient,
+      { publishGroup, publishMailbox, registerGroupEpoch: async () => {} } as unknown as DsClient,
       {
         identityProvider: () => IDENTITY_TOKEN,
         onPersistWithCommit: async () => {

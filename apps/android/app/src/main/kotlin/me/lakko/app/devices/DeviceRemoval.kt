@@ -173,11 +173,23 @@ public object DeviceRemoval {
         seed.fill(0)
 
         try {
+            val signerBeforeCommit = DeviceGroupJournalAccess.signerOf(ensured.group, ensured.identity)
             val commitBytes = ensured.group.removeDeviceAt(
                 identity = ensured.identity,
                 leafIndex = leafIndex,
             )
             val groupId = ensured.group.groupId()
+            // ADR-0053 client contract point 3 — epoch N+1's key registered
+            // before the commit is published or persisted; a refusal throws with
+            // nothing on the wire (this handle is throwaway).
+            val commitSigner = DsClient().use { ds ->
+                DeviceGroupJournalAccess.registerNext(
+                    ds = ds,
+                    groupId = groupId,
+                    before = signerBeforeCommit,
+                    after = DeviceGroupJournalAccess.signerOf(ensured.group, ensured.identity),
+                )
+            }
 
             // Broadcast to the DeviceGroup journal. The DS treats the
             // deterministic 32-byte group_id as opaque bytes. G-13
@@ -185,7 +197,7 @@ public object DeviceRemoval {
             // envelope so peers can verify the removal under the policy.
             val envelope = DeviceGroupJournalEnvelope.encode(commitBytes, attestation)
             DsClient().use { ds ->
-                ds.publishGroup(groupId = groupId, payload = envelope)
+                ds.publishGroup(groupId = groupId, payload = envelope, signer = commitSigner)
             }
 
             DeviceGroupLifecycle.persistSnapshot(
@@ -234,12 +246,20 @@ public object DeviceRemoval {
             if (ensured.group.requireAttestedRemovals()) {
                 return
             }
+            val signerBeforeCommit = DeviceGroupJournalAccess.signerOf(ensured.group, ensured.identity)
             val commit = ensured.group.setRequireAttestedRemovals(ensured.identity)
             val groupId = ensured.group.groupId()
             // The policy commit removes nothing, so it carries no attestation.
             val envelope = DeviceGroupJournalEnvelope.encode(commit, null)
             DsClient().use { ds ->
-                ds.publishGroup(groupId = groupId, payload = envelope)
+                // ADR-0053 client contract point 3 — register N+1 first.
+                val commitSigner = DeviceGroupJournalAccess.registerNext(
+                    ds = ds,
+                    groupId = groupId,
+                    before = signerBeforeCommit,
+                    after = DeviceGroupJournalAccess.signerOf(ensured.group, ensured.identity),
+                )
+                ds.publishGroup(groupId = groupId, payload = envelope, signer = commitSigner)
             }
             DeviceGroupLifecycle.persistSnapshot(
                 context = context,

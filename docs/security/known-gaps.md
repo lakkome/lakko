@@ -4345,7 +4345,7 @@ test for.
 
 ## Delivery service
 
-### G-42: A journal's name is its only key - a leaked `group_id` reads, writes and knocks; a mailbox is named by a public key anyone can compute - **OPEN, closing under [ADR-0053](../adr/0053-ds-journal-authorisation.md) (Accepted 2026-09-27; S1 - the `lakko-ds-proof` crate and the server side in `services/ds/src/access.rs` - built the same day; until S2-S4 land no client signs a request or claims a journal, so the posture below is unchanged in practice)**
+### G-42: A journal's name is its only key - a leaked `group_id` reads, writes and knocks; a mailbox is named by a public key anyone can compute - **CLOSING under [ADR-0053](../adr/0053-ds-journal-authorisation.md): S1-S4 built and deployed to the test stack 2026-09-27; a claimed journal refuses a request by name alone (walked live: unsigned read, unsigned write and a forged proof 401, a competing registration 409). Residuals: rendezvous mailboxes stay open by name by design, an evicted member keeps READ access to ciphertext until its epoch ages out of the retention window, and the S5 `lakko-security` pass is open**
 
 **Symptom.** `services/ds` serves and accepts both journals to anyone who names them
 (`services/ds/src/main.rs`: *"No authentication on Phase 1.3 - anyone with the right

@@ -1861,8 +1861,8 @@ public final class ChatViewModel: ObservableObject {
     /// pending external-join request (owner/admin only). Publishes ONE
     /// artifact, an ordinary admin-authored `Add` proposal; there is no commit,
     /// no epoch advance and no Welcome here. The joiner is admitted when a
-    /// committer sweeps the proposal, which is what posts the
-    /// `WelcomeRendezvous` they are polling for — and ADR-0045 decision 2 gives
+    /// committer sweeps the proposal, which is what sends the Welcome to their
+    /// mailbox (ADR-0053) — and ADR-0045 decision 2 gives
     /// that step no deadline, so the notice must not promise it has happened.
     ///
     /// The sweep is attempted immediately so the common single-admin case still
@@ -2438,7 +2438,9 @@ public final class ChatViewModel: ObservableObject {
         let payload = ForwardPayload.forwardPayload(
             of: message,
             authorLabel: forwardAuthorLabel(for: message),
-            originGroupIdHex: groupIdHex)
+            originGroupIdHex: groupIdHex,
+            // ADR-0053 section 6 — a forward out of a one-to-one carries no origin.
+            sourceIsOneToOne: repository.conversationKind(groupIdHex: groupIdHex) == .chat)
         let refs = try await ForwardAttachments.reencryptAll(message.attachments)
         try await repository.sendMessage(
             groupIdHex: targetGroupIdHex,
