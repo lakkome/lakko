@@ -499,6 +499,35 @@ nothing yet run against a deployed DS.
   knock returns the epoch, and the joiner waits for its group to appear through the
   ordinary device-mailbox Welcome path.
 
+### Walked live, 2026-09-27
+
+Deployed to the test stack the same day. A claimed four-member group carried
+messages between web, iOS and Android in all six directions with signed
+requests, and the same group by name alone was refused (unsigned read, unsigned
+write, forged proof: 401; a competing registration: 409). The `/g/` link join
+over the knock worked end to end with an iOS owner and two joiners, web and
+Android: probe knock, knock with the proposal, approval, the sweep registering
+the next epoch before its commit, the Welcome in the joiner's device mailbox,
+messages both ways.
+
+- **The knock's proof of work is too slow for native clients at the default.**
+  `lakko-pow-server` defaults to 8 bits; the native solver (no JIT - iOS forbids
+  one) needs about 21 s on a Mac for 8 bits and took minutes on the Android
+  emulator, past the 300 s challenge life, so the Android knock failed with 401
+  until the test stack set `LAKKO_DS_POW_EFFORT_BITS=0`, the value its other
+  services already use. The same default governs production auth, discovery and
+  push-gw, where no mobile client has exercised it either. Open question 3
+  (knock cost) is now a measured problem, not a tuning note.
+- **iOS polls the knock queue without a throttle** - about twice a second across
+  the groups it owns - where Android waits 10 s per group and web reads knocks
+  after each long poll.
+- **Android copy**: the join failure shows protocol words ("DS knock
+  (external-join request) failed") with no retry, and success says "Find it
+  under Groups", a section the app does not have.
+- **The owner's pending request reads "Member"** even when the joiner is a
+  contact: the request carries the joiner's device leaf key, and the name lookup
+  keys on the account.
+
 ## References
 
 - [ADR-0005](0005-contact-invitations.md) pseudonym lifecycle; [ADR-0017](0017-phrase-seeded-identity.md)
