@@ -27,6 +27,9 @@ struct CoPublishersPanel: View {
     @State private var pollTask: Task<Void, Never>?
     /// ADR-0053 — how far the knocks have been read (their own id space).
     @State private var knockCursor: Int64 = 0
+    /// ADR-0053 — the same per-group floor on knock reads the chat poll keeps;
+    /// the journal itself is still polled every 5 s.
+    @State private var knockThrottle = KnockPollThrottle()
 
     private let ds = DsClient()
 
@@ -165,7 +168,8 @@ struct CoPublishersPanel: View {
         do {
             let outcome = try await CoPublisher.pollJournal(
                 ds: ds, identity: identity, publisherGroup: publisherGroup,
-                knockAfter: knockCursor)
+                knockAfter: knockCursor,
+                readKnocks: knockThrottle.take(channelId))
             knockCursor = outcome.knockCursor
             pending = try CoPublisher.pending(publisherGroup: publisherGroup)
         } catch {

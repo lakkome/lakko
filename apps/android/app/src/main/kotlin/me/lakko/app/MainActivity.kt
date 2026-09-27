@@ -1721,6 +1721,12 @@ private fun SessionRoot(
                     me.lakko.app.ui.chat.JoinGroupLandingScreen(
                         viewModel = groupJoinVm,
                         onDone = { navController.popBackStack() },
+                        onOpenChat = { hex ->
+                            // Replace the landing with the chat, so Back from
+                            // the chat does not return to a finished join.
+                            navController.popBackStack()
+                            navController.navigate(Routes.chat(hex)) { launchSingleTop = true }
+                        },
                     )
                 }
             }

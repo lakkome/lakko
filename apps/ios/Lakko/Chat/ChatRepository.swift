@@ -247,6 +247,17 @@ public final class ChatRepository: ObservableObject {
     /// ADR-0053 point 2 — groups already claimed this session (claim-on-open
     /// runs on the first poll of each group per session).
     private var claimedGroupsThisSession: Set<String> = []
+    /// ADR-0053 point 7 — the per-group floor on knock reads.
+    private let knockThrottle = KnockPollThrottle()
+    /// ADR-0053 — the same floor for the attribution read, which reads the
+    /// whole knock queue for the members sheet. A sibling keyed the same way
+    /// (by group), so the two reads do not starve each other.
+    private let attributionThrottle = KnockPollThrottle()
+
+    /// Take one attribution read for `groupIdHex` if the floor allows it.
+    func takeJoinAttributionRead(groupIdHex: String) -> Bool {
+        attributionThrottle.take(groupIdHex)
+    }
 
     /// ADR-0048 — where a received in-group profile goes: the shared profile
     /// directory in production. A seam so a test can capture what the receive
@@ -689,6 +700,8 @@ public final class ChatRepository: ObservableObject {
         // ADR-0053 — the signers belong to the identity of the closing session.
         dsSigners.reset()
         claimedGroupsThisSession.removeAll()
+        knockThrottle.reset()
+        attributionThrottle.reset()
         // ADR-0045 — a new session re-establishes its own beacon cadence; a
         // carried-over stamp would suppress the first beacon of that session,
         // which the core deliberately makes immediate.
@@ -2543,6 +2556,18 @@ public final class ChatRepository: ObservableObject {
         return try? record.group.pendingExternalJoins()
     }
 
+    /// ADR-0053 — the ACCOUNT key a pending external-join request belongs to,
+    /// from the joiner's verified device binding (the joiner's own key when its
+    /// leaf is unbound). A request is keyed on the joiner's DEVICE leaf key and
+    /// contacts on the account key, so this is what names a contact on the
+    /// request row. Approve / reject still take the leaf key. `nil` when the
+    /// group is unknown here or the read fails.
+    public func pendingExternalJoinAccountKey(groupIdHex: String, joinerSignatureKey: Data) -> Data? {
+        guard let record = groups[groupIdHex] else { return nil }
+        return (try? record.group.pendingExternalJoinAccountKey(
+            joinerSignatureKey: joinerSignatureKey)) ?? nil
+    }
+
     /// ADR-0027 / UX §7.1 — whether a request the quarantine turned away has
     /// been observed for this group since the last time an admin acted.
     ///
@@ -2565,18 +2590,21 @@ public final class ChatRepository: ObservableObject {
     /// returns the joiner signature key, the issuer fingerprint, and whether the
     /// issuer is in the current roster. Advisory — the role-gated approval gate
     /// is the boundary, so failures degrade to an empty list.
+    ///
+    /// `nil` when the knocks could not be read (retried by the caller later);
+    /// an empty list when they were read and carry no attribution.
     public func fetchJoinAttributions(
         groupIdHex: String
-    ) async -> [(joinerSignatureKey: Data, issuerFingerprint: String, issuerInRoster: Bool)] {
-        guard let record = groups[groupIdHex] else { return [] }
-        guard let groupId = try? record.group.groupId() else { return [] }
+    ) async -> [(joinerSignatureKey: Data, issuerFingerprint: String, issuerInRoster: Bool)]? {
+        guard let record = groups[groupIdHex] else { return nil }
+        guard let groupId = try? record.group.groupId() else { return nil }
         // ADR-0050 — the capability issuer is an ACCOUNT key.
         let rosterKeys = Set(PersonKey.people((try? record.group.members()) ?? []))
         // ADR-0053 point 6 — a joiner's attribution rides its knock, not the
         // journal: read the knocks, signed like a group read.
         guard let raw = try? await dsClient.fetchKnocks(
             groupId: groupId, after: 0, waitSecs: 0, auth: dsAuth(groupIdHex: groupIdHex))
-        else { return [] }
+        else { return nil }
         var out: [(Data, String, Bool)] = []
         for m in raw.messages {
             guard let attr = try? parseGroupJoinAttribution(bytes: m.payload) else { continue }
@@ -3810,10 +3838,14 @@ public final class ChatRepository: ObservableObject {
         let after = record.cursor
         let groupId = record.groupId
         // ADR-0053 point 7 — an owner / admin device reads what non-members
-        // knocked, next to the journal and on its own cursor. Not awaited with
-        // the long poll: a knock waiting for approval must not sit behind 30 s
-        // of an idle journal.
-        Task { @MainActor [weak self] in await self?.pollKnocks(groupIdHex: groupIdHex) }
+        // knocked, next to the journal and on its own cursor, at most once per
+        // `KnockPollThrottle.floorSeconds` per group (the journal is polled far
+        // more often than anyone knocks). Not awaited with the long poll: a
+        // knock waiting for approval must not sit behind 30 s of an idle
+        // journal.
+        if knockThrottle.take(groupIdHex) {
+            Task { @MainActor [weak self] in await self?.pollKnocks(groupIdHex: groupIdHex) }
+        }
         // ADR-0053 point 1 — the read is signed with the group's access key.
         let raw = try await chatClient.fetchGroupJournal(
             groupId: groupId,

@@ -59,6 +59,7 @@ import {
 } from "../ds/access";
 import { solvePow } from "../auth/pow";
 import { KIND_WELCOME, parseEnvelope, wrapEnvelope } from "../contacts/envelope";
+import { takeKnockReadSlot } from "../chat/knock-cursor";
 import { base64Encode } from "../auth/account-id";
 import { withGroupMlsLock } from "../mls/group-lock";
 import {
@@ -179,8 +180,12 @@ export async function pollCoPublisherJournal(
   // one fails and is skipped. Knocks are pruned after seven days, so the
   // re-read stays small. A failed read is retried next tick.
   let knocks: Awaited<ReturnType<DsClient["fetchKnocks"]>> | null = null;
+  // The panel polls every 5 s; knocks are read at most once per 10 s per
+  // group (`KNOCK_READ_MIN_INTERVAL_MS`), the floor every client shares.
   try {
-    knocks = await ds.fetchKnocks(groupId, { after: 0, waitSecs: 0 });
+    if (takeKnockReadSlot(groupIdB64, Date.now())) {
+      knocks = await ds.fetchKnocks(groupId, { after: 0, waitSecs: 0 });
+    }
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn("co-publisher: knock read failed; retried next tick", err);

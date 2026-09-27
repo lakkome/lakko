@@ -13,7 +13,7 @@ import SwiftUI
 /// (ADR-0053): a probe learns the group's epoch and a second knock carries the
 /// external-join proposal (ADR-0027). The Welcome then reaches this device's
 /// own mailbox, the session inbox poll joins it, and this screen surfaces
-/// "Joined" once the group appears. The link conveys the
+/// "You joined the group." with "Open chat" once the group appears. The link conveys the
 /// `group_id` and a claim about who is inviting to what; the admin approval
 /// gate is the security boundary.
 ///
@@ -59,7 +59,9 @@ public final class JoinGroupLandingViewModel: ObservableObject {
         case waiting
         case joined(groupIdHex: String)
         case invalid
-        case failed(String)
+        /// ADR-0053 — one of the shared failure states; the raw error is
+        /// logged, never shown.
+        case failed(JoinRequestFailure)
     }
 
     @Published public private(set) var state: State = .loading
@@ -119,7 +121,8 @@ public final class JoinGroupLandingViewModel: ObservableObject {
             let resolved = try await repository.resolveGroupInviteSlug(slug: slug)
             self.resolved = resolved
         } catch {
-            state = .failed(error.localizedDescription)
+            NSLog("group join: resolving the invite link failed: %@", String(describing: error))
+            state = .failed(JoinRequestFailure.classify(error))
             return
         }
         guard let resolved else { return }
@@ -180,7 +183,21 @@ public final class JoinGroupLandingViewModel: ObservableObject {
             state = .waiting
             startPolling(groupId: result.groupId)
         } catch {
-            state = .failed(error.localizedDescription)
+            NSLog("group join: the request failed: %@", String(describing: error))
+            state = .failed(JoinRequestFailure.classify(error))
+        }
+    }
+
+    /// "Try again" on the generic failure: re-run whatever failed — the link
+    /// resolve when it never resolved, the request otherwise.
+    public func retry() async {
+        guard case .failed = state else { return }
+        if resolved == nil {
+            state = .loading
+            await load()
+        } else {
+            state = .ready
+            await request()
         }
     }
 
@@ -194,7 +211,7 @@ public final class JoinGroupLandingViewModel: ObservableObject {
                 // included), and the session-wide inbox poll joins it. So the
                 // wait is on the group appearing, never on the group journal,
                 // which a non-member cannot read.
-                if await repo.hasGroup(groupIdHex: groupIdHex) {
+                if repo.hasGroup(groupIdHex: groupIdHex) {
                     self?.state = .joined(groupIdHex: groupIdHex)
                     return
                 }
@@ -217,10 +234,17 @@ public final class JoinGroupLandingViewModel: ObservableObject {
 public struct JoinGroupLandingScreen: View {
     @StateObject private var viewModel: JoinGroupLandingViewModel
     private let onDone: () -> Void
+    /// Open the joined group (replaces this screen with the chat).
+    private let onOpenChat: (String) -> Void
 
-    public init(viewModel: JoinGroupLandingViewModel, onDone: @escaping () -> Void) {
+    public init(
+        viewModel: JoinGroupLandingViewModel,
+        onDone: @escaping () -> Void,
+        onOpenChat: @escaping (String) -> Void
+    ) {
         self._viewModel = StateObject(wrappedValue: viewModel)
         self.onDone = onDone
+        self.onOpenChat = onOpenChat
     }
 
     public var body: some View {
@@ -249,12 +273,20 @@ public struct JoinGroupLandingScreen: View {
                     onDone()
                 }
                 .tint(.lakkoAccent)
-            case .failed(let message):
+            case .failed(let failure):
                 headlineBlock
-                Text(message)
+                Text(failure.message)
                     .font(.footnote)
                     .foregroundStyle(Color.lakkoDanger)
                     .fixedSize(horizontal: false, vertical: true)
+                if failure.offersRetry {
+                    Button(joinTryAgain) {
+                        Task { await viewModel.retry() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.lakkoAccent)
+                    .disabled(viewModel.requesting)
+                }
                 Button("Close") {
                     viewModel.dismiss()
                     onDone()
@@ -290,14 +322,14 @@ public struct JoinGroupLandingScreen: View {
                 .tint(.lakkoAccent)
                 .disabled(viewModel.requesting)
                 footer
-            case .joined:
+            case .joined(let groupIdHex):
                 headlineBlock
-                Text("Joined. You can find the group in your chats.")
+                Text(joinSucceededMessage)
                     .foregroundStyle(Color.lakkoText)
                     .fixedSize(horizontal: false, vertical: true)
-                Button("Done") {
+                Button(joinOpenChat) {
                     viewModel.dismiss()
-                    onDone()
+                    onOpenChat(groupIdHex)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.lakkoAccent)

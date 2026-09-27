@@ -324,13 +324,22 @@ public final class ContactsRepository: ObservableObject {
                     // `joinGroupFromWelcome` republishes this device's
                     // KeyPackage on success AND failure, so the directory
                     // never keeps serving a KeyPackage the Welcome consumed.
+                    //
+                    // ADR-0053 — a failure HERE is logged and never surfaced
+                    // (the web client's rule). Since ADR-0050 every chat Welcome
+                    // is sealed to a DEVICE leaf and lands in the device
+                    // mailbox, whose failures still surface below. What reaches
+                    // the ACCOUNT mailbox is a Welcome sealed to the account
+                    // identity — a channel co-publisher Welcome, which
+                    // `CoPublisher.pollForCoPublishWelcome` joins itself — and
+                    // the chat identity cannot open it, so reporting it read as
+                    // a failed chat join that never was one.
                     if let chatRepository = chatRepository {
                         do {
                             _ = try await chatRepository
                                 .joinGroupFromWelcome(welcomeBytes: welcomeBytes)
                         } catch {
-                            NSLog("contacts inbox: joining a chat from a Welcome failed: \(error)")
-                            welcomeJoinFailure = Self.welcomeJoinFailureMessage
+                            NSLog("contacts inbox: an account-mailbox Welcome did not open as a chat (expected for a co-publisher Welcome): \(error)")
                         }
                     }
                     continue

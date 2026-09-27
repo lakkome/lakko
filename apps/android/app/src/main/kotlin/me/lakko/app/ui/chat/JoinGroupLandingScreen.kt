@@ -105,6 +105,8 @@ public class JoinGroupLandingViewModel(
         public data object Requesting : State
         public data object Waiting : State
         public data class Joined(val groupIdHex: String) : State
+        /** [message] is one of the fixed sentences [me.lakko.app.chat.joinFailureCopy]
+         *  returns — never a raw or protocol message. */
         public data class Failed(val message: String) : State
     }
 
@@ -182,9 +184,10 @@ public class JoinGroupLandingViewModel(
         if (mutableRequesting.value) return
         val ticket = resolved ?: return
         mutableRequesting.value = true
-        // Only the first request passes through `Requesting`; a re-request
-        // keeps the wait copy on screen.
-        if (mutableState.value == State.Ready) mutableState.value = State.Requesting
+        // Only the first request passes through `Requesting` (and a `Try
+        // again` after a failure); a re-request keeps the wait copy on screen.
+        val before = mutableState.value
+        if (before == State.Ready || before is State.Failed) mutableState.value = State.Requesting
         // A re-request replaces the poll rather than adding a second one.
         pollJob?.cancel()
         pollJob = viewModelScope.launch {
@@ -201,8 +204,14 @@ public class JoinGroupLandingViewModel(
                 )
                 groupId = result.first
                 joinerKey = result.second
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                mutableRequesting.value = false
+                throw e
             } catch (e: Throwable) {
-                mutableState.value = State.Failed(e.message ?: e.toString())
+                // The raw cause goes to the log; the person reads one of the
+                // fixed sentences (docs/ux/group-invite-page.md).
+                android.util.Log.w("JoinGroupLanding", "join request failed", e)
+                mutableState.value = State.Failed(me.lakko.app.chat.joinFailureCopy(e))
                 mutableRequesting.value = false
                 return@launch
             }
@@ -247,6 +256,8 @@ public class JoinGroupLandingViewModel(
 public fun JoinGroupLandingScreen(
     viewModel: JoinGroupLandingViewModel,
     onDone: () -> Unit,
+    /** Opens the joined group's chat. */
+    onOpenChat: (groupIdHex: String) -> Unit,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val card by viewModel.card.collectAsStateWithLifecycle()
@@ -318,14 +329,26 @@ public fun JoinGroupLandingScreen(
                 InviteFoot(card)
             }
             is JoinGroupLandingViewModel.State.Joined -> {
-                Text("You joined the group. Find it under Groups.")
+                Text(me.lakko.app.chat.JOIN_SUCCESS_COPY, textAlign = TextAlign.Center)
                 Spacer(Modifier.height(12.dp))
-                Button(onClick = onDone) { Text("Done") }
+                Button(onClick = { onOpenChat(s.groupIdHex) }) { Text(me.lakko.app.chat.JOIN_OPEN_CHAT) }
             }
             is JoinGroupLandingViewModel.State.Failed -> {
+                InviteHeadline(card)
+                Spacer(Modifier.height(16.dp))
                 Text(s.message, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center)
                 Spacer(Modifier.height(12.dp))
-                Button(onClick = onDone) { Text("Close") }
+                // "Try again" only with the general failure; the other two
+                // sentences ask the person to wait or fix the clock first.
+                if (me.lakko.app.chat.joinFailureOffersRetry(s.message)) {
+                    Button(
+                        onClick = { viewModel.request() },
+                        enabled = !requesting,
+                    ) { Text(me.lakko.app.chat.JOIN_TRY_AGAIN) }
+                } else {
+                    Button(onClick = onDone) { Text("Close") }
+                }
+                InviteFoot(card)
             }
         }
     }

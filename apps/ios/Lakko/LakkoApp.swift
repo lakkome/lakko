@@ -1165,7 +1165,10 @@ private struct SessionRoot: View, Equatable {
                     repository: chatRepository,
                     intake: inviteIntake
                 ),
-                onDone: { pop(route, from: tab) }
+                onDone: { pop(route, from: tab) },
+                onOpenChat: { hex in
+                    replaceTop(route, with: .chat(groupIdHex: hex), in: tab)
+                }
             )
         case .callJoinLanding(let slug):
             // ADR-0032 (G-21/G-22) — a tapped `/c/<slug>` multi-joiner call

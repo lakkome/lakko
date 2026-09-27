@@ -1611,6 +1611,19 @@ impl Group {
         Ok(g.pending_external_joins())
     }
 
+    /// The account key behind a pending external-join request (32 bytes),
+    /// resolved from the joiner's verified ADR-0050 device binding, or `None`.
+    /// Use it to name a request from a contact; approving still goes by the
+    /// leaf key `pendingExternalJoins` returns.
+    pub fn pending_external_join_account_key(
+        &self,
+        joiner_signature_key: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.pending_external_join_account_key(&joiner_signature_key)
+            .map(|k| k.to_vec()))
+    }
+
     /// **Propose** adding a member from their published KeyPackage (TLS wire
     /// form) — the ADR-0045 proposal-path twin of
     /// [`Self::add_member_from_wire`].

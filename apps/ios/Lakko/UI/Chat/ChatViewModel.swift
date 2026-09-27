@@ -213,6 +213,11 @@ public final class ChatViewModel: ObservableObject {
     /// ADR-0028 OQ2 (G-3) — keyed by joiner signature key. Refreshed alongside
     /// `pendingJoins`; a missing entry means the joiner posted no attribution.
     @Published public private(set) var joinAttributions: [Data: JoinAttribution] = [:]
+    /// ADR-0053 — the pending joiner keys the current `joinAttributions` map
+    /// was read for; `nil` before the first read. See ``JoinAttributionRefresh``.
+    private var attributionsFetchedFor: Set<Data>?
+    /// An attribution read is in flight; a second is not started beside it.
+    private var attributionsInFlight = false
     /// ADR-0028 (G-3) — the minted group invite-link (the owner/admin "create
     /// invite link" affordance), or `nil` before it is generated.
     @Published public private(set) var inviteLink: String?
@@ -1301,18 +1306,39 @@ public final class ChatViewModel: ObservableObject {
     private func refreshJoinAttributions() {
         guard canManageMembers else {
             joinAttributions = [:]
+            attributionsFetchedFor = nil
             return
         }
+        let pending = Set(pendingJoins)
         let hex = groupIdHex
-        Task { [weak self] in
-            guard let self else { return }
-            let attrs = await self.repository.fetchJoinAttributions(groupIdHex: hex)
-            var map: [Data: JoinAttribution] = [:]
-            for a in attrs {
-                map[a.joinerSignatureKey] = JoinAttribution(
-                    issuerFingerprint: a.issuerFingerprint, issuerInRoster: a.issuerInRoster)
+        let decision = JoinAttributionRefresh.decide(
+            pending: pending,
+            fetchedFor: attributionsFetchedFor,
+            inFlight: attributionsInFlight,
+            allowRead: { self.repository.takeJoinAttributionRead(groupIdHex: hex) })
+        switch decision {
+        case .keep:
+            return
+        case .clear:
+            joinAttributions = [:]
+            attributionsFetchedFor = []
+        case .fetch:
+            attributionsInFlight = true
+            Task { [weak self] in
+                guard let self else { return }
+                let attrs = await self.repository.fetchJoinAttributions(groupIdHex: hex)
+                self.attributionsInFlight = false
+                // A failed read records nothing, so a later refresh retries
+                // (behind the same floor) and the map on screen stays.
+                guard let attrs else { return }
+                var map: [Data: JoinAttribution] = [:]
+                for a in attrs {
+                    map[a.joinerSignatureKey] = JoinAttribution(
+                        issuerFingerprint: a.issuerFingerprint, issuerInRoster: a.issuerInRoster)
+                }
+                self.joinAttributions = map
+                self.attributionsFetchedFor = pending
             }
-            self.joinAttributions = map
         }
     }
 
@@ -1344,6 +1370,31 @@ public final class ChatViewModel: ObservableObject {
         // the name, so it shows the list form (`Alice Petrova · @alice`); the
         // resolver already falls back to the fingerprint WITHOUT `@`.
         return ProfileDirectory.shared.resolve(signatureKey: member.signaturePublicKey).listLabel
+    }
+
+    /// ADR-0053 — the label of a pending join request row: the contact's name
+    /// resolved through the joiner's ACCOUNT key (the request itself is keyed
+    /// on their device leaf key, which no contact is stored under), else the
+    /// label the row has always shown for a stranger.
+    func pendingJoinLabel(_ ref: Data) -> String {
+        Self.pendingJoinLabel(
+            accountKeyName: repository
+                .pendingExternalJoinAccountKey(groupIdHex: groupIdHex, joinerSignatureKey: ref)
+                .map { ProfileDirectory.shared.resolve(signatureKey: $0) },
+            leafName: personName(signatureKeyB64: base64Encode(ref)))
+    }
+
+    /// Pure rule behind ``pendingJoinLabel(_:)``: a name the account key
+    /// resolves to (anything but the placeholder) wins; otherwise the leaf
+    /// key's name, else "Someone" — the pre-existing row label.
+    nonisolated static func pendingJoinLabel(
+        accountKeyName: ResolvedDisplayName?,
+        leafName: String?
+    ) -> String {
+        if let accountKeyName, accountKeyName.source != .placeholder {
+            return accountKeyName.name
+        }
+        return leafName ?? ResolvedDisplayName.placeholderSomeone
     }
 
     /// ADR-0048 — the bare resolved name for a signature key (base64), for

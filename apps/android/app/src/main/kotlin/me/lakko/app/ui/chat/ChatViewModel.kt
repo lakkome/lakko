@@ -1654,28 +1654,69 @@ public class ChatViewModel(
         }
     }
 
+    /** ADR-0053 — the pending set the current attribution map was read for,
+     *  and the deferred re-evaluation when the per-group floor held a read. */
+    private var joinAttributionsFetchedFor: Set<String>? = null
+    private var deferredJoinAttributions: kotlinx.coroutines.Job? = null
+
     /** ADR-0028 OQ2 (G-3) — refresh the advisory join-attribution map for the
      *  current pending requests. Best-effort; owner/admin only (the role-gated
-     *  approval gate is the boundary). */
+     *  approval gate is the boundary). ADR-0053 — the read covers the whole
+     *  knock queue, so it runs only when the pending set changed and at most
+     *  once per 10 s per group ([me.lakko.app.chat.joinAttributionDecision]). */
     private fun refreshJoinAttributions() {
         if (!mutableCanManageMembers.value) {
+            deferredJoinAttributions?.cancel()
+            joinAttributionsFetchedFor = null
             mutableJoinAttributions.value = emptyMap()
             return
         }
-        viewModelScope.launch {
-            val attrs = repo.fetchJoinAttributions(groupIdHex)
-            mutableJoinAttributions.value = attrs.associate { a ->
-                a.joinerSignatureKey.joinToString("") { b -> "%02x".format(b.toInt() and 0xff) } to
-                    JoinAttributionUi(
-                        issuerFingerprint = a.issuerFingerprint,
-                        issuerInRoster = a.issuerInRoster,
-                        issuerKeyB64 = a.issuerSignatureKey
-                            .takeIf { it.isNotEmpty() }
-                            ?.let { me.lakko.app.chat.outboxB64(it) },
-                    )
+        val pending = mutablePendingJoins.value.map(::joinerKeyHex).toSet()
+        val now = System.currentTimeMillis()
+        when (
+            val decision = me.lakko.app.chat.joinAttributionDecision(
+                pending = pending,
+                fetchedFor = joinAttributionsFetchedFor,
+                lastFetchMs = me.lakko.app.chat.JoinAttributionReads.lastFetchMs(groupIdHex),
+                nowMs = now,
+            )
+        ) {
+            me.lakko.app.chat.JoinAttributionDecision.Clear -> {
+                deferredJoinAttributions?.cancel()
+                joinAttributionsFetchedFor = null
+                mutableJoinAttributions.value = emptyMap()
+            }
+            me.lakko.app.chat.JoinAttributionDecision.Keep -> Unit
+            is me.lakko.app.chat.JoinAttributionDecision.Defer -> {
+                if (deferredJoinAttributions?.isActive == true) return
+                deferredJoinAttributions = viewModelScope.launch {
+                    kotlinx.coroutines.delay(decision.waitMs)
+                    refreshJoinAttributions()
+                }
+            }
+            me.lakko.app.chat.JoinAttributionDecision.Fetch -> {
+                deferredJoinAttributions?.cancel()
+                me.lakko.app.chat.JoinAttributionReads.markFetched(groupIdHex, now)
+                joinAttributionsFetchedFor = pending
+                viewModelScope.launch {
+                    val attrs = repo.fetchJoinAttributions(groupIdHex)
+                    mutableJoinAttributions.value = attrs.associate { a ->
+                        joinerKeyHex(a.joinerSignatureKey) to
+                            JoinAttributionUi(
+                                issuerFingerprint = a.issuerFingerprint,
+                                issuerInRoster = a.issuerInRoster,
+                                issuerKeyB64 = a.issuerSignatureKey
+                                    .takeIf { it.isNotEmpty() }
+                                    ?.let { me.lakko.app.chat.outboxB64(it) },
+                            )
+                    }
+                }
             }
         }
     }
+
+    private fun joinerKeyHex(key: ByteArray): String =
+        key.joinToString("") { b -> "%02x".format(b.toInt() and 0xff) }
 
     /** Our own leaf index — the roster marks it "(you)" and blocks self-removal. */
     public fun ownLeafIndex(): UInt? = repo.ownLeafIndex(groupIdHex)
@@ -1760,6 +1801,20 @@ public class ChatViewModel(
      * case (nobody sees a request to add themselves to a group they are already
      * in).
      */
+    /**
+     * ADR-0053 — the label of a pending join request: the contact's name
+     * resolved through the joiner's ACCOUNT key (a request is keyed on the
+     * device leaf key, contacts on the account key); the existing leaf-key
+     * label for a joiner this device does not know.
+     */
+    public fun pendingJoinLabel(joinerSignatureKey: ByteArray): String =
+        me.lakko.app.chat.pendingJoinLabel(
+            accountKey = repo.pendingExternalJoinAccountKey(groupIdHex, joinerSignatureKey),
+            leafKey = joinerSignatureKey,
+            knownName = { key -> profileNames.resolve(key).takeIf { !it.isPlaceholder }?.listLabel },
+            fallbackLabel = { key -> nameOfKeyB64(me.lakko.app.chat.outboxB64(key)) },
+        )
+
     public fun nameOfKeyB64(keyB64: String?): String {
         val key = try {
             keyB64?.let { android.util.Base64.decode(it, android.util.Base64.DEFAULT) }

@@ -90,6 +90,8 @@ import { memberKeysOf, peerName } from "../chat/peer-name";
 import { ownPersonKeyB64, peopleCountOf, personKeyOf } from "../chat/person-key";
 import { groupTitle, isUnnamedGroupLabel } from "../chat/group-title";
 import { memberListLabelOf, memberNameOf } from "../profile/member-label";
+import { pendingJoinLabel } from "../chat/pending-join-label";
+import { JoinAttributionGate } from "../chat/join-attribution-gate";
 import { groupCallsFor } from "../calls/group-call-store";
 import { chatCallAffordance, type ChatCallAffordance } from "../calls/group-call-host";
 import {
@@ -412,6 +414,10 @@ import { decideConversationKind, type ConversationKind } from "../chat/conversat
  * both render this; `backTo` is the list the conversation was opened from, so
  * Back returns there (docs/ux/client-redesign.md section 3).
  */
+/** One attribution gate for the whole page, so the per-group 10 s floor holds
+ *  across remounts of the chat view (ADR-0053, `chat/join-attribution-gate.ts`). */
+const joinAttributionGate = new JoinAttributionGate();
+
 export default function Chat(props: { backTo?: string }): JSX.Element {
   const auth = useAuth();
   const chats = useChats();
@@ -2882,33 +2888,69 @@ function ChatView(props: {
   }
 
   // ADR-0028 OQ2 — resolve which member's `/g/` link each pending request
-  // arrived on. Per `membersVersion`, read the journal's join-attribution
-  // envelopes and build a `joinerKeyB64 -> { issuerFingerprint, issuerInRoster }`
+  // arrived on. Read the join-attribution envelopes (from the knock queue since
+  // ADR-0053) and build a `joinerKeyB64 -> { issuerKeyB64, issuerInRoster }`
   // map; `issuerInRoster` checks the attribution's issuer pubkey against the live
   // roster. Advisory metadata for the admin — the role-gated approval gate is the
   // boundary, so a missing / failed lookup never blocks Approve.
-  const [joinAttributions, setJoinAttributions] = createSignal<
-    Map<string, { issuerKeyB64: string; issuerInRoster: boolean }>
-  >(new Map());
-  createEffect(() => {
-    membersVersion();
-    if (!canManageMembers()) return;
-    const gid = props.entry.group.groupId;
+  //
+  // ADR-0053 — the attributions live in the knock queue and the read pages it
+  // from the start, so it is taken only when the pending joiner set changes,
+  // at most once per 10 s per group (`chat/join-attribution-gate.ts`); an
+  // empty pending set clears the map with no read. The roster check is done
+  // at read time below (not fetch time), so a roster change needs no re-read.
+  const [joinAttributionKeys, setJoinAttributionKeys] = createSignal<Map<string, string>>(
+    new Map(),
+  );
+  const joinAttributions = createMemo(() => {
     const rosterB64 = new Set(members().map((m) => base64Encode(m.sigPubkey)));
+    const map = new Map<string, { issuerKeyB64: string; issuerInRoster: boolean }>();
+    for (const [joiner, issuerKeyB64] of joinAttributionKeys()) {
+      // ADR-0048 — the issuer is named through the resolver.
+      map.set(joiner, { issuerKeyB64, issuerInRoster: rosterB64.has(issuerKeyB64) });
+    }
+    return map;
+  });
+  let attributionRetry: ReturnType<typeof setTimeout> | undefined;
+  onCleanup(() => {
+    if (attributionRetry !== undefined) clearTimeout(attributionRetry);
+  });
+  const [attributionTick, setAttributionTick] = createSignal(0);
+  // This view starts with an empty map, so whatever set the gate remembers
+  // from an earlier mount no longer describes what is on screen.
+  joinAttributionGate.forget(props.entry.groupIdB64);
+  createEffect(() => {
+    attributionTick();
+    if (!canManageMembers()) return;
+    const pending = pendingJoins().map((k) => base64Encode(k));
+    const gid = props.entry.group.groupId;
+    const groupIdB64 = props.entry.groupIdB64;
+    const decision = joinAttributionGate.decide(groupIdB64, pending, Date.now());
+    if (decision.kind === "clear") {
+      setJoinAttributionKeys(new Map());
+      return;
+    }
+    if (decision.kind === "keep") return;
+    if (decision.kind === "wait") {
+      if (attributionRetry !== undefined) clearTimeout(attributionRetry);
+      attributionRetry = setTimeout(() => {
+        attributionRetry = undefined;
+        setAttributionTick((n) => n + 1);
+      }, decision.retryInMs);
+      return;
+    }
     void (async () => {
       try {
         const attrs = await contacts.fetchJoinAttributions(gid);
-        const map = new Map<string, { issuerKeyB64: string; issuerInRoster: boolean }>();
+        const map = new Map<string, string>();
         for (const a of attrs) {
-          map.set(base64Encode(a.joinerSignatureKey), {
-            // ADR-0048 — the issuer is named through the resolver.
-            issuerKeyB64: base64Encode(a.issuerSignaturePubkey),
-            issuerInRoster: rosterB64.has(base64Encode(a.issuerSignaturePubkey)),
-          });
+          map.set(base64Encode(a.joinerSignatureKey), base64Encode(a.issuerSignaturePubkey));
         }
-        setJoinAttributions(map);
+        setJoinAttributionKeys(map);
+        joinAttributionGate.fetched(groupIdB64, pending);
       } catch {
-        // best-effort advisory metadata — leave the map as-is
+        // best-effort advisory metadata — leave the map as-is; the set stays
+        // "changed" and is read again once the floor allows.
       }
     })();
   });
@@ -6677,7 +6719,12 @@ function ChatView(props: {
                           }}
                         >
                           <span class="lk-ellipsis" style={{ "font-size": "0.85rem" }}>
-                            {memberListLabel(base64Encode(ref))}
+                            {/* Resolved through the joiner's ACCOUNT key: the
+                                request is keyed on its device leaf, contacts on
+                                the account (ADR-0050). */}
+                            {pendingJoinLabel(props.entry.group, ref, base64Encode, (k) =>
+                              profiles.resolve(k),
+                            )}
                           </span>
                           {(() => {
                             const attr = joinAttributions().get(base64Encode(ref));

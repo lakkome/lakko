@@ -2893,8 +2893,9 @@ struct MembersSheet: View {
                                     // ADR-0048 — the one resolver: a contact's
                                     // rename or profile name when known, else the
                                     // fingerprint without `@`.
-                                    Text(viewModel.personName(signatureKeyB64: base64Encode(ref))
-                                        ?? "Someone")
+                                    // ADR-0053 — resolved through the joiner's
+                                    // account key, so a contact is named.
+                                    Text(viewModel.pendingJoinLabel(ref))
                                         .font(.footnote)
                                     // ADR-0028 OQ2 — which member's link this
                                     // request arrived on + whether they are still

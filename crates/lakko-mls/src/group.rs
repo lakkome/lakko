@@ -1208,6 +1208,33 @@ impl Group {
             .collect()
     }
 
+    /// The **account** key behind a pending external-join request, resolved
+    /// from the retained KeyPackage's ADR-0050 device binding (verified: the
+    /// binding is signed by the account key it names), or the joiner's own key
+    /// for an unbound Phase 1 credential. `None` when no such request is
+    /// pending or the credential carries a binding that does not verify.
+    ///
+    /// A request is keyed on the joiner's device leaf key, which names one of
+    /// a person's phones; contacts are stored under the account key. Without
+    /// this, an admin's pending list could only ever say "Member", even for a
+    /// joiner the admin knows. Read-only, and only a label: approving still
+    /// goes by the leaf key and through the role gate.
+    #[must_use]
+    pub fn pending_external_join_account_key(
+        &self,
+        joiner_signature_key: &[u8],
+    ) -> Option<[u8; 32]> {
+        let pending = self
+            .pending_external_joins
+            .iter()
+            .find(|p| p.joiner_signature_key == joiner_signature_key)?;
+        let leaf = pending.key_package.leaf_node();
+        crate::device_binding::account_key_of_credential(
+            leaf.credential().serialized_content(),
+            leaf.signature_key().as_slice(),
+        )
+    }
+
     /// The retained KeyPackage for `proposal_ref`, cloned so the caller can
     /// attempt an approve without consuming the request.
     ///

@@ -2013,6 +2013,8 @@ public fun JoinCoPublisherScreen(
     var busy by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    // ADR-0053 — "Try again" is offered only with the general failure.
+    var offerRetry by remember { mutableStateOf(false) }
     val ds = remember { DsClient() }
     val scope = rememberCoroutineScope()
 
@@ -2045,85 +2047,100 @@ public fun JoinCoPublisherScreen(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
-            Button(
-                onClick = {
-                    val trimmed = link.trim()
-                    if (busy || trimmed.isEmpty()) return@Button
-                    busy = true
-                    error = null
-                    status = "Sending your request..."
-                    scope.launch {
-                        try {
-                            val publisher = state.publisher
-                                ?: throw IllegalStateException("channel publisher identity not available")
-                            // The request mints a KeyPackage whose private keys
-                            // live in the shared identity's provider; the join
-                            // below must run on the SAME identity, and the
-                            // joined group is persisted with it.
-                            val request = publisher.withIdentity { identity ->
-                                CoPublisher.requestToCoPublish(ds, identity, trimmed)
-                            }
-                            status = "Waiting for the channel owner to approve..."
-                            var keys: ChannelPublisherKeys? = null
-                            var attempts = 0
-                            while (keys == null && attempts < 60) {
-                                keys = publisher.withIdentity(persist = false) { identity ->
-                                    CoPublisher.pollForCoPublishWelcome(
-                                        ds,
-                                        identity,
-                                        request.groupId,
-                                        request.joinerKey,
-                                        request.channelIdHex,
-                                        // G-29 — reuse the persisted signing seed on a re-poll.
-                                        state.persistedPublisherSigningSeed(request.channelIdHex),
-                                    )
-                                }
-                                if (keys == null) {
-                                    delay(3_000L)
-                                    attempts += 1
-                                } else {
-                                    // Joined: the PublisherGroup now lives in the
-                                    // provider at the post-approve epoch.
-                                    publisher.persist()
-                                }
-                            }
-                            val resolved = keys
-                            if (resolved == null) {
-                                error = "No approval yet. Try again once the owner has approved."
-                                return@launch
-                            }
-                            val name = localName.trim()
-                            state.addChannel(
-                                ChannelHandle(
-                                    id = request.channelIdHex,
-                                    localName = name.ifEmpty { "Shared channel" },
-                                    localDescription = "",
-                                    addedAtMs = System.currentTimeMillis().toULong(),
-                                ),
-                            )
-                            state.setKeys(request.channelIdHex, resolved)
-                            onJoined(request.channelIdHex)
-                        } catch (e: LegacyChannelException) {
-                            error = e.message
-                        } catch (e: me.lakko.app.chat.GroupNotAcceptingRequests) {
-                            // ADR-0053 — the owner has not claimed the channel's
-                            // journal yet; nothing was sent.
-                            error = me.lakko.app.chat.GROUP_NOT_ACCEPTING_REQUESTS
-                        } catch (e: Throwable) {
-                            Log.w(TAG, "co-publish request failed", e)
-                            error = "Could not send the request. Check the link and try again."
-                        } finally {
-                            busy = false
-                            status = null
+            // Sends the request; reached from `Request to join` and from
+            // `Try again` after a general failure.
+            fun submit() {
+                val trimmed = link.trim()
+                if (busy || trimmed.isEmpty()) return
+                busy = true
+                error = null
+                offerRetry = false
+                status = "Sending your request..."
+                scope.launch {
+                    try {
+                        val publisher = state.publisher
+                            ?: throw IllegalStateException("channel publisher identity not available")
+                        // The request mints a KeyPackage whose private keys
+                        // live in the shared identity's provider; the join
+                        // below must run on the SAME identity, and the
+                        // joined group is persisted with it.
+                        val request = publisher.withIdentity { identity ->
+                            CoPublisher.requestToCoPublish(ds, identity, trimmed)
                         }
+                        status = "Waiting for the channel owner to approve..."
+                        var keys: ChannelPublisherKeys? = null
+                        var attempts = 0
+                        while (keys == null && attempts < 60) {
+                            keys = publisher.withIdentity(persist = false) { identity ->
+                                CoPublisher.pollForCoPublishWelcome(
+                                    ds,
+                                    identity,
+                                    request.groupId,
+                                    request.joinerKey,
+                                    request.channelIdHex,
+                                    // G-29 — reuse the persisted signing seed on a re-poll.
+                                    state.persistedPublisherSigningSeed(request.channelIdHex),
+                                )
+                            }
+                            if (keys == null) {
+                                delay(3_000L)
+                                attempts += 1
+                            } else {
+                                // Joined: the PublisherGroup now lives in the
+                                // provider at the post-approve epoch.
+                                publisher.persist()
+                            }
+                        }
+                        val resolved = keys
+                        if (resolved == null) {
+                            error = "No approval yet. Try again once the owner has approved."
+                            return@launch
+                        }
+                        val name = localName.trim()
+                        state.addChannel(
+                            ChannelHandle(
+                                id = request.channelIdHex,
+                                localName = name.ifEmpty { "Shared channel" },
+                                localDescription = "",
+                                addedAtMs = System.currentTimeMillis().toULong(),
+                            ),
+                        )
+                        state.setKeys(request.channelIdHex, resolved)
+                        onJoined(request.channelIdHex)
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: LegacyChannelException) {
+                        error = e.message
+                    } catch (e: Throwable) {
+                        // The raw cause goes to the log; the person reads
+                        // one of the join screen's fixed sentences (the
+                        // "isn't taking requests yet" one when the owner
+                        // has not claimed the journal; nothing was sent).
+                        Log.w(TAG, "co-publish request failed", e)
+                        val copy = me.lakko.app.chat.joinFailureCopy(e)
+                        error = copy
+                        offerRetry = me.lakko.app.chat.joinFailureOffersRetry(copy)
+                    } finally {
+                        busy = false
+                        status = null
                     }
-                },
+                }
+            }
+            Button(
+                onClick = { submit() },
                 enabled = !busy && link.trim().isNotEmpty(),
                 modifier = Modifier.fillMaxWidth(),
             ) { Text(if (busy) "Requesting..." else "Request to join") }
 
             status?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             error?.let { ErrorLine(it) }
+            if (error != null && offerRetry) {
+                Button(
+                    onClick = { submit() },
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text(me.lakko.app.chat.JOIN_TRY_AGAIN) }
+            }
         }
     }
 }

@@ -125,7 +125,8 @@ public enum CoPublisher {
         ds: DsClient,
         identity: Identity,
         publisherGroup: PublisherGroup,
-        knockAfter: Int64 = 0
+        knockAfter: Int64 = 0,
+        readKnocks: Bool = true
     ) async throws -> PollOutcome {
         let groupId = try publisherGroup.groupId()
         let signerBefore = try? publisherGroup.dsAccessSigner(identity: identity)
@@ -143,12 +144,16 @@ public enum CoPublisher {
             }
         }
         var knockCursor = knockAfter
-        let knocks = try await ds.fetchKnocks(
-            groupId: groupId, after: knockAfter, waitSecs: 0,
-            auth: auth(ds: ds, identity: identity, publisherGroup: publisherGroup))
-        for row in knocks.messages {
-            knockCursor = max(knockCursor, row.id)
-            _ = try? publisherGroup.processKnock(identity: identity, bytes: row.payload)
+        // `readKnocks` is the caller's floor (``KnockPollThrottle``): the
+        // journal poll runs every few seconds, the knock read far less often.
+        if readKnocks {
+            let knocks = try await ds.fetchKnocks(
+                groupId: groupId, after: knockAfter, waitSecs: 0,
+                auth: auth(ds: ds, identity: identity, publisherGroup: publisherGroup))
+            for row in knocks.messages {
+                knockCursor = max(knockCursor, row.id)
+                _ = try? publisherGroup.processKnock(identity: identity, bytes: row.payload)
+            }
         }
         await dsHealRegistration(
             ds: ds, groupId: groupId, before: signerBefore,

@@ -69,6 +69,13 @@ import {
 import { paths } from "./paths";
 import { PublicLayout } from "../ui/PublicLayout";
 import { joinGroupAuthLinks } from "./join-group-auth";
+import {
+  JOIN_REQUEST_FAILED,
+  JOIN_SUCCEEDED_OPENING,
+  JOIN_TRY_AGAIN,
+  joinFailureNotice,
+  type JoinFailureNotice,
+} from "./join-group-failure";
 import { recordConversationKind } from "../chat/conversation-kind-store";
 // ADR-0028 v2 — the sealed preview and the link key in the URL fragment
 // (docs/ux/group-invite-page.md). The copy lives in a plain module for the
@@ -165,7 +172,9 @@ export default function JoinGroup() {
   });
 
   const [phase, setPhase] = createSignal<JoinPhase>("idle");
-  const [error, setError] = createSignal<string | null>(null);
+  /** The failure sentence and whether `Try again` is offered — never the raw
+   *  error, which is logged instead. */
+  const [error, setError] = createSignal<JoinFailureNotice | null>(null);
   /** In flight, so `Request again` cannot be double-tapped into two journal
    *  rows. Separate from `phase`, which stays `waiting` across a re-request —
    *  going back through `requesting` would hide the wait copy and read as a
@@ -180,9 +189,9 @@ export default function JoinGroup() {
     if (requesting()) return;
     setError(null);
     setRequesting(true);
-    // A re-request keeps the `waiting` copy on screen; only the first one
-    // passes through `requesting`.
-    if (phase() === "idle") setPhase("requesting");
+    // A re-request keeps the `waiting` copy on screen; the first request and
+    // a `Try again` after a failure pass through `requesting`.
+    if (phase() === "idle" || phase() === "error") setPhase("requesting");
     // A re-request replaces the poll rather than adding a second one.
     if (pollTimer !== undefined) clearInterval(pollTimer);
     try {
@@ -226,7 +235,9 @@ export default function JoinGroup() {
         finish(landed);
       }, 1000);
     } catch (err) {
-      setError(String(err));
+      // eslint-disable-next-line no-console
+      console.warn("group-join: request failed", err);
+      setError(joinFailureNotice(err));
       setPhase("error");
     } finally {
       setRequesting(false);
@@ -301,10 +312,20 @@ export default function JoinGroup() {
             </button>
           </Show>
           <Show when={phase() === "joined"}>
-            <p>Joined! Opening chat…</p>
+            <p>{JOIN_SUCCEEDED_OPENING}</p>
           </Show>
           <Show when={phase() === "error"}>
-            <p style={{ color: "var(--error)" }}>Failed: {error()}</p>
+            <p style={{ color: "var(--error)" }}>{error()?.message ?? JOIN_REQUEST_FAILED}</p>
+            <Show when={error()?.offerRetry !== false}>
+              <button
+                type="button"
+                class="primary"
+                disabled={requesting()}
+                onClick={() => void onRequest(decoded()!)}
+              >
+                {JOIN_TRY_AGAIN}
+              </button>
+            </Show>
           </Show>
           {/* The one thing on the page the inviter cannot fake stays, at the
               foot and in the muted style, for a person who was told the

@@ -617,3 +617,53 @@ fn one_published_key_package_opens_a_welcome_per_group() {
     assert_eq!(j1.epoch(), g1.epoch());
     assert_eq!(j2.epoch(), g2.epoch());
 }
+
+// ============================================================================
+// ADR-0053 walk finding: an admin's pending join request read "Member" even
+// for a contact, because the request is keyed on the joiner's device leaf and
+// contacts on the account. The retained KeyPackage carries the verified
+// device binding; the accessor names the account behind it.
+// ============================================================================
+
+#[test]
+fn a_pending_join_request_names_the_joiners_account() {
+    let owner_account = account(0x61);
+    let owner = device(&owner_account, 0x62);
+    let mut g = Group::create(&owner).expect("group");
+
+    let joiner_account = account(0x63);
+    let joiner_device = device(&joiner_account, 0x64);
+    let proposal = joiner_device
+        .create_external_join_proposal(&g.group_id(), g.epoch())
+        .expect("a bound device crafts an external-join proposal");
+    assert!(matches!(
+        g.process_incoming_verifying_roles(&owner, &proposal),
+        Ok(Incoming::ExternalJoinProposal { .. })
+    ));
+    let leaf_key = joiner_device.signature_public_key().to_vec();
+    assert_eq!(g.pending_external_joins(), vec![leaf_key.clone()]);
+
+    // The leaf key names the phone; the accessor names the person.
+    assert_ne!(leaf_key, account_key(&joiner_account));
+    assert_eq!(
+        g.pending_external_join_account_key(&leaf_key)
+            .map(|k| k.to_vec()),
+        Some(account_key(&joiner_account)),
+    );
+
+    // An unbound Phase 1 joiner is its own account.
+    let phase1 = account(0x65);
+    let proposal = phase1
+        .create_external_join_proposal(&g.group_id(), g.epoch())
+        .expect("phase 1 proposal");
+    g.process_incoming_verifying_roles(&owner, &proposal)
+        .expect("stored");
+    assert_eq!(
+        g.pending_external_join_account_key(phase1.signature_public_key())
+            .map(|k| k.to_vec()),
+        Some(phase1.signature_public_key().to_vec()),
+    );
+
+    // No such request: nothing.
+    assert!(g.pending_external_join_account_key(&[0u8; 32]).is_none());
+}

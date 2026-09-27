@@ -40,3 +40,35 @@ export function writeKnockCursor(groupIdB64: string, id: number): void {
     /* storage unavailable: the next poll re-reads, which is harmless */
   }
 }
+
+/**
+ * The floor on how often one device reads one group's knock queue: at most
+ * once per this many milliseconds per group. A knock waits on a human
+ * approval, so reading it faster buys nothing, and the knock read sits beside
+ * the journal fetch, which returns early and often (a new row, a user
+ * action, a wake) - iOS was measured reading knocks about twice a second
+ * before this floor, which Android and web now share.
+ */
+export const KNOCK_READ_MIN_INTERVAL_MS = 10_000;
+
+const lastKnockReadMs = new Map<string, number>();
+
+/**
+ * Is a knock read of `groupIdB64` due at `nowMs`? When it is, the read is
+ * recorded as taken (the caller is about to make it), so a second caller in
+ * the same window is told no. A clock that went backwards reads as due, so a
+ * wrong clock can never stop knock reads for good.
+ */
+export function takeKnockReadSlot(groupIdB64: string, nowMs: number): boolean {
+  const last = lastKnockReadMs.get(groupIdB64);
+  if (last !== undefined && nowMs >= last && nowMs - last < KNOCK_READ_MIN_INTERVAL_MS) {
+    return false;
+  }
+  lastKnockReadMs.set(groupIdB64, nowMs);
+  return true;
+}
+
+/** Test hook: forget every recorded read. */
+export function resetKnockReadSlotsForTests(): void {
+  lastKnockReadMs.clear();
+}

@@ -1153,6 +1153,23 @@ impl Group {
         Ok(g.pending_external_joins().concat())
     }
 
+    /// The account key behind a pending external-join request (32 bytes),
+    /// resolved from the joiner's verified ADR-0050 device binding, or
+    /// `undefined`. Use it to name a request from a contact; approving still
+    /// goes by the leaf key `pendingExternalJoins` returns.
+    #[wasm_bindgen(js_name = pendingExternalJoinAccountKey)]
+    pub fn pending_external_join_account_key(
+        &self,
+        joiner_signature_key: &[u8],
+    ) -> Result<Option<Vec<u8>>, JsValue> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        Ok(g.pending_external_join_account_key(joiner_signature_key)
+            .map(|k| k.to_vec()))
+    }
+
     /// Remove a member by their leaf index. Returns the wire-encoded
     /// commit to broadcast.
     #[wasm_bindgen(js_name = removeMember)]

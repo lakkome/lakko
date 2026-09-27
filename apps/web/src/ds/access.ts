@@ -357,27 +357,63 @@ export interface KnockPorts {
   buildAttribution(): Uint8Array | null;
 }
 
+/** The copy for a group that returned no epoch to the probe. */
+export const GROUP_NOT_TAKING_REQUESTS = "This group isn't taking requests yet. Try again later.";
+
 /** The knock was refused because the group has never been claimed, so no
  *  epoch could be learned. */
 export class GroupNotClaimedError extends Error {
   override name = "GroupNotClaimedError";
   constructor() {
-    super("This group is not taking requests yet. Try again later.");
+    super(GROUP_NOT_TAKING_REQUESTS);
+  }
+}
+
+/** `true` when `err` is an HTTP refusal with status 401 (structural, so this
+ *  module need not import the DS client). */
+function isUnauthorized(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { status?: unknown }).status === 401
+  );
+}
+
+/**
+ * One knock under a fresh proof of work, retried ONCE under another fresh
+ * proof when the DS answers 401. The knock route carries no DS proof, so a
+ * 401 there means the proof of work was unknown to the server - in practice
+ * a challenge that expired while it was being solved (the server keeps a
+ * challenge for 300 s, and a slow device at the configured effort can take
+ * longer). A second 401, and any other failure, propagates.
+ */
+async function knockUnderFreshPow(
+  ports: KnockPorts,
+  payloads: readonly Uint8Array[],
+): Promise<{ ids: readonly number[]; epoch: number | null }> {
+  for (let attempt = 0; ; attempt++) {
+    const challenge = await ports.challenge();
+    const pow = await ports.solve(challenge.seed, challenge.effortBits);
+    try {
+      return await ports.knock(pow, payloads);
+    } catch (err) {
+      if (attempt === 0 && isUnauthorized(err)) continue;
+      throw err;
+    }
   }
 }
 
 /**
  * The link joiner's sequence: probe for the epoch, build the proposal for it,
  * then knock with the attribution and the proposal. No journal read. Two
- * separate proofs of work, because the server consumes a challenge on use.
+ * separate proofs of work, because the server consumes a challenge on use;
+ * each knock is retried once under a fresh proof if its proof expired.
  */
 export async function knockToJoin(ports: KnockPorts): Promise<{
   epoch: bigint;
   ids: readonly number[];
 }> {
-  const probeChallenge = await ports.challenge();
-  const probePow = await ports.solve(probeChallenge.seed, probeChallenge.effortBits);
-  const probe = await ports.knock(probePow, []);
+  const probe = await knockUnderFreshPow(ports, []);
   if (probe.epoch === null || !Number.isInteger(probe.epoch) || probe.epoch < 0) {
     throw new GroupNotClaimedError();
   }
@@ -387,8 +423,6 @@ export async function knockToJoin(ports: KnockPorts): Promise<{
   const attribution = ports.buildAttribution();
   if (attribution !== null) payloads.push(attribution);
   payloads.push(proposal);
-  const challenge = await ports.challenge();
-  const pow = await ports.solve(challenge.seed, challenge.effortBits);
-  const result = await ports.knock(pow, payloads);
+  const result = await knockUnderFreshPow(ports, payloads);
   return { epoch, ids: result.ids };
 }

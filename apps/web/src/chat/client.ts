@@ -78,7 +78,7 @@ import type { FetchResult } from "../ds/client";
 import { base64Encode } from "../auth/account-id";
 import { withGroupMlsLock } from "../mls/group-lock";
 import { healAfterApply, takeSigner } from "../ds/access";
-import { readKnockCursor, writeKnockCursor } from "./knock-cursor";
+import { readKnockCursor, takeKnockReadSlot, writeKnockCursor } from "./knock-cursor";
 import { PushClient } from "../push/client";
 import { loadWasm } from "../wasm";
 import type {
@@ -1058,7 +1058,7 @@ export class ChatClient {
     // read is logged and retried next poll; it never fails the journal poll.
     const groupIdB64 = base64Encode(groupId);
     let knocks: { after: number; rows: FetchResult } | null = null;
-    if (readsKnocks(group, myIdentity)) {
+    if (readsKnocks(group, myIdentity) && takeKnockReadSlot(groupIdB64, Date.now())) {
       const knockAfter = readKnockCursor(groupIdB64);
       try {
         knocks = {

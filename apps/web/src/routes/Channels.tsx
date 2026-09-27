@@ -65,6 +65,8 @@ import {
 } from "../channels/composer";
 import { pollForCoPublishWelcome, requestToCoPublish } from "../channels/copublisher";
 import { LegacyChannelError } from "../channels/legacy-v1";
+import { coPublisherJoinFailure } from "../channels/copublisher-join-failure";
+import { JOIN_TRY_AGAIN } from "./join-group-failure";
 import { DiscoveryHttpError, registerChannelHandle } from "../channels/channel-discovery";
 import { channelTitle, displayHandle } from "../channels/channel-row";
 import { knownSubscriberCount } from "../channels/ui-cache";
@@ -564,6 +566,8 @@ const JoinCoPublisher: Component = () => {
   const [name, setName] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  /** `Try again` under a failed request — only for the general failure. */
+  const [offerRetry, setOfferRetry] = createSignal(false);
   const [status, setStatus] = createSignal<string | null>(null);
 
   async function onJoin(): Promise<void> {
@@ -580,6 +584,7 @@ const JoinCoPublisher: Component = () => {
     }
     setBusy(true);
     setError(null);
+    setOfferRetry(false);
     setStatus("Sending your request...");
     try {
       await awaitChannelsHydration();
@@ -614,11 +619,12 @@ const JoinCoPublisher: Component = () => {
       channelsActions.setKeys(channelIdHex, keys);
       navigate(paths.channel(channelIdHex));
     } catch (err) {
-      setError(
-        err instanceof LegacyChannelError
-          ? err.message
-          : `Could not join. Check the link and try again. (${String(err)})`,
-      );
+      // The knock's three sentences (ADR-0053); never the raw error.
+      // eslint-disable-next-line no-console
+      console.warn("co-publisher join: request failed", err);
+      const notice = coPublisherJoinFailure(err);
+      setError(notice.message);
+      setOfferRetry(notice.offerRetry);
     } finally {
       setBusy(false);
       setStatus(null);
@@ -688,6 +694,18 @@ const JoinCoPublisher: Component = () => {
               {msg()}
             </div>
           )}
+        </Show>
+        <Show when={error() !== null && offerRetry()}>
+          <div class="lk-actions">
+            <button
+              type="button"
+              class="primary"
+              disabled={busy()}
+              onClick={(): void => void onJoin()}
+            >
+              {JOIN_TRY_AGAIN}
+            </button>
+          </div>
         </Show>
         <div class="lk-actions lk-row-end">
           <button

@@ -493,6 +493,282 @@ final class DsJournalAccessTests: XCTestCase {
         XCTAssertEqual(pow, ["seed": "AA==", "nonce": "BB==", "solution": "CC=="])
     }
 
+    // MARK: A knock whose proof of work expired mid-solve
+
+    private struct HttpRefusal {
+        static func status(_ code: Int) -> Error {
+            DsClientError.http(status: code, endpoint: "/ds/group/ab/knock", body: "")
+        }
+    }
+
+    /// A 401 on a knock POST is an expired challenge: fetch + solve a fresh one
+    /// and retry that knock once.
+    func testAnExpiredPowIsReSolvedAndTheKnockRetriedOnce() async throws {
+        var log: [String] = []
+        var knocks = 0
+        var solves = 0
+        let epoch = try await DsKnockJoin(
+            solvePow: {
+                solves += 1
+                log.append("pow\(solves)")
+                return PowProofPayload(seed: "s\(solves)", nonce: "n", solution: "x")
+            },
+            knock: { pow, payloads in
+                knocks += 1
+                log.append("knock:\(payloads.count)@\(pow.seed)")
+                if knocks == 1 { throw HttpRefusal.status(401) }
+                return 3
+            },
+            createProposal: { _ in Data([0xB0]) },
+            attribution: { nil }
+        ).run()
+        XCTAssertEqual(epoch, 3)
+        XCTAssertEqual(
+            log, ["pow1", "knock:0@s1", "pow2", "knock:0@s2", "pow3", "knock:1@s3"],
+            "the probe is retried under a FRESH challenge, then the request pays its own")
+    }
+
+    /// Only once: a second 401 surfaces (as the generic failure).
+    func testASecondExpiredPowSurfaces() async throws {
+        var knocks = 0
+        do {
+            _ = try await DsKnockJoin(
+                solvePow: { PowProofPayload(seed: "s", nonce: "n", solution: "x") },
+                knock: { _, _ in knocks += 1; throw HttpRefusal.status(401) },
+                createProposal: { _ in Data() },
+                attribution: { nil }
+            ).run()
+            XCTFail("two expired proofs must fail")
+        } catch {
+            XCTAssertEqual(JoinRequestFailure.classify(error), .generic)
+        }
+        XCTAssertEqual(knocks, 2)
+    }
+
+    /// Any other failure is not retried.
+    func testANonPowFailureIsNotRetried() async throws {
+        var knocks = 0
+        do {
+            _ = try await DsKnockJoin(
+                solvePow: { PowProofPayload(seed: "s", nonce: "n", solution: "x") },
+                knock: { _, _ in knocks += 1; throw HttpRefusal.status(503) },
+                createProposal: { _ in Data() },
+                attribution: { nil }
+            ).run()
+            XCTFail("a 503 must fail")
+        } catch {}
+        XCTAssertEqual(knocks, 1)
+    }
+
+    /// The second knock (attribution + proposal) gets the same one retry.
+    func testTheRequestKnockAlsoRetriesAnExpiredPow() async throws {
+        var knocks = 0
+        _ = try await DsKnockJoin(
+            solvePow: { PowProofPayload(seed: "s", nonce: "n", solution: "x") },
+            knock: { _, payloads in
+                knocks += 1
+                if !payloads.isEmpty && knocks == 2 { throw HttpRefusal.status(401) }
+                return 1
+            },
+            createProposal: { _ in Data([0xB0]) },
+            attribution: { nil }
+        ).run()
+        XCTAssertEqual(knocks, 3)
+    }
+
+    // MARK: The knock poll floor
+
+    func testTheKnockPollFloorIsTenSecondsPerGroup() {
+        let throttle = KnockPollThrottle()
+        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+        XCTAssertEqual(KnockPollThrottle.floorSeconds, 10)
+        XCTAssertTrue(throttle.take("a", now: t0))
+        XCTAssertFalse(throttle.take("a", now: t0.addingTimeInterval(0.5)))
+        XCTAssertFalse(throttle.take("a", now: t0.addingTimeInterval(9.9)))
+        XCTAssertTrue(throttle.take("b", now: t0.addingTimeInterval(1)), "the floor is per group")
+        XCTAssertTrue(throttle.take("a", now: t0.addingTimeInterval(10)))
+        XCTAssertFalse(throttle.take("a", now: t0.addingTimeInterval(15)))
+    }
+
+    /// Twice a second for 43 s (what was measured live) is at most five reads.
+    func testTheFloorBoundsASteadyPoll() {
+        let throttle = KnockPollThrottle()
+        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+        let reads = (0..<86).filter { throttle.take("g", now: t0.addingTimeInterval(Double($0) * 0.5)) }
+        XCTAssertEqual(reads.count, 5)
+    }
+
+    /// A clock that went backwards must not silence the knocks.
+    func testABackwardsClockCountsAsDue() {
+        let throttle = KnockPollThrottle()
+        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+        XCTAssertTrue(throttle.take("a", now: t0))
+        XCTAssertTrue(throttle.take("a", now: t0.addingTimeInterval(-60)))
+    }
+
+    func testReleaseResetsTheFloor() {
+        let throttle = KnockPollThrottle()
+        let t0 = Date()
+        XCTAssertTrue(throttle.take("a", now: t0))
+        throttle.reset()
+        XCTAssertTrue(throttle.take("a", now: t0))
+    }
+
+    // MARK: The members sheet's attribution read
+
+    private let keyA = Data(repeating: 0xA1, count: 32)
+    private let keyB = Data(repeating: 0xB2, count: 32)
+
+    private func decide(
+        _ pending: Set<Data>, _ fetchedFor: Set<Data>?, inFlight: Bool = false,
+        allow: Bool = true, asked: inout Int
+    ) -> JoinAttributionRefresh.Decision {
+        var count = 0
+        let decision = JoinAttributionRefresh.decide(
+            pending: pending, fetchedFor: fetchedFor, inFlight: inFlight,
+            allowRead: { count += 1; return allow })
+        asked += count
+        return decision
+    }
+
+    func testANewPendingSetIsReadOnce() {
+        var asked = 0
+        XCTAssertEqual(decide([keyA], nil, asked: &asked), .fetch)
+        XCTAssertEqual(decide([keyA, keyB], [keyA], asked: &asked), .fetch, "a new joiner")
+        XCTAssertEqual(decide([keyB], [keyA, keyB], asked: &asked), .fetch, "one left the set")
+        XCTAssertEqual(asked, 3)
+    }
+
+    /// The same pending set keeps the map and does not even spend the floor.
+    func testAnUnchangedPendingSetKeepsTheMapWithoutARead() {
+        var asked = 0
+        XCTAssertEqual(decide([keyA, keyB], [keyB, keyA], asked: &asked), .keep)
+        XCTAssertEqual(asked, 0)
+    }
+
+    /// No pending joiner empties the map with no read; once empty, it stays
+    /// that way without re-publishing.
+    func testAnEmptyPendingSetClearsWithoutARead() {
+        var asked = 0
+        XCTAssertEqual(decide([], [keyA], asked: &asked), .clear)
+        XCTAssertEqual(decide([], nil, asked: &asked), .clear)
+        XCTAssertEqual(decide([], [], asked: &asked), .keep)
+        XCTAssertEqual(asked, 0)
+    }
+
+    /// A changed set inside the floor waits (keeping the map); the next
+    /// refresh after the floor reads.
+    func testAChangedSetInsideTheFloorWaits() {
+        var asked = 0
+        XCTAssertEqual(decide([keyA, keyB], [keyA], allow: false, asked: &asked), .keep)
+        XCTAssertEqual(decide([keyA, keyB], [keyA], allow: true, asked: &asked), .fetch)
+        XCTAssertEqual(asked, 2)
+    }
+
+    /// A read already running is not doubled.
+    func testAReadInFlightIsNotDoubled() {
+        var asked = 0
+        XCTAssertEqual(decide([keyA], nil, inFlight: true, asked: &asked), .keep)
+        XCTAssertEqual(asked, 0)
+    }
+
+    /// End to end with the real floor: an open sheet refreshing twice a second
+    /// for 60 s with an unchanged pending set reads once; a new joiner arriving
+    /// mid-way costs one more read, no sooner than the floor allows.
+    func testAnOpenSheetReadsAtMostOncePerFloorAndOnlyOnChange() {
+        let throttle = KnockPollThrottle()
+        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+        var fetchedFor: Set<Data>?
+        var reads: [Double] = []
+        for tick in 0..<120 {
+            let seconds = Double(tick) * 0.5
+            let pending: Set<Data> = seconds < 3 ? [keyA] : [keyA, keyB]
+            let decision = JoinAttributionRefresh.decide(
+                pending: pending, fetchedFor: fetchedFor, inFlight: false,
+                allowRead: { throttle.take("g", now: t0.addingTimeInterval(seconds)) })
+            if decision == .fetch {
+                reads.append(seconds)
+                fetchedFor = pending
+            }
+        }
+        XCTAssertEqual(reads, [0, 10], "the first read, then the change once the floor allows")
+    }
+
+    // MARK: The join screen's failure copy
+
+    func testJoinFailureCopyIsExact() {
+        XCTAssertEqual(joinSucceededMessage, "You joined the group.")
+        XCTAssertEqual(joinOpenChat, "Open chat")
+        XCTAssertEqual(joinTryAgain, "Try again")
+        XCTAssertEqual(
+            JoinRequestFailure.generic.message,
+            "Your request didn't go through. Check your connection and try again.")
+        XCTAssertEqual(
+            JoinRequestFailure.notTakingRequests.message,
+            "This group isn't taking requests yet. Try again later.")
+        XCTAssertEqual(JoinRequestFailure.clockSkew.message, "Check this device's date and time.")
+        XCTAssertTrue(JoinRequestFailure.generic.offersRetry)
+        XCTAssertFalse(JoinRequestFailure.notTakingRequests.offersRetry)
+        XCTAssertFalse(JoinRequestFailure.clockSkew.offersRetry)
+    }
+
+    func testJoinFailureClassification() {
+        XCTAssertEqual(JoinRequestFailure.classify(DsKnockJoinError.groupNotClaimed), .notTakingRequests)
+        XCTAssertEqual(
+            JoinRequestFailure.classify(DsClientError.clockSkew(endpoint: "/ds/x")), .clockSkew)
+        XCTAssertEqual(
+            JoinRequestFailure.classify(
+                ChatError.wrapped("DS knock failed", underlying: DsClientError.clockSkew(endpoint: "/x"))),
+            .clockSkew, "a wrapped clock error is still the clock")
+        XCTAssertEqual(
+            JoinRequestFailure.classify(
+                ChatError.wrapped("x", underlying: DsClientError.network(endpoint: "/x", underlying: URLError(.notConnectedToInternet)))),
+            .generic)
+        XCTAssertEqual(JoinRequestFailure.classify(ChatError.argument("anything")), .generic)
+    }
+
+    // MARK: The pending join request label
+
+    private func resolved(_ rename: String?) -> ResolvedDisplayName {
+        resolveDisplayName(
+            signatureKey: Data(repeating: 1, count: 32), localRename: rename,
+            profile: nil, verification: nil)
+    }
+
+    /// A contact is stored under their ACCOUNT key, so the account key names
+    /// them — even though the leaf key alone would read "Member".
+    func testAPendingJoinFromAContactIsNamedThroughTheAccountKey() {
+        XCTAssertEqual(
+            ChatViewModel.pendingJoinLabel(accountKeyName: resolved("Anna"), leafName: "Member"),
+            "Anna")
+    }
+
+    /// A stranger keeps the label the row always had.
+    func testAPendingJoinFromAStrangerKeepsTheExistingLabel() {
+        XCTAssertEqual(
+            ChatViewModel.pendingJoinLabel(accountKeyName: resolved(nil), leafName: "Member"),
+            "Member")
+        XCTAssertEqual(
+            ChatViewModel.pendingJoinLabel(accountKeyName: nil, leafName: nil), "Someone")
+    }
+
+    /// The core's account-key read against real MLS bytes: a joiner whose leaf
+    /// carries no device binding is named by its own key.
+    func testThePendingJoinAccountKeyOfAnUnboundJoinerIsItsOwnKey() throws {
+        let owner = try identity(12)
+        let group = try Group.create(identity: owner)
+        let joiner = try identity(13)
+        let proposal = try joiner.createExternalJoinProposal(
+            groupId: try group.groupId(), epoch: try group.epoch())
+        _ = try group.processKnock(identity: owner, bytes: proposal)
+        XCTAssertEqual(
+            try group.pendingExternalJoinAccountKey(joinerSignatureKey: joiner.signaturePublicKey()),
+            joiner.signaturePublicKey())
+        XCTAssertNil(
+            try? group.pendingExternalJoinAccountKey(joinerSignatureKey: Data(repeating: 7, count: 32)),
+            "no request, no key (nil or a refusal)")
+    }
+
     // MARK: Point 7 — the core knock gate (`processKnock`), against real MLS bytes
 
     private func identity(_ byte: UInt8) throws -> Identity {

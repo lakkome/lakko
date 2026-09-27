@@ -2347,6 +2347,22 @@ public class ChatRepository(
     }
 
     /**
+     * ADR-0053 — the ACCOUNT key behind a pending join request keyed on
+     * [joinerSignatureKey] (a device leaf key): from the joiner's verified
+     * device binding, or the joiner's own key when it is unbound. `null` when
+     * there is no such pending request or the handle cannot be read. For the
+     * label only: approve and reject still take the leaf key.
+     */
+    public fun pendingExternalJoinAccountKey(groupIdHex: String, joinerSignatureKey: ByteArray): ByteArray? {
+        val record = groups[groupIdHex] ?: return null
+        return try {
+            record.group.pendingExternalJoinAccountKey(joinerSignatureKey)
+        } catch (e: Throwable) {
+            null
+        }
+    }
+
+    /**
      * ADR-0045 UX §7 — the same retained set, but with a TORN read reported as
      * `null` rather than folded into an empty list.
      *

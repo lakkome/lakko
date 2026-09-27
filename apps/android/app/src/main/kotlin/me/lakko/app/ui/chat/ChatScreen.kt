@@ -3776,7 +3776,9 @@ private fun MembersSheet(
                                 // fingerprint: a stranger's profile has not
                                 // reached this device).
                                 Text(
-                                    text = viewModel.nameOfKeyB64(me.lakko.app.chat.outboxB64(ref)),
+                                    // ADR-0053 — named through the joiner's
+                                    // account key, where contacts live.
+                                    text = viewModel.pendingJoinLabel(ref),
                                     style = MaterialTheme.typography.bodySmall,
                                 )
                                 // ADR-0028 OQ2 — which member's `/g/` link this

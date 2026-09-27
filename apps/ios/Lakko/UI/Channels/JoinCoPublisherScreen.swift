@@ -17,7 +17,13 @@ struct JoinCoPublisherScreen: View {
     @State private var localName: String = ""
     @State private var busy = false
     @State private var status: String?
+    /// A readable message that is not one of the shared request failures (a
+    /// retired-derivation channel, an invalid link, an owner who has not yet
+    /// approved), or `nil`.
     @State private var errorMessage: String?
+    /// ADR-0053 — the shared join-request failure (same copy and Try-again
+    /// rule as the group join screen). The raw error is logged, never shown.
+    @State private var failure: JoinRequestFailure?
 
     private let ds = DsClient()
 
@@ -46,7 +52,18 @@ struct JoinCoPublisherScreen: View {
                     }
                 }
             }
-            if let errorMessage {
+            if let failure {
+                Section {
+                    Text(failure.message)
+                        .foregroundStyle(Color.lakkoDanger)
+                    if failure.offersRetry {
+                        Button(joinTryAgain) {
+                            Task { await join() }
+                        }
+                        .disabled(busy)
+                    }
+                }
+            } else if let errorMessage {
                 Section {
                     Text(errorMessage)
                         .foregroundStyle(Color.lakkoDanger)
@@ -73,6 +90,7 @@ struct JoinCoPublisherScreen: View {
         if trimmed.isEmpty { return }
         busy = true
         errorMessage = nil
+        failure = nil
         status = "Sending your request..."
         defer {
             busy = false
@@ -114,9 +132,14 @@ struct JoinCoPublisherScreen: View {
             dismiss()
         } catch let err as LegacyChannelError {
             errorMessage = err.message
+        } catch let err as CoPublisherError {
+            // Not a co-publisher link at all: the link itself is the problem,
+            // which no retry fixes — the invite page's invalid-link copy.
+            NSLog("Channels: co-publish link rejected: %@", String(describing: err))
+            errorMessage = groupInviteInvalidMessage
         } catch {
             NSLog("Channels: co-publish request failed: %@", String(describing: error))
-            errorMessage = "Could not send the request. Check the link and try again."
+            failure = JoinRequestFailure.classify(error)
         }
     }
 }

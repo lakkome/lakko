@@ -518,15 +518,24 @@ messages both ways.
   services already use. The same default governs production auth, discovery and
   push-gw, where no mobile client has exercised it either. Open question 3
   (knock cost) is now a measured problem, not a tuning note.
-- **iOS polls the knock queue without a throttle** - about twice a second across
-  the groups it owns - where Android waits 10 s per group and web reads knocks
-  after each long poll.
-- **Android copy**: the join failure shows protocol words ("DS knock
-  (external-join request) failed") with no retry, and success says "Find it
-  under Groups", a section the app does not have.
-- **The owner's pending request reads "Member"** even when the joiner is a
-  contact: the request carries the joiner's device leaf key, and the name lookup
-  keys on the account.
+- **iOS polled the knock queue without a throttle** - about twice a second
+  across the groups it owns, and 45 times a minute for a group whose info sheet
+  was open, because the join-attribution label re-read the whole queue on every
+  poll. Web had the same attribution re-read. Fixed on all three the same day:
+  knock reads are held to once per 10 s per group, and the attribution label is
+  re-read only when the set of pending joiners changes. Measured after the fix
+  with a pending request and the sheet open: 4 to 5 reads a minute per group.
+- **Join screen copy** (Android showed protocol words, web a raw error, the
+  three said success three ways). Unified on all three: "You joined the group."
+  with Open chat; "Your request didn't go through. Check your connection and try
+  again." with Try again; "This group isn't taking requests yet. Try again
+  later."; "Check this device's date and time." A knock whose proof of work
+  expired mid-solve is retried once with a fresh challenge.
+- **The owner's pending request read "Member"** even when the joiner was a
+  contact: the request carries the joiner's device leaf key, and contacts are
+  keyed on the account. `Group::pending_external_join_account_key` (core + both
+  FFI surfaces) names the account from the retained KeyPackage's verified device
+  binding; re-walked, the request reads "Maria Lopez".
 
 ## References
 

@@ -254,6 +254,11 @@ public func dsHealRegistration(
 /// epoch, build the proposal for it, knock with the attribution and the
 /// proposal. No journal read. Each step injected, so the sequence is pinned by
 /// a test with fakes.
+///
+/// A knock POST refused with `401` means its proof of work expired while it
+/// was being solved (a challenge lives 300 s and a phone may take minutes at
+/// a higher effort): the knock is retried ONCE with a freshly fetched and
+/// solved challenge before the failure surfaces.
 public struct DsKnockJoin {
     /// A fresh PoW proof for one knock (challenge + solve).
     public var solvePow: () async throws -> PowProofPayload
@@ -264,17 +269,30 @@ public struct DsKnockJoin {
     /// The join attribution, or `nil` when it could not be composed (it is
     /// advisory; the proposal goes regardless).
     public var attribution: () -> Data?
+    /// Whether a knock failure is an expired proof of work.
+    public var isPowExpired: (Error) -> Bool
 
     public init(
         solvePow: @escaping () async throws -> PowProofPayload,
         knock: @escaping (PowProofPayload, [Data]) async throws -> UInt64?,
         createProposal: @escaping (UInt64) throws -> Data,
-        attribution: @escaping () -> Data?
+        attribution: @escaping () -> Data?,
+        isPowExpired: @escaping (Error) -> Bool = DsKnockJoin.isUnauthorized
     ) {
         self.solvePow = solvePow
         self.knock = knock
         self.createProposal = createProposal
         self.attribution = attribution
+        self.isPowExpired = isPowExpired
+    }
+
+    /// A knock carries no proof header, so the only `401` it can get is the
+    /// PoW verifier's (an expired or already-used challenge).
+    public static func isUnauthorized(_ error: Error) -> Bool {
+        if let ds = error as? DsClientError, case .http(let status, _, _) = ds {
+            return status == 401
+        }
+        return false
     }
 
     /// Run the sequence. Returns the epoch the proposal targets.
@@ -284,17 +302,26 @@ public struct DsKnockJoin {
     /// by every member in silence and the joiner would wait forever.
     @discardableResult
     public func run() async throws -> UInt64 {
-        let probePow = try await solvePow()
-        guard let epoch = try await knock(probePow, []) else {
+        guard let epoch = try await knockPaying([]) else {
             throw DsKnockJoinError.groupNotClaimed
         }
         let proposal = try createProposal(epoch)
         var rows: [Data] = []
         if let attribution = attribution() { rows.append(attribution) }
         rows.append(proposal)
-        let pow = try await solvePow()
-        _ = try await knock(pow, rows)
+        _ = try await knockPaying(rows)
         return epoch
+    }
+
+    /// One knock with its own proof of work, retried once on an expired one.
+    private func knockPaying(_ payloads: [Data]) async throws -> UInt64? {
+        let pow = try await solvePow()
+        do {
+            return try await knock(pow, payloads)
+        } catch let error where isPowExpired(error) {
+            let fresh = try await solvePow()
+            return try await knock(fresh, payloads)
+        }
     }
 }
 
@@ -306,7 +333,109 @@ public enum DsKnockJoinError: Error, LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .groupNotClaimed:
-            return "This group is not taking requests right now. Try again later."
+            return JoinRequestFailure.notTakingRequests.message
         }
     }
 }
+
+/// ADR-0053 point 7 — at most one knock read per group per ``floorSeconds``.
+///
+/// Knocks are polled next to the group journal, and the journal is polled far
+/// more often than a join request arrives (measured live: about twice a second
+/// across the groups one owner holds). The floor matches Android's.
+@MainActor
+public final class KnockPollThrottle {
+    public nonisolated static let floorSeconds: TimeInterval = 10
+
+    private let floor: TimeInterval
+    private var lastAt: [String: Date] = [:]
+
+    public init(floorSeconds: TimeInterval = KnockPollThrottle.floorSeconds) {
+        floor = floorSeconds
+    }
+
+    /// `true` when `key` may be polled at `now`, and records the poll. A clock
+    /// that went backwards counts as due, so a skewed clock cannot silence
+    /// the knocks for good.
+    public func take(_ key: String, now: Date = Date()) -> Bool {
+        if let last = lastAt[key], now >= last, now.timeIntervalSince(last) < floor {
+            return false
+        }
+        lastAt[key] = now
+        return true
+    }
+
+    public func reset() {
+        lastAt.removeAll()
+    }
+}
+
+/// ADR-0053 — whether the members sheet re-reads the join attributions.
+///
+/// The attribution read goes over the whole knock queue, and the sheet asks
+/// on every poll result while it is open (measured live: 45 reads in 60 s).
+/// It needs to ask only when the set of pending joiners differs from the set
+/// the shown map was read for, and even then at most once per floor.
+public enum JoinAttributionRefresh {
+    public enum Decision: Equatable {
+        /// Nothing changed (or a read is already running, or the floor is not
+        /// yet due): keep the map on screen.
+        case keep
+        /// No pending joiner: empty the map, read nothing.
+        case clear
+        /// Read the attributions for the current pending set.
+        case fetch
+    }
+
+    /// `allowRead` is asked only when a read would otherwise happen, so the
+    /// floor is not spent on a refresh that needs nothing.
+    public static func decide(
+        pending: Set<Data>,
+        fetchedFor: Set<Data>?,
+        inFlight: Bool,
+        allowRead: () -> Bool
+    ) -> Decision {
+        if pending.isEmpty { return fetchedFor == [] ? .keep : .clear }
+        if pending == fetchedFor || inFlight { return .keep }
+        return allowRead() ? .fetch : .keep
+    }
+}
+
+/// The join screen's failure states (`docs/ux/group-invite-page.md`), in the
+/// exact copy all three clients share. Never a raw error: the error is logged.
+public enum JoinRequestFailure: Equatable {
+    /// The group's journal has no registered epoch (the probe returned none).
+    case notTakingRequests
+    /// A signed request was refused and the device clock is off.
+    case clockSkew
+    /// Anything else.
+    case generic
+
+    public var message: String {
+        switch self {
+        case .notTakingRequests:
+            return "This group isn't taking requests yet. Try again later."
+        case .clockSkew:
+            return DsClockSkew.copy
+        case .generic:
+            return "Your request didn't go through. Check your connection and try again."
+        }
+    }
+
+    /// Only the generic failure offers "Try again": the other two are not
+    /// fixed by pressing a button now.
+    public var offersRetry: Bool { self == .generic }
+
+    public static func classify(_ error: Error) -> JoinRequestFailure {
+        if let knock = error as? DsKnockJoinError, knock == .groupNotClaimed {
+            return .notTakingRequests
+        }
+        if DsClientError.clockSkewCopy(in: error) != nil { return .clockSkew }
+        return .generic
+    }
+}
+
+/// The join screen's success copy and its controls.
+public let joinSucceededMessage = "You joined the group."
+public let joinOpenChat = "Open chat"
+public let joinTryAgain = "Try again"
