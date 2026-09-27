@@ -4342,3 +4342,47 @@ covered: cross-invariant interactions (each was reasoned about locally); the enu
 in C-66 being a mirror of openmls rules Lakko does not own; and whether the three-layer
 gate's by-reference/by-value split holds under compositions nobody has thought to write a
 test for.
+
+## Delivery service
+
+### G-42: A journal's name is its only key - a leaked `group_id` reads, writes and knocks; a mailbox is named by a public key anyone can compute - **OPEN, closing under [ADR-0053](../adr/0053-ds-journal-authorisation.md) (Proposed 2026-09-27)**
+
+**Symptom.** `services/ds` serves and accepts both journals to anyone who names them
+(`services/ds/src/main.rs`: *"No authentication on Phase 1.3 - anyone with the right
+pseudonym can publish or fetch"*). Three roads hand the name to people outside the
+conversation: (1) a forward carries the origin conversation's `group_id` inside its
+sealed payload ([ADR-0052](../adr/0052-reply-forward-pin.md) decision 2 - reproduced
+live 2026-09-27: two recipients who share no conversation with the original author hold
+the author-forwarder `group_id`); (2) a mailbox pseudonym is
+`BLAKE3("lakko-pseudonym/v1/identity" || identity_pk)` and the identity key is
+published by discovery, so a mailbox is derivable from a username; (3) the `/g/` joiner
+reads the whole group journal and posts into it before it is a member, by design.
+
+**What the name buys.** Not the content - every row is MLS- or HPKE-sealed. It buys the
+metadata (row count, timing, sizes: the activity of a conversation, or whether and when a
+person received a contact request or was added to a group), a write into the journal
+(bytes every member fetches, fails to open and drops, at their cost), and for a group an
+external-join proposal nobody invited ([ADR-0028](../adr/0028-group-join-ticket.md)
+"ask, never in"). The pseudonym cannot be guessed (256 random bits), so every exposure is
+one leaked name, one conversation - but ADR-0052 leaks one on purpose, and the mailbox
+name was never secret.
+
+**Why it went unrecorded.** The Phase 1.3 posture is stated in the service header and
+relied on by [ADR-0045](../adr/0045-remote-commit-epoch-fork.md) (the case against a
+DS-side epoch gate) and ADR-0028 (the joiner's unauthenticated read), but no gap named
+what the posture costs once a name travels; ADR-0052 wrote *"an opaque conversation id
+they cannot open; that is the whole disclosure"*, which is true of content and false of
+the journal.
+
+**Closing.** ADR-0053: a claimed journal is opened only by a request signed with a key
+it was claimed under - for a group a per-epoch Ed25519 key every member derives from
+`Group::export_secret("lakko/ds/access/v1", ...)` (rotation with the epoch, eviction
+revokes at the commit), for a mailbox the identity key its pseudonym hashes; a failed
+proof is answered as a nonexistent journal; the non-member's one act, asking to join,
+moves to a PoW-gated knock whose response carries the epoch; the joiner's Welcome moves
+to its mailbox (C-69 amended). Rendezvous mailboxes (pairing, recovery, courier, state
+bundle: random names exchanged out of band, alive for minutes) stay capability-by-name
+and are this gap's accepted residual. Until it lands: a leaked `group_id` is a read of
+metadata and a write of garbage, and a forward from a one-to-one should carry no origin
+(ADR-0052 amendment).
+

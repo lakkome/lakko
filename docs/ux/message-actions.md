@@ -305,7 +305,9 @@ verbatim (the edited text if it was edited), its attachments re-encrypted
 under fresh keys and uploaded again (decision 2's OQ1: the two conversations
 never share a blob), the original author's display name as the forwarder's
 timeline shows it, and - when the forwarder is in the origin conversation,
-which a forwarder always is - the origin reference. A forwarded message's
+which a forwarder always is, and the origin is not a one-to-one (its only other
+holder is the other participant; ADR-0052 amendment of 2026-09-27) - the origin
+reference. A forwarded message's
 quote (if it was a reply) is NOT carried; a forwarded forward carries the
 ORIGINAL author's name and origin, never the forwarder's. Reactions are not
 carried. A message that cannot be forwarded yet (its attachments still

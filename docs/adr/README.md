@@ -67,3 +67,10 @@ detail, and `Implemented` is used where the decision is fully landed.
 | [0044](0044-push-routing-secret-recency.md) | Accepted | Mint-epoch recency ordering for the push routing secret (extends 0042 + 0043) |
 | [0045](0045-remote-commit-epoch-fork.md) | Proposed | Proposal-based membership commits with a designated committer (G-38 residual 1) |
 | [0046](0046-external-crypto-review.md) | Accepted | External cryptographic review — a programme gate, not a per-change blocker |
+| [0047](0047-media-messages-and-gif-proxy.md) | Accepted | Media messages, emoji picker and a server-side GIF proxy |
+| [0048](0048-profile-names.md) | Accepted | Profile names, carried end-to-end encrypted and bound to the sender's key |
+| [0049](0049-identity-recovery-word-vault.md) | Accepted | Identity recovery: three of the twenty-four words, a confirmation prompt on another device, and a passkey |
+| [0050](0050-per-device-conversation-leaves.md) | Accepted | Per-device conversation leaves, a second device is a full client (ADR-0007 Phase 2b, G-40) |
+| [0051](0051-group-and-channel-names.md) | Accepted | Group and channel names carried end-to-end encrypted to every member and subscriber |
+| [0052](0052-reply-forward-pin.md) | Accepted | Reply, forward and pin |
+| [0053](0053-ds-journal-authorisation.md) | Proposed | A journal on the Delivery Service is opened by a key, not by its name (G-42) |

@@ -181,6 +181,14 @@ sees the name only: tapping does nothing, and it does not say why, because an
 answer would confirm the conversation exists. What the recipient does learn is
 an opaque conversation id they cannot open; that is the whole disclosure.
 
+> **Corrected 2026-09-27.** "Cannot open" was true of the content and false of the
+> journal: `services/ds` serves and accepts a journal to anyone who names it, so the id
+> in a forward let a recipient outside the conversation read its metadata, write into
+> it and knock on it. Recorded as **G-42**; closed by
+> [ADR-0053](0053-ds-journal-authorisation.md), under which the id grants nothing and
+> the origin keeps being carried. One amendment stands on its own: a forward **from a
+> one-to-one** carries no origin (its only other holder is the other participant).
+
 A message forwarded onward keeps the original name rather than the forwarder's,
 so a chain does not rewrite its own history.
 
