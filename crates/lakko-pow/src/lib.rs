@@ -12,10 +12,23 @@
 //!   * **Server** can opt into the `compiler` feature for an
 //!     x86_64 JIT verify. It cannot be used on `wasm32` (no
 //!     executable memory).
-//!   * **Client** must run on host, iOS, Android **and** wasm32.
-//!     We disable `equix`'s default features (so no JIT) and
-//!     stick to the portable interpreter — same algorithm,
-//!     5–10× slower on x86 but the only option in the browser.
+//!   * **Client** must run on host, iOS, Android **and** wasm32. The
+//!     JIT is enabled wherever a process may map executable memory -
+//!     every native target except iOS - and the portable interpreter
+//!     is kept on iOS and wasm32 (same algorithm, about 10x slower per
+//!     attempt on a Mac, 20x on the Android emulator; measured
+//!     2026-09-27). `equix` picks the JIT with `TryCompile` and falls
+//!     back to the interpreter on its own if compiling fails.
+//!
+//! ## Every solution counts
+//!
+//! One Equix run yields a variable number of solutions (about two on
+//! average). The effort gate hashes `seed || nonce || solution`, so each
+//! solution is an independent draw against it, and the server accepts
+//! any valid one. The solver therefore checks every solution a run
+//! produces, which halves the expected work at no cost to the gate: an
+//! attacker could always do the same, so this only closes the gap
+//! between an honest client and one.
 //!
 //! Bundling this into `services/auth` would force a feature
 //! conflict; bundling it into `lakko-ffi-wasm` would couple the
@@ -158,6 +171,9 @@ pub fn solve_with_budget(
     // re-instantiate per nonce, since the program input is
     // `seed || nonce` and the nonce changes.
     let mut rng = rand::rngs::OsRng;
+    // The solver's working memory (a few MiB) is reused across attempts
+    // instead of being allocated per nonce.
+    let mut memory = equix::SolverMemory::new();
 
     for _ in 0..max_attempts {
         // Fresh random nonce per attempt. Using random nonces
@@ -169,25 +185,24 @@ pub fn solve_with_budget(
         // Equix may legitimately fail to find a solution for
         // ~5% of (seed, nonce) pairs. Treat that as "skip and
         // retry with a different nonce".
-        let Ok(solutions) = equix::solve(&challenge) else {
+        let Ok(equix) = equix::EquiX::new(&challenge) else {
             continue;
         };
-        let Some(solution) = solutions.first() else {
-            continue;
-        };
-
-        let solution_bytes = solution.to_bytes();
-        if !meets_effort(seed, &challenge[SEED_LEN..], &solution_bytes, effort_bits) {
-            continue;
+        // Every solution the run produced is a separate draw against the
+        // effort gate (see the module doc); the first that passes wins.
+        for solution in &equix.solve_with_memory(&mut memory) {
+            let solution_bytes = solution.to_bytes();
+            if !meets_effort(seed, &challenge[SEED_LEN..], &solution_bytes, effort_bits) {
+                continue;
+            }
+            let mut nonce = [0u8; NONCE_LEN];
+            nonce.copy_from_slice(&challenge[SEED_LEN..]);
+            return Ok(PowProof {
+                seed: *seed,
+                nonce,
+                solution: solution_bytes,
+            });
         }
-
-        let mut nonce = [0u8; NONCE_LEN];
-        nonce.copy_from_slice(&challenge[SEED_LEN..]);
-        return Ok(PowProof {
-            seed: *seed,
-            nonce,
-            solution: solution_bytes,
-        });
     }
 
     Err(PowError::BudgetExhausted)
@@ -271,6 +286,23 @@ mod tests {
             meets_effort(&proof.seed, &proof.nonce, &proof.solution, 4),
             "produced proof must satisfy its own effort gate"
         );
+    }
+
+    /// Proofs taken from any solution of a run - not only the first - are
+    /// what the server accepts: equix verifies them and they meet their own
+    /// effort gate. At 6 bits a winning solution is often not the first one
+    /// a run produced, so this exercises the path that used to be skipped.
+    #[test]
+    fn any_winning_solution_verifies_like_the_server_checks_it() {
+        for i in 0..8u8 {
+            let seed = [i.wrapping_mul(29) ^ 0x5C; SEED_LEN];
+            let proof = solve(&seed, 6).expect("solve");
+            let mut challenge = [0u8; SEED_LEN + NONCE_LEN];
+            challenge[..SEED_LEN].copy_from_slice(&proof.seed);
+            challenge[SEED_LEN..].copy_from_slice(&proof.nonce);
+            equix::verify_bytes(&challenge, &proof.solution).expect("equix verify");
+            assert!(meets_effort(&proof.seed, &proof.nonce, &proof.solution, 6));
+        }
     }
 
     /// Each call samples fresh nonces; two solves on the same

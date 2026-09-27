@@ -518,6 +518,12 @@ messages both ways.
   services already use. The same default governs production auth, discovery and
   push-gw, where no mobile client has exercised it either. Open question 3
   (knock cost) is now a measured problem, not a tuning note.
+  **Measured and partly fixed the same day:** the client solver ran without the
+  Equix JIT and used only the first solution of each run. `lakko-pow` now uses
+  the JIT on every native target but iOS and checks every solution; 8 bits
+  measured 0.6 s on a Mac, about 1 s on the Android emulator and 6.8 s in the
+  iOS simulator (16-21 s and about 2 minutes before). What each action should
+  cost is a separate, open policy decision.
 - **iOS polled the knock queue without a throttle** - about twice a second
   across the groups it owns, and 45 times a minute for a group whose info sheet
   was open, because the join-attribution label re-read the whole queue on every
