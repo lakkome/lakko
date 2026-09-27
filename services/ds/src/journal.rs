@@ -18,13 +18,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::body::Body;
+use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Json, Response};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use http_body_util::BodyExt as _;
 use serde::{Deserialize, Serialize};
 use sqlx::types::chrono::{DateTime, Utc};
 use sqlx::MySqlPool;
@@ -33,7 +32,7 @@ use tokio::sync::Notify;
 use crate::AppState;
 
 /// Pseudonym length: 32 raw bytes = 64 lowercase hex chars.
-const PSEUDONYM_LEN: usize = 32;
+pub(crate) const PSEUDONYM_LEN: usize = 32;
 const HEX_LEN: usize = PSEUDONYM_LEN * 2;
 
 /// Per-message body ceiling. Bigger than typical MLS app messages
@@ -43,7 +42,7 @@ const HEX_LEN: usize = PSEUDONYM_LEN * 2;
 pub(crate) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
 /// Default GET page size if `?limit=` is omitted.
-const DEFAULT_LIMIT: u32 = 100;
+pub(crate) const DEFAULT_LIMIT: u32 = 100;
 
 /// Hard cap on a single GET response.
 const MAX_LIMIT: u32 = 1000;
@@ -76,6 +75,9 @@ pub(crate) enum Queue {
     Group,
     /// `ds_mailbox_messages`, `(device_id, ...)`.
     Mailbox,
+    /// `ds_group_knocks`, `(group_id, ...)` - ADR-0053 section 4, the
+    /// non-member's requests to join, kept apart from the members' rows.
+    Knock,
 }
 
 impl Queue {
@@ -83,12 +85,13 @@ impl Queue {
         match self {
             Queue::Group => "ds_group_messages",
             Queue::Mailbox => "ds_mailbox_messages",
+            Queue::Knock => "ds_group_knocks",
         }
     }
 
     fn owner_col(self) -> &'static str {
         match self {
-            Queue::Group => "group_id",
+            Queue::Group | Queue::Knock => "group_id",
             Queue::Mailbox => "device_id",
         }
     }
@@ -137,7 +140,7 @@ impl Notifiers {
 
 /// Validate that the path parameter is exactly 64 lowercase hex chars
 /// and decode to 32 raw bytes.
-fn decode_pseudonym(hex_str: &str) -> Result<[u8; PSEUDONYM_LEN], (StatusCode, String)> {
+pub(crate) fn decode_pseudonym(hex_str: &str) -> Result<[u8; PSEUDONYM_LEN], (StatusCode, String)> {
     if hex_str.len() != HEX_LEN {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -176,24 +179,17 @@ pub(crate) struct PublishResponse {
 /// `RequestBodyLimit` layer), inserts into the right table, wakes up
 /// any in-flight long-poll GETs on the same `(queue, owner_id)` key,
 /// and returns the assigned id.
-async fn publish(
+pub(crate) async fn publish(
     pool: &MySqlPool,
     notifiers: &Notifiers,
     queue: Queue,
     owner_id: &[u8; PSEUDONYM_LEN],
-    body: Body,
+    bytes: &[u8],
 ) -> Result<Json<PublishResponse>, (StatusCode, String)> {
-    // Collect the body. The DefaultBodyLimit + RequestBodyLimit layer
-    // already enforces MAX_MESSAGE_BYTES, so a client trying to sneak
-    // a 4 MB blob in here gets 413 before reaching this code.
-    let bytes = body
-        .collect()
-        .await
-        .map_err(|e| {
-            tracing::warn!(error = %e, "client body collect error");
-            (StatusCode::BAD_REQUEST, format!("body error: {e}"))
-        })?
-        .to_bytes();
+    // The body arrives collected: the DefaultBodyLimit layer already
+    // enforces MAX_MESSAGE_BYTES, so a client trying to sneak a 4 MB blob
+    // in gets 413 before reaching this code, and the ADR-0053 gate has to
+    // see the bytes before they are stored.
 
     // Build SQL with the table + column literally substituted —
     // these are compile-time `&'static str`, never user input, so no
@@ -206,7 +202,7 @@ async fn publish(
 
     let result = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(&owner_id[..])
-        .bind(bytes.as_ref())
+        .bind(bytes)
         .execute(pool)
         .await
         .map_err(|e| {
@@ -348,7 +344,7 @@ async fn fetch(
 ///      re-fetch tick (defence-in-depth), and (c) the deadline.
 ///   4. On any wakeup do a fresh `fetch`; ship rows if any. On
 ///      deadline, ship the empty response.
-async fn fetch_with_wait(
+pub(crate) async fn fetch_with_wait(
     pool: &MySqlPool,
     notifiers: &Notifiers,
     queue: Queue,
@@ -406,19 +402,29 @@ async fn fetch_with_wait(
 pub(crate) async fn post_group(
     State(state): State<AppState>,
     AxumPath(group_hex): AxumPath<String>,
-    body: Body,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> Result<Response, (StatusCode, String)> {
     let owner = decode_pseudonym(&group_hex)?;
-    let resp = publish(&state.db, &state.notifiers, Queue::Group, &owner, body).await?;
+    // ADR-0053: a claimed group takes a publish only from a member.
+    crate::access::gate_group(&state, &owner, &method, &uri, &headers, &body).await?;
+    let resp = publish(&state.db, &state.notifiers, Queue::Group, &owner, &body).await?;
     Ok((StatusCode::CREATED, resp).into_response())
 }
 
 pub(crate) async fn get_group(
     State(state): State<AppState>,
     AxumPath(group_hex): AxumPath<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     Query(q): Query<FetchQuery>,
 ) -> Result<Response, (StatusCode, String)> {
     let owner = decode_pseudonym(&group_hex)?;
+    // ADR-0053: a claimed group's journal is read by members only.
+    crate::access::gate_group(&state, &owner, &method, &uri, &headers, &[]).await?;
     let limit = q.limit.unwrap_or(DEFAULT_LIMIT);
     let wait = q.wait.unwrap_or(0);
     let resp = fetch_with_wait(
@@ -442,19 +448,26 @@ pub(crate) async fn get_group(
 pub(crate) async fn post_mailbox(
     State(state): State<AppState>,
     AxumPath(device_hex): AxumPath<String>,
-    body: Body,
+    body: Bytes,
 ) -> Result<Response, (StatusCode, String)> {
     let owner = decode_pseudonym(&device_hex)?;
-    let resp = publish(&state.db, &state.notifiers, Queue::Mailbox, &owner, body).await?;
+    // Deliberately ungated (ADR-0053 section 2): a mailbox is the cold inbox
+    // strangers are meant to reach; only reading it is the owner's.
+    let resp = publish(&state.db, &state.notifiers, Queue::Mailbox, &owner, &body).await?;
     Ok((StatusCode::CREATED, resp).into_response())
 }
 
 pub(crate) async fn get_mailbox(
     State(state): State<AppState>,
     AxumPath(device_hex): AxumPath<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     Query(q): Query<FetchQuery>,
 ) -> Result<Response, (StatusCode, String)> {
     let owner = decode_pseudonym(&device_hex)?;
+    // ADR-0053: a claimed mailbox is read by its owner only.
+    crate::access::gate_mailbox_read(&state, &owner, &method, &uri, &headers).await?;
     let limit = q.limit.unwrap_or(DEFAULT_LIMIT);
     let wait = q.wait.unwrap_or(0);
     let resp = fetch_with_wait(
@@ -480,7 +493,9 @@ pub(crate) async fn get_mailbox(
 // ============================================================================
 
 /// Spawn a background task that deletes messages older than
-/// `RETENTION_SECS` from both journals. Aborted when the service stops.
+/// `RETENTION_SECS` from both journals, knocks older than
+/// `KNOCK_RETENTION_SECS`, and spent proof nonces. Aborted when the service
+/// stops.
 pub(crate) fn spawn_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(PRUNE_INTERVAL);
@@ -488,13 +503,18 @@ pub(crate) fn spawn_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()> {
         interval.tick().await;
         loop {
             interval.tick().await;
-            for queue in [Queue::Group, Queue::Mailbox] {
+            crate::access::prune_nonces(&pool).await;
+            for queue in [Queue::Group, Queue::Mailbox, Queue::Knock] {
+                let retention = match queue {
+                    Queue::Knock => crate::access::KNOCK_RETENTION_SECS,
+                    Queue::Group | Queue::Mailbox => RETENTION_SECS,
+                };
                 let sql = format!(
                     "DELETE FROM {} WHERE created_at < NOW(3) - INTERVAL ? SECOND",
                     queue.table(),
                 );
                 match sqlx::query(sqlx::AssertSqlSafe(sql))
-                    .bind(RETENTION_SECS)
+                    .bind(retention)
                     .execute(&pool)
                     .await
                 {
@@ -551,6 +571,8 @@ mod tests {
         assert_eq!(Queue::Group.owner_col(), "group_id");
         assert_eq!(Queue::Mailbox.table(), "ds_mailbox_messages");
         assert_eq!(Queue::Mailbox.owner_col(), "device_id");
+        assert_eq!(Queue::Knock.table(), "ds_group_knocks");
+        assert_eq!(Queue::Knock.owner_col(), "group_id");
     }
 
     #[test]

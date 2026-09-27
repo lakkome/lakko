@@ -55,5 +55,18 @@ chrono = { version = "0.4", default-features = false, features = ["serde"] }
 # Body collection helper (BodyExt::collect on axum's Body).
 http-body-util = "0.1"
 
+# ADR-0053 - the request proof a claimed journal requires: canonical bytes,
+# header codec and verifier, shared with both FFI surfaces. Re-exports the
+# Ed25519 key types, so no direct lakko-crypto dependency is needed here.
+lakko-ds-proof.workspace = true
+
+# ADR-0053 section 4 - the knock (a non-member's request to join) is the one
+# unauthenticated write to a claimed group and is PoW-gated with the shared
+# server-side Equix verifier the other services already use.
+lakko-pow-server.workspace = true
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+# The client-side Equix solver, so the knock tests can pay a real (effort-0)
+# proof of work against the same table the handler verifies.
+lakko-pow.workspace = true

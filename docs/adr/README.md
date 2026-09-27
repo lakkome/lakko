@@ -73,4 +73,4 @@ detail, and `Implemented` is used where the decision is fully landed.
 | [0050](0050-per-device-conversation-leaves.md) | Accepted | Per-device conversation leaves, a second device is a full client (ADR-0007 Phase 2b, G-40) |
 | [0051](0051-group-and-channel-names.md) | Accepted | Group and channel names carried end-to-end encrypted to every member and subscriber |
 | [0052](0052-reply-forward-pin.md) | Accepted | Reply, forward and pin |
-| [0053](0053-ds-journal-authorisation.md) | Proposed | A journal on the Delivery Service is opened by a key, not by its name (G-42) |
+| [0053](0053-ds-journal-authorisation.md) | Accepted | A journal on the Delivery Service is opened by a key, not by its name (G-42) |

@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-ds-proof"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The Delivery Service request proof (ADR-0053): canonical bytes, the header codec and the verifier, shared by services/ds and both FFI surfaces"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+# Ed25519 sign / verify + BLAKE3 over the body. The same primitives the
+# rest of the core signs with; no new cryptography enters here.
+lakko-crypto.workspace = true
+
+# `IdentityPseudonym::from_identity` - the one derivation that says which
+# public key a mailbox is named after, defined once and used here rather
+# than copied (a copied domain string would drift silently and fail closed
+# on every mailbox claim).
+lakko-contacts.workspace = true
+
+# Base64url-no-pad (RFC 4648 section 5) for the header's nonce and signature.
+base64 = "0.22"

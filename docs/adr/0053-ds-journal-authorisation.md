@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0053: A journal on the Delivery Service is opened by a key, not by its name
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-09-27, the maintainer's call; S1 built the same day, S2 next)
 - **Date:** 2026-09-27
 - **Context:** Phase 3 (product hardening), closes G-42
 - **Supersedes:** the "no authentication" posture of `services/ds` (Phase 1.3), and
@@ -89,8 +89,13 @@ X-Lakko-DS-Proof: v1.<epoch>.<unix_ms>.<nonce_b64url>.<sig_b64url>
 `sig` is Ed25519 over the canonical bytes
 
 ```text
-"lakko/ds/proof/v1" || method || canonical_path || query || BLAKE3(body) || unix_ms(8 BE) || nonce(16)
+"lakko/ds/proof/v1" || 0x00 || method || 0x00 || canonical_path || 0x00 || query || 0x00
+  || BLAKE3(body) || epoch(8 BE) || unix_ms(8 BE) || nonce(16)
 ```
+
+(NUL separators keep `method || path || query` unambiguous, and the epoch is
+bound so a proof under one epoch's key cannot be presented under another
+label - both added when the crate was written, S1.)
 
 where `canonical_path` is the service path (`/ds/group/<hex>/messages`), never
 the nginx prefix (`/api/ds/`, `/native/ds/`), so web and native sign the same
@@ -146,9 +151,18 @@ names a person, and neither is key material (invariants #2 and #5 hold).
 
 For a claimed group journal both `GET` and `POST` require a proof. For a claimed
 mailbox `GET` requires one and `POST` does not. Any request that fails the check
-- no header, unknown epoch, bad signature, stale time, replayed nonce - receives
-the response an **unclaimed, empty** journal would give: the server never says
-"this exists but not for you". A malicious server can still refuse service or
+- no header, unknown epoch, bad signature, stale time, replayed nonce - is
+refused with one uniform `401` and no detail.
+
+> **Amended before S1 (2026-09-27).** The first draft answered a failed proof
+> "as an unclaimed, empty journal would" so the server never said "this exists
+> but not for you". Two facts made that the wrong trade. A member whose clock is
+> wrong would see its publishes accepted and silently dropped - the failure a
+> chat must never have - where a `401` lets the client say "check the device
+> clock" (open question 2). And what a `401` reveals - that the name is claimed
+> - is nothing a caller does not already know, since a 256-bit name cannot be
+> probed and is only ever held because it was given out. So the refusal is
+> loud and uniform; what stays hidden is everything behind it. A malicious server can still refuse service or
 serve a stale view; both are availability, which the zero-trust posture never
 promised to prevent, and neither reveals content.
 
@@ -280,6 +294,10 @@ rather than engineered around.
   `services/ds` (migration: `ds_group_access`, `ds_mailbox_access`,
   `ds_group_knocks`; the proof middleware; claim, knock and knocks routes;
   existence-hiding responses) with integration tests over a real MariaDB.
+  **Built 2026-09-27** (`crates/lakko-ds-proof`, `services/ds/src/access.rs`,
+  migration `0002_journal_access.sql`; 7 crate tests, the `proof_parse` fuzz
+  target, six `LAKKO_DS_TEST_DATABASE_URL`-gated DS tests green against a local
+  MariaDB). See *What S1 found* below.
 - **S2** FFI: `Group.dsAccessKey()` / `DeviceGroup` / `PublisherGroup`, `signDsProof`,
   the mailbox proof under the identity key; UniFFI + wasm.
 - **S3** web: `DsClient` signs every call; claim at create and on open; the
@@ -289,6 +307,34 @@ rather than engineered around.
 - **S5** docs + security: C-69 amendment, G-42 to closed, the invariant index,
   PRODUCT-READINESS, and the `lakko-security` pass (touches auth of a service and
   every client's transport; invariants #2, #4, #5).
+
+## What S1 found
+
+- **The gate is a per-handler call, not middleware.** The proof covers the
+  request body, and axum's body is a stream, so the handler that publishes has
+  to collect the bytes before the check can run; a layer would have to buffer
+  and re-inject them. `publish` now takes the collected `Bytes` and the three
+  gated handlers call `gate_group` / `gate_mailbox_read` on them (a `GET` proves
+  over an empty body). Section 2's "middleware" reads as "the check every gated
+  handler runs first".
+- **The nonce cache is the table's primary key.** `ds_proof_nonces
+  (pseudonym, nonce)` with `INSERT IGNORE`: zero rows affected is the replay.
+  No in-process set, so a restart does not forget the last two minutes of
+  nonces, and section 5's "moves to the shared store" is already true of it.
+- **Two registrations are legal at `latest`.** A replacement of the latest
+  epoch (the abandoned-staged-sweep shape) must be proven under the epoch
+  *before* it, never under the key it replaces: otherwise a device holding the
+  latest key could swap it for one of its own with nothing to vouch for the
+  change. The test pins both directions.
+- **The knock's PoW and the knock's payload are one table apart.** The proof
+  of work is consumed in `pow_challenges` by the shared `lakko-pow-server`
+  verifier before the row is written; a repeated proof is refused there, so a
+  knock cannot be replayed for free even though the knock route itself carries
+  no proof header.
+- **Only the registration rows and the routes are new on the DS.** The journal
+  tables, the wire of `messages` and the long-poll are untouched; the
+  unclaimed posture is byte-for-byte Phase 1.3, which is what lets the flag
+  day proceed client by client (S2-S4) with the server already deployed.
 
 ## References
 

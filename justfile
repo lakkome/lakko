@@ -95,6 +95,7 @@ fuzz-check:
     cargo check --manifest-path crates/lakko-auth-token/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-shamir/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-mnemonic/fuzz/Cargo.toml
+    cargo check --manifest-path crates/lakko-ds-proof/fuzz/Cargo.toml
     cargo check --manifest-path services/sfu/fuzz/Cargo.toml
 
 # Build `lakko-ffi-wasm` for `wasm32-unknown-unknown`. CI runs this

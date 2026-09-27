@@ -23,10 +23,15 @@
 //!   * Fan-out is implicit: clients with the group's pseudonym poll
 //!     the journal. The server doesn't know who is in the group.
 //!
-//! No authentication on Phase 1.3 — anyone with the right pseudonym
-//! can publish or fetch. Pseudonyms are 32 bytes random; guessing one
-//! is infeasible. Anti-DoS is nginx-layer rate limit; PoW gating is
-//! deferred to Phase 2 (same plan as `services/storage`).
+//! Phase 1.3 had no authentication — anyone with the right pseudonym could
+//! publish or fetch, on the ground that a 32-byte random name cannot be
+//! guessed. ADR-0053 (`src/access.rs`) ended that where a name travels: a
+//! journal its owner has **claimed** answers only a request carrying a proof
+//! signed with a key it was claimed under (a per-epoch key every member of a
+//! group derives from the MLS exporter; the identity key a mailbox is named
+//! after), a failed proof is one uniform 401, and the one act a non-member
+//! has - asking to join - is a PoW-gated knock. An unclaimed journal keeps
+//! the old posture. Anti-DoS beyond that is the nginx-layer rate limit.
 //!
 //! Configuration via environment variables (loaded by systemd from
 //! `/etc/lakko/lakko.env`):
@@ -44,11 +49,17 @@
 //! - `GET    /ds/group/{group_id_hex}/messages`    — `?after=<id>&limit=<n>&wait=<secs>`
 //! - `POST   /ds/mailbox/{device_id_hex}/messages` — publish to device mailbox
 //! - `GET    /ds/mailbox/{device_id_hex}/messages` — `?after=<id>&limit=<n>&wait=<secs>`
+//! - `PUT    /ds/group/{group_id_hex}/access`      — register an epoch's access key (ADR-0053)
+//! - `PUT    /ds/mailbox/{device_id_hex}/access`   — claim a mailbox under its identity key
+//! - `POST   /ds/group/{group_id_hex}/knock`       — a non-member's request to join (PoW)
+//! - `GET    /ds/group/{group_id_hex}/knocks`      — the members read the knocks
+//! - `POST   /pow/challenge`                       — a proof-of-work challenge for a knock
 //!
 //! See `~/.claude/plans/1-nested-wreath.md` §4 (MLS Delivery Service).
 
 #![forbid(unsafe_code)]
 
+mod access;
 mod journal;
 
 use std::net::SocketAddr;
@@ -58,7 +69,7 @@ use anyhow::{Context, Result};
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::Router;
 use serde_json::json;
 use sqlx::mysql::MySqlPoolOptions;
@@ -123,6 +134,7 @@ async fn main() -> Result<()> {
     };
 
     let _pruner = journal::spawn_pruner(pool.clone());
+    let _pow_pruner = lakko_pow_server::spawn_pruner(pool.clone());
 
     let app = build_app(state);
 
@@ -156,6 +168,17 @@ pub(crate) fn build_app(state: AppState) -> Router {
             "/ds/mailbox/{device_hex}/messages",
             post(journal::post_mailbox).get(journal::get_mailbox),
         )
+        .route(
+            "/ds/group/{group_hex}/access",
+            put(access::put_group_access),
+        )
+        .route(
+            "/ds/mailbox/{device_hex}/access",
+            put(access::put_mailbox_access),
+        )
+        .route("/ds/group/{group_hex}/knock", post(access::post_knock))
+        .route("/ds/group/{group_hex}/knocks", get(access::get_knocks))
+        .route("/pow/challenge", post(access::issue_pow_challenge))
         .layer(DefaultBodyLimit::max(journal::MAX_MESSAGE_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
