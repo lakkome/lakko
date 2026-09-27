@@ -11,6 +11,7 @@ package me.lakko.app.ui.chat
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -130,6 +131,14 @@ import java.util.Locale
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.selected
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
 import androidx.lifecycle.repeatOnLifecycle
@@ -196,6 +205,9 @@ public fun ChatScreen(
     /** ADR-0052 decision 2 / UX 5.1 — Forward was chosen on a message: open
      *  the "Forward to" picker with it. */
     onForwardMessage: (ForwardRequest) -> Unit = {},
+    /** UX section 8 — Forward was chosen on a selection: open the same
+     *  picker with the requests, oldest first. */
+    onForwardSelection: (List<ForwardRequest>) -> Unit = {},
     /** UX 5.1 "Tap to jump" — open another conversation this device holds,
      *  after the message to light in it has been published to
      *  [PendingMessageJump]. */
@@ -229,6 +241,16 @@ public fun ChatScreen(
     DisposableEffect(viewModel) {
         onDispose { viewModel.onCancelReply() }
     }
+    // UX section 8 — selection mode. The value and every rule live in the
+    // view model / `MessageSelection.kt`; this screen swaps the header for
+    // the selection bar and the composer for the action bar while it is set.
+    // Back leaves the mode before it leaves the chat.
+    val selection by viewModel.selection.collectAsStateWithLifecycle()
+    val bulkBusy by viewModel.bulkBusy.collectAsStateWithLifecycle()
+    val bulkStatus by viewModel.bulkStatus.collectAsStateWithLifecycle()
+    val selecting = selection != null
+    var confirmBulkDelete by remember { mutableStateOf(false) }
+    BackHandler(enabled = selecting) { viewModel.onCancelSelection() }
     // UX 3.1 "Tap to jump" — the row a tapped quote scrolled to, lit for about
     // a second and a half and then back to normal.
     var highlightedMessageId by remember { mutableStateOf<Long?>(null) }
@@ -624,6 +646,13 @@ public fun ChatScreen(
         // above the navigation bar and the keyboard.
         contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
+        val liveSelection = selection
+        if (liveSelection != null) {
+            SelectionBar(
+                countLabel = liveSelection.countLabel,
+                onCancel = viewModel::onCancelSelection,
+            )
+        } else {
         Header(
             title = headerTitle,
             subtitle = headerSubtitle,
@@ -667,6 +696,7 @@ public fun ChatScreen(
                 }
             },
         )
+        }
         },
     ) { scaffoldPadding ->
     Box(modifier = Modifier.fillMaxSize().padding(scaffoldPadding)) {
@@ -860,6 +890,21 @@ public fun ChatScreen(
                             personalPinned = msg.messageId in personalPins,
                             mayShared = mayPinShared,
                         )
+                        // UX section 8 — while selecting, the whole row is the
+                        // toggle and a mark sits at its leading edge; a row that
+                        // cannot be acted on shows no mark and answers nothing.
+                        val selectable = me.lakko.app.chat.canSelectMessage(msg)
+                        val isSelected = selection?.contains(msg.messageId) == true
+                        SelectableTimelineRow(
+                            selecting = selecting,
+                            selectable = selectable,
+                            selected = isSelected,
+                            markLabel = me.lakko.app.chat.selectionMarkLabel(
+                                messageLabel = selectionRowLabel(msg),
+                                selected = isSelected,
+                            ),
+                            onToggle = { viewModel.onToggleSelection(msg) },
+                        ) {
                         MessageRow(
                             msg = msg,
                             // UX 5.2 — a run's first row gets the wide gap, the
@@ -891,7 +936,9 @@ public fun ChatScreen(
                             },
                             // ADR-0045 UX §6.2.5 — the same predicate the
                             // composer is gated on, two `when`s below.
-                            actionsAvailable = me.lakko.app.chat.messageActionsState(
+                            // UX section 8 — and never while selecting: the
+                            // reaction row and the action card do not open.
+                            actionsAvailable = !selecting && me.lakko.app.chat.messageActionsState(
                                 membership,
                             ) == me.lakko.app.chat.MessageActions.AVAILABLE,
                             // ADR-0024 — read-state inputs (own
@@ -983,7 +1030,10 @@ public fun ChatScreen(
                                 viewModel.onReactToMessage(msg.messageId, emoji)
                             },
                             onRetrySend = { viewModel.onRetrySend(it) },
+                            // UX section 8 — enter selection mode on this row.
+                            onSelect = { viewModel.onEnterSelection(msg) },
                         )
+                        }
                     }
                     // ADR-0047 — outgoing media still uploading or not sent.
                     items(items = pendingMedia, key = { "pending-${it.tempId}" }) { row ->
@@ -1022,7 +1072,29 @@ public fun ChatScreen(
         // ADR-0024 — the typing indicator lives in the header's second line
         // (UX 5.2), not above the input bar; see `headerSubtitle`.
 
-        when (val slot = me.lakko.app.chat.composerState(membership, state.draft)) {
+        // UX section 8 — the action bar in place of the composer while
+        // selecting. Forward hands the selection, oldest first, to the picker;
+        // Delete asks first, because a bulk delete is irreversible and
+        // multiplied.
+        val liveSelection = selection
+        if (liveSelection != null) {
+            SelectionActionBar(
+                selection = liveSelection,
+                busy = bulkBusy,
+                status = bulkStatus,
+                onForward = {
+                    val requests = viewModel.selectedMessagesInOrder().map { msg ->
+                        ForwardRequest(
+                            sourceGroupIdHex = state.groupIdHex,
+                            message = msg,
+                            authorLabel = timelineAuthorLabel(msg),
+                        )
+                    }
+                    if (requests.isNotEmpty()) onForwardSelection(requests)
+                },
+                onDelete = { confirmBulkDelete = true },
+            )
+        } else when (val slot = me.lakko.app.chat.composerState(membership, state.draft)) {
             me.lakko.app.chat.ComposerSlot.Composer -> Composer(
                 recorder = recorder,
                 emojiInsert = pendingEmojiInsert,
@@ -1063,6 +1135,33 @@ public fun ChatScreen(
     // held record button keeps its gesture.
     VideoNoteOverlay(recorder)
     }
+    }
+
+    // UX section 8 — "Delete 12 messages?" with a destructive Delete and Cancel.
+    val confirmCount = selection?.count ?: 0
+    if (confirmBulkDelete && confirmCount > 0) {
+        AlertDialog(
+            onDismissRequest = { confirmBulkDelete = false },
+            title = { Text(me.lakko.app.chat.confirmDeleteLabel(confirmCount)) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmBulkDelete = false
+                        viewModel.onDeleteSelected()
+                    },
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error,
+                    ),
+                ) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmBulkDelete = false }) { Text("Cancel") }
+            },
+        )
+    } else if (confirmBulkDelete) {
+        // The selection emptied under the dialog (another device deleted the
+        // rows); there is nothing left to confirm.
+        confirmBulkDelete = false
     }
 
     picker?.let { request ->
@@ -1305,6 +1404,8 @@ private fun MessageRow(
     onPin: () -> Unit = {},
     /** UX 4.1 — the row's word, `Pin` or `Unpin`, decided by the caller. */
     pinLabel: String = "Pin",
+    /** UX section 8 — Select was chosen on this message. */
+    onSelect: () -> Unit = {},
 ) {
     val gapAbove = if (firstInRun) 8.dp else 2.dp
     // UX 3.1 — "the surface tint used for the pressed state": Material's
@@ -1341,6 +1442,7 @@ private fun MessageRow(
                 onJumpToForward = onJumpToForward,
                 onPin = onPin,
                 pinLabel = pinLabel,
+                onSelect = onSelect,
                 // ADR-0024 — own bubble: compute the read tick.
                 readState = ownReadStateFor(
                     messageId = msg.messageId,
@@ -1407,6 +1509,7 @@ private fun MessageRow(
                     onJumpToForward = onJumpToForward,
                     onPin = onPin,
                     pinLabel = pinLabel,
+                    onSelect = onSelect,
                     // Incoming bubbles never show our read state.
                     readState = OwnReadState.None,
                     // UX section 4 — incoming on the sunken surface.
@@ -1604,6 +1707,8 @@ internal fun Bubble(
     onPin: () -> Unit = {},
     /** UX 4.1 — the row's word, `Pin` or `Unpin`, decided by the caller. */
     pinLabel: String = "Pin",
+    /** UX section 8 — Select was chosen on this message. */
+    onSelect: () -> Unit = {},
 ) {
     // ADR-0023 — every affordance is gated on the message having a
     // real DS messageId (0 ⇒ a not-yet-acked outgoing row that no
@@ -1859,6 +1964,10 @@ internal fun Bubble(
                     onPin = {
                         menuOpen = false
                         onPin()
+                    },
+                    onSelect = {
+                        menuOpen = false
+                        onSelect()
                     },
                     onCopy = {
                         menuOpen = false
@@ -3986,6 +4095,234 @@ private fun MembersSheet(
                     Spacer(Modifier.weight(1f))
                     TextButton(onClick = viewModel::toggleMembersPanel) { Text("Done") }
                 }
+            }
+        }
+    }
+}
+
+// =============================================================================
+// UX section 8 — selection mode
+// =============================================================================
+
+/**
+ * What the selection mark names a row by: the message's text, or its kind
+ * when it has none (a photo, a voice message), so a screen reader can tell
+ * one mark from the next.
+ */
+private fun selectionRowLabel(msg: ChatMessage): String =
+    msg.text.ifEmpty {
+        msg.attachments.firstOrNull()
+            ?.let { mediaPreviewLabel(PreviewAttachment(kind = it.kind, mime = it.mime)) }
+            ?: "Message"
+    }
+
+/** Diameter of the selection mark; also its tap-friendly footprint inside the
+ *  row (the whole row is the target, so the mark itself needs no 40dp). */
+private val SELECTION_MARK_SIZE: Dp = 22.dp
+
+/** Gap between the mark and the row it belongs to. */
+private val SELECTION_MARK_GAP: Dp = 8.dp
+
+/**
+ * Section 8 — a timeline row while selecting: the mark at the leading edge
+ * and the WHOLE row as the toggle, a tap and a long press alike. Outside
+ * selection mode it is the row itself, untouched.
+ *
+ * The toggle is a transparent layer drawn OVER the row rather than a click
+ * modifier on it: the bubble's own controls (an attachment, a quote, a
+ * forward line) each answer a tap, and a layer above them is what keeps a
+ * tap anywhere on the row a toggle and nothing else. A row that cannot be
+ * acted on gets the layer too, so its controls stay quiet while selecting,
+ * but no mark and no answer.
+ */
+@Composable
+private fun SelectableTimelineRow(
+    selecting: Boolean,
+    selectable: Boolean,
+    selected: Boolean,
+    markLabel: String,
+    onToggle: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    if (!selecting) {
+        content()
+        return
+    }
+    Box(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (selectable) {
+                SelectionMark(selected = selected)
+            } else {
+                Spacer(Modifier.width(SELECTION_MARK_SIZE))
+            }
+            Spacer(Modifier.width(SELECTION_MARK_GAP))
+            Box(Modifier.weight(1f)) { content() }
+        }
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .then(
+                    if (selectable) {
+                        Modifier
+                            .semantics {
+                                role = Role.Checkbox
+                                contentDescription = markLabel
+                                this.selected = selected
+                                stateDescription = if (selected) {
+                                    me.lakko.app.chat.SELECTED_STATE_LABEL
+                                } else {
+                                    me.lakko.app.chat.NOT_SELECTED_STATE_LABEL
+                                }
+                            }
+                            .combinedClickable(
+                                onClick = onToggle,
+                                onLongClick = onToggle,
+                            )
+                    } else {
+                        // Swallows the tap so nothing under it answers; says
+                        // nothing, because there is nothing to select.
+                        Modifier.combinedClickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = {},
+                            onLongClick = {},
+                        )
+                    },
+                ),
+        )
+    }
+}
+
+/** Section 8 — an empty circle, filled with a check when selected. */
+@Composable
+private fun SelectionMark(selected: Boolean) {
+    if (selected) {
+        Icon(
+            imageVector = Icons.Filled.CheckCircle,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(SELECTION_MARK_SIZE),
+        )
+    } else {
+        Box(
+            modifier = Modifier
+                .size(SELECTION_MARK_SIZE)
+                .border(
+                    width = 1.5.dp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    shape = CircleShape,
+                ),
+        )
+    }
+}
+
+/**
+ * Section 8 — the selection bar in place of the header: a leading `Cancel`,
+ * the count in the middle, nothing trailing.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SelectionBar(
+    countLabel: String,
+    onCancel: () -> Unit,
+) {
+    TopAppBar(
+        navigationIcon = {
+            TextButton(onClick = onCancel) { Text(me.lakko.app.chat.SELECTION_CANCEL_LABEL) }
+        },
+        title = {
+            Text(
+                text = countLabel,
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            )
+        },
+    )
+}
+
+/**
+ * Section 8 — the action bar in place of the composer: `Forward` and
+ * `Delete`, each with its icon and label, and one helper line under them
+ * — "Only your own messages can be deleted." while Delete is held back, or
+ * the progress copy after a run stopped short.
+ *
+ * The same elevated surface and hairline top as the composer it stands in
+ * for (design system: composer = elevated surface, hairline top).
+ */
+@Composable
+private fun SelectionActionBar(
+    selection: me.lakko.app.chat.MessageSelection,
+    busy: Boolean,
+    status: String?,
+    onForward: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Surface(color = MaterialTheme.colorScheme.surface) {
+        Column(Modifier.fillMaxWidth()) {
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            if (busy) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(
+                    onClick = onForward,
+                    enabled = selection.forwardEnabled && !busy,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.Forward,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("Forward")
+                }
+                TextButton(
+                    onClick = onDelete,
+                    enabled = selection.deleteEnabled && !busy,
+                    modifier = Modifier.weight(1f),
+                    // The destructive action in the platform's destructive
+                    // colour; Material's own disabled colour when held back.
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error,
+                    ),
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Delete,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("Delete")
+                }
+            }
+            // One helper slot: the progress copy after a failure outranks the
+            // gate's explanation, because it is the newer fact.
+            val helper = status ?: selection.deleteHelper
+            if (helper != null) {
+                Text(
+                    text = helper,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (status != null) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .semantics { liveRegion = LiveRegionMode.Polite },
+                )
             }
         }
     }

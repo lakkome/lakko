@@ -53,10 +53,12 @@ public enum MessageLongPress {
 
 /// One row of the action card.
 ///
-/// Section 3 lists nine actions; seven of them exist today (Pin is one word
-/// with two rows). Select and Read by each need surface that is not built
-/// (section 6 is the handover to the ADR), so they are deliberately absent
-/// rather than present and dead: a row that cannot work is worse than no row.
+/// Section 3 lists nine actions; eight of them exist today (Pin is one word
+/// with two rows). Read by needs surface that is not built (section 6 is the
+/// handover to the ADR), so it is deliberately absent rather than present and
+/// dead: a row that cannot work is worse than no row. Select has its surface
+/// since section 8 was built (``MessageSelection`` and the chat screen's
+/// selection mode).
 public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
 
     /// ADR-0052 decision 1 — arms the composer with a quote of this message
@@ -82,6 +84,12 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
     /// Puts the message text on the clipboard. Nothing leaves the device.
     case copy
 
+    /// Section 8 — enters selection mode with this message already selected,
+    /// from which Delete and Forward act on the set. Offered on the rows that
+    /// are selectable at all: landed, not a tombstone, send complete (the
+    /// Forward gate), while this device can still act.
+    case select
+
     /// Own, not deleted (ADR-0023).
     case edit
 
@@ -97,6 +105,7 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         case .pin: return "Pin"
         case .unpin: return "Unpin"
         case .copy: return "Copy"
+        case .select: return "Select"
         case .edit: return "Edit"
         case .delete: return "Delete"
         }
@@ -109,6 +118,7 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         case .pin: return "pin"
         case .unpin: return "pin.slash"
         case .copy: return "doc.on.doc"
+        case .select: return "checkmark.circle"
         case .edit: return "pencil"
         case .delete: return "trash"
         }
@@ -122,18 +132,19 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
     /// The actions this message offers, in section 2's order.
     ///
     /// **The order is the rule, not the list.** Section 2: the new-message
-    /// actions come first, then the ones that only read, then the ones that
-    /// change this message, and the destructive one comes last and separated.
-    /// Reply and Forward start a new message, Copy reads, Edit changes, Delete
-    /// destroys, so the order falls out. Pin is the one placed by a more
-    /// specific sentence: section 4.1 puts it "in the action card after
-    /// Forward", so it sits there rather than beside Edit.
+    /// actions come first (Reply, Forward), then the ones that only read
+    /// (Copy, Select), then the ones that change this message (Pin, Edit), and
+    /// the destructive one comes last and separated. Pin used to sit right
+    /// after Forward on section 4.1's sentence; with Select in the card it
+    /// takes section 2's slot, with Edit, so the two read-only rows stay
+    /// together: Reply, Forward, Copy, Select, Pin, Edit, Delete.
     ///
     /// React is NOT in this list, which is the whole point of section 2: it is a
     /// row of its own above the bubble, not an item in this card.
     public static func offered(
         canReply: Bool, canForward: Bool, canEditOrDelete: Bool, hasText: Bool,
-        pin: PinMenuState = .unavailable
+        pin: PinMenuState = .unavailable,
+        canSelect: Bool = false
     ) -> [MessageMenuAction] {
         var actions: [MessageMenuAction] = []
         // Section 3.1 — any message with an id; a tombstone and a row that
@@ -142,18 +153,20 @@ public enum MessageMenuAction: String, CaseIterable, Identifiable, Sendable {
         // Section 5.1 — any landed message that is not a tombstone; a row
         // still sending, or one whose send failed, cannot be forwarded yet.
         if canForward { actions.append(.forward) }
-        // Section 4.1 — `Pin` after Forward, on any message whose send is
-        // complete and that is not deleted; `Unpin` when it is pinned in a
-        // scope this device can clear.
+        // Section 3 — "any message with text". A message with only an
+        // attachment has nothing to put on the clipboard, and a tombstone has
+        // nothing left at all.
+        if hasText { actions.append(.copy) }
+        // Section 8 — on every row that is selectable in the mode it opens.
+        if canSelect { actions.append(.select) }
+        // Section 4.1 — `Pin` on any message whose send is complete and that
+        // is not deleted; `Unpin` when it is pinned in a scope this device can
+        // clear.
         switch pin {
         case .pin: actions.append(.pin)
         case .unpin: actions.append(.unpin)
         case .unavailable: break
         }
-        // Section 3 — "any message with text". A message with only an
-        // attachment has nothing to put on the clipboard, and a tombstone has
-        // nothing left at all.
-        if hasText { actions.append(.copy) }
         if canEditOrDelete {
             actions.append(.edit)
             actions.append(.delete)

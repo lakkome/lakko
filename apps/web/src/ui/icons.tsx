@@ -25,6 +25,9 @@ const PATHS = {
   mic: `<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v4M9 21h6"/>`,
   send: `<path d="M4 12 20 4l-4 16-4.5-6.5z"/><path d="M11.5 13.5 20 4"/>`,
   check: `<path d="M5 12.5l4.5 4.5L19 7.5"/>`,
+  // The `Select` row of the message menu (docs/ux/message-actions.md section
+  // 8): the same empty-circle-with-a-check the row's selection mark draws.
+  select: `<circle cx="12" cy="12" r="8.5"/><path d="M8 12.3l2.7 2.7L16.3 9.5"/>`,
   dcheck: `<path d="M2.5 12.5 6.5 16.5 14.5 8.5"/><path d="M9.5 15 11 16.5 21 6.5"/>`,
   key: `<circle cx="8" cy="14" r="4.5"/><path d="M11.5 10.5 20 2.5M17 5.5l2.5 2.5M14.5 8l2.5 2.5"/>`,
   devices: `<rect x="3" y="5" width="13" height="10" rx="1.5"/><path d="M7 19h5"/><rect x="17" y="9" width="4.5" height="10" rx="1.2"/>`,

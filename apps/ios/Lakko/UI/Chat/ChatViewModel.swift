@@ -2421,23 +2421,51 @@ public final class ChatViewModel: ObservableObject {
     /// from, because the target chat has nothing to attach it to.
     func forward(_ message: ChatMessage, to targetGroupIdHex: String) {
         forwardingMessage = nil
-        let payload = ForwardPayload.forwardPayload(
-            of: message,
-            authorLabel: forwardAuthorLabel(for: message),
-            originGroupIdHex: groupIdHex)
-        let repository = repository
         Task { @MainActor [weak self] in
             do {
-                let refs = try await ForwardAttachments.reencryptAll(message.attachments)
-                try await repository.sendMessage(
-                    groupIdHex: targetGroupIdHex,
-                    plaintext: payload.text,
-                    attachments: refs,
-                    forward: payload.forward)
+                try await self?.forwardAwaiting(message, to: targetGroupIdHex)
             } catch {
                 NSLog("ADR-0052 forward failed: \(error)")
                 self?.sendError = "Forward failed. Try again."
             }
+        }
+    }
+
+    /// The one forward, awaited: compose section 5.1's payload, re-encrypt the
+    /// attachments, send. The single `forward` and the bulk run (section 8)
+    /// both go through here, so a forward is composed in exactly one place.
+    func forwardAwaiting(_ message: ChatMessage, to targetGroupIdHex: String) async throws {
+        let payload = ForwardPayload.forwardPayload(
+            of: message,
+            authorLabel: forwardAuthorLabel(for: message),
+            originGroupIdHex: groupIdHex)
+        let refs = try await ForwardAttachments.reencryptAll(message.attachments)
+        try await repository.sendMessage(
+            groupIdHex: targetGroupIdHex,
+            plaintext: payload.text,
+            attachments: refs,
+            forward: payload.forward)
+    }
+
+    // MARK: - `docs/ux/message-actions.md` section 8 — Delete and Forward in bulk
+
+    /// Section 8 — one delete per message, oldest first (the caller hands them
+    /// in timeline order), awaiting each and stopping at the first failure.
+    /// Each is the single delete: the same repository call, the same local
+    /// apply, the pin records going with it (section 4.1).
+    func bulkDelete(_ messages: [ChatMessage]) async -> MessageSelection.BulkOutcome<ChatMessage> {
+        await MessageSelection.run(over: messages) { message in
+            try await self.deleteMessageAwaiting(message)
+        }
+    }
+
+    /// Section 8 — one forwarded message per selected message, oldest first,
+    /// each composed exactly as the single forward composes one.
+    func bulkForward(
+        _ messages: [ChatMessage], to targetGroupIdHex: String
+    ) async -> MessageSelection.BulkOutcome<ChatMessage> {
+        await MessageSelection.run(over: messages) { message in
+            try await self.forwardAwaiting(message, to: targetGroupIdHex)
         }
     }
 
@@ -2665,19 +2693,31 @@ public final class ChatViewModel: ObservableObject {
 
     /// Delete (tombstone) own message `message`.
     func deleteMessage(_ message: ChatMessage) {
-        let target = message.messageId
-        guard target > 0 else { return }
+        guard message.messageId > 0 else { return }
         Task { @MainActor in
             do {
-                try await repository.deleteMessage(
-                    groupIdHex: groupIdHex,
-                    target: target
-                )
+                try await deleteMessageAwaiting(message)
             } catch {
                 sendError = (error as? LocalizedError)?.errorDescription
                     ?? "Delete failed."
             }
         }
+    }
+
+    /// The one delete, awaited. The single `deleteMessage` and the bulk run
+    /// (`docs/ux/message-actions.md` section 8) both go through here. A
+    /// message without a server id is refused as an error rather than skipped,
+    /// so a bulk run stops on it instead of counting it as done.
+    func deleteMessageAwaiting(_ message: ChatMessage) async throws {
+        let target = message.messageId
+        guard target > 0 else { throw MessageSelectionError.notLanded }
+        try await repository.deleteMessage(groupIdHex: groupIdHex, target: target)
+    }
+
+    /// Why a bulk step refused before reaching the repository.
+    enum MessageSelectionError: Error {
+        /// The message carries no server id, so there is nothing to act on.
+        case notLanded
     }
 
     /// React to `message` with `emoji` — toggles on the receive

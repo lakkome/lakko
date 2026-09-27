@@ -46,8 +46,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.chat.ConversationRowKind
-import me.lakko.app.chat.ForwardRequest
+import me.lakko.app.chat.ForwardBatch
+import me.lakko.app.chat.ForwardOutcome
 import me.lakko.app.chat.ForwardSender
+import me.lakko.app.chat.PendingForwardOutcome
 import me.lakko.app.chat.conversationRowMatchesQuery
 import me.lakko.app.chat.orderConversationRows
 import me.lakko.app.devices.sync.DeviceGroupSyncRepository
@@ -86,10 +88,14 @@ public fun ForwardPickerScreen(
     /** The forward landed in this conversation: open it. */
     onForwarded: (targetGroupIdHex: String) -> Unit,
     modifier: Modifier = Modifier,
+    /** Section 8 — a selection's forward stopped short: return to the source
+     *  conversation, which reads the outcome and keeps the unsent selected.
+     *  Defaults to [onBack], which is what the picker's route does. */
+    onReturnToSource: () -> Unit = onBack,
 ) {
     // A picker with nothing to forward — a process restored onto this route —
     // closes rather than showing a list that can do nothing.
-    if (viewModel.request == null) {
+    if (viewModel.batch == null) {
         LaunchedEffect(Unit) { onBack() }
         return
     }
@@ -193,7 +199,11 @@ public fun ForwardPickerScreen(
                         ConversationRowBody(
                             row = row,
                             modifier = Modifier.clickable(enabled = pickable) {
-                                viewModel.forward(row.id) { onForwarded(row.id) }
+                                viewModel.forward(
+                                    targetGroupIdHex = row.id,
+                                    onDone = { onForwarded(row.id) },
+                                    onReturnToSource = onReturnToSource,
+                                )
                             },
                         )
                     }
@@ -210,7 +220,7 @@ internal const val FORWARD_PICKER_TITLE: String = "Forward to"
 internal const val FORWARDING_LABEL: String = "Forwarding"
 
 /**
- * The picker's state: the request it was opened with (taken once from the
+ * The picker's state: the batch it was opened with (taken once from the
  * [me.lakko.app.chat.PendingForward] slot, so it survives rotation with the
  * view model rather than being spent by it), the in-flight flag, and the
  * last failure.
@@ -218,7 +228,7 @@ internal const val FORWARDING_LABEL: String = "Forwarding"
 public class ForwardViewModel(
     private val repo: ChatRepository,
     /** `null` when the slot was empty on arrival — the picker then closes. */
-    public val request: ForwardRequest?,
+    public val batch: ForwardBatch?,
     private val sender: ForwardSender = ForwardSender(
         send = { target, text, attachments, forward ->
             repo.sendMessage(
@@ -229,6 +239,8 @@ public class ForwardViewModel(
             )
         },
     ),
+    /** Section 8 — where a selection's outcome is left for the source. */
+    private val publishOutcome: (ForwardOutcome) -> Unit = PendingForwardOutcome::publish,
 ) : ViewModel() {
     private val mutableBusy = MutableStateFlow(false)
     private val mutableError = MutableStateFlow<String?>(null)
@@ -240,27 +252,52 @@ public class ForwardViewModel(
     public val error: StateFlow<String?> = mutableError.asStateFlow()
 
     /**
-     * Send the request into [targetGroupIdHex]; [onDone] runs on success. A
-     * second pick while one is in flight is ignored — the list is disabled
-     * meanwhile, so this is the seam's own guard rather than the UI's.
+     * Send the batch into [targetGroupIdHex], oldest first, stopping at the
+     * first failure. On full success [onDone] runs. A failed single forward
+     * (section 5.1) is reported here, in the picker; a failed selection
+     * (section 8) leaves the outcome for the source conversation and runs
+     * [onReturnToSource], so the person lands back on the selection with the
+     * unsent messages still selected and "Forwarded K of N." A second pick
+     * while one is in flight is ignored — the list is disabled meanwhile, so
+     * this is the seam's own guard rather than the UI's.
      */
-    public fun forward(targetGroupIdHex: String, onDone: () -> Unit) {
-        val req = request ?: return
+    public fun forward(
+        targetGroupIdHex: String,
+        onDone: () -> Unit,
+        onReturnToSource: () -> Unit = {},
+    ) {
+        val current = batch ?: return
         if (!mutableBusy.compareAndSet(expect = false, update = true)) return
         mutableError.value = null
         viewModelScope.launch {
-            try {
-                sender.forward(req, targetGroupIdHex)
-                mutableBusy.value = false
-                onDone()
+            val result = try {
+                sender.forwardAll(current.requests, targetGroupIdHex)
             } catch (e: kotlin.coroutines.cancellation.CancellationException) {
                 mutableBusy.value = false
                 throw e
-            } catch (e: Throwable) {
-                mutableBusy.value = false
-                // A refusal that names itself keeps its own words, as the
-                // composer's failure line does.
-                mutableError.value = e.message?.takeIf { it.isNotBlank() } ?: "Could not forward."
+            }
+            mutableBusy.value = false
+            if (current.fromSelection) {
+                // The source reads this whether the run completed or not: a
+                // complete outcome is what tells it to leave selection mode.
+                publishOutcome(
+                    ForwardOutcome(
+                        sourceGroupIdHex = current.sourceGroupIdHex,
+                        done = result.done,
+                        total = result.total,
+                        unsentMessageIds = result.unsent.map { it.message.messageId }.toSet(),
+                    ),
+                )
+            }
+            when {
+                result.complete -> onDone()
+                current.fromSelection -> onReturnToSource()
+                else -> {
+                    // A refusal that names itself keeps its own words, as the
+                    // composer's failure line does.
+                    mutableError.value =
+                        result.failure?.message?.takeIf { it.isNotBlank() } ?: "Could not forward."
+                }
             }
         }
     }

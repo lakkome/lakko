@@ -1643,6 +1643,128 @@ a.ghost.small.lk-wide-only {
   color: var(--surface-muted);
 }
 
+/* docs/ux/message-actions.md section 8 — selection mode.
+
+   The selection bar takes the header's slot and surface (`.lk-chat-head`):
+   Cancel leading, the count centred between two cells of equal width, nothing
+   trailing. The action bar takes the composer's slot and surface: two
+   buttons, each an icon and a label, and the helper line under them when
+   Delete is disabled by someone else's message. */
+.lk-select-bar {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+}
+.lk-select-cancel {
+  justify-self: start;
+  min-height: 36px;
+  padding: 0 10px;
+  color: var(--accent);
+}
+.lk-select-count {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--surface-fg);
+  text-align: center;
+  white-space: nowrap;
+}
+.lk-select-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 16px 14px;
+  border-top: 1px solid var(--surface-border);
+  background: var(--surface-elevated);
+  flex: 0 0 auto;
+}
+.lk-select-actions-row {
+  display: flex;
+  justify-content: space-around;
+  gap: 8px;
+}
+.lk-select-action {
+  flex: 1 1 0;
+  min-height: 44px;
+  gap: 8px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--accent);
+}
+.lk-select-action:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+.lk-select-action.danger {
+  color: var(--danger);
+}
+.lk-select-action.danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+}
+.lk-select-action:disabled {
+  color: var(--surface-faint);
+  cursor: default;
+}
+.lk-select-helper {
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--surface-muted);
+  text-align: center;
+}
+
+/* The mark at the leading edge of every row while selecting: an empty circle,
+   filled with a check when the row is selected. It sits FIRST in the row on
+   both sides - an outgoing row is right-aligned, so `margin-right: auto` keeps
+   the mark at the left while the bubble stays where it was. A row that cannot
+   be acted on gets an empty slot of the same width instead, so the bubbles
+   stay in one column. */
+.lk-select-mark,
+.lk-select-mark-slot {
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  margin-right: auto;
+  align-self: center;
+}
+.lk-select-mark {
+  min-height: 0;
+  padding: 0;
+  border-radius: var(--radius-pill);
+  border: 2px solid var(--surface-faint);
+  background: transparent;
+  color: var(--accent-fg);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.lk-select-mark:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+.lk-select-mark[aria-checked="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.lk-select-mark:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* The whole row is the tap target while selecting, so the bubble's own
+   controls (play, the waveform, an attachment chip's buttons) go inert and a
+   press anywhere on the row reaches the row. A selected row is tinted the way
+   a jumped-to row is. */
+.lk-timeline.selecting .lk-bubble-row.selectable {
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.lk-timeline.selecting .lk-bubble-row.selectable .lk-bubble {
+  pointer-events: none;
+}
+.lk-timeline.selecting .lk-bubble-row.selectable:hover {
+  background-color: var(--surface-hover);
+}
+.lk-timeline.selecting .lk-bubble-row.selected,
+.lk-timeline.selecting .lk-bubble-row.selected:hover {
+  background-color: var(--surface-selected);
+}
+
 /* ADR-0052 decision 3 / docs/ux/message-actions.md section 4 — the pinned
    bar under the chat header: one pin at a time, a thin stacked indicator
    (how many, which one) at the leading edge, the author or `For you` and the

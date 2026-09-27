@@ -142,6 +142,10 @@ function host(over: Partial<BubbleHost> = {}): BubbleHost {
     fullReactPickerId: null,
     onOpenFullReactPicker: () => {},
     onCloseFullReactPicker: () => {},
+    selecting: false,
+    isSelected: () => false,
+    onToggleSelect: () => {},
+    onSelect: () => {},
     ...over,
   };
 }
@@ -467,10 +471,10 @@ describe("the action card's width", () => {
     const { items } = openMenuOn(ownMessage("hello"));
     const labels = all("[role='menuitem'] span", items as HTMLElement).map((s) => s.textContent);
     // Section 2: the ones that produce a new message (Reply, then Forward -
-    // ADR-0052 decisions 1 and 2), then the one that keeps it (Pin, decision
-    // 3, after Forward per section 4.1), then the ones that only read (Copy),
-    // then the ones that change this message (Edit), then the destructive one.
-    expect(labels).toEqual(["Reply", "Forward", "Pin", "Copy", "Edit", "Delete"]);
+    // ADR-0052 decisions 1 and 2), then the ones that only read (Copy, then
+    // Select - section 8), then the ones that change this message (Pin,
+    // decision 3, then Edit), then the destructive one.
+    expect(labels).toEqual(["Reply", "Forward", "Copy", "Select", "Pin", "Edit", "Delete"]);
     // "separated", and structurally so: the divider is a wrapper of its own,
     // not a border hung off the colour class.
     const del = one(".lk-msg-menu-destructive [role='menuitem']");
@@ -523,7 +527,7 @@ describe("Copy", () => {
     // Not the Edit / Delete predicate: section 3 offers Copy on "any message
     // with text", and an incoming message has no Edit row at all.
     const { items } = openMenuOn(incoming("hello"));
-    expect(labelsOf(items as HTMLElement)).toEqual(["Reply", "Forward", "Pin", "Copy"]);
+    expect(labelsOf(items as HTMLElement)).toEqual(["Reply", "Forward", "Copy", "Select", "Pin"]);
   });
 
   it("is absent on a message with no text", () => {
@@ -532,15 +536,22 @@ describe("Copy", () => {
     const { items } = openMenuOn(ownMessage("", [voiceRef()]));
     expect(present(".lk-msg-menu-items")).toBe(true);
     expect((items as HTMLElement).textContent).not.toContain("Copy");
-    expect(labelsOf(items as HTMLElement)).toEqual(["Reply", "Forward", "Pin", "Edit", "Delete"]);
+    expect(labelsOf(items as HTMLElement)).toEqual([
+      "Reply",
+      "Forward",
+      "Select",
+      "Pin",
+      "Edit",
+      "Delete",
+    ]);
   });
 
-  it("leaves an incoming media message with Reply, Forward and Pin alone in the card", () => {
-    // Nothing to copy and nothing to edit; Reply, Forward and Pin are offered
-    // on any complete message with an id (ADR-0052), so the card is drawn
-    // with those three rows.
+  it("leaves an incoming media message with Reply, Forward, Select and Pin in the card", () => {
+    // Nothing to copy and nothing to edit; Reply, Forward, Select and Pin are
+    // offered on any complete message with an id (ADR-0052, section 8), so
+    // the card is drawn with those four rows.
     const { items } = openMenuOn(incoming("", [voiceRef()]));
-    expect(labelsOf(items as HTMLElement)).toEqual(["Reply", "Forward", "Pin"]);
+    expect(labelsOf(items as HTMLElement)).toEqual(["Reply", "Forward", "Select", "Pin"]);
     expect(present("[role='group'][aria-label='React']")).toBe(true);
   });
 });
@@ -709,13 +720,14 @@ describe("Forward", () => {
 // ---------------------------------------------------------------------------
 
 describe("Pin", () => {
-  it("is the THIRD row of the card, after Forward, and hands the view this message's id", () => {
+  it("follows the read-only rows (Copy, Select) and hands the view this message's id", () => {
     const chosen: number[] = [];
     const { items } = openMenuOn(incoming("hello"), { onPin: (id) => chosen.push(id) });
     const rows = all<HTMLElement>("[role='menuitem']", items as HTMLElement);
     expect(rows[1]?.textContent).toContain("Forward");
-    expect(rows[2]?.textContent).toContain("Pin");
-    mouse(rows[2] as HTMLElement, "click");
+    expect(rows[3]?.textContent).toContain("Select");
+    expect(rows[4]?.textContent).toContain("Pin");
+    mouse(rows[4] as HTMLElement, "click");
     expect(chosen).toEqual([42]);
     expect(present("[role='menu']")).toBe(false);
   });
@@ -731,5 +743,98 @@ describe("Pin", () => {
     expect(labelsOf(items as HTMLElement)).toContain("Unpin");
     expect(labelsOf(items as HTMLElement)).not.toContain("Pin");
     expect(asked).toContain(42);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Select — `message-actions.md` section 8. The rules are `selection.ts`; what
+// is pinned here is the row: the mark, the whole-row toggle, the right-click
+// toggle, and the menu staying shut while selecting.
+// ---------------------------------------------------------------------------
+
+describe("Select", () => {
+  const MARK = ".lk-select-mark";
+
+  it("is the FOURTH row of the card, after Copy, and hands the view this message's id", () => {
+    const entered: number[] = [];
+    const { items } = openMenuOn(incoming("hello"), { onSelect: (id) => entered.push(id) });
+    const rows = all<HTMLElement>("[role='menuitem']", items as HTMLElement);
+    expect(rows[2]?.textContent).toContain("Copy");
+    expect(rows[3]?.textContent).toContain("Select");
+    mouse(rows[3] as HTMLElement, "click");
+    expect(entered).toEqual([42]);
+    expect(present("[role='menu']")).toBe(false);
+  });
+
+  it("outside the mode there is no mark", () => {
+    mount(incoming("hello"));
+    expect(present(MARK)).toBe(false);
+    expect(present(".lk-select-mark-slot")).toBe(false);
+  });
+
+  it("in the mode a selectable row shows the mark: a checkbox named by the text, unchecked", () => {
+    mount(incoming("hello  there"), { selecting: true });
+    const mark = one<HTMLElement>(MARK);
+    expect(mark.getAttribute("role")).toBe("checkbox");
+    expect(mark.getAttribute("aria-checked")).toBe("false");
+    expect(mark.getAttribute("aria-label")).toBe("hello there");
+    expect(one(".lk-bubble-row").classList.contains("selectable")).toBe(true);
+  });
+
+  it("a message with no text is named by its kind", () => {
+    mount(incoming("", [voiceRef()]), { selecting: true });
+    expect(one<HTMLElement>(MARK).getAttribute("aria-label")).toBe("Voice message");
+  });
+
+  it("the mark is checked, and the row tinted, when the view says this id is selected", () => {
+    mount(incoming("hello"), { selecting: true, isSelected: (id) => id === 42 });
+    expect(one<HTMLElement>(MARK).getAttribute("aria-checked")).toBe("true");
+    expect(one(".lk-bubble-row").classList.contains("selected")).toBe(true);
+  });
+
+  it("the whole row is the tap target, and the mark toggles exactly once", () => {
+    const toggled: number[] = [];
+    mount(incoming("hello"), { selecting: true, onToggleSelect: (id) => toggled.push(id) });
+    mouse(one(".lk-bubble-row"), "click");
+    expect(toggled).toEqual([42]);
+    // The mark's own click must not reach the row and toggle it back.
+    mouse(one(MARK), "click");
+    expect(toggled).toEqual([42, 42]);
+  });
+
+  it("a right-click toggles like a tap and opens no menu", () => {
+    const toggled: number[] = [];
+    const bubble = mount(incoming("hello"), {
+      selecting: true,
+      onToggleSelect: (id) => toggled.push(id),
+    });
+    mouse(bubble, "contextmenu", { clientX: 40, clientY: 60 });
+    expect(present("[role='menu']")).toBe(false);
+    expect(toggled).toEqual([42]);
+    // And the bubble is no longer a tab stop: there is no menu to reach.
+    expect(bubble.hasAttribute("tabindex")).toBe(false);
+  });
+
+  it("a deleted message is not selectable: no mark, an empty slot, no toggle", () => {
+    const toggled: number[] = [];
+    mount(incoming("hello"), {
+      selecting: true,
+      opState: () => ({ deleted: true, reactions: new Map() }),
+      onToggleSelect: (id) => toggled.push(id),
+    });
+    expect(present(MARK)).toBe(false);
+    expect(present(".lk-select-mark-slot")).toBe(true);
+    mouse(one(".lk-bubble-row"), "click");
+    expect(toggled).toEqual([]);
+  });
+
+  it("a message whose send failed is not selectable (the Forward gate)", () => {
+    const toggled: number[] = [];
+    const failed: TimelineRow = { ...ownMessage("hello"), ack: "failed" } as TimelineRow;
+    mount(failed, { selecting: true, onToggleSelect: (id) => toggled.push(id) });
+    expect(present(MARK)).toBe(false);
+    expect(present(".lk-select-mark-slot")).toBe(true);
+    mouse(one(".lk-bubble-row"), "click");
+    expect(toggled).toEqual([]);
   });
 });

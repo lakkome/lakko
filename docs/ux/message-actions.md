@@ -175,8 +175,10 @@ The authority and ordering rules the section above left to the ADR are settled
 there (ADR-0052 decision 3, closed 2026-09-26); this section is what a person
 sees, in the order they see it.
 
-**The row.** `Pin` sits in the action card after `Forward`, on any message
-whose send is complete and that is not deleted. On a message that is already
+**The row.** `Pin` sits in the action card in section 2's slot - after the
+reading actions Copy and Select, before Edit (it used to read "after Forward"
+here, from before Select was built; section 2's order is the one the clients
+follow) - on any message whose send is complete and that is not deleted. On a message that is already
 pinned in one scope the row reads `Unpin`; on one pinned in both it still reads
 `Unpin` and the sheet below asks which.
 
@@ -383,3 +385,68 @@ the receding backdrop are the same idea everywhere; the mechanics are not.
 
 Whatever differs, the ACTION SET must not: a message offers the same actions on
 every client, or the menu becomes a thing people learn per device.
+
+## 8. Select: Delete and Forward in bulk
+
+Select is the row in the card that makes the two multiplied actions bearable
+(section 3). It adds no wire surface: a selection is a UI mode, and what it
+does at the end is the one-message Delete or Forward of sections 3 and 5.1
+repeated over a set. Building it is what stops those two from being built a
+second time.
+
+**Entering.** `Select` in the action card enters selection mode with the
+message it was opened on already selected. In this mode the conversation
+header is replaced by a selection bar: a leading `Cancel`, the count in the
+middle ("1 selected", "12 selected"), nothing trailing. The composer is
+replaced by an action bar with two buttons, `Forward` and `Delete`, each with
+its icon and label. The reaction row and the action card do not open while
+selecting; a long press or right-click on a row toggles it like a tap.
+
+**Selecting.** Every message row shows a selection mark at its leading edge -
+an empty circle, filled with a check when the row is selected - and the whole
+row is the tap target. Rows that cannot be acted on are not selectable and
+show no mark: a date separator or a system row, a deleted message, a message
+whose send has not completed or has failed (the Forward gate of section 5.1).
+At most 100 messages can be selected; at the limit further taps do nothing and
+the count reads "100 selected, the limit". The mark is a toggle for
+accessibility purposes, named by the message's text or kind and stating
+"Selected" or "Not selected".
+
+**Delete.** Lakko has no "delete for me": a delete is the section 3 delete,
+which is sent to everyone and which peers accept only from the message's
+author (ADR-0023). So `Delete` is enabled when the selection is not empty and
+every selected message is the person's own; when it holds someone else's
+message the button is disabled and a helper line under the bar reads "Only
+your own messages can be deleted." A single delete today asks nothing; a bulk
+one is irreversible and multiplied, so it confirms: "Delete 12 messages?" with
+a destructive `Delete` and `Cancel` ("Delete 1 message?" for one). On
+confirmation the client sends one delete per message, oldest first, applying
+each locally as the single delete does (the pin records go with it, section
+4.1). On a failure it stops, keeps the unsent messages selected, and says
+"Deleted 5 of 12." Full success leaves selection mode.
+
+**Forward.** `Forward` is enabled when the selection is not empty. It opens the
+picker of section 5.1, titled "Forward to", one target. Picking a row sends one
+forwarded message per selected message, oldest first, each composed exactly as
+section 5.1 composes a single forward (the edited text, the attachments
+re-encrypted under fresh keys, the original author's name, the origin
+reference; no quote, no reactions). On full success the client leaves selection
+mode and takes the person to the target conversation, where the forwarded
+messages are the newest bubbles in their original order. On a failure it stays
+in the source conversation with the unsent messages still selected and says
+"Forwarded 5 of 12." Cancel in the picker sends nothing and returns to the
+selection as it was.
+
+**Leaving.** `Cancel`, Back on Android, Escape on web, a completed action, or
+navigating to another conversation all leave selection mode and clear the
+selection. Nothing about a selection is persisted.
+
+**Copy of the day.** "Select", "N selected", "100 selected, the limit", "Only
+your own messages can be deleted.", "Delete N messages?" / "Delete 1 message?",
+"Deleted K of N.", "Forwarded K of N.".
+
+**Cross-platform shape.** The same mode everywhere: the selection bar in place
+of the header, the action bar in place of the composer, the mark at the leading
+edge of each row. Web adds Escape and the right-click toggle; iOS and Android
+add the long-press toggle. The gates are the ones the single actions already
+compute (own, deleted, send complete), read once for the whole selection.

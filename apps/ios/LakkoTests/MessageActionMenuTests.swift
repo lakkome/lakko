@@ -108,6 +108,29 @@ final class MessageActionMenuTests: XCTestCase {
         )
     }
 
+    /// Section 8 / section 2 — Select is the second read-only row, right after
+    /// Copy and before anything that changes the message: Reply, Forward,
+    /// Copy, Select, Pin, Edit, Delete. Withheld where the mode could not
+    /// select the row (a tombstone, a send not complete), independently of
+    /// Copy: a photo with no caption offers Select and no Copy.
+    func testSelectSitsAfterCopyAndBeforePin() {
+        XCTAssertEqual(
+            MessageMenuAction.offered(
+                canReply: true, canForward: true, canEditOrDelete: true, hasText: true, pin: .pin,
+                canSelect: true),
+            [.reply, .forward, .copy, .select, .pin, .edit, .delete])
+        XCTAssertEqual(
+            MessageMenuAction.offered(
+                canReply: true, canForward: true, canEditOrDelete: false, hasText: false, canSelect: true),
+            [.reply, .forward, .select])
+        XCTAssertEqual(
+            MessageMenuAction.offered(
+                canReply: true, canForward: false, canEditOrDelete: false, hasText: true, canSelect: false),
+            [.reply, .copy])
+        XCTAssertEqual(MessageMenuAction.select.title, "Select")
+        XCTAssertFalse(MessageMenuAction.select.isDestructive)
+    }
+
     /// Forward has its own title and its own glyph, the mirror of Reply's.
     func testForwardHasItsOwnTitleAndGlyph() {
         XCTAssertEqual(MessageMenuAction.forward.title, "Forward")

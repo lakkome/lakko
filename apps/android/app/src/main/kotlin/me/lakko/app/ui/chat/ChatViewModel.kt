@@ -96,6 +96,140 @@ public class ChatViewModel(
         MutableStateFlow(ComposerState())
 
     // -------------------------------------------------------------
+    // `docs/ux/message-actions.md` section 8 — Select (bulk Delete / Forward)
+    // -------------------------------------------------------------
+
+    private val mutableSelection: MutableStateFlow<me.lakko.app.chat.MessageSelection?> =
+        MutableStateFlow(null)
+
+    /**
+     * The live selection while the screen is in selection mode, `null`
+     * otherwise. Every rule of the mode is in `MessageSelection.kt`; this
+     * holds the value so a rotation keeps it and so the source conversation
+     * still has it when the picker on top of it hands back an outcome.
+     * Nothing about it is persisted (section 8, "Leaving").
+     */
+    public val selection: StateFlow<me.lakko.app.chat.MessageSelection?> = mutableSelection.asStateFlow()
+
+    private val mutableBulkBusy = MutableStateFlow(false)
+
+    /** `true` while a bulk delete is running; the action bar waits. */
+    public val bulkBusy: StateFlow<Boolean> = mutableBulkBusy.asStateFlow()
+
+    private val mutableBulkStatus = MutableStateFlow<String?>(null)
+
+    /**
+     * "Deleted K of N." / "Forwarded K of N." after a run stopped short,
+     * shown under the action bar; `null` otherwise. Cleared by the next
+     * action and by leaving the mode.
+     */
+    public val bulkStatus: StateFlow<String?> = mutableBulkStatus.asStateFlow()
+
+    init {
+        // Section 8 — the picker leaves a selection's forward outcome in the
+        // slot. It is read HERE rather than by the screen because the source
+        // screen is not composed while the picker (or the target chat) is on
+        // top of it, and this view model is: it lives with the back-stack
+        // entry, so the selection is cleared or narrowed at once.
+        viewModelScope.launch {
+            me.lakko.app.chat.PendingForwardOutcome.pending.collect { outcome ->
+                if (outcome != null && outcome.sourceGroupIdHex == groupIdHex) {
+                    me.lakko.app.chat.PendingForwardOutcome.take(groupIdHex)?.let(::applyForwardOutcome)
+                }
+            }
+        }
+    }
+
+    /** `Select` was chosen on [message]: enter the mode with it selected. */
+    public fun onEnterSelection(message: me.lakko.app.chat.ChatMessage) {
+        if (!me.lakko.app.chat.canSelectMessage(message)) return
+        if (mutableBulkBusy.value) return
+        mutableBulkStatus.value = null
+        mutableSelection.value = me.lakko.app.chat.MessageSelection.starting(
+            messageId = message.messageId,
+            isOwn = message.direction == me.lakko.app.chat.Direction.Outgoing,
+        )
+    }
+
+    /** A tap or long press on a row while selecting. A row that cannot be
+     *  acted on is not selectable and the tap does nothing. */
+    public fun onToggleSelection(message: me.lakko.app.chat.ChatMessage) {
+        val current = mutableSelection.value ?: return
+        if (mutableBulkBusy.value) return
+        if (!me.lakko.app.chat.canSelectMessage(message)) return
+        mutableSelection.value = current.toggle(
+            messageId = message.messageId,
+            isOwn = message.direction == me.lakko.app.chat.Direction.Outgoing,
+        )
+    }
+
+    /** `Cancel`, Back, or navigating away: leave the mode and clear it. A run
+     *  in flight finishes first — its sends have already left. */
+    public fun onCancelSelection() {
+        if (mutableBulkBusy.value) return
+        mutableSelection.value = null
+        mutableBulkStatus.value = null
+    }
+
+    /** The selected messages, oldest first — the order both actions run in.
+     *  The screen turns these into forward requests, because the author
+     *  label a request carries is the timeline's to resolve. */
+    public fun selectedMessagesInOrder(): List<me.lakko.app.chat.ChatMessage> {
+        val current = mutableSelection.value ?: return emptyList()
+        return me.lakko.app.chat.selectedInTimelineOrder(current, state.value.messages)
+    }
+
+    /**
+     * Section 8's Delete, after the confirmation: one section-3 delete per
+     * selected message, oldest first, each applied locally as the single
+     * delete is. Stops at the first failure, keeps the unsent selected and
+     * says "Deleted K of N."; full success leaves the mode.
+     */
+    public fun onDeleteSelected() {
+        val current = mutableSelection.value ?: return
+        if (!current.deleteEnabled) return
+        if (!mutableBulkBusy.compareAndSet(expect = false, update = true)) return
+        mutableBulkStatus.value = null
+        val ordered = me.lakko.app.chat.selectedInTimelineOrder(current, state.value.messages)
+        viewModelScope.launch {
+            val result = try {
+                me.lakko.app.chat.performInOrder(ordered) { message ->
+                    repo.deleteMessage(groupIdHex = groupIdHex, targetMessageId = message.messageId)
+                }
+            } finally {
+                mutableBulkBusy.value = false
+            }
+            if (result.complete) {
+                mutableSelection.value = null
+                mutableBulkStatus.value = null
+            } else {
+                mutableSelection.value = mutableSelection.value?.retain(result.unsent.map { it.messageId })
+                mutableBulkStatus.value = me.lakko.app.chat.progressLabel(
+                    me.lakko.app.chat.BulkAction.DELETE,
+                    result.done,
+                    result.total,
+                )
+                android.util.Log.w("ChatViewModel", "onDeleteSelected stopped short", result.failure)
+            }
+        }
+    }
+
+    private fun applyForwardOutcome(outcome: me.lakko.app.chat.ForwardOutcome) {
+        val current = mutableSelection.value ?: return
+        if (outcome.complete) {
+            mutableSelection.value = null
+            mutableBulkStatus.value = null
+        } else {
+            mutableSelection.value = current.retain(outcome.unsentMessageIds)
+            mutableBulkStatus.value = me.lakko.app.chat.progressLabel(
+                me.lakko.app.chat.BulkAction.FORWARD,
+                outcome.done,
+                outcome.total,
+            )
+        }
+    }
+
+    // -------------------------------------------------------------
     // ADR-0052 / `docs/ux/message-actions.md` section 3.1 — Reply
     // -------------------------------------------------------------
 

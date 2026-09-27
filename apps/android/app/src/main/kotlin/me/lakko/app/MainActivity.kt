@@ -1569,6 +1569,12 @@ private fun SessionRoot(
                             me.lakko.app.chat.PendingForward.publish(request)
                             navController.navigate(Routes.FORWARD)
                         },
+                        // UX section 8 — a selection's Forward: the same
+                        // picker, one target, the requests oldest first.
+                        onForwardSelection = { requests ->
+                            me.lakko.app.chat.PendingForward.publishSelection(requests)
+                            navController.navigate(Routes.FORWARD)
+                        },
                         // UX 5.1 "Tap to jump" — the origin conversation is
                         // pushed over this one; Back returns here.
                         onOpenConversation = { hex ->
@@ -1584,7 +1590,7 @@ private fun SessionRoot(
                         factory = singletonViewModelFactory {
                             me.lakko.app.ui.chat.ForwardViewModel(
                                 repo = chatRepository,
-                                request = me.lakko.app.chat.PendingForward.take(),
+                                batch = me.lakko.app.chat.PendingForward.take(),
                             )
                         },
                     )
@@ -1593,6 +1599,10 @@ private fun SessionRoot(
                         repository = chatRepository,
                         deviceGroupSync = deviceGroupSync,
                         onBack = { navController.popBackStack() },
+                        // Section 8 — a selection's forward that stopped short
+                        // returns to the source chat beneath, which keeps the
+                        // unsent messages selected and says how far it got.
+                        onReturnToSource = { navController.popBackStack() },
                         // Section 5.1 — picking sends at once and takes the
                         // person to that conversation. The picker leaves the
                         // back stack; a forward into the conversation it was

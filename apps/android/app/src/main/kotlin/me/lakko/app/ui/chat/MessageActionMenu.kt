@@ -27,6 +27,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Forward
 import androidx.compose.material.icons.automirrored.filled.Reply
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
@@ -55,6 +56,9 @@ import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.layoutId
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -144,9 +148,13 @@ internal data class MessageActions(
     /** Section 4.1 — what the row reads: `Pin`, or `Unpin` when this device
      *  can undo a pin in at least one scope. Decided by `pinMenuFor`. */
     val pinLabel: String = "Pin",
+    /** Section 8 — Select enters the multi-select mode with this message
+     *  already selected. Offered where the row could be selected at all:
+     *  a completed send that is not deleted. */
+    val canSelect: Boolean = false,
 ) {
     /** Whether the card has anything to draw. */
-    val any: Boolean get() = canCopy || canEdit || canDelete || canReply || canForward || canPin
+    val any: Boolean get() = canCopy || canEdit || canDelete || canReply || canForward || canPin || canSelect
 }
 
 /**
@@ -186,6 +194,9 @@ internal fun messageActionsFor(
     // strictly needs; it is kept because the menu is how the row is reached.
     canPin = menuAvailable && sendComplete,
     pinLabel = pinLabel,
+    // Section 8 — the same gates a selectable row has (`canSelectMessage`):
+    // the id and deleted gates ride in `menuAvailable`, the send gate here.
+    canSelect = menuAvailable && sendComplete,
 )
 
 /**
@@ -229,7 +240,23 @@ internal fun MessageActionMenuOverlay(
     onForward: () -> Unit = {},
     /** Section 4.1 (ADR-0052 decision 3) — Pin / Unpin was chosen. */
     onPin: () -> Unit = {},
+    /** Section 8 — Select was chosen: enter selection mode on this message. */
+    onSelect: () -> Unit = {},
 ) {
+    // The chat window's own height, read OUTSIDE the popup. Inside it,
+    // `constraints.maxHeight` is the popup window's height, which the system
+    // hands out without subtracting the insets the popup content is placed
+    // under - so a card clamped against it could still run off the bottom of
+    // the screen (seen live 2026-09-27: on a message near the composer the
+    // card showed Reply..Select and Pin, Edit and Delete were below the
+    // display edge). The bubble is measured in this window's space, so its
+    // height is the visible bottom in that same space.
+    // The display's height less the navigation bar, read from the chat
+    // window: `LocalView.current.height` read here still let the card run one
+    // row past the display edge on the emulator, so the display metrics are
+    // the reference and the navigation bar is taken off explicitly.
+    val hostHeight = LocalContext.current.resources.displayMetrics.heightPixels -
+        WindowInsets.navigationBars.getBottom(LocalDensity.current)
     Popup(
         popupPositionProvider = WindowOriginProvider,
         onDismissRequest = onDismiss,
@@ -260,7 +287,8 @@ internal fun MessageActionMenuOverlay(
         ) {
             // Nothing is placed until the origin is known - one frame - because
             // a hole drawn at the wrong offset is worse than no hole at all.
-            val bubble = origin?.let { bubbleBounds.translate(-it) } ?: return@Box
+            val originNow = origin ?: return@Box
+            val bubble = bubbleBounds.translate(-originNow)
             Box(
                 Modifier
                     .fillMaxSize()
@@ -291,6 +319,9 @@ internal fun MessageActionMenuOverlay(
             MenuLayout(
                 bubble = bubble,
                 alignEnd = alignEnd,
+                // The chat window's bottom edge, in the popup content's space
+                // (the same translation the bubble got).
+                visibleBottom = (hostHeight - originNow.y).toInt(),
                 row = {
                     MessageReactionRow(
                         reactions = reactions,
@@ -306,6 +337,7 @@ internal fun MessageActionMenuOverlay(
                             onForward = onForward,
                             onPin = onPin,
                             onCopy = onCopy,
+                            onSelect = onSelect,
                             onEdit = onEdit,
                             onDelete = onDelete,
                         )
@@ -382,11 +414,11 @@ private val REACTION_TAP_SIZE: Dp = 40.dp
  * Section 2 — the action card, sized by its own content and nothing else.
  *
  * Section 2's order, of what exists today: the actions that produce a new
- * message first (Reply, then Forward), then the reading action (Copy), then
- * the one that changes this message (Edit), then the destructive one,
- * separated and in the platform's destructive colour. Pin, Select and Read by
- * are section 3 rows that nothing has built yet; they slot into that order
- * when they land.
+ * message first (Reply, then Forward), then the ones that only read (Copy,
+ * then Select), then the ones that change this message (Pin, Edit), then the
+ * destructive one, separated and in the platform's destructive colour. Read
+ * by is the one section 3 row nothing has built yet; it slots into that order
+ * when it lands.
  *
  * The look is section 2's shared card, whose reference is web's
  * `.lk-msg-menu-card` / `.lk-msg-menu-items` (`apps/web/src/styles.css`), not
@@ -404,6 +436,7 @@ internal fun MessageActionCard(
     modifier: Modifier = Modifier,
     onForward: () -> Unit = {},
     onPin: () -> Unit = {},
+    onSelect: () -> Unit = {},
 ) {
     Surface(
         modifier = modifier.testTag(ACTION_CARD_TAG),
@@ -446,20 +479,30 @@ internal fun MessageActionCard(
                     onClick = onForward,
                 )
             }
-            if (actions.canPin) {
-                // Section 4.1 — after Forward: the keep-message action. The
-                // word is decided once by `pinMenuFor` and rendered here.
-                ActionRow(
-                    label = actions.pinLabel,
-                    icon = Icons.Filled.PushPin,
-                    onClick = onPin,
-                )
-            }
             if (actions.canCopy) {
                 ActionRow(
                     label = "Copy",
                     icon = Icons.Filled.ContentCopy,
                     onClick = onCopy,
+                )
+            }
+            if (actions.canSelect) {
+                // Section 8 — after Copy, with the actions that only read:
+                // entering the mode changes nothing until an action fires.
+                ActionRow(
+                    label = me.lakko.app.chat.SELECT_ACTION_LABEL,
+                    icon = Icons.Filled.CheckCircle,
+                    onClick = onSelect,
+                )
+            }
+            if (actions.canPin) {
+                // Section 4.1 — the keep-message action, with the ones that
+                // change this message. The word is decided once by
+                // `pinMenuFor` and rendered here.
+                ActionRow(
+                    label = actions.pinLabel,
+                    icon = Icons.Filled.PushPin,
+                    onClick = onPin,
                 )
             }
             if (actions.canEdit) {
@@ -481,7 +524,7 @@ internal fun MessageActionCard(
                         // row gap above it.
                         .padding(top = DESTRUCTIVE_GAP),
                 ) {
-                    if (actions.canReply || actions.canForward || actions.canPin || actions.canCopy || actions.canEdit) {
+                    if (actions.canReply || actions.canForward || actions.canCopy || actions.canSelect || actions.canPin || actions.canEdit) {
                         HorizontalDivider(
                             thickness = CARD_BORDER_WIDTH,
                             color = MaterialTheme.colorScheme.outlineVariant,
@@ -582,6 +625,10 @@ private fun ActionRow(
 private fun MenuLayout(
     bubble: Rect,
     alignEnd: Boolean,
+    /** The lowest y (in this layout's coordinates) that is on screen; the
+     *  popup's own `maxHeight` overstates it, see the caller. `0` or less
+     *  means unknown, and the layout falls back to `maxHeight`. */
+    visibleBottom: Int = 0,
     row: @Composable () -> Unit,
     card: @Composable () -> Unit,
 ) {
@@ -598,7 +645,7 @@ private fun MenuLayout(
         val rowPlaceable = measurables.first { it.layoutId == SLOT_ROW }.measure(loose)
         val cardPlaceable = measurables.first { it.layoutId == SLOT_CARD }.measure(loose)
         val width = constraints.maxWidth
-        val height = constraints.maxHeight
+        val height = if (visibleBottom > 0) minOf(constraints.maxHeight, visibleBottom) else constraints.maxHeight
 
         fun x(itemWidth: Int): Int {
             val wanted = if (alignEnd) bubble.right.toInt() - itemWidth else bubble.left.toInt()

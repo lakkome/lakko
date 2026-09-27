@@ -43,6 +43,7 @@ import {
 import { forwardLineLabel } from "./forward";
 import { ownPersonKeyB64 } from "./person-key";
 import { replyQuoteLabel, replyQuoteLines } from "./reply-snapshot";
+import { canSelectRow, selectionMarkName } from "./selection";
 import { NotSent } from "../media/MediaBubbles";
 import { shortTime } from "./timeline-layout";
 import type { TimelineRow } from "./timeline-row";
@@ -123,6 +124,16 @@ export interface BubbleHost {
   fullReactPickerId: number | null;
   onOpenFullReactPicker: (messageId: number) => void;
   onCloseFullReactPicker: () => void;
+  /** `message-actions.md` section 8 — selection mode. While `selecting`,
+   *  every selectable row shows a mark at its leading edge and the whole row
+   *  toggles; the action menu does not open. The set itself stays in the
+   *  view: the bubble asks whether ITS id is in it and reports a toggle. */
+  selecting: boolean;
+  isSelected: (messageId: number) => boolean;
+  onToggleSelect: (messageId: number) => void;
+  /** Section 8 — `Select` was chosen in the card: enter the mode with this
+   *  message already selected. */
+  onSelect: (messageId: number) => void;
 }
 
 export function TimelineBubble(
@@ -350,7 +361,29 @@ function ChatBubbleBody(
   // membership (ADR-0045 UX §6.2.5 — Edit / Delete / React all compose an
   // application message, so all three die with Send), and not mid-edit.
   const menuAvailable = (): boolean =>
-    props.actionsAvailable && props.messageId !== undefined && !isEditing() && !isDeleted();
+    props.actionsAvailable &&
+    props.messageId !== undefined &&
+    !isEditing() &&
+    !isDeleted() &&
+    // Section 8 "Entering": "The reaction row and the action card do not open
+    // while selecting; a long press or right-click on a row toggles it".
+    !props.selecting;
+
+  // Section 8 "Selecting" — the same gate the single actions compute, read
+  // here for the mark and the row's tap. Not `menuAvailable`: that one also
+  // answers "not while selecting", and this must answer during it.
+  const selectable = (): boolean =>
+    canSelectRow({
+      hasId: props.messageId !== undefined,
+      deleted: isDeleted(),
+      sendComplete: props.ack === "sent",
+    });
+  const rowSelectable = (): boolean => props.selecting && selectable();
+  const rowSelected = (): boolean =>
+    rowSelectable() && props.messageId !== undefined && props.isSelected(props.messageId);
+  const toggleRow = (): void => {
+    if (rowSelectable() && props.messageId !== undefined) props.onToggleSelect(props.messageId);
+  };
 
   function openMenu(x: number, y: number): void {
     if (!menuAvailable() || bubbleEl === undefined) return;
@@ -521,8 +554,53 @@ function ChatBubbleBody(
         outgoing: !isIncoming,
         "run-start": props.startsRun,
         "run-end": props.endsRun,
+        selectable: rowSelectable(),
+        selected: rowSelected(),
+      }}
+      /* Section 8 — "the whole row is the tap target", and on web a
+         right-click "toggles it like a tap". The bubble's own controls are
+         inert while selecting (`.lk-timeline.selecting`), so a press anywhere
+         on the row lands here. A row that is not selectable takes nothing. */
+      onClick={() => {
+        if (rowSelectable()) toggleRow();
+      }}
+      onContextMenu={(e) => {
+        if (!props.selecting) return;
+        e.preventDefault();
+        toggleRow();
       }}
     >
+      {/* Section 8 "Selecting" — the mark at the leading edge: an empty
+          circle, filled with a check when selected. A toggle for
+          accessibility purposes, named by the message's text or kind, its
+          state in `aria-checked`. A row that cannot be acted on shows NO mark;
+          it keeps the mark's width so the bubbles stay in one column. */}
+      <Show when={props.selecting}>
+        <Show
+          when={selectable()}
+          fallback={<span class="lk-select-mark-slot" aria-hidden="true" />}
+        >
+          <button
+            type="button"
+            class="lk-select-mark"
+            role="checkbox"
+            aria-checked={rowSelected()}
+            aria-label={selectionMarkName(
+              { text: displayText(), attachments: props.attachments },
+              (a) => props.hub.decision(a).bubble,
+            )}
+            onClick={(e) => {
+              // The row's own handler would toggle it back.
+              e.stopPropagation();
+              toggleRow();
+            }}
+          >
+            <Show when={rowSelected()}>
+              <Icon name="check" size={14} strokeWidth={2.4} />
+            </Show>
+          </button>
+        </Show>
+      </Show>
       <Show when={props.avatar !== null}>
         <span class="lk-bubble-gutter">
           <Show when={props.avatar !== "gutter" && props.avatar}>
@@ -841,6 +919,11 @@ function ChatBubbleBody(
               /* Nothing is sent and nothing is stored: the text goes from this
                  device's memory to this device's clipboard. */
               onCopy={(text) => void copyMessageText(text)}
+              /* Section 8 — the same gate as Forward, read once. */
+              canSelect={selectable()}
+              onSelect={() => {
+                if (props.messageId !== undefined) props.onSelect(props.messageId);
+              }}
               onEdit={() => props.onStartEdit(props.messageId as number, displayText())}
               onDelete={() => {
                 if (props.messageId !== undefined) void props.onDeleteMessage(props.messageId);

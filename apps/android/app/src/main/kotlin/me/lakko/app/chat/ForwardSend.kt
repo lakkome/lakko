@@ -75,6 +75,18 @@ public class ForwardSender(
         send(targetGroupIdHex, text, attachments, ref)
     }
 
+    /**
+     * Section 8 — forward every request into [targetGroupIdHex], in the
+     * order given (oldest first), each composed exactly as [forward] composes
+     * one, stopping at the first failure. The result says how many landed and
+     * which were not sent; it never throws for a failed send.
+     */
+    public suspend fun forwardAll(
+        requests: List<ForwardRequest>,
+        targetGroupIdHex: String,
+    ): BulkResult<ForwardRequest> =
+        performInOrder(requests) { forward(it, targetGroupIdHex) }
+
     /** One attachment under a fresh key, with its metadata carried over. */
     private suspend fun reEncrypt(source: AttachmentRef): AttachmentRef {
         val bytes = download(source)

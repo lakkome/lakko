@@ -148,7 +148,9 @@ class MessageActionMenuTest {
         // ADR-0052 decision 2 / §5.1 — Forward is offered on any message with
         // an id that is not deleted and whose send is complete, own or not.
         // §2's order: the actions that produce a new message first (Reply,
-        // then Forward), then Copy, then Edit, then Delete.
+        // then Forward), then the ones that only read (Copy, then Select —
+        // §8), then the ones that change this message (Pin, Edit), then
+        // Delete.
         compose.setContent { BubbleUnderTest(own("Hello there")) }
         openMenu()
 
@@ -156,11 +158,15 @@ class MessageActionMenuTest {
         val reply = top("Reply")
         val forward = top("Forward")
         val copy = top("Copy")
+        val select = top("Select")
+        val pin = top("Pin")
         val edit = top("Edit")
         val delete = top("Delete")
         assertTrue("Forward ($forward) must sit below Reply ($reply)", reply < forward)
         assertTrue("Copy ($copy) must sit below Forward ($forward)", forward < copy)
-        assertTrue("Edit ($edit) must sit below Copy ($copy)", copy < edit)
+        assertTrue("Select ($select) must sit below Copy ($copy)", copy < select)
+        assertTrue("Pin ($pin) must sit below Select ($select)", select < pin)
+        assertTrue("Edit ($edit) must sit below Pin ($pin)", pin < edit)
         assertTrue("Delete ($delete) must sit below Edit ($edit)", edit < delete)
 
         compose.onNodeWithText("Forward").performClick()
@@ -216,6 +222,9 @@ class MessageActionMenuTest {
 
         val card = compose.onNodeWithTag(ACTION_CARD_TAG).fetchSemanticsNode().boundsInWindow
         val copy = compose.onNodeWithText("Copy").fetchSemanticsNode().boundsInWindow
+        // Copy and Select are neighbours (§2's order); Edit is the row the
+        // destructive rule sits under.
+        val select = compose.onNodeWithText("Select").fetchSemanticsNode().boundsInWindow
         val edit = compose.onNodeWithText("Edit").fetchSemanticsNode().boundsInWindow
         val delete = compose.onNodeWithText("Delete").fetchSemanticsNode().boundsInWindow
         val px = { dp: androidx.compose.ui.unit.Dp -> with(compose.density) { dp.toPx() } }
@@ -231,7 +240,7 @@ class MessageActionMenuTest {
         assertEquals("row inset from the card's trailing edge", inset, card.right - copy.right, tolerance)
         // Rows 2 apart; the destructive group a further 2, then the 1dp rule,
         // then 2 more before Delete — web's gap, margin, border and padding.
-        assertEquals("gap between two ordinary rows", px(ROW_GAP), edit.top - copy.bottom, tolerance)
+        assertEquals("gap between two ordinary rows", px(ROW_GAP), select.top - copy.bottom, tolerance)
         assertEquals(
             "gap across the destructive rule",
             px(ROW_GAP + DESTRUCTIVE_GAP + CARD_BORDER_WIDTH + DESTRUCTIVE_GAP),

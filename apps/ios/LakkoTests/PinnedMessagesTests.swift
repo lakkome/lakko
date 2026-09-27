@@ -269,11 +269,19 @@ final class PinnedMessagesTests: XCTestCase {
         XCTAssertEqual(PinSheet.menuState(sharedPinned: false, personalPinned: true, maySetShared: false), .unpin)
     }
 
-    /// Section 4.1 — `Pin` sits after Forward; `Unpin` takes the same slot.
-    func testPinSitsAfterForwardInTheCard() {
+    /// Section 2 — `Pin` sits with the actions that change this message, after
+    /// the read-only pair (Copy, Select) and before Edit; `Unpin` takes the
+    /// same slot. (Section 4.1's "after Forward" was where it sat before
+    /// section 8 put Select in the card.)
+    func testPinSitsWithTheChangingActionsInTheCard() {
+        XCTAssertEqual(
+            MessageMenuAction.offered(
+                canReply: true, canForward: true, canEditOrDelete: true, hasText: true, pin: .pin,
+                canSelect: true),
+            [.reply, .forward, .copy, .select, .pin, .edit, .delete])
         XCTAssertEqual(
             MessageMenuAction.offered(canReply: true, canForward: true, canEditOrDelete: true, hasText: true, pin: .pin),
-            [.reply, .forward, .pin, .copy, .edit, .delete])
+            [.reply, .forward, .copy, .pin, .edit, .delete])
         XCTAssertEqual(
             MessageMenuAction.offered(canReply: true, canForward: true, canEditOrDelete: false, hasText: false, pin: .unpin),
             [.reply, .forward, .unpin])

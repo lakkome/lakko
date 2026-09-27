@@ -25,6 +25,29 @@ public data class ForwardRequest(
 )
 
 /**
+ * What one visit to the "Forward to" picker sends: one request for the single
+ * Forward of section 5.1, several — oldest first — for section 8's bulk
+ * Forward. All from one source conversation.
+ *
+ * [fromSelection] is what tells the picker where a failure lands: a single
+ * forward reports it in the picker, a selection's forward returns to the
+ * source conversation with the unsent messages still selected and says
+ * "Forwarded K of N." (section 8). A one-message selection is still a
+ * selection, so this is a flag rather than a count.
+ */
+public data class ForwardBatch(
+    val requests: List<ForwardRequest>,
+    val fromSelection: Boolean,
+) {
+    init {
+        require(requests.isNotEmpty()) { "a forward batch names at least one message" }
+    }
+
+    /** The conversation every request came from. */
+    val sourceGroupIdHex: String get() = requests.first().sourceGroupIdHex
+}
+
+/**
  * The one-shot slot between a chat and the picker route.
  *
  * A slot rather than a navigation argument, the way
@@ -37,17 +60,69 @@ public data class ForwardRequest(
  * Pure Kotlin, so the handshake runs on the host JVM.
  */
 public object PendingForward {
-    private val slot = MutableStateFlow<ForwardRequest?>(null)
+    private val slot = MutableStateFlow<ForwardBatch?>(null)
 
-    /** The request waiting for a picker, or `null`. */
-    public val pending: StateFlow<ForwardRequest?> = slot.asStateFlow()
+    /** The batch waiting for a picker, or `null`. */
+    public val pending: StateFlow<ForwardBatch?> = slot.asStateFlow()
 
+    /** Section 5.1 — one message, chosen from its own action card. */
     public fun publish(request: ForwardRequest) {
-        slot.value = request
+        slot.value = ForwardBatch(requests = listOf(request), fromSelection = false)
     }
 
-    /** Take the request and empty the slot. */
-    public fun take(): ForwardRequest? = slot.getAndUpdate { null }
+    /** Section 8 — a selection, oldest first. */
+    public fun publishSelection(requests: List<ForwardRequest>) {
+        if (requests.isEmpty()) return
+        slot.value = ForwardBatch(requests = requests, fromSelection = true)
+    }
+
+    /** Take the batch and empty the slot. */
+    public fun take(): ForwardBatch? = slot.getAndUpdate { null }
+}
+
+/**
+ * Section 8 — how a selection's forward ended, handed back from the picker
+ * to the source conversation: how many landed, how many were asked for, and
+ * which messages were not sent (still to be selected). A complete outcome
+ * ([done] == [total]) is what tells the source to leave selection mode.
+ */
+public data class ForwardOutcome(
+    val sourceGroupIdHex: String,
+    val done: Int,
+    val total: Int,
+    val unsentMessageIds: Set<Long>,
+) {
+    public val complete: Boolean get() = done == total
+}
+
+/**
+ * The slot the picker leaves a [ForwardOutcome] in for the source
+ * conversation, keyed on the conversation so an outcome meant for one chat
+ * is never spent by another.
+ */
+public object PendingForwardOutcome {
+    private val slot = MutableStateFlow<ForwardOutcome?>(null)
+
+    /** The outcome waiting to be read, or `null`. */
+    public val pending: StateFlow<ForwardOutcome?> = slot.asStateFlow()
+
+    public fun publish(outcome: ForwardOutcome) {
+        slot.value = outcome
+    }
+
+    /** Take the outcome meant for [groupIdHex], if there is one. */
+    public fun take(groupIdHex: String): ForwardOutcome? {
+        var taken: ForwardOutcome? = null
+        slot.update { current ->
+            if (current != null && current.sourceGroupIdHex == groupIdHex) {
+                taken = current
+                null
+            } else {
+                current
+            }
+        }
+        return taken
+    }
 }
 
 /**

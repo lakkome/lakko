@@ -66,6 +66,19 @@ import {
 import { ForwardPicker } from "../chat/ForwardPicker";
 import type { ForwardPickerRow } from "../chat/forward-picker";
 import {
+  bulkDeleteConfirmation,
+  deleteDecision,
+  enterSelection,
+  forwardEnabled,
+  leaveSelection,
+  oldestFirst,
+  progressLabel,
+  selectionCountLabel,
+  toggleSelected,
+  withoutDone,
+  type Selection,
+} from "../chat/selection";
+import {
   persistedFromReplyRef,
   replyRefFromPersisted,
   replySnapshotFor,
@@ -335,7 +348,7 @@ import { removeMemberConfirmation } from "../chat/remove-member-confirm";
 import { deleteChatConfirmation } from "../chat/delete-chat-confirm";
 import { deleteChat } from "../chat/delete-chat";
 import { leaveGroupConfirmation } from "../chat/leave-group-confirm";
-import { namedAction, requestConfirm } from "../ui/confirm-dialog";
+import { namedAction, pendingConfirm, requestConfirm } from "../ui/confirm-dialog";
 import {
   applyOp,
   editDeleteAuthorized,
@@ -710,6 +723,62 @@ function ChatView(props: {
   // closed. Session-scoped like the reply strip: this view is keyed on the
   // group id, so switching conversation drops it.
   const [forwardingId, setForwardingId] = createSignal<number | null>(null);
+  // message-actions.md section 8 — selection mode. The mode and the set are
+  // two signals: deselecting the last row leaves the person IN the mode with
+  // "0 selected" and both buttons disabled, which is what the spec's "enabled
+  // when the selection is not empty" describes. Session-scoped like the reply
+  // strip and the forward id: this view is keyed on the group id, so
+  // navigating to another conversation remounts it and the selection goes
+  // with it ("Leaving": nothing about a selection is persisted). Every rule
+  // is `chat/selection.ts`; this is the wiring.
+  const [selecting, setSelecting] = createSignal(false);
+  const [selection, setSelection] = createSignal<Selection>(leaveSelection());
+  /** Section 8 "Forward" — the picker is open for the whole selection (as
+   *  against `forwardingId`, which opens it for one message). */
+  const [bulkForwardOpen, setBulkForwardOpen] = createSignal(false);
+  function enterSelectionMode(messageId: number): void {
+    setSelection(enterSelection(messageId));
+    setSelecting(true);
+  }
+  function leaveSelectionMode(): void {
+    setSelecting(false);
+    setSelection(leaveSelection());
+    setBulkForwardOpen(false);
+  }
+  const toggleSelectedRow = (messageId: number): void => {
+    setSelection(toggleSelected(selection(), messageId));
+  };
+  /** The selected messages, oldest first, with the one fact Delete needs:
+   *  whether each is this person's own — the same answer the card gives
+   *  Edit / Delete (an outgoing row; a row that is no longer here is not
+   *  ours to delete). */
+  const selectedItems = (): Array<{ id: number; own: boolean }> =>
+    oldestFirst(selection()).map((id) => ({
+      id,
+      own: rows().find((r) => rowMessageId(r) === id)?.kind === "outgoing",
+    }));
+  const deleteState = createMemo(() => deleteDecision(selectedItems()));
+  // Section 8 "Leaving" — Escape on web. On the capture phase, so it is
+  // decided before whatever is stacked on top of the mode (the confirmation,
+  // the picker) handles the same key: while one of those is open, Escape is
+  // theirs and the selection stays as it was.
+  createEffect(() => {
+    if (!selecting()) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== "Escape") return;
+      if (pendingConfirm() !== null || bulkForwardOpen()) return;
+      e.preventDefault();
+      leaveSelectionMode();
+    };
+    document.addEventListener("keydown", onKey, true);
+    onCleanup(() => document.removeEventListener("keydown", onKey, true));
+  });
+  // Both bulk actions compose application messages, so both die with Send
+  // (ADR-0045 UX section 6.2.5); a mode whose two buttons can never act again
+  // ends with the membership.
+  createEffect(() => {
+    if (selecting() && membershipEnded()) leaveSelectionMode();
+  });
   /** The timeline's name for a row's author: "You" for an own message (this
    *  device's or this person's other device, ADR-0050), else the one display
    *  resolver, else the same fallback the bubble draws. Shared by the reply
@@ -767,10 +836,52 @@ function ChatView(props: {
   async function forwardTo(target: ForwardPickerRow): Promise<void> {
     const messageId = forwardingId();
     if (messageId === null) return;
-    const row = rows().find((r) => rowMessageId(r) === messageId);
-    if (row === undefined) throw new Error("That message is no longer here.");
     const entry = chats.get(target.id);
     if (entry === undefined) throw new Error("That conversation is no longer here.");
+    await forwardOne(messageId, entry);
+    setForwardingId(null);
+    // Into this very conversation the person is already looking at it.
+    if (entry.groupIdB64 !== props.entry.groupIdB64) navigate(hrefOfConversation(entry));
+  }
+  /**
+   * Section 8 "Forward" — the picker was chosen for the whole selection. One
+   * forwarded message per selected message, oldest first, each composed
+   * exactly as {@link forwardOne} composes a single forward. On a failure it
+   * stops: the picker closes, the unsent messages stay selected, and the
+   * notice says how far it got. On full success it leaves the mode and goes
+   * to the target the way the single forward does.
+   */
+  async function forwardSelectionTo(target: ForwardPickerRow): Promise<void> {
+    const entry = chats.get(target.id);
+    if (entry === undefined) throw new Error("That conversation is no longer here.");
+    const ids = oldestFirst(selection());
+    const done: number[] = [];
+    setError(null);
+    for (const id of ids) {
+      try {
+        await forwardOne(id, entry);
+      } catch {
+        setSelection(withoutDone(selection(), done));
+        setBulkForwardOpen(false);
+        setError(progressLabel("forwarded", done.length, ids.length));
+        return;
+      }
+      done.push(id);
+    }
+    leaveSelectionMode();
+    if (entry.groupIdB64 !== props.entry.groupIdB64) navigate(hrefOfConversation(entry));
+  }
+  /**
+   * ONE forward of ONE message into `entry`: compose, re-encrypt, publish,
+   * record. The single forward and the bulk one both run this, so the two
+   * cannot compose a forwarded message two ways (section 8: what selection
+   * does at the end is the one-message action repeated). Navigation and the
+   * picker's state are the callers'. A throw means nothing was sent for THIS
+   * message.
+   */
+  async function forwardOne(messageId: number, entry: ActiveGroup): Promise<void> {
+    const row = rows().find((r) => rowMessageId(r) === messageId);
+    if (row === undefined) throw new Error("That message is no longer here.");
     const original =
       row.kind === "outgoing" ? row.plaintext : row.event.kind === "application" ? row.event.text : "";
     const attachments =
@@ -825,7 +936,6 @@ function ChatView(props: {
           forward: payload.forward,
         },
       ]);
-      setForwardingId(null);
       return;
     }
     // Into another conversation: the sent row goes straight into that
@@ -856,8 +966,6 @@ function ChatView(props: {
         });
       }
     }
-    setForwardingId(null);
-    navigate(hrefOfConversation(entry));
   }
   /**
    * Section 5.1 "Tap to jump" — the "Forwarded from" line was pressed. When
@@ -3915,24 +4023,56 @@ function ChatView(props: {
     }
   }
 
+  /** ONE delete of ONE own message: publish the delete op, tombstone it
+   *  locally, drop its pin records. The single delete and the bulk one both
+   *  run this (section 8). A throw means this message was not deleted. */
+  async function deleteOne(messageId: number): Promise<void> {
+    const envelopeBytes = await composeDeleteEnvelope(messageId);
+    await chat.sendMessage(
+      props.requireIdentity(),
+      props.entry.group,
+      envelopeBytes,
+    );
+    setMsgOps(applyOp(msgOps(), { op: "delete", target: messageId }));
+    // Section 4.1 — a deleted message leaves the bar and its pin records
+    // go with it.
+    void pins.messageDeleted(props.entry.groupIdB64, messageId);
+  }
+
   /** Delete our own message — publish a delete op + tombstone it
    *  locally. */
   async function onDeleteMessage(messageId: number): Promise<void> {
     setError(null);
     try {
-      const envelopeBytes = await composeDeleteEnvelope(messageId);
-      await chat.sendMessage(
-        props.requireIdentity(),
-        props.entry.group,
-        envelopeBytes,
-      );
-      setMsgOps(applyOp(msgOps(), { op: "delete", target: messageId }));
-      // Section 4.1 — a deleted message leaves the bar and its pin records
-      // go with it.
-      void pins.messageDeleted(props.entry.groupIdB64, messageId);
+      await deleteOne(messageId);
     } catch (err) {
       setError(formatError(err));
     }
+  }
+
+  /**
+   * Section 8 "Delete" — the bar's Delete. Confirms ("Delete N messages?"),
+   * then one delete per message, oldest first, each applied locally as the
+   * single delete does. On a failure it stops, keeps the unsent messages
+   * selected and says how far it got; full success leaves the mode.
+   */
+  async function deleteSelection(): Promise<void> {
+    if (!deleteState().enabled) return;
+    const ids = oldestFirst(selection());
+    if (!(await requestConfirm(bulkDeleteConfirmation(ids.length)))) return;
+    setError(null);
+    const done: number[] = [];
+    for (const id of ids) {
+      try {
+        await deleteOne(id);
+      } catch {
+        setSelection(withoutDone(selection(), done));
+        setError(progressLabel("deleted", done.length, ids.length));
+        return;
+      }
+      done.push(id);
+    }
+    leaveSelectionMode();
   }
 
   /** React to any message with `emoji` — publish a reaction op +
@@ -5881,6 +6021,22 @@ function ChatView(props: {
           </span>
         </div>
       </Show>
+      {/* message-actions.md section 8 "Entering" — while selecting, the
+          selection bar replaces the header: a leading Cancel, the count in the
+          middle, nothing trailing (the trailing cell is an empty twin of the
+          leading one, which is what keeps the count centred). */}
+      <Show when={selecting()}>
+        <header class="lk-chat-head lk-select-bar">
+          <button type="button" class="ghost lk-select-cancel" onClick={leaveSelectionMode}>
+            Cancel
+          </button>
+          <span class="lk-select-count" role="status" aria-live="polite">
+            {selectionCountLabel(selection().size)}
+          </span>
+          <span class="lk-select-bar-trail" aria-hidden="true" />
+        </header>
+      </Show>
+      <Show when={!selecting()}>
       <header class="lk-chat-head">
         <button
           type="button"
@@ -6014,6 +6170,7 @@ function ChatView(props: {
           </div>
         </div>
       </header>
+      </Show>
 
       {/* ADR-0052 decision 3 / message-actions.md section 4 — the pinned bar,
           under the header, one pin at a time. No pins, no bar: the header
@@ -7285,9 +7442,14 @@ function ChatView(props: {
           while a message id is armed. Picking sends at once and navigates;
           Back, Esc and the backdrop send nothing. */}
       <ForwardPicker
-        open={forwardingId() !== null}
-        onClose={() => setForwardingId(null)}
-        onPick={forwardTo}
+        open={forwardingId() !== null || bulkForwardOpen()}
+        onClose={() => {
+          setForwardingId(null);
+          // Section 8: Cancel in the picker "returns to the selection as it
+          // was" - the mode and the set are untouched.
+          setBulkForwardOpen(false);
+        }}
+        onPick={(row) => (bulkForwardOpen() ? forwardSelectionTo(row) : forwardTo(row))}
       />
 
       {/* The layer carries its own copy of both while it is open, so an
@@ -7316,7 +7478,7 @@ function ChatView(props: {
           </p>
         }
       >
-        <ol class="lk-timeline">
+        <ol class="lk-timeline" classList={{ selecting: selecting() }}>
           <For each={timelineEntries()}>
             {(entry, i) => {
               const place = (): TimelineLayout =>
@@ -7395,6 +7557,10 @@ function ChatView(props: {
                   setFullReactPickerId(id);
                 }}
                 onCloseFullReactPicker={() => setFullReactPickerId(null)}
+                selecting={selecting()}
+                isSelected={(id) => selection().has(id)}
+                onToggleSelect={toggleSelectedRow}
+                onSelect={enterSelectionMode}
               />
                 )}
               </Show>
@@ -7658,7 +7824,38 @@ function ChatView(props: {
 
       </div>
 
-      <Show when={!membershipEnded()}>
+      {/* message-actions.md section 8 — while selecting, the action bar
+          replaces the composer: Forward and Delete, each with its icon and
+          label, and under the bar the one line that explains a disabled
+          Delete. Sits in the composer's slot so the layout does not jump. */}
+      <Show when={selecting() && !membershipEnded()}>
+        <div class="lk-select-actions" role="toolbar" aria-label="Selected messages">
+          <div class="lk-select-actions-row">
+            <button
+              type="button"
+              class="lk-select-action"
+              disabled={!forwardEnabled(selection())}
+              onClick={() => setBulkForwardOpen(true)}
+            >
+              <Icon name="forward" size={18} />
+              <span>Forward</span>
+            </button>
+            <button
+              type="button"
+              class="lk-select-action danger"
+              disabled={!deleteState().enabled}
+              onClick={() => void deleteSelection()}
+            >
+              <Icon name="trash" size={18} />
+              <span>Delete</span>
+            </button>
+          </div>
+          <Show when={deleteState().helper}>
+            {(helper) => <div class="lk-select-helper">{helper()}</div>}
+          </Show>
+        </div>
+      </Show>
+      <Show when={!membershipEnded() && !selecting()}>
       {/* ADR-0047 UX §6 — the permission-denied card and the short hints. */}
       <RecorderNotices recorder={recorder} />
       <VideoNoteOverlay recorder={recorder} />

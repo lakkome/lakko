@@ -62,12 +62,14 @@
  *
  * Order within the action card is section 2's: the actions that produce a NEW
  * message first (Reply, then Forward - ADR-0052 decisions 1 and 2), then the
- * ones that only read (Copy), then the ones that change this message (Edit),
- * then the destructive one, separated and in the platform's destructive
- * colour. Reply is offered on any message with an id, which is every message
- * this menu opens on; Forward on any such message whose send is complete
- * (`canForward` - section 5.1: a message whose attachments are still
- * uploading, or that failed to send, does not offer it). The separation of
+ * ones that only read (Copy, then Select - section 8), then the ones that
+ * change this message (Pin, then Edit), then the destructive one, separated
+ * and in the platform's destructive colour. Reply is offered on any message
+ * with an id, which is every message this menu opens on; Forward on any such
+ * message whose send is complete (`canForward` - section 5.1: a message whose
+ * attachments are still uploading, or that failed to send, does not offer
+ * it); Select on the same gate (`canSelect` - section 8 reads the gates the
+ * single actions compute, once for the whole selection). The separation of
  * the destructive row is its own element
  * rather than a border hung off `.danger`, because "separated" and "red" are
  * two of the spec's requirements and a selector that conflates them breaks
@@ -144,6 +146,12 @@ export interface MessageMenuProps {
    *  at once or opens the sheet. */
   onPin: () => void;
   onCopy: (text: string) => void;
+  /** Section 8 — whether the `Select` row is offered: the same gate as
+   *  Forward (an id, a complete send; the menu never opens on a deleted
+   *  message). */
+  canSelect: boolean;
+  /** Section 8 — enter selection mode with this message already selected. */
+  onSelect: () => void;
   onEdit: () => void;
   onDelete: () => void;
   onClose: () => void;
@@ -309,14 +317,6 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
                 <span>Forward</span>
               </button>
             </Show>
-            <Show when={props.pinLabel}>
-              {(label) => (
-                <button type="button" role="menuitem" onClick={() => run(() => props.onPin())}>
-                  <Icon name="pin" size={16} />
-                  <span>{label()}</span>
-                </button>
-              )}
-            </Show>
             <Show when={copyable()}>
               {(text) => (
                 <button
@@ -326,6 +326,20 @@ export function MessageMenu(props: MessageMenuProps): JSX.Element {
                 >
                   <Icon name="copy" size={16} />
                   <span>Copy</span>
+                </button>
+              )}
+            </Show>
+            <Show when={props.canSelect}>
+              <button type="button" role="menuitem" onClick={() => run(() => props.onSelect())}>
+                <Icon name="select" size={16} />
+                <span>Select</span>
+              </button>
+            </Show>
+            <Show when={props.pinLabel}>
+              {(label) => (
+                <button type="button" role="menuitem" onClick={() => run(() => props.onPin())}>
+                  <Icon name="pin" size={16} />
+                  <span>{label()}</span>
                 </button>
               )}
             </Show>

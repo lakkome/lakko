@@ -90,6 +90,28 @@ public struct ChatScreen: View {
     /// second and a half").
     static let jumpHighlightSeconds: Double = 1.5
 
+    /// `docs/ux/message-actions.md` section 8 — the selection, while the
+    /// screen is in selection mode; `nil` otherwise. Screen state and not
+    /// view-model state on purpose: section 8 says nothing about a selection
+    /// is persisted and that navigating to another conversation leaves the
+    /// mode, and a `@State` on the screen dies with the screen.
+    @State private var selection: MessageSelection?
+
+    /// Section 8 — the "Forward to" picker opened from the action bar (the
+    /// single forward's picker is driven by the view model's
+    /// `forwardingMessage`; the bulk one has no single message to hang on).
+    @State private var bulkForwardOpen = false
+
+    /// Section 8 — "Delete N messages?" is up.
+    @State private var confirmBulkDelete = false
+
+    /// Section 8 — what the action bar says after a run stopped short
+    /// ("Deleted 5 of 12."). `nil` until a run fails; cleared on the next tap.
+    @State private var bulkNotice: String?
+
+    /// Section 8 — a run is in flight; the bar's buttons wait for it.
+    @State private var bulkRunning = false
+
     /// Which picker is open: the composer's (Emoji + GIF), or the reaction
     /// bar's `+` for one message (Emoji only).
     private struct PickerRequest: Identifiable {
@@ -250,7 +272,13 @@ public struct ChatScreen: View {
             }
             messagesList
             Divider()
-            composer
+            // Section 8 — the composer is REPLACED by the action bar while
+            // selecting, the way the header is replaced by the selection bar.
+            if let selection {
+                selectionActionBar(selection)
+            } else {
+                composer
+            }
         }
         .onGeometryChange(for: CGFloat.self) { proxy in
             proxy.size.width
@@ -313,6 +341,31 @@ public struct ChatScreen: View {
                 )
             }
         }
+        // Section 8 — the same picker, titled the same, one target, opened
+        // from the selection's action bar. Picking sends one forward per
+        // selected message, oldest first; Cancel returns to the selection as
+        // it was.
+        .sheet(isPresented: $bulkForwardOpen) {
+            ForwardPickerScreen(
+                rows: viewModel.forwardTargets(
+                    flags: deviceGroupSync.flags,
+                    readCursors: deviceGroupSync.readCursors),
+                onPick: { row in
+                    bulkForwardOpen = false
+                    runBulkForward(to: row.id)
+                },
+                onCancel: { bulkForwardOpen = false }
+            )
+        }
+        // Section 8 — a bulk delete is irreversible and multiplied, so it
+        // confirms where the single delete asks nothing.
+        .alert(
+            MessageSelection.confirmDeleteLabel(selection?.count ?? 0),
+            isPresented: $confirmBulkDelete
+        ) {
+            Button("Delete", role: .destructive) { runBulkDelete() }
+            Button("Cancel", role: .cancel) {}
+        }
         // ADR-0052 decision 3 / section 4.1 — the pin sheet: who is this pin
         // for. A row acts at once and dismisses; Cancel does nothing.
         .sheet(
@@ -345,7 +398,26 @@ public struct ChatScreen: View {
         }
         .navigationTitle(headline)
         .navigationBarTitleDisplayMode(.inline)
+        // Section 8 — while selecting, the header IS the selection bar: a
+        // leading Cancel where Back was, the count in the middle, nothing
+        // trailing. Back is hidden rather than left beside Cancel, because
+        // section 8 says Cancel leaves the mode and Back would leave the
+        // conversation.
+        .navigationBarBackButtonHidden(selection != nil)
         .toolbar {
+            if let selection {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Cancel") { leaveSelection() }
+                        .disabled(bulkRunning)
+                        .accessibilityIdentifier("selection-cancel")
+                }
+                ToolbarItem(placement: .principal) {
+                    Text(selection.countLabel)
+                        .font(.headline)
+                        .foregroundStyle(Color.lakkoText)
+                        .accessibilityIdentifier("selection-count")
+                }
+            } else {
             // UX spec section 5.2: system back, avatar + name in the middle,
             // then call and video call. The overflow menu is gone with the
             // duplicate route it held (`docs/ux/conversation-info.md`
@@ -412,6 +484,7 @@ public struct ChatScreen: View {
             // the same screen, and the whole menu was that one item, so the
             // menu goes with it. Anything the menu later carries that is not
             // info belongs back here.
+            }
         }
         .sheet(isPresented: $viewModel.conversationInfoOpen) {
             // Section 3 — a layer over the conversation, which stays where it
@@ -634,6 +707,18 @@ public struct ChatScreen: View {
                             if let dateLabel = entry.dateLabel {
                                 DateSeparator(label: dateLabel)
                             }
+                            // Section 8 — while selecting, each row gets a
+                            // mark at its leading edge and the whole row is
+                            // the toggle; a row that cannot be acted on shows
+                            // no mark and takes no tap.
+                            let rowSelection = selectionRowState(for: entry.message)
+                            SelectableMessageRow(
+                                state: rowSelection,
+                                accessibilityName: MessageSelection.accessibilityName(
+                                    text: entry.message.deleted ? "" : entry.message.text,
+                                    attachmentCount: entry.message.attachments.count),
+                                onToggle: { toggleSelection(entry.message.messageId) }
+                            ) {
                             MessageRow(
                                 message: entry.message,
                                 ownIdentity: viewModel.ownIdentity,
@@ -696,14 +781,22 @@ public struct ChatScreen: View {
                                 // or `Unpin` after Forward; the sheet decides
                                 // who it is for.
                                 pinState: viewModel.pinMenuState(for: entry.message),
-                                onPin: { viewModel.beginPin(entry.message) }
+                                onPin: { viewModel.beginPin(entry.message) },
+                                // Section 8 — the menu's Select enters the
+                                // mode with this message; while in it the
+                                // menu does not open.
+                                selecting: selection != nil,
+                                onSelect: { enterSelection(with: entry.message.messageId) }
                             )
+                            }
                             // Tighter inside a run, a clear gap between runs.
                             .padding(.top, entry.startsRun ? 10 : 2)
                             // Section 3.1 — the jumped-to row is tinted with
-                            // the surface used for a pressed row, briefly.
+                            // the surface used for a pressed row, briefly;
+                            // section 8 — a selected row keeps that tint.
                             .background(
                                 highlightedMessageId == entry.message.messageId
+                                    || rowSelection == .selected
                                     ? Color.lakkoSurfaceSelected : Color.clear
                             )
                             .id(entry.message.messageId)
@@ -934,6 +1027,163 @@ public struct ChatScreen: View {
             case 1: return "1 person in the call"
             default: return "\(count) people in the call"
             }
+        }
+    }
+
+    // MARK: - `docs/ux/message-actions.md` section 8 — selection mode
+
+    /// Section 8's row gate, over the same facts the single actions gate on
+    /// (own is not among them: a row is selectable whether or not it is own,
+    /// Delete's own-only rule is read over the whole selection at the bar).
+    private func isSelectable(_ message: ChatMessage) -> Bool {
+        MessageSelection.canSelect(
+            actionsAvailable: viewModel.messageActionsAvailable,
+            isSystemRow: message.direction == .system,
+            hasId: message.messageId > 0,
+            deleted: message.deleted,
+            sendComplete: message.ack == .sent)
+    }
+
+    /// What the row draws for `message`: nothing outside the mode, no mark for
+    /// a row that cannot be acted on, else its mark.
+    private func selectionRowState(for message: ChatMessage) -> SelectionRowState {
+        guard let selection else { return .notSelecting }
+        guard isSelectable(message) else { return .notSelectable }
+        return selection.contains(message.messageId) ? .selected : .unselected
+    }
+
+    /// Section 8, "Entering" — with the message the card was opened on
+    /// already selected. The menu is closed by the time this runs.
+    private func enterSelection(with messageId: Int64) {
+        bulkNotice = nil
+        selection = MessageSelection(initial: messageId)
+    }
+
+    /// Section 8, "Leaving" — Cancel, a completed action; the selection is
+    /// cleared with the mode.
+    private func leaveSelection() {
+        selection = nil
+        bulkNotice = nil
+        confirmBulkDelete = false
+        bulkForwardOpen = false
+    }
+
+    private func toggleSelection(_ messageId: Int64) {
+        guard selection != nil, !bulkRunning else { return }
+        bulkNotice = nil
+        selection?.toggle(messageId)
+    }
+
+    /// The selected messages in the timeline's order, oldest first, over the
+    /// rows the timeline draws now (a message that stopped being selectable
+    /// since it was tapped is dropped rather than acted on).
+    private var selectedMessagesOldestFirst: [ChatMessage] {
+        guard let selection else { return [] }
+        let drawn = viewModel.messages.filter { !ChatTimeline.isHiddenSystemRow($0) && isSelectable($0) }
+        let ordered = selection.selectedInOrder(of: drawn.map(\.messageId))
+        let byId = Dictionary(drawn.map { ($0.messageId, $0) }, uniquingKeysWith: { first, _ in first })
+        return ordered.compactMap { byId[$0] }
+    }
+
+    /// Section 8 — Delete's own-only gate, read once for the whole selection.
+    private var selectionIsAllOwn: Bool {
+        selectedMessagesOldestFirst.allSatisfy { $0.direction == .outgoing }
+    }
+
+    /// Section 8 — the bar that takes the composer's slot: `Forward` and
+    /// `Delete`, each with its icon and label, and the helper line under it
+    /// when Delete is disabled for someone else's message (or the progress
+    /// copy after a run stopped short).
+    @ViewBuilder
+    private func selectionActionBar(_ selection: MessageSelection) -> some View {
+        let allOwn = selectionIsAllOwn
+        let helper = bulkNotice ?? selection.deleteHelper(allOwn: allOwn)
+        VStack(spacing: 6) {
+            HStack(spacing: 0) {
+                Button {
+                    bulkNotice = nil
+                    bulkForwardOpen = true
+                } label: {
+                    Label("Forward", systemImage: "arrowshape.turn.up.right")
+                        .font(.body.weight(.medium))
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.lakkoAccent)
+                .disabled(!selection.forwardEnabled || bulkRunning)
+                .opacity(selection.forwardEnabled && !bulkRunning ? 1 : 0.4)
+                .accessibilityIdentifier("selection-forward")
+                Button {
+                    bulkNotice = nil
+                    confirmBulkDelete = true
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                        .font(.body.weight(.medium))
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.lakkoDanger)
+                .disabled(!selection.deleteEnabled(allOwn: allOwn) || bulkRunning)
+                .opacity(selection.deleteEnabled(allOwn: allOwn) && !bulkRunning ? 1 : 0.4)
+                .accessibilityIdentifier("selection-delete")
+            }
+            if let helper {
+                Text(helper)
+                    .font(.footnote)
+                    .foregroundStyle(bulkNotice == nil ? Color.lakkoTextMuted : Color.lakkoDanger)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .accessibilityIdentifier("selection-helper")
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.lakkoSurface)
+        .accessibilityIdentifier("selection-action-bar")
+    }
+
+    /// Section 8 — on confirmation, one delete per message, oldest first,
+    /// stopping at the first failure with the unsent ones still selected;
+    /// full success leaves the mode.
+    private func runBulkDelete() {
+        let messages = selectedMessagesOldestFirst
+        guard !messages.isEmpty, !bulkRunning else { return }
+        bulkRunning = true
+        Task { @MainActor in
+            let outcome = await viewModel.bulkDelete(messages)
+            bulkRunning = false
+            finish(outcome, kind: .delete, onSuccess: {})
+        }
+    }
+
+    /// Section 8 — one forward per message, oldest first; on full success
+    /// leave the mode and go to the target, where the forwards are the newest
+    /// bubbles in their original order; on a failure stay here with the unsent
+    /// ones still selected.
+    private func runBulkForward(to targetGroupIdHex: String) {
+        let messages = selectedMessagesOldestFirst
+        guard !messages.isEmpty, !bulkRunning else { return }
+        bulkRunning = true
+        Task { @MainActor in
+            let outcome = await viewModel.bulkForward(messages, to: targetGroupIdHex)
+            bulkRunning = false
+            finish(outcome, kind: .forward, onSuccess: { onOpenConversation(targetGroupIdHex, nil) })
+        }
+    }
+
+    private func finish(
+        _ outcome: MessageSelection.BulkOutcome<ChatMessage>,
+        kind: MessageSelection.BulkKind,
+        onSuccess: () -> Void
+    ) {
+        if outcome.succeeded {
+            leaveSelection()
+            onSuccess()
+        } else {
+            selection = MessageSelection(remaining: outcome.remaining.map(\.messageId))
+            bulkNotice = MessageSelection.progressLabel(
+                kind: kind, done: outcome.done, total: outcome.total)
         }
     }
 
@@ -1391,6 +1641,83 @@ private struct DateSeparator: View {
 /// Internal rather than private so the DEBUG-only UI-test fixture
 /// (`UiTestFixtures.swift`) can mount the shipping row instead of a copy of it.
 /// Nothing else outside this file constructs one.
+/// `docs/ux/message-actions.md` section 8 — a timeline row in selection mode:
+/// the mark at the leading edge and the whole row as the tap target.
+///
+/// A wrapper around the production `MessageRow` rather than a branch inside it,
+/// for the same reason the menu host wraps the conversation: the overlay that
+/// takes the row's taps and long presses sits ABOVE the bubble's own controls,
+/// so a play disc or a photo under the finger receives nothing while selecting
+/// and the menu's long press never fires. Outside the mode it draws the row
+/// unchanged, with no leading inset.
+/// What a timeline row draws for the selection mode.
+enum SelectionRowState: Equatable {
+    /// Not in selection mode: the row as it always was.
+    case notSelecting
+    /// In the mode, but this row cannot be acted on: no mark, no tap. The
+    /// leading inset is kept so the bubbles stay in one column.
+    case notSelectable
+    case unselected
+    case selected
+
+    /// The mark's column: the glyph plus its breathing room.
+    static let markColumnWidth: CGFloat = 40
+}
+
+struct SelectableMessageRow<Row: View>: View {
+
+    typealias State = SelectionRowState
+
+    let state: State
+    /// Section 8 — the toggle is named by the message's text or kind.
+    let accessibilityName: String
+    let onToggle: () -> Void
+    @ViewBuilder let row: () -> Row
+
+    var body: some View {
+        switch state {
+        case .notSelecting:
+            row()
+        case .notSelectable:
+            HStack(spacing: 0) {
+                Color.clear.frame(width: SelectionRowState.markColumnWidth)
+                row()
+            }
+            // Not acted on, not tapped: the row's own controls keep working,
+            // but nothing here opens a menu (the row is told it is selecting).
+        case .unselected, .selected:
+            let selected = state == .selected
+            HStack(alignment: .center, spacing: 0) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 22))
+                    .foregroundStyle(selected ? Color.lakkoAccent : Color.lakkoTextMuted)
+                    .frame(width: SelectionRowState.markColumnWidth)
+                    .accessibilityHidden(true)
+                row()
+            }
+            .contentShape(Rectangle())
+            // The overlay is what makes the WHOLE row the target and what
+            // keeps the press from reaching the bubble's controls or the
+            // menu: a hit-testable layer above the row, answering a tap and a
+            // long press the same way (section 8, "a long press ... toggles
+            // it like a tap").
+            .overlay {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { onToggle() }
+                    .onLongPressGesture(minimumDuration: MessageLongPress.thresholdSeconds) {
+                        onToggle()
+                    }
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(accessibilityName)
+            .accessibilityValue(MessageSelection.accessibilityValue(selected: selected))
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { onToggle() }
+        }
+    }
+}
+
 struct MessageRow: View {
     let message: ChatMessage
     /// ADR-0023 — the local member's IDENTITY (their signature key),
@@ -1456,6 +1783,12 @@ struct MessageRow: View {
     /// ADR-0052 decision 3 — the menu's `Pin` / `Unpin`: open the sheet, or
     /// act at once when there is only one way to unpin.
     var onPin: () -> Void = {}
+    /// `docs/ux/message-actions.md` section 8 — the screen is in selection
+    /// mode: the reaction row and the action card do not open (the row's
+    /// long press toggles the selection instead, handled by the wrapper).
+    var selecting: Bool = false
+    /// Section 8 — the menu's `Select`: enter the mode with this message.
+    var onSelect: () -> Void = {}
 
     /// `docs/ux/message-actions.md` — where the menu goes when it opens, `nil`
     /// outside a ``MessageMenuHost``.
@@ -1559,6 +1892,17 @@ struct MessageRow: View {
     /// a row still sending or one that failed has nothing on the server to
     /// forward yet.
     private var canForward: Bool { canReact && message.ack == .sent }
+
+    /// Section 8 — Select is offered on the rows the mode can select, which is
+    /// the Forward gate (landed, not a tombstone, send complete).
+    private var canSelect: Bool {
+        MessageSelection.canSelect(
+            actionsAvailable: actionsAvailable,
+            isSystemRow: message.direction == .system,
+            hasId: message.messageId > 0,
+            deleted: message.deleted,
+            sendComplete: message.ack == .sent)
+    }
 
     private var isOutgoing: Bool { message.direction == .outgoing }
 
@@ -1712,7 +2056,8 @@ struct MessageRow: View {
             hasText: canCopy,
             // Section 4.1 — on any message whose send is complete and that
             // is not deleted, which is the set Forward is offered on.
-            pin: canForward ? pinState : .unavailable)
+            pin: canForward ? pinState : .unavailable,
+            canSelect: canSelect)
     }
 
     /// Make a bubble the thing the menu opens on.
@@ -1752,6 +2097,10 @@ struct MessageRow: View {
 
     private func openMenu(_ bubble: AnyView) {
         guard let menuPresenter else { return }
+        // Section 8 — "the reaction row and the action card do not open while
+        // selecting". The wrapper already takes the press; this is the row's
+        // own half of the rule.
+        guard !selecting else { return }
         let frame = bubbleFrame.frame
         // Nothing has reported a frame yet, so there is nowhere to draw the
         // menu. Opening it anyway would put the bubble copy at the window's
@@ -1783,6 +2132,8 @@ struct MessageRow: View {
                         // Decided here because this is what knows which text the
                         // person can see.
                         MessageClipboard.copy(message.text)
+                    case .select:
+                        onSelect()
                     case .edit:
                         onEdit()
                     case .delete:
