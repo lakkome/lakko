@@ -81,6 +81,7 @@ use lakko_mls::{Group as MlsGroup, Identity as MlsIdentity, Incoming as MlsIncom
 pub mod attachments;
 pub mod call_signaling;
 pub mod committer_beacon;
+pub mod ds_proof;
 pub mod group_name;
 pub mod pin;
 pub mod profile;
@@ -349,6 +350,17 @@ impl Group {
     pub fn account_key_at(&self, leaf_index: u32) -> Result<Option<Vec<u8>>, FfiError> {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         Ok(g.account_key_at(leaf_index))
+    }
+
+    /// The ADR-0053 access signer for this journal at the restored epoch, so
+    /// the read-only wake fetch of a claimed group journal can carry its
+    /// proof. A pure exporter read over the throwaway group (C-59).
+    pub fn ds_access_signer(
+        &self,
+        identity: &Identity,
+    ) -> Result<Arc<ds_proof::DsProofSigner>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        ds_proof::group_signer(&g, &identity.inner)
     }
 }
 

@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0053: A journal on the Delivery Service is opened by a key, not by its name
 
-- **Status:** Accepted (2026-09-27, the maintainer's call; S1 built the same day, S2 next)
+- **Status:** Accepted (2026-09-27, the maintainer's call; S1 and S2 built the same day, S3 next)
 - **Date:** 2026-09-27
 - **Context:** Phase 3 (product hardening), closes G-42
 - **Supersedes:** the "no authentication" posture of `services/ds` (Phase 1.3), and
@@ -299,7 +299,15 @@ rather than engineered around.
   target, six `LAKKO_DS_TEST_DATABASE_URL`-gated DS tests green against a local
   MariaDB). See *What S1 found* below.
 - **S2** FFI: `Group.dsAccessKey()` / `DeviceGroup` / `PublisherGroup`, `signDsProof`,
-  the mailbox proof under the identity key; UniFFI + wasm.
+  the mailbox proof under the identity key; UniFFI + wasm. **Built 2026-09-27**
+  as one opaque `DsProofSigner` per journal per epoch rather than a key
+  accessor plus a free signing function: `Group.dsAccessSigner(identity)` (and
+  the `DeviceGroup` / `PublisherGroup` twins) returns the signer, `dsMailboxSigner`
+  the identity-key one, and the signer carries `sign`, the epoch, the verifying
+  key and the two claim bodies - so the exporter seed never crosses the FFI and
+  no client spells a JSON field. Also on the NSE extension surface (`sign` only,
+  no claim body: a claim is a write, C-59). Host tests on all three prove the
+  header a signer produces is what `services/ds` verifies.
 - **S3** web: `DsClient` signs every call; claim at create and on open; the
   service worker's wake fetch; the `/g/` joiner over the knock; the sweep's
   Welcome to the mailbox; the one-to-one forward-origin rule.

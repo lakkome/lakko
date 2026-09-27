@@ -48,7 +48,7 @@
 
 #![forbid(unsafe_code)]
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::engine::general_purpose::{STANDARD as B64_STD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
 use lakko_contacts::IdentityPseudonym;
 use lakko_crypto::hash;
@@ -290,6 +290,97 @@ pub fn mailbox_pseudonym(identity_pk: &VerifyingKey) -> [u8; 32] {
     *IdentityPseudonym::from_identity(identity_pk).as_bytes()
 }
 
+/// The client half: one signer per journal per epoch, held by the client and
+/// re-derived when the epoch moves.
+///
+/// Time and randomness are the caller's - [`Self::sign_at`] takes the clock
+/// reading and the nonce - so this type is the same on the host, in the
+/// browser (where `SystemTime` does not exist) and in an extension process;
+/// each FFI surface supplies its own clock and CSPRNG.
+#[derive(Clone)]
+pub struct DsProofSigner {
+    epoch: u64,
+    key: SigningKey,
+}
+
+impl core::fmt::Debug for DsProofSigner {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DsProofSigner")
+            .field("epoch", &self.epoch)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DsProofSigner {
+    /// The group access signer for `epoch`, from the 32 exporter bytes of
+    /// `Group::export_secret(ACCESS_KEY_LABEL, group_id, 32)` at that epoch.
+    #[must_use]
+    pub fn for_group(epoch: u64, exporter_seed: &[u8; 32]) -> Self {
+        Self {
+            epoch,
+            key: access_signing_key(exporter_seed),
+        }
+    }
+
+    /// The mailbox signer: the identity key itself, at [`MAILBOX_EPOCH`].
+    #[must_use]
+    pub fn for_mailbox(identity_seed: &[u8; 32]) -> Self {
+        Self {
+            epoch: MAILBOX_EPOCH,
+            key: SigningKey::from_seed(identity_seed),
+        }
+    }
+
+    /// The epoch this signer proves membership at.
+    #[must_use]
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// The verifying key the server must hold for this signer's proofs to
+    /// pass - what a claim registers.
+    #[must_use]
+    pub fn verifying_key(&self) -> VerifyingKey {
+        self.key.verifying_key()
+    }
+
+    /// Sign `req` at `now_ms` with `nonce`, ready for [`Proof::encode`].
+    #[must_use]
+    pub fn sign_at(&self, req: &RequestParts<'_>, now_ms: u64, nonce: [u8; NONCE_LEN]) -> Proof {
+        sign(&self.key, req, self.epoch, now_ms, nonce)
+    }
+
+    /// The JSON body of `PUT /ds/group/{hex}/access` registering this signer's
+    /// key: `{"epoch":<n>,"access_pk_b64":"<standard base64>"}`. Defined here
+    /// so no client spells the field names itself.
+    #[must_use]
+    pub fn group_claim_body_json(&self) -> String {
+        format!(
+            "{{\"epoch\":{},\"access_pk_b64\":\"{}\"}}",
+            self.epoch,
+            B64_STD.encode(self.verifying_key().to_bytes())
+        )
+    }
+
+    /// The JSON body of `PUT /ds/mailbox/{hex}/access` claiming the mailbox
+    /// this signer's identity key names: `{"identity_pk_b64":"<standard
+    /// base64>"}`.
+    #[must_use]
+    pub fn mailbox_claim_body_json(&self) -> String {
+        format!(
+            "{{\"identity_pk_b64\":\"{}\"}}",
+            B64_STD.encode(self.verifying_key().to_bytes())
+        )
+    }
+
+    /// The pseudonym of the mailbox this signer's key names (meaningful for
+    /// a [`Self::for_mailbox`] signer).
+    #[must_use]
+    pub fn mailbox_pseudonym(&self) -> [u8; 32] {
+        mailbox_pseudonym(&self.verifying_key())
+    }
+}
+
 /// Harness entry points for the fuzz crate. Not part of the supported API.
 #[doc(hidden)]
 pub mod fuzz_api {
@@ -487,6 +578,52 @@ mod tests {
         assert_eq!(a.verifying_key().to_bytes(), b.verifying_key().to_bytes());
         let c = access_signing_key(&[0x45u8; 32]);
         assert_ne!(a.verifying_key().to_bytes(), c.verifying_key().to_bytes());
+    }
+
+    #[test]
+    fn the_client_signer_produces_what_the_server_verifies() {
+        let seed = [0x61u8; 32];
+        let signer = DsProofSigner::for_group(7, &seed);
+        let r = req(b"payload");
+        let proof = signer.sign_at(&r, 1_000_000, [0x11u8; NONCE_LEN]);
+        assert_eq!(proof.epoch, 7);
+        let header = proof.encode();
+        let parsed = Proof::parse(&header).unwrap();
+        assert!(verify(&parsed, &r, &signer.verifying_key(), 1_000_500).is_ok());
+        // The verifying key is the one `access_signing_key` derives.
+        assert_eq!(
+            signer.verifying_key().to_bytes(),
+            access_signing_key(&seed).verifying_key().to_bytes()
+        );
+    }
+
+    #[test]
+    fn the_mailbox_signer_names_its_own_mailbox() {
+        let identity_seed = [0x62u8; 32];
+        let signer = DsProofSigner::for_mailbox(&identity_seed);
+        assert_eq!(signer.epoch(), MAILBOX_EPOCH);
+        let vk = SigningKey::from_seed(&identity_seed).verifying_key();
+        assert_eq!(signer.mailbox_pseudonym(), mailbox_pseudonym(&vk));
+        assert!(mailbox_owner_matches(
+            &signer.mailbox_pseudonym(),
+            &signer.verifying_key()
+        ));
+    }
+
+    #[test]
+    fn claim_bodies_carry_the_fields_the_ds_reads() {
+        let signer = DsProofSigner::for_group(3, &[0x63u8; 32]);
+        let body = signer.group_claim_body_json();
+        let pk = B64_STD.encode(signer.verifying_key().to_bytes());
+        assert_eq!(body, format!("{{\"epoch\":3,\"access_pk_b64\":\"{pk}\"}}"));
+        let mailbox = DsProofSigner::for_mailbox(&[0x64u8; 32]);
+        let pk = B64_STD.encode(mailbox.verifying_key().to_bytes());
+        assert_eq!(
+            mailbox.mailbox_claim_body_json(),
+            format!("{{\"identity_pk_b64\":\"{pk}\"}}")
+        );
+        // Standard base64 with padding is what the server decodes.
+        assert!(pk.ends_with('=') || pk.len() % 4 == 0);
     }
 
     fn hex(bytes: &[u8]) -> String {

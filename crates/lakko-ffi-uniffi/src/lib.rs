@@ -43,6 +43,7 @@ pub mod backup;
 pub mod channels;
 pub mod contacts;
 pub mod discovery;
+pub mod ds_proof;
 pub mod mnemonic;
 pub mod pairing;
 pub mod pow;
@@ -2057,6 +2058,19 @@ impl Group {
         })
     }
 
+    /// The ADR-0053 access signer for this journal at the current epoch:
+    /// `export_secret("lakko/ds/access/v1", groupId, 32)` wrapped as a signer
+    /// whose `sign` produces the `x-lakko-ds-proof` header a claimed journal
+    /// requires and whose `groupClaimBodyJson` registers the epoch's key.
+    /// Re-derive after every commit.
+    pub fn ds_access_signer(
+        &self,
+        identity: &Identity,
+    ) -> Result<Arc<ds_proof::DsProofSigner>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        ds_proof::group_signer(&g, &identity.inner)
+    }
+
     /// Derive a `length`-byte secret bound to the current epoch.
     pub fn export_secret(
         &self,
@@ -2377,6 +2391,17 @@ impl PublisherGroup {
     // external-join machinery (ADR-0027/0028) verbatim. These delegate to the
     // inner Group; the owner mints a `/g/` link over `group_id`, applies the
     // joiner's external-add via `process_incoming_verifying_roles`, and approves.
+
+    /// The ADR-0053 access signer for the publisher journal at the current
+    /// epoch - the same derivation as `Group.dsAccessSigner` over the
+    /// underlying group. Re-derive after every commit (every rotation).
+    pub fn ds_access_signer(
+        &self,
+        identity: &Identity,
+    ) -> Result<Arc<ds_proof::DsProofSigner>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        ds_proof::group_signer(g.inner(), &identity.inner)
+    }
 
     /// ADR-0028 OQ3 — the underlying MLS `group_id`. A co-publisher invite-link
     /// is minted over this; the joiner targets it when crafting its
@@ -2718,6 +2743,17 @@ impl DeviceGroup {
             commit: group::encode_message(&commit)?,
             welcome: group::encode_message(&welcome)?,
         })
+    }
+
+    /// The ADR-0053 access signer for the DeviceGroup journal at the current
+    /// epoch - the same derivation as `Group.dsAccessSigner` over the
+    /// underlying group. Re-derive after every commit.
+    pub fn ds_access_signer(
+        &self,
+        identity: &Identity,
+    ) -> Result<Arc<ds_proof::DsProofSigner>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        ds_proof::group_signer(g.as_group(), &identity.inner)
     }
 
     /// The deterministic `group_id` this DeviceGroup is bound

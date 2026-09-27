@@ -53,8 +53,13 @@ workspace = true
 [dependencies]
 thiserror.workspace = true
 lakko-mls.workspace = true
+# ADR-0053 - the request proof a claimed DS journal requires (the client
+# half: per-epoch group signer, mailbox signer, claim bodies).
+lakko-ds-proof.workspace = true
 lakko-attachments.workspace = true
 lakko-contacts.workspace = true
+# The CSPRNG nonce of the ADR-0053 proof; already in the tree through lakko-mls.
+lakko-crypto.workspace = true
 lakko-calls.workspace = true
 
 # `build` powers the `uniffi::setup_scaffolding!()` proc-macro; `cli` enables

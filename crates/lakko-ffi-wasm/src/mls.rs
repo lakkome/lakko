@@ -190,6 +190,14 @@ pub struct Identity {
     inner: MlsIdentity,
 }
 
+impl Identity {
+    /// The core identity, for sibling modules that need the seed material
+    /// (ADR-0053 mailbox signer). Crate-private on purpose.
+    pub(crate) const fn mls_identity(&self) -> &MlsIdentity {
+        &self.inner
+    }
+}
+
 #[wasm_bindgen]
 impl Identity {
     /// Generate a fresh identity with the given user-display label.
@@ -1627,6 +1635,23 @@ impl Group {
             .map_err(MlsFailure::into_js)
     }
 
+    /// The ADR-0053 access signer for this journal at the current epoch:
+    /// `export_secret("lakko/ds/access/v1", groupId, 32)` wrapped as a signer
+    /// whose `sign` produces the `x-lakko-ds-proof` header a claimed journal
+    /// requires and whose `groupClaimBodyJson` registers the epoch's key.
+    /// Re-derive after every commit.
+    #[wasm_bindgen(js_name = dsAccessSigner)]
+    pub fn ds_access_signer(
+        &self,
+        identity: &Identity,
+    ) -> Result<crate::ds_proof::DsProofSigner, JsValue> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        crate::ds_proof::group_signer(&g, &identity.inner)
+    }
+
     /// Derive a `length`-byte secret bound to the current epoch.
     #[wasm_bindgen(js_name = exportSecret)]
     pub fn export_secret(
@@ -2119,6 +2144,21 @@ impl PublisherGroup {
     // inner Group; the owner mints a `/g/` link over `groupId`, applies the
     // joiner's external-add via `processIncomingVerifyingRoles`, and approves.
 
+    /// The ADR-0053 access signer for the publisher journal at the current
+    /// epoch - the same derivation as `Group.dsAccessSigner` over the
+    /// underlying group. Re-derive after every commit (every rotation).
+    #[wasm_bindgen(js_name = dsAccessSigner)]
+    pub fn ds_access_signer(
+        &self,
+        identity: &Identity,
+    ) -> Result<crate::ds_proof::DsProofSigner, JsValue> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        crate::ds_proof::group_signer(g.inner(), &identity.inner)
+    }
+
     /// ADR-0028 OQ3 — the underlying MLS `group_id`. A co-publisher invite-link
     /// is minted over this; the joiner targets it when crafting its
     /// external-join proposal.
@@ -2325,6 +2365,21 @@ impl DeviceGroup {
             commit_bytes: group::encode_message(&commit).map_err(mls_err)?,
             welcome_bytes: group::encode_message(&welcome).map_err(mls_err)?,
         })
+    }
+
+    /// The ADR-0053 access signer for the DeviceGroup journal at the current
+    /// epoch - the same derivation as `Group.dsAccessSigner` over the
+    /// underlying group. Re-derive after every commit.
+    #[wasm_bindgen(js_name = dsAccessSigner)]
+    pub fn ds_access_signer(
+        &self,
+        identity: &Identity,
+    ) -> Result<crate::ds_proof::DsProofSigner, JsValue> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| js_error("internal lock poisoned"))?;
+        crate::ds_proof::group_signer(g.as_group(), &identity.inner)
     }
 
     /// The deterministic `group_id` this DeviceGroup is bound

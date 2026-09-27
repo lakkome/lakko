@@ -22,6 +22,9 @@ workspace = true
 
 [dependencies]
 lakko-mls.workspace = true
+# ADR-0053 - the request proof a claimed DS journal requires (the client
+# half: per-epoch group signer, mailbox signer, claim bodies).
+lakko-ds-proof.workspace = true
 lakko-contacts.workspace = true
 # Presentation rules the three clients share — the order of the one
 # conversation list and the gate in front of the discovery lookup

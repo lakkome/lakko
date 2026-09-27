@@ -21,6 +21,9 @@ workspace = true
 [dependencies]
 thiserror.workspace = true
 lakko-mls.workspace = true
+# ADR-0053 - the request proof a claimed DS journal requires (the client
+# half: per-epoch group signer, mailbox signer, claim bodies).
+lakko-ds-proof.workspace = true
 # OPAQUE-PAKE client surface — wraps `RegistrationSession` and
 # `LoginSession` for Swift / Kotlin (mirror of the wasm-bindgen
 # surface in `lakko-ffi-wasm/src/auth.rs`). 1.15d1.

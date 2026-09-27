@@ -74,6 +74,7 @@ pub mod backup;
 pub mod channels;
 pub mod contacts;
 pub mod discovery;
+pub mod ds_proof;
 pub mod mls;
 pub mod mnemonic;
 pub mod pairing;
