@@ -747,6 +747,22 @@ public struct ChatScreen: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
             }
+            .onAppear {
+                // Open at the newest message. The view model is handed the
+                // thread's messages before this view exists (`sync(state:)`
+                // runs in its init), so the count below never changes on
+                // open and a long chat used to appear at the top of its
+                // history. Not `defaultScrollAnchor(.bottom)`: that also
+                // bottom-aligns a chat shorter than the screen, which web
+                // does not do. The second call runs after the lazy stack has
+                // laid its rows out, when the first one may have had nothing
+                // to measure yet.
+                guard let last = lastDrawnMessageId else { return }
+                scrollProxy.scrollTo(last, anchor: .bottom)
+                Task { @MainActor in
+                    scrollProxy.scrollTo(last, anchor: .bottom)
+                }
+            }
             .onChange(of: viewModel.messages.count) { _, _ in
                 // Scroll to the latest message whenever the list grows.
                 if let last = lastDrawnMessageId {

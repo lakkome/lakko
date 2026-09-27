@@ -582,13 +582,26 @@ public fun ChatScreen(
     var pendingEmojiInsert by remember { mutableStateOf<Pair<Long, String>?>(null) }
     var emojiInsertSeq by remember { mutableStateOf(0L) }
 
+    // Whether the timeline has been positioned at its newest row once. The
+    // first positioning is a jump, every later one an animation: on a cold
+    // start the rows arrive before the list has laid anything out, and
+    // `animateScrollToItem` against a list with no visible items returns
+    // without moving, which is how a long chat used to open at the top of
+    // its history. `scrollToItem` sets the position directly and survives
+    // the first layout.
+    var positionedOnce by remember { mutableStateOf(false) }
     LaunchedEffect(timeline.size, pendingMedia.size) {
         // Auto-scroll to the latest row on every new message
         // (Outgoing send + Incoming poll both bump the count, and so does an
         // outgoing media bubble entering the timeline).
         val total = timeline.size + pendingMedia.size
         if (total > 0) {
-            listState.animateScrollToItem(total - 1)
+            if (positionedOnce) {
+                listState.animateScrollToItem(total - 1)
+            } else {
+                listState.scrollToItem(total - 1)
+                positionedOnce = true
+            }
         }
     }
 
