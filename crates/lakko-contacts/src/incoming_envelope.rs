@@ -50,10 +50,20 @@
 //!    role table), and keeps it only if
 //!    [`crate::group_name::group_name_is_newer`] than the stored
 //!    stamp for that group. An empty name clears the name.
-//! 8. **Intro-message fallthrough** — plain free-text
-//!    `ContactRequest` (ADR-0005 scenario A; "add me as a
-//!    contact"). Caller renders the bytes as a UTF-8 intro
-//!    message.
+//! 8. [`crate::profile_request::try_unwrap_profile_request`] and
+//!    [`crate::pin::try_unwrap_pin`] (ADR-0048 trigger 4, ADR-0052).
+//! 9. [`crate::introduction::try_unwrap_introduction_offer`] and
+//!    [`crate::introduction::try_unwrap_introductions`] — a contact's
+//!    introduction record to relay, and a contact's bundle of records to
+//!    search (ADR-0058 §4).
+//! 10. [`crate::visibility::try_unwrap_visibility`] and
+//!     [`crate::visibility::try_unwrap_reach_state`] — the owner's own
+//!     setting and reach-key versions, from another of their devices
+//!     (ADR-0058 §7).
+//! 11. **Intro-message fallthrough** — plain free-text
+//!     `ContactRequest` (ADR-0005 scenario A; "add me as a
+//!     contact"). Caller renders the bytes as a UTF-8 intro
+//!     message.
 //!
 //! The order matters: the two call-side envelopes are
 //! mutually exclusive (see C-32 and C-33 in
@@ -86,11 +96,18 @@ use crate::call_kp_forward::try_unwrap_call_kp_forward;
 use crate::call_welcome::{try_unwrap_call_welcome, CallWelcomeError};
 use crate::committer_beacon::{try_unwrap_committer_beacon, CommitterBeaconError};
 use crate::group_name::{try_unwrap_group_name, GroupName, GroupNameError};
+use crate::introduction::{
+    try_unwrap_introduction_offer, try_unwrap_introductions, IntroductionError, IntroductionRecord,
+    IntroductionsBundle,
+};
 use crate::media_state::{try_unwrap_media_state, MediaStateError};
 use crate::pin::{try_unwrap_pin, PinError, PinOp};
 use crate::profile::{try_unwrap_profile, Profile, ProfileError};
 use crate::profile_request::{try_unwrap_profile_request, ProfileRequestError};
 use crate::push_routing::{try_unwrap_push_routing_secret, PushRoutingSecretError};
+use crate::visibility::{
+    try_unwrap_reach_state, try_unwrap_visibility, ReachState, VisibilityError, VisibilitySetting,
+};
 
 /// Discriminated dispatch result. Borrow-flavoured slice so
 /// the dispatcher itself is zero-copy; the caller decides
@@ -201,6 +218,24 @@ pub enum IncomingEnvelope<'a> {
     /// for that message — the whole read-decide-write under the per-group
     /// lock (C-62 sub-invariant 5).
     Pin(PinOp),
+    /// A contact's introduction record to relay (ADR-0058 §4), structurally
+    /// checked and still sealed. Never a chat bubble. **Accept it only from
+    /// the other participant of a 1:1 conversation** and keep the newest per
+    /// contact; it goes into the bundles this device sends its contacts.
+    IntroductionOffer(IntroductionRecord),
+    /// A contact's bundle of introduction records (ADR-0058 §4), padded to a
+    /// size bucket. Never a chat bubble. Keep the newest per contact via
+    /// [`crate::introduction::bundle_is_newer`]; search it locally with OPRF
+    /// outputs. Never re-relayed (contacts of contacts, not further).
+    Introductions(IntroductionsBundle),
+    /// The owner's "who can find me" setting, from another of their devices
+    /// (ADR-0058 §7). Never a chat bubble. **Accept only on the owner's
+    /// DeviceGroup**, keep via [`crate::visibility::visibility_is_newer`].
+    Visibility(VisibilitySetting),
+    /// The owner's reach-key version counters, from another of their
+    /// devices (ADR-0058 §7). Same rules as [`Self::Visibility`], ordered by
+    /// [`crate::visibility::reach_state_is_newer`].
+    ReachState(ReachState),
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -250,6 +285,14 @@ pub enum DispatchError {
     /// The pin domain (ADR-0052) with a malformed payload.
     #[error(transparent)]
     Pin(#[from] PinError),
+    /// An introduction offer or bundle matched its domain but was
+    /// malformed.
+    #[error(transparent)]
+    Introduction(#[from] IntroductionError),
+    /// A setting or reach-state envelope matched its domain but was
+    /// malformed.
+    #[error(transparent)]
+    Visibility(#[from] VisibilityError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -313,6 +356,18 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
         return Ok(IncomingEnvelope::Pin(op));
     }
     // 8. Plain intro message — ADR-0005 scenario A.
+    if let Some(record) = try_unwrap_introduction_offer(plaintext)? {
+        return Ok(IncomingEnvelope::IntroductionOffer(record));
+    }
+    if let Some(bundle) = try_unwrap_introductions(plaintext)? {
+        return Ok(IncomingEnvelope::Introductions(bundle));
+    }
+    if let Some(setting) = try_unwrap_visibility(plaintext)? {
+        return Ok(IncomingEnvelope::Visibility(setting));
+    }
+    if let Some(state) = try_unwrap_reach_state(plaintext)? {
+        return Ok(IncomingEnvelope::ReachState(state));
+    }
     Ok(IncomingEnvelope::IntroMessage(plaintext))
 }
 
@@ -377,6 +432,8 @@ mod tests {
             username: Some("alice".to_string()),
             updated_at_ms: 42,
             account_id: None,
+            username_certificate: None,
+            grants: Vec::new(),
         };
         let wrapped = compose_profile(&profile).unwrap();
         assert_eq!(
@@ -389,15 +446,15 @@ mod tests {
     fn an_out_of_bounds_profile_is_an_error_not_an_intro_message() {
         // Fail-closed: a profile carrying a right-to-left override in
         // its name must be dropped, never rendered as chat text.
-        use crate::profile::{DisplayNameError, PROFILE_ENVELOPE_DOMAIN_V1, PROFILE_VERSION_V2};
+        use crate::profile::{DisplayNameError, PROFILE_ENVELOPE_DOMAIN_V1, PROFILE_VERSION_V3};
         let name = "Alice\u{202E}".as_bytes();
         let mut wrapped = PROFILE_ENVELOPE_DOMAIN_V1.to_vec();
-        wrapped.push(PROFILE_VERSION_V2);
+        wrapped.push(PROFILE_VERSION_V3);
         wrapped.extend_from_slice(&0u64.to_be_bytes());
         wrapped.push(u8::try_from(name.len()).unwrap());
         wrapped.extend_from_slice(name);
-        wrapped.push(0);
-        wrapped.push(0);
+        // No username, account id, certificate or grants.
+        wrapped.extend_from_slice(&[0, 0, 0, 0]);
         assert_eq!(
             dispatch_incoming_envelope(&wrapped),
             Err(DispatchError::Profile(ProfileError::DisplayName(
@@ -447,6 +504,86 @@ mod tests {
             dispatch_incoming_envelope(&truncated),
             Err(DispatchError::GroupName(GroupNameError::Truncated)),
         );
+    }
+
+    #[test]
+    fn dispatches_the_adr_0058_envelopes() {
+        use crate::introduction::{
+            compose_bundle, compose_introduction, compose_introduction_offer, IntroductionPayload,
+        };
+        use crate::reach::{ReachClass, ReachGrant};
+        use crate::visibility::{compose_reach_state, compose_visibility, ReachStateEntry};
+
+        let payload = IntroductionPayload {
+            identity_pk: [1; 32],
+            account_id: [2; 16],
+            display_name: Some("Anna".to_string()),
+            username: None,
+            username_certificate: None,
+            fof: ReachGrant::derive(&[9; 32], ReachClass::Fof, b"", 1).unwrap(),
+        };
+        let record = compose_introduction(&payload, &[[5; 64]], 1).unwrap();
+        let parsed = IntroductionRecord::decode(&record).unwrap();
+        assert_eq!(
+            dispatch_incoming_envelope(&compose_introduction_offer(&record).unwrap()).unwrap(),
+            IncomingEnvelope::IntroductionOffer(parsed.clone()),
+        );
+        let bundle = compose_bundle(&[parsed], 3).unwrap();
+        assert!(matches!(
+            dispatch_incoming_envelope(&bundle).unwrap(),
+            IncomingEnvelope::Introductions(b) if b.records.len() == 1 && b.updated_at_ms == 3
+        ));
+        let setting = VisibilitySetting::default_for_new_account();
+        assert_eq!(
+            dispatch_incoming_envelope(&compose_visibility(&setting).unwrap()).unwrap(),
+            IncomingEnvelope::Visibility(setting),
+        );
+        let state = ReachState {
+            entries: vec![ReachStateEntry {
+                class: ReachClass::Contact,
+                scope_id: Vec::new(),
+                version: 4,
+            }],
+            updated_at_ms: 5,
+        };
+        assert_eq!(
+            dispatch_incoming_envelope(&compose_reach_state(&state).unwrap()).unwrap(),
+            IncomingEnvelope::ReachState(state),
+        );
+    }
+
+    #[test]
+    fn a_malformed_adr_0058_envelope_is_an_error_not_an_intro_message() {
+        use crate::introduction::{
+            INTRODUCTIONS_ENVELOPE_DOMAIN_V1, INTRODUCTION_OFFER_ENVELOPE_DOMAIN_V1,
+        };
+        use crate::visibility::{REACH_STATE_ENVELOPE_DOMAIN_V1, VISIBILITY_ENVELOPE_DOMAIN_V1};
+        for domain in [
+            INTRODUCTION_OFFER_ENVELOPE_DOMAIN_V1,
+            INTRODUCTIONS_ENVELOPE_DOMAIN_V1,
+        ] {
+            let mut bad = domain.to_vec();
+            bad.push(0x7F);
+            assert_eq!(
+                dispatch_incoming_envelope(&bad),
+                Err(DispatchError::Introduction(
+                    IntroductionError::UnknownVersion(0x7F)
+                )),
+            );
+        }
+        for domain in [
+            VISIBILITY_ENVELOPE_DOMAIN_V1,
+            REACH_STATE_ENVELOPE_DOMAIN_V1,
+        ] {
+            let mut bad = domain.to_vec();
+            bad.push(0x7F);
+            assert_eq!(
+                dispatch_incoming_envelope(&bad),
+                Err(DispatchError::Visibility(VisibilityError::UnknownVersion(
+                    0x7F
+                ))),
+            );
+        }
     }
 
     #[test]

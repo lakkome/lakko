@@ -219,6 +219,8 @@ mod tests {
             username: None,
             updated_at_ms: 1,
             account_id: None,
+            username_certificate: None,
+            grants: Vec::new(),
         })
         .unwrap();
         assert!(decode_group_name_envelope(profile).is_err());

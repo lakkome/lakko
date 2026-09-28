@@ -66,6 +66,16 @@ pub enum ChannelError {
         got: usize,
     },
 
+    /// A member card's profile exceeds `MAX_MEMBER_CARD_PROFILE_LEN`
+    /// (ADR-0058).
+    #[error("member card profile exceeds {max} bytes (got {got})")]
+    MemberCardTooLong {
+        /// Configured maximum.
+        max: usize,
+        /// Actual length the caller passed.
+        got: usize,
+    },
+
     /// Wire format failed to parse — short buffer, truncated field,
     /// or invalid length prefix.
     #[error("wire format invalid: {0}")]

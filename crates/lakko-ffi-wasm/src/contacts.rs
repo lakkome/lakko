@@ -175,6 +175,9 @@ fn prepare_profile(
         username,
         updated_at_ms,
         account_id,
+        // ADR-0058 fields are not surfaced on this FFI until sprint S3.
+        username_certificate: None,
+        grants: Vec::new(),
     })
 }
 
@@ -1763,6 +1766,8 @@ impl WasmIncomingEnvelope {
 /// is malformed (below the Welcome / KP-forward minimum floor,
 /// or an invalid media-state payload).
 #[wasm_bindgen(js_name = dispatchIncomingEnvelope)]
+// One arm per envelope kind; splitting the table would hide which kinds exist.
+#[allow(clippy::too_many_lines)]
 pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelope, JsError> {
     let parsed =
         rust_dispatch_incoming_envelope(plaintext).map_err(|err| JsError::new(&err.to_string()))?;
@@ -1847,6 +1852,15 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             profile: None,
             group_name: None,
             pin: Some(op.into()),
+        },
+        // ADR-0058: refused (dropped, never rendered) until surfaced in S3.
+        IncomingEnvelope::IntroductionOffer(_)
+        | IncomingEnvelope::Introductions(_)
+        | IncomingEnvelope::Visibility(_)
+        | IncomingEnvelope::ReachState(_) => {
+            return Err(JsError::new(
+                "envelope kind not yet surfaced on this FFI (ADR-0058 S3)",
+            ));
         },
         IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::IntroMessage,

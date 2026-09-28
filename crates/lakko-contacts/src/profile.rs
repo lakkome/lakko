@@ -6,7 +6,8 @@
 //!
 //! ## What travels, and where
 //!
-//! A profile is `{display_name, username, updated_at_ms}`. It rides:
+//! A profile is `{display_name, username, updated_at_ms, account_id,
+//! username_certificate, grants}`. It rides:
 //!
 //! * inside a [`crate::request::ContactRequest`]'s sealed envelope, so a
 //!   recipient can show who is asking before accepting (the framing lives
@@ -39,19 +40,35 @@
 //!   attempted.
 //! * `display_name` is unverifiable by construction and is shown as the
 //!   person's own statement.
+//! * `username_certificate` (v3, [ADR-0058](../../../docs/adr/0058-scoped-discovery.md)
+//!   §5) is opaque here: discovery signs `(OPRF(username), account_id)` and a
+//!   viewer verifies it (one OPRF evaluation plus the signature) in
+//!   `lakko-attest`, which owns the layout. This codec checks only its
+//!   length and that it never comes without a username.
+//! * `grants` (v3, ADR-0058 §3) are reach keys the sender hands to the
+//!   members of the group the envelope is published in: the `group` key when
+//!   the sender's setting lets that group find them, the `member` key always,
+//!   and the `channel` key inside a channel member card. A grant is a
+//!   **secret** ([`crate::reach::ReachGrant`]); the envelope is only ever sent
+//!   inside an E2EE carrier.
 //!
 //! ## Wire shape
 //!
 //! ```text
 //!   plaintext_payload =
 //!       PROFILE_ENVELOPE_DOMAIN_V1 || version || updated_at_ms || name_len || name || username_len || username
-//!      └──── 17 bytes, ASCII ────┘ └─ 0x01 ─┘ └── 8 B, BE ───┘ └── 1 B ──┘ └ .. ┘ └──── 1 B ────┘ └── .. ──┘
+//!      └──── 17 bytes, ASCII ────┘ └─ 0x03 ─┘ └── 8 B, BE ───┘ └── 1 B ──┘ └ .. ┘ └──── 1 B ────┘ └── .. ──┘
+//!
+//!       || account_id_len || account_id || cert_len || cert || grant_count || grants
+//!          └─ 1 B: 0|16 ─┘ └── .. ────┘  └ 1 B: 0|153 ┘ └ .. ┘ └── 1 B ───┘ └ 37 B each ┘
 //!
 //!                     "lakko/profile/v1\x00"
 //! ```
 //!
-//! A length of `0` means "no name" / "no username". Total length is
-//! between [`PROFILE_ENVELOPE_MIN_LEN`] and [`PROFILE_ENVELOPE_MAX_LEN`].
+//! A length of `0` means "no name" / "no username" / "no account id" / "no
+//! certificate". Total length is between [`PROFILE_ENVELOPE_MIN_LEN`] and
+//! [`PROFILE_ENVELOPE_MAX_LEN`]. v3 (ADR-0058) is a flag day: v1 and v2 are
+//! refused as [`ProfileError::UnknownVersion`].
 //!
 //! ## Bounds, and why a violation rejects the whole envelope
 //!
@@ -60,6 +77,10 @@
 //!   line break, no control character (general category `Cc`) and no format
 //!   character (`Cf`) — see [`DisplayNameError`].
 //! * `username`: canonical per [`crate::username::check_canonical_username`].
+//! * `username_certificate`: exactly [`USERNAME_CERT_LEN`] bytes, and only
+//!   beside a username.
+//! * `grants`: at most [`MAX_PROFILE_GRANTS`], no two of one class, and only
+//!   of a class a profile may carry ([`is_profile_grant_class`]).
 //!
 //! An envelope violating any bound is **rejected as a whole**. Unlike
 //! attachment metadata, a profile has no remainder worth keeping: a valid
@@ -127,6 +148,7 @@ use core::result::Result as CoreResult;
 
 use thiserror::Error;
 
+use crate::reach::{ReachClass, ReachError, ReachGrant, REACH_GRANT_LEN};
 use crate::username::{check_canonical_username, UsernameError, USERNAME_MAX_LEN};
 
 /// 17-byte domain separator prepended to the profile payload.
@@ -150,6 +172,22 @@ pub const PROFILE_VERSION_V1: u8 = 0x01;
 /// cannot name an account for the call roster.
 pub const PROFILE_VERSION_V2: u8 = 0x02;
 
+/// Schema version carried in the first payload byte since ADR-0058
+/// (2026-09-28): the username certificate and the reach grants follow the
+/// account id. v1 and v2 are refused (`UnknownVersion`) — a flag day, since
+/// nothing is deployed.
+pub const PROFILE_VERSION_V3: u8 = 0x03;
+
+/// Length of the discovery-signed username certificate a profile may carry
+/// (ADR-0058 §5). Opaque to this crate: `lakko-attest` defines the layout
+/// with this same length, and verification (one OPRF evaluation plus the
+/// signature) happens there, never here.
+pub const USERNAME_CERT_LEN: usize = 153;
+
+/// Most reach grants one profile may carry (ADR-0058 §3): the `group` and the
+/// `member` key of a group, or the `channel` key of a channel.
+pub const MAX_PROFILE_GRANTS: usize = 2;
+
 /// Length of the account id the envelope may carry: the 16-byte auth
 /// account id, the value the SFU's per-call peer tag is derived from
 /// (ADR-0021), so a call tile can be matched to this profile.
@@ -165,15 +203,33 @@ pub const DISPLAY_NAME_MAX_CHARS: usize = 64;
 pub const DISPLAY_NAME_MAX_BYTES: usize = u8::MAX as usize;
 
 /// Bytes after the separator that every envelope carries: version,
-/// `updated_at_ms`, `name_len`, `username_len`.
-const FIXED_PAYLOAD_LEN: usize = 1 + 8 + 1 + 1 + 1;
+/// `updated_at_ms`, `name_len`, `username_len`, `account_id_len`,
+/// `cert_len`, `grant_count`.
+const FIXED_PAYLOAD_LEN: usize = 1 + 8 + 1 + 1 + 1 + 1 + 1;
 
 /// Shortest well-formed envelope: no name, no username.
 pub const PROFILE_ENVELOPE_MIN_LEN: usize = PROFILE_ENVELOPE_DOMAIN_V1.len() + FIXED_PAYLOAD_LEN;
 
-/// Longest well-formed envelope: a maximal name and a maximal username.
-pub const PROFILE_ENVELOPE_MAX_LEN: usize =
-    PROFILE_ENVELOPE_MIN_LEN + DISPLAY_NAME_MAX_BYTES + USERNAME_MAX_LEN + ACCOUNT_ID_LEN;
+/// Longest well-formed envelope: a maximal name, a maximal username, an
+/// account id, a certificate and the most grants.
+pub const PROFILE_ENVELOPE_MAX_LEN: usize = PROFILE_ENVELOPE_MIN_LEN
+    + DISPLAY_NAME_MAX_BYTES
+    + USERNAME_MAX_LEN
+    + ACCOUNT_ID_LEN
+    + USERNAME_CERT_LEN
+    + MAX_PROFILE_GRANTS * REACH_GRANT_LEN;
+
+/// `true` for the reach classes a profile may hand out (ADR-0058 §3):
+/// `group`, `member`, `channel`. The others travel elsewhere — a `contact`
+/// key in the 1:1 conversation, a `link` key inside a capability, a `reply`
+/// key as a delegation, a `fof` key inside an introduction record.
+#[must_use]
+pub const fn is_profile_grant_class(class: ReachClass) -> bool {
+    matches!(
+        class,
+        ReachClass::Group | ReachClass::Member | ReachClass::Channel
+    )
+}
 
 /// Unicode general category `Cf` (format), as inclusive code-point ranges.
 ///
@@ -251,6 +307,13 @@ pub struct Profile {
     /// (C-68). `None` when the sender did not say (a guest, or a device
     /// that has no account id at hand).
     pub account_id: Option<[u8; ACCOUNT_ID_LEN]>,
+    /// The discovery-signed username certificate (ADR-0058 §5), exactly
+    /// [`USERNAME_CERT_LEN`] bytes, opaque here. Requires `username`.
+    pub username_certificate: Option<Vec<u8>>,
+    /// Reach grants handed to the receivers (ADR-0058 §3): at most
+    /// [`MAX_PROFILE_GRANTS`], one per class, of a class
+    /// [`is_profile_grant_class`] admits. Secret — see the module docs.
+    pub grants: Vec<ReachGrant>,
 }
 
 impl Profile {
@@ -261,12 +324,38 @@ impl Profile {
     ///
     /// * [`ProfileError::DisplayName`] — the display name violates a bound.
     /// * [`ProfileError::Username`] — the username is not canonical.
+    /// * [`ProfileError::CertificateLength`] /
+    ///   [`ProfileError::CertificateWithoutUsername`] — the certificate is
+    ///   the wrong length, or there is no username for it to certify.
+    /// * [`ProfileError::TooManyGrants`] / [`ProfileError::DuplicateGrantClass`]
+    ///   / [`ProfileError::GrantClassNotAllowed`] — a grant bound.
     pub fn validate(&self) -> CoreResult<(), ProfileError> {
         if let Some(name) = &self.display_name {
             check_display_name(name).map_err(ProfileError::DisplayName)?;
         }
         if let Some(username) = &self.username {
             check_canonical_username(username).map_err(ProfileError::Username)?;
+        }
+        if let Some(cert) = &self.username_certificate {
+            if cert.len() != USERNAME_CERT_LEN {
+                return Err(ProfileError::CertificateLength { got: cert.len() });
+            }
+            if self.username.is_none() {
+                return Err(ProfileError::CertificateWithoutUsername);
+            }
+        }
+        if self.grants.len() > MAX_PROFILE_GRANTS {
+            return Err(ProfileError::TooManyGrants {
+                count: self.grants.len(),
+            });
+        }
+        for (i, grant) in self.grants.iter().enumerate() {
+            if !is_profile_grant_class(grant.class) {
+                return Err(ProfileError::GrantClassNotAllowed(grant.class.to_byte()));
+            }
+            if self.grants[..i].iter().any(|g| g.class == grant.class) {
+                return Err(ProfileError::DuplicateGrantClass(grant.class.to_byte()));
+            }
         }
         Ok(())
     }
@@ -454,7 +543,7 @@ pub fn compose_profile(profile: &Profile) -> CoreResult<Vec<u8>, ProfileError> {
 
     let mut out = Vec::with_capacity(PROFILE_ENVELOPE_MIN_LEN + name.len() + username.len());
     out.extend_from_slice(PROFILE_ENVELOPE_DOMAIN_V1);
-    out.push(PROFILE_VERSION_V2);
+    out.push(PROFILE_VERSION_V3);
     out.extend_from_slice(&profile.updated_at_ms.to_be_bytes());
     out.push(name_len);
     out.extend_from_slice(name);
@@ -466,6 +555,26 @@ pub fn compose_profile(profile: &Profile) -> CoreResult<Vec<u8>, ProfileError> {
             out.extend_from_slice(id);
         },
         None => out.push(0),
+    }
+    match &profile.username_certificate {
+        Some(cert) => {
+            // `validate` pinned the length to USERNAME_CERT_LEN (< 256).
+            out.push(
+                u8::try_from(cert.len())
+                    .map_err(|_| ProfileError::CertificateLength { got: cert.len() })?,
+            );
+            out.extend_from_slice(cert);
+        },
+        None => out.push(0),
+    }
+    // `validate` bounded the count to MAX_PROFILE_GRANTS.
+    out.push(
+        u8::try_from(profile.grants.len()).map_err(|_| ProfileError::TooManyGrants {
+            count: profile.grants.len(),
+        })?,
+    );
+    for grant in &profile.grants {
+        out.extend_from_slice(&grant.encode());
     }
     Ok(out)
 }
@@ -482,8 +591,11 @@ pub fn compose_profile(profile: &Profile) -> CoreResult<Vec<u8>, ProfileError> {
 ///
 /// * [`ProfileError::Truncated`] — the payload ends before a declared field.
 /// * [`ProfileError::UnknownVersion`] — the version byte is not
-///   [`PROFILE_VERSION_V1`].
-/// * [`ProfileError::TrailingBytes`] — bytes remain after the username.
+///   [`PROFILE_VERSION_V3`].
+/// * [`ProfileError::TrailingBytes`] — bytes remain after the grants.
+/// * [`ProfileError::AccountIdLength`] / [`ProfileError::CertificateLength`]
+///   — a length byte that is neither 0 nor the field's one length.
+/// * [`ProfileError::Grant`] — a grant's class byte is not a class.
 /// * [`ProfileError::DisplayName`] / [`ProfileError::Username`] — a field is
 ///   out of bounds.
 pub fn try_unwrap_profile(plaintext: &[u8]) -> CoreResult<Option<Profile>, ProfileError> {
@@ -493,7 +605,7 @@ pub fn try_unwrap_profile(plaintext: &[u8]) -> CoreResult<Option<Profile>, Profi
     let mut cur = payload;
 
     let version = take_u8(&mut cur)?;
-    if version != PROFILE_VERSION_V2 {
+    if version != PROFILE_VERSION_V3 {
         return Err(ProfileError::UnknownVersion(version));
     }
     let updated_at_bytes: [u8; 8] = take(&mut cur, 8)?
@@ -516,6 +628,22 @@ pub fn try_unwrap_profile(plaintext: &[u8]) -> CoreResult<Option<Profile>, Profi
         },
         got => return Err(ProfileError::AccountIdLength { got }),
     };
+    let cert_len = usize::from(take_u8(&mut cur)?);
+    let username_certificate = match cert_len {
+        0 => None,
+        USERNAME_CERT_LEN => Some(take(&mut cur, USERNAME_CERT_LEN)?.to_vec()),
+        got => return Err(ProfileError::CertificateLength { got }),
+    };
+    let grant_count = usize::from(take_u8(&mut cur)?);
+    if grant_count > MAX_PROFILE_GRANTS {
+        return Err(ProfileError::TooManyGrants { count: grant_count });
+    }
+    let mut grants = Vec::with_capacity(grant_count);
+    for _ in 0..grant_count {
+        let grant =
+            ReachGrant::decode(take(&mut cur, REACH_GRANT_LEN)?).map_err(ProfileError::Grant)?;
+        grants.push(grant);
+    }
     if !cur.is_empty() {
         return Err(ProfileError::TrailingBytes { count: cur.len() });
     }
@@ -541,6 +669,8 @@ pub fn try_unwrap_profile(plaintext: &[u8]) -> CoreResult<Option<Profile>, Profi
         username,
         updated_at_ms,
         account_id,
+        username_certificate,
+        grants,
     };
     profile.validate()?;
     Ok(Some(profile))
@@ -567,13 +697,13 @@ pub enum ProfileError {
     /// The payload ends before a declared field.
     #[error("profile envelope is truncated")]
     Truncated,
-    /// Bytes remain after the username field.
+    /// Bytes remain after the last field.
     #[error("profile envelope has {count} trailing bytes")]
     TrailingBytes {
-        /// How many bytes followed the username.
+        /// How many bytes followed the last field.
         count: usize,
     },
-    /// The version byte is not [`PROFILE_VERSION_V1`].
+    /// The version byte is not [`PROFILE_VERSION_V3`].
     #[error("profile envelope carries unknown schema version {0:#04x}")]
     UnknownVersion(u8),
     /// The display name violates a bound.
@@ -588,6 +718,31 @@ pub enum ProfileError {
         /// The length byte as read.
         got: usize,
     },
+    /// The username certificate is neither absent nor exactly
+    /// [`USERNAME_CERT_LEN`] bytes.
+    #[error("profile username certificate is {got} bytes, expected 0 or {USERNAME_CERT_LEN}")]
+    CertificateLength {
+        /// The length as read.
+        got: usize,
+    },
+    /// A username certificate without a username to certify.
+    #[error("profile carries a username certificate but no username")]
+    CertificateWithoutUsername,
+    /// More than [`MAX_PROFILE_GRANTS`] grants.
+    #[error("profile carries {count} reach grants, at most {MAX_PROFILE_GRANTS} allowed")]
+    TooManyGrants {
+        /// The count as read.
+        count: usize,
+    },
+    /// Two grants of one class (the class byte).
+    #[error("profile carries two reach grants of class {0:#04x}")]
+    DuplicateGrantClass(u8),
+    /// A grant of a class a profile may not carry (the class byte).
+    #[error("profile may not carry a reach grant of class {0:#04x}")]
+    GrantClassNotAllowed(u8),
+    /// A grant failed to decode.
+    #[error("invalid reach grant: {0}")]
+    Grant(ReachError),
 }
 
 impl ProfileError {
@@ -605,6 +760,12 @@ impl ProfileError {
             Self::DisplayName(e) => format!("displayName.{}", e.code()),
             Self::Username(e) => format!("username.{}", e.code()),
             Self::AccountIdLength { .. } => "accountId.length".to_string(),
+            Self::CertificateLength { .. } => "certificate.length".to_string(),
+            Self::CertificateWithoutUsername => "certificate.withoutUsername".to_string(),
+            Self::TooManyGrants { .. } => "grants.tooMany".to_string(),
+            Self::DuplicateGrantClass(_) => "grants.duplicateClass".to_string(),
+            Self::GrantClassNotAllowed(_) => "grants.classNotAllowed".to_string(),
+            Self::Grant(e) => format!("grants.{}", e.code()),
         }
     }
 }
@@ -638,7 +799,21 @@ mod tests {
             username: username.map(str::to_string),
             updated_at_ms: at,
             account_id: None,
+            username_certificate: None,
+            grants: Vec::new(),
         }
+    }
+
+    fn grant(class: ReachClass, byte: u8) -> ReachGrant {
+        ReachGrant {
+            class,
+            version: 1,
+            seed: lakko_crypto::SecretBytes::new([byte; 32]),
+        }
+    }
+
+    fn cert(byte: u8) -> Vec<u8> {
+        vec![byte; USERNAME_CERT_LEN]
     }
 
     /// Hand-build an envelope with arbitrary (possibly invalid) fields,
@@ -651,9 +826,21 @@ mod tests {
         out.extend_from_slice(name);
         out.push(u8::try_from(username.len()).unwrap());
         out.extend_from_slice(username);
-        // v2: no account id.
-        out.push(0);
+        // No account id, no certificate, no grants.
+        out.extend_from_slice(&[0, 0, 0]);
         out
+    }
+
+    fn insert_at(v: &mut Vec<u8>, at: usize, bytes: &[u8]) {
+        let tail = v.split_off(at);
+        v.extend_from_slice(bytes);
+        v.extend_from_slice(&tail);
+    }
+
+    /// The byte offset of the account-id length byte in an envelope built
+    /// by [`raw`] / `compose` with the given name and username lengths.
+    fn account_id_len_offset(name_len: usize, username_len: usize) -> usize {
+        PROFILE_ENVELOPE_DOMAIN_V1.len() + 1 + 8 + 1 + name_len + 1 + username_len
     }
 
     // --- wire format ---------------------------------------------------------
@@ -679,7 +866,7 @@ mod tests {
         let sep = PROFILE_ENVELOPE_DOMAIN_V1.len();
         assert_eq!(sep, 17);
         assert_eq!(&wire[..sep], b"lakko/profile/v1\x00");
-        assert_eq!(wire[sep], PROFILE_VERSION_V2);
+        assert_eq!(wire[sep], PROFILE_VERSION_V3);
         assert_eq!(&wire[sep + 1..sep + 9], &[1, 2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(wire[sep + 9], 2);
         assert_eq!(&wire[sep + 10..sep + 12], b"Al");
@@ -687,15 +874,16 @@ mod tests {
         assert_eq!(&wire[sep + 13..sep + 16], b"abc");
         assert_eq!(
             &wire[sep + 16..],
-            &[0],
-            "no account id: one zero length byte"
+            &[0, 0, 0],
+            "no account id, no certificate, no grants: three zero bytes"
         );
     }
 
     #[test]
     fn envelope_length_bounds_are_the_documented_construction() {
-        assert_eq!(PROFILE_ENVELOPE_MIN_LEN, 29);
-        assert_eq!(PROFILE_ENVELOPE_MAX_LEN, 29 + 255 + 32 + 16);
+        assert_eq!(PROFILE_ENVELOPE_MIN_LEN, 31);
+        assert_eq!(PROFILE_ENVELOPE_MAX_LEN, 31 + 255 + 32 + 16 + 153 + 2 * 37);
+        assert_eq!(PROFILE_ENVELOPE_MAX_LEN, 561);
         let empty = compose_profile(&profile(None, None, 0)).unwrap();
         assert_eq!(empty.len(), PROFILE_ENVELOPE_MIN_LEN);
         // A maximal envelope: 255 bytes of name in exactly 64 chars (63
@@ -705,6 +893,8 @@ mod tests {
         assert_eq!(name.chars().count(), DISPLAY_NAME_MAX_CHARS);
         let mut maximal = profile(Some(&name), Some(&"a".repeat(32)), 0);
         maximal.account_id = Some([7; ACCOUNT_ID_LEN]);
+        maximal.username_certificate = Some(cert(9));
+        maximal.grants = vec![grant(ReachClass::Group, 1), grant(ReachClass::Member, 2)];
         let max = compose_profile(&maximal).unwrap();
         assert_eq!(max.len(), PROFILE_ENVELOPE_MAX_LEN);
     }
@@ -750,7 +940,7 @@ mod tests {
 
     #[test]
     fn unknown_versions_are_refused() {
-        for v in [0x00, 0x01, 0xFF] {
+        for v in [0x00, 0x01, 0x02, 0x04, 0xFF] {
             assert_eq!(
                 decode_profile(&raw(v, 0, b"", b"")),
                 Err(ProfileError::UnknownVersion(v))
@@ -761,11 +951,11 @@ mod tests {
     #[test]
     fn non_utf8_fields_are_refused() {
         assert_eq!(
-            decode_profile(&raw(2, 0, &[0xFF, 0xFE], b"")),
+            decode_profile(&raw(3, 0, &[0xFF, 0xFE], b"")),
             Err(ProfileError::DisplayName(DisplayNameError::NotUtf8))
         );
         assert_eq!(
-            decode_profile(&raw(2, 0, b"", &[0xC3, 0x28, 0x61])),
+            decode_profile(&raw(3, 0, b"", &[0xC3, 0x28, 0x61])),
             Err(ProfileError::Username(UsernameError::InvalidCharacters))
         );
     }
@@ -774,13 +964,13 @@ mod tests {
     fn an_out_of_bounds_field_rejects_the_whole_envelope() {
         // A perfectly good username does not rescue a bad name, and vice versa.
         assert_eq!(
-            decode_profile(&raw(2, 0, "Alice\u{202E}".as_bytes(), b"alice")),
+            decode_profile(&raw(3, 0, "Alice\u{202E}".as_bytes(), b"alice")),
             Err(ProfileError::DisplayName(
                 DisplayNameError::ControlOrFormatCharacter
             ))
         );
         assert_eq!(
-            decode_profile(&raw(2, 0, b"Pavel", "p\u{430}vel".as_bytes())),
+            decode_profile(&raw(3, 0, b"Pavel", "p\u{430}vel".as_bytes())),
             Err(ProfileError::Username(UsernameError::InvalidCharacters))
         );
     }
@@ -809,7 +999,7 @@ mod tests {
             );
             let compose_err = compose_profile(&p).unwrap_err();
             let decode_err =
-                decode_profile(&raw(2, 0, name.as_bytes(), username.as_bytes())).unwrap_err();
+                decode_profile(&raw(3, 0, name.as_bytes(), username.as_bytes())).unwrap_err();
             assert_eq!(compose_err, decode_err, "{name:?} / {username:?}");
         }
         // 65 chars cannot even be hand-built past the u8 length on some
@@ -817,7 +1007,7 @@ mod tests {
         let long = "a".repeat(DISPLAY_NAME_MAX_CHARS + 1);
         assert_eq!(
             compose_profile(&profile(Some(&long), None, 0)),
-            decode_profile(&raw(2, 0, long.as_bytes(), b"")).map(|_| Vec::new()),
+            decode_profile(&raw(3, 0, long.as_bytes(), b"")).map(|_| Vec::new()),
         );
     }
 
@@ -956,7 +1146,7 @@ mod tests {
     fn error_messages_never_echo_the_name() {
         let err = check_display_name("Secret\u{202E}Name").unwrap_err();
         assert!(!err.to_string().contains("Secret"));
-        let err = decode_profile(&raw(2, 0, "Secret\u{202E}".as_bytes(), b"")).unwrap_err();
+        let err = decode_profile(&raw(3, 0, "Secret\u{202E}".as_bytes(), b"")).unwrap_err();
         assert!(!err.to_string().contains("Secret"));
         assert!(!format!("{err:?}").contains("Secret"));
     }
@@ -966,23 +1156,24 @@ mod tests {
         let mut p = profile(Some("Alice"), Some("alice"), 7);
         p.account_id = Some([0xAB; ACCOUNT_ID_LEN]);
         let wire = compose_profile(&p).unwrap();
-        assert_eq!(wire.len(), 29 + 5 + 5 + 16);
+        assert_eq!(wire.len(), 31 + 5 + 5 + 16);
         assert_eq!(decode_profile(&wire).unwrap(), p);
-        // No account id: a single zero length byte, nothing after it.
+        // No account id: a single zero length byte.
         let bare = compose_profile(&profile(None, None, 1)).unwrap();
         assert_eq!(bare.len(), PROFILE_ENVELOPE_MIN_LEN);
         assert_eq!(decode_profile(&bare).unwrap().account_id, None);
+        let at = account_id_len_offset(0, 0);
         // A length byte that is neither 0 nor 16 is refused as a whole.
         let mut odd = bare.clone();
-        *odd.last_mut().unwrap() = 4;
-        odd.extend_from_slice(&[1, 2, 3, 4]);
+        odd[at] = 4;
+        insert_at(&mut odd, at + 1, &[1, 2, 3, 4]);
         assert_eq!(
             decode_profile(&odd),
             Err(ProfileError::AccountIdLength { got: 4 })
         );
         // Claims 16 bytes, carries fewer: truncated.
-        let mut short = bare.clone();
-        *short.last_mut().unwrap() = 16;
+        let mut short = bare[..=at].to_vec();
+        short[at] = 16;
         short.extend_from_slice(&[0; 8]);
         assert_eq!(decode_profile(&short), Err(ProfileError::Truncated));
     }
@@ -1015,6 +1206,251 @@ mod tests {
         );
     }
 
+    // --- v3: certificate and grants (ADR-0058) ------------------------------
+
+    #[test]
+    fn certificate_and_grants_round_trip() {
+        let mut p = profile(Some("Alice"), Some("alice"), 5);
+        p.username_certificate = Some(cert(0x5A));
+        for grants in [
+            vec![],
+            vec![grant(ReachClass::Group, 1)],
+            vec![grant(ReachClass::Member, 2)],
+            vec![grant(ReachClass::Channel, 3)],
+            vec![grant(ReachClass::Group, 4), grant(ReachClass::Member, 5)],
+            vec![grant(ReachClass::Member, 6), grant(ReachClass::Group, 7)],
+            vec![grant(ReachClass::Channel, 8), grant(ReachClass::Member, 9)],
+        ] {
+            p.grants = grants;
+            let wire = compose_profile(&p).unwrap();
+            assert_eq!(
+                wire.len(),
+                31 + 5 + 5 + USERNAME_CERT_LEN + p.grants.len() * REACH_GRANT_LEN
+            );
+            assert_eq!(decode_profile(&wire).unwrap(), p);
+        }
+    }
+
+    #[test]
+    fn a_certificate_needs_a_username() {
+        let mut p = profile(Some("Alice"), None, 5);
+        p.username_certificate = Some(cert(1));
+        assert_eq!(
+            compose_profile(&p),
+            Err(ProfileError::CertificateWithoutUsername)
+        );
+        // The same fields on the wire, hand-built past compose.
+        let mut wire = raw(3, 5, b"Alice", b"");
+        let at = account_id_len_offset(5, 0);
+        wire[at + 1] = u8::try_from(USERNAME_CERT_LEN).unwrap();
+        insert_at(&mut wire, at + 2, &cert(1));
+        assert_eq!(
+            decode_profile(&wire),
+            Err(ProfileError::CertificateWithoutUsername)
+        );
+    }
+
+    #[test]
+    fn a_certificate_of_any_other_length_is_refused() {
+        for len in [
+            1usize,
+            64,
+            USERNAME_CERT_LEN - 1,
+            USERNAME_CERT_LEN + 1,
+            255,
+        ] {
+            let mut p = profile(None, Some("alice"), 5);
+            p.username_certificate = Some(vec![0; len]);
+            assert_eq!(
+                compose_profile(&p),
+                Err(ProfileError::CertificateLength { got: len })
+            );
+            let mut wire = raw(3, 5, b"", b"alice");
+            let at = account_id_len_offset(0, 5);
+            wire[at + 1] = u8::try_from(len).unwrap();
+            insert_at(&mut wire, at + 2, &vec![0; len]);
+            assert_eq!(
+                decode_profile(&wire),
+                Err(ProfileError::CertificateLength { got: len })
+            );
+        }
+        // An empty `Some` is refused by compose (the wire has no spelling
+        // for it: a zero length is `None`).
+        let mut p = profile(None, Some("alice"), 5);
+        p.username_certificate = Some(Vec::new());
+        assert_eq!(
+            compose_profile(&p),
+            Err(ProfileError::CertificateLength { got: 0 })
+        );
+    }
+
+    #[test]
+    fn grant_bounds_are_refused_by_compose_and_decode_alike() {
+        let cases: Vec<(Vec<ReachGrant>, ProfileError)> = vec![
+            (
+                vec![
+                    grant(ReachClass::Group, 1),
+                    grant(ReachClass::Member, 2),
+                    grant(ReachClass::Channel, 3),
+                ],
+                ProfileError::TooManyGrants { count: 3 },
+            ),
+            (
+                vec![grant(ReachClass::Group, 1), grant(ReachClass::Group, 2)],
+                ProfileError::DuplicateGrantClass(ReachClass::Group.to_byte()),
+            ),
+            (
+                vec![grant(ReachClass::Contact, 1)],
+                ProfileError::GrantClassNotAllowed(ReachClass::Contact.to_byte()),
+            ),
+            (
+                vec![grant(ReachClass::Link, 1)],
+                ProfileError::GrantClassNotAllowed(ReachClass::Link.to_byte()),
+            ),
+            (
+                vec![grant(ReachClass::Reply, 1)],
+                ProfileError::GrantClassNotAllowed(ReachClass::Reply.to_byte()),
+            ),
+            (
+                vec![grant(ReachClass::Group, 1), grant(ReachClass::Fof, 1)],
+                ProfileError::GrantClassNotAllowed(ReachClass::Fof.to_byte()),
+            ),
+        ];
+        for (grants, why) in cases {
+            let mut p = profile(Some("Alice"), None, 5);
+            p.grants.clone_from(&grants);
+            assert_eq!(compose_profile(&p), Err(why), "{grants:?}");
+            // The same grants on the wire, hand-built past compose.
+            let mut wire = raw(3, 5, b"Alice", b"");
+            let count_at = account_id_len_offset(5, 0) + 2;
+            wire[count_at] = u8::try_from(grants.len()).unwrap();
+            for g in &grants {
+                wire.extend_from_slice(&g.encode());
+            }
+            assert_eq!(decode_profile(&wire), Err(why), "{grants:?}");
+        }
+    }
+
+    #[test]
+    fn a_grant_with_an_unknown_class_byte_is_refused() {
+        let mut wire = raw(3, 5, b"Alice", b"");
+        let count_at = account_id_len_offset(5, 0) + 2;
+        wire[count_at] = 1;
+        let mut g = grant(ReachClass::Group, 1).encode();
+        g[0] = 0x09;
+        wire.extend_from_slice(&g);
+        assert_eq!(
+            decode_profile(&wire),
+            Err(ProfileError::Grant(ReachError::UnknownClass(0x09)))
+        );
+    }
+
+    #[test]
+    fn a_huge_grant_count_is_refused_before_reading_grants() {
+        let mut wire = raw(3, 5, b"", b"");
+        let count_at = account_id_len_offset(0, 0) + 2;
+        wire[count_at] = 0xFF;
+        assert_eq!(
+            decode_profile(&wire),
+            Err(ProfileError::TooManyGrants { count: 255 })
+        );
+    }
+
+    #[test]
+    fn every_truncation_point_of_a_full_v3_envelope_is_refused() {
+        let mut p = profile(Some("Alice"), Some("alice"), 9);
+        p.account_id = Some([3; ACCOUNT_ID_LEN]);
+        p.username_certificate = Some(cert(4));
+        p.grants = vec![grant(ReachClass::Group, 1), grant(ReachClass::Member, 2)];
+        let wire = compose_profile(&p).unwrap();
+        for cut in PROFILE_ENVELOPE_DOMAIN_V1.len()..wire.len() {
+            assert_eq!(
+                try_unwrap_profile(&wire[..cut]),
+                Err(ProfileError::Truncated),
+                "cut at {cut}"
+            );
+        }
+        let mut long = wire;
+        long.push(0);
+        assert_eq!(
+            decode_profile(&long),
+            Err(ProfileError::TrailingBytes { count: 1 })
+        );
+    }
+
+    #[test]
+    fn debug_of_a_profile_never_prints_a_grant_seed() {
+        let mut p = profile(Some("Alice"), None, 5);
+        p.grants = vec![grant(ReachClass::Group, 0xEE)];
+        let dbg = format!("{p:?}");
+        assert!(!dbg.contains("238"), "{dbg}");
+        assert!(dbg.contains("redacted"));
+    }
+
+    /// Every single-byte substitution of a full v3 envelope: decode never
+    /// panics, and whatever still decodes re-composes to the identical bytes.
+    #[test]
+    fn every_single_byte_mutation_decodes_canonically_or_is_refused() {
+        let mut p = profile(Some("Al"), Some("abc"), 9);
+        p.account_id = Some([3; ACCOUNT_ID_LEN]);
+        p.username_certificate = Some(cert(4));
+        p.grants = vec![grant(ReachClass::Group, 1), grant(ReachClass::Member, 2)];
+        let wire = compose_profile(&p).unwrap();
+        for at in 0..wire.len() {
+            for byte in [
+                0u8,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                16,
+                0x61,
+                0x7F,
+                0x99,
+                0xFF,
+                wire[at] ^ 1,
+            ] {
+                let mut m = wire.clone();
+                m[at] = byte;
+                if let Ok(decoded) = decode_profile(&m) {
+                    assert_eq!(compose_profile(&decoded).unwrap(), m);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn v3_error_codes_are_frozen() {
+        assert_eq!(
+            ProfileError::CertificateLength { got: 1 }.code(),
+            "certificate.length"
+        );
+        assert_eq!(
+            ProfileError::CertificateWithoutUsername.code(),
+            "certificate.withoutUsername"
+        );
+        assert_eq!(
+            ProfileError::TooManyGrants { count: 3 }.code(),
+            "grants.tooMany"
+        );
+        assert_eq!(
+            ProfileError::DuplicateGrantClass(4).code(),
+            "grants.duplicateClass"
+        );
+        assert_eq!(
+            ProfileError::GrantClassNotAllowed(1).code(),
+            "grants.classNotAllowed"
+        );
+        assert_eq!(
+            ProfileError::Grant(ReachError::UnknownClass(9)).code(),
+            "grants.unknownClass"
+        );
+    }
+
     // --- order ---------------------------------------------------------------
 
     #[test]
@@ -1040,6 +1476,10 @@ mod tests {
             crate::group_name::GROUP_NAME_ENVELOPE_DOMAIN_V1,
             crate::pin::PIN_ENVELOPE_DOMAIN_V1,
             crate::profile_request::PROFILE_REQUEST_ENVELOPE_DOMAIN_V1,
+            crate::introduction::INTRODUCTION_OFFER_ENVELOPE_DOMAIN_V1,
+            crate::introduction::INTRODUCTIONS_ENVELOPE_DOMAIN_V1,
+            crate::visibility::VISIBILITY_ENVELOPE_DOMAIN_V1,
+            crate::visibility::REACH_STATE_ENVELOPE_DOMAIN_V1,
             crate::invite::REVOKE_DOMAIN_V1,
             crate::invite::OWNER_LIST_DOMAIN_V1,
             crate::invite::JOINER_TAG_SALT_DOMAIN_V1,

@@ -5152,6 +5152,20 @@ pub fn epoch_after_message(bytes: Vec<u8>) -> Option<u64> {
 mod tests {
     use super::*;
 
+    /// ADR-0058: a profile carries the discovery-signed username certificate
+    /// opaquely under `lakko-contacts`' own length constant, and
+    /// `lakko-attest` defines the layout. The two crates do not depend on
+    /// each other, so the equality is pinned here, in a crate that links
+    /// both: a layout change in one that the other missed would make every
+    /// certificate fail to travel in a profile.
+    #[test]
+    fn username_certificate_length_agrees_between_profile_and_attest() {
+        assert_eq!(
+            lakko_contacts::profile::USERNAME_CERT_LEN,
+            lakko_attest::USERNAME_CERT_LEN
+        );
+    }
+
     /// Mirror of the lakko-mls integration test driven through the FFI
     /// surface. Exercises the same lifecycle one Swift / Kotlin client would.
     #[test]

@@ -54,3 +54,10 @@ path = "fuzz_targets/channel_meta_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "member_card_open"
+path = "fuzz_targets/member_card_open.rs"
+test = false
+doc = false
+bench = false

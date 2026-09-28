@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0058: Who can find me, and why knowing someone is not permission to reach them
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-09-28, the maintainer's call)
 - **Date:** 2026-09-28
 - **Context:** Phase 3 (product); UX spec [`docs/ux/who-can-find-me.md`](../ux/who-can-find-me.md)
 - **Amends:** [ADR-0048](0048-profile-names.md) (profile envelope v3, username
@@ -125,7 +125,8 @@ envelope carries the name and no username, which is what UX section 6.2 shows.
 The `member` reach seed rides in every group's profile regardless.
 
 - **Search in 2.2 is local.** A member's client matches the typed username or
-  name against the profiles holding a grant, then runs the reach check. No
+  name against the profiles holding a grant, as loosely as its local search
+  (any part of any word), then runs the reach check. No
   server lookup, so the server learns nothing about who searched for whom.
 - **Shrink**: the owner's client, which already detects a shrink by
   signature-key set difference (ADR-0043), bumps the `group` and `member`
@@ -148,27 +149,35 @@ seeds), deleted on unsubscribe (a signed `DELETE`) and by the existing 90-day
 subscriber prune. The `channel` reach key is versioned by the channel epoch.
 Publishers upload a card like anyone else.
 
-### 4. Contacts of contacts: relayed, sealed under the searched name
+### 4. Contacts of contacts: relayed, sealed under the searched terms
 
 When 2.1 is on, the owner (Alice) builds one **introduction record**:
 
-- `tag_u = BLAKE3-derive-key("lakko/fof/tag/v1", OPRF(username))`, and
-  `tag_n` the same over `OPRF(normalised name)`;
+- the **search terms**: the username, and every prefix of 3 to 16 letters of
+  every word of the normalised name (a word shorter than 3 letters whole), at
+  most 64 name terms (section 5, "Name search");
 - the payload - identity public key, `account_id`, name, username
-  certificate, `fof` reach seed and version - sealed twice, under a key
-  derived from `OPRF(username)` and under one from `OPRF(normalised name)`.
+  certificate, `fof` reach seed and version - sealed once under a random
+  content key;
+- per term `o = OPRF(term)`: `tag = BLAKE3-derive-key("lakko/fof/tag/v1", o)`
+  and the content key wrapped under `BLAKE3-derive-key("lakko/fof/key/v1", o)`.
 
 She sends it to each contact in their 1:1 conversation. Each contact's client
 (Carol) sends her contacts (Bob) an **introductions bundle**: the records of
 all her contacts who turned 2.1 on, padded to a size bucket. Bob, searching
-`anna weber`, computes the OPRF once (one anonymous token, ADR-0054) and
-matches the tag locally, opens the record, runs the reach check, and shows the
-result.
+`anna web`, computes the OPRF of one query term (`anna`, the longest word;
+one anonymous token, ADR-0054), matches the tag locally, opens the record,
+filters by the whole query, runs the reach check, and shows the result.
 
 - **Why the OPRF.** Usernames and names are low-entropy. Keyed on the plain
   string, a bundle would let Bob recover Carol's contacts offline from a
   dictionary. Keyed on the server's OPRF, each guess costs an online,
   token-rationed evaluation, the same cost as today's public lookup.
+- **What prefix search costs** (the maintainer's call, 2026-09-28): a Bob with
+  enough tokens can walk every 3-letter prefix and so list the contacts of his
+  contacts who turned 2.1 on. The token quota is the only bound. Exact
+  whole-name matching would have made that walk impractical and was rejected
+  as poor UX.
 - **Narrowing.** Alice removes a contact: new `fof` version, the old key
   unregistered at once (so the reach check fails immediately), a new record to
   the remaining contacts. Carol removes Bob: Bob keeps Alice's record until
@@ -183,11 +192,14 @@ result.
 - **Everyone** sets `open` on the mailbox and publishes in discovery: the
   username binding (unchanged table, gains `public BOOLEAN`), and
   `display_names(oprf_hash BINARY(64), account_id BINARY(16), PRIMARY KEY
-  (oprf_hash, account_id))`, one row per account. `POST
-  /discovery/name/lookup` returns up to 20 account ids for one hash (a cap
-  chosen, not measured). The name is on the server only as an OPRF output,
-  never plaintext (invariant #1), and matching is exact over the normalised
-  name, which is what UX section 6.1 specifies.
+  (oprf_hash, account_id))`, one row per name search term. `POST
+  /discovery/name/lookup` returns up to 20 account ids for one term's hash (a
+  cap chosen, not measured); the client fetches their profiles and filters by
+  the whole query. The name is on the server only as OPRF outputs, never
+  plaintext (invariant #1). The server learns how many terms each public
+  person has (roughly their name's length) and which accounts share a term;
+  anyone with tokens can list the people in Everyone by walking prefixes,
+  which is what Everyone means.
 - **Leaving Everyone** clears `public`, deletes the name rows and the `open`
   flag. `lookup` of a non-public username answers exactly as for an
   unregistered one.
@@ -198,9 +210,16 @@ result.
   with no lookup - so ADR-0048 verification keeps working for people who do
   not answer lookups, and no endpoint confirms a guessed username for a known
   account id.
-- **Name normalisation** (NFKD, drop combining marks, case-fold, collapse
-  whitespace, trim) is one function in `lakko-contacts`, on both FFI surfaces;
-  every client and the three search paths use it.
+- **Name search** (UX section 6.1, decided 2026-09-28: word prefixes, not the
+  whole name). One implementation in `lakko-discovery-client` (not
+  `lakko-contacts`: that crate is linked by the iOS notification extension
+  and must not carry Unicode tables), on both FFI surfaces: normalisation
+  (NFKD, lowercase, drop marks, collapse whitespace, trim; at least 2
+  characters), `name_search_terms` (what a person publishes or seals under),
+  `name_query_term` (the one term a query looks up: its longest word, cut to
+  16 letters), and `name_matches_query` (the post-filter: every query word is
+  a prefix of some name word). Name terms are OPRF inputs in their own domain,
+  apart from usernames and channel handles.
 
 ### 6. Links and requests
 
@@ -282,6 +301,15 @@ The UI transition rules of UX section 11 live in `lakko_ui_rules`.
 - **A searcher who finds someone through 2.1** can tell which of their
   contacts' bundles held the record - so which of their contacts knows the
   person. Inherent to relaying; the PSI alternative removes it.
+- **An introduction record shows its issue time and its term count in the
+  clear**, so a bundle holder sees roughly how long each name is and how the
+  records were issued over time. Padding dummies copy both from real records.
+- **A bundle holding exactly one real record has no dummies**, because the
+  smallest size bucket is 1; its holder learns the relaying contact has one
+  contact with 2.1 on.
+- **Prefix search is enumerable.** With enough anonymous tokens, a searcher can
+  walk every 3-letter prefix and list the people in Everyone, and the contacts
+  of their own contacts who turned 2.1 on. The token quota is the only bound.
 - **A contact** can pass their key to anyone. As today with a username; fixed
   by the rotation on removal.
 - **`member`**: a co-member the owner hides from holds a key that the DS

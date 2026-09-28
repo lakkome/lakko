@@ -552,6 +552,9 @@ fn prepare_profile(p: FfiProfile) -> Result<RustProfile, FfiError> {
         username,
         updated_at_ms: p.updated_at_ms,
         account_id,
+        // ADR-0058 fields are not surfaced on this FFI until sprint S3.
+        username_certificate: None,
+        grants: Vec::new(),
     })
 }
 
@@ -1859,6 +1862,18 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
         IncomingEnvelope::Pin(op) => {
             pin = Some(op.into());
             (FfiIncomingEnvelopeKind::Pin, Vec::new(), None, None)
+        },
+        // ADR-0058 envelopes are classified by the core (so they never fall
+        // through to the intro-message path) but not yet surfaced on this
+        // FFI; that is sprint S3. Until then they are refused, which the
+        // caller treats as "drop, never render".
+        IncomingEnvelope::IntroductionOffer(_)
+        | IncomingEnvelope::Introductions(_)
+        | IncomingEnvelope::Visibility(_)
+        | IncomingEnvelope::ReachState(_) => {
+            return Err(FfiError::Contacts(
+                "envelope kind not yet surfaced on this FFI (ADR-0058 S3)".to_string(),
+            ));
         },
         IncomingEnvelope::IntroMessage(p) => (
             FfiIncomingEnvelopeKind::IntroMessage,

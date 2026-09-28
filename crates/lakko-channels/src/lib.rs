@@ -44,6 +44,13 @@
 //!   [`classify_post_plaintext`]. `compose_channel_meta` /
 //!   `decode_channel_meta` / `channel_meta_is_newer`.
 //!
+//! ## What's also here (ADR-0058)
+//!
+//! - [`member_card`] — a subscriber's profile sealed under the channel's
+//!   current epoch seed for the channel member list, keyed and bound per
+//!   `(channel, epoch, subscriber)` so the server cannot swap two cards.
+//!   `seal_member_card` / `member_card_epoch` / `open_member_card`.
+//!
 //! ## What's NOT here yet
 //!
 //! - **Rotation distribution wire (4c).** The fanout
@@ -86,6 +93,7 @@
 
 pub mod epoch;
 pub mod error;
+pub mod member_card;
 pub mod meta;
 pub mod post;
 pub mod rotation_policy;
@@ -94,6 +102,11 @@ pub mod subscribe;
 
 pub use epoch::{EpochId, EPOCH_ID_LEN};
 pub use error::{ChannelError, Result};
+pub use member_card::{
+    member_card_epoch, open_member_card, seal_member_card, MAX_MEMBER_CARD_PROFILE_LEN,
+    MEMBER_CARD_KEY_INFO_V1, MEMBER_CARD_MAX_LEN, MEMBER_CARD_MIN_LEN, MEMBER_CARD_VERSION_V1,
+    SUBSCRIBER_PK_LEN,
+};
 pub use meta::{
     channel_meta_is_newer, classify_post_plaintext, compose_channel_meta, decode_channel_meta,
     ChannelMeta, ChannelMetaError, ChannelMetaFieldError, PostContent, CHANNEL_META_DOMAIN_V1,

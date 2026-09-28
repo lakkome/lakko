@@ -140,17 +140,26 @@ noise.
 The Chats search field keeps its two halves ([`navigation.md`](navigation.md)
 section 4): the local filter, and the one network row.
 
-- Text that is a username (`[a-z0-9_]`, 3-32) offers **Look up @name** as
-  today.
-- Any other text of at least 2 characters offers **Find people named
-  "text"**.
-- Both ask the network and show a result list. A username returns at most
-  one person; a name can return several.
+- Local results (contacts, members of the person's groups and channels)
+  appear as the person types, from the first letter.
+- Text of at least 2 characters also offers **Search people** under them,
+  which asks the network for both the username and the name and shows one
+  result list. A username returns at most one person; a name can return
+  several.
 
-**Matching a name.** The whole name, ignoring letter case, repeated spaces
-and accents: `anna weber` finds `Anna Weber` and `Anna  Wéber`, and `anna`
-does not find `Anna Weber`. Whoever can find a person by name finds them by
-the name in their profile at the moment of the search.
+**Matching a name** (decided 2026-09-28: whole-name matching was rejected as
+poor UX). Letter case, accents and repeated spaces never matter.
+
+- **Among people this device already knows** - contacts, and the members of
+  groups and channels whose profiles it holds - matching is as loose as the
+  platform's local search: any part of any word.
+- **Through contacts of contacts and among people who chose Everyone**, the
+  network can only match the **start of a word**, from 3 letters: `ann` and
+  `web` find `Anna Weber`, `nna` does not. A word shorter than 3 letters is
+  matched whole (`ли` finds `Ли Вэй`). Several words narrow the result: `anna
+  web` finds `Anna Weber`, `anna x` does not. Typos are not forgiven.
+- Whoever can find a person by name finds them by the name in their profile
+  at the moment it was last published.
 
 A result row: avatar, name, `@username`, and the action **Add contact**,
 which opens the existing contact-request flow with its introduction. The row
@@ -243,8 +252,8 @@ The screen must not claim more than has happened.
 - The part-restoration memory of section 3 (last parts on), stored with it.
 - Per member of a group or channel: can I find this person - which decides
   Add contact and the `@username` in section 6.2.
-- Network search by username **and by name**, returning a list, with a
-  not-found answer identical to a refusal.
+- Network search by username **and by word prefix of the name**, returning a
+  list, with a not-found answer identical to a refusal.
 - Refusal of a contact request from anyone the setting does not allow, and
   from anyone who does not hold a link from the person, **before it
   reaches them** - not a filter on their device that the sender can defeat.

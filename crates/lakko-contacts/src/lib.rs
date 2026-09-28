@@ -38,6 +38,14 @@
 //!   for everyone, `updated_at_ms`): fixed-length, fail-closed, classified
 //!   by [`incoming_envelope`]; the order is [`pin::pin_is_newer`], the
 //!   authority is the receiver's role-table check.
+//! - [`reach`] — ADR-0058 reach keys: the per-class, per-scope Ed25519 keys
+//!   an identity mailbox accepts a write under, derived from the account
+//!   seed, and the [`ReachGrant`] that hands one to someone.
+//! - [`introduction`] — ADR-0058 contacts of contacts: introduction records
+//!   sealed under OPRF outputs, the offer that asks a contact to relay one,
+//!   and the padded bundle a contact relays.
+//! - [`visibility`] — ADR-0058 "who can find me" setting and the reach-key
+//!   version state, as envelopes the owner's devices exchange.
 //!
 //! ## What's NOT here (1.9b and later)
 //!
@@ -78,6 +86,7 @@ pub mod group_invite;
 pub mod group_join_attribution;
 pub mod group_name;
 pub mod incoming_envelope;
+pub mod introduction;
 pub mod invite;
 pub mod media_state;
 pub mod pin;
@@ -85,9 +94,11 @@ pub mod profile;
 pub mod profile_request;
 pub mod pseudonym;
 pub mod push_routing;
+pub mod reach;
 pub mod request;
 pub mod safety;
 pub mod username;
+pub mod visibility;
 
 pub use ack::{compose_ack, decode_and_verify_ack, ContactAck};
 pub use call_invite::{
@@ -128,6 +139,16 @@ pub use group_name::{
     GROUP_NAME_ENVELOPE_MAX_LEN, GROUP_NAME_ENVELOPE_MIN_LEN, GROUP_NAME_VERSION_V1,
 };
 pub use incoming_envelope::{dispatch_incoming_envelope, DispatchError, IncomingEnvelope};
+pub use introduction::{
+    bundle_is_newer, compose_bundle, compose_introduction, compose_introduction_offer,
+    decode_introduction_offer, decode_introductions, fof_tag, introduction_tags, open_introduction,
+    try_unwrap_introduction_offer, try_unwrap_introductions, IntroductionEntry, IntroductionError,
+    IntroductionPayload, IntroductionRecord, IntroductionsBundle, BUNDLE_SIZE_BUCKETS,
+    FOF_KEY_DOMAIN, FOF_TAG_DOMAIN, FOF_TAG_LEN, INTRODUCTIONS_ENVELOPE_DOMAIN_V1,
+    INTRODUCTION_OFFER_ENVELOPE_DOMAIN_V1, INTRODUCTION_RECORD_MAX_LEN,
+    INTRODUCTION_RECORD_MIN_LEN, MAX_BUNDLE_RECORDS, MAX_INTRODUCTION_TERMS, OPRF_OUTPUT_LEN,
+    WRAPPED_KEY_LEN,
+};
 pub use invite::{
     compute_joiner_tag, generate_blob_id, owner_list_canonical_bytes, revoke_canonical_bytes,
     sign_owner_list, sign_revocation, InviteCapability, BLOB_ID_B64URL_LEN, BLOB_ID_LEN,
@@ -143,10 +164,12 @@ pub use pin::{
     PIN_ENVELOPE_DOMAIN_V1, PIN_ENVELOPE_LEN, PIN_VERSION_V1,
 };
 pub use profile::{
-    check_display_name, compose_profile, decode_profile, is_format_char, normalize_display_name,
-    profile_is_newer, try_unwrap_profile, DisplayNameError, Profile, ProfileError,
-    DISPLAY_NAME_MAX_BYTES, DISPLAY_NAME_MAX_CHARS, FORMAT_CHAR_RANGES, PROFILE_ENVELOPE_DOMAIN_V1,
-    PROFILE_ENVELOPE_MAX_LEN, PROFILE_ENVELOPE_MIN_LEN, PROFILE_VERSION_V1,
+    check_display_name, compose_profile, decode_profile, is_format_char, is_profile_grant_class,
+    normalize_display_name, profile_is_newer, try_unwrap_profile, DisplayNameError, Profile,
+    ProfileError, DISPLAY_NAME_MAX_BYTES, DISPLAY_NAME_MAX_CHARS, FORMAT_CHAR_RANGES,
+    MAX_PROFILE_GRANTS, PROFILE_ENVELOPE_DOMAIN_V1, PROFILE_ENVELOPE_MAX_LEN,
+    PROFILE_ENVELOPE_MIN_LEN, PROFILE_VERSION_V1, PROFILE_VERSION_V2, PROFILE_VERSION_V3,
+    USERNAME_CERT_LEN,
 };
 pub use profile_request::{
     compose_profile_request, decode_profile_request, should_request_profiles,
@@ -163,6 +186,10 @@ pub use push_routing::{
     PUSH_ROUTING_SECRET_MINT_EPOCH_LEN, PUSH_ROUTING_SECRET_PAYLOAD_LEN,
     PUSH_ROUTING_SECRET_VERSION_V2,
 };
+pub use reach::{
+    reach_seed, reach_verifying_key, ReachClass, ReachError, ReachGrant, MAX_REACH_SCOPE_ID_LEN,
+    REACH_GRANT_LEN, REACH_SEED_DOMAIN, REACH_SEED_LEN,
+};
 pub use request::{compose, decode_and_verify, open_envelope, ContactRequest, ACCOUNT_ID_LEN};
 pub use safety::{
     safety_number, safety_number_bytes, SAFETY_NUMBER_DIGITS, SAFETY_NUMBER_DIGITS_PER_GROUP,
@@ -171,6 +198,13 @@ pub use safety::{
 pub use username::{
     check_canonical_username, login_handle, UsernameError, LOGIN_HANDLE_DOMAIN, LOGIN_HANDLE_LEN,
     USERNAME_MAX_LEN, USERNAME_MIN_LEN,
+};
+pub use visibility::{
+    compose_reach_state, compose_visibility, decode_reach_state, decode_visibility,
+    reach_state_is_newer, try_unwrap_reach_state, try_unwrap_visibility, visibility_is_newer,
+    GroupsForm, ReachState, ReachStateEntry, ScopeId, ScopeKind, VisibilityError, VisibilityMode,
+    VisibilitySetting, MAX_CHOSEN_SCOPES, MAX_REACH_STATE_ENTRIES, MAX_SCOPE_ID_LEN,
+    REACH_STATE_ENVELOPE_DOMAIN_V1, VISIBILITY_ENVELOPE_DOMAIN_V1,
 };
 
 /// Entry points for the fuzz harnesses in `crates/lakko-contacts/fuzz`.

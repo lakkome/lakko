@@ -44,7 +44,19 @@
 //! Key resolution and the nonce replay cache are the server's, since both
 //! are state; this crate is pure.
 //!
+//! # Reach proofs and delegations ([ADR-0058] section 2)
+//!
+//! A write to a claimed, closed identity mailbox is signed not by the
+//! identity key but by a **reach key** the owner registered
+//! ([`DsProofSigner::for_reach`]). Its proofs carry [`REACH_EPOCH`]
+//! (`u64::MAX`) in the epoch field, a value no group reaches and distinct
+//! from the identity-key mailbox proof's [`MAILBOX_EPOCH`] (0), so the server
+//! can never confuse which key table a proof must be checked against. A reach
+//! key holder may also hand one write to another key through a
+//! [`Delegation`] (module [`delegation`], which states the server contract).
+//!
 //! [ADR-0053]: ../../../docs/adr/0053-ds-journal-authorisation.md
+//! [ADR-0058]: ../../../docs/adr/0058-scoped-discovery.md
 
 #![forbid(unsafe_code)]
 
@@ -54,6 +66,13 @@ use lakko_contacts::IdentityPseudonym;
 use lakko_crypto::hash;
 
 pub use lakko_crypto::signing::{Signature, SigningKey, VerifyingKey};
+
+pub mod delegation;
+
+pub use delegation::{
+    sign_delegation, verify_delegation, Delegation, DelegationError, DELEGATION_HEADER_NAME,
+    DELEGATION_LEN, MAX_DELEGATION_TTL_MS,
+};
 
 /// The request header the proof travels in (lowercase, as HTTP/2 carries it).
 pub const PROOF_HEADER_NAME: &str = "x-lakko-ds-proof";
@@ -69,6 +88,14 @@ pub const SIGNATURE_LEN: usize = 64;
 pub const PROOF_WINDOW_MS: u64 = 120_000;
 /// The epoch label a mailbox proof carries (a mailbox has no epochs).
 pub const MAILBOX_EPOCH: u64 = 0;
+/// The epoch label a reach-key proof carries ([ADR-0058] section 2).
+///
+/// A delegate's proof carries it too. `u64::MAX`: never a group epoch, never
+/// [`MAILBOX_EPOCH`], so a server cannot check a reach proof against the
+/// wrong key table.
+///
+/// [ADR-0058]: ../../../docs/adr/0058-scoped-discovery.md
+pub const REACH_EPOCH: u64 = u64::MAX;
 /// Upper bound on the header's length; anything longer is refused unparsed.
 pub const MAX_HEADER_LEN: usize = 256;
 
@@ -331,6 +358,20 @@ impl DsProofSigner {
         }
     }
 
+    /// A reach-key signer ([ADR-0058] section 2), at [`REACH_EPOCH`]: signs a
+    /// write to a closed identity mailbox with a reach key the owner
+    /// registered. A [`Delegation`]'s delegate signs with this too, over its
+    /// own delegate seed.
+    ///
+    /// [ADR-0058]: ../../../docs/adr/0058-scoped-discovery.md
+    #[must_use]
+    pub fn for_reach(reach_seed: &[u8; 32]) -> Self {
+        Self {
+            epoch: REACH_EPOCH,
+            key: SigningKey::from_seed(reach_seed),
+        }
+    }
+
     /// The epoch this signer proves membership at.
     #[must_use]
     pub const fn epoch(&self) -> u64 {
@@ -405,6 +446,37 @@ pub mod fuzz_api {
         };
         let _ = super::verify(&proof, &req, &key, proof.unix_ms);
         true
+    }
+
+    /// Parse the bytes as a delegation and verify whatever parses.
+    ///
+    /// Raw, and as a header value when they are UTF-8, against a fixed
+    /// mailbox and clock. Asserts round-trip stability: a delegation that decodes
+    /// re-encodes to the identical bytes and header text. `true` when either
+    /// form parses.
+    ///
+    /// # Panics
+    ///
+    /// When the round trip is not stable - the fuzzer's finding.
+    #[must_use]
+    pub fn delegation_parse(data: &[u8]) -> bool {
+        const MAILBOX: [u8; 32] = [0x10; 32];
+        const NOW_MS: u64 = 1_700_000_000_000;
+        let mut parsed = false;
+        if let Ok(d) = super::Delegation::decode(data) {
+            parsed = true;
+            assert!(d.encode().as_slice() == data, "decode/encode not stable");
+            let _ = super::verify_delegation(&d, &MAILBOX, NOW_MS);
+            let _ = super::verify_delegation(&d, &d.mailbox, d.expires_at_ms.saturating_sub(1));
+        }
+        if let Ok(text) = core::str::from_utf8(data) {
+            if let Ok(d) = super::Delegation::parse_header_value(text) {
+                parsed = true;
+                assert!(d.to_header_value() == text, "header round trip not stable");
+                let _ = super::verify_delegation(&d, &MAILBOX, NOW_MS);
+            }
+        }
+        parsed
     }
 }
 
@@ -608,6 +680,52 @@ mod tests {
             &signer.mailbox_pseudonym(),
             &signer.verifying_key()
         ));
+    }
+
+    #[test]
+    fn a_reach_proof_carries_the_reach_epoch() {
+        let signer = DsProofSigner::for_reach(&[0x65u8; 32]);
+        assert_eq!(signer.epoch(), REACH_EPOCH);
+        assert_ne!(REACH_EPOCH, MAILBOX_EPOCH);
+        let r = req(b"contact request");
+        let proof = signer.sign_at(&r, 1_000_000, [0x12u8; NONCE_LEN]);
+        assert_eq!(proof.epoch, u64::MAX);
+        let parsed = Proof::parse(&proof.encode()).unwrap();
+        assert_eq!(parsed.epoch, REACH_EPOCH);
+        verify(&parsed, &r, &signer.verifying_key(), 1_000_000).unwrap();
+        // The same key's proof under the mailbox label does not verify as a
+        // reach proof: the epoch is bound.
+        let mut relabelled = parsed;
+        relabelled.epoch = MAILBOX_EPOCH;
+        assert_eq!(
+            verify(&relabelled, &r, &signer.verifying_key(), 1_000_000),
+            Err(ProofError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn a_delegate_writes_with_a_reach_signer_over_its_own_seed() {
+        let mailbox = mailbox_pseudonym(&SigningKey::from_seed(&[0x70u8; 32]).verifying_key());
+        let reach_seed = [0x71u8; 32];
+        let delegate = DsProofSigner::for_reach(&[0x72u8; 32]);
+        let d = sign_delegation(
+            &reach_seed,
+            &mailbox,
+            &delegate.verifying_key().to_bytes(),
+            1_000_000 + 60_000,
+            [0x73u8; NONCE_LEN],
+        );
+        verify_delegation(&d, &mailbox, 1_000_000).unwrap();
+        let r = req(b"welcome");
+        let proof = delegate.sign_at(&r, 1_000_000, [0x74u8; NONCE_LEN]);
+        let delegate_vk = VerifyingKey::from_bytes(&d.delegate_pk).unwrap();
+        verify(&proof, &r, &delegate_vk, 1_000_000).unwrap();
+        assert_eq!(
+            d.issuer_pk,
+            DsProofSigner::for_reach(&reach_seed)
+                .verifying_key()
+                .to_bytes()
+        );
     }
 
     #[test]
