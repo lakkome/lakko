@@ -46,6 +46,7 @@ pub mod contacts;
 pub mod device_link;
 pub mod discovery;
 pub mod ds_proof;
+pub mod l10n;
 pub mod mnemonic;
 pub mod pairing;
 pub mod pow;
@@ -476,6 +477,16 @@ pub enum FfiError {
     /// One variant on purpose: the page says "this link is damaged".
     #[error("{0}")]
     InviteLinkDamaged(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0058 interface localization — appended, for the ordinal reason
+    // above.
+    // ------------------------------------------------------------------
+    /// A catalog, translation or translation bundle was refused. A client
+    /// falls back (bundle -> built-in, built-in -> English) and never shows
+    /// this message to a person.
+    #[error("{0}")]
+    L10n(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {

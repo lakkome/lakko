@@ -33,6 +33,7 @@ members = [
     "crates/lakko-mnemonic",
     "crates/lakko-shamir",
     "crates/lakko-ui-rules",
+    "crates/lakko-l10n",
     "crates/lakko-discovery-client",
     "crates/lakko-tuf",
     "crates/lakko-ffi-uniffi",
@@ -53,6 +54,7 @@ members = [
     "services/witness",
     "services/transport-rendezvous",
     "tools/release-manifest",
+    "tools/l10n",
 ]
 # Fuzz crates require nightly + libfuzzer-sys; they opt out of this
 # workspace via their own `[workspace]` block and are listed here only so
@@ -109,6 +111,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# CLDR plural categories for lakko-l10n (ADR-0058).
+icu_plurals = "2"
+icu_locale_core = "2"
+# `sync`: ICU4X data held in `Arc`, not `Rc`, so a catalog can cross the
+# UniFFI boundary (which requires `Send + Sync`).
+icu_provider = { version = "2", features = ["sync"] }
 
 # Internal crates — path + version (cargo-deny rejects wildcard-only deps).
 # The version is kept in lockstep with workspace.package.version so they
@@ -142,6 +150,7 @@ lakko-anon-token-server = { path = "crates/lakko-anon-token-server", version = "
 lakko-mnemonic = { path = "crates/lakko-mnemonic", version = "0.0.0" }
 lakko-shamir = { path = "crates/lakko-shamir", version = "0.0.0" }
 lakko-ui-rules = { path = "crates/lakko-ui-rules", version = "0.0.0" }
+lakko-l10n = { path = "crates/lakko-l10n", version = "0.0.0" }
 lakko-discovery-client = { path = "crates/lakko-discovery-client", version = "0.0.0" }
 
 [workspace.lints.rust]

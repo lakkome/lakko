@@ -98,6 +98,8 @@ jobs:
             manifest: crates/lakko-anon-token/fuzz/Cargo.toml
           - crate: lakko-device-link
             manifest: crates/lakko-device-link/fuzz/Cargo.toml
+          - crate: lakko-l10n
+            manifest: crates/lakko-l10n/fuzz/Cargo.toml
           - crate: lakko-svc-sfu
             manifest: services/sfu/fuzz/Cargo.toml
 

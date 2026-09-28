@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-l10n"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Interface localization (ADR-0058): language resolution, the message formatter, the catalog and the signed translation bundle"
+
+[lints]
+workspace = true
+
+[dependencies]
+lakko-crypto.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# CLDR plural categories (ADR-0058 open question 1). ICU4X; its
+# `icu_locale_core` sibling was already in the tree through `idna`.
+icu_plurals.workspace = true
+icu_locale_core.workspace = true
+# Only for its `sync` feature (Arc-backed data), see the workspace pin.
+icu_provider.workspace = true

@@ -98,6 +98,7 @@ fuzz-check:
     cargo check --manifest-path crates/lakko-ds-proof/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-anon-token/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-device-link/fuzz/Cargo.toml
+    cargo check --manifest-path crates/lakko-l10n/fuzz/Cargo.toml
     cargo check --manifest-path services/sfu/fuzz/Cargo.toml
 
 # Build `lakko-ffi-wasm` for `wasm32-unknown-unknown`. CI runs this
@@ -160,8 +161,17 @@ fuzz-list:
     @ls crates/lakko-shamir/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
     @echo "lakko-mnemonic:"
     @ls crates/lakko-mnemonic/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
+    @echo "lakko-l10n:"
+    @ls crates/lakko-l10n/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
     @echo "lakko-svc-sfu:"
     @ls services/sfu/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
+
+# ADR-0058 interface catalog: validate the English source and every
+# translation under l10n/catalog (syntax, arguments, plural forms,
+# translator comments). Prints per language what is missing and which
+# security-critical strings still wait for review.
+l10n-check:
+    cargo run -q -p lakko-l10n-tool -- check
 
 # Audit-pack drift gate — every numbered invariant in
 # docs/security/{calls,transport,mls-state-machine}.md
