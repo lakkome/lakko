@@ -4386,3 +4386,26 @@ and are this gap's accepted residual. Until it lands: a leaked `group_id` is a r
 metadata and a write of garbage, and a forward from a one-to-one should carry no origin
 (ADR-0052 amendment).
 
+
+### G-43: `services/channels` authorises no publisher operation - anyone who knows a `channel_id` can rotate, deliver envelopes and read the subscriber list - **OPEN (recorded 2026-09-28 while designing [ADR-0059](../adr/0059-channel-discover.md))**
+
+**What the code does.** `create_channel` takes only `{channel_id}` and registers no key;
+publishing a post, `POST /rotate`, `/rotate/stage`, `/rotate/commit`, delivering a seed
+envelope, registering a subscriber and `GET /v1/channels/{id}/subscribers` take no
+session, no signature and no owner key (`services/channels/src/api.rs`, the router;
+`migrations/0001_init.sql`: `channels` is `id, current_epoch, next_cursor, created_at`).
+ADR-0010's planned publisher-only distribute route was never built. Checked in the
+tree on 2026-09-28; not measured against a deployment.
+
+**What it buys an attacker.** Not post content: every post is AEAD-sealed under the
+epoch seed and Ed25519-signed, and readers drop a post whose signature fails. It buys
+availability and metadata: a rotation or a staged commit nobody authorised advances the
+channel's epoch or files envelopes under it, which can leave subscribers without a seed
+they can open; the full subscriber key list and its size are public; and, because
+subscriber registration is free, the subscriber count is forgeable. A `channel_id` is
+public to anyone who resolves the channel's handle.
+
+**Closing.** ADR-0059 introduces a per-channel owner key registered at creation and uses
+it for the directory, the subscriber list and a token-gated subscribe. Gating publish,
+rotate and deliver on the same key (plus co-publisher keys the owner registers) is the
+remaining change and is not part of ADR-0059.

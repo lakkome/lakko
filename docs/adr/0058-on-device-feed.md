@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 - **Date:** 2026-09-28
 - **Context:** product completeness, new destination. UX spec:
   [`docs/ux/feed.md`](../ux/feed.md). Recommendations (Discover) are a
-  separate decision, [ADR-0059](0059-channel-discover.md) (to be written);
+  separate decision, [ADR-0059](0059-channel-discover.md);
   this ADR covers everything that needs no server change.
 
 ## Context

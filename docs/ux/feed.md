@@ -218,12 +218,16 @@ A Settings row, **Settings → Security → Channels I share**, lists every
 group the switch is on in, so it can be turned off in one place.
 
 A card's reason line counts people, never names them unless they are the
-person's contacts: "Followed by Anna and 2 others in Book club".
+person's contacts: "Followed by Anna and 2 others in Book club". Such a
+card shows name and handle only; the description loads when the person
+opens the card.
 
 ### 6.4 Listing a channel
 
-The channel manage screen (owner and co-publishers) gains **List in
-Discover**:
+The channel manage screen gains **List in Discover**, for the channel's
+**owner only** (ADR-0059: the listing is signed by a key only the account
+that created the channel can derive; co-publishers see the state, not the
+switch):
 
 - off by default;
 - when turned on: pick a topic and a language, then a dialog: "Anyone can
@@ -252,6 +256,8 @@ Discover**:
 | Discover | search returned nothing | "No channels found." |
 | Discover | a card's channel can no longer be subscribed to (delisted, deleted) | Subscribe fails: "This channel is no longer available." The card is removed |
 | Discover | rate-limited | "Too many searches. Try again in a minute." |
+| Discover | subscribe allowance used up for today | "You've subscribed to a lot of channels today. Try again tomorrow." |
+| Discover | the handle on a card does not lead to that channel | Subscribe refused: "This channel is no longer available." The card is removed |
 | Listing | refused by the server | "Couldn't list this channel. Try again." The switch returns to off |
 
 ## 8. Cross-platform shape
