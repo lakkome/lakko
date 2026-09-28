@@ -147,7 +147,6 @@ describe("the signup proof of work is cancellable", () => {
 });
 
 describe("every other auth route lost its proof of work", () => {
-  const ACCOUNT = new Uint8Array(16).fill(7);
   /** A login handle on the wire (ADR-0054 S5): base64url of 32 bytes. */
   const HANDLE = "B".repeat(43);
 
@@ -165,8 +164,8 @@ describe("every other auth route lost its proof of work", () => {
     ["/recovery-contact/recover/start", (c: AuthClient) => c.recoveryContactRecoverStart(HANDLE, ContactKind.Email, "a@b.c")],
     ["/recovery-contact/recover/finish", (c: AuthClient) => c.recoveryContactRecoverFinish(HANDLE, ContactKind.Email, "123456")],
     ["/recovery-contact/enroll/start", (c: AuthClient) => c.recoveryContactEnrollStart("tok", ContactKind.Email, "a@b.c")],
-    ["/device/authorize/redeem", (c: AuthClient) => c.deviceAuthorizeRedeem(ACCOUNT, "grant")],
-    ["/device/request", (c: AuthClient) => c.deviceRequestCreate(ACCOUNT, new Uint8Array([1]))],
+    ["/device/authorize/redeem", (c: AuthClient) => c.deviceAuthorizeRedeem("grant")],
+    ["/device/request", (c: AuthClient) => c.deviceRequestCreate(new Uint8Array(32).fill(7), new Uint8Array([1]))],
   ])("%s: one request, no pow field", async (path, run) => {
     const seen = stubFetch(() => ({ status: 401, json: {} }));
     await run(new AuthClient("/api/auth")).catch(() => undefined);

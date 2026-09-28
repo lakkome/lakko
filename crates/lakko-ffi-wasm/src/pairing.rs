@@ -1,21 +1,23 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! wasm-bindgen surface for the device-pairing QR codec
-//! (Phase 2a3b1b).
+//! wasm-bindgen surface for the device-pairing payload codec
+//! (Phase 2a3b1b; v2 since ADR-0056).
 //!
 //! Mirror of the UniFFI surface (`lakko-ffi-uniffi::pairing`) and
 //! the Rust core (`lakko_mls::pairing`). Two free functions:
 //!
 //!   * [`encode_pairing_qr`] — fresh-device side. Bundle the
-//!     account_id + KeyPackage bytes + 32-byte rendezvous
-//!     pseudonym into the wire-format payload that the QR-render
-//!     library on the JS side then turns into pixels.
+//!     32-byte login handle of the username the person typed
+//!     (`loginHandle(username)`) + KeyPackage bytes + 32-byte
+//!     rendezvous pseudonym into the wire-format payload that the
+//!     QR-render library turns into pixels, or that
+//!     `POST /device/request` carries.
 //!
-//!   * [`decode_pairing_qr`] — scanner side. Parse the wire-format
-//!     bytes the camera library handed us, verify the embedded
-//!     account_id matches the local session, return the
-//!     KeyPackage bytes + rendezvous pseudonym for the
+//!   * [`decode_pairing_qr`] — confirming side. Parse the wire-format
+//!     bytes, verify the embedded login handle matches the handle
+//!     of the local account's own username (constant time), return
+//!     the KeyPackage bytes + rendezvous pseudonym for the
 //!     downstream `addDeviceFromWire` + DS-mailbox PUT flow.
 //!
 //! See `docs/adr/0007-multi-device-identity.md` and the
@@ -26,69 +28,82 @@ use lakko_mls::error::Error as MlsError;
 use lakko_mls::pairing as inner;
 use wasm_bindgen::prelude::*;
 
-/// Build the wire-format pairing QR payload.
+/// Build the wire-format pairing payload.
 ///
-/// `account_id` is the 16-byte UUIDv7. `key_package` is the
-/// TLS-encoded `KeyPackage` from the joining device's
-/// DeviceIdentity. `rendezvous_pseudonym` is a fresh 32-byte
-/// random slot the joining device chose for this pairing
-/// session — the DS mailbox at that pseudonym is the one-shot
-/// Welcome delivery channel.
+/// `login_handle` is the 32-byte handle of the username the person
+/// typed (`loginHandle(username)`). `key_package` is the TLS-encoded
+/// `KeyPackage` from the joining device's DeviceIdentity.
+/// `rendezvous_pseudonym` is a fresh 32-byte random slot the joining
+/// device chose for this pairing session — the DS mailbox at that
+/// pseudonym is the one-shot Welcome delivery channel.
 ///
 /// # Errors
 ///
-/// `JsError` on wrong-length `account_id` (≠ 16) /
+/// `JsError` on wrong-length `login_handle` (≠ 32) /
 /// `rendezvous_pseudonym` (≠ 32), or any of the inner
 /// encode failure modes (all unreachable in practice given
 /// valid inputs).
 #[wasm_bindgen(js_name = encodePairingQr)]
 pub fn encode_pairing_qr(
-    account_id: &[u8],
+    login_handle: &[u8],
     key_package: &[u8],
     rendezvous_pseudonym: &[u8],
 ) -> Result<Vec<u8>, JsError> {
-    if account_id.len() != 16 {
-        return Err(JsError::new("account_id must be 16 bytes"));
-    }
-    if rendezvous_pseudonym.len() != inner::RENDEZVOUS_PSEUDONYM_LEN {
-        return Err(JsError::new(&format!(
-            "rendezvous_pseudonym must be {} bytes",
-            inner::RENDEZVOUS_PSEUDONYM_LEN,
-        )));
-    }
-    let mut acct = [0u8; 16];
-    acct.copy_from_slice(account_id);
-    let mut rendezvous = [0u8; inner::RENDEZVOUS_PSEUDONYM_LEN];
-    rendezvous.copy_from_slice(rendezvous_pseudonym);
-
-    inner::encode(&acct, key_package, &rendezvous).map_err(err_to_js)
+    encode_inner(login_handle, key_package, rendezvous_pseudonym).map_err(|e| JsError::new(&e))
 }
 
-/// Scanner side: parse the wire bytes, verify the embedded
-/// `account_id` matches `expected_account_id`, return a
-/// structured [`DecodedPairingQr`] handle.
+/// Confirming side: parse the wire bytes, verify the embedded login
+/// handle matches `expected_login_handle` (the handle of the local
+/// account's own username), return a structured [`DecodedPairingQr`]
+/// handle.
 ///
 /// # Errors
 ///
 /// `JsError` on:
-///   - Wrong-length `expected_account_id` (≠ 16).
+///   - Wrong-length `expected_login_handle` (≠ 32).
 ///   - Malformed wire bytes (proto-decode failure, wrong
 ///     embedded field lengths).
-///   - `expected_account_id` mismatch — the QR was scanned
-///     against a session for a different account.
-///   - Newer-version payload than this binary recognises.
+///   - A handle mismatch — the payload was made for another
+///     account's name.
+///   - Any payload version other than 2 (a v1 payload is refused).
 #[wasm_bindgen(js_name = decodePairingQr)]
 pub fn decode_pairing_qr(
     bytes: &[u8],
-    expected_account_id: &[u8],
+    expected_login_handle: &[u8],
 ) -> Result<DecodedPairingQr, JsError> {
-    if expected_account_id.len() != 16 {
-        return Err(JsError::new("expected_account_id must be 16 bytes"));
-    }
-    let mut acct = [0u8; 16];
-    acct.copy_from_slice(expected_account_id);
-    let decoded = inner::decode(bytes, &acct).map_err(err_to_js)?;
-    Ok(DecodedPairingQr { inner: decoded })
+    decode_inner(bytes, expected_login_handle)
+        .map(|inner| DecodedPairingQr { inner })
+        .map_err(|e| JsError::new(&e))
+}
+
+fn encode_inner(
+    login_handle: &[u8],
+    key_package: &[u8],
+    rendezvous_pseudonym: &[u8],
+) -> Result<Vec<u8>, String> {
+    let handle: inner::LoginHandle = login_handle
+        .try_into()
+        .map_err(|_| format!("login_handle must be {} bytes", inner::LOGIN_HANDLE_LEN))?;
+    let rendezvous: inner::RendezvousPseudonym = rendezvous_pseudonym.try_into().map_err(|_| {
+        format!(
+            "rendezvous_pseudonym must be {} bytes",
+            inner::RENDEZVOUS_PSEUDONYM_LEN
+        )
+    })?;
+    inner::encode(&handle, key_package, &rendezvous).map_err(|e: MlsError| e.to_string())
+}
+
+fn decode_inner(
+    bytes: &[u8],
+    expected_login_handle: &[u8],
+) -> Result<inner::DecodedPairingQr, String> {
+    let handle: inner::LoginHandle = expected_login_handle.try_into().map_err(|_| {
+        format!(
+            "expected_login_handle must be {} bytes",
+            inner::LOGIN_HANDLE_LEN
+        )
+    })?;
+    inner::decode(bytes, &handle).map_err(|e| e.to_string())
 }
 
 /// Decoded pairing QR — returned by [`decode_pairing_qr`].
@@ -117,6 +132,31 @@ impl DecodedPairingQr {
     }
 }
 
-fn err_to_js(e: MlsError) -> JsError {
-    JsError::new(&e.to_string())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_then_decode_round_trips_under_the_same_handle() {
+        let wire = encode_inner(&[0x11; 32], &[7u8; 64], &[9u8; 32]).unwrap();
+        let got = decode_inner(&wire, &[0x11; 32]).unwrap();
+        assert_eq!(got.key_package, vec![7u8; 64]);
+        assert_eq!(got.rendezvous_pseudonym, [9u8; 32]);
+    }
+
+    #[test]
+    fn decode_refuses_another_handle() {
+        let wire = encode_inner(&[0x11; 32], &[7u8; 64], &[9u8; 32]).unwrap();
+        let err = decode_inner(&wire, &[0x12; 32]).unwrap_err();
+        assert!(err.contains("login_handle mismatch"), "got: {err}");
+    }
+
+    #[test]
+    fn wrong_length_handles_are_refused_at_the_boundary() {
+        // A 16-byte value (an account id, the v1 shape) is not a handle.
+        assert!(encode_inner(&[0x11; 16], &[7u8; 64], &[9u8; 32]).is_err());
+        let wire = encode_inner(&[0x11; 32], &[7u8; 64], &[9u8; 32]).unwrap();
+        assert!(decode_inner(&wire, &[0x11; 16]).is_err());
+        assert!(encode_inner(&[0x11; 32], &[7u8; 64], &[9u8; 31]).is_err());
+    }
 }

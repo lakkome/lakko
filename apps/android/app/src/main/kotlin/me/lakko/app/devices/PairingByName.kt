@@ -1,0 +1,263 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+package me.lakko.app.devices
+
+import kotlinx.coroutines.CancellationException
+import me.lakko.app.auth.AuthClientArgError
+import me.lakko.app.auth.DeviceAuthorizeRedeemResult
+import me.lakko.app.auth.LoginHandleSource
+import me.lakko.app.auth.NamedHandle
+import me.lakko.app.auth.base64UrlEncodeNoPad
+import me.lakko.app.auth.namedHandleOrRefuse
+import uniffi.lakko_ffi_uniffi.DecodedPairingQr
+import uniffi.lakko_ffi_uniffi.FfiException
+
+/*
+ * ADR-0056 - a fresh device names its account by the login handle of the
+ * username the person types, never by account id. Nothing before a session
+ * carries the account id: the pairing payload holds the handle, the confirming
+ * device checks it against the handle of its own username, and the fresh
+ * device learns its account id from the grant redeem response.
+ *
+ * The decisions here take their native dependencies as parameters so the host
+ * JVM tests run without the native library.
+ */
+
+/** Shown in place of the pairing affordances on an account with no username
+ *  (a guest): neither side of a pairing can name the account. */
+public const val PAIRING_NO_USERNAME_COPY: String = "Set a username first to add another device."
+
+/** A scanned code whose login handle is not this account's. */
+public const val PAIRING_WRONG_ACCOUNT_COPY: String =
+    "This code is for a different account. Check that the new device uses the same username as this one."
+
+/** A code from a different pairing version (the other device runs another Lakko version). */
+public const val PAIRING_UNSUPPORTED_COPY: String =
+    "This code comes from a different version of Lakko. Update Lakko on both devices and try again."
+
+/** Any other refusal of a scanned code (a payload version this build does not
+ *  read, a malformed payload). */
+public const val PAIRING_FAILED_COPY: String = "Pairing failed. Try again."
+
+/** The typed-nothing refusal on the fresh-device side. */
+public const val PAIRING_NO_NAME_COPY: String = "Enter your username first."
+
+/**
+ * The name a fresh device's pairing payload carries: the [typed] name when
+ * there is one, else [fallbackUsername] (the account cached on this device).
+ *
+ * @throws AuthClientArgError with [PAIRING_NO_NAME_COPY] when there is neither,
+ *   or with the username rule's own copy when the name fails the rule.
+ */
+public fun pairingNameFor(
+    typed: String,
+    fallbackUsername: String?,
+    source: LoginHandleSource,
+): NamedHandle {
+    val trimmed = typed.trim()
+    val name = when {
+        trimmed.isNotEmpty() -> trimmed
+        !fallbackUsername.isNullOrBlank() -> fallbackUsername
+        else -> throw AuthClientArgError(PAIRING_NO_NAME_COPY)
+    }
+    return namedHandleOrRefuse(source, name)
+}
+
+/**
+ * The login handle of this account's own [username], or `null` for an account
+ * with no username (a guest) or a stored name the rule refuses: such an account
+ * can neither show nor confirm a pairing code.
+ */
+public fun ownPairingHandle(username: String?, source: LoginHandleSource): ByteArray? {
+    if (username.isNullOrBlank()) return null
+    return try {
+        source.handleFor(username).handle
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        null
+    }
+}
+
+/** What a confirming device makes of a scanned code. */
+public sealed interface PairingScanDecision {
+    /** The code is for this account; confirm, then run the scan flow. */
+    public class Accepted(public val decoded: DecodedPairingQr) : PairingScanDecision
+
+    /** Refused before any MLS commit; [copy] is what the scanner shows. */
+    public data class Refused(public val copy: String) : PairingScanDecision
+}
+
+/**
+ * Decode a scanned pairing payload against the handle of this account's own
+ * username. [decode] is `parsePairingQr(wire, expectedLoginHandle)`.
+ *
+ * A handle mismatch (the core's `Group` error, "login_handle mismatch") shows
+ * [PAIRING_WRONG_ACCOUNT_COPY]; an account with no username shows
+ * [PAIRING_NO_USERNAME_COPY]; everything else (a version other than 2, a
+ * malformed payload) shows [PAIRING_FAILED_COPY].
+ */
+public fun decodeForOwnAccount(
+    scanned: ByteArray,
+    ownUsername: String?,
+    source: LoginHandleSource,
+    decode: (wire: ByteArray, expectedLoginHandle: ByteArray) -> DecodedPairingQr,
+): PairingScanDecision {
+    val handle = ownPairingHandle(ownUsername, source)
+        ?: return PairingScanDecision.Refused(PAIRING_NO_USERNAME_COPY)
+    return try {
+        PairingScanDecision.Accepted(decode(scanned, handle))
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: FfiException.Group) {
+        if (e.message.orEmpty().contains(LOGIN_HANDLE_MISMATCH)) {
+            PairingScanDecision.Refused(PAIRING_WRONG_ACCOUNT_COPY)
+        } else {
+            PairingScanDecision.Refused(PAIRING_FAILED_COPY)
+        }
+    } catch (_: FfiException.Unsupported) {
+        PairingScanDecision.Refused(PAIRING_UNSUPPORTED_COPY)
+    } catch (_: Exception) {
+        PairingScanDecision.Refused(PAIRING_FAILED_COPY)
+    } finally {
+        handle.fill(0)
+    }
+}
+
+/** The core's error body for a payload made for another account's name. */
+internal const val LOGIN_HANDLE_MISMATCH: String = "login_handle mismatch"
+
+/** Result of [completeJoinByName]. */
+public sealed interface JoinByNameResult {
+    /** The grant redeemed and the joined group is that account's DeviceGroup. */
+    public class Joined(
+        public val accountId: ByteArray,
+        public val sessionToken: String,
+        public val sessionExpiresAtMs: Long,
+    ) : JoinByNameResult
+
+    /** The redeem failed (expired, used, network): no account id, no session. */
+    public data object RedeemFailed : JoinByNameResult
+
+    /** The redeem named an account whose DeviceGroup is not the one joined. */
+    public data object WrongGroup : JoinByNameResult
+}
+
+/**
+ * The fresh device's last step before it knows its account: redeem the grant
+ * (the request carries the grant only) and check that the group it joined is
+ * the DeviceGroup of the account the redeem names. Nothing is persisted before
+ * this returns [JoinByNameResult.Joined].
+ *
+ * @param redeem `POST /device/authorize/redeem` with the base64url grant.
+ * @param groupIdFor `deviceGroupIdFor(accountId)`.
+ */
+public suspend fun completeJoinByName(
+    joinedGroupId: ByteArray,
+    grantToken: ByteArray,
+    redeem: suspend (grantTokenB64: String) -> DeviceAuthorizeRedeemResult,
+    groupIdFor: (accountId: ByteArray) -> ByteArray,
+): JoinByNameResult {
+    val redeemed = try {
+        redeem(base64UrlEncodeNoPad(grantToken))
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        return JoinByNameResult.RedeemFailed
+    }
+    val expected = try {
+        groupIdFor(redeemed.accountId)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        return JoinByNameResult.WrongGroup
+    }
+    if (!expected.contentEquals(joinedGroupId)) return JoinByNameResult.WrongGroup
+    return JoinByNameResult.Joined(
+        accountId = redeemed.accountId,
+        sessionToken = redeemed.sessionToken,
+        sessionExpiresAtMs = redeemed.sessionExpiresAtMs,
+    )
+}
+
+/**
+ * The native and network steps of a join by name, in the order
+ * [runJoinByName] calls them. The production implementation sits in
+ * [PairingOrchestrator.JoinSession] over the plain-`Group` join; host tests
+ * pass a fake.
+ */
+public interface JoinByNameSteps {
+    /** The scanner's sealed recovery row, or `null` when it never came. */
+    public suspend fun pollRecoveryRow(): ByteArray?
+
+    /** Open the row under the joined group's exporter key and parse it. */
+    public fun openRecoveryRow(sealed: ByteArray): RecoveryPayload.ParsedRecoveryPayload
+
+    /** The MLS group id of the group the Welcome joined. */
+    public fun joinedGroupId(): ByteArray
+
+    /** `POST /device/authorize/redeem` with the base64url grant only. */
+    public suspend fun redeem(grantTokenB64: String): DeviceAuthorizeRedeemResult
+
+    /** `deviceGroupIdFor(accountId)`. */
+    public fun groupIdFor(accountId: ByteArray): ByteArray
+
+    /** Persist the device seed and the DeviceGroup under [accountId], then
+     *  fetch and apply the history and state bundles. Called only after
+     *  the redeem named the account and its DeviceGroup id matched. */
+    public suspend fun persistAs(accountId: ByteArray)
+}
+
+/**
+ * The ordering of a join by name (ADR-0056): open the recovery row, redeem the
+ * grant, check that the DeviceGroup of the account the redeem named is the
+ * group the Welcome joined, and only then persist anything. A Welcome for
+ * another account's group is refused after the redeem with nothing persisted
+ * and the seed zeroized.
+ *
+ * @return `null` when the recovery row never came (nothing persisted); an
+ *   outcome with no session and no account id when the redeem failed
+ *   (nothing persisted; the caller refuses a seed-only restore); the full
+ *   outcome after [JoinByNameSteps.persistAs].
+ * @throws IllegalStateException on a group mismatch.
+ */
+public suspend fun runJoinByName(steps: JoinByNameSteps): PairingOrchestrator.JoinRecoveryOutcome? {
+    val sealed = steps.pollRecoveryRow() ?: return null
+    val parsed = steps.openRecoveryRow(sealed)
+    var phraseSeed: ByteArray? = parsed.phraseSeed
+    try {
+        val result = completeJoinByName(
+            joinedGroupId = steps.joinedGroupId(),
+            grantToken = parsed.grantToken,
+            redeem = steps::redeem,
+            groupIdFor = steps::groupIdFor,
+        )
+        val outcome = when (result) {
+            // No account id, so nothing can be persisted: the caller refuses
+            // a seed-only outcome and the person retries with a fresh code.
+            JoinByNameResult.RedeemFailed ->
+                PairingOrchestrator.JoinRecoveryOutcome(parsed.phraseSeed, null, null, null)
+            JoinByNameResult.WrongGroup -> throw IllegalStateException(JOIN_WRONG_ACCOUNT_COPY)
+            is JoinByNameResult.Joined -> {
+                steps.persistAs(result.accountId)
+                PairingOrchestrator.JoinRecoveryOutcome(
+                    phraseSeed = parsed.phraseSeed,
+                    sessionToken = result.sessionToken,
+                    sessionExpiresAtMs = result.sessionExpiresAtMs,
+                    accountId = result.accountId,
+                )
+            }
+        }
+        phraseSeed = null
+        return outcome
+    } finally {
+        phraseSeed?.fill(0)
+        parsed.grantToken.fill(0)
+    }
+}
+
+/** The fresh device's refusal when the redeemed account's DeviceGroup is not
+ *  the group it joined. */
+public const val JOIN_WRONG_ACCOUNT_COPY: String =
+    "Could not confirm the account on the other device. Try again."

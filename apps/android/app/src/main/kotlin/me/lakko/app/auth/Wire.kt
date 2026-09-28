@@ -228,11 +228,9 @@ data class DeviceAuthorizeStartResponse(
  *  authorization and the server's counters the anti-spam gate. */
 @Serializable
 data class DeviceAuthorizeRedeemRequest(
-    /** URL-safe base64 (no pad) of the 16-byte account id the fresh
-     *  device learned from the pairing QR. */
-    val account_id_b64: String,
     /** URL-safe base64 (no pad) of the raw 32-byte grant token
-     *  received over the rendezvous channel. */
+     *  received over the rendezvous channel. The grant alone names
+     *  the account (ADR-0056); the response carries its id. */
     val grant_token_b64: String,
 )
 

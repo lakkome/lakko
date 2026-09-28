@@ -68,6 +68,12 @@ struct DeviceSession {
     let accountIdB64: String
     let sessionToken: String
     let accountIdentitySeed: Data
+    /// The account's canonical username; empty for a guest (ADR-0032).
+    let username: String
+
+    /// ADR-0056 — the login handle of this account's own username, which a
+    /// pairing code must name; `nil` for a guest, who cannot add a device.
+    var loginHandle: Data? { ownLoginHandle(username: username) }
 
     @MainActor
     static func current(_ authRepository: AuthRepository) -> DeviceSession? {
@@ -81,7 +87,8 @@ struct DeviceSession {
             accountIdBytes: secrets.accountId,
             accountIdB64: account.accountIdB64,
             sessionToken: secrets.sessionToken,
-            accountIdentitySeed: secrets.accountIdentitySeed
+            accountIdentitySeed: secrets.accountIdentitySeed,
+            username: account.username
         )
     }
 }
@@ -132,7 +139,15 @@ struct AddDeviceScreen: View {
                 Text("Linking is end-to-end encrypted between your two devices.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                if let session = DeviceSession.current(authRepository) {
+                if let session = DeviceSession.current(authRepository),
+                   session.loginHandle == nil {
+                    // ADR-0056 — a pairing code names the account by its
+                    // username; a guest has none, so neither side can run.
+                    Text(PairingScanFailure.needsUsernameCopy)
+                        .font(.footnote)
+                        .foregroundStyle(Color.lakkoTextMuted)
+                } else if let session = DeviceSession.current(authRepository),
+                          let handle = session.loginHandle {
                     Picker("", selection: $side) {
                         ForEach(Side.allCases) { s in
                             Text(s.label).tag(s)
@@ -146,11 +161,13 @@ struct AddDeviceScreen: View {
                     switch side {
                     case .show:
                         PairView(
+                            loginHandle: handle,
                             accountIdBytes: session.accountIdBytes,
                             accountIdB64: session.accountIdB64
                         )
                     case .scan:
                         ScanView(
+                            ownLoginHandle: handle,
                             accountIdBytes: session.accountIdBytes,
                             accountIdB64: session.accountIdB64,
                             accountIdentitySeed: session.accountIdentitySeed,
@@ -241,6 +258,8 @@ struct RecoveryFactorsScreen: View {
 
 private struct PairView: View {
 
+    /// ADR-0056 — this account's login handle, which the QR carries.
+    let loginHandle: Data
     let accountIdBytes: Data
     let accountIdB64: String
 
@@ -313,6 +332,7 @@ private struct PairView: View {
         state = .preparing
         do {
             let s = try PairingOrchestrator.prepareJoinFlow(
+                loginHandle: loginHandle,
                 accountIdBytes: accountIdBytes,
                 accountIdB64: accountIdB64
             )
@@ -363,6 +383,9 @@ private struct PairView: View {
 
 private struct ScanView: View {
 
+    /// ADR-0056 — this account's own login handle; a scanned code must
+    /// name it.
+    let ownLoginHandle: Data
     let accountIdBytes: Data
     let accountIdB64: String
     /// ADR-0018 factor (a) — the scanner's cached AccountIdentity
@@ -498,6 +521,7 @@ private struct ScanView: View {
                 )
                 let scanned = try await PairingOrchestrator.runScanFlow(
                     scannedBytes: bytes,
+                    ownLoginHandle: ownLoginHandle,
                     accountIdBytes: accountIdBytes,
                     accountIdB64: accountIdB64,
                     recovery: recovery
@@ -508,7 +532,7 @@ private struct ScanView: View {
                 onDeviceAdded(scanned.newDeviceKey)
                 state = .done
             } catch {
-                state = .error(error.localizedDescription)
+                state = .error(PairingScanFailure.userFacing(error))
             }
         }
     }

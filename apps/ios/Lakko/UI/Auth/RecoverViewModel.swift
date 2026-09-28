@@ -61,8 +61,8 @@ public final class RecoverViewModel: ObservableObject {
         }
     }
 
-    /// ADR-0018 — non-nil once the AnotherDevice mode resolved the
-    /// typed username to an account id via discovery.
+    /// ADR-0018 / ADR-0056 — non-nil once the AnotherDevice mode turned the
+    /// typed username into its login handle (no lookup).
     @Published public private(set) var deviceRestoreTarget: DeviceRestoreTarget?
     @Published public var phrase: String = ""
     @Published public var sharesInput: String = ""
@@ -254,59 +254,48 @@ public final class RecoverViewModel: ObservableObject {
 
     // MARK: - ADR-0018 factor (a), path (b) — another-device restore
 
-    /// Resolve the typed username to an account id via the discovery
-    /// service so the AnotherDevice restore can build the pairing QR.
-    /// Anonymous (OPRF-blinded lookup, no session needed). Mirror of
-    /// Android's `RecoverViewModel.lookupForDeviceRestore`.
-    public func lookupForDeviceRestore() {
+    /// Turn the typed username into the login handle the pairing code names
+    /// the account by (ADR-0056), so the AnotherDevice restore can show its
+    /// QR. No network: nothing before a session looks the account up, and
+    /// the account id is learned from the grant redeem after the other
+    /// device confirms. A name that breaks the username rule gets its
+    /// reason copy.
+    public func prepareDeviceRestore() {
         guard !busy else { return }
-        let typed = username.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !typed.isEmpty else {
-            error = "Enter your username first."
-            return
-        }
-        busy = true
-        error = nil
-        Task {
-            do {
-                let discovery = DiscoveryClient()
-                let resolved = try await discovery.lookup(username: typed)
-                guard let account = resolved.account else {
-                    busy = false
-                    error = "No account found for that username."
-                    return
-                }
-                deviceRestoreTarget = DeviceRestoreTarget(
-                    accountIdBytes: account,
-                    accountIdB64: base64Encode(account),
-                    username: resolved.normalisedUsername
-                )
-                busy = false
-            } catch {
-                busy = false
-                self.error = (error as? LocalizedError)?.errorDescription
-                    ?? "Lookup failed. Try again."
-            }
+        do {
+            let name = try LoginName.make(
+                username,
+                emptyError: AuthClientError.argument("Enter your username first.")
+            )
+            deviceRestoreTarget = DeviceRestoreTarget(
+                username: name.canonical,
+                loginHandle: name.handle
+            )
+            error = nil
+        } catch {
+            self.error = (error as? LocalizedError)?.errorDescription
+                ?? "Enter your username first."
         }
     }
 
     /// Complete the no-password restore with the identity + redeemed
-    /// session token received from the other device. Async passthrough
-    /// to ``AuthRepository/completeFromDeviceRestore(accountIdBytes:accountIdB64:username:phraseSeed:sessionToken:sessionExpiresAtMs:)``;
+    /// session token received from the other device. The account id is the
+    /// one the grant redeem returned (ADR-0056). Async passthrough to
+    /// ``AuthRepository/completeFromDeviceRestore(accountIdBytes:accountIdB64:username:phraseSeed:sessionToken:sessionExpiresAtMs:)``;
     /// verification failures propagate to the calling panel. Requires
-    /// the redeemed token (without it this device has no ACCESS) —
-    /// refused otherwise with a clear message. Mirror of Android's
-    /// `RecoverViewModel.completeFromDeviceRestore`.
+    /// the redeemed token and account id (without them this device has no
+    /// ACCESS) — refused otherwise with a clear message.
     public func completeFromDeviceRestore(
         outcome: PairingOrchestrator.JoinRecoveryOutcome
     ) async throws {
         guard let target = deviceRestoreTarget else {
             throw AuthClientError.argument(
-                "no resolved account — look up your username first"
+                "no username — enter your username first"
             )
         }
         guard let token = outcome.sessionToken,
-              let expiry = outcome.sessionExpiresAtMs else {
+              let expiry = outcome.sessionExpiresAtMs,
+              let accountIdBytes = outcome.accountId else {
             // Seed-only outcome: the grant redeem failed, so this
             // device has IDENTITY but no ACCESS. Refuse rather than
             // leave a half-restored profile; the user retries (a
@@ -320,8 +309,8 @@ public final class RecoverViewModel: ObservableObject {
             )
         }
         try await repository.completeFromDeviceRestore(
-            accountIdBytes: target.accountIdBytes,
-            accountIdB64: target.accountIdB64,
+            accountIdBytes: accountIdBytes,
+            accountIdB64: base64Encode(accountIdBytes),
             username: target.username,
             phraseSeed: outcome.phraseSeed,
             sessionToken: token,
@@ -551,17 +540,15 @@ public final class RecoverViewModel: ObservableObject {
     public static let minPasswordLength: Int = 8
 }
 
-/// ADR-0018 factor (a), path (b) — the resolved restore target the
-/// AnotherDevice mode pairs against. Mirror of Android's
-/// `DeviceRestoreTarget`.
+/// ADR-0018 factor (a), path (b) — who the AnotherDevice mode pairs as:
+/// the canonical username typed and its login handle (ADR-0056). No account
+/// id: the fresh device learns it from the grant redeem.
 public struct DeviceRestoreTarget: Equatable {
-    public let accountIdBytes: Data
-    public let accountIdB64: String
     public let username: String
+    public let loginHandle: Data
 
-    public init(accountIdBytes: Data, accountIdB64: String, username: String) {
-        self.accountIdBytes = accountIdBytes
-        self.accountIdB64 = accountIdB64
+    public init(username: String, loginHandle: Data) {
         self.username = username
+        self.loginHandle = loginHandle
     }
 }

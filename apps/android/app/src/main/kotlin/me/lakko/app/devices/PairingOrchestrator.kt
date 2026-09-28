@@ -7,10 +7,15 @@ import android.content.Context
 import me.lakko.app.auth.AuthClient
 import me.lakko.app.auth.DeviceIdentityStore
 import me.lakko.app.auth.base64UrlDecodeNoPad
-import me.lakko.app.auth.base64UrlEncodeNoPad
+import me.lakko.app.auth.base64Encode
 import me.lakko.app.ds.DsClient
+import java.security.SecureRandom
+import uniffi.lakko_ffi_uniffi.DecodedPairingQr
 import uniffi.lakko_ffi_uniffi.DeviceGroup
+import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.Identity
+import uniffi.lakko_ffi_uniffi.deviceGroupIdFor
+import uniffi.lakko_ffi_uniffi.loadDeviceGroup
 import uniffi.lakko_ffi_uniffi.openWithKey
 import uniffi.lakko_ffi_uniffi.sealWithKey
 
@@ -34,8 +39,9 @@ import uniffi.lakko_ffi_uniffi.sealWithKey
  *     `accept(welcomeBytes)`.
  *
  *   * [runScanFlow] — scanner-device side. One-shot suspend
- *     function: decode the scanned QR, add the new device's
- *     leaf, publish the Welcome, persist the snapshot.
+ *     function: take a payload already checked against this
+ *     account's login handle ([decodeForOwnAccount]), add the new
+ *     device's leaf, publish the Welcome, persist the snapshot.
  */
 public object PairingOrchestrator {
 
@@ -45,6 +51,9 @@ public object PairingOrchestrator {
      * AccountIdentity seed (IDENTITY — always present when this
      * object is non-null); the session token pair is ACCESS and is
      * `null` when the grant redeem failed (seed-only degradation).
+     * `accountId` is the raw 16-byte account id the redeem response
+     * named (ADR-0056: the only place a device that joined by name
+     * learns it), `null` exactly when the redeem failed.
      * The consumer (AuthRepository.completeFromPairing /
      * completeFromDeviceRestore) owns zeroizing `phraseSeed`.
      */
@@ -52,6 +61,17 @@ public object PairingOrchestrator {
         public val phraseSeed: ByteArray,
         public val sessionToken: String?,
         public val sessionExpiresAtMs: Long?,
+        public val accountId: ByteArray?,
+    )
+
+    /**
+     * An account this device already knows (it holds a session or a
+     * parked login for it). A join for a known account checks the
+     * Welcome against its DeviceGroup id up front, as before ADR-0056.
+     */
+    public class KnownAccount(
+        public val accountIdBytes: ByteArray,
+        public val accountIdB64: String,
     )
 
     /**
@@ -67,6 +87,19 @@ public object PairingOrchestrator {
      *      DeviceIdentity + post-join DeviceGroup FFI handles
      *      are freed.
      *
+     * Two shapes (ADR-0056):
+     *
+     *   * **known account** — `known` is set; the DeviceIdentity
+     *     seed is the account's persisted one and the Welcome is
+     *     joined as that account's DeviceGroup.
+     *   * **by name** — `known` is `null`; the device has no
+     *     account id and must not look one up. The DeviceIdentity
+     *     seed lives in memory only, the Welcome is joined as a
+     *     plain group, and nothing is persisted until the grant
+     *     redeem names the account and that account's DeviceGroup
+     *     id matches the joined group. This shape requires the
+     *     recovery row (`accept(recovery = true)`).
+     *
      * Idempotent on `dispose()` — safe to call multiple times.
      */
     public class JoinSession internal constructor(
@@ -76,8 +109,10 @@ public object PairingOrchestrator {
         /** 32-byte rendezvous pseudonym surfaced for debug. */
         public val rendezvous: ByteArray,
         private val identity: Identity,
-        private val accountIdBytes: ByteArray,
-        private val accountIdB64: String,
+        private val known: KnownAccount?,
+        /** By-name only: the in-memory DeviceIdentity seed, persisted
+         *  once the account is known, zeroized on dispose. */
+        private val unboundDeviceSeed: ByteArray?,
         private val context: Context,
     ) {
         private var group: DeviceGroup? = null
@@ -96,18 +131,22 @@ public object PairingOrchestrator {
          * DeviceGroup with the Welcome the scanner published,
          * persist the resulting snapshot.
          *
-         * Throws when the embedded `group_id` doesn't match the
-         * deterministic `BLAKE3("lakko-device-group/v1" ||
-         * account_id)` value for this account — defensive
-         * against a misrouted Welcome from a different user.
+         * For a known account, throws when the embedded
+         * `group_id` doesn't match the deterministic
+         * `BLAKE3("lakko-device-group/v1" || account_id)` value —
+         * defensive against a misrouted Welcome from a different
+         * user. For a join by name the same check runs after the
+         * redeem names the account (see [JoinSession]).
          *
          * With `recovery = true` (ADR-0018 factor (a)) also polls
          * past the Welcome for the scanner's sealed recovery row,
          * opens it under the shared post-join exporter key, redeems
          * the grant for a session token, and returns the typed
          * outcome. Absence of the row (older scanner, or its
-         * best-effort half failed) returns `null` — the join itself
-         * is unaffected and the caller falls back to phrase entry.
+         * best-effort half failed) returns `null` — for a known
+         * account the join itself is unaffected and the caller
+         * falls back to phrase entry; for a join by name nothing
+         * was persisted.
          */
         public suspend fun accept(
             welcomeBytes: ByteArray,
@@ -115,13 +154,15 @@ public object PairingOrchestrator {
             recovery: Boolean = false,
         ): JoinRecoveryOutcome? {
             check(!disposed) { "JoinSession.accept called after dispose" }
+            val account = known
+                ?: return acceptByName(welcomeBytes, welcomeCursor, recovery)
             // The deterministic group_id check inside
             // DeviceGroup.joinFromWelcome rejects a misrouted
             // Welcome before any state advance.
             val joined = DeviceGroup.joinFromWelcome(
                 welcome = welcomeBytes,
                 identity = identity,
-                accountId = accountIdBytes,
+                accountId = account.accountIdBytes,
             )
             group = joined
             // ADR-0050 — a device joining by pairing is admitted to the
@@ -130,85 +171,185 @@ public object PairingOrchestrator {
             DeviceGroupLifecycle.persistSnapshot(
                 context = context,
                 identity = identity,
-                accountIdB64 = accountIdB64,
+                accountIdB64 = account.accountIdB64,
             )
-
-            // Phase 2a3d8-ui — history catch-up bundle.
             if (welcomeCursor != null) {
-                try {
-                    val outcome = WelcomeCourier.pollForHistoryBundle(
-                        rendezvousPseudonym = rendezvous,
-                        welcomeCursor = welcomeCursor,
-                    )
-                    if (outcome is WelcomeCourier.HistoryBundleOutcome.Received) {
-                        val secret = joined.historyBundleSecret(identity)
-                        val applied = HistoryBundleCodec.applyToMessageLog(
-                            context = context,
-                            accountIdB64 = accountIdB64,
-                            secret = secret,
-                            sealedBytes = outcome.sealedBytes,
-                        )
-                        android.util.Log.i(
-                            "PairingOrchestrator",
-                            "history catch-up: applied $applied rows",
-                        )
-                    }
-                } catch (cause: Throwable) {
-                    android.util.Log.w(
-                        "PairingOrchestrator",
-                        "history bundle apply failed",
-                        cause,
-                    )
-                }
-            }
-
-            // ADR-0050 section 2.9 — the state bundle (contacts, pins, known
-            // group ids), best-effort like the history bundle.
-            if (welcomeCursor != null) {
-                var key: ByteArray? = null
-                try {
-                    val sealed = StateBundle.poll(rendezvous, welcomeCursor)
-                    if (sealed != null) {
-                        key = joined.exportSecret(
-                            identity,
-                            StateBundle.EXPORTER_LABEL,
-                            rendezvous,
-                            StateBundle.EXPORTER_KEY_LENGTH.toUInt(),
-                        )
-                        val bundle = StateBundle.decode(openWithKey(key, sealed))
-                        if (bundle != null) {
-                            val (contacts, pins) = StateBundle.apply(context, bundle)
-                            android.util.Log.i(
-                                "PairingOrchestrator",
-                                "state bundle: $contacts contacts, $pins pins",
-                            )
-                        }
-                    }
-                } catch (cause: kotlinx.coroutines.CancellationException) {
-                    throw cause
-                } catch (cause: Throwable) {
-                    android.util.Log.w("PairingOrchestrator", "state bundle apply failed", cause)
-                } finally {
-                    key?.fill(0)
-                }
+                applyCatchUpBundles(joined, account.accountIdB64, welcomeCursor)
             }
 
             // ADR-0018 factor (a) — opt-in recovery payload.
             if (recovery && welcomeCursor != null) {
-                return runJoinerRecovery(joined, welcomeCursor)
+                return runJoinerRecovery(joined, account, welcomeCursor)
             }
             return null
+        }
+
+        /**
+         * ADR-0056 join by name: join the Welcome as a plain group,
+         * open the recovery row, redeem the grant (grant only), and
+         * only when the redeemed account's DeviceGroup id is the
+         * joined group persist the DeviceIdentity seed and the
+         * snapshot under that account.
+         */
+        private suspend fun acceptByName(
+            welcomeBytes: ByteArray,
+            welcomeCursor: Long?,
+            recovery: Boolean,
+        ): JoinRecoveryOutcome? {
+            val seed = checkNotNull(unboundDeviceSeed) { "join by name without a device seed" }
+            check(recovery && welcomeCursor != null) {
+                "a join by name needs the recovery row: without it the account stays unknown"
+            }
+            // The plain-Group join: the DeviceGroup join would check the
+            // Welcome against an account id this device does not have yet.
+            // The exporter is the same one DeviceGroup.exportSecret
+            // delegates to, so the recovery row opens under it.
+            val plain = Group.joinFromWelcome(welcome = welcomeBytes, identity = identity)
+            try {
+                return runJoinByName(
+                    object : JoinByNameSteps {
+                        override suspend fun pollRecoveryRow(): ByteArray? {
+                            val row = try {
+                                RecoveryPayload.pollForRecoveryPayload(
+                                    rendezvousPseudonym = rendezvous,
+                                    afterCursor = welcomeCursor,
+                                )
+                            } catch (cause: kotlinx.coroutines.CancellationException) {
+                                throw cause
+                            } catch (cause: Throwable) {
+                                android.util.Log.w("PairingOrchestrator", "recovery payload poll failed", cause)
+                                return null
+                            }
+                            return (row as? RecoveryPayload.RecoveryPayloadOutcome.Received)?.sealedBlob
+                        }
+
+                        override fun openRecoveryRow(sealed: ByteArray): RecoveryPayload.ParsedRecoveryPayload {
+                            var key: ByteArray? = null
+                            var payload: ByteArray? = null
+                            try {
+                                key = plain.exportSecret(
+                                    identity,
+                                    RecoveryPayload.RECOVERY_EXPORTER_LABEL,
+                                    rendezvous,
+                                    RecoveryPayload.RECOVERY_EXPORTER_KEY_LENGTH.toUInt(),
+                                )
+                                payload = openWithKey(key, sealed)
+                                return RecoveryPayload.parseRecoveryPayload(payload)
+                            } finally {
+                                key?.fill(0)
+                                payload?.fill(0)
+                            }
+                        }
+
+                        override fun joinedGroupId(): ByteArray = plain.groupId()
+
+                        override suspend fun redeem(grantTokenB64: String) =
+                            AuthClient().use { client -> client.deviceAuthorizeRedeem(grantTokenB64) }
+
+                        override fun groupIdFor(accountId: ByteArray): ByteArray =
+                            deviceGroupIdFor(accountId)
+
+                        override suspend fun persistAs(accountId: ByteArray) {
+                            val accountIdB64 = base64Encode(accountId)
+                            DeviceIdentityStore.putDeviceIdentitySeed(context, accountIdB64, seed)
+                            val joined = loadDeviceGroup(identity, accountId)
+                                ?: throw IllegalStateException("joined DeviceGroup not found in storage")
+                            group = joined
+                            // ADR-0050 — the scanning device admits this one to
+                            // the account's chats; say so until they land.
+                            StateBundle.markRestored(context)
+                            DeviceGroupLifecycle.persistSnapshot(
+                                context = context,
+                                identity = identity,
+                                accountIdB64 = accountIdB64,
+                            )
+                            applyCatchUpBundles(joined, accountIdB64, welcomeCursor)
+                        }
+                    },
+                )
+            } finally {
+                try {
+                    plain.close()
+                } catch (_: Throwable) {
+                    // best-effort
+                }
+            }
+        }
+
+        /** Phase 2a3d8-ui history catch-up + ADR-0050 section 2.9 state
+         *  bundle, both best-effort. */
+        private suspend fun applyCatchUpBundles(
+            joined: DeviceGroup,
+            accountIdB64: String,
+            welcomeCursor: Long,
+        ) {
+            try {
+                val outcome = WelcomeCourier.pollForHistoryBundle(
+                    rendezvousPseudonym = rendezvous,
+                    welcomeCursor = welcomeCursor,
+                )
+                if (outcome is WelcomeCourier.HistoryBundleOutcome.Received) {
+                    val secret = joined.historyBundleSecret(identity)
+                    val applied = HistoryBundleCodec.applyToMessageLog(
+                        context = context,
+                        accountIdB64 = accountIdB64,
+                        secret = secret,
+                        sealedBytes = outcome.sealedBytes,
+                    )
+                    android.util.Log.i(
+                        "PairingOrchestrator",
+                        "history catch-up: applied $applied rows",
+                    )
+                }
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                android.util.Log.w(
+                    "PairingOrchestrator",
+                    "history bundle apply failed",
+                    cause,
+                )
+            }
+
+            var key: ByteArray? = null
+            try {
+                val sealed = StateBundle.poll(rendezvous, welcomeCursor)
+                if (sealed != null) {
+                    key = joined.exportSecret(
+                        identity,
+                        StateBundle.EXPORTER_LABEL,
+                        rendezvous,
+                        StateBundle.EXPORTER_KEY_LENGTH.toUInt(),
+                    )
+                    val bundle = StateBundle.decode(openWithKey(key, sealed))
+                    if (bundle != null) {
+                        val (contacts, pins) = StateBundle.apply(context, bundle)
+                        android.util.Log.i(
+                            "PairingOrchestrator",
+                            "state bundle: $contacts contacts, $pins pins",
+                        )
+                    }
+                }
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                android.util.Log.w("PairingOrchestrator", "state bundle apply failed", cause)
+            } finally {
+                key?.fill(0)
+            }
         }
 
         /**
          * Poll for the scanner's sealed recovery row, open it under
          * the shared post-join exporter key, redeem the grant.
          * Every failure degrades (row absent → `null`; redeem
-         * failure → seed-only outcome) — the join is never broken
-         * by this path. Transient secrets are zeroized.
+         * failure, or a redeem naming another account → seed-only
+         * outcome) — the join is never broken by this path.
+         * Transient secrets are zeroized.
          */
         private suspend fun runJoinerRecovery(
             joined: DeviceGroup,
+            account: KnownAccount,
             welcomeCursor: Long,
         ): JoinRecoveryOutcome? {
             val outcome = try {
@@ -240,30 +381,34 @@ public object PairingOrchestrator {
                 payload = openWithKey(exporterKey, outcome.sealedBlob)
                 val parsed = RecoveryPayload.parseRecoveryPayload(payload)
                 grantToken = parsed.grantToken
-                // Redeem the single-use grant for a session token.
-                // A redeem failure (endpoint down, grant expired)
-                // degrades to a seed-only outcome — the identity
+                // Redeem the single-use grant for a session token (the
+                // request carries the grant only, ADR-0056). A redeem
+                // failure (endpoint down, grant expired), or a redeem that
+                // names an account whose DeviceGroup is not the one just
+                // joined, degrades to a seed-only outcome — the identity
                 // still restores; only ACCESS needs another factor.
-                val redeemed = try {
-                    AuthClient().use { client ->
-                        client.deviceAuthorizeRedeem(
-                            accountId = accountIdBytes,
-                            grantTokenB64 = base64UrlEncodeNoPad(parsed.grantToken),
-                        )
-                    }
-                } catch (cause: Throwable) {
+                val redeemed = completeJoinByName(
+                    joinedGroupId = joined.groupId(),
+                    grantToken = parsed.grantToken,
+                    redeem = { grantB64 ->
+                        AuthClient().use { client -> client.deviceAuthorizeRedeem(grantB64) }
+                    },
+                    groupIdFor = { accountId -> deviceGroupIdFor(accountId) },
+                ) as? JoinByNameResult.Joined
+                if (redeemed == null) {
                     android.util.Log.w(
                         "PairingOrchestrator",
                         "device grant redeem failed (seed-only outcome)",
-                        cause,
                     )
-                    null
                 }
                 return JoinRecoveryOutcome(
                     phraseSeed = parsed.phraseSeed,
                     sessionToken = redeemed?.sessionToken,
                     sessionExpiresAtMs = redeemed?.sessionExpiresAtMs,
+                    accountId = redeemed?.accountId ?: account.accountIdBytes.copyOf(),
                 )
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
             } catch (cause: Throwable) {
                 android.util.Log.w(
                     "PairingOrchestrator",
@@ -283,6 +428,7 @@ public object PairingOrchestrator {
         public fun dispose() {
             if (disposed) return
             disposed = true
+            unboundDeviceSeed?.fill(0)
             try {
                 group?.close()
             } catch (_: Throwable) {
@@ -298,11 +444,16 @@ public object PairingOrchestrator {
     }
 
     /**
-     * Joining-device side entry point. Builds the
-     * DeviceIdentity from the cached seed, generates a fresh
-     * rendezvous slot, produces a KeyPackage, encodes the
-     * pairing QR. The view drives the rest via the returned
-     * [JoinSession].
+     * Joining-device side entry point. Builds the DeviceIdentity,
+     * generates a fresh rendezvous slot, produces a KeyPackage,
+     * encodes the pairing payload with `loginHandle`
+     * (`loginHandle(username)` of the account's name, ADR-0056).
+     * The view drives the rest via the returned [JoinSession].
+     *
+     * `known` is the account this device already knows (its
+     * persisted DeviceIdentity seed is used); `null` is a join by
+     * name, whose DeviceIdentity seed stays in memory until the
+     * grant redeem names the account.
      *
      * The caller owns [JoinSession.dispose] — the typical
      * call site sits inside a Compose `DisposableEffect`
@@ -310,22 +461,32 @@ public object PairingOrchestrator {
      */
     public fun prepareJoinFlow(
         context: Context,
-        accountIdBytes: ByteArray,
-        accountIdB64: String,
+        loginHandle: ByteArray,
+        known: KnownAccount?,
     ): JoinSession {
-        val seed = DeviceIdentityStore.ensureDeviceIdentitySeed(
-            context = context,
-            accountIdB64 = accountIdB64,
-        )
-        val identity = Identity.fromSeed(seed)
-        // Best-effort scrub of the raw seed bytes; the
-        // Identity has them folded into its in-memory state
-        // and no longer needs the heap buffer.
-        seed.fill(0)
+        val seed = if (known != null) {
+            DeviceIdentityStore.ensureDeviceIdentitySeed(
+                context = context,
+                accountIdB64 = known.accountIdB64,
+            )
+        } else {
+            ByteArray(DeviceIdentityStore.SEED_LENGTH).also { SecureRandom().nextBytes(it) }
+        }
+        val identity = try {
+            Identity.fromSeed(seed)
+        } catch (cause: Throwable) {
+            seed.fill(0)
+            throw cause
+        }
+        // Known account: best-effort scrub of the raw seed bytes; the
+        // Identity has them folded into its in-memory state. By name:
+        // the seed is kept (and zeroized on dispose) until the account
+        // is known and it can be persisted.
+        if (known != null) seed.fill(0)
         val keyPackage = identity.createKeyPackage()
         val rendezvous = PairingCodec.generateRendezvousPseudonym()
         val qrPayload = PairingCodec.buildPairingQrPayload(
-            accountId = accountIdBytes,
+            loginHandle = loginHandle,
             keyPackage = keyPackage,
             rendezvousPseudonym = rendezvous,
         )
@@ -333,8 +494,8 @@ public object PairingOrchestrator {
             qrPayload = qrPayload,
             rendezvous = rendezvous,
             identity = identity,
-            accountIdBytes = accountIdBytes,
-            accountIdB64 = accountIdB64,
+            known = known,
+            unboundDeviceSeed = if (known == null) seed else null,
             context = context.applicationContext,
         )
     }
@@ -353,14 +514,13 @@ public object PairingOrchestrator {
     )
 
     /**
-     * Scanner-device side entry point. One-shot: decode the
-     * QR, run `addDeviceFromWire`, publish the Welcome,
-     * persist the snapshot.
+     * Scanner-device side entry point. One-shot: run
+     * `addDeviceFromWire` on a payload [decodeForOwnAccount]
+     * already checked against this account's own login handle
+     * (ADR-0056 — the check runs at scan time, before the
+     * confirmation), publish the Welcome, persist the snapshot.
      *
      * Throws the inner error verbatim when:
-     *   * The QR was scanned against a different account.
-     *   * The QR carries a newer-version payload than this
-     *     binary recognises.
      *   * The Welcome PUT fails (DS-mailbox unreachable).
      *   * The DeviceGroup state on this device is corrupt.
      */
@@ -382,15 +542,11 @@ public object PairingOrchestrator {
 
     public suspend fun runScanFlow(
         context: Context,
-        scannedBytes: ByteArray,
+        decoded: DecodedPairingQr,
         accountIdBytes: ByteArray,
         accountIdB64: String,
         recovery: ScanRecovery? = null,
     ): ScanResult {
-        val decoded = PairingCodec.parsePairingQrPayload(
-            wireBytes = scannedBytes,
-            expectedAccountId = accountIdBytes,
-        )
         val seed = DeviceIdentityStore.ensureDeviceIdentitySeed(
             context = context,
             accountIdB64 = accountIdB64,

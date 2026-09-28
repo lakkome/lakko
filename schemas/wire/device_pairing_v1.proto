@@ -5,17 +5,22 @@ syntax = "proto3";
 
 package lakko.wire.device_pairing.v1;
 
-// Device-pairing QR payload (Phase 2a3b1).
+// Device-pairing QR payload (Phase 2a3b1; v2 since ADR-0056).
 //
-// Encodes everything a paired-up device's "Scan" screen needs to
-// drive `DeviceGroup::add_device_from_wire` for a fresh device's
+// Encodes everything a paired-up device's "Scan" screen (or the
+// ADR-0049 "Is this you?" prompt, which carries the same bytes
+// through `POST /device/request`) needs to drive
+// `DeviceGroup::add_device_from_wire` for a fresh device's
 // KeyPackage:
 //
-//   * `account_id`  — the 16-byte UUIDv7 the existing device
-//     authenticates against. The scanner verifies it matches the
-//     local account before continuing, so a fresh device's QR
-//     scanned from the wrong account's session is rejected
-//     before any MLS commit lands.
+//   * `login_handle` — the 32-byte ADR-0054 S5 login handle of the
+//     username the person typed on the fresh device
+//     (`BLAKE3-derive-key("lakko/auth/login-handle/v1",
+//     canonical_username)`). The confirming device compares it,
+//     in constant time, with the handle of its own username, so a
+//     payload meant for another account's name is refused before
+//     any MLS commit lands. Since ADR-0056 nothing a fresh device
+//     sends before it holds a session carries the account id.
 //   * `key_package` — TLS-encoded `KeyPackage` produced by
 //     `Identity::create_key_package` on the fresh device. The
 //     scanner deserialises + validates it as part of the
@@ -25,23 +30,22 @@ package lakko.wire.device_pairing.v1;
 // The QR contents are **not** authenticated end-to-end on the
 // wire — anyone who can show this QR to the scanner is trusted
 // by the user's physical action (the user pointed the camera at
-// it). Cross-device safety-number confirmation is a follow-up
-// (mirror of Signal's verify-existing-contact flow); for 2a3b
-// the trust anchor is the user pressing a button on both
-// devices.
+// it). On the camera-less route the six-digit comparison code
+// both devices derive from these bytes is what stops the relay
+// substituting its own device (ADR-0049).
 //
 // Generated Rust code lives in
 // `crates/lakko-proto/src/generated/wire_device_pairing/`.
 message PairingQr {
-    // Logical version of the QR payload format. Bumped on
-    // breaking changes; older scanners must reject payloads
-    // with version > supported.
+    // Logical version of the QR payload format. 2 since ADR-0056
+    // (the account id was replaced by the login handle). The
+    // decoder accepts exactly 2: there is no dual path.
     uint32 version = 1;
 
-    // The account the fresh device is asking to join. Scanner
-    // compares against its local `IdentitySecrets.accountId`
-    // before driving `DeviceGroup::add_device_from_wire`.
-    bytes account_id = 2;
+    // Field 2 was the 16-byte `account_id` (v1). ADR-0056 retired
+    // it; the number and the name are never reused.
+    reserved 2;
+    reserved "account_id";
 
     // TLS-encoded `KeyPackage` for the fresh device's
     // DeviceIdentity (ADR-0007). The same bytes
@@ -58,7 +62,7 @@ message PairingQr {
     // Welcome message. Sequence: the fresh device generates a
     // random pseudonym, starts polling
     // GET /ds/mailbox/{pseudonym}/messages, encodes
-    // (account_id, key_package, pseudonym) into this QR; the
+    // (login_handle, key_package, pseudonym) into this QR; the
     // scanner device decodes the QR, runs
     // DeviceGroup::add_device_from_wire(key_package) to
     // produce a Welcome, PUTs the Welcome at
@@ -70,8 +74,14 @@ message PairingQr {
     // in wire/v1.proto, contact pseudonyms in lakko-contacts).
     bytes rendezvous_pseudonym = 4;
 
+    // The 32-byte login handle of the account the fresh device
+    // asks to join (ADR-0056). The scanner compares it, in
+    // constant time, with the handle of its own username before
+    // driving `DeviceGroup::add_device_from_wire`.
+    bytes login_handle = 5;
+
     // Reserved for future use — never re-purpose. Slot for the
     // optional fingerprint-attestation extension landing in
     // 2a3b's safety-number follow-up.
-    reserved 5 to 15;
+    reserved 6 to 15;
 }

@@ -32,7 +32,11 @@ import {
   putDeviceIdentitySeed,
 } from "../auth/device-identity-store";
 import { AuthClient } from "../auth/client";
-import { base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
+import {
+  base64Encode,
+  base64UrlDecodeNoPad,
+  base64UrlEncodeNoPad,
+} from "../auth/account-id";
 import {
   buildPairingQrPayload,
   generateRendezvousPseudonym,
@@ -96,6 +100,28 @@ export interface JoinRecoveryOutcome {
   readonly sessionToken: string | null;
   /** Expiry of `sessionToken` (unix ms), `null` iff it is. */
   readonly sessionExpiresAtMs: number | null;
+  /** The 16-byte account id (ADR-0056). A fresh device learns it here,
+   *  from the grant redeem, and nowhere earlier; on a path that already
+   *  held a session it is that session's id. `null` when the redeem failed
+   *  on a path that knew no id. */
+  readonly accountIdBytes: Uint8Array | null;
+}
+
+/** The joined DeviceGroup belongs to another account than the grant
+ *  (ADR-0056): refused before anything is stored. */
+export const JOINED_WRONG_ACCOUNT =
+  "The other device answered for a different account. Nothing was changed on this device.";
+
+/** The exporter half of a joined group (`Group` or `DeviceGroup`). */
+interface PairingExporter {
+  exportSecret(identity: WasmIdentity, label: string, context: Uint8Array, length: number): Uint8Array;
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 1) diff |= (a[i] ?? 0) ^ (b[i] ?? 0);
+  return diff === 0;
 }
 
 /** Result of [`JoinSession.accept`]. */
@@ -171,6 +197,9 @@ export async function prepareJoinFlow(args: {
   readonly accountIdBytes: Uint8Array;
   readonly accountIdB64: string;
   readonly deviceKey: CryptoKey;
+  /** ADR-0056 — the 32-byte login handle of this account's username; the
+   *  payload names the account by it, never by the id. */
+  readonly loginHandle: Uint8Array;
 }): Promise<JoinSession> {
   const wasm = await loadWasm();
   const seed = await ensureDeviceIdentitySeed(args.accountIdB64, args.deviceKey);
@@ -181,7 +210,7 @@ export async function prepareJoinFlow(args: {
   const keyPackage = identity.createKeyPackage();
   const rendezvous = generateRendezvousPseudonym();
   const qrPayload = await buildPairingQrPayload(
-    args.accountIdBytes,
+    args.loginHandle,
     keyPackage,
     rendezvous,
   );
@@ -279,11 +308,11 @@ export async function prepareJoinFlow(args: {
         const recoveryTask =
           opts.recovery === true
             ? runJoinerRecovery({
-                group: liveGroup,
+                exporter: liveGroup,
                 identity: liveIdentity,
                 rendezvous,
                 welcomeCursor: opts.welcomeCursor,
-                accountIdBytes: args.accountIdBytes,
+                expectedAccountIdBytes: args.accountIdBytes,
               })
             : Promise.resolve<JoinRecoveryOutcome | null>(null);
         const [, , recovered] = await Promise.all([historyTask, stateTask, recoveryTask]);
@@ -351,13 +380,24 @@ async function receiveStateBundle(
  * row logs + returns `null` (fail-closed on identity: nothing is
  * cached here; the caller verifies the seed against the published
  * bundle before trusting it).
+ *
+ * ADR-0056: the redeem carries the grant alone and answers with the account
+ * id. When the caller already knows its account (`expectedAccountIdBytes`),
+ * a redeem answering for another account is treated as a failed redeem: the
+ * session is dropped and the known id is kept.
  */
-async function runJoinerRecovery(args: {
-  readonly group: WasmDeviceGroup;
+export async function runJoinerRecovery(args: {
+  readonly exporter: PairingExporter;
   readonly identity: WasmIdentity;
   readonly rendezvous: Uint8Array;
   readonly welcomeCursor: number;
-  readonly accountIdBytes: Uint8Array;
+  readonly expectedAccountIdBytes: Uint8Array | null;
+  /** Injectable for tests. */
+  readonly redeem?: (grantTokenB64: string) => Promise<{
+    readonly accountId: Uint8Array;
+    readonly sessionToken: string;
+    readonly sessionExpiresAtMs: number;
+  }>;
 }): Promise<JoinRecoveryOutcome | null> {
   let outcome;
   try {
@@ -373,7 +413,7 @@ async function runJoinerRecovery(args: {
   let key: Uint8Array | null = null;
   let plaintext: Uint8Array | null = null;
   try {
-    key = args.group.exportSecret(
+    key = args.exporter.exportSecret(
       args.identity,
       RECOVERY_EXPORTER_LABEL,
       args.rendezvous,
@@ -387,19 +427,28 @@ async function runJoinerRecovery(args: {
     // seed-only rather than discarding the IDENTITY half.
     let sessionToken: string | null = null;
     let sessionExpiresAtMs: number | null = null;
+    let accountIdBytes: Uint8Array | null = args.expectedAccountIdBytes;
     try {
-      const redeemed = await new AuthClient().deviceAuthorizeRedeem(
-        args.accountIdBytes,
-        base64UrlEncodeNoPad(parsed.grantToken),
-      );
-      sessionToken = redeemed.sessionToken;
-      sessionExpiresAtMs = redeemed.sessionExpiresAtMs;
+      const redeem =
+        args.redeem ?? ((grant: string) => new AuthClient().deviceAuthorizeRedeem(grant));
+      const redeemed = await redeem(base64UrlEncodeNoPad(parsed.grantToken));
+      if (
+        args.expectedAccountIdBytes !== null &&
+        !bytesEqual(redeemed.accountId, args.expectedAccountIdBytes)
+      ) {
+        // eslint-disable-next-line no-console
+        console.warn("device grant redeem answered for another account; session dropped");
+      } else {
+        sessionToken = redeemed.sessionToken;
+        sessionExpiresAtMs = redeemed.sessionExpiresAtMs;
+        accountIdBytes = redeemed.accountId;
+      }
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("device grant redeem failed", err);
     }
     parsed.grantToken.fill(0);
-    return { phraseSeed: parsed.phraseSeed, sessionToken, sessionExpiresAtMs };
+    return { phraseSeed: parsed.phraseSeed, sessionToken, sessionExpiresAtMs, accountIdBytes };
   } catch (err) {
     // Wrong key / tampered blob / malformed payload — drop it.
     // eslint-disable-next-line no-console
@@ -456,10 +505,25 @@ export interface AnonymousJoinSession {
  * generated IN MEMORY here and persisted later via
  * [`AnonymousJoinSession.persistTo`] — right after the caller
  * derives + stores the device key from the recovered phrase seed.
+ *
+ * ADR-0056: the payload names the account by the login handle of the
+ * username the person typed; nothing before the session carries the
+ * account id, and the fresh device may not know it at all. So `accept`
+ * joins the MLS group first (`Group.joinFromWelcome`, which needs no
+ * account), opens the recovery row under the group's exporter, redeems the
+ * grant, and learns the account id from the redeem response. Only then is
+ * the Welcome bound to the account: the joined group's id must equal
+ * `deviceGroupIdFor(account id)` (the check `DeviceGroup.joinFromWelcome`
+ * performed up front before), else the whole outcome is refused and nothing
+ * is persisted. `known` (a path that already holds a session) keeps the
+ * redeem honest: an answer for another account drops the redeemed session.
  */
 export async function prepareAnonymousJoinFlow(args: {
-  readonly accountIdBytes: Uint8Array;
-  readonly accountIdB64: string;
+  /** 32-byte login handle of the typed username (ADR-0056). */
+  readonly loginHandle: Uint8Array;
+  /** The account, when this device already knows it (a signed-in device
+   *  parked without its identity). Absent on the no-password entry. */
+  readonly known?: { readonly accountIdBytes: Uint8Array; readonly accountIdB64: string };
 }): Promise<AnonymousJoinSession> {
   const wasm = await loadWasm();
   // Fresh random per-device seed, held in memory until `persistTo`.
@@ -473,12 +537,14 @@ export async function prepareAnonymousJoinFlow(args: {
   const keyPackage = identity.createKeyPackage();
   const rendezvous = generateRendezvousPseudonym();
   const qrPayload = await buildPairingQrPayload(
-    args.accountIdBytes,
+    args.loginHandle,
     keyPackage,
     rendezvous,
   );
 
   let group: WasmDeviceGroup | null = null;
+  // The account the joined group was bound to, set by a successful accept.
+  let account: { readonly bytes: Uint8Array; readonly b64: string } | null = null;
   // ADR-0050 — fetched at accept, when the DeviceGroup handle that derives
   // the exporter keys is alive; applied at `persistTo`, when the device key
   // that wraps the message log exists. Before this the history bundle the
@@ -500,13 +566,42 @@ export async function prepareAnonymousJoinFlow(args: {
       if (identity === null) {
         throw new Error("join session already disposed");
       }
-      group = wasm.DeviceGroup.joinFromWelcome(
-        welcomeBytes,
-        identity,
-        args.accountIdBytes,
-      );
-      const liveGroup = group;
       const liveIdentity = identity;
+      // No account id yet: join the plain MLS group, bind it below.
+      const joined = wasm.Group.joinFromWelcome(welcomeBytes, liveIdentity);
+      let recovery: JoinRecoveryOutcome | null;
+      try {
+        recovery = await runJoinerRecovery({
+          exporter: joined,
+          identity: liveIdentity,
+          rendezvous,
+          welcomeCursor: opts.welcomeCursor,
+          expectedAccountIdBytes: args.known?.accountIdBytes ?? null,
+        });
+        // No row, or no account learned: the restore cannot land (the
+        // caller refuses either case); nothing is bound or persisted.
+        if (recovery === null || recovery.accountIdBytes === null) {
+          return { recovery };
+        }
+        const accountIdBytes = recovery.accountIdBytes;
+        if (!bytesEqual(wasm.deviceGroupIdFor(accountIdBytes), joined.groupId)) {
+          recovery.phraseSeed.fill(0);
+          throw new Error(JOINED_WRONG_ACCOUNT);
+        }
+        const loaded = wasm.loadDeviceGroup(liveIdentity, accountIdBytes);
+        if (loaded === undefined) {
+          recovery.phraseSeed.fill(0);
+          throw new Error("internal: the joined device group did not load");
+        }
+        group = loaded;
+        account = {
+          bytes: accountIdBytes,
+          b64: args.known?.accountIdB64 ?? base64Encode(accountIdBytes),
+        };
+      } finally {
+        joined.free();
+      }
+      const liveGroup = group;
       const historyTask = (async (): Promise<void> => {
         try {
           const sealed = await pollForHistoryBundle(rendezvous, opts.welcomeCursor);
@@ -536,31 +631,24 @@ export async function prepareAnonymousJoinFlow(args: {
       })();
       // The recovery row is what lands the session; the two bundles ride
       // alongside and are applied once there is a device key to write under.
-      const [recovery] = await Promise.all([
-        runJoinerRecovery({
-          group,
-          identity,
-          rendezvous,
-          welcomeCursor: opts.welcomeCursor,
-          accountIdBytes: args.accountIdBytes,
-        }),
-        historyTask,
-        stateTask,
-      ]);
+      await Promise.all([historyTask, stateTask]);
       return { recovery };
     },
     async persistTo(deviceKey): Promise<void> {
       if (identity === null || deviceIdentitySeed === null) {
         throw new Error("join session already disposed");
       }
+      if (account === null) {
+        throw new Error("internal: persistTo before a bound accept");
+      }
       await putDeviceIdentitySeed(
-        args.accountIdB64,
+        account.b64,
         deviceIdentitySeed,
         deviceKey,
       );
       await persistDeviceGroupSnapshot(
         identity,
-        args.accountIdB64,
+        account.b64,
         deviceKey,
       );
       deviceIdentitySeed.fill(0);
@@ -570,7 +658,7 @@ export async function prepareAnonymousJoinFlow(args: {
         pendingHistory = null;
         try {
           const applied = await applyHistoryBundleToLog({
-            accountIdB64: args.accountIdB64,
+            accountIdB64: account.b64,
             deviceKey,
             secret: history.secret,
             sealedBytes: history.sealedBytes,
@@ -634,9 +722,10 @@ export interface ScanResult {
  * serialise on the snapshot-store write (IDB transaction).
  *
  * Throws the inner error verbatim when:
- *   - The QR was scanned against a different account.
- *   - The QR carries a newer-version payload than this binary
- *     recognises.
+ *   - The payload names another account (ADR-0056: its login handle is not
+ *     this account's own) — `PAIRING_WRONG_ACCOUNT` copy.
+ *   - The payload's version is not one this build reads —
+ *     `PAIRING_UNSUPPORTED` copy.
  *   - The Welcome PUT fails (DS-mailbox unreachable).
  *   - The DeviceGroup state on this device is corrupt.
  *
@@ -644,6 +733,9 @@ export interface ScanResult {
  */
 export async function runScanFlow(args: {
   readonly scannedBytes: Uint8Array;
+  /** ADR-0056 — this account's OWN login handle (from its own username,
+   *  `ownPairingHandle`); the payload is refused unless it names it. */
+  readonly loginHandle: Uint8Array;
   readonly accountIdBytes: Uint8Array;
   readonly accountIdB64: string;
   readonly deviceKey: CryptoKey;
@@ -668,7 +760,7 @@ export async function runScanFlow(args: {
 }): Promise<ScanResult> {
   const decoded = await parsePairingQrPayload(
     args.scannedBytes,
-    args.accountIdBytes,
+    args.loginHandle,
   );
 
   const seed = await ensureDeviceIdentitySeed(args.accountIdB64, args.deviceKey);

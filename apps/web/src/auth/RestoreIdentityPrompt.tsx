@@ -43,6 +43,8 @@ import {
 import RestoreViaDevicePanel, {
   type DeviceRestoreFlowHandle,
 } from "../devices/RestoreViaDevicePanel";
+import { loginHandleFor } from "./login-handle";
+import { UsernameField } from "./recover/UsernameField";
 
 export default function RestoreIdentityPrompt(): JSX.Element {
   const auth = useAuth();
@@ -58,6 +60,17 @@ export default function RestoreIdentityPrompt(): JSX.Element {
   const [wordsOff, setWordsOff] = createSignal(false);
   const triesLeft = (): number => WORD_VAULT_DESTRUCTION_CAP - misses();
   const wordsUnavailable = (): boolean => wordsOff() || misses() >= WORD_VAULT_DESTRUCTION_CAP;
+
+  // ADR-0056: the other-device route addresses the account by the login
+  // handle of its username. A sign-in that left no name on this device (a
+  // passkey sign-in) asks for it; the handle is computed locally.
+  const [typedUsername, setTypedUsername] = createSignal("");
+  let pairingHandle: Uint8Array | null = null;
+  const pairingUsername = (): string => {
+    const acct = account();
+    if (acct === null) return "";
+    return acct.username.trim().length > 0 ? acct.username : typedUsername();
+  };
 
   const methods = (): typeof RESTORE_IDENTITY_METHODS =>
     RESTORE_IDENTITY_METHODS.filter((m) => m.id !== "words" || !wordsUnavailable());
@@ -150,12 +163,19 @@ export default function RestoreIdentityPrompt(): JSX.Element {
     if (acct === null) {
       throw new Error("Nothing to restore. Log in first.");
     }
+    const name = pairingUsername().trim();
+    if (name.length === 0) {
+      throw new Error("Enter the username of the account.");
+    }
+    // Throws the username rule's copy for a name it refuses.
+    const loginHandle = (await loginHandleFor(name)).bytes;
+    pairingHandle = loginHandle;
     const accountIdBytes = base64Decode(acct.accountIdB64);
     const deviceKey = await getDeviceKey(acct.accountIdB64);
     if (deviceKey === null) {
       const anon = await prepareAnonymousJoinFlow({
-        accountIdBytes,
-        accountIdB64: acct.accountIdB64,
+        loginHandle,
+        known: { accountIdBytes, accountIdB64: acct.accountIdB64 },
       });
       return {
         qrPayload: anon.qrPayload,
@@ -171,6 +191,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
       accountIdBytes,
       accountIdB64: acct.accountIdB64,
       deviceKey,
+      loginHandle,
     });
     return {
       qrPayload: session.qrPayload,
@@ -262,12 +283,18 @@ export default function RestoreIdentityPrompt(): JSX.Element {
                     compare the code. The transfer is end-to-end encrypted; Lakko's servers
                     cannot read it. No camera needed; a QR code is there if you prefer.
                   </p>
+                  <Show when={(account()?.username.trim().length ?? 0) === 0}>
+                    <div>
+                      <UsernameField
+                        value={typedUsername}
+                        setValue={setTypedUsername}
+                        disabled={busy}
+                      />
+                    </div>
+                  </Show>
                   <RestoreViaDevicePanel
                     prepare={prepareDeviceFlow}
-                    requestAccount={() => {
-                      const acct = account();
-                      return acct === null ? null : base64Decode(acct.accountIdB64);
-                    }}
+                    requestHandle={() => pairingHandle}
                     onRestored={async (outcome) => {
                       await auth.completeFromPairing(
                         outcome.phraseSeed,

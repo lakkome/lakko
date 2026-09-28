@@ -35,7 +35,10 @@ import me.lakko.app.devices.WelcomeCourier
  *     cached identity seed; `onRecovered` drives
  *     `AuthRepository.completeFromPairing`.
  *   * path (b): the Recover screen's no-password mode; `onRecovered`
- *     drives `AuthRepository.completeFromDeviceRestore`.
+ *     drives `AuthRepository.completeFromDeviceRestore`. This device has
+ *     no account id: the code carries the login handle of the typed
+ *     username and the account id arrives with the grant redeem
+ *     (ADR-0056).
  *
  * Mirror of `apps/web/src/devices/RestoreViaDevicePanel.tsx`. The
  * panel renders the pairing QR; the user scans it with their
@@ -52,8 +55,11 @@ import me.lakko.app.devices.WelcomeCourier
  */
 @Composable
 public fun RestoreViaDevicePanel(
-    accountIdBytes: ByteArray,
-    accountIdB64: String,
+    /** `loginHandle(username)` of the account's name (ADR-0056). */
+    loginHandle: ByteArray,
+    /** The account when this device already knows it (path (a)); `null`
+     *  for the join by name of path (b). */
+    known: PairingOrchestrator.KnownAccount?,
     onRecovered: suspend (PairingOrchestrator.JoinRecoveryOutcome) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -91,8 +97,8 @@ public fun RestoreViaDevicePanel(
                     try {
                         val js = PairingOrchestrator.prepareJoinFlow(
                             context = context,
-                            accountIdBytes = accountIdBytes,
-                            accountIdB64 = accountIdB64,
+                            loginHandle = loginHandle,
+                            known = known,
                         )
                         session = js
                         ui = RestoreViaDeviceUi.Waiting(js.qrPayload)

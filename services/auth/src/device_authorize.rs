@@ -14,15 +14,19 @@
 //!   stores only its SHA-256 hash, and returns the raw token to the
 //!   existing device.
 //! - **`POST /device/authorize/redeem`** — anonymous (the fresh device has
-//!   no token yet); per-address limited — the 256-bit grant token is not
-//!   guessable, so there is no name counter to add. The fresh device submits the `grant_token` (which
-//!   it received over the existing E2EE pairing / rendezvous channel) plus
-//!   the `account_id` it learned from the pairing QR. The server recomputes
-//!   `SHA-256(grant_token)`, **atomically consumes** the matching grant (a
-//!   single `DELETE … WHERE account_id=? AND grant_hash=? AND
-//!   expires_at>NOW(3)` whose `rows_affected == 1`, so the consume is
-//!   race-free and strictly single-use), and issues the session-token
-//!   triple.
+//!   no token yet); per-address limited. The body is the `grant_token` alone
+//!   (ADR-0056): nothing a fresh device sends before it holds a session names
+//!   the account. The server recomputes `SHA-256(grant_token)`, finds the
+//!   grant by that hash (its own unique index, migration `0022`), and
+//!   **atomically consumes** it — a `SELECT … FOR UPDATE` of the live row and
+//!   a `DELETE` of exactly that row whose `rows_affected == 1`, in one
+//!   transaction, so the consume is race-free and strictly single-use — then
+//!   issues the session-token triple. The response's `account_id_b64` is
+//!   where the fresh device learns its account id, after proving the grant.
+//!   There is no per-name counter: the grant is 256 random bits, so a guess
+//!   never lands, and keying a counter on the presented hash would charge a
+//!   bucket nobody else ever shares (every guess is a new hash); the
+//!   per-address bucket is the only useful limit.
 //!
 //! Why a server grant and not "trust the MLS Welcome": the DS is opaque and
 //! the auth service is never in the MLS path, so only an
@@ -93,20 +97,6 @@ fn grant_hash(token: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(&digest);
     out
-}
-
-/// Decode the URL-safe base64 16-byte `account_id` the fresh device learned
-/// from the pairing QR.
-fn decode_account_id(b64: &str) -> Result<[u8; ACCOUNT_ID_LEN], ApiError> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(b64)
-        .map_err(|_| ApiError::BadInput("account_id_b64 not URL-safe base64"))?;
-    if bytes.len() != ACCOUNT_ID_LEN {
-        return Err(ApiError::BadInput("account_id must decode to 16 bytes"));
-    }
-    let mut out = [0u8; ACCOUNT_ID_LEN];
-    out.copy_from_slice(&bytes);
-    Ok(out)
 }
 
 /// Decode the URL-safe base64 32-byte raw grant token the fresh device
@@ -196,47 +186,31 @@ pub(crate) async fn start(
 /// token.
 ///
 /// Anonymous (the fresh device has no token yet), per-address limited. The
-/// fresh device
-/// submits the `grant_token` (received over the rendezvous channel) plus the
-/// `account_id` (from the pairing QR). The server recomputes
-/// `SHA-256(grant_token)` and atomically consumes the matching live grant. A
-/// missing / expired / unknown grant fails as an enumeration-safe `401` —
-/// the same generic shape an OPAQUE bad-credential login returns.
+/// fresh device submits the `grant_token` alone (received over the
+/// rendezvous channel; ADR-0056). The server recomputes
+/// `SHA-256(grant_token)`, finds the account through it and atomically
+/// consumes the live grant. A missing / expired / unknown grant fails as an
+/// enumeration-safe `401` — the same generic shape an OPAQUE bad-credential
+/// login returns.
 #[axum::debug_handler]
 pub(crate) async fn redeem(
     State(state): State<AppState>,
     Json(req): Json<DeviceAuthorizeRedeemReq>,
 ) -> Result<Json<DeviceAuthorizeRedeemRes>, ApiError> {
-    let account_id = decode_account_id(&req.account_id_b64)?;
     let token = decode_grant_token(&req.grant_token_b64)?;
     let hash = grant_hash(&token);
 
-    // Atomic single-use consume: a `DELETE` whose `rows_affected == 1`
-    // means a live grant existed and is now gone. Race-free — two redeems
-    // of the same token can have at most one `DELETE` affect a row.
-    let consumed = sqlx::query(
-        "DELETE FROM device_grants \
-         WHERE account_id = ? AND grant_hash = ? AND expires_at > NOW(3)",
-    )
-    .bind(account_id.as_slice())
-    .bind(hash.as_slice())
-    .execute(&state.db)
-    .await
-    .map_err(ApiError::Db)?
-    .rows_affected()
-        == 1;
-
-    if !consumed {
-        // Enumeration-safe: do NOT leak whether the account exists, whether
-        // the grant never existed, or whether it expired. Same generic
-        // `401 invalid credentials` shape an OPAQUE bad-credential login
-        // returns (opaque.rs `login_finish_inner`).
-        tracing::debug!(
-            account_id = %URL_SAFE_NO_PAD.encode(account_id),
-            "device-authorize: redeem rejected (no live grant)",
-        );
+    let Some(account_id) = consume_grant(&state.db, &hash)
+        .await
+        .map_err(ApiError::Db)?
+    else {
+        // Enumeration-safe: do NOT leak whether the grant never existed or
+        // merely expired. Same generic `401 invalid credentials` shape an
+        // OPAQUE bad-credential login returns (opaque.rs
+        // `login_finish_inner`).
+        tracing::debug!("device-authorize: redeem rejected (no live grant)");
         return Err(ApiError::InvalidCredential);
-    }
+    };
 
     tracing::info!(
         account_id = %URL_SAFE_NO_PAD.encode(account_id),
@@ -249,6 +223,41 @@ pub(crate) async fn redeem(
         session_token,
         session_expires_at_ms,
     }))
+}
+
+/// Consume the live grant whose hash is `hash` and return its account, or
+/// `None` when there is none (unknown, expired, or already consumed).
+///
+/// MariaDB has no `DELETE … RETURNING` we rely on elsewhere (see
+/// `opaque::take_login_state`), so this is a transaction: a locking read of
+/// the live row, then a `DELETE` of exactly that `(account_id, grant_hash)`
+/// whose `rows_affected == 1`. Two concurrent redeems of one token serialise
+/// on the row lock; the second reads nothing once the first commits.
+async fn consume_grant(
+    pool: &sqlx::MySqlPool,
+    hash: &[u8; 32],
+) -> Result<Option<[u8; ACCOUNT_ID_LEN]>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let row: Option<(Vec<u8>,)> = sqlx::query_as(
+        "SELECT account_id FROM device_grants \
+         WHERE grant_hash = ? AND expires_at > NOW(3) FOR UPDATE",
+    )
+    .bind(hash.as_slice())
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(account_id) = row.and_then(|(v,)| <[u8; ACCOUNT_ID_LEN]>::try_from(v.as_slice()).ok())
+    else {
+        tx.commit().await?;
+        return Ok(None);
+    };
+    let deleted = sqlx::query("DELETE FROM device_grants WHERE account_id = ? AND grant_hash = ?")
+        .bind(account_id.as_slice())
+        .bind(hash.as_slice())
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    tx.commit().await?;
+    Ok((deleted == 1).then_some(account_id))
 }
 
 // ----------------------------------------------------------------
@@ -264,12 +273,9 @@ pub(crate) struct DeviceAuthorizeStartRes {
     pub grant_token_b64: String,
 }
 
-/// `POST /device/authorize/redeem` request body.
+/// `POST /device/authorize/redeem` request body (ADR-0056: the grant alone).
 #[derive(Deserialize)]
 pub(crate) struct DeviceAuthorizeRedeemReq {
-    /// URL-safe base64 of the 16-byte `account_id` the fresh device learned
-    /// from the pairing QR.
-    pub account_id_b64: String,
     /// URL-safe base64 of the raw 32-byte grant token the fresh device
     /// received over the rendezvous channel.
     pub grant_token_b64: String,
@@ -280,7 +286,8 @@ pub(crate) struct DeviceAuthorizeRedeemReq {
 /// every login flow returns.
 #[derive(Serialize)]
 pub(crate) struct DeviceAuthorizeRedeemRes {
-    /// URL-safe base64 of the 16-byte account id (echoed for the client).
+    /// URL-safe base64 of the 16-byte account id. Since ADR-0056 this is
+    /// where the fresh device first learns it.
     pub account_id_b64: String,
     /// Bearer token. Same shape as OPAQUE / WebAuthn login's
     /// `session_token` — issued by `lakko-auth-token::TokenSecret::issue`.
@@ -321,22 +328,6 @@ mod tests {
         // A collision here is astronomically unlikely; a constant token
         // would make a leaked /start response trivially replayable.
         assert_ne!(random_grant_token(), random_grant_token());
-    }
-
-    #[test]
-    fn decode_account_id_validates_length() {
-        let ok = URL_SAFE_NO_PAD.encode([0u8; ACCOUNT_ID_LEN]);
-        assert_eq!(decode_account_id(&ok).expect("16 bytes").len(), 16);
-
-        let short = URL_SAFE_NO_PAD.encode([0u8; 8]);
-        assert!(matches!(
-            decode_account_id(&short),
-            Err(ApiError::BadInput(_))
-        ));
-        assert!(matches!(
-            decode_account_id("!!!not-base64!!!"),
-            Err(ApiError::BadInput(_))
-        ));
     }
 
     #[test]
@@ -532,7 +523,6 @@ mod device_authorize_e2e_tests {
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
                         "pow": { "seed": "junk", "nonce": "junk", "solution": "junk" },
-                        "account_id_b64": account_id_b64,
                         "grant_token_b64": URL_SAFE_NO_PAD.encode([0x55u8; 32]),
                     }))
                     .unwrap(),
@@ -565,7 +555,6 @@ mod device_authorize_e2e_tests {
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
-                        "account_id_b64": account_id_b64,
                         "grant_token_b64": bogus,
                     }))
                     .unwrap(),
@@ -579,9 +568,9 @@ mod device_authorize_e2e_tests {
             "redeem with an unknown grant must 401 enumeration-safe"
         );
 
-        // (i continued) /redeem the REAL grant (anonymous)
-        // succeeds and returns a verifiable session token.
-        let (st, body) = send(
+        // The old body (an account id and no grant) is refused outright
+        // (ADR-0056: no dual path); nothing is consumed.
+        let (st, _b) = send(
             &state,
             Request::builder()
                 .method(Method::POST)
@@ -590,6 +579,27 @@ mod device_authorize_e2e_tests {
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
                         "account_id_b64": account_id_b64,
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            st.is_client_error() && st != StatusCode::UNAUTHORIZED,
+            "got {st}"
+        );
+
+        // (i continued) /redeem the REAL grant (anonymous, the grant alone)
+        // succeeds and returns the account id and a verifiable session token.
+        let (st, body) = send(
+            &state,
+            Request::builder()
+                .method(Method::POST)
+                .uri("/device/authorize/redeem")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
                         "grant_token_b64": grant_token_b64,
                     }))
                     .unwrap(),
@@ -621,7 +631,6 @@ mod device_authorize_e2e_tests {
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
-                        "account_id_b64": account_id_b64,
                         "grant_token_b64": grant_token_b64,
                     }))
                     .unwrap(),
@@ -671,7 +680,6 @@ mod device_authorize_e2e_tests {
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
-                        "account_id_b64": account_id_b64,
                         "grant_token_b64": grant2_b64,
                     }))
                     .unwrap(),

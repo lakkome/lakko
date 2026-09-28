@@ -700,7 +700,8 @@ fn build_app(state: AppState) -> Router {
         // ADR-0018 factor (a) — redeem a device grant for a session token.
         // ANONYMOUS: the fresh device has no token yet (the whole point is
         // to mint it). Per-address limited; the grant token (held by the
-        // fresh device over the rendezvous channel) is the authorization.
+        // fresh device over the rendezvous channel) is the authorization
+        // and, since ADR-0056, the whole body: its hash finds the account.
         .route(
             "/device/authorize/redeem",
             post(device_authorize::redeem).route_layer(ip(limits::Category::Attempt)),
@@ -722,8 +723,9 @@ fn build_app(state: AppState) -> Router {
             post(word_vault::recover_start).route_layer(ip(limits::Category::Attempt)),
         )
         // ADR-0049 section 2 — the fresh device posts its pairing payload
-        // (anonymous; per-target + per-address limited) and polls whether
-        // the request is still open.
+        // (anonymous; names the account by login handle since ADR-0056;
+        // per-handle + per-address limited; 503 without the handle pepper)
+        // and polls whether the request is still open.
         .route(
             "/device/request",
             post(device_request::create).route_layer(ip(limits::Category::DeviceRequest)),

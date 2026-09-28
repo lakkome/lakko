@@ -193,9 +193,6 @@ export interface DeviceAuthorizeStartResponse {
 /** `POST /device/authorize/redeem` request body. Anonymous (the
  *  fresh device has no token yet) (no proof of work since ADR-0054 S4). */
 export interface DeviceAuthorizeRedeemRequest {
-  /** URL-safe base64 (no pad) of the 16-byte account_id the fresh
-   *  device learned from the pairing QR. */
-  account_id_b64: string;
   /** URL-safe base64 (no pad) of the raw 32-byte grant token
    *  received over the rendezvous channel. */
   grant_token_b64: string;
@@ -205,7 +202,8 @@ export interface DeviceAuthorizeRedeemRequest {
  *  `(account_id, session_token, expiry)` triple every login flow
  *  returns. */
 export interface DeviceAuthorizeRedeemResponse {
-  /** URL-safe base64 (no pad) of the 16-byte account id (echoed). */
+  /** URL-safe base64 (no pad) of the 16-byte account id: where a fresh
+   *  device first learns it (ADR-0056). */
   account_id_b64: string;
   session_token: string;
   session_expires_at_ms: number;
@@ -247,7 +245,8 @@ export interface TotpRecoverRequest {
 /** `POST /totp/recover` response body — the same `(account_id,
  *  session_token, expiry)` triple every other login flow returns. */
 export interface TotpRecoverResponse {
-  /** URL-safe base64 (no pad) of the 16-byte account id (echoed). */
+  /** URL-safe base64 (no pad) of the 16-byte account id: where a fresh
+   *  device first learns it (ADR-0056). */
   account_id_b64: string;
   session_token: string;
   session_expires_at_ms: number;
@@ -322,7 +321,8 @@ export interface RecoveryContactRecoverFinishRequest {
  *  `(account_id, session_token, expiry)` triple every other login flow
  *  returns. */
 export interface RecoveryContactRecoverFinishResponse {
-  /** URL-safe base64 (no pad) of the 16-byte account id (echoed). */
+  /** URL-safe base64 (no pad) of the 16-byte account id: where a fresh
+   *  device first learns it (ADR-0056). */
   account_id_b64: string;
   session_token: string;
   session_expires_at_ms: number;
@@ -433,7 +433,9 @@ export interface PasskeyVaultGetResponse {
 
 /** `POST /device/request` request body. Anonymous (no proof of work since ADR-0054 S4). */
 export interface DeviceRequestCreateRequest {
-  account_id_b64: string;
+  /** base64url (no pad) of the 32-byte login handle of the typed username
+   *  (ADR-0056). Never an account id. */
+  handle: string;
   /** Standard base64 of the pairing payload (the bytes the QR carries). */
   pairing_payload_b64: string;
 }

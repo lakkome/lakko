@@ -23,8 +23,8 @@ import uniffi.lakko_ffi_uniffi.parsePairingQr
  *     wire bytes the ZXing `MultiFormatWriter` turns into pixels.
  *   * [parsePairingQrPayload] — scanner side. Take the bytes the
  *     ML Kit `BarcodeScanner` handed us (base64url-decoded
- *     upstream), verify the embedded `account_id`, return the
- *     decoded contents.
+ *     upstream), verify the embedded login handle against this
+ *     account's own, return the decoded contents.
  *
  * The UI sits on top of these in
  * `apps/android/.../ui/devices/DevicesScreen.kt`.
@@ -46,41 +46,41 @@ public object PairingCodec {
     }
 
     /**
-     * Build the wire-format pairing QR payload.
+     * Build the wire-format pairing payload (v2, ADR-0056).
      *
-     * `accountId` is the raw 16-byte UUIDv7. `keyPackage` is
-     * the TLS-encoded `KeyPackage` from the joining device's
-     * DeviceIdentity. `rendezvousPseudonym` is the 32-byte slot
-     * from [generateRendezvousPseudonym].
+     * `loginHandle` is the 32-byte `loginHandle(username)` of the name
+     * the person typed (never the account id: nothing before a session
+     * carries it). `keyPackage` is the TLS-encoded `KeyPackage` from the
+     * joining device's DeviceIdentity. `rendezvousPseudonym` is the
+     * 32-byte slot from [generateRendezvousPseudonym].
      *
-     * Throws the underlying `FfiException` on wrong-length
-     * `accountId` / `rendezvousPseudonym` — these are
-     * programmer errors that bubble straight to the caller.
+     * Throws the underlying `FfiException.Codec` on a wrong-length
+     * `loginHandle` / `rendezvousPseudonym` (programmer errors).
      */
     public fun buildPairingQrPayload(
-        accountId: ByteArray,
+        loginHandle: ByteArray,
         keyPackage: ByteArray,
         rendezvousPseudonym: ByteArray,
     ): ByteArray = buildPairingQr(
-        accountId = accountId,
+        loginHandle = loginHandle,
         keyPackage = keyPackage,
         rendezvousPseudonym = rendezvousPseudonym,
     )
 
     /**
-     * Parse a pairing QR payload + verify it's for the local
-     * account. Throws `FfiException` on:
-     *   * wrong-length `expectedAccountId`,
-     *   * malformed wire bytes,
-     *   * wrong embedded `account_id` (scanned a QR from a
-     *     different account's session),
-     *   * newer-version payload than this binary recognises.
+     * Parse a pairing payload and check it names this account: the
+     * embedded login handle must equal `expectedLoginHandle`, the
+     * handle of this account's own username. Throws `FfiException`:
+     *   * `Codec` - wrong-length handle, malformed wire bytes,
+     *   * `Unsupported` - a payload version other than 2,
+     *   * `Group` ("login_handle mismatch") - the code was made for
+     *     another account's name.
      */
     public fun parsePairingQrPayload(
         wireBytes: ByteArray,
-        expectedAccountId: ByteArray,
+        expectedLoginHandle: ByteArray,
     ): DecodedPairingQr = parsePairingQr(
         wire = wireBytes,
-        expectedAccountId = expectedAccountId,
+        expectedLoginHandle = expectedLoginHandle,
     )
 }

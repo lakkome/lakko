@@ -210,30 +210,39 @@ public class AuthClient(
      * enumeration-safe 401 ([AuthHttpError]), indistinguishable from
      * a wrong credential by design.
      *
-     * @param accountId      Raw 16-byte account id from the pairing QR.
+     * ADR-0056: the request carries the grant only. The server finds the
+     * account by the grant's hash and hands the account id back in the
+     * response, after the grant is proven; this is where a fresh device
+     * first learns which account it joined.
+     *
      * @param grantTokenB64  URL-safe base64 (no pad) of the raw
      *                       32-byte grant token received over the
      *                       rendezvous channel.
      */
     public suspend fun deviceAuthorizeRedeem(
-        accountId: ByteArray,
         grantTokenB64: String,
     ): DeviceAuthorizeRedeemResult {
-        if (accountId.size != ACCOUNT_ID_LEN) {
-            throw AuthClientArgError("accountId must be $ACCOUNT_ID_LEN bytes")
-        }
         if (grantTokenB64.isEmpty()) {
             throw AuthClientArgError("grantTokenB64 must be non-empty")
         }
         val resp: DeviceAuthorizeRedeemResponse = post(
             "/device/authorize/redeem",
-            DeviceAuthorizeRedeemRequest(
-                account_id_b64 = base64UrlEncodeNoPad(accountId),
-                grant_token_b64 = grantTokenB64,
-            ),
+            DeviceAuthorizeRedeemRequest(grant_token_b64 = grantTokenB64),
         )
+        val accountId = try {
+            base64UrlDecodeNoPad(resp.account_id_b64)
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+        if (accountId == null || accountId.size != ACCOUNT_ID_LEN) {
+            throw AuthHttpError(
+                status = HTTP_OK,
+                endpoint = "/device/authorize/redeem",
+                body = "malformed account_id_b64",
+            )
+        }
         return DeviceAuthorizeRedeemResult(
-            accountId = base64UrlDecodeNoPad(resp.account_id_b64),
+            accountId = accountId,
             sessionToken = resp.session_token,
             sessionExpiresAtMs = resp.session_expires_at_ms,
         )
@@ -996,6 +1005,9 @@ public class AuthClient(
 
         /** Ed25519 identity pubkey length (ADR-0036 genesis-attest mint). */
         private const val PUBKEY_LEN: Int = 32
+
+        /** A 2xx whose body failed a shape check. */
+        private const val HTTP_OK: Int = 200
 
         /** `/signup/finish` without a live start (ADR-0054 S4). */
         private const val HTTP_GONE: Int = 410

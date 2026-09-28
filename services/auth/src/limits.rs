@@ -10,7 +10,8 @@
 //!
 //! - **Per name** ([`charge_name`]): a fixed-window counter keyed on what the
 //!   request names — the login handle it tries to log into (ADR-0054 S5), the
-//!   contact hash it asks to send a code to, the account a device request targets. The
+//!   contact hash it asks to send a code to, the login handle a device request
+//!   targets (ADR-0056). The
 //!   counter is charged BEFORE the handler looks anything up, and it exists
 //!   for a name with no account exactly as for one with an account, so a
 //!   refusal says nothing about existence (same status, same body, same
@@ -126,7 +127,7 @@ pub(crate) enum Scope {
     CodeSendContact = 7,
     /// `/recovery-contact/enroll/start`, keyed on the signed-in account.
     CodeSendAccount = 8,
-    /// `/device/request`, keyed on the target account id.
+    /// `/device/request`, keyed on the target login handle (ADR-0056).
     DeviceRequestTarget = 9,
     /// `/device/authorize/start`, keyed on the signed-in account.
     DeviceGrantMint = 10,

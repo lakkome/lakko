@@ -1,45 +1,68 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Device-pairing QR payload (Phase 2a3b1).
+//! Device-pairing QR payload (Phase 2a3b1; v2 since ADR-0056).
 //!
 //! Wraps the generated [`lakko_proto::wire::device_pairing::v1::PairingQr`]
 //! type with two helpers the three clients (web / iOS / Android)
 //! consume to drive the add-device handshake:
 //!
 //!   * [`encode`] — fresh device side. Bundle its
-//!     `Identity::create_key_package()` bytes + its
-//!     `account_id` into the wire payload to render as a QR.
-//!   * [`decode`] — scanner side. Parse the QR bytes, **verify
-//!     the embedded `account_id` matches the local account**,
-//!     and surface the inner [`KeyPackage`] for
-//!     [`DeviceGroup::add_device_from_wire`].
+//!     `Identity::create_key_package()` bytes + the **login handle**
+//!     of the username the person typed into the wire payload, to
+//!     render as a QR or post to `POST /device/request` (ADR-0049).
+//!   * [`decode`] — confirming side. Parse the bytes, **verify the
+//!     embedded login handle matches the confirming device's own
+//!     handle** (constant time), and surface the inner `KeyPackage`
+//!     for `DeviceGroup::add_device_from_wire`.
 //!
 //! The wire format itself lives in
 //! `schemas/wire/device_pairing_v1.proto`; this module is the
 //! one place that knows the field shape so the three clients
 //! don't end up with subtly different decode paths.
 //!
+//! ## Why a login handle and not the account id (ADR-0056)
+//!
+//! v1 carried the 16-byte `account_id`. A fresh device learned it through
+//! a username lookup, and since ADR-0054 S3 a lookup needs a session the
+//! fresh device does not have. The handle
+//! (`BLAKE3-derive-key("lakko/auth/login-handle/v1", canonical_username)`,
+//! `lakko_contacts::username::login_handle`) is a public function of the
+//! name the person types, so the fresh device computes it locally and the
+//! confirming device computes its own from its own username. Field 2 is
+//! reserved; the decoder accepts version 2 only (no dual path).
+//!
 //! ## Trust model
 //!
-//! - The QR payload is **not** signed — see the proto docstring.
+//! - The payload is **not** signed — see the proto docstring.
 //!   The trust anchor is the user pointing the camera at their
-//!   own device's screen.
-//! - The `account_id` check is the only structural guard: it
-//!   stops the scanner from accidentally enrolling a stranger's
-//!   device into the local DeviceGroup if they scan a QR from
-//!   the wrong session by mistake. It does **not** stop an
-//!   active attacker who can present an arbitrary QR — that's
-//!   what the safety-number follow-up will cover.
+//!   own device's screen, or comparing the six-digit code on the
+//!   camera-less route.
+//! - The handle check is the only structural guard: it stops the
+//!   confirming device from enrolling a device meant for another
+//!   account's name into the local DeviceGroup by mistake. It does
+//!   **not** stop an active attacker who can present an arbitrary
+//!   payload (the handle is a public function of the username) —
+//!   that is what the comparison code covers.
+//! - The comparison is constant time ([`SecretBytes`]' equality, which is
+//!   `subtle::ConstantTimeEq`). The handle is not a secret, so this is
+//!   defence in depth that the ADR asks for, not a load-bearing property.
 
 use prost::Message as _;
 
-use crate::device_group::AccountId;
+use lakko_crypto::secret::SecretBytes;
+
 use crate::error::{Error, Result};
 
-/// Current QR payload schema version. Bumped on breaking
-/// changes; older scanners reject newer payloads.
-pub const PAIRING_VERSION: u32 = 1;
+/// Current payload schema version. The decoder accepts exactly this
+/// version (ADR-0056: no dual path).
+pub const PAIRING_VERSION: u32 = 2;
+
+/// Length of a login handle in bytes (ADR-0054 S5).
+pub const LOGIN_HANDLE_LEN: usize = 32;
+
+/// 32-byte login handle of the account a fresh device asks to join.
+pub type LoginHandle = [u8; LOGIN_HANDLE_LEN];
 
 /// Length of the rendezvous pseudonym in bytes. Pinned at 32
 /// to mirror every other pseudonym width in Lakko (routing
@@ -66,19 +89,14 @@ pub struct DecodedPairingQr {
     pub rendezvous_pseudonym: RendezvousPseudonym,
 }
 
-/// Fresh-device side: build the wire-format QR payload.
+/// Fresh-device side: build the wire-format payload.
 ///
-/// `key_package_bytes` is the TLS-encoded `KeyPackage` from
-/// `Identity::create_key_package()` plus
-/// `lakko_mls::key_package::serialize(...)`. Caller owns the
-/// bytes — this function does not retain a reference past
-/// return.
-///
-/// `rendezvous_pseudonym` is a fresh random 32-byte slot the
-/// joining device chose for this pairing session. The scanner
-/// will PUT the Welcome bytes to the DS mailbox keyed by this
-/// pseudonym; the joining device polls that slot until the
-/// Welcome arrives.
+/// `login_handle` is the handle of the username the person typed
+/// (`lakko_contacts::username::login_handle`). `key_package_bytes` is the
+/// TLS-encoded `KeyPackage` from `Identity::create_key_package()`.
+/// `rendezvous_pseudonym` is a fresh random 32-byte slot the joining
+/// device chose for this pairing session; the confirming device PUTs the
+/// Welcome to the DS mailbox keyed by it.
 ///
 /// # Errors
 ///
@@ -86,15 +104,15 @@ pub struct DecodedPairingQr {
 /// failure (constant-size fields make it practically
 /// impossible).
 pub fn encode(
-    account_id: &AccountId,
+    login_handle: &LoginHandle,
     key_package_bytes: &[u8],
     rendezvous_pseudonym: &RendezvousPseudonym,
 ) -> Result<Vec<u8>> {
     let payload = lakko_proto::wire::device_pairing::v1::PairingQr {
         version: PAIRING_VERSION,
-        account_id: account_id.to_vec(),
         key_package: key_package_bytes.to_vec(),
         rendezvous_pseudonym: rendezvous_pseudonym.to_vec(),
+        login_handle: login_handle.to_vec(),
     };
     let mut buf = Vec::with_capacity(payload.encoded_len());
     payload
@@ -103,49 +121,54 @@ pub fn encode(
     Ok(buf)
 }
 
-/// Scanner side: parse the wire-format QR payload and bind it
-/// to `expected_account_id`. Returns the embedded
-/// `KeyPackage` bytes + rendezvous pseudonym ready to drive
-/// [`crate::device_group::DeviceGroup::add_device_from_wire`]
-/// and the subsequent Welcome PUT.
+/// Confirming side: parse the wire-format payload and bind it to
+/// `expected_login_handle`, the handle of the confirming device's own
+/// username. Returns the embedded `KeyPackage` bytes + rendezvous
+/// pseudonym ready to drive
+/// [`crate::device_group::DeviceGroup::add_device_from_wire`] and the
+/// subsequent Welcome PUT.
 ///
 /// # Errors
 ///
-/// - [`Error::Codec`] when the bytes don't decode or the
-///   embedded `account_id` / `rendezvous_pseudonym` is the
-///   wrong length (structurally suspicious).
-/// - [`Error::Unsupported`] when the payload's `version` is
-///   newer than this binary knows.
-/// - [`Error::Group`] with a `"account_id mismatch"` body when
-///   the embedded `account_id` is not equal to
-///   `expected_account_id`. The scanner refuses to enrol the
-///   fresh device into the local DeviceGroup.
-pub fn decode(bytes: &[u8], expected_account_id: &AccountId) -> Result<DecodedPairingQr> {
+/// - [`Error::Codec`] when the bytes don't decode or the embedded
+///   `login_handle` / `rendezvous_pseudonym` is the wrong length
+///   (structurally suspicious). A v1 payload carries no field 5 and so
+///   fails here too if it somehow claims version 2.
+/// - [`Error::Unsupported`] when the payload's `version` is anything other
+///   than [`PAIRING_VERSION`] (older or newer).
+/// - [`Error::Group`] with a `"login_handle mismatch"` body when the
+///   embedded handle is not equal to `expected_login_handle`. The
+///   confirming device refuses to enrol the fresh device.
+pub fn decode(bytes: &[u8], expected_login_handle: &LoginHandle) -> Result<DecodedPairingQr> {
     let payload = lakko_proto::wire::device_pairing::v1::PairingQr::decode(bytes)
         .map_err(|e| Error::Codec(format!("PairingQr decode: {e}")))?;
 
-    if payload.version > PAIRING_VERSION {
-        return Err(Error::Unsupported("pairing QR is newer than this client"));
-    }
-    if payload.account_id.len() != 16 {
-        return Err(Error::Codec(format!(
-            "PairingQr account_id length {} != 16",
-            payload.account_id.len()
-        )));
-    }
-    if payload.account_id.as_slice() != expected_account_id.as_slice() {
-        return Err(Error::Group(
-            "pairing QR account_id mismatch (scanned from a different account)".into(),
+    if payload.version != PAIRING_VERSION {
+        return Err(Error::Unsupported(
+            "pairing payload version is not supported by this client",
         ));
     }
-    if payload.rendezvous_pseudonym.len() != RENDEZVOUS_PSEUDONYM_LEN {
-        return Err(Error::Codec(format!(
-            "PairingQr rendezvous_pseudonym length {} != {RENDEZVOUS_PSEUDONYM_LEN}",
-            payload.rendezvous_pseudonym.len()
-        )));
+    let embedded: LoginHandle = payload.login_handle.as_slice().try_into().map_err(|_| {
+        Error::Codec(format!(
+            "PairingQr login_handle length {} != {LOGIN_HANDLE_LEN}",
+            payload.login_handle.len()
+        ))
+    })?;
+    if SecretBytes::new(embedded) != SecretBytes::new(*expected_login_handle) {
+        return Err(Error::Group(
+            "pairing payload login_handle mismatch (meant for another account's name)".into(),
+        ));
     }
-    let mut rendezvous = [0u8; RENDEZVOUS_PSEUDONYM_LEN];
-    rendezvous.copy_from_slice(&payload.rendezvous_pseudonym);
+    let rendezvous: RendezvousPseudonym = payload
+        .rendezvous_pseudonym
+        .as_slice()
+        .try_into()
+        .map_err(|_| {
+            Error::Codec(format!(
+                "PairingQr rendezvous_pseudonym length {} != {RENDEZVOUS_PSEUDONYM_LEN}",
+                payload.rendezvous_pseudonym.len()
+            ))
+        })?;
     Ok(DecodedPairingQr {
         key_package: payload.key_package,
         rendezvous_pseudonym: rendezvous,
@@ -155,12 +178,14 @@ pub fn decode(bytes: &[u8], expected_account_id: &AccountId) -> Result<DecodedPa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lakko_proto::wire::device_pairing::v1::PairingQr;
+    use proptest::prelude::*;
 
-    fn fixture_account_id() -> AccountId {
-        let mut id = [0u8; 16];
-        id[0] = 0xab;
-        id[15] = 0xcd;
-        id
+    fn fixture_handle() -> LoginHandle {
+        let mut h = [0u8; LOGIN_HANDLE_LEN];
+        h[0] = 0xab;
+        h[LOGIN_HANDLE_LEN - 1] = 0xcd;
+        h
     }
 
     fn fixture_rendezvous() -> RendezvousPseudonym {
@@ -170,70 +195,143 @@ mod tests {
         p
     }
 
+    fn encode_raw(payload: &PairingQr) -> Vec<u8> {
+        let mut buf = Vec::new();
+        payload.encode(&mut buf).unwrap();
+        buf
+    }
+
+    /// Append a length-delimited protobuf field (wire type 2) by hand, for
+    /// field numbers the generated type no longer knows.
+    fn push_bytes_field(buf: &mut Vec<u8>, field: u32, value: &[u8]) {
+        let key = (field << 3) | 2;
+        prost::encoding::encode_varint(u64::from(key), buf);
+        prost::encoding::encode_varint(value.len() as u64, buf);
+        buf.extend_from_slice(value);
+    }
+
     #[test]
     fn encode_decode_roundtrip() {
-        let account = fixture_account_id();
+        let handle = fixture_handle();
         let kp_bytes = vec![0x42u8; 768]; // shape-realistic stub
         let rendezvous = fixture_rendezvous();
-        let qr = encode(&account, &kp_bytes, &rendezvous).expect("encode");
-        let recovered = decode(&qr, &account).expect("decode");
+        let qr = encode(&handle, &kp_bytes, &rendezvous).expect("encode");
+        let recovered = decode(&qr, &handle).expect("decode");
         assert_eq!(recovered.key_package, kp_bytes);
         assert_eq!(recovered.rendezvous_pseudonym, rendezvous);
     }
 
     #[test]
-    fn decode_rejects_wrong_account() {
-        let account_a = fixture_account_id();
-        let mut account_b = fixture_account_id();
-        account_b[0] ^= 0xFF;
-        let kp_bytes = vec![0x42u8; 128];
-        let qr = encode(&account_a, &kp_bytes, &fixture_rendezvous()).expect("encode");
-        match decode(&qr, &account_b) {
-            Ok(_) => panic!("decode should reject a QR for the other account"),
+    fn encoded_payload_carries_version_two_and_no_account_id() {
+        let qr = encode(&fixture_handle(), &[1, 2, 3], &fixture_rendezvous()).unwrap();
+        let raw = PairingQr::decode(qr.as_slice()).unwrap();
+        assert_eq!(raw.version, 2);
+        assert_eq!(raw.login_handle, fixture_handle().to_vec());
+        // Field 2 (the retired account_id) is never written: its key byte
+        // (2 << 3 | 2 = 0x12) never appears at a field boundary. Walk the
+        // top-level fields to check.
+        let mut rest = qr.as_slice();
+        while !rest.is_empty() {
+            let key = prost::encoding::decode_varint(&mut rest).unwrap();
+            assert_ne!(key >> 3, 2, "field 2 must not be emitted");
+            match key & 7 {
+                0 => {
+                    prost::encoding::decode_varint(&mut rest).unwrap();
+                },
+                2 => {
+                    let len = usize::try_from(prost::encoding::decode_varint(&mut rest).unwrap())
+                        .unwrap();
+                    rest = &rest[len..];
+                },
+                other => panic!("unexpected wire type {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn decode_rejects_wrong_handle() {
+        let handle_a = fixture_handle();
+        let mut handle_b = fixture_handle();
+        handle_b[0] ^= 0xFF;
+        let qr = encode(&handle_a, &[0x42u8; 128], &fixture_rendezvous()).expect("encode");
+        match decode(&qr, &handle_b) {
+            Ok(_) => panic!("decode should reject a payload for another name"),
             Err(Error::Group(msg)) => {
-                assert!(msg.contains("account_id mismatch"), "got: {msg}");
+                assert!(msg.contains("login_handle mismatch"), "got: {msg}");
             },
             Err(other) => panic!("unexpected error: {other:?}"),
         }
     }
 
     #[test]
-    fn decode_rejects_newer_version() {
-        let account = fixture_account_id();
-        // Hand-roll a payload with version = 999.
-        let payload = lakko_proto::wire::device_pairing::v1::PairingQr {
-            version: 999,
-            account_id: account.to_vec(),
-            key_package: vec![0u8; 32],
-            rendezvous_pseudonym: fixture_rendezvous().to_vec(),
-        };
-        let mut buf = Vec::new();
-        payload.encode(&mut buf).unwrap();
-        match decode(&buf, &account) {
-            Ok(_) => panic!("decode should reject a future version"),
-            Err(Error::Unsupported(_)) => {},
-            Err(other) => panic!("unexpected error: {other:?}"),
+    fn decode_rejects_every_version_but_two() {
+        let handle = fixture_handle();
+        for version in [0u32, 1, 3, 999] {
+            let buf = encode_raw(&PairingQr {
+                version,
+                key_package: vec![0u8; 32],
+                rendezvous_pseudonym: fixture_rendezvous().to_vec(),
+                login_handle: handle.to_vec(),
+            });
+            match decode(&buf, &handle) {
+                Ok(_) => panic!("decode should reject version {version}"),
+                Err(Error::Unsupported(_)) => {},
+                Err(other) => panic!("version {version}: unexpected error: {other:?}"),
+            }
         }
     }
 
+    /// A v1 payload as a v1 encoder wrote it: version 1, the 16-byte
+    /// account id in field 2, no handle. Refused on the version.
     #[test]
-    fn decode_rejects_bad_account_id_length() {
-        let account = fixture_account_id();
-        // 8-byte account_id instead of 16.
-        let payload = lakko_proto::wire::device_pairing::v1::PairingQr {
-            version: PAIRING_VERSION,
-            account_id: vec![0xaa; 8],
-            key_package: vec![0u8; 32],
-            rendezvous_pseudonym: fixture_rendezvous().to_vec(),
-        };
+    fn decode_rejects_a_v1_payload() {
         let mut buf = Vec::new();
-        payload.encode(&mut buf).unwrap();
-        match decode(&buf, &account) {
-            Ok(_) => panic!("decode should reject short account_id"),
-            Err(Error::Codec(msg)) => {
-                assert!(msg.contains("length"), "got: {msg}");
-            },
+        prost::encoding::encode_key(1, prost::encoding::WireType::Varint, &mut buf);
+        prost::encoding::encode_varint(1, &mut buf);
+        push_bytes_field(&mut buf, 2, &[0xAB; 16]);
+        push_bytes_field(&mut buf, 3, &[0u8; 32]);
+        push_bytes_field(&mut buf, 4, &fixture_rendezvous());
+        assert!(matches!(
+            decode(&buf, &fixture_handle()),
+            Err(Error::Unsupported(_))
+        ));
+    }
+
+    /// A payload that claims version 2 but carries the old field 2 and no
+    /// handle: the unknown field is skipped, the missing handle is a
+    /// zero-length field, refused on the length.
+    #[test]
+    fn decode_rejects_old_account_id_field_without_handle() {
+        let mut buf = Vec::new();
+        prost::encoding::encode_key(1, prost::encoding::WireType::Varint, &mut buf);
+        prost::encoding::encode_varint(u64::from(PAIRING_VERSION), &mut buf);
+        push_bytes_field(&mut buf, 2, &[0xAB; 16]);
+        push_bytes_field(&mut buf, 3, &[0u8; 32]);
+        push_bytes_field(&mut buf, 4, &fixture_rendezvous());
+        match decode(&buf, &fixture_handle()) {
+            Ok(_) => panic!("decode should reject a payload with no handle"),
+            Err(Error::Codec(msg)) => assert!(msg.contains("login_handle"), "got: {msg}"),
             Err(other) => panic!("unexpected error: {other:?}"),
+        }
+        // Not even the all-zero expected handle matches a missing one.
+        assert!(decode(&buf, &[0u8; LOGIN_HANDLE_LEN]).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_bad_handle_length() {
+        let handle = fixture_handle();
+        for len in [0usize, 16, 31, 33, 64] {
+            let buf = encode_raw(&PairingQr {
+                version: PAIRING_VERSION,
+                key_package: vec![0u8; 32],
+                rendezvous_pseudonym: fixture_rendezvous().to_vec(),
+                login_handle: vec![0xab; len],
+            });
+            match decode(&buf, &handle) {
+                Ok(_) => panic!("decode should reject a {len}-byte handle"),
+                Err(Error::Codec(msg)) => assert!(msg.contains("login_handle"), "got: {msg}"),
+                Err(other) => panic!("len {len}: unexpected error: {other:?}"),
+            }
         }
     }
 
@@ -241,17 +339,14 @@ mod tests {
     /// rejected before any DS-mailbox interaction.
     #[test]
     fn decode_rejects_bad_rendezvous_pseudonym_length() {
-        let account = fixture_account_id();
-        // 16-byte rendezvous instead of 32.
-        let payload = lakko_proto::wire::device_pairing::v1::PairingQr {
+        let handle = fixture_handle();
+        let buf = encode_raw(&PairingQr {
             version: PAIRING_VERSION,
-            account_id: account.to_vec(),
             key_package: vec![0u8; 32],
             rendezvous_pseudonym: vec![0xee; 16],
-        };
-        let mut buf = Vec::new();
-        payload.encode(&mut buf).unwrap();
-        match decode(&buf, &account) {
+            login_handle: handle.to_vec(),
+        });
+        match decode(&buf, &handle) {
             Ok(_) => panic!("decode should reject short rendezvous_pseudonym"),
             Err(Error::Codec(msg)) => {
                 assert!(
@@ -260,6 +355,45 @@ mod tests {
                 );
             },
             Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    proptest! {
+        /// Round trip for any handle, KeyPackage bytes and rendezvous.
+        #[test]
+        fn prop_round_trip(
+            handle in any::<[u8; 32]>(),
+            kp in proptest::collection::vec(any::<u8>(), 0..2048),
+            rendezvous in any::<[u8; 32]>(),
+        ) {
+            let qr = encode(&handle, &kp, &rendezvous).unwrap();
+            let got = decode(&qr, &handle).unwrap();
+            prop_assert_eq!(got.key_package, kp);
+            prop_assert_eq!(got.rendezvous_pseudonym, rendezvous);
+        }
+
+        /// Any handle that differs from the embedded one is refused with the
+        /// mismatch error, whichever byte differs.
+        #[test]
+        fn prop_wrong_handle_refused(
+            handle in any::<[u8; 32]>(),
+            other in any::<[u8; 32]>(),
+            kp in proptest::collection::vec(any::<u8>(), 0..256),
+        ) {
+            prop_assume!(handle != other);
+            let qr = encode(&handle, &kp, &fixture_rendezvous()).unwrap();
+            let refused = matches!(decode(&qr, &other), Err(Error::Group(_)));
+            prop_assert!(refused);
+        }
+
+        /// Arbitrary bytes never panic, and anything that decodes carries
+        /// version 2 and the expected handle (the fuzz oracle, run here too).
+        #[test]
+        fn prop_arbitrary_bytes_never_panic(
+            bytes in proptest::collection::vec(any::<u8>(), 0..512),
+        ) {
+            let _ = decode(&bytes, &fixture_handle());
+            prop_assert!(crate::fuzz_api::pairing_qr_acceptance_is_bound(&bytes));
         }
     }
 }

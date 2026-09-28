@@ -23,7 +23,7 @@ import { authLimitMessage } from "../auth/auth-error-copy";
 import { createSignal, onCleanup, Show, Switch, Match, type JSX } from "solid-js";
 import QRCode from "qrcode";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
-import { AuthClient } from "../auth/client";
+import { AuthClient, AuthHttpError } from "../auth/client";
 import {
   comparisonCode,
   DEVICE_REQUEST_STATUS_POLL_MS,
@@ -63,9 +63,10 @@ export default function RestoreViaDevicePanel(props: {
   /** ADR-0049 section 2: when given, the pairing payload is ALSO posted to
    *  the auth service so a signed-in device can confirm without a camera;
    *  the panel then leads with the comparison code and keeps the QR code
-   *  behind a toggle. Evaluated after `prepare()` (the account may only be
-   *  known then). `null` keeps the QR-only behaviour. */
-  readonly requestAccount?: () => Uint8Array | null;
+   *  behind a toggle. ADR-0056: the request is addressed by the 32-byte
+   *  login handle of the typed username, never by an account id. Evaluated
+   *  after `prepare()`. `null` keeps the QR-only behaviour. */
+  readonly requestHandle?: () => Uint8Array | null;
 }): JSX.Element {
   type State =
     | { kind: "idle" }
@@ -104,20 +105,26 @@ export default function RestoreViaDevicePanel(props: {
    *  confirming device deletes it right after publishing the Welcome, so
    *  the Welcome poll is given a grace period to land first. */
   async function publishRequest(flow: DeviceRestoreFlowHandle, abort: AbortController): Promise<void> {
-    const account = props.requestAccount?.() ?? null;
-    if (account === null) return;
+    const handle = props.requestHandle?.() ?? null;
+    if (handle === null) return;
     setCode(await comparisonCode(flow.qrPayload));
     const client = new AuthClient();
     let requestId: string;
     try {
-      requestId = (await client.deviceRequestCreate(account, flow.qrPayload)).requestId;
+      requestId = (await client.deviceRequestCreate(handle, flow.qrPayload)).requestId;
     } catch (err) {
       // ADR-0054 S4: `device-request-limited` has its own copy.
       const limit = authLimitMessage(err);
+      const byNameOff =
+        err instanceof AuthHttpError &&
+        err.status === 503 &&
+        err.errorCode === "login-by-name-disabled";
       setRequestNote(
         limit ??
-          "Could not reach the server to ask your other device; the QR code still works. " +
-            (err instanceof Error ? err.message : String(err)),
+          (byNameOff
+            ? "Asking your other device is not available right now; the QR code still works."
+            : "Could not reach the server to ask your other device; the QR code still works. " +
+              (err instanceof Error ? err.message : String(err))),
       );
       setShowQr(true);
       return;
@@ -176,7 +183,7 @@ export default function RestoreViaDevicePanel(props: {
           // A confirmation on another device can take minutes (the request
           // itself lives ten); a QR scan is quick. Keep polling for the
           // Welcome as long as the request is alive, in one-minute legs.
-          const confirmRoute = (props.requestAccount?.() ?? null) !== null;
+          const confirmRoute = (props.requestHandle?.() ?? null) !== null;
           const deadline = Date.now() + (confirmRoute ? 10 * 60_000 : 60_000);
           let outcome = await flow.awaitWelcome(abort.signal);
           while (

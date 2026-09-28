@@ -48,6 +48,7 @@ import {
   removeDeviceAt,
   type DeviceListItem,
 } from "../devices/remove";
+import { PAIRING_NEEDS_USERNAME, ownPairingHandle } from "../devices/pairing";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
 import { paths } from "./paths";
@@ -58,15 +59,24 @@ export default function Devices(): JSX.Element {
   const auth = useAuth();
   const [add, setAdd] = createSignal<AddMode>("closed");
 
-  const session = (): { accountIdB64: string; accountIdBytes: Uint8Array } | null => {
+  const session = (): {
+    accountIdB64: string;
+    accountIdBytes: Uint8Array;
+    username: string;
+  } | null => {
     const s = auth.state();
     const secrets = auth.identitySecrets();
     if (s.kind !== "session" || secrets === null) return null;
     return {
       accountIdB64: s.account.accountId,
       accountIdBytes: secrets.accountId,
+      username: s.account.username,
     };
   };
+  // ADR-0056: both halves of adding a device address the account by the
+  // login handle of its username, so an account with no username (a guest)
+  // cannot add one.
+  const hasUsername = (): boolean => (session()?.username.trim().length ?? 0) > 0;
 
   return (
     <article>
@@ -96,14 +106,18 @@ export default function Devices(): JSX.Element {
                 type="button"
                 class="primary"
                 aria-expanded={add() !== "closed"}
+                disabled={!hasUsername()}
                 onClick={() => setAdd(add() === "closed" ? "pick" : "closed")}
               >
                 <Icon name="plus" size={18} />
                 Add a device
               </button>
             </div>
+            <Show when={!hasUsername()}>
+              <p class="lk-meta" style={{ margin: 0 }}>{PAIRING_NEEDS_USERNAME}</p>
+            </Show>
           </section>
-          <Show when={add() !== "closed"}>
+          <Show when={add() !== "closed" && hasUsername()}>
             <section class="lk-card" aria-label="Add a device">
               <Switch>
                 <Match when={add() === "pick"}>
@@ -133,6 +147,7 @@ export default function Devices(): JSX.Element {
                   <PairView
                     accountIdB64={session()!.accountIdB64}
                     accountIdBytes={session()!.accountIdBytes}
+                    username={session()!.username}
                     onBack={() => setAdd("pick")}
                   />
                 </Match>
@@ -140,6 +155,7 @@ export default function Devices(): JSX.Element {
                   <ScanView
                     accountIdB64={session()!.accountIdB64}
                     accountIdBytes={session()!.accountIdBytes}
+                    username={session()!.username}
                     onBack={() => setAdd("pick")}
                   />
                 </Match>
@@ -358,6 +374,7 @@ function DevicesListView(props: {
 function PairView(props: {
   readonly accountIdB64: string;
   readonly accountIdBytes: Uint8Array;
+  readonly username: string;
   readonly onBack: () => void;
 }): JSX.Element {
   type State =
@@ -385,6 +402,7 @@ function PairView(props: {
         accountIdBytes: props.accountIdBytes,
         accountIdB64: props.accountIdB64,
         deviceKey,
+        loginHandle: await ownPairingHandle(props.username),
       });
       // Encode the wire bytes as a base64url string and feed
       // into `qrcode`. The library accepts arbitrary strings;
@@ -521,6 +539,7 @@ function PairView(props: {
 function ScanView(props: {
   readonly accountIdB64: string;
   readonly accountIdBytes: Uint8Array;
+  readonly username: string;
   readonly onBack: () => void;
 }): JSX.Element {
   // ADR-0018 factor (a): the scanner side also transfers ACCESS +
@@ -591,6 +610,9 @@ function ScanView(props: {
           : undefined;
       const scanned = await runScanFlow({
         scannedBytes,
+        // ADR-0056: this account's own handle; a code made for another
+        // account's name is refused with the wrong-account copy.
+        loginHandle: await ownPairingHandle(props.username),
         accountIdBytes: props.accountIdBytes,
         accountIdB64: props.accountIdB64,
         deviceKey,

@@ -35,15 +35,55 @@ public enum PairingOrchestrator {
         public let phraseSeed: Data
         public let sessionToken: String?
         public let sessionExpiresAtMs: Int64?
+        /// ADR-0056 — the raw 16-byte account id the redeemed grant belongs
+        /// to, from the redeem response; `nil` when the redeem failed. A
+        /// fresh device that named its account by username first learns the
+        /// id here.
+        public let accountId: Data?
 
         public init(
             phraseSeed: Data,
             sessionToken: String?,
-            sessionExpiresAtMs: Int64?
+            sessionExpiresAtMs: Int64?,
+            accountId: Data? = nil
         ) {
             self.phraseSeed = phraseSeed
             self.sessionToken = sessionToken
             self.sessionExpiresAtMs = sessionExpiresAtMs
+            self.accountId = accountId
+        }
+    }
+
+    /// Which account a joining device is joining (ADR-0056).
+    public enum JoinTarget {
+        /// A signed-in device (or one parked on the identity prompt after a
+        /// password sign-in): the account id is already known, and the
+        /// Welcome is checked against it at join.
+        case account(accountIdBytes: Data, accountIdB64: String)
+        /// A fresh device with no session that named its account by the
+        /// username typed: nothing before the session carries the account
+        /// id. The device learns it from the grant redeem after the join,
+        /// and only then checks the joined group against it.
+        case byName
+    }
+
+    /// Why a join by name could not finish (ADR-0056).
+    public enum JoinByNameError: Error, LocalizedError, Equatable {
+        /// The other device linked this one but sent no recovery row, or its
+        /// grant could not be redeemed: without the redeem the device does
+        /// not know its account.
+        case noAccess
+        /// The group joined is not the DeviceGroup of the account the grant
+        /// belongs to.
+        case wrongAccount
+
+        public var errorDescription: String? {
+            switch self {
+            case .noAccess:
+                return "The other device linked this one but the sign-in could not be completed. Try again."
+            case .wrongAccount:
+                return "The other device belongs to a different account. Try again with the right username."
+            }
         }
     }
 
@@ -65,21 +105,32 @@ public enum PairingOrchestrator {
         public let rendezvous: Data
 
         fileprivate let identity: Identity
-        fileprivate let accountIdBytes: Data
-        fileprivate let accountIdB64: String
+        fileprivate let target: JoinTarget
+        /// ADR-0056 — the device-identity seed of a join by name, held in
+        /// memory until the redeem names the account it is persisted under.
+        /// Empty for ``JoinTarget/account(accountIdBytes:accountIdB64:)``,
+        /// whose seed is already in the Keychain.
+        fileprivate var pendingDeviceSeed: Data
+        fileprivate let redeem: (String) async throws -> DeviceAuthorizeRedeemResult
 
         fileprivate init(
             qrPayload: Data,
             rendezvous: Data,
             identity: Identity,
-            accountIdBytes: Data,
-            accountIdB64: String
+            target: JoinTarget,
+            pendingDeviceSeed: Data,
+            redeem: @escaping (String) async throws -> DeviceAuthorizeRedeemResult
         ) {
             self.qrPayload = qrPayload
             self.rendezvous = rendezvous
             self.identity = identity
-            self.accountIdBytes = accountIdBytes
-            self.accountIdB64 = accountIdB64
+            self.target = target
+            self.pendingDeviceSeed = pendingDeviceSeed
+            self.redeem = redeem
+        }
+
+        deinit {
+            pendingDeviceSeed.resetBytes(in: 0..<pendingDeviceSeed.count)
         }
 
         /// Long-poll the rendezvous mailbox.
@@ -117,6 +168,33 @@ public enum PairingOrchestrator {
             welcomeCursor: Int64? = nil,
             recovery: Bool = false
         ) async throws -> JoinRecoveryOutcome? {
+            switch target {
+            case .account(let accountIdBytes, let accountIdB64):
+                return try await acceptForAccount(
+                    welcomeBytes: welcomeBytes,
+                    welcomeCursor: welcomeCursor,
+                    recovery: recovery,
+                    accountIdBytes: accountIdBytes,
+                    accountIdB64: accountIdB64
+                )
+            case .byName:
+                guard let cursor = welcomeCursor else {
+                    throw JoinByNameError.noAccess
+                }
+                return try await acceptByName(
+                    welcomeBytes: welcomeBytes,
+                    welcomeCursor: cursor
+                )
+            }
+        }
+
+        private func acceptForAccount(
+            welcomeBytes: Data,
+            welcomeCursor: Int64?,
+            recovery: Bool,
+            accountIdBytes: Data,
+            accountIdB64: String
+        ) async throws -> JoinRecoveryOutcome? {
             // The deterministic group_id check inside
             // DeviceGroup.joinFromWelcome rejects a misrouted
             // Welcome before any state advance.
@@ -129,51 +207,139 @@ public enum PairingOrchestrator {
                 identity: identity,
                 accountIdB64: accountIdB64
             )
-
-            // Phase 2a3d8-ui — history catch-up bundle.
             if let cursor = welcomeCursor {
-                do {
-                    let sealed = try await WelcomeCourier.pollForHistoryBundle(
-                        rendezvousPseudonym: rendezvous,
-                        welcomeCursor: cursor
-                    )
-                    if case .received(let sealedBytes) = sealed {
-                        let secret = try joined.historyBundleSecret(
-                            identity: identity
-                        )
-                        let applied = try HistoryBundleCodec.applyToMessageLog(
-                            accountIdB64: accountIdB64,
-                            secret: secret,
-                            sealedBytes: sealedBytes
-                        )
-                        NSLog("history catch-up: applied %d rows", applied)
-                    }
-                } catch {
-                    NSLog("history bundle apply failed: %@", error.localizedDescription)
-                }
-            }
-
-            // ADR-0050 section 2.9 — the state bundle (contacts, pins, known
-            // group ids), best-effort like the history bundle.
-            if let cursor = welcomeCursor,
-               let bundle = await StateBundle.receive(
-                   group: joined,
-                   identity: identity,
-                   rendezvousPseudonym: rendezvous,
-                   afterCursor: cursor
-               ) {
-                let applied = StateBundle.apply(bundle)
-                NSLog("state bundle: %d contacts, %d pins", applied.contacts, applied.pins)
+                await receiveBundles(joined: joined, accountIdB64: accountIdB64, welcomeCursor: cursor)
             }
 
             // ADR-0018 factor (a) — opt-in recovery payload.
             if recovery, let cursor = welcomeCursor {
-                return await runJoinerRecovery(
-                    joined: joined,
+                guard let outcome = await runJoinerRecovery(
+                    exportSecret: { label, context, length in
+                        try joined.exportSecret(
+                            identity: self.identity, label: label, context: context, length: length
+                        )
+                    },
                     welcomeCursor: cursor
-                )
+                ) else { return nil }
+                // The grant belongs to the account whose DeviceGroup this
+                // device just joined; a redeem naming another account keeps
+                // the identity (verified against the published bundle later)
+                // but not the session.
+                if let redeemed = outcome.accountId, redeemed != accountIdBytes {
+                    NSLog("device grant redeem named another account (seed-only outcome)")
+                    return JoinRecoveryOutcome(
+                        phraseSeed: outcome.phraseSeed,
+                        sessionToken: nil,
+                        sessionExpiresAtMs: nil,
+                        accountId: nil
+                    )
+                }
+                return outcome
             }
             return nil
+        }
+
+        /// ADR-0056 — the join of a fresh device that named its account by
+        /// username. The account id is unknown until the grant redeem, so
+        /// the Welcome is joined as a plain group, the recovery row is
+        /// opened under its exporter (the DeviceGroup exporter IS the
+        /// underlying group's), the grant is redeemed, and only then is the
+        /// joined group checked to be that account's DeviceGroup. A redeem
+        /// that fails or a group of another account ends the join: without
+        /// the account the device has nothing to land.
+        private func acceptByName(
+            welcomeBytes: Data,
+            welcomeCursor: Int64
+        ) async throws -> JoinRecoveryOutcome {
+            let plain = try PairingOrchestrator.joinWelcomeByName(
+                welcomeBytes: welcomeBytes,
+                identity: identity
+            )
+            guard let outcome = await runJoinerRecovery(
+                exportSecret: { label, context, length in
+                    try plain.exportSecret(
+                        identity: self.identity, label: label, context: context, length: length
+                    )
+                },
+                welcomeCursor: welcomeCursor
+            ) else {
+                throw JoinByNameError.noAccess
+            }
+            guard let accountIdBytes = outcome.accountId, outcome.sessionToken != nil else {
+                var seed = outcome.phraseSeed
+                seed.resetBytes(in: 0..<seed.count)
+                throw JoinByNameError.noAccess
+            }
+            let joined: DeviceGroup
+            do {
+                joined = try PairingOrchestrator.adoptJoinedDeviceGroup(
+                    identity: identity,
+                    accountIdBytes: accountIdBytes
+                )
+            } catch {
+                var seed = outcome.phraseSeed
+                seed.resetBytes(in: 0..<seed.count)
+                throw error
+            }
+            let accountIdB64 = base64Encode(accountIdBytes)
+            // The device-identity seed is keyed by account; it is persisted
+            // only now, once the redeem named the account.
+            if !pendingDeviceSeed.isEmpty {
+                do {
+                    try DeviceIdentityStore.putDeviceIdentitySeed(
+                        accountIdB64: accountIdB64,
+                        seed: pendingDeviceSeed
+                    )
+                } catch {
+                    NSLog("device identity seed persist (join by name) failed: %@", error.localizedDescription)
+                }
+                pendingDeviceSeed.resetBytes(in: 0..<pendingDeviceSeed.count)
+                pendingDeviceSeed = Data()
+            }
+            DeviceGroupLifecycle.persistSnapshot(
+                identity: identity,
+                accountIdB64: accountIdB64
+            )
+            await receiveBundles(joined: joined, accountIdB64: accountIdB64, welcomeCursor: welcomeCursor)
+            return outcome
+        }
+
+        /// Phase 2a3d8-ui history catch-up bundle + ADR-0050 section 2.9
+        /// state bundle, both best-effort after the join.
+        private func receiveBundles(
+            joined: DeviceGroup,
+            accountIdB64: String,
+            welcomeCursor cursor: Int64
+        ) async {
+            do {
+                let sealed = try await WelcomeCourier.pollForHistoryBundle(
+                    rendezvousPseudonym: rendezvous,
+                    welcomeCursor: cursor
+                )
+                if case .received(let sealedBytes) = sealed {
+                    let secret = try joined.historyBundleSecret(
+                        identity: identity
+                    )
+                    let applied = try HistoryBundleCodec.applyToMessageLog(
+                        accountIdB64: accountIdB64,
+                        secret: secret,
+                        sealedBytes: sealedBytes
+                    )
+                    NSLog("history catch-up: applied %d rows", applied)
+                }
+            } catch {
+                NSLog("history bundle apply failed: %@", error.localizedDescription)
+            }
+
+            if let bundle = await StateBundle.receive(
+                group: joined,
+                identity: identity,
+                rendezvousPseudonym: rendezvous,
+                afterCursor: cursor
+            ) {
+                let applied = StateBundle.apply(bundle)
+                NSLog("state bundle: %d contacts, %d pins", applied.contacts, applied.pins)
+            }
         }
 
         /// Poll for the scanner's sealed recovery row, open it under
@@ -183,7 +349,7 @@ public enum PairingOrchestrator {
         /// by this path. Transient secrets are zeroized
         /// (best-effort under Swift `Data` value semantics).
         private func runJoinerRecovery(
-            joined: DeviceGroup,
+            exportSecret: (String, Data, UInt32) throws -> Data,
             welcomeCursor: Int64
         ) async -> JoinRecoveryOutcome? {
             let outcome: RecoveryPayload.RecoveryPayloadOutcome
@@ -211,25 +377,21 @@ public enum PairingOrchestrator {
                 grantToken.resetBytes(in: 0..<grantToken.count)
             }
             do {
-                exporterKey = try joined.exportSecret(
-                    identity: identity,
-                    label: RecoveryPayload.recoveryExporterLabel,
-                    context: rendezvous,
-                    length: UInt32(RecoveryPayload.recoveryExporterKeyLength)
+                exporterKey = try exportSecret(
+                    RecoveryPayload.recoveryExporterLabel,
+                    rendezvous,
+                    UInt32(RecoveryPayload.recoveryExporterKeyLength)
                 )
                 payload = try openWithKey(key: exporterKey, wire: sealedBlob)
                 let parsed = try RecoveryPayload.parseRecoveryPayload(payload)
                 grantToken = parsed.grantToken
-                // Redeem the single-use grant for a session token.
-                // A redeem failure (endpoint down, grant expired)
-                // degrades to a seed-only outcome — the identity
-                // still restores; only ACCESS needs another factor.
+                // Redeem the single-use grant for a session token. The
+                // grant alone names the account (ADR-0056); the response
+                // carries the account id. A redeem failure (endpoint down,
+                // grant expired) degrades to a seed-only outcome.
                 var redeemed: DeviceAuthorizeRedeemResult?
                 do {
-                    redeemed = try await AuthClient().deviceAuthorizeRedeem(
-                        accountId: accountIdBytes,
-                        grantTokenB64: base64UrlEncodeNoPad(parsed.grantToken)
-                    )
+                    redeemed = try await redeem(base64UrlEncodeNoPad(parsed.grantToken))
                 } catch {
                     NSLog(
                         "device grant redeem failed (seed-only outcome): %@",
@@ -240,7 +402,8 @@ public enum PairingOrchestrator {
                 return JoinRecoveryOutcome(
                     phraseSeed: parsed.phraseSeed,
                     sessionToken: redeemed?.sessionToken,
-                    sessionExpiresAtMs: redeemed?.sessionExpiresAtMs
+                    sessionExpiresAtMs: redeemed?.sessionExpiresAtMs,
+                    accountId: redeemed?.accountId
                 )
             } catch {
                 NSLog(
@@ -252,13 +415,19 @@ public enum PairingOrchestrator {
         }
     }
 
-    /// Joining-device side entry point. Builds the DeviceIdentity
-    /// from the cached seed, generates a fresh rendezvous slot,
-    /// produces a KeyPackage, encodes the pairing QR. The view
-    /// drives the rest via the returned [`JoinSession`].
+    /// Joining-device side entry point for a device that knows its
+    /// account (signed in, or parked on the identity prompt). Builds the
+    /// DeviceIdentity from the cached seed, generates a fresh rendezvous
+    /// slot, produces a KeyPackage, encodes the pairing QR naming the
+    /// account by `loginHandle` (ADR-0056). The view drives the rest via
+    /// the returned [`JoinSession`].
     public static func prepareJoinFlow(
+        loginHandle: Data,
         accountIdBytes: Data,
-        accountIdB64: String
+        accountIdB64: String,
+        redeem: @escaping (String) async throws -> DeviceAuthorizeRedeemResult = {
+            try await AuthClient().deviceAuthorizeRedeem(grantTokenB64: $0)
+        }
     ) throws -> JoinSession {
         let seed = try DeviceIdentityStore.ensureDeviceIdentitySeed(
             accountIdB64: accountIdB64
@@ -267,7 +436,7 @@ public enum PairingOrchestrator {
         let keyPackage = try identity.createKeyPackage()
         let rendezvous = PairingCodec.generateRendezvousPseudonym()
         let qrPayload = try PairingCodec.buildPairingQrPayload(
-            accountId: accountIdBytes,
+            loginHandle: loginHandle,
             keyPackage: keyPackage,
             rendezvousPseudonym: rendezvous
         )
@@ -275,9 +444,67 @@ public enum PairingOrchestrator {
             qrPayload: qrPayload,
             rendezvous: rendezvous,
             identity: identity,
-            accountIdBytes: accountIdBytes,
-            accountIdB64: accountIdB64
+            target: .account(accountIdBytes: accountIdBytes, accountIdB64: accountIdB64),
+            pendingDeviceSeed: Data(),
+            redeem: redeem
         )
+    }
+
+    /// ADR-0056 — joining-device side entry point for a fresh device that
+    /// names its account by the typed username. No lookup and no account id:
+    /// a fresh device-identity seed is held in memory, the QR carries the
+    /// login handle, and ``JoinSession/accept(welcomeBytes:welcomeCursor:recovery:)``
+    /// learns the account from the grant redeem.
+    public static func prepareRestoreByNameFlow(
+        loginHandle: Data,
+        redeem: @escaping (String) async throws -> DeviceAuthorizeRedeemResult = {
+            try await AuthClient().deviceAuthorizeRedeem(grantTokenB64: $0)
+        }
+    ) throws -> JoinSession {
+        var seed = Data(count: DeviceIdentityStore.seedLength)
+        let status = seed.withUnsafeMutableBytes { ptr -> OSStatus in
+            guard let base = ptr.baseAddress else { return errSecAllocate }
+            return SecRandomCopyBytes(kSecRandomDefault, DeviceIdentityStore.seedLength, base)
+        }
+        guard status == errSecSuccess else {
+            throw DeviceIdentityStoreError.keychain(status: status, operation: "SecRandomCopyBytes")
+        }
+        let identity = try Identity.fromSeed(seed: seed)
+        let keyPackage = try identity.createKeyPackage()
+        let rendezvous = PairingCodec.generateRendezvousPseudonym()
+        let qrPayload = try PairingCodec.buildPairingQrPayload(
+            loginHandle: loginHandle,
+            keyPackage: keyPackage,
+            rendezvousPseudonym: rendezvous
+        )
+        return JoinSession(
+            qrPayload: qrPayload,
+            rendezvous: rendezvous,
+            identity: identity,
+            target: .byName,
+            pendingDeviceSeed: seed,
+            redeem: redeem
+        )
+    }
+
+    /// ADR-0056 — join a DeviceGroup Welcome before the account is known:
+    /// a plain group join. The group_id check waits for
+    /// ``adoptJoinedDeviceGroup(identity:accountIdBytes:)``.
+    static func joinWelcomeByName(welcomeBytes: Data, identity: Identity) throws -> Group {
+        try Group.joinFromWelcome(welcome: welcomeBytes, identity: identity)
+    }
+
+    /// ADR-0056 — the deferred group_id check of a join by name: load the
+    /// DeviceGroup of `accountIdBytes` from the identity's storage. It is
+    /// there only if the Welcome joined was that account's DeviceGroup
+    /// (its group_id is derived from the account id), so a group of any
+    /// other account is refused here, as `DeviceGroup.joinFromWelcome`
+    /// refuses it for a device that knew its account up front.
+    static func adoptJoinedDeviceGroup(identity: Identity, accountIdBytes: Data) throws -> DeviceGroup {
+        guard let group = try loadDeviceGroup(identity: identity, accountId: accountIdBytes) else {
+            throw JoinByNameError.wrongAccount
+        }
+        return group
     }
 
     /// Result of [`runScanFlow`].
@@ -326,13 +553,15 @@ public enum PairingOrchestrator {
     /// persist the snapshot.
     ///
     /// Throws the inner error verbatim when:
-    ///   * The QR was scanned against a different account.
+    ///   * The QR names a different account's username (ADR-0056:
+    ///     `FfiError.Group` "login_handle mismatch").
     ///   * The QR carries a newer-version payload than this
     ///     binary recognises.
     ///   * The Welcome PUT fails (DS-mailbox unreachable).
     ///   * The DeviceGroup state on this device is corrupt.
     public static func runScanFlow(
         scannedBytes: Data,
+        ownLoginHandle: Data,
         accountIdBytes: Data,
         accountIdB64: String,
         recovery: ScanRecovery? = nil
@@ -341,9 +570,12 @@ public enum PairingOrchestrator {
         // thrown pairing error before the recovery block runs.
         defer { recovery?.wipeSeed() }
 
+        // ADR-0056 — the payload names the account by the login handle of
+        // the username typed on the new device; it must be this account's
+        // own handle, else nothing is committed.
         let decoded = try PairingCodec.parsePairingQrPayload(
             wireBytes: scannedBytes,
-            expectedAccountId: accountIdBytes
+            expectedLoginHandle: ownLoginHandle
         )
         let seed = try DeviceIdentityStore.ensureDeviceIdentitySeed(
             accountIdB64: accountIdB64

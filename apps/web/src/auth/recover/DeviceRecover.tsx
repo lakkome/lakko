@@ -7,12 +7,16 @@
  * confirms the request, and the identity plus a single-use access grant
  * arrive end-to-end encrypted. The grant redeems for a session, so neither a
  * password nor the phrase is typed here.
+ *
+ * ADR-0056: nothing here looks the name up. The typed username becomes its
+ * login handle locally; the pairing payload and the device request carry
+ * the handle, and the account id is learned from the grant redeem, after
+ * the other device confirmed.
  */
 import type { JSX } from "solid-js";
 import { useAuth } from "../AuthContext";
 import { base64Encode } from "../account-id";
-import { requireValidUsername } from "../../profile/username-field";
-import { DiscoveryClient } from "../../discovery/client";
+import { nameTargetFor } from "../login-handle";
 import {
   prepareAnonymousJoinFlow,
   type AnonymousJoinSession,
@@ -29,13 +33,11 @@ export function DeviceRecover(props: {
   readonly onDone: () => void;
 }): JSX.Element {
   const auth = useAuth();
-  const discovery = new DiscoveryClient();
 
   // Captured across prepare -> onRestored (the panel guarantees the ordering;
   // components run once in Solid, so plain variables work).
   let resolved: {
-    accountIdBytes: Uint8Array;
-    accountIdB64: string;
+    loginHandle: Uint8Array;
     username: string;
   } | null = null;
   let liveSession: AnonymousJoinSession | null = null;
@@ -45,24 +47,16 @@ export function DeviceRecover(props: {
     if (trimmed.length === 0) {
       throw new Error("Enter the username of the account.");
     }
-    // ADR-0048 section 4: throws the reason copy; no lookup is sent.
-    const lookup = await discovery.lookup(await requireValidUsername(trimmed));
-    if (lookup.account === null) {
-      throw new Error("No account with that username. Check the spelling.");
-    }
-    const accountIdBytes = lookup.account;
-    const accountIdB64 = base64Encode(accountIdBytes);
-    resolved = {
-      accountIdBytes,
-      accountIdB64,
-      username: lookup.normalisedUsername,
-    };
+    // ADR-0048 section 4 / ADR-0056: a name the rule refuses throws the
+    // reason copy; nothing is sent. An unknown name is not detectable here
+    // by design: the request simply goes unanswered.
+    const target = await nameTargetFor(trimmed);
+    resolved = { loginHandle: target.handle.bytes, username: target.username };
     // No device key exists yet, so the join runs with an in-memory device
     // seed until `completeFromDeviceRestore` bootstraps the key and
     // `persistTo` lands the state.
     const session = await prepareAnonymousJoinFlow({
-      accountIdBytes,
-      accountIdB64,
+      loginHandle: target.handle.bytes,
     });
     liveSession = session;
     return {
@@ -86,16 +80,22 @@ export function DeviceRecover(props: {
     }
     // The redeemed session token is the ONLY access on this path; there is
     // no password. Without it the restore cannot complete.
-    if (outcome.sessionToken === null || outcome.sessionExpiresAtMs === null) {
+    if (
+      outcome.sessionToken === null ||
+      outcome.sessionExpiresAtMs === null ||
+      outcome.accountIdBytes === null
+    ) {
       outcome.phraseSeed.fill(0);
       throw new Error(
         "Your other device sent the identity, but this device could not be let in. Try again, or use your recovery phrase.",
       );
     }
     const session = liveSession;
+    // ADR-0056: the account id comes from the grant redeem.
+    const accountIdBytes = outcome.accountIdBytes;
     await auth.completeFromDeviceRestore({
-      accountIdBytes: resolved.accountIdBytes,
-      accountIdB64: resolved.accountIdB64,
+      accountIdBytes,
+      accountIdB64: base64Encode(accountIdBytes),
       username: resolved.username,
       phraseSeed: outcome.phraseSeed,
       sessionToken: outcome.sessionToken,
@@ -122,7 +122,7 @@ export function DeviceRecover(props: {
       <RestoreViaDevicePanel
         prepare={prepare}
         onRestored={onRestored}
-        requestAccount={() => resolved?.accountIdBytes ?? null}
+        requestHandle={() => resolved?.loginHandle ?? null}
       />
     </div>
   );

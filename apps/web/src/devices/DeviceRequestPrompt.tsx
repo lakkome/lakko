@@ -26,6 +26,12 @@ import { getDeviceKey } from "../auth/key-store";
 import { base64Decode } from "../auth/account-id";
 import { comparisonCode, DEVICE_REQUEST_POLL_MS } from "./device-request";
 import { runScanFlow } from "./orchestrator";
+import {
+  PAIRING_NEEDS_USERNAME,
+  PAIRING_UNSUPPORTED,
+  PAIRING_WRONG_ACCOUNT,
+  ownPairingHandle,
+} from "./pairing";
 
 export function DeviceRequestPrompt(): JSX.Element {
   const auth = useAuth();
@@ -111,6 +117,10 @@ export function DeviceRequestPrompt(): JSX.Element {
       const client = new AuthClient();
       const scanned = await runScanFlow({
         scannedBytes: p.payload,
+        // ADR-0056: this account's own login handle. A request is routed
+        // here by handle, so a mismatch means a server that routed another
+        // name's request to this account: refused before any commit.
+        loginHandle: await ownPairingHandle(s.account.username),
         accountIdBytes: base64Decode(s.account.accountId),
         accountIdB64: s.account.accountId,
         deviceKey,
@@ -145,7 +155,10 @@ export function DeviceRequestPrompt(): JSX.Element {
           : String(err);
       // ADR-0054 S4: a server limit says when to try again, never "failed".
       const limit = authLimitMessage(err);
-      setResult(limit ?? `Could not add the device: ${detail}`);
+      const own = [PAIRING_WRONG_ACCOUNT, PAIRING_UNSUPPORTED, PAIRING_NEEDS_USERNAME].includes(detail)
+        ? detail
+        : null;
+      setResult(limit ?? own ?? `Could not add the device: ${detail}`);
       handled.add(p.requestId);
       setPending(null);
     } finally {

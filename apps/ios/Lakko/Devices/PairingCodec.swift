@@ -15,8 +15,8 @@ import LakkoCore
 ///     turns into pixels.
 ///   * [`parsePairingQrPayload`] — scanner side. Take the
 ///     bytes the `AVCaptureMetadataOutput` QR pipeline handed
-///     us, verify the embedded account_id, return the
-///     decoded contents.
+///     us, verify the embedded login handle names this device's
+///     own account (ADR-0056), return the decoded contents.
 ///
 /// The actual UI sits on top of these in
 /// `apps/ios/Lakko/UI/Devices/DevicesScreen.swift`
@@ -41,38 +41,95 @@ public enum PairingCodec {
         return bytes
     }
 
-    /// Build the wire-format pairing QR payload.
+    /// Build the wire-format pairing QR payload (ADR-0056 v2).
     ///
-    /// `accountId` is the raw 16-byte UUIDv7. `keyPackage` is
-    /// the TLS-encoded `KeyPackage` from the joining device's
-    /// DeviceIdentity. `rendezvousPseudonym` is the 32-byte
-    /// slot from [`generateRendezvousPseudonym`].
+    /// `loginHandle` is the 32-byte handle of the username the person
+    /// typed (or the signed-in account's own name), from the core's
+    /// `loginHandle`: the payload names the account by name, never by
+    /// account id, so a fresh device needs no lookup before a session.
+    /// `keyPackage` is the TLS-encoded `KeyPackage` from the joining
+    /// device's DeviceIdentity. `rendezvousPseudonym` is the 32-byte slot
+    /// from [`generateRendezvousPseudonym`].
     public static func buildPairingQrPayload(
-        accountId: Data,
+        loginHandle: Data,
         keyPackage: Data,
         rendezvousPseudonym: Data
     ) throws -> Data {
         return try buildPairingQr(
-            accountId: accountId,
+            loginHandle: loginHandle,
             keyPackage: keyPackage,
             rendezvousPseudonym: rendezvousPseudonym
         )
     }
 
-    /// Parse a pairing QR payload + verify it's for the
-    /// local account. Throws on:
-    ///   * wrong-length `expectedAccountId`,
-    ///   * malformed wire bytes,
-    ///   * wrong embedded `account_id` (scanned a QR from a
-    ///     different account's session),
-    ///   * newer-version payload than this binary recognises.
+    /// Parse a pairing QR payload and check it names this device's own
+    /// account. `expectedLoginHandle` is the confirming device's handle,
+    /// computed from its own username. Throws on:
+    ///   * a wrong-length handle or malformed wire bytes (`FfiError.Codec`),
+    ///   * a payload naming a different account's name (`FfiError.Group`,
+    ///     "login_handle mismatch"),
+    ///   * a payload version this binary does not read (`FfiError.Unsupported`).
+    /// ``PairingScanFailure/userFacing(_:)`` turns the last two into copy.
     public static func parsePairingQrPayload(
         wireBytes: Data,
-        expectedAccountId: Data
+        expectedLoginHandle: Data
     ) throws -> DecodedPairingQr {
         return try parsePairingQr(
             wire: wireBytes,
-            expectedAccountId: expectedAccountId
+            expectedLoginHandle: expectedLoginHandle
         )
     }
+}
+
+/// What a confirming device shows when a scanned pairing code is refused.
+public enum PairingScanFailure {
+
+    /// The payload names another account (the name typed on the new device
+    /// is not this account's username).
+    public static let wrongAccountCopy =
+        "This code is for a different account. Check that the new device uses the same username as this one."
+
+    /// The payload comes from a Lakko version this one cannot read.
+    public static let unsupportedCopy =
+        "This code comes from a different version of Lakko. Update Lakko on both devices and try again."
+
+    /// A signed-in account without a username (a guest) has no login
+    /// handle, so no pairing code can name it.
+    public static let needsUsernameCopy = "Set a username first to add another device."
+
+    /// Whether `error` is the core's refusal of a payload naming another
+    /// account's handle.
+    public static func isWrongAccount(_ error: Error) -> Bool {
+        if case .Group(let message) = error as? FfiError {
+            return message.contains("login_handle mismatch")
+        }
+        return false
+    }
+
+    /// Copy for a failed scan: the wrong-account and version refusals get
+    /// their own sentence, anything else keeps its description.
+    public static func userFacing(_ error: Error) -> String {
+        if isWrongAccount(error) { return wrongAccountCopy }
+        if case .Unsupported = error as? FfiError { return unsupportedCopy }
+        return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+    }
+}
+
+/// The login handle of a signed-in account's own username, or `nil` when
+/// the account has no username (a guest) or the name does not pass the
+/// username rule. The confirming device passes it to
+/// ``PairingCodec/parsePairingQrPayload(wireBytes:expectedLoginHandle:)``
+/// and a signed-in joining device builds its payload with it.
+func ownLoginHandle(
+    username: String,
+    derive: (String) throws -> Data = { try loginHandle(username: $0) }
+) -> Data? {
+    let trimmed = username.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    let name = try? LoginName.make(
+        trimmed,
+        emptyError: AuthClientError.argument("empty username"),
+        derive: derive
+    )
+    return name?.handle
 }

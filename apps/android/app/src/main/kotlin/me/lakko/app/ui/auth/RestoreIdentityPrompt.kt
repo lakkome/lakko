@@ -16,6 +16,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -106,11 +107,23 @@ public fun RestoreIdentityPrompt(
             onBack = { if (!state.busy) way = null },
             modifier = modifier,
         ) {
-            me.lakko.app.ui.devices.RestoreViaDevicePanel(
-                accountIdBytes = base64Decode(accountIdB64),
-                accountIdB64 = accountIdB64,
-                onRecovered = { outcome -> viewModel.completeFromPairing(outcome) },
-            )
+            // ADR-0056 — the code names the account by the login handle of
+            // its username; an account with none (a guest) cannot pair.
+            val handle = remember(username) {
+                me.lakko.app.devices.ownPairingHandle(username, me.lakko.app.auth.UniffiLoginHandleSource)
+            }
+            if (handle == null) {
+                Lead(me.lakko.app.devices.PAIRING_NO_USERNAME_COPY)
+            } else {
+                me.lakko.app.ui.devices.RestoreViaDevicePanel(
+                    loginHandle = handle,
+                    known = me.lakko.app.devices.PairingOrchestrator.KnownAccount(
+                        accountIdBytes = base64Decode(accountIdB64),
+                        accountIdB64 = accountIdB64,
+                    ),
+                    onRecovered = { outcome -> viewModel.completeFromPairing(outcome) },
+                )
+            }
             Spacer(Modifier.height(16.dp))
         }
 

@@ -51,10 +51,14 @@ public struct RestoreIdentityPromptScreen: View {
                 )
 
             case .device:
-                if let accountIdBytes = viewModel.accountIdBytes {
+                if let accountIdBytes = viewModel.accountIdBytes,
+                   let handle = ownLoginHandle(username: viewModel.username) {
                     RestoreViaDevicePanel(
-                        accountIdBytes: accountIdBytes,
-                        accountIdB64: viewModel.accountIdB64,
+                        target: .account(
+                            accountIdBytes: accountIdBytes,
+                            accountIdB64: viewModel.accountIdB64,
+                            loginHandle: handle
+                        ),
                         onRecovered: { outcome in
                             try await viewModel.completeFromPairing(outcome: outcome)
                         }
@@ -66,6 +70,10 @@ public struct RestoreIdentityPromptScreen: View {
                         RoundedRectangle(cornerRadius: LakkoRadius.card)
                             .stroke(Color.lakkoBorder, lineWidth: 1)
                     )
+                } else if viewModel.accountIdBytes != nil {
+                    // ADR-0056 — the pairing code names the account by its
+                    // username; an account without one cannot be named.
+                    AuthHint(text: PairingScanFailure.needsUsernameCopy, isError: true)
                 } else {
                     AuthHint(
                         text: "Something is wrong with the account saved on this device. Log out and log in again, or use your recovery phrase.",

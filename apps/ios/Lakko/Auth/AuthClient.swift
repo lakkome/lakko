@@ -200,36 +200,27 @@ public final class AuthClient {
     /// factor (a), fresh-device side). Mirror of the web / Android
     /// `AuthClient.deviceAuthorizeRedeem`.
     ///
-    /// Anonymous (the fresh device has no token yet). Limited per account and per address server-side (ADR-0054 S4); a
-    /// missing / expired / already-consumed grant fails as an
-    /// enumeration-safe 401 (``AuthClientError/http(status:endpoint:body:)``),
-    /// indistinguishable from a wrong credential by design.
+    /// Anonymous (the fresh device has no token yet) and, since ADR-0056,
+    /// carries the grant only: the fresh device learns its account id from
+    /// the response, after proving the grant. Limited per address
+    /// server-side (ADR-0054 S4); a missing / expired / already-consumed
+    /// grant fails as an enumeration-safe 401
+    /// (``AuthClientError/http(status:endpoint:body:)``).
     ///
-    /// - Parameters:
-    ///   - accountId:     Raw 16-byte account id from the pairing QR.
-    ///   - grantTokenB64: URL-safe base64 (no pad) of the raw
-    ///                    32-byte grant token received over the
-    ///                    rendezvous channel.
+    /// - Parameter grantTokenB64: URL-safe base64 (no pad) of the raw
+    ///   32-byte grant token received over the rendezvous channel.
     public func deviceAuthorizeRedeem(
-        accountId: Data,
         grantTokenB64: String
     ) async throws -> DeviceAuthorizeRedeemResult {
-        guard accountId.count == accountIdLength else {
-            throw AuthClientError.argument(
-                "accountId must be \(accountIdLength) bytes"
-            )
-        }
         guard !grantTokenB64.isEmpty else {
             throw AuthClientError.argument("grantTokenB64 must be non-empty")
         }
         let resp: DeviceAuthorizeRedeemResponse = try await post(
             endpoint: "/device/authorize/redeem",
-            body: DeviceAuthorizeRedeemRequest(
-                accountIdB64: base64UrlEncodeNoPad(accountId),
-                grantTokenB64: grantTokenB64
-            )
+            body: DeviceAuthorizeRedeemRequest(grantTokenB64: grantTokenB64)
         )
-        guard let accountIdBytes = base64UrlDecodeNoPad(resp.accountIdB64) else {
+        guard let accountIdBytes = base64UrlDecodeNoPad(resp.accountIdB64),
+              accountIdBytes.count == accountIdLength else {
             throw AuthClientError.http(
                 status: 200,
                 endpoint: "/device/authorize/redeem",
@@ -1083,11 +1074,12 @@ public struct RecoverResult: Equatable {
     }
 }
 
-/// Result of ``AuthClient/deviceAuthorizeRedeem(accountId:grantTokenB64:)``
+/// Result of ``AuthClient/deviceAuthorizeRedeem(grantTokenB64:)``
 /// — the same `(account_id, session_token, expiry)` triple every other
 /// login flow returns (ADR-0018 factor (a)).
 public struct DeviceAuthorizeRedeemResult: Equatable {
-    /// Raw 16-byte account id echoed back by the server.
+    /// Raw 16-byte account id the grant belongs to - where a fresh device
+    /// first learns it (ADR-0056).
     public let accountId: Data
     /// Bearer token issued by the auth service — the fresh device's
     /// only ACCESS on the no-password restore path.
@@ -1129,7 +1121,8 @@ public struct TotpEnrollStartResult: Equatable {
 /// triple every other login flow returns. ACCESS only, no identity
 /// material.
 public struct TotpRecoverResult: Equatable {
-    /// Raw 16-byte account id echoed back by the server.
+    /// Raw 16-byte account id the grant belongs to - where a fresh device
+    /// first learns it (ADR-0056).
     public let accountId: Data
     public let sessionToken: String
     public let sessionExpiresAtMs: Int64
@@ -1155,7 +1148,8 @@ private struct TotpEnrollFinishAck: Decodable {}
 /// expiry)` triple every other login flow returns. ACCESS only, no
 /// identity material.
 public struct RecoveryContactRecoverResult: Equatable {
-    /// Raw 16-byte account id echoed back by the server.
+    /// Raw 16-byte account id the grant belongs to - where a fresh device
+    /// first learns it (ADR-0056).
     public let accountId: Data
     public let sessionToken: String
     public let sessionExpiresAtMs: Int64

@@ -12,12 +12,19 @@
 //! on Confirm runs the unchanged ADR-0018 add-device flow against the
 //! payload it fetched.
 //!
-//! - **`POST /device/request`** — anonymous. Charged to the target
-//!   account's prompt counter and the per-address bucket (ADR-0054 S4, `429`
-//!   `device-request-limited`: every request puts a prompt on that account's
-//!   signed-in devices, and a newer one replaces the older). Stores the
-//!   payload for the account (one open request per account) and returns a
-//!   random `request_id`.
+//! - **`POST /device/request`** — anonymous. Names the account by the
+//!   **login handle** of the username the person typed (ADR-0056; the
+//!   ADR-0054 S5 handle, resolved by [`crate::login_handle::resolve`]), never
+//!   by account id. Charged to the handle's prompt counter and the
+//!   per-address bucket (ADR-0054 S4, `429` `device-request-limited`: every
+//!   request puts a prompt on that account's signed-in devices, and a newer
+//!   one replaces the older). Stores the payload for the resolved account
+//!   (one open request per account) and returns a random `request_id`. A
+//!   handle nobody holds resolves to its stable stand-in account id and the
+//!   request is stored against it exactly the same way: no device polls a
+//!   stand-in, so the request simply expires, and neither this answer nor
+//!   `/device/request/status` says whether the name exists. Without the
+//!   handle pepper the route answers `503 login-by-name-disabled`.
 //! - **`POST /device/request/status`** — anonymous, unlimited (the id is a
 //!   128-bit secret; the answer is one bit). Lets the fresh device notice
 //!   a decline.
@@ -47,7 +54,6 @@ use serde::{Deserialize, Serialize};
 use crate::webauthn::{ApiError, AuthenticatedAccount};
 use crate::AppState;
 
-const ACCOUNT_ID_LEN: usize = 16;
 const REQUEST_ID_LEN: usize = 16;
 
 /// A pairing payload is a protobuf carrying one KeyPackage and a 32-byte
@@ -60,7 +66,8 @@ const REQUEST_TTL_SECS: i64 = 600;
 /// `POST /device/request` body.
 #[derive(Deserialize)]
 pub(crate) struct CreateReq {
-    pub account_id_b64: String,
+    /// The 32-byte login handle of the account, base64url without padding.
+    pub handle: String,
     /// Standard base64 of the pairing payload bytes.
     pub pairing_payload_b64: String,
 }
@@ -104,7 +111,8 @@ pub(crate) async fn create(
     State(state): State<AppState>,
     Json(req): Json<CreateReq>,
 ) -> Result<Json<CreateRes>, ApiError> {
-    let account_id = decode_account_id(&req.account_id_b64)?;
+    let pepper = crate::login_handle::pepper(&state)?;
+    let handle = crate::login_handle::decode_handle(&req.handle)?;
     let payload = STANDARD
         .decode(&req.pairing_payload_b64)
         .map_err(|_| ApiError::BadInput("pairing_payload_b64 not base64"))?;
@@ -113,15 +121,20 @@ pub(crate) async fn create(
             "pairing payload has an impossible length",
         ));
     }
-    // Counted against the named account before anything is looked up, so an
-    // unknown account trips the limit exactly like a known one.
+    // Counted against the named handle before anything is looked up, so an
+    // unknown name trips the limit exactly like a known one.
     crate::limits::charge_name(
         &state.db,
         &state.limits,
         crate::limits::Scope::DeviceRequestTarget,
-        &account_id,
+        &handle,
     )
     .await?;
+    // A bound handle names its account; an unbound one its stand-in, which
+    // is stored the same way and polled by nobody (ADR-0056).
+    let account_id = crate::login_handle::resolve(&state.db, &pepper, &handle)
+        .await?
+        .account_id;
     let mut request_id = [0u8; REQUEST_ID_LEN];
     OsRng.fill_bytes(&mut request_id);
 
@@ -131,10 +144,7 @@ pub(crate) async fn create(
         .await
         .map_err(ApiError::Db)?;
 
-    // An unknown account must answer like a known one (enumeration
-    // safety), so the insert failing on the account FK is folded into the
-    // same 200: the request simply never shows up anywhere.
-    let inserted = sqlx::query(
+    sqlx::query(
         "INSERT INTO device_requests (account_id, request_id, pairing_payload, expires_at) \
          VALUES (?, ?, ?, NOW(3) + INTERVAL ? SECOND) \
          ON DUPLICATE KEY UPDATE request_id = VALUES(request_id), \
@@ -146,19 +156,11 @@ pub(crate) async fn create(
     .bind(payload.as_slice())
     .bind(REQUEST_TTL_SECS)
     .execute(&state.db)
-    .await;
-    match inserted {
-        Ok(_) => {
-            tracing::info!(
-                account_id = %URL_SAFE_NO_PAD.encode(account_id),
-                "device-request: posted"
-            );
-        },
-        Err(sqlx::Error::Database(e)) if e.is_foreign_key_violation() => {
-            tracing::debug!("device-request: unknown account, request dropped");
-        },
-        Err(e) => return Err(ApiError::Db(e)),
-    }
+    .await
+    .map_err(ApiError::Db)?;
+    // No account id in the log: for an unknown name it is a stand-in, and
+    // logging which one would let the logs tell the two apart.
+    tracing::info!("device-request: posted");
 
     Ok(Json(CreateRes {
         request_id_b64: URL_SAFE_NO_PAD.encode(request_id),
@@ -236,16 +238,6 @@ pub(crate) async fn delete(
     Ok(Json(serde_json::json!({ "removed": removed == 1 })))
 }
 
-fn decode_account_id(b64: &str) -> Result<[u8; ACCOUNT_ID_LEN], ApiError> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(b64)
-        .map_err(|_| ApiError::BadInput("account_id_b64 not URL-safe base64"))?;
-    bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| ApiError::BadInput("account_id must decode to 16 bytes"))
-}
-
 fn decode_request_id(b64: &str) -> Result<[u8; REQUEST_ID_LEN], ApiError> {
     let bytes = URL_SAFE_NO_PAD
         .decode(b64)
@@ -268,7 +260,9 @@ mod tests {
     }
 }
 
-/// Database-backed round trip: post, list, status, delete, status again.
+/// Database-backed round trip by login handle (ADR-0056): post, list,
+/// status, delete, status again; an unknown handle answers identically and
+/// reaches nobody; the per-handle limit; the old body and the dormant pepper.
 /// Runs only with `LAKKO_AUTH_TEST_DATABASE_URL` set.
 #[cfg(test)]
 mod device_request_e2e_tests {
@@ -329,12 +323,15 @@ mod device_request_e2e_tests {
         crate::MIGRATIONS.run(&pool).await.expect("migrate");
 
         let account_id: [u8; 16] = *Uuid::now_v7().as_bytes();
-        let account_id_b64 = URL_SAFE_NO_PAD.encode(account_id);
         sqlx::query("INSERT INTO accounts (id) VALUES (?)")
             .bind(account_id.as_slice())
             .execute(&pool)
             .await
             .expect("insert account");
+        // The account's login handle (ADR-0054 S5); the fresh device names
+        // the account by it (ADR-0056).
+        let (handle, handle_b64) = crate::login_handle::random_handle();
+        crate::login_handle::bind_for_test(&pool, &account_id, &handle).await;
 
         let token_secret = lakko_auth_token::TokenSecret::new(vec![7u8; 64]).expect("token secret");
         let state = crate::AppState {
@@ -397,7 +394,7 @@ mod device_request_e2e_tests {
             "/device/request",
             None,
             Some(serde_json::json!({
-                "account_id_b64": account_id_b64,
+                "handle": handle_b64,
                 "pairing_payload_b64": STANDARD.encode(&payload),
             })),
         )
@@ -411,15 +408,16 @@ mod device_request_e2e_tests {
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let request_id_b64 = v["request_id_b64"].as_str().unwrap().to_string();
 
-        // An unknown account answers identically (200 + an id) and stores nothing.
-        let ghost = URL_SAFE_NO_PAD.encode(Uuid::now_v7().as_bytes());
+        // A name nobody holds answers identically (200 + an id) and is stored
+        // against its stand-in, which no device polls.
+        let (ghost_handle, ghost) = crate::login_handle::random_handle();
         let (st, body) = json_req(
             &state,
             Method::POST,
             "/device/request",
             None,
             Some(serde_json::json!({
-                "account_id_b64": ghost,
+                "handle": ghost,
                 "pairing_payload_b64": STANDARD.encode(&payload),
             })),
         )
@@ -442,9 +440,34 @@ mod device_request_e2e_tests {
         .await;
         assert_eq!(st, StatusCode::OK);
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["pending"], false);
+        assert_eq!(
+            v["pending"], true,
+            "an unknown name's request looks open, exactly like a real one"
+        );
+        // It reached nobody: the only row it wrote is under the stand-in,
+        // which is not an account.
+        let stand_in =
+            crate::login_handle::resolve(&pool, &crate::login_handle::TEST_PEPPER, &ghost_handle)
+                .await
+                .unwrap();
+        assert!(!stand_in.bound);
+        let ghost_rows: Vec<(Vec<u8>,)> = sqlx::query_as(
+            "SELECT r.account_id FROM device_requests r \
+             WHERE r.request_id = ?",
+        )
+        .bind(URL_SAFE_NO_PAD.decode(&ghost_id).unwrap())
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(ghost_rows, vec![(stand_in.account_id.to_vec(),)]);
+        let is_account: Option<i64> = sqlx::query_scalar("SELECT 1 FROM accounts WHERE id = ?")
+            .bind(stand_in.account_id.as_slice())
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+        assert!(is_account.is_none(), "the stand-in is not an account");
 
-        // The signed-in device sees it, payload intact.
+        // The signed-in device sees its own request, payload intact.
         let (st, body) =
             json_req(&state, Method::GET, "/device/requests", Some(&bearer), None).await;
         assert_eq!(
@@ -518,21 +541,21 @@ mod device_request_e2e_tests {
                     "/device/request",
                     None,
                     Some(serde_json::json!({
-                        "account_id_b64": id,
+                        "handle": id,
                         "pairing_payload_b64": STANDARD.encode(&payload),
                     })),
                 )
                 .await
             }
         };
-        for id in [&account_id_b64, &ghost] {
+        for id in [&handle_b64, &ghost] {
             for _ in 1..limit {
                 let (st, _) = post(id.clone()).await;
                 assert_eq!(st, StatusCode::OK, "under the limit");
             }
         }
         let mut refusals = Vec::new();
-        for id in [&account_id_b64, &ghost] {
+        for id in [&handle_b64, &ghost] {
             let (st, body) = post(id.clone()).await;
             assert_eq!(
                 st,
@@ -545,6 +568,44 @@ mod device_request_e2e_tests {
         }
         assert_eq!(refusals[0], refusals[1], "known and unknown refused alike");
 
+        // The old body (an account id, no handle) is refused outright.
+        let (st, _) = json_req(
+            &state,
+            Method::POST,
+            "/device/request",
+            None,
+            Some(serde_json::json!({
+                "account_id_b64": URL_SAFE_NO_PAD.encode(account_id),
+                "pairing_payload_b64": STANDARD.encode(&payload),
+            })),
+        )
+        .await;
+        assert!(st.is_client_error() && st != StatusCode::TOO_MANY_REQUESTS);
+
+        // Without the handle pepper the route is dormant, like every name route.
+        let mut dormant = state.clone();
+        dormant.handle_pepper = None;
+        let (st, body) = json_req(
+            &dormant,
+            Method::POST,
+            "/device/request",
+            None,
+            Some(serde_json::json!({
+                "handle": handle_b64,
+                "pairing_payload_b64": STANDARD.encode(&payload),
+            })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"], "login-by-name-disabled");
+
+        sqlx::query("DELETE FROM device_requests WHERE account_id IN (?, ?)")
+            .bind(account_id.as_slice())
+            .bind(stand_in.account_id.as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("DELETE FROM accounts WHERE id = ?")
             .bind(account_id.as_slice())
             .execute(&pool)

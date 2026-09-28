@@ -443,12 +443,48 @@ class AuthClientTest {
             client.recoveryContactRecoverStart(ByteArray(32), ContactKind.EMAIL, "a@b.c")
             client.recoveryContactRecoverFinish(ByteArray(32), ContactKind.EMAIL, "123456")
             client.recoveryContactEnrollStart("tok", ContactKind.EMAIL, "a@b.c")
-            client.deviceAuthorizeRedeem(ByteArray(16), "grant")
+            client.deviceAuthorizeRedeem("grant")
         }
         assertEquals(5, captured.size)
         for (req in captured) {
             assertFalse(req.url, req.url.endsWith("/pow/challenge"))
             assertFalse(req.url, req.body?.containsKey("pow") ?: false)
+        }
+    }
+
+    @Test
+    fun `device authorize redeem sends only the grant and takes the account id from the response`() = runTest {
+        val captured = mutableListOf<CapturedRequest>()
+        val accountId = ByteArray(16) { (it + 1).toByte() }
+        val result = client(
+            responses = listOf(
+                HttpStatusCode.OK to
+                    """{"account_id_b64":"${base64UrlEncodeNoPad(accountId)}","session_token":"tok","session_expires_at_ms":42}""",
+            ),
+            captured = captured,
+        ).use { client -> client.deviceAuthorizeRedeem("R1JBTlQ") }
+        assertEquals(1, captured.size)
+        assertTrue(captured[0].url.endsWith("/device/authorize/redeem"))
+        val body = captured[0].body!!
+        assertEquals(setOf("grant_token_b64"), body.keys)
+        assertEquals("R1JBTlQ", body["grant_token_b64"]!!.jsonPrimitive.content)
+        assertNull(captured[0].authorization)
+        assertTrue(result.accountId.contentEquals(accountId))
+        assertEquals("tok", result.sessionToken)
+        assertEquals(42L, result.sessionExpiresAtMs)
+    }
+
+    @Test
+    fun `device authorize redeem refuses a response whose account id is not 16 bytes`() {
+        assertThrows(AuthHttpError::class.java) {
+            runTest {
+                client(
+                    responses = listOf(
+                        HttpStatusCode.OK to
+                            """{"account_id_b64":"AAAA","session_token":"tok","session_expires_at_ms":42}""",
+                    ),
+                ).use { client -> client.deviceAuthorizeRedeem("R1JBTlQ") }
+            }
         }
     }
 

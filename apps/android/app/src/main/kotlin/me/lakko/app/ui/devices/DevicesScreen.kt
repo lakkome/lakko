@@ -64,7 +64,15 @@ import me.lakko.app.auth.AuthClient
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.AuthState
 import me.lakko.app.devices.DeviceRemoval
+import me.lakko.app.auth.UniffiLoginHandleSource
+import me.lakko.app.devices.PAIRING_FAILED_COPY
+import me.lakko.app.devices.PAIRING_NO_USERNAME_COPY
+import me.lakko.app.devices.PairingCodec
 import me.lakko.app.devices.PairingOrchestrator
+import me.lakko.app.devices.PairingScanDecision
+import me.lakko.app.devices.decodeForOwnAccount
+import me.lakko.app.devices.ownPairingHandle
+import uniffi.lakko_ffi_uniffi.DecodedPairingQr
 import me.lakko.app.devices.WelcomeCourier
 import me.lakko.app.webauthn.WebauthnClient
 import me.lakko.app.webauthn.WebauthnHttpError
@@ -222,6 +230,20 @@ public fun AddDeviceScreen(
                 )
                 return@Column
             }
+            // ADR-0056 — a pairing code names the account by the login
+            // handle of its username; an account with none (a guest) can
+            // neither show nor confirm one.
+            val ownHandle = remember(account.username) {
+                ownPairingHandle(account.username, UniffiLoginHandleSource)
+            }
+            if (ownHandle == null) {
+                Text(
+                    PAIRING_NO_USERNAME_COPY,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                return@Column
+            }
             when (mode) {
                 null -> {
                     OptionRow(
@@ -238,10 +260,14 @@ public fun AddDeviceScreen(
                     )
                 }
                 AddDeviceMode.Show -> PairSection(
-                    accountIdBytes = secrets.accountId,
-                    accountIdB64 = account.accountIdB64,
+                    loginHandle = ownHandle,
+                    known = PairingOrchestrator.KnownAccount(
+                        accountIdBytes = secrets.accountId,
+                        accountIdB64 = account.accountIdB64,
+                    ),
                 )
                 AddDeviceMode.Scan -> ScanSection(
+                    ownUsername = account.username,
                     accountIdBytes = secrets.accountId,
                     accountIdB64 = account.accountIdB64,
                     accountIdentitySeed = secrets.accountIdentitySeed,
@@ -293,8 +319,8 @@ private sealed interface PairUi {
 
 @Composable
 private fun PairSection(
-    accountIdBytes: ByteArray,
-    accountIdB64: String,
+    loginHandle: ByteArray,
+    known: PairingOrchestrator.KnownAccount,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -329,8 +355,8 @@ private fun PairSection(
                     try {
                         val js = PairingOrchestrator.prepareJoinFlow(
                             context = context,
-                            accountIdBytes = accountIdBytes,
-                            accountIdB64 = accountIdB64,
+                            loginHandle = loginHandle,
+                            known = known,
                         )
                         session = js
                         state = PairUi.Waiting(js.qrPayload)
@@ -456,15 +482,10 @@ private sealed interface ScanUi {
      *  parks here until the user explicitly confirms: the scan now
      *  transfers DeviceGroup membership AND the identity seed AND a
      *  session grant, so it must not run on a bare camera glance. */
-    data class ConfirmTransfer(val scannedBytes: ByteArray) : ScanUi {
-        override fun equals(other: Any?): Boolean {
-            if (this === other) return true
-            if (other !is ConfirmTransfer) return false
-            return scannedBytes.contentEquals(other.scannedBytes)
-        }
-
-        override fun hashCode(): Int = scannedBytes.contentHashCode()
-    }
+    /** ADR-0056 — the payload was checked against this account's own
+     *  login handle before this state is reached, so a code made for
+     *  another account never asks for confirmation. */
+    class ConfirmTransfer(val decoded: DecodedPairingQr) : ScanUi
 
     data object Processing : ScanUi
     data object Done : ScanUi
@@ -473,6 +494,7 @@ private sealed interface ScanUi {
 
 @Composable
 private fun ScanSection(
+    ownUsername: String,
     accountIdBytes: ByteArray,
     accountIdB64: String,
     accountIdentitySeed: ByteArray,
@@ -569,11 +591,26 @@ private fun ScanSection(
                                     "the camera at the code on your other device."
                                 return@QrScannerComposable
                             }
-                            // ADR-0018 / lakko-security finding #1 —
-                            // park for explicit confirmation instead of
-                            // running the transfer on a bare decode.
+                            // ADR-0056 — the code must name this
+                            // account: its login handle is checked
+                            // against the handle of our own username.
                             scanHint = null
-                            state = ScanUi.ConfirmTransfer(bytes)
+                            state = when (
+                                val decision = decodeForOwnAccount(
+                                    scanned = bytes,
+                                    ownUsername = ownUsername,
+                                    source = UniffiLoginHandleSource,
+                                    decode = PairingCodec::parsePairingQrPayload,
+                                )
+                            ) {
+                                // ADR-0018 / lakko-security finding #1 —
+                                // park for explicit confirmation instead
+                                // of running the transfer on a bare decode.
+                                is PairingScanDecision.Accepted ->
+                                    ScanUi.ConfirmTransfer(decision.decoded)
+                                is PairingScanDecision.Refused ->
+                                    ScanUi.Error(decision.copy)
+                            }
                         },
                         onError = { msg ->
                             state = ScanUi.Error(msg)
@@ -626,7 +663,7 @@ private fun ScanSection(
                                     // + zeroized there).
                                     val scanned = PairingOrchestrator.runScanFlow(
                                         context = context,
-                                        scannedBytes = s.scannedBytes,
+                                        decoded = s.decoded,
                                         accountIdBytes = accountIdBytes,
                                         accountIdB64 = accountIdB64,
                                         recovery = PairingOrchestrator.ScanRecovery(
@@ -649,7 +686,7 @@ private fun ScanSection(
                                     state = ScanUi.Done
                                 } catch (cause: Throwable) {
                                     state = ScanUi.Error(
-                                        cause.message ?: "Pairing failed",
+                                        cause.message ?: PAIRING_FAILED_COPY,
                                     )
                                 }
                             }

@@ -303,8 +303,9 @@ private struct RecoverForm: View {
     }
 
     /// ADR-0018 factor (a), path (b): restore through an already linked
-    /// device. The username is resolved first (the pairing code carries the
-    /// account), then the QR flow runs with the recovery payload.
+    /// device. The pairing code names the account by the login handle of
+    /// the typed username (ADR-0056, no lookup), then the QR flow runs with
+    /// the recovery payload.
     @ViewBuilder
     private var anotherDeviceSection: some View {
         if let target = viewModel.deviceRestoreTarget {
@@ -316,8 +317,7 @@ private struct RecoverForm: View {
                     .foregroundStyle(Color.lakkoText)
             }
             RestoreViaDevicePanel(
-                accountIdBytes: target.accountIdBytes,
-                accountIdB64: target.accountIdB64,
+                target: .byName(loginHandle: target.loginHandle),
                 onRecovered: { outcome in
                     try await viewModel.completeFromDeviceRestore(outcome: outcome)
                 }
@@ -330,17 +330,17 @@ private struct RecoverForm: View {
                 contentType: .username,
                 disabled: viewModel.busy,
                 submitLabel: .go,
-                onSubmit: viewModel.lookupForDeviceRestore
+                onSubmit: viewModel.prepareDeviceRestore
             )
             UsernameRuleHint(input: viewModel.username)
             if let error = viewModel.error {
                 AuthHint(text: error, isError: true)
             }
             AuthPrimaryButton(
-                title: "Find account",
+                title: "Continue",
                 busy: viewModel.busy,
-                busyTitle: "Looking up...",
-                action: viewModel.lookupForDeviceRestore
+                busyTitle: "Continue",
+                action: viewModel.prepareDeviceRestore
             )
         }
     }

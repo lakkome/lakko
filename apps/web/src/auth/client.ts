@@ -146,7 +146,8 @@ export interface LoginResult {
  *  The same `(account_id, session_token, expiry)` triple every other
  *  login flow returns. */
 export interface DeviceAuthorizeRedeemResult {
-  /** Raw 16-byte account id, echoed back by the server. */
+  /** Raw 16-byte account id. On the device-grant redeem this is where a
+   *  fresh device first learns it (ADR-0056). */
   accountId: Uint8Array;
   sessionToken: string;
   sessionExpiresAtMs: number;
@@ -167,7 +168,8 @@ export interface TotpEnrollStartResult {
  *  same `(account_id, session_token, expiry)` triple every other
  *  login flow returns — ACCESS only, no identity material. */
 export interface TotpRecoverResult {
-  /** Raw 16-byte account id, echoed back by the server. */
+  /** Raw 16-byte account id. On the device-grant redeem this is where a
+   *  fresh device first learns it (ADR-0056). */
   accountId: Uint8Array;
   sessionToken: string;
   sessionExpiresAtMs: number;
@@ -178,7 +180,8 @@ export interface TotpRecoverResult {
  *  every other login flow returns — ACCESS only, no identity
  *  material. */
 export interface RecoveryContactRecoverResult {
-  /** Raw 16-byte account id, echoed back by the server. */
+  /** Raw 16-byte account id. On the device-grant redeem this is where a
+   *  fresh device first learns it (ADR-0056). */
   accountId: Uint8Array;
   sessionToken: string;
   sessionExpiresAtMs: number;
@@ -370,18 +373,15 @@ export class AuthClient {
    * enumeration-safe 401 (`AuthHttpError`), indistinguishable from
    * a wrong credential by design.
    *
-   * @param accountId      Raw 16-byte account id from the pairing QR.
+   * ADR-0056: the body is the grant alone. The server finds the account
+   * from the grant's hash, and this response is where a fresh device first
+   * learns its account id, after proving the grant.
+   *
    * @param grantTokenB64  URL-safe base64 (no pad) of the raw
    *                       32-byte grant token received over the
    *                       rendezvous channel.
    */
-  async deviceAuthorizeRedeem(
-    accountId: Uint8Array,
-    grantTokenB64: string,
-  ): Promise<DeviceAuthorizeRedeemResult> {
-    if (accountId.length !== 16) {
-      throw new AuthClientArgError("accountId must be 16 bytes");
-    }
+  async deviceAuthorizeRedeem(grantTokenB64: string): Promise<DeviceAuthorizeRedeemResult> {
     if (grantTokenB64.length === 0) {
       throw new AuthClientArgError("grantTokenB64 must be non-empty");
     }
@@ -389,11 +389,14 @@ export class AuthClient {
       DeviceAuthorizeRedeemRequest,
       DeviceAuthorizeRedeemResponse
     >("/device/authorize/redeem", {
-      account_id_b64: base64UrlEncodeNoPad(accountId),
       grant_token_b64: grantTokenB64,
     });
+    const accountId = base64UrlDecodeNoPad(resp.account_id_b64);
+    if (accountId.length !== 16) {
+      throw new AuthClientArgError("redeem response carried a malformed account id");
+    }
     return {
-      accountId: base64UrlDecodeNoPad(resp.account_id_b64),
+      accountId,
       sessionToken: resp.session_token,
       sessionExpiresAtMs: resp.session_expires_at_ms,
     };
@@ -1052,19 +1055,21 @@ export class AuthClient {
   // confirmation
   // -----------------------------------------------------------------
 
-  /** `POST /device/request` — the fresh device posts its pairing payload.
-   *  Anonymous, limited server-side (ADR-0054 S4). A 200 says nothing about whether the account exists. */
+  /** `POST /device/request` — the fresh device posts its pairing payload,
+   *  addressed by the login handle of the typed username (ADR-0056), never
+   *  by an account id. Anonymous, limited server-side (ADR-0054 S4). A 200
+   *  says nothing about whether the name exists. */
   async deviceRequestCreate(
-    accountId: Uint8Array,
+    loginHandle: Uint8Array,
     pairingPayload: Uint8Array,
   ): Promise<{ requestId: string; expiresInSecs: number }> {
-    if (accountId.length !== 16) {
-      throw new AuthClientArgError("accountId must be 16 bytes");
+    if (loginHandle.length !== 32) {
+      throw new AuthClientArgError("loginHandle must be 32 bytes");
     }
     const resp = await this.post<DeviceRequestCreateRequest, DeviceRequestCreateResponse>(
       "/device/request",
       {
-        account_id_b64: base64UrlEncodeNoPad(accountId),
+        handle: base64UrlEncodeNoPad(loginHandle),
         pairing_payload_b64: base64Encode(pairingPayload),
       },
     );

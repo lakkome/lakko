@@ -29,8 +29,17 @@ import SwiftUI
 /// verify) — surfaced inline.
 public struct RestoreViaDevicePanel: View {
 
-    public let accountIdBytes: Data
-    public let accountIdB64: String
+    /// Which account the QR names (ADR-0056): always by login handle; the
+    /// account id only when this device already knows it.
+    public enum Target {
+        /// Path (a): signed in by password, parked on the identity prompt.
+        case account(accountIdBytes: Data, accountIdB64: String, loginHandle: Data)
+        /// Path (b): a fresh device with no session; the account id comes
+        /// from the grant redeem.
+        case byName(loginHandle: Data)
+    }
+
+    public let target: Target
     public let onRecovered: (PairingOrchestrator.JoinRecoveryOutcome) async throws -> Void
 
     @State private var ui: PanelState = .idle
@@ -47,12 +56,10 @@ public struct RestoreViaDevicePanel: View {
     }
 
     public init(
-        accountIdBytes: Data,
-        accountIdB64: String,
+        target: Target,
         onRecovered: @escaping (PairingOrchestrator.JoinRecoveryOutcome) async throws -> Void
     ) {
-        self.accountIdBytes = accountIdBytes
-        self.accountIdB64 = accountIdB64
+        self.target = target
         self.onRecovered = onRecovered
     }
 
@@ -110,10 +117,19 @@ public struct RestoreViaDevicePanel: View {
     private func start() {
         ui = .preparing
         do {
-            let s = try PairingOrchestrator.prepareJoinFlow(
-                accountIdBytes: accountIdBytes,
-                accountIdB64: accountIdB64
-            )
+            let s: PairingOrchestrator.JoinSession
+            switch target {
+            case .account(let accountIdBytes, let accountIdB64, let loginHandle):
+                s = try PairingOrchestrator.prepareJoinFlow(
+                    loginHandle: loginHandle,
+                    accountIdBytes: accountIdBytes,
+                    accountIdB64: accountIdB64
+                )
+            case .byName(let loginHandle):
+                s = try PairingOrchestrator.prepareRestoreByNameFlow(
+                    loginHandle: loginHandle
+                )
+            }
             session = s
             ui = .waiting(qrPayload: s.qrPayload)
             pollTask = Task { @MainActor in

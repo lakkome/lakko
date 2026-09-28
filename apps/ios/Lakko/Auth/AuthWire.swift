@@ -379,24 +379,20 @@ public struct DeviceAuthorizeStartResponse: Codable, Equatable {
     }
 }
 
-/// `POST /device/authorize/redeem` request body. Anonymous — the
-/// fresh device has no token yet; the server limits it per account
-/// and per address (ADR-0054 S4).
+/// `POST /device/authorize/redeem` request body (ADR-0056). Anonymous: the
+/// fresh device has no token yet and does not know its account id either -
+/// the grant alone names the account (the server finds it by the grant's
+/// hash) and the response carries the id.
 public struct DeviceAuthorizeRedeemRequest: Codable, Equatable {
-    /// URL-safe base64 (no pad) of the 16-byte account id the fresh
-    /// device learned from the pairing QR.
-    public let accountIdB64: String
     /// URL-safe base64 (no pad) of the raw 32-byte grant token
     /// received over the rendezvous channel.
     public let grantTokenB64: String
 
-    public init(accountIdB64: String, grantTokenB64: String) {
-        self.accountIdB64 = accountIdB64
+    public init(grantTokenB64: String) {
         self.grantTokenB64 = grantTokenB64
     }
 
     enum CodingKeys: String, CodingKey {
-        case accountIdB64 = "account_id_b64"
         case grantTokenB64 = "grant_token_b64"
     }
 }

@@ -257,15 +257,15 @@ private fun AnotherDeviceForm(
             BusyButton(
                 label = "Continue",
                 busy = state.busy,
-                busyLabel = "Looking up...",
-                onClick = viewModel::lookupForDeviceRestore,
+                busyLabel = "Preparing...",
+                onClick = viewModel::startDeviceRestore,
             )
         } else {
             Lead("Restoring @${target.username}")
             Spacer(Modifier.height(12.dp))
             me.lakko.app.ui.devices.RestoreViaDevicePanel(
-                accountIdBytes = target.accountIdBytes,
-                accountIdB64 = target.accountIdB64,
+                loginHandle = target.loginHandle,
+                known = null,
                 onRecovered = viewModel::completeFromDeviceRestore,
             )
         }

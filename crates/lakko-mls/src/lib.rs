@@ -133,18 +133,38 @@ pub mod fuzz_api {
         crate::group::decode_pending_external_joins(bytes, identity).is_ok()
     }
 
-    /// Try to decode a device-pairing QR payload (`pairing::decode`). Returns
-    /// `true` on a successful prost decode + the structural binding checks
-    /// (version / account_id-length + match / rendezvous-pseudonym-length). The
-    /// bytes are the MOST attacker-controllable input in the system — a victim
-    /// physically scans a QR a malicious actor crafted — so this parser must
-    /// stay panic-free on arbitrary input. A fixed all-zero `expected_account_id`
-    /// keeps the harness reproducible; the fuzzer exercises the decode + the
-    /// length/version gates (the account_id-equality path is reachable for a
-    /// matching embedded id).
+    /// The fixed login handle [`decode_pairing_qr`] binds against: 32 bytes
+    /// of `0x5A`, a value the fuzzer can reach by construction.
+    pub const PAIRING_QR_EXPECTED_HANDLE: [u8; crate::pairing::LOGIN_HANDLE_LEN] =
+        [0x5A; crate::pairing::LOGIN_HANDLE_LEN];
+
+    /// Try to decode a device-pairing payload (`pairing::decode`, v2 since
+    /// ADR-0056). Returns `true` on a successful prost decode + the
+    /// structural binding checks (version == 2 / login-handle length +
+    /// constant-time match / rendezvous-pseudonym length). The bytes are the
+    /// MOST attacker-controllable input in the system — a victim physically
+    /// scans a QR a malicious actor crafted, or a relay serves the posted
+    /// payload — so this parser must stay panic-free on arbitrary input. The
+    /// fixed [`PAIRING_QR_EXPECTED_HANDLE`] keeps the harness reproducible.
     #[must_use]
     pub fn decode_pairing_qr(bytes: &[u8]) -> bool {
-        crate::pairing::decode(bytes, &[0u8; 16]).is_ok()
+        crate::pairing::decode(bytes, &PAIRING_QR_EXPECTED_HANDLE).is_ok()
+    }
+
+    /// The guard oracle for the `pairing_qr` target: `false` exactly when
+    /// [`decode_pairing_qr`] accepts a payload whose version is not 2 or
+    /// whose embedded handle is not [`PAIRING_QR_EXPECTED_HANDLE`]. The
+    /// harness asserts it; it never panics itself.
+    #[must_use]
+    pub fn pairing_qr_acceptance_is_bound(bytes: &[u8]) -> bool {
+        use prost::Message as _;
+        if !decode_pairing_qr(bytes) {
+            return true;
+        }
+        lakko_proto::wire::device_pairing::v1::PairingQr::decode(bytes).is_ok_and(|p| {
+            p.version == crate::pairing::PAIRING_VERSION
+                && p.login_handle.as_slice() == PAIRING_QR_EXPECTED_HANDLE.as_slice()
+        })
     }
 
     /// Try to open a history-bundle (`history_bundle::open_bundle`), the

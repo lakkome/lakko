@@ -1,22 +1,25 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! UniFFI surface for the device-pairing QR codec
-//! (Phase 2a3b1b).
+//! UniFFI surface for the device-pairing payload codec
+//! (Phase 2a3b1b; v2 since ADR-0056).
 //!
 //! Mirror of `crates/lakko-ffi-wasm/src/pairing.rs` for iOS +
 //! Android. Two free functions:
 //!
 //!   * [`build_pairing_qr`] — fresh-device side. Bundle the
-//!     account_id + KeyPackage bytes + 32-byte rendezvous
-//!     pseudonym into the wire-format payload the platform's
-//!     QR-render library turns into pixels.
+//!     32-byte login handle of the username the person typed
+//!     (`loginHandle(username)`) + KeyPackage bytes + 32-byte
+//!     rendezvous pseudonym into the wire-format payload the
+//!     platform's QR-render library turns into pixels, or that
+//!     `POST /device/request` carries.
 //!
-//!   * [`parse_pairing_qr`] — scanner side. Parse the wire
-//!     bytes the camera library handed us, verify the embedded
-//!     account_id matches the local session, return the
-//!     KeyPackage bytes + rendezvous pseudonym for the
-//!     downstream `addDeviceFromWire` + DS-mailbox PUT flow.
+//!   * [`parse_pairing_qr`] — confirming side. Parse the wire
+//!     bytes, verify the embedded login handle matches the
+//!     handle of the local account's own username (constant
+//!     time), return the KeyPackage bytes + rendezvous pseudonym
+//!     for the downstream `addDeviceFromWire` + DS-mailbox PUT
+//!     flow.
 //!
 //! `Record` (vs `Object` handle) for the decode result keeps
 //! the boundary cheap — both byte arrays cross as `Data` /
@@ -39,61 +42,100 @@ pub struct DecodedPairingQr {
     pub rendezvous_pseudonym: Vec<u8>,
 }
 
-/// Build the wire-format pairing QR payload.
+/// Build the wire-format pairing payload.
 ///
 /// # Errors
 ///
-/// * [`FfiError::Codec`] on wrong-length `account_id` (≠ 16)
+/// * [`FfiError::Codec`] on wrong-length `login_handle` (≠ 32)
 ///   / `rendezvous_pseudonym` (≠ 32).
-/// * [`FfiError::Mls`] on the (practically unreachable) inner
+/// * [`FfiError::Codec`] also on the (practically unreachable) inner
 ///   encode failure.
 #[uniffi::export]
 pub fn build_pairing_qr(
-    account_id: Vec<u8>,
+    login_handle: Vec<u8>,
     key_package: Vec<u8>,
     rendezvous_pseudonym: Vec<u8>,
 ) -> Result<Vec<u8>, FfiError> {
-    if account_id.len() != 16 {
-        return Err(FfiError::Codec("account_id must be 16 bytes".into()));
-    }
-    if rendezvous_pseudonym.len() != inner::RENDEZVOUS_PSEUDONYM_LEN {
-        return Err(FfiError::Codec(format!(
-            "rendezvous_pseudonym must be {} bytes",
-            inner::RENDEZVOUS_PSEUDONYM_LEN,
-        )));
-    }
-    let mut acct = [0u8; 16];
-    acct.copy_from_slice(&account_id);
-    let mut rendezvous = [0u8; inner::RENDEZVOUS_PSEUDONYM_LEN];
-    rendezvous.copy_from_slice(&rendezvous_pseudonym);
-
-    Ok(inner::encode(&acct, &key_package, &rendezvous)?)
+    let handle = handle_array(&login_handle, "login_handle")?;
+    let rendezvous: inner::RendezvousPseudonym =
+        rendezvous_pseudonym.as_slice().try_into().map_err(|_| {
+            FfiError::Codec(format!(
+                "rendezvous_pseudonym must be {} bytes",
+                inner::RENDEZVOUS_PSEUDONYM_LEN,
+            ))
+        })?;
+    Ok(inner::encode(&handle, &key_package, &rendezvous)?)
 }
 
-/// Scanner side: parse the wire bytes, verify the embedded
-/// `account_id` matches `expected_account_id`, return the
-/// decoded contents.
+/// Confirming side: parse the wire bytes, verify the embedded
+/// login handle matches `expected_login_handle` (the handle of
+/// the local account's own username), return the decoded
+/// contents.
 ///
 /// # Errors
 ///
-/// See the docstring of [`build_pairing_qr`] — same error
-/// vocabulary plus the wire-format-rejection cases from
-/// [`lakko_mls::pairing::decode`].
+/// * [`FfiError::Codec`] on a wrong-length `expected_login_handle`
+///   or a malformed payload (bad protobuf, wrong embedded lengths).
+/// * [`FfiError::Unsupported`] on any payload version other than 2
+///   (a v1 payload from a client that has not moved is refused).
+/// * [`FfiError::Group`] on a handle mismatch — the payload was made
+///   for another account's name.
 #[uniffi::export]
 pub fn parse_pairing_qr(
     wire: Vec<u8>,
-    expected_account_id: Vec<u8>,
+    expected_login_handle: Vec<u8>,
 ) -> Result<DecodedPairingQr, FfiError> {
-    if expected_account_id.len() != 16 {
-        return Err(FfiError::Codec(
-            "expected_account_id must be 16 bytes".into(),
-        ));
-    }
-    let mut acct = [0u8; 16];
-    acct.copy_from_slice(&expected_account_id);
-    let decoded = inner::decode(&wire, &acct)?;
+    let handle = handle_array(&expected_login_handle, "expected_login_handle")?;
+    let decoded = inner::decode(&wire, &handle)?;
     Ok(DecodedPairingQr {
         key_package: decoded.key_package,
         rendezvous_pseudonym: decoded.rendezvous_pseudonym.to_vec(),
     })
+}
+
+fn handle_array(bytes: &[u8], what: &str) -> Result<inner::LoginHandle, FfiError> {
+    bytes
+        .try_into()
+        .map_err(|_| FfiError::Codec(format!("{what} must be {} bytes", inner::LOGIN_HANDLE_LEN)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_then_parse_round_trips_under_the_same_handle() {
+        let handle = vec![0x11u8; 32];
+        let wire = build_pairing_qr(handle.clone(), vec![7u8; 64], vec![9u8; 32]).unwrap();
+        let got = parse_pairing_qr(wire, handle).unwrap();
+        assert_eq!(got.key_package, vec![7u8; 64]);
+        assert_eq!(got.rendezvous_pseudonym, vec![9u8; 32]);
+    }
+
+    #[test]
+    fn parse_refuses_another_handle() {
+        let wire = build_pairing_qr(vec![0x11; 32], vec![7u8; 64], vec![9u8; 32]).unwrap();
+        assert!(matches!(
+            parse_pairing_qr(wire, vec![0x12; 32]),
+            Err(FfiError::Group(_))
+        ));
+    }
+
+    #[test]
+    fn wrong_length_handles_are_refused_at_the_boundary() {
+        // A 16-byte value (an account id, the v1 shape) is not a handle.
+        assert!(matches!(
+            build_pairing_qr(vec![0x11; 16], vec![7u8; 64], vec![9u8; 32]),
+            Err(FfiError::Codec(_))
+        ));
+        let wire = build_pairing_qr(vec![0x11; 32], vec![7u8; 64], vec![9u8; 32]).unwrap();
+        assert!(matches!(
+            parse_pairing_qr(wire, vec![0x11; 16]),
+            Err(FfiError::Codec(_))
+        ));
+        assert!(matches!(
+            build_pairing_qr(vec![0x11; 32], vec![7u8; 64], vec![9u8; 31]),
+            Err(FfiError::Codec(_))
+        ));
+    }
 }

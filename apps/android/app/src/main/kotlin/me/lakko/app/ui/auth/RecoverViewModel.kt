@@ -39,12 +39,10 @@ import uniffi.lakko_ffi_uniffi.FfiException
 public class RecoverViewModel(
     private val repo: AuthRepository,
     public val cachedUsername: String?,
-    /** ADR-0018 — factory for the discovery client the AnotherDevice
-     *  mode uses to resolve the typed username to an account id.
-     *  Overridable for tests. */
-    private val discoveryClientFactory: () -> me.lakko.app.discovery.DiscoveryClient = {
-        me.lakko.app.discovery.DiscoveryClient()
-    },
+    /** ADR-0056 — username to login handle for the AnotherDevice mode's
+     *  pairing payload (the native core). Overridable for tests. */
+    private val loginHandleSource: me.lakko.app.auth.LoginHandleSource =
+        me.lakko.app.auth.UniffiLoginHandleSource,
     /** ADR-0048 §4 — the core's username rule (`validateUsername`). */
     private val validateUsername: (String) -> String =
         { uniffi.lakko_ffi_uniffi.validateUsername(it) },
@@ -135,57 +133,22 @@ public class RecoverViewModel(
     }
 
     /**
-     * ADR-0018 factor (a), path (b) — resolve the typed username to
-     * an account id via the discovery service so the AnotherDevice
-     * restore can build the pairing QR. Anonymous (OPRF-blinded
-     * lookup, no session needed).
+     * ADR-0018 factor (a), path (b) — start the AnotherDevice restore:
+     * the typed username (or the account cached on this device) becomes
+     * the login handle the pairing payload carries (ADR-0056). Nothing is
+     * looked up: the account id arrives only with the grant redeem, after
+     * the other device confirms.
      */
-    public fun lookupForDeviceRestore() {
+    public fun startDeviceRestore() {
         val snapshot = mutableState.value
         if (snapshot.busy) return
-        val typed = snapshot.username.trim()
-        if (typed.isEmpty()) {
-            mutableState.update {
-                it.copy(error = "Enter your username first.")
-            }
+        val target = try {
+            deviceRestoreTargetFor(snapshot.username, cachedUsername, loginHandleSource)
+        } catch (err: AuthClientArgError) {
+            mutableState.update { it.copy(error = err.message) }
             return
         }
-        val lookupName = usernameOrRefuse(typed) ?: return
-        mutableState.update { it.copy(busy = true, error = null) }
-        viewModelScope.launch {
-            try {
-                val resolved = discoveryClientFactory().use { discovery ->
-                    discovery.lookup(lookupName)
-                }
-                val account = resolved.account
-                if (account == null) {
-                    mutableState.update {
-                        it.copy(
-                            busy = false,
-                            error = "No account with that username. Check the spelling.",
-                        )
-                    }
-                    return@launch
-                }
-                mutableState.update {
-                    it.copy(
-                        busy = false,
-                        deviceRestoreTarget = DeviceRestoreTarget(
-                            accountIdBytes = account,
-                            accountIdB64 = me.lakko.app.auth.base64Encode(account),
-                            username = resolved.normalisedUsername,
-                        ),
-                    )
-                }
-            } catch (cause: Throwable) {
-                mutableState.update {
-                    it.copy(
-                        busy = false,
-                        error = cause.message ?: "Could not look up the account. Try again.",
-                    )
-                }
-            }
-        }
+        mutableState.update { it.copy(error = null, deviceRestoreTarget = target) }
     }
 
     /**
@@ -194,34 +157,25 @@ public class RecoverViewModel(
      * from the other device. Suspend passthrough to
      * [AuthRepository.completeFromDeviceRestore]; verification
      * failures propagate to the calling panel. Requires the redeemed
-     * token (without it this device has no ACCESS) — refused
-     * otherwise with a clear message.
+     * token and the account id the redeem named (without them this
+     * device has no ACCESS) — refused otherwise with a clear message.
      */
     public suspend fun completeFromDeviceRestore(
         outcome: me.lakko.app.devices.PairingOrchestrator.JoinRecoveryOutcome,
     ) {
         val target = mutableState.value.deviceRestoreTarget
-            ?: throw AuthClientArgError("no resolved account — look up your username first")
-        val token = outcome.sessionToken
-        val expiry = outcome.sessionExpiresAtMs
-        if (token == null || expiry == null) {
-            // Seed-only outcome: the grant redeem failed, so this
-            // device has IDENTITY but no ACCESS. Refuse rather than
-            // leave a half-restored profile; the user retries (a
-            // fresh pairing mints a fresh grant).
+        if (target == null) {
             outcome.phraseSeed.fill(0)
-            throw AuthClientArgError(
-                "The other device transferred your identity but the " +
-                    "sign-in grant could not be redeemed. Try again.",
-            )
+            throw AuthClientArgError("Enter your username first.")
         }
+        val done = deviceRestoreCompletion(target, outcome)
         repo.completeFromDeviceRestore(
-            accountIdBytes = target.accountIdBytes,
-            accountIdB64 = target.accountIdB64,
-            username = target.username,
-            phraseSeed = outcome.phraseSeed,
-            sessionToken = token,
-            sessionExpiresAtMs = expiry,
+            accountIdBytes = done.accountIdBytes,
+            accountIdB64 = done.accountIdB64,
+            username = done.username,
+            phraseSeed = done.phraseSeed,
+            sessionToken = done.sessionToken,
+            sessionExpiresAtMs = done.sessionExpiresAtMs,
         )
     }
 
@@ -665,27 +619,80 @@ public enum class RecoverMode { Phrase, Shares, AnotherDevice, Authenticator, Co
  *  [Code] collects the 6-digit code and finishes. */
 public enum class ContactRecoverStep { Request, Code }
 
-/** ADR-0018 factor (a), path (b) — the resolved restore target the
- *  AnotherDevice mode pairs against. */
-public data class DeviceRestoreTarget(
-    val accountIdBytes: ByteArray,
-    val accountIdB64: String,
-    val username: String,
+/** ADR-0018 factor (a), path (b) — what the AnotherDevice mode pairs
+ *  against: the canonical username and its 32-byte login handle
+ *  (ADR-0056). No account id: the fresh device learns it from the
+ *  grant redeem. */
+public class DeviceRestoreTarget(
+    public val username: String,
+    public val loginHandle: ByteArray,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is DeviceRestoreTarget) return false
-        return accountIdBytes.contentEquals(other.accountIdBytes) &&
-            accountIdB64 == other.accountIdB64 &&
-            username == other.username
+        return username == other.username && loginHandle.contentEquals(other.loginHandle)
     }
 
-    override fun hashCode(): Int {
-        var h = accountIdBytes.contentHashCode()
-        h = 31 * h + accountIdB64.hashCode()
-        h = 31 * h + username.hashCode()
-        return h
+    override fun hashCode(): Int = 31 * username.hashCode() + loginHandle.contentHashCode()
+}
+
+/**
+ * The [DeviceRestoreTarget] for the name in the username field ([typed]),
+ * else the account cached on this device ([cachedUsername]).
+ *
+ * @throws AuthClientArgError with the form copy (no name, or the username
+ *   rule's reason).
+ */
+public fun deviceRestoreTargetFor(
+    typed: String,
+    cachedUsername: String?,
+    source: me.lakko.app.auth.LoginHandleSource,
+): DeviceRestoreTarget {
+    val named = me.lakko.app.devices.pairingNameFor(typed, cachedUsername, source)
+    return DeviceRestoreTarget(username = named.username, loginHandle = named.handle)
+}
+
+/** The inputs of [AuthRepository.completeFromDeviceRestore], checked. */
+public class DeviceRestoreCompletion(
+    public val accountIdBytes: ByteArray,
+    public val accountIdB64: String,
+    public val username: String,
+    public val phraseSeed: ByteArray,
+    public val sessionToken: String,
+    public val sessionExpiresAtMs: Long,
+)
+
+/**
+ * Check a join-by-name outcome can complete the restore: the grant was
+ * redeemed, so the session and the account id (from the redeem response,
+ * ADR-0056) are present. A seed-only outcome zeroizes the seed and throws.
+ */
+public fun deviceRestoreCompletion(
+    target: DeviceRestoreTarget,
+    outcome: me.lakko.app.devices.PairingOrchestrator.JoinRecoveryOutcome,
+): DeviceRestoreCompletion {
+    val token = outcome.sessionToken
+    val expiry = outcome.sessionExpiresAtMs
+    val accountId = outcome.accountId
+    if (token == null || expiry == null || accountId == null) {
+        // Seed-only outcome: the grant redeem failed, so this device has
+        // IDENTITY but no ACCESS and no account id. Refuse rather than
+        // leave a half-restored profile; the user retries (a fresh
+        // pairing mints a fresh grant).
+        outcome.phraseSeed.fill(0)
+        throw AuthClientArgError(
+            "The other device transferred your identity but the " +
+                "sign-in grant could not be redeemed. Try again.",
+        )
     }
+    return DeviceRestoreCompletion(
+        accountIdBytes = accountId.copyOf(),
+        accountIdB64 = me.lakko.app.auth.base64Encode(accountId),
+        username = target.username,
+        phraseSeed = outcome.phraseSeed,
+        sessionToken = token,
+        sessionExpiresAtMs = expiry,
+    )
 }
 
 /** Snapshot of every field the [RecoverScreen] renders. */
@@ -701,8 +708,9 @@ public data class RecoverUiState(
     val confirm: String = "",
     val busy: Boolean = false,
     val error: String? = null,
-    /** ADR-0018 — non-null once the AnotherDevice mode resolved the
-     *  typed username to an account id via discovery. */
+    /** ADR-0018 — non-null once the AnotherDevice mode turned the
+     *  username into the login handle its pairing code carries
+     *  (ADR-0056; no lookup). */
     val deviceRestoreTarget: DeviceRestoreTarget? = null,
     /** ADR-0018 factor (c) — the 6-digit authenticator code field. */
     val totpCode: String = "",

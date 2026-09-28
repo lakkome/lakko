@@ -334,7 +334,8 @@ pub(crate) async fn delete_credential(
 /// A3 (GDPR right-to-erasure) — delete the authenticated account and ALL of its
 /// server-side **auth** state. `DELETE FROM accounts` cascades to every
 /// account-keyed table (OPAQUE registrations, passkeys, recovery factors,
-/// in-flight states + grants), so a single statement purges the auth tier.
+/// in-flight states + grants); the one table without the foreign key,
+/// `device_requests` (ADR-0056), is cleared beside it in one transaction.
 ///
 /// Authorization: the session token proves the account (bearer middleware).
 /// When the account has a passkey, deletion ALSO requires a fresh single-use
@@ -373,12 +374,22 @@ pub(crate) async fn delete_account(
         }
     }
 
-    // One statement; FK ON DELETE CASCADE purges every account-keyed auth table.
-    sqlx::query("DELETE FROM accounts WHERE id = ?")
+    // FK ON DELETE CASCADE purges every account-keyed auth table except
+    // `device_requests`, whose foreign key ADR-0056 dropped (an unknown
+    // handle's request is stored against a stand-in id that is not an
+    // account); its row is removed in the same transaction.
+    let mut tx = state.db.begin().await.map_err(ApiError::Db)?;
+    sqlx::query("DELETE FROM device_requests WHERE account_id = ?")
         .bind(auth.0.as_slice())
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await
         .map_err(ApiError::Db)?;
+    sqlx::query("DELETE FROM accounts WHERE id = ?")
+        .bind(auth.0.as_slice())
+        .execute(&mut *tx)
+        .await
+        .map_err(ApiError::Db)?;
+    tx.commit().await.map_err(ApiError::Db)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
