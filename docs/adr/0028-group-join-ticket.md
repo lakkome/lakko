@@ -9,6 +9,69 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 - **Date:** 2026-06-25
 - **Context:** Phase 3/4 — the live consumer of ADR-0027 (external-join approval, G-3)
 
+> **AMENDED 2026-09-28 — sealed links (maintainer's decision on the security
+> pass below). Every invite link carries a secret after `#`, and the
+> capability is encrypted under it.** Flag day, no dual format: a `/g/` link
+> without its fragment no longer opens, and the ledger holds nothing a
+> pre-amendment client can read.
+>
+> - **Link shapes.** `/i/`, `/c/` and `/g/` all read
+>   `https://<host>/<k>/<8-char id>#<16-char secret>` (pointer), or
+>   `https://<host>/<k>/<base64url sealed blob>#<16-char secret>` (the inline
+>   fallback, used only when the upload fails on transport). A link whose
+>   fragment is missing or is not 16 base64url characters is **damaged**, on
+>   every kind.
+> - **One construction for all three kinds** (`lakko_contacts::link_seal`):
+>   a 12-byte CSPRNG secret (`LINK_SECRET_LEN`, the `/g/` width of the
+>   short-link amendment, now shared); the sealed blob is
+>   `kind(1) ‖ version(1) ‖ nonce(12) ‖ ChaCha20-Poly1305(key, nonce,
+>   aad = kind ‖ version, plaintext = the WHOLE signed capability)`, with
+>   `kind` the path letter (`i`, `c`, `g`) and
+>   `key = HKDF-SHA256(ikm = secret, salt = nonce,
+>   info = "lakko/invite-link/<k>/seal-key/v1\0")`. The per-link nonce as
+>   the salt keeps a search over secrets from being amortised across links;
+>   the per-kind `info` and the kind byte in the AAD refuse a blob behind the
+>   wrong path. Every open failure (no secret, wrong secret, another kind,
+>   truncated, tampered, substituted, a capability that does not verify
+>   inside) is the one refusal `ContactError::LinkDamaged`.
+> - **`/g/` keeps its sealed preview inside the capability** rather than
+>   folding the names into the plaintext: the plaintext capability also
+>   travels in the joiner's `group_join_attribution` to the group's knock
+>   journal on the Delivery Service, where it is not encrypted to anyone, so
+>   the names must stay sealed there. One secret serves both layers under
+>   independent HKDF derivations (`info` differs). The capability wire (v2)
+>   is unchanged.
+> - **What the server stores and needs.** The ledger column holds the sealed
+>   blob only (migration `0022_sealed_invite_links.sql`, widths derived from
+>   each codec's `MAX_SEALED_LEN`: 254 / 4338 / 938 bytes). What the server
+>   used to read out of the capability now arrives in clear upload fields:
+>   `issuer_pubkey` (the key the issuer-signed revoke verifies against, all
+>   three kinds), `expiry_ms` (fetch filter, pruner) and `max_uses` (consume
+>   ceiling; for `/g/` it was a clear field already), plus, for `/i/` only,
+>   `label` and `bootstrap_referral` for the owner's own list of live invites
+>   (owner metadata the server could read before; sealing it for the owner
+>   too is a possible follow-up). `owner_account_id` is the session's
+>   account. The server no longer stores `group_id` or `call_id` at all. An
+>   uploader who lies in a clear field only changes how its own link
+>   behaves; naming someone else's `issuer_pubkey` gives that person, not the
+>   uploader, the power to revoke the row.
+> - **The joiner tag** is computed by the joiner over the PLAINTEXT
+>   capability the link opens to, as before; the server needs nothing else
+>   from the plaintext to count a consume, and it can no longer recompute a
+>   candidate joiner's tag itself.
+>
+> **Closed** by this amendment (the first three items the security pass
+> below left open): a 48-bit `/c/` pointer is no longer a bearer into an
+> auto-admitted call (a fetched blob opens nothing without the 96-bit
+> secret); a malicious discovery can no longer substitute `/i/` or `/c/`
+> capabilities (a substituted blob fails the AEAD open); a `/g/` pointer that
+> lost its fragment no longer accepts a substituted capability (it opens
+> nothing). **Still open — the burn residual:** anyone holding a live id can
+> spend an invite's uses with random joiner tags, one anonymous token and the
+> per-IP limit per attempt, because the tag is opaque to the server. Binding
+> a consume to knowledge of the secret (a consume key derived from it, its
+> verifier stored beside the blob) would close it; not built.
+
 > **SECURITY PASS 2026-09-28 (`lakko-security` on the short-link amendment
 > below).** Fixed in the same pass:
 >
@@ -44,7 +107,8 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 >   decode / validate / re-encode agreement.
 >
 > **Still OPEN — design items this pass did not change**, recorded so the
-> short-link trade is read with them:
+> short-link trade is read with them. *(The first three are CLOSED by the
+> sealed-link amendment above; the fourth remains.)*
 >
 > - **A `/c/` pointer link is a 48-bit bearer into a call that may
 >   auto-admit.** The id is the only secret in the link; whoever fetches it

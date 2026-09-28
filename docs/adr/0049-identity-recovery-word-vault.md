@@ -268,6 +268,53 @@ No PII, no key material in the clear, nothing that identifies a person
 
 ### 2. Another device: a confirmation prompt, not only a QR code
 
+> **Amended 2026-09-28 (security pass): the code is typed, not compared.**
+> The comparison code below was `SHA-256("lakko/device-request/sas/v1" ||
+> pairing_payload)` shown on both screens. The payload carries a free 32-byte
+> rendezvous pseudonym, so a malicious relay (the server, or anyone who
+> controls it) grinds its own payload P' until its code equals the victim's
+> (about a million hashes, milliseconds), and the person's comparison passes
+> for a device the relay controls: a full account takeover. The flow below
+> is kept as history; what replaces it:
+>
+> 1. The old device **chooses** six uniformly random digits (rejection
+>    sampling, no modulo bias) and shows them; the person **types** them on
+>    the new device. The server never sees the code.
+> 2. The devices run **SPAKE2** (Ed25519 group, RustCrypto `spake2` 0.4, new
+>    crate `crates/lakko-device-link`) with the code as the password. The
+>    old device is side B and moves first, since it knows the code first;
+>    the new device is side A. Both identities and the transcript bind the
+>    auth `request_id` and the login handle, so an exchange cannot be moved
+>    to another request or another account's name.
+> 3. HKDF over the SPAKE2 key and the transcript gives a payload key and two
+>    confirmation keys. The new device seals the ADR-0056 pairing payload
+>    under the payload key and sends it with `confirm_a` (an HMAC over the
+>    transcript and the SHA-256 of the sealed payload); the old device
+>    checks `confirm_a` in constant time, opens the payload, and only then
+>    pairs. It returns `confirm_b`, which the new device checks before
+>    trusting the Welcome that follows.
+> 4. **One guess per request.** The old device's state is consumed by its
+>    one verify; auth writes the old device's message once, the sealed
+>    payload once and the outcome once. A wrong code ends the request
+>    (`wrong_code`) and the person starts again. A passive relay learns
+>    nothing it can test offline; an active one has one chance in a million
+>    per request the person's device answers, and each attempt puts a
+>    prompt on that device, which clients rate-limit.
+>
+> Relay routes (auth, migration `0024_device_link_pake.sql`, the table
+> rebuilt: flag day): `POST /device/request {handle}`; `GET
+> /device/requests`; `POST /device/requests/{id}/pake {pake_b_b64}`; `POST
+> /device/request/status {request_id_b64}` -> `{pending, pake_b_b64,
+> outcome, confirm_b_b64}`; `POST /device/request/payload {request_id_b64,
+> pake_a_b64, sealed_payload_b64, confirm_a_b64}`; `POST
+> /device/requests/{id}/result {outcome, confirm_b_b64?}`; `DELETE
+> /device/requests/{id}` (decline). A request for a handle nobody holds is
+> stored against its stand-in and answers every anonymous route exactly as a
+> real request no device has answered yet. UX: `docs/ux/identity-recovery.md`
+> section 4 (amended the same day). Residual stated plainly: the `spake2`
+> crate has not been independently audited and does not zeroize its own
+> copy of the password and its ephemeral scalar; recorded for G-39.
+
 The existing flow (ADR-0018 factor (a)) already does the right cryptography:
 a single-use `device_grants` token for ACCESS, the seed sealed over the
 rendezvous channel for IDENTITY. What it lacks is a way to start it that

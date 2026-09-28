@@ -11,7 +11,8 @@ use lakko_contacts::call_invite::{
 };
 use lakko_contacts::call_invite::{
     call_sign_revocation as rust_call_sign_revocation, compose as rust_call_invite_compose,
-    decode_and_verify as rust_call_invite_decode, CallInviteCapability as RustCallInviteCapability,
+    decode_and_verify as rust_call_invite_decode, open_link as rust_call_invite_open_link,
+    seal_link as rust_call_invite_seal_link, CallInviteCapability as RustCallInviteCapability,
     CallInviteMedia as RustCallInviteMedia, CALL_ID_LEN, MAX_KEY_PACKAGE_LEN,
 };
 use lakko_contacts::call_kp_forward::{
@@ -35,8 +36,8 @@ use lakko_contacts::group_invite::{
     compose as rust_group_invite_compose,
     compose_with_preview as rust_group_invite_compose_with_preview,
     decode_and_verify as rust_group_invite_decode, generate_link_key as rust_generate_link_key,
-    group_sign_revocation as rust_group_sign_revocation,
-    GroupInviteCapability as RustGroupInviteCapability,
+    group_sign_revocation as rust_group_sign_revocation, open_link as rust_group_invite_open_link,
+    seal_link as rust_group_invite_seal_link, GroupInviteCapability as RustGroupInviteCapability,
     GroupInvitePreview as RustGroupInvitePreview,
     LINK_SECRET_B64URL_LEN as GROUP_INVITE_LINK_SECRET_B64URL_LEN,
     LINK_SECRET_LEN as GROUP_INVITE_LINK_SECRET_LEN, MAX_GROUP_ID_LEN,
@@ -56,8 +57,15 @@ use lakko_contacts::incoming_envelope::{
 };
 use lakko_contacts::invite::{
     compose as rust_invite_compose, compute_joiner_tag as rust_compute_joiner_tag,
-    decode_and_verify as rust_invite_decode, sign_owner_list as rust_sign_owner_list,
+    decode_and_verify as rust_invite_decode, open_link as rust_invite_open_link,
+    seal_link as rust_invite_seal_link, sign_owner_list as rust_sign_owner_list,
     sign_revocation as rust_sign_revocation, BLOB_ID_B64URL_LEN, BLOB_ID_LEN,
+};
+use lakko_contacts::link_seal::{
+    generate_link_secret as rust_generate_link_secret,
+    link_secret_from_slice as rust_link_secret_from_slice,
+    LINK_SECRET_B64URL_LEN as INVITE_LINK_SECRET_B64URL_LEN,
+    LINK_SECRET_LEN as INVITE_LINK_SECRET_LEN,
 };
 use lakko_contacts::media_state::{
     compose_media_state as rust_compose_media_state, decode_media_state as rust_decode_media_state,
@@ -103,6 +111,83 @@ fn contact_err(e: ContactError) -> JsError {
 
 fn crypto_err(e: lakko_crypto::error::Error) -> JsError {
     JsError::new(&format!("{e}"))
+}
+
+// ============================================================================
+// Sealed invite links — the 2026-09-28 security pass (ADR-0028, ADR-0009)
+// ============================================================================
+
+/// Thrown by every `openLink`: an `Error` whose `inviteLinkError` property is
+/// `"damaged"` for a missing or wrong fragment secret, a blob of another kind,
+/// a truncated, tampered or substituted blob, or a capability that does not
+/// verify. Any other failure (none is reachable today) keeps its message and
+/// carries no code.
+fn invite_link_error(e: ContactError) -> JsValue {
+    match e {
+        ContactError::LinkDamaged => coded_error(&e.to_string(), "inviteLinkError", "damaged"),
+        other => JsError::new(&format!("{other}")).into(),
+    }
+}
+
+/// What every invite compose returns (`/i/`, `/c/`, `/g/`): the sealed blob
+/// to upload (or base64url-encode into the inline `/<k>/<sealed>#<secret>`
+/// link), the fresh 12-byte link secret for the URL fragment only, and the
+/// issuer's 32-byte Ed25519 key the upload carries in clear for the revoke.
+#[wasm_bindgen(js_name = InviteLinkMint)]
+pub struct WasmInviteLinkMint {
+    sealed: Vec<u8>,
+    link_secret: Vec<u8>,
+    issuer_pubkey: Vec<u8>,
+}
+
+#[wasm_bindgen(js_class = InviteLinkMint)]
+impl WasmInviteLinkMint {
+    /// The sealed link blob.
+    #[wasm_bindgen(getter)]
+    pub fn sealed(&self) -> Vec<u8> {
+        self.sealed.clone()
+    }
+
+    /// The link secret (12 bytes) for the URL fragment.
+    #[wasm_bindgen(getter, js_name = linkSecret)]
+    pub fn link_secret(&self) -> Vec<u8> {
+        self.link_secret.clone()
+    }
+
+    /// The issuer's Ed25519 verifying key (32 bytes), for the upload body.
+    #[wasm_bindgen(getter, js_name = issuerPubkey)]
+    pub fn issuer_pubkey(&self) -> Vec<u8> {
+        self.issuer_pubkey.clone()
+    }
+}
+
+fn seal_mint(
+    signing: &SigningKey,
+    seal: impl FnOnce(&[u8; INVITE_LINK_SECRET_LEN]) -> Result<Vec<u8>, ContactError>,
+    secret: [u8; INVITE_LINK_SECRET_LEN],
+) -> Result<WasmInviteLinkMint, JsError> {
+    let sealed = seal(&secret).map_err(contact_err)?;
+    Ok(WasmInviteLinkMint {
+        sealed,
+        link_secret: secret.to_vec(),
+        issuer_pubkey: signing.verifying_key().to_bytes().to_vec(),
+    })
+}
+
+/// Width in bytes of an invite link secret (the URL fragment), every kind: 12.
+#[wasm_bindgen(js_name = inviteLinkSecretLen)]
+#[must_use]
+pub fn invite_link_secret_len() -> u32 {
+    u32::try_from(INVITE_LINK_SECRET_LEN).unwrap_or(u32::MAX)
+}
+
+/// Length of an invite link secret in the URL fragment: base64url without
+/// padding, 16 characters. Any other fragment length (or none) is a damaged
+/// link.
+#[wasm_bindgen(js_name = inviteLinkSecretUrlLen)]
+#[must_use]
+pub fn invite_link_secret_url_len() -> u32 {
+    u32::try_from(INVITE_LINK_SECRET_B64URL_LEN).unwrap_or(u32::MAX)
 }
 
 /// A real `Error` carrying one stable reason code as an own property —
@@ -980,12 +1065,13 @@ pub fn compute_safety_number(my_pubkey: &[u8], their_pubkey: &[u8]) -> Result<St
 #[wasm_bindgen]
 pub struct InviteCapability {
     inner: RustInviteCapability,
+    wire: Vec<u8>,
 }
 
 #[wasm_bindgen]
 impl InviteCapability {
-    /// Compose a signed invite capability. Returns the wire bytes.
-    /// Caller is responsible for base64url-encoding into a URL.
+    /// Compose a signed invite capability and seal it for an `/i/` link under
+    /// a fresh link secret. Returns an `InviteLinkMint`.
     ///
     /// `ownerSigningSeed` is the 32-byte Ed25519 seed that powers
     /// the `Identity` (see `mls.rs::Identity::ed25519Seed` for the
@@ -1013,7 +1099,7 @@ impl InviteCapability {
         max_uses: u32,
         bootstrap_referral: bool,
         label: &str,
-    ) -> Result<Vec<u8>, JsError> {
+    ) -> Result<WasmInviteLinkMint, JsError> {
         if owner_signing_seed.len() != 32 {
             return Err(JsError::new("ownerSigningSeed must be 32 bytes"));
         }
@@ -1046,7 +1132,7 @@ impl InviteCapability {
             )));
         }
 
-        rust_invite_compose(
+        let wire = rust_invite_compose(
             &signing,
             &acct,
             &x25519_pub,
@@ -1055,18 +1141,45 @@ impl InviteCapability {
             bootstrap_referral,
             label,
         )
-        .map_err(contact_err)
+        .map_err(contact_err)?;
+        seal_mint(
+            &signing,
+            |secret| rust_invite_seal_link(secret, &wire),
+            rust_generate_link_secret(),
+        )
     }
 
-    /// Joiner-side: decode wire bytes, verify the Ed25519
-    /// signature, return the validated `InviteCapability`. Does
-    /// NOT check expiry — call [`InviteCapability::isValidNow`]
-    /// separately so the UI can render "this invite expired N
-    /// minutes ago" rather than a generic failure.
+    /// Decode PLAINTEXT capability wire bytes and verify the Ed25519
+    /// signature. A link never carries plaintext since the 2026-09-28
+    /// security pass — a joiner uses [`InviteCapability::openLink`]. Does
+    /// NOT check expiry — call [`InviteCapability::isValidNow`].
     #[wasm_bindgen(js_name = decodeAndVerify)]
     pub fn decode_and_verify(wire: &[u8]) -> Result<InviteCapability, JsError> {
         let inner = rust_invite_decode(wire).map_err(contact_err)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            wire: wire.to_vec(),
+        })
+    }
+
+    /// Joiner-side: open an `/i/` link's sealed blob (fetched by id, or the
+    /// inline path segment) with the 12-byte secret from the URL fragment and
+    /// verify the capability inside. Does NOT check expiry.
+    ///
+    /// # Errors
+    ///
+    /// Throws an `Error` with `inviteLinkError: "damaged"` on any failure.
+    #[wasm_bindgen(js_name = openLink)]
+    pub fn open_link(sealed: &[u8], link_secret: &[u8]) -> Result<InviteCapability, JsValue> {
+        let secret = rust_link_secret_from_slice(link_secret).map_err(invite_link_error)?;
+        let (inner, wire) = rust_invite_open_link(&secret, sealed).map_err(invite_link_error)?;
+        Ok(Self { inner, wire })
+    }
+
+    /// The plaintext capability wire — what `computeJoinerInviteTag` takes.
+    #[wasm_bindgen(getter)]
+    pub fn wire(&self) -> Vec<u8> {
+        self.wire.clone()
     }
 
     /// Inviter's long-term Ed25519 verifying key (32 bytes).
@@ -1310,9 +1423,10 @@ pub fn compute_joiner_invite_tag(
 // CallInviteCapability — ROADMAP 3c3
 // ============================================================================
 
-/// Compose + sign a call-invite capability (Phase 3c3).
-/// Returns the wire bytes the platform base64url-encodes
-/// into a `https://<host>/c/<...>` link.
+/// Compose + sign a call-invite capability (Phase 3c3) and seal it for a
+/// `/c/` link under a fresh link secret (the 2026-09-28 security pass).
+/// Returns an `InviteLinkMint`; the link is `/c/<id>#<secret>` after the
+/// upload, or `/c/<base64url sealed>#<secret>` inline.
 ///
 /// Same shape as `composeInviteCapability` but for a
 /// link-based group-call invite. The owner embeds a
@@ -1331,7 +1445,7 @@ pub fn compose_call_invite_capability(
     media_video: bool,
     one_time_key_package: &[u8],
     label: &str,
-) -> Result<Vec<u8>, JsError> {
+) -> Result<WasmInviteLinkMint, JsError> {
     if owner_signing_seed.len() != 32 {
         return Err(JsError::new("ownerSigningSeed must be 32 bytes"));
     }
@@ -1378,7 +1492,11 @@ pub fn compose_call_invite_capability(
         label,
     )
     .map_err(|e| JsError::new(&format!("{e}")))?;
-    Ok(wire)
+    seal_mint(
+        &signing,
+        |secret| rust_call_invite_seal_link(secret, &wire),
+        rust_generate_link_secret(),
+    )
 }
 
 /// Composed and verified call-invite capability (Phase
@@ -1386,16 +1504,41 @@ pub fn compose_call_invite_capability(
 #[wasm_bindgen]
 pub struct CallInviteCapability {
     pub(crate) inner: RustCallInviteCapability,
+    wire: Vec<u8>,
 }
 
 #[wasm_bindgen]
 impl CallInviteCapability {
-    /// Joiner-side: decode wire bytes, verify the Ed25519
-    /// signature, return the validated capability.
+    /// Decode PLAINTEXT capability wire bytes and verify the Ed25519
+    /// signature. A link never carries plaintext — a joiner uses `openLink`.
     #[wasm_bindgen(js_name = decodeAndVerify)]
     pub fn decode_and_verify(wire: &[u8]) -> Result<CallInviteCapability, JsError> {
         let inner = rust_call_invite_decode(wire).map_err(|e| JsError::new(&format!("{e}")))?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            wire: wire.to_vec(),
+        })
+    }
+
+    /// Joiner-side: open a `/c/` link's sealed blob with the 12-byte secret
+    /// from the URL fragment and verify the capability inside. Without the
+    /// secret a fetched blob is not a seat in the call. Does NOT check expiry.
+    ///
+    /// # Errors
+    ///
+    /// Throws an `Error` with `inviteLinkError: "damaged"` on any failure.
+    #[wasm_bindgen(js_name = openLink)]
+    pub fn open_link(sealed: &[u8], link_secret: &[u8]) -> Result<CallInviteCapability, JsValue> {
+        let secret = rust_link_secret_from_slice(link_secret).map_err(invite_link_error)?;
+        let (inner, wire) =
+            rust_call_invite_open_link(&secret, sealed).map_err(invite_link_error)?;
+        Ok(Self { inner, wire })
+    }
+
+    /// The plaintext capability wire — what `computeJoinerInviteTag` takes.
+    #[wasm_bindgen(getter)]
+    pub fn wire(&self) -> Vec<u8> {
+        self.wire.clone()
     }
 
     /// Inviter's long-term Ed25519 verifying key (32 bytes).
@@ -2484,16 +2627,17 @@ pub fn committer_beacon_envelope_len() -> u32 {
 // GroupInviteCapability — ADR-0028 (group join-ticket, G-3)
 // ============================================================================
 
-/// Owner-side: compose + sign a group join-ticket capability (ADR-0028).
+/// Owner-side: compose + sign a group join-ticket capability without a
+/// preview (ADR-0028) and seal it for a `/g/` link under a fresh link secret.
 /// `issuerSigningSeed` is the 32-byte Ed25519 seed; `groupId` is the target
 /// group's opaque MLS GroupId bytes; `expiryMs` is UNIX millis (`0` = never).
-/// Returns the wire bytes the web client base64url-encodes into `/g/<slug>`.
+/// Returns an `InviteLinkMint`.
 #[wasm_bindgen(js_name = composeGroupInviteCapability)]
 pub fn compose_group_invite_capability(
     issuer_signing_seed: &[u8],
     group_id: &[u8],
     expiry_ms: u64,
-) -> Result<Vec<u8>, JsError> {
+) -> Result<WasmInviteLinkMint, JsError> {
     if issuer_signing_seed.len() != 32 {
         return Err(JsError::new("issuerSigningSeed must be 32 bytes"));
     }
@@ -2505,8 +2649,13 @@ pub fn compose_group_invite_capability(
             "groupId must be 1..={MAX_GROUP_ID_LEN} bytes"
         )));
     }
-    rust_group_invite_compose(&signing, group_id, expiry_ms)
-        .map_err(|e| JsError::new(&format!("{e}")))
+    let wire = rust_group_invite_compose(&signing, group_id, expiry_ms)
+        .map_err(|e| JsError::new(&format!("{e}")))?;
+    seal_mint(
+        &signing,
+        |secret| rust_group_invite_seal_link(secret, &wire),
+        rust_generate_link_key(),
+    )
 }
 
 /// Owner-side: sign a group-invite revocation (ADR-0028 revoke). Returns the
@@ -2600,35 +2749,11 @@ impl WasmGroupInvitePreview {
     }
 }
 
-/// What `composeGroupInviteCapabilityWithPreview` mints: the signed capability
-/// bytes (the slug) and the fresh 12-byte link secret (16 base64url
-/// characters) that goes in the URL fragment and nowhere a server reads. The
-/// getter keeps its `linkKey` name; it carries the secret the preview key is
-/// derived from.
-#[wasm_bindgen(js_name = GroupInviteMint)]
-pub struct WasmGroupInviteMint {
-    wire: Vec<u8>,
-    link_key: Vec<u8>,
-}
-
-#[wasm_bindgen(js_class = GroupInviteMint)]
-impl WasmGroupInviteMint {
-    /// The capability bytes.
-    #[wasm_bindgen(getter)]
-    pub fn wire(&self) -> Vec<u8> {
-        self.wire.clone()
-    }
-
-    /// The link secret (12 bytes) for the URL fragment.
-    #[wasm_bindgen(getter, js_name = linkKey)]
-    pub fn link_key(&self) -> Vec<u8> {
-        self.link_key.clone()
-    }
-}
-
-/// Mint a `/g/` capability that carries a sealed preview (ADR-0028 v2). Names
-/// are prepared like a profile / group name (trimmed; blank = none) and
-/// refused past the display-name rule.
+/// Mint a `/g/` capability that carries a sealed preview (ADR-0028 v2) and
+/// seal the whole capability for the link under the same fresh link secret
+/// (the 2026-09-28 security pass). Names are prepared like a profile / group
+/// name (trimmed; blank = none) and refused past the display-name rule.
+/// Returns an `InviteLinkMint`.
 ///
 /// # Errors
 ///
@@ -2641,7 +2766,7 @@ pub fn compose_group_invite_capability_with_preview(
     group_name: Option<String>,
     inviter_name: Option<String>,
     member_count: u16,
-) -> Result<WasmGroupInviteMint, JsError> {
+) -> Result<WasmInviteLinkMint, JsError> {
     if issuer_signing_seed.len() != 32 {
         return Err(JsError::new("issuerSigningSeed must be 32 bytes"));
     }
@@ -2665,10 +2790,11 @@ pub fn compose_group_invite_capability_with_preview(
     let wire =
         rust_group_invite_compose_with_preview(&signing, group_id, expiry_ms, &preview, &link_key)
             .map_err(|e| JsError::new(&format!("{e}")))?;
-    Ok(WasmGroupInviteMint {
-        wire,
-        link_key: link_key.to_vec(),
-    })
+    seal_mint(
+        &signing,
+        |secret| rust_group_invite_seal_link(secret, &wire),
+        link_key,
+    )
 }
 
 /// Decoded, signature-verified group join-ticket (ADR-0028) — the wasm face
@@ -2676,16 +2802,45 @@ pub fn compose_group_invite_capability_with_preview(
 #[wasm_bindgen]
 pub struct GroupInviteCapability {
     pub(crate) inner: RustGroupInviteCapability,
+    wire: Vec<u8>,
 }
 
 #[wasm_bindgen]
 impl GroupInviteCapability {
-    /// Joiner-side: decode wire bytes, verify the Ed25519 signature, return the
-    /// validated capability. Does **not** check expiry — call `isValidNow`.
+    /// Decode PLAINTEXT capability wire bytes and verify the Ed25519 signature
+    /// (the join attribution carries plaintext; a link never does since the
+    /// 2026-09-28 security pass — use `openLink`). Does **not** check expiry —
+    /// call `isValidNow`.
     #[wasm_bindgen(js_name = decodeAndVerify)]
     pub fn decode_and_verify(wire: &[u8]) -> Result<GroupInviteCapability, JsError> {
         let inner = rust_group_invite_decode(wire).map_err(|e| JsError::new(&format!("{e}")))?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            wire: wire.to_vec(),
+        })
+    }
+
+    /// Joiner-side: open a `/g/` link's sealed blob with the 12-byte secret
+    /// from the URL fragment and verify the capability inside; the same
+    /// secret then opens the preview (`openPreview`). A `/g/` link without its
+    /// fragment has nothing to open this with. Does NOT check expiry.
+    ///
+    /// # Errors
+    ///
+    /// Throws an `Error` with `inviteLinkError: "damaged"` on any failure.
+    #[wasm_bindgen(js_name = openLink)]
+    pub fn open_link(sealed: &[u8], link_secret: &[u8]) -> Result<GroupInviteCapability, JsValue> {
+        let secret = rust_link_secret_from_slice(link_secret).map_err(invite_link_error)?;
+        let (inner, wire) =
+            rust_group_invite_open_link(&secret, sealed).map_err(invite_link_error)?;
+        Ok(Self { inner, wire })
+    }
+
+    /// The plaintext capability wire — what `computeJoinerInviteTag` and
+    /// `composeGroupJoinAttribution` take.
+    #[wasm_bindgen(getter)]
+    pub fn wire(&self) -> Vec<u8> {
+        self.wire.clone()
     }
 
     /// The target group's opaque MLS GroupId bytes — pass to
@@ -2994,7 +3149,11 @@ mod tests {
         )
         .unwrap();
 
-        let cap = InviteCapability::decode_and_verify(&wire).unwrap();
+        assert_eq!(wire.link_secret().len(), 12);
+        let cap = InviteCapability::open_link(&wire.sealed(), &wire.link_secret())
+            .unwrap_or_else(|_| panic!("the minted link opens"));
+        assert_eq!(cap.owner_signature_pubkey(), wire.issuer_pubkey());
+        assert!(InviteCapability::decode_and_verify(&cap.wire()).is_ok());
         assert_eq!(cap.owner_account_id(), owner_account_id.to_vec());
         assert_eq!(cap.owner_x25519_pubkey(), owner_x25519_pub.to_vec());
         assert_eq!(cap.expiry_ms(), 1_700_000_000_000);
@@ -3129,7 +3288,11 @@ mod tests {
         )
         .unwrap();
 
-        let cap = InviteCapability::decode_and_verify(&wire).unwrap();
+        assert_eq!(wire.link_secret().len(), 12);
+        let cap = InviteCapability::open_link(&wire.sealed(), &wire.link_secret())
+            .unwrap_or_else(|_| panic!("the minted link opens"));
+        assert_eq!(cap.owner_signature_pubkey(), wire.issuer_pubkey());
+        assert!(InviteCapability::decode_and_verify(&cap.wire()).is_ok());
         assert_eq!(cap.expiry_ms(), 0);
         assert_eq!(cap.max_uses(), 0);
         assert!(cap.bootstrap_referral());

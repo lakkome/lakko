@@ -38,6 +38,10 @@
 //!   for everyone, `updated_at_ms`): fixed-length, fail-closed, classified
 //!   by [`incoming_envelope`]; the order is [`pin::pin_is_newer`], the
 //!   authority is the receiver's role-table check.
+//! - [`registrar_seed`] — the ADR-0057 registrar-seed envelope (a journal
+//!   root hands one member its Delivery Service registrar seed, sealed to
+//!   that member's account X25519 key): fixed-length, fail-closed,
+//!   classified by [`incoming_envelope`].
 //!
 //! ## What's NOT here (1.9b and later)
 //!
@@ -79,12 +83,14 @@ pub mod group_join_attribution;
 pub mod group_name;
 pub mod incoming_envelope;
 pub mod invite;
+pub mod link_seal;
 pub mod media_state;
 pub mod pin;
 pub mod profile;
 pub mod profile_request;
 pub mod pseudonym;
 pub mod push_routing;
+pub mod registrar_seed;
 pub mod request;
 pub mod safety;
 pub mod username;
@@ -163,6 +169,11 @@ pub use push_routing::{
     PUSH_ROUTING_SECRET_MINT_EPOCH_LEN, PUSH_ROUTING_SECRET_PAYLOAD_LEN,
     PUSH_ROUTING_SECRET_VERSION_V2,
 };
+pub use registrar_seed::{
+    compose_registrar_seed, decode_registrar_seed, try_unwrap_registrar_seed,
+    RegistrarSeedEnvelope, RegistrarSeedError, RegistrarSeedRank,
+    REGISTRAR_SEED_ENVELOPE_DOMAIN_V1, REGISTRAR_SEED_ENVELOPE_LEN, REGISTRAR_SEED_VERSION_V1,
+};
 pub use request::{compose, decode_and_verify, open_envelope, ContactRequest, ACCOUNT_ID_LEN};
 pub use safety::{
     safety_number, safety_number_bytes, SAFETY_NUMBER_DIGITS, SAFETY_NUMBER_DIGITS_PER_GROUP,
@@ -186,5 +197,14 @@ pub mod fuzz_api {
     #[must_use]
     pub fn group_invite_preview_plaintext(plain: &[u8]) -> Option<bool> {
         crate::group_invite::fuzz_preview_plaintext(plain)
+    }
+
+    /// Open a sealed invite link (any kind, chosen by `kind_byte`) under
+    /// `secret` and verify the capability inside. `None` when it refuses;
+    /// `Some(true)` when whatever opened re-seals and re-opens to the same
+    /// plaintext, `Some(false)` on a disagreement (a bug).
+    #[must_use]
+    pub fn open_sealed_link(kind_byte: u8, secret: &[u8], sealed: &[u8]) -> Option<bool> {
+        crate::link_seal::fuzz_open(kind_byte, secret, sealed)
     }
 }

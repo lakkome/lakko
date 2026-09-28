@@ -12,7 +12,7 @@
 //!
 //! Routes:
 //!
-//! - `POST /discovery/group-invite`                       — upload + verify + mint a random id (session-gated).
+//! - `POST /discovery/group-invite`                       — upload a sealed capability + mint a random id (session-gated).
 //! - `GET  /discovery/group-invite/{blob_id}`             — fetch by id (open, per-IP rate-limited).
 //! - `POST /discovery/group-invite/{blob_id}/consume`     — atomic per-joiner consume (open).
 //!
@@ -22,10 +22,21 @@
 //! role-gated, peer-verified): a leaked link lets a stranger *ask* to join,
 //! never *in*. So `max_uses` here is a SOFT anti-spam knob — how many strangers
 //! may queue an external-join request — not an access control. It is NOT part
-//! of the signed `GroupInviteCapability` wire (which carries only `group_id` +
-//! `issuer_signature_pubkey` + `expiry_ms`); the uploader supplies it in the
+//! of the signed `GroupInviteCapability` wire; the uploader supplies it in the
 //! POST body, and lying about it only changes how many requests reach the
 //! admin, who still approves each one individually.
+//!
+//! ## The ledger stores ciphertext (2026-09-28 security pass)
+//!
+//! The capability arrives SEALED under a key derived from the 12-byte link
+//! secret in the URL fragment (`lakko_contacts::link_seal`), the same secret
+//! that opens the preview inside it. The server can neither read nor verify
+//! it; a `/g/` link that lost its fragment used to accept whatever capability
+//! the ledger returned, and now opens nothing, and a blob the ledger
+//! substitutes fails the joiner's AEAD open. `issuer_pubkey` (for the revoke)
+//! and `expiry_ms` (for the fetch filter and the pruner) arrive in clear
+//! beside the blob; the `group_id` the server used to copy out is no longer
+//! stored at all.
 //!
 //! ## No owner-account binding; revocation is issuer-signed
 //!
@@ -34,8 +45,8 @@
 //! anti-impersonation account-match check (there is no account field to match);
 //! the session-token gate is a pure DoS / "logged-in user" rate-limit.
 //! Revocation (`DELETE /discovery/group-invite/{blob_id}`) is authorised the
-//! same way: the request carries an Ed25519 signature by the capability's own
-//! issuer key over `group_revoke_canonical_bytes` (domain
+//! same way: the request carries an Ed25519 signature by the issuer key the
+//! uploader named in clear over `group_revoke_canonical_bytes` (domain
 //! `lakko-group-invite-revoke/v1`, the 6-byte id and a timestamp inside
 //! `GROUP_INVITE_REVOKE_REPLAY_WINDOW_MS`). Expiry and the periodic pruner
 //! remain the other lifecycle controls.
@@ -46,51 +57,42 @@ use axum::Json;
 use base64::engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD as B64URL};
 use base64::Engine as _;
 use lakko_contacts::group_invite::{
-    decode_and_verify, group_revoke_canonical_bytes, GROUP_INVITE_REVOKE_REPLAY_WINDOW_MS,
-    MAX_GROUP_ID_LEN, MAX_SEALED_PREVIEW_LEN,
+    group_revoke_canonical_bytes, GROUP_INVITE_REVOKE_REPLAY_WINDOW_MS, MAX_SEALED_LEN,
 };
 use lakko_contacts::invite::JOINER_TAG_LEN;
-use lakko_crypto::signing::{
-    PUBLIC_KEY_LEN as ED25519_PUBLIC_KEY_LEN, SIGNATURE_LEN as ED25519_SIGNATURE_LEN,
-};
+use lakko_contacts::link_seal::LinkKind;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 
-/// Server-side ceiling on the capability size: the longest v2 capability the
-/// `lakko_contacts::group_invite` codec can produce, derived from its bounds
-/// rather than written as a literal, so a codec change moves it. The fields
-/// are schema version (1) + `group_id_len` (2) + `group_id` (up to
-/// `MAX_GROUP_ID_LEN`) + issuer key + `expiry_ms` (8) + `preview_len` (2) +
-/// sealed preview (up to `MAX_SEALED_PREVIEW_LEN`) + signature, which comes to
-/// 908 bytes. The `VARBINARY` width of `group_invites.capability_bytes`
-/// (migration `0021_group_invite_capability_width.sql`) matches it; a test
-/// pins both, and another composes a maximal capability and checks it fits
-/// exactly. Before the 2026-09-28 security pass this was 512, so a link whose
-/// preview carried long names was refused at upload and the client fell back
-/// to the long inline link.
-const MAX_CAPABILITY_BYTES: usize = 1
-    + 2
-    + MAX_GROUP_ID_LEN
-    + ED25519_PUBLIC_KEY_LEN
-    + 8
-    + 2
-    + MAX_SEALED_PREVIEW_LEN
-    + ED25519_SIGNATURE_LEN;
+/// Server-side ceiling on the sealed blob: the longest sealed `/g/` link the
+/// codec can produce (`lakko_contacts::group_invite::MAX_SEALED_LEN`, the
+/// 908-byte maximal capability plus the 30-byte seal, 938 bytes), derived
+/// rather than written as a literal so a codec change moves it. The
+/// `VARBINARY` width of `group_invites.sealed_capability` (migration
+/// `0022_sealed_invite_links.sql`) matches it; a test pins both, and another
+/// seals a maximal capability and checks it fits exactly.
+const MAX_SEALED_BYTES: usize = MAX_SEALED_LEN;
 
 /// Sentinel for "unlimited" `max_uses` — matches the SQL CASE expression in the
 /// consume handler.
 const MAX_USES_UNLIMITED: u32 = u32::MAX;
 
 // ============================================================================
-// POST /discovery/group-invite — upload + verify + mint a random id
+// POST /discovery/group-invite — upload a sealed capability + mint a random id
 // ============================================================================
 
 #[derive(Deserialize)]
 pub(crate) struct UploadRequest {
-    /// Standard-alphabet base64 of `lakko_contacts::group_invite::compose(...)`
-    /// output. The server decodes + verifies the wire signature before storing.
-    pub(crate) capability: String,
+    /// Standard-alphabet base64 of the sealed link blob
+    /// (`lakko_contacts::group_invite::seal_link`). Opaque to the server.
+    pub(crate) sealed: String,
+    /// Standard-alphabet base64 of the 32-byte Ed25519 key that signed the
+    /// capability — the key an issuer-signed revoke must verify against.
+    pub(crate) issuer_pubkey: String,
+    /// The capability's `expiry_ms` (`0` = never expires), in clear for the
+    /// fetch filter and the pruner.
+    pub(crate) expiry_ms: u64,
     /// SOFT consume ceiling — `0` = single-use, `0xFFFFFFFF` = unlimited, any
     /// other N = at most N consumes. NOT part of the signed capability and NOT
     /// a security boundary (see the module docs): it is the issuer's own
@@ -102,12 +104,12 @@ pub(crate) struct UploadRequest {
 pub(crate) struct UploadResponse {
     /// base64url-no-pad of the random [`lakko_contacts::invite::BLOB_ID_LEN`]-byte
     /// ledger id (8 characters), minted fresh for this upload: the same
-    /// capability uploaded twice gets two ids. The client substitutes this
-    /// directly into the `/g/<blob_id>` URL.
+    /// blob uploaded twice gets two ids. The client puts it in the
+    /// `/g/<blob_id>#<secret>` URL.
     pub(crate) blob_id: String,
 }
 
-/// `POST /discovery/group-invite` — store a verified group-invite capability under a fresh id.
+/// `POST /discovery/group-invite` — store a sealed group-invite capability under a fresh id.
 pub(crate) async fn upload(
     State(state): State<AppState>,
     // Session-token-gated via the route_layer in `main.rs`. There is no
@@ -117,41 +119,10 @@ pub(crate) async fn upload(
     axum::Extension(authed): axum::Extension<crate::auth::AuthenticatedAccount>,
     Json(payload): Json<UploadRequest>,
 ) -> Result<Json<UploadResponse>, (StatusCode, String)> {
-    let bytes = B64.decode(&payload.capability).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("invalid capability base64: {e}"),
-        )
-    })?;
-    if bytes.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "capability must be non-empty".to_string(),
-        ));
-    }
-    if bytes.len() > MAX_CAPABILITY_BYTES {
-        return Err((
-            StatusCode::PAYLOAD_TOO_LARGE,
-            format!(
-                "capability exceeds the {MAX_CAPABILITY_BYTES}-byte ceiling (got {} bytes)",
-                bytes.len()
-            ),
-        ));
-    }
-
-    // Verify the wire signature server-side — rejects forged / tampered
-    // payloads at ingress and gives us the parsed fields for the denormalised
-    // index columns.
-    let cap = decode_and_verify(&bytes).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("group-invite did not verify: {e}"),
-        )
-    })?;
-
-    let issuer_pubkey = cap.issuer_signature_pubkey.to_bytes();
-    let group_id = cap.group_id;
-    let expiry_ms: u64 = cap.expiry_ms;
+    let sealed =
+        crate::ledger_id::parse_sealed_upload(&payload.sealed, LinkKind::Group, MAX_SEALED_BYTES)?;
+    let issuer_pubkey = crate::ledger_id::parse_issuer_pubkey(&payload.issuer_pubkey)?;
+    let expiry_ms: u64 = payload.expiry_ms;
     let max_uses: u32 = payload.max_uses;
 
     // A random id, never an upsert: a collision is retried under a fresh id
@@ -160,18 +131,16 @@ pub(crate) async fn upload(
     let db = state.db.clone();
     let blob_id = crate::ledger_id::insert_with_fresh_id("group_invites", |id| {
         let db = db.clone();
-        let bytes = bytes.clone();
-        let group_id = group_id.clone();
+        let sealed = sealed.clone();
         async move {
             sqlx::query(
                 "INSERT INTO group_invites \
-                    (blob_id, capability_bytes, issuer_pubkey, group_id, expiry_ms, max_uses) \
-                 VALUES (?, ?, ?, ?, ?, ?)",
+                    (blob_id, sealed_capability, issuer_pubkey, expiry_ms, max_uses) \
+                 VALUES (?, ?, ?, ?, ?)",
             )
             .bind(id.to_vec())
-            .bind(bytes)
+            .bind(sealed)
             .bind(issuer_pubkey.to_vec())
-            .bind(group_id)
             .bind(expiry_ms)
             .bind(max_uses)
             .execute(&db)
@@ -187,7 +156,7 @@ pub(crate) async fn upload(
         issuer_pubkey = %B64.encode(issuer_pubkey),
         expiry_ms = expiry_ms,
         max_uses = max_uses,
-        bytes = bytes.len(),
+        bytes = sealed.len(),
         "group-invite stored",
     );
     Ok(Json(UploadResponse {
@@ -201,11 +170,10 @@ pub(crate) async fn upload(
 
 #[derive(Serialize)]
 pub(crate) struct FetchResponse {
-    /// Standard-alphabet base64 of the stored capability bytes. The client
-    /// re-verifies the signature locally before requesting to join, and a link
-    /// carrying a preview secret opens the preview only on the capability it
-    /// was minted for (the preview key binds the group id and issuer).
-    pub(crate) capability: String,
+    /// Standard-alphabet base64 of the stored sealed blob. The client opens it
+    /// with the link secret, which verifies the capability inside and then
+    /// opens its preview; without the secret it opens nothing.
+    pub(crate) sealed: String,
 }
 
 /// `GET /discovery/group-invite/{blob_id}` — fetch by id.
@@ -219,7 +187,7 @@ pub(crate) async fn fetch(
     let blob_id = crate::ledger_id::parse_blob_id(&blob_id_b64url)?;
 
     let row: Option<(Vec<u8>, u64)> =
-        sqlx::query_as("SELECT capability_bytes, expiry_ms FROM group_invites WHERE blob_id = ?")
+        sqlx::query_as("SELECT sealed_capability, expiry_ms FROM group_invites WHERE blob_id = ?")
             .bind(&blob_id[..])
             .fetch_optional(&state.db)
             .await
@@ -231,7 +199,7 @@ pub(crate) async fn fetch(
                 )
             })?;
 
-    let (capability_bytes, expiry_ms) =
+    let (sealed, expiry_ms) =
         row.ok_or((StatusCode::NOT_FOUND, "group-invite not found".to_string()))?;
 
     if expiry_ms != 0 && current_unix_ms() >= expiry_ms {
@@ -240,7 +208,7 @@ pub(crate) async fn fetch(
     }
 
     Ok(Json(FetchResponse {
-        capability: B64.encode(&capability_bytes),
+        sealed: B64.encode(&sealed),
     }))
 }
 
@@ -494,13 +462,13 @@ pub(crate) struct RevokeRequest {
 ///
 ///   * **204 No Content** — row deleted (idempotent on success).
 ///   * **404 Not Found** — folded over "no row" / "signature did not verify" /
-///     "issuer pubkey could not be recovered" (denies status-code probing).
+///     "stored issuer key malformed" (denies status-code probing).
 ///   * **400 Bad Request** — bad base64 / wrong-sized signature / `signed_at_ms`
 ///     outside the replay window.
 ///
-/// The issuer's verifying key is recovered from the stored capability's
-/// `issuer_signature_pubkey` (the key that minted the link); the signature is
-/// checked against the group-invite revoke domain, so a captured call-invite /
+/// The issuer's verifying key is the clear `issuer_pubkey` the uploader stored
+/// beside the sealed blob (the server cannot read the capability); the
+/// signature is checked against the group-invite revoke domain, so a captured call-invite /
 /// contact-invite revoke signature cannot be replayed here.
 #[allow(clippy::too_many_lines)] // single-shot lifecycle — mirrors call_invite::revoke
 pub(crate) async fn revoke(
@@ -543,10 +511,9 @@ pub(crate) async fn revoke(
     let signature = lakko_crypto::signing::Signature::from_bytes(&signature_bytes)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("malformed signature: {e}")))?;
 
-    // Recover the issuer's verifying key from the stored capability. "No row"
-    // folds into 404.
+    // The issuer key stored beside the sealed blob. "No row" folds into 404.
     let row: Option<(Vec<u8>,)> =
-        sqlx::query_as("SELECT capability_bytes FROM group_invites WHERE blob_id = ?")
+        sqlx::query_as("SELECT issuer_pubkey FROM group_invites WHERE blob_id = ?")
             .bind(&blob_id[..])
             .fetch_optional(&state.db)
             .await
@@ -557,28 +524,12 @@ pub(crate) async fn revoke(
                     "internal db error".to_string(),
                 )
             })?;
-    let Some((capability_bytes,)) = row else {
+    let Some(issuer_key) = row.and_then(|(k,)| crate::ledger_id::stored_issuer_key(&k)) else {
         return Err((StatusCode::NOT_FOUND, "group-invite not found".to_string()));
     };
 
-    let cap = match decode_and_verify(&capability_bytes) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                blob_id = %blob_id_b64url,
-                "revoke: stored group-invite did not re-verify",
-            );
-            return Err((StatusCode::NOT_FOUND, "group-invite not found".to_string()));
-        },
-    };
-
     let canonical = group_revoke_canonical_bytes(&blob_id, payload.signed_at_ms);
-    if cap
-        .issuer_signature_pubkey
-        .verify(&canonical, &signature)
-        .is_err()
-    {
+    if issuer_key.verify(&canonical, &signature).is_err() {
         // Signature mismatch — fold into 404.
         return Err((StatusCode::NOT_FOUND, "group-invite not found".to_string()));
     }
@@ -697,34 +648,32 @@ mod tests {
         assert_eq!(PRUNE_INTERVAL, std::time::Duration::from_secs(3600));
     }
 
-    /// `MAX_CAPABILITY_BYTES` pins the `VARBINARY(...)` width declared in
-    /// `0021_group_invite_capability_width.sql`. Drift surfaces as a test
+    /// `MAX_SEALED_BYTES` pins the `group_invites.sealed_capability` width
+    /// declared in `0022_sealed_invite_links.sql`. Drift surfaces as a test
     /// failure rather than a silent "everything past N bytes 500s in
     /// production".
     #[test]
-    fn max_capability_bytes_matches_column_width() {
-        let migration = include_str!("../migrations/0021_group_invite_capability_width.sql");
+    fn max_sealed_bytes_matches_column_width() {
+        let migration = include_str!("../migrations/0022_sealed_invite_links.sql");
+        let normalised = migration.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            migration.contains(&format!("VARBINARY({MAX_CAPABILITY_BYTES})")),
-            "MAX_CAPABILITY_BYTES ({MAX_CAPABILITY_BYTES}) must match the \
-             VARBINARY width declared in 0021_group_invite_capability_width.sql",
+            normalised.contains(&format!("sealed_capability VARBINARY({MAX_SEALED_BYTES})")),
+            "MAX_SEALED_BYTES ({MAX_SEALED_BYTES}) must match group_invites.sealed_capability \
+             in 0022_sealed_invite_links.sql",
         );
     }
 
-    /// The derivation lands where the security review computed it by hand.
+    /// The derivation lands where it was computed by hand: the 908-byte
+    /// maximal v2 capability plus the 30-byte seal.
     #[test]
-    fn max_capability_bytes_is_the_computed_v2_maximum() {
-        assert_eq!(MAX_CAPABILITY_BYTES, 908);
+    fn max_sealed_bytes_is_the_computed_maximum() {
+        assert_eq!(lakko_contacts::group_invite::MAX_WIRE_LEN, 908);
+        assert_eq!(MAX_SEALED_BYTES, 938);
     }
 
-    /// The largest capability the codec can compose (a 256-byte group id and a
-    /// preview whose two names are each 255 bytes) is exactly the ceiling, so
-    /// every capability a client can mint fits the ledger.
-    #[test]
-    fn a_maximal_capability_fits_the_ceiling_exactly() {
-        use lakko_contacts::group_invite::{
-            compose_with_preview, generate_link_key, GroupInvitePreview, GROUP_INVITE_NEVER_EXPIRES,
-        };
+    fn maximal_capability(expiry_ms: u64, secret: &[u8; 12]) -> Vec<u8> {
+        use lakko_contacts::group_invite::{compose_with_preview, GroupInvitePreview};
+        use lakko_contacts::MAX_GROUP_ID_LEN;
         use lakko_crypto::signing::SigningKey;
 
         // 63 four-byte scalars plus one three-byte scalar: 64 scalars and 255
@@ -736,108 +685,152 @@ mod tests {
             inviter_name: Some(long_name),
             member_count: u16::MAX,
         };
-        let issuer = SigningKey::generate();
-        let group_id = vec![0x5a; MAX_GROUP_ID_LEN];
-        let wire = compose_with_preview(
-            &issuer,
-            &group_id,
-            GROUP_INVITE_NEVER_EXPIRES,
+        compose_with_preview(
+            &SigningKey::from_seed(&[0x61; 32]),
+            &vec![0x5a; MAX_GROUP_ID_LEN],
+            expiry_ms,
             &preview,
-            &generate_link_key(),
+            secret,
         )
-        .expect("maximal capability composes");
-        assert_eq!(wire.len(), MAX_CAPABILITY_BYTES);
-        assert!(decode_and_verify(&wire).is_ok());
+        .expect("maximal capability composes")
     }
 
-    /// A maximal capability survives the real ledger: upload stores it, fetch
-    /// returns it byte for byte. Gated on `LAKKO_DISCOVERY_TEST_DATABASE_URL`
-    /// (skips when unset); before migration 0021 the column truncated or
-    /// refused anything past 512 bytes.
+    /// The largest capability the codec can compose, sealed, is exactly the
+    /// ceiling, so every link a client can mint fits the ledger.
+    #[test]
+    fn a_maximal_sealed_link_fits_the_ceiling_exactly() {
+        use lakko_contacts::group_invite::{generate_link_key, open_link, seal_link};
+        let secret = generate_link_key();
+        let wire = maximal_capability(0, &secret);
+        let sealed = seal_link(&secret, &wire).unwrap();
+        assert_eq!(sealed.len(), MAX_SEALED_BYTES);
+        assert_eq!(open_link(&secret, &sealed).unwrap().1, wire);
+    }
+
+    /// A maximal sealed link survives the real ledger: upload stores it,
+    /// fetch returns it byte for byte, the fragment's secret opens it and its
+    /// preview, another secret opens nothing, and an issuer-signed revoke
+    /// verifies against the clear key. Gated on
+    /// `LAKKO_DISCOVERY_TEST_DATABASE_URL` (skips when unset).
     #[tokio::test]
-    async fn a_maximal_capability_round_trips_through_the_ledger() {
+    async fn a_maximal_sealed_link_round_trips_through_the_ledger() {
         use axum::extract::{Path, State};
         use axum::{Extension, Json};
         use lakko_contacts::group_invite::{
-            compose_with_preview, generate_link_key, GroupInvitePreview,
+            generate_link_key, group_sign_revocation, open_link, seal_link,
         };
         use lakko_crypto::signing::SigningKey;
 
         let Some(db) =
-            crate::anon_token_route_tests::test_pool("a_maximal_capability_round_trips").await
+            crate::anon_token_route_tests::test_pool("a_maximal_sealed_link_round_trips").await
         else {
             return;
         };
         let state = crate::anon_token_route_tests::state(db, false);
 
-        let long_name = format!("{}{}", "\u{1F600}".repeat(63), '\u{20AC}');
-        let preview = GroupInvitePreview {
-            group_name: Some(long_name.clone()),
-            inviter_name: Some(long_name),
-            member_count: 3,
-        };
-        let group_id = vec![0x3c; MAX_GROUP_ID_LEN];
+        let secret = generate_link_key();
         let expiry_ms = current_unix_ms() + 3_600_000;
-        let wire = compose_with_preview(
-            &SigningKey::generate(),
-            &group_id,
-            expiry_ms,
-            &preview,
-            &generate_link_key(),
-        )
-        .expect("maximal capability composes");
-        assert_eq!(wire.len(), MAX_CAPABILITY_BYTES);
+        let wire = maximal_capability(expiry_ms, &secret);
+        let sealed = seal_link(&secret, &wire).unwrap();
+        let issuer = SigningKey::from_seed(&[0x61; 32]);
 
         let Json(stored) = upload(
             State(state.clone()),
             Extension(crate::auth::AuthenticatedAccount([0x21; 16])),
             Json(UploadRequest {
-                capability: B64.encode(&wire),
+                sealed: B64.encode(&sealed),
+                issuer_pubkey: B64.encode(issuer.verifying_key().to_bytes()),
+                expiry_ms,
                 max_uses: 1,
             }),
         )
         .await
-        .expect("a maximal capability uploads");
-        let Json(fetched) = fetch(State(state), Path(stored.blob_id))
+        .expect("a maximal sealed link uploads");
+        let Json(fetched) = fetch(State(state.clone()), Path(stored.blob_id.clone()))
             .await
-            .expect("the stored capability fetches");
-        assert_eq!(B64.decode(fetched.capability).unwrap(), wire);
+            .expect("the stored blob fetches");
+        let fetched = B64.decode(fetched.sealed).unwrap();
+        assert_eq!(fetched, sealed);
+        let (cap, opened) = open_link(&secret, &fetched).expect("the secret opens it");
+        assert_eq!(opened, wire);
+        assert!(cap.open_preview(&secret).unwrap().is_some());
+        assert!(open_link(&generate_link_key(), &fetched).is_err());
+
+        let blob_id = crate::ledger_id::parse_blob_id(&stored.blob_id).unwrap();
+        let now = current_unix_ms();
+        let ok = revoke(
+            State(state.clone()),
+            Path(stored.blob_id.clone()),
+            Extension(crate::auth::AuthenticatedAccount([0x21; 16])),
+            Json(RevokeRequest {
+                signed_at_ms: now,
+                signature: B64.encode(group_sign_revocation(&issuer, &blob_id, now)),
+            }),
+        )
+        .await
+        .expect("the issuer revokes");
+        assert_eq!(ok, StatusCode::NO_CONTENT);
+        assert!(fetch(State(state), Path(stored.blob_id)).await.is_err());
     }
 
-    /// One byte over the ceiling is refused before any verification.
+    /// One byte over the ceiling, a blob of another kind, and a bad issuer
+    /// key are refused before any insert.
     #[tokio::test]
-    async fn one_byte_over_the_ceiling_is_refused() {
+    async fn malformed_uploads_are_refused() {
         use axum::extract::State;
         use axum::{Extension, Json};
+        use lakko_contacts::link_seal::{generate_link_secret, seal};
 
         let Some(db) = crate::anon_token_route_tests::test_pool("one_byte_over_the_ceiling").await
         else {
             return;
         };
         let state = crate::anon_token_route_tests::state(db, false);
-        let Err((status, _)) = upload(
-            State(state),
-            Extension(crate::auth::AuthenticatedAccount([0x22; 16])),
-            Json(UploadRequest {
-                capability: B64.encode(vec![0u8; MAX_CAPABILITY_BYTES + 1]),
-                max_uses: 1,
-            }),
-        )
-        .await
-        else {
-            panic!("an oversized capability must be refused");
-        };
-        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        let key = B64.encode(
+            lakko_crypto::signing::SigningKey::generate()
+                .verifying_key()
+                .to_bytes(),
+        );
+        let own = seal(LinkKind::Group, &generate_link_secret(), b"x").unwrap();
+        for (sealed, issuer, want) in [
+            (
+                vec![b'g'; MAX_SEALED_BYTES + 1],
+                key.clone(),
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+            (
+                seal(LinkKind::Contact, &generate_link_secret(), b"x").unwrap(),
+                key.clone(),
+                StatusCode::BAD_REQUEST,
+            ),
+            (own, B64.encode([0u8; 31]), StatusCode::BAD_REQUEST),
+        ] {
+            let Err((status, _)) = upload(
+                State(state.clone()),
+                Extension(crate::auth::AuthenticatedAccount([0x22; 16])),
+                Json(UploadRequest {
+                    sealed: B64.encode(sealed),
+                    issuer_pubkey: issuer,
+                    expiry_ms: 0,
+                    max_uses: 1,
+                }),
+            )
+            .await
+            else {
+                panic!("a malformed upload must be refused");
+            };
+            assert_eq!(status, want);
+        }
     }
 
     #[test]
     fn blob_id_len_matches_column_width() {
-        let migration = include_str!("../migrations/0018_short_invite_ids.sql");
+        let migration = include_str!("../migrations/0022_sealed_invite_links.sql");
         let normalised = migration.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             normalised.contains(&format!("blob_id BINARY({BLOB_ID_LEN})")),
             "BLOB_ID_LEN ({BLOB_ID_LEN}) must match the BINARY width \
-             declared in 0018_short_invite_ids.sql",
+             declared in 0022_sealed_invite_links.sql",
         );
     }
 
@@ -848,27 +841,26 @@ mod tests {
         assert_eq!(MAX_USES_UNLIMITED, u32::MAX);
     }
 
-    /// 0014 migration shape pin — the denormalised index columns the upload
-    /// host-side bind layout relies on (`issuer_pubkey`, `group_id`,
-    /// `expiry_ms`, `max_uses`). A future migration that drops one would
-    /// silently break the INSERT.
+    /// 0022 migration shape pin — the columns the upload bind layout relies on
+    /// (`sealed_capability`, `issuer_pubkey`, `expiry_ms`, `max_uses`). A
+    /// future migration that drops one would silently break the INSERT.
     #[test]
     fn group_invites_migration_columns() {
-        let migration = include_str!("../migrations/0018_short_invite_ids.sql");
+        let migration = include_str!("../migrations/0022_sealed_invite_links.sql");
         assert!(
             migration.contains("CREATE TABLE IF NOT EXISTS group_invites"),
-            "0018 migration must create `group_invites`",
+            "0022 migration must create `group_invites`",
         );
         for col in [
+            "sealed_capability",
             "issuer_pubkey",
-            "group_id",
             "expiry_ms",
             "max_uses",
             "used_count",
         ] {
             assert!(
                 migration.contains(col),
-                "0018 migration must declare the `{col}` column",
+                "0022 migration must declare the `{col}` column",
             );
         }
     }
@@ -879,25 +871,25 @@ mod tests {
     /// dedup or leak orphan rows; surface here.
     #[test]
     fn group_invite_consumers_migration_shape() {
-        let migration = include_str!("../migrations/0018_short_invite_ids.sql");
+        let migration = include_str!("../migrations/0022_sealed_invite_links.sql");
         let normalised = migration.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             migration.contains("CREATE TABLE IF NOT EXISTS group_invite_consumers"),
-            "0018 migration must create `group_invite_consumers`",
+            "0022 migration must create `group_invite_consumers`",
         );
         assert!(
             normalised.contains(&format!("joiner_tag BINARY({JOINER_TAG_LEN})")),
-            "0018 migration must declare joiner_tag as BINARY({JOINER_TAG_LEN})",
+            "0022 migration must declare joiner_tag as BINARY({JOINER_TAG_LEN})",
         );
         assert!(
             migration.contains("PRIMARY KEY (blob_id, joiner_tag)"),
-            "0018 migration must PK on (blob_id, joiner_tag)",
+            "0022 migration must PK on (blob_id, joiner_tag)",
         );
         assert!(
             migration.contains(
                 "FOREIGN KEY (blob_id) REFERENCES group_invites(blob_id) ON DELETE CASCADE",
             ),
-            "0018 migration must FK CASCADE on group_invites.blob_id",
+            "0022 migration must FK CASCADE on group_invites.blob_id",
         );
     }
 }

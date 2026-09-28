@@ -67,10 +67,12 @@ const VERSION: u8 = 2;
 /// this purpose cannot be replayed as any other Lakko Ed25519 artefact.
 const ATTRIBUTION_SIG_DOMAIN: &[u8] = b"lakko/group-join-attribution/v1";
 
-/// Upper bound on the embedded capability. A [`GroupInviteCapability`] tops out
-/// around 363 bytes (a 256-byte `group_id`); 512 matches the discovery ledger
-/// column width and leaves headroom.
-const MAX_CAPABILITY_LEN: usize = 512;
+/// Upper bound on the embedded capability: the longest wire the group-invite
+/// codec can compose (908 bytes, a 256-byte `group_id` and a maximal sealed
+/// preview). It was 512, sized for the v1 capability, so a joiner holding a
+/// link whose preview named a long group or inviter could not post its
+/// attribution; found and fixed in the 2026-09-28 security pass.
+const MAX_CAPABILITY_LEN: usize = crate::group_invite::MAX_WIRE_LEN;
 
 /// A group-join attribution decoded from a journal envelope (ADR-0028 OQ2).
 #[derive(Debug, Clone)]
@@ -113,7 +115,7 @@ pub fn compose_attribution(joiner_signing_seed: &[u8], capability_bytes: &[u8]) 
     let signing = SigningKey::from_seed(&seed);
     let joiner_signature_key = signing.verifying_key().to_bytes();
 
-    // Cast is safe: bounded by MAX_CAPABILITY_LEN (512) above.
+    // Cast is safe: bounded by MAX_CAPABILITY_LEN (908) above.
     #[allow(clippy::cast_possible_truncation)]
     let cap_len = capability_bytes.len() as u16;
     let mut prefix =

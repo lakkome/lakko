@@ -11,6 +11,30 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
   and still in force.
 - **Date:** 2026-05-21
 
+> **AMENDED 2026-09-28 — sealed links (the maintainer's decision on the
+> [ADR-0028](0028-group-join-ticket.md) security pass; the full construction
+> is in that ADR's head note).** A `/c/` link now reads
+> `https://<host>/c/<8-char id>#<16-char secret>`, or
+> `https://<host>/c/<base64url sealed blob>#<16-char secret>` inline when the
+> upload failed. The whole signed `CallInviteCapability` is encrypted under a
+> key derived from the 12-byte fragment secret
+> (`lakko_contacts::call_invite::seal_link` / `open_link`, over the shared
+> `lakko_contacts::link_seal`); the discovery ledger stores the sealed blob
+> only, and the upload carries `issuer_pubkey`, `expiry_ms` and `max_uses` in
+> clear (the revoke verifies against `issuer_pubkey`; the ledger no longer
+> stores `call_id`). A link without its fragment, or with a wrong one, is
+> **damaged**. **Closed:** a 48-bit `/c/` pointer was a bearer into a call
+> that may auto-admit (ADR-0032) — whoever fetched the id held a valid
+> capability; a fetched blob now opens nothing without the 96-bit secret.
+> **Closed:** a malicious discovery could substitute any validly-signed
+> capability under a live id; a substituted blob now fails the AEAD open.
+> **Still open:** anyone holding a live id can spend its uses with random
+> joiner tags (one anonymous token and the per-IP limit per attempt); for a
+> call link `max_uses` is unlimited by default (`CALL_INVITE_MAX_USES`), so
+> this bites only a link minted with a ceiling. The joiner tag is still
+> computed by the joiner over the plaintext capability. The pointer / inline
+> section of the Decision below predates both amendments.
+
 > **Update 2026-09-27 ([ADR-0028](0028-group-join-ticket.md) short-link
 > amendment):** the `/c/` ledger id below is no longer `SHA-256(capability_bytes)`.
 > All three invite ledgers now use a random 6-byte id the server mints at

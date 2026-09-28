@@ -43,6 +43,7 @@ pub mod auth;
 pub mod backup;
 pub mod channels;
 pub mod contacts;
+pub mod device_link;
 pub mod discovery;
 pub mod ds_proof;
 pub mod mnemonic;
@@ -449,6 +450,32 @@ pub enum FfiError {
     /// (and the blinding factors it held) is consumed by the first call.
     #[error("anonymous-token request already finalized")]
     AnonTokenAlreadyFinalized,
+
+    // ------------------------------------------------------------------
+    // ADR-0049 section 2 device link — appended, for the ordinal reason above.
+    // ------------------------------------------------------------------
+    /// The device-link key confirmation did not verify: the code typed on the
+    /// new device is not the code the signed-in device showed, or a value
+    /// was changed in transit. The request is spent; start a new one.
+    #[error("the device-link code did not match")]
+    DeviceLinkWrongCode,
+
+    /// Any other device-link refusal. The message starts with a code
+    /// (`invalid-code`, `malformed`, `bad-input`, `already-used`,
+    /// `not-ready`, `internal`) followed by `": "` and the reason.
+    #[error("{0}")]
+    DeviceLink(String),
+
+    // ------------------------------------------------------------------
+    // Sealed invite links (2026-09-28 security pass of ADR-0028 / ADR-0009)
+    // — appended, for the ordinal reason above.
+    // ------------------------------------------------------------------
+    /// An invite link (`/i/`, `/c/`, `/g/`) did not open: no or a wrong
+    /// secret in the fragment, a blob of another kind, a truncated, tampered
+    /// or substituted blob, or a capability that does not verify inside it.
+    /// One variant on purpose: the page says "this link is damaged".
+    #[error("{0}")]
+    InviteLinkDamaged(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {

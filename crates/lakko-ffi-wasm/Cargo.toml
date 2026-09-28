@@ -28,6 +28,9 @@ lakko-ds-proof.workspace = true
 # ADR-0054 S3 - the client half of the anonymous rate-limit tokens (blind,
 # finalize with the DLEQ check, header encoding).
 lakko-anon-token.workspace = true
+# ADR-0049 section 2 (amended 2026-09-28) - the device link: the SPAKE2
+# exchange behind the camera-less add-device confirmation.
+lakko-device-link.workspace = true
 lakko-contacts.workspace = true
 # Presentation rules the three clients share — the order of the one
 # conversation list and the gate in front of the discovery lookup

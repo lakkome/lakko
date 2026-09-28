@@ -571,12 +571,22 @@ fn build_app(state: AppState) -> Router {
         // output; opaque per-credential blobs only the account reads.
         .route("/vault/passkey", put(word_vault::passkey_put))
         .route("/vault/passkey/get", post(word_vault::passkey_get))
-        // ADR-0049 section 2 — the signed-in device's side of a camera-less
-        // add-device confirmation: see and close the pending request.
+        // ADR-0049 section 2 (the device link since 2026-09-28) — the
+        // signed-in device's side of a camera-less add-device confirmation:
+        // see the open request, post its SPAKE2 message once, record the
+        // outcome once, or decline.
         .route("/device/requests", get(device_request::list))
         .route(
             "/device/requests/{request_id_b64}",
             delete(device_request::delete),
+        )
+        .route(
+            "/device/requests/{request_id_b64}/pake",
+            post(device_request::answer),
+        )
+        .route(
+            "/device/requests/{request_id_b64}/result",
+            post(device_request::result),
         )
         // ADR-0054 S5 — bind / remove the login handle the name routes
         // resolve. Bearer-auth: the caller binds its own account. A bind is
@@ -733,15 +743,18 @@ fn build_app(state: AppState) -> Router {
             "/vault/recover/start",
             post(word_vault::recover_start).route_layer(ip(limits::Category::Attempt)),
         )
-        // ADR-0049 section 2 — the fresh device posts its pairing payload
-        // (anonymous; names the account by login handle since ADR-0056;
-        // per-handle + per-address limited; 503 without the handle pepper)
-        // and polls whether the request is still open.
+        // ADR-0049 section 2 (the device link since 2026-09-28) — the fresh
+        // device opens a request (anonymous; names the account by login
+        // handle since ADR-0056; per-handle + per-address limited; 503
+        // without the handle pepper), polls it, and posts its sealed
+        // pairing payload once. The request id is a 128-bit secret carried
+        // in the body; the payload route is single-shot per request.
         .route(
             "/device/request",
             post(device_request::create).route_layer(ip(limits::Category::DeviceRequest)),
         )
         .route("/device/request/status", post(device_request::status))
+        .route("/device/request/payload", post(device_request::payload))
         .route(
             "/vault/recover/finish",
             post(word_vault::recover_finish).route_layer(ip(limits::Category::Attempt)),

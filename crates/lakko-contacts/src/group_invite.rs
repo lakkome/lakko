@@ -51,6 +51,19 @@
 //! profile name), which is why the fingerprint stays available as the
 //! out-of-band check.
 //!
+//! ## The sealed link (2026-09-28 security pass)
+//!
+//! The whole signed capability now travels sealed under the same link secret
+//! ([`crate::link_seal`], [`seal_link`] / [`open_link`]): the discovery
+//! ledger stores the sealed blob only, a link is `/g/<id>#<secret>` or (the
+//! inline fallback) `/g/<sealed blob>#<secret>`, and a link without its
+//! fragment is damaged rather than accepting whatever capability the ledger
+//! returns. The preview stays sealed separately INSIDE the capability, not
+//! folded into its plaintext, because the plaintext capability travels
+//! beyond the link: the joiner's `group_join_attribution` carries it to the
+//! group's knock journal on the Delivery Service, where it is not encrypted to
+//! anyone, and the names must not appear there.
+//!
 //! ## Wire format (manual codec, v2)
 //!
 //! ```text
@@ -82,7 +95,6 @@ use lakko_crypto::aead::{
     open_with_key, seal_with_key, KEY_LEN as AEAD_KEY_LEN, NONCE_LEN, TAG_LEN,
 };
 use lakko_crypto::kdf::hkdf_sha256;
-use lakko_crypto::random;
 use lakko_crypto::secret::SecretBytes;
 use lakko_crypto::signing::{
     Signature, SigningKey, VerifyingKey, PUBLIC_KEY_LEN as ED25519_PUB_LEN, SIGNATURE_LEN,
@@ -95,17 +107,15 @@ use crate::profile::check_display_name;
 /// Current schema version on the wire.
 const SCHEMA_VERSION: u8 = 2;
 
-/// Length of the link secret that opens the sealed preview. It rides in the
-/// URL fragment and never reaches a server. 96 bits of CSPRNG output, the
+/// The link secret: 12 bytes (16 base64url characters) in the URL fragment,
+/// never on a server. Since the 2026-09-28 security pass one secret opens
+/// both layers of a `/g/` link — the sealed capability
+/// ([`crate::link_seal`], [`open_link`]) and, inside it, the sealed preview
+/// ([`GroupInviteCapability::open_preview`]) — under two independent HKDF
+/// derivations with distinct `info`. 96 bits of CSPRNG output, the
 /// maintainer's length choice for a link of about 45 characters (the
-/// short-link amendment of ADR-0028, 2026-09-27): the preview is a name and a
-/// count behind a link its holder shares, and a 2^96 offline search per link
-/// (per-link, see [`preview_key`]) is out of reach.
-pub const LINK_SECRET_LEN: usize = 12;
-
-/// Length of the link secret in its URL-fragment form: base64url without
-/// padding of [`LINK_SECRET_LEN`] bytes.
-pub const LINK_SECRET_B64URL_LEN: usize = 16;
+/// short-link amendment of ADR-0028, 2026-09-27).
+pub use crate::link_seal::{LINK_SECRET_B64URL_LEN, LINK_SECRET_LEN};
 
 /// HKDF-SHA256 `info` domain for the preview key (see [`preview_key`]).
 pub const PREVIEW_KEY_DOMAIN_V1: &[u8] = b"lakko/group-invite/preview-key/v1\x00";
@@ -247,13 +257,57 @@ impl GroupInvitePreview {
     }
 }
 
-/// Mint a fresh link secret (the URL-fragment value). One per link: it is what
-/// makes the preview safe to seal under a random nonce, and it is never reused.
+/// Mint a fresh link secret (the URL-fragment value). One per link, never
+/// reused; it seals the capability and derives the preview key.
 #[must_use]
 pub fn generate_link_key() -> [u8; LINK_SECRET_LEN] {
-    let mut secret = [0u8; LINK_SECRET_LEN];
-    random::fill(&mut secret);
-    secret
+    crate::link_seal::generate_link_secret()
+}
+
+/// Longest capability wire the codec can produce: schema version (1) +
+/// `group_id_len` (2) + a [`MAX_GROUP_ID_LEN`] group id + the issuer key +
+/// `expiry_ms` (8) + `preview_len` (2) + a [`MAX_SEALED_PREVIEW_LEN`] sealed
+/// preview + the signature (908 bytes). The `/g/` join attribution carries
+/// the plaintext capability, so this bounds it too.
+pub const MAX_WIRE_LEN: usize =
+    1 + 2 + MAX_GROUP_ID_LEN + ED25519_PUB_LEN + 8 + 2 + MAX_SEALED_PREVIEW_LEN + SIGNATURE_LEN;
+
+/// Longest sealed `/g/` link blob (what the discovery ledger stores).
+pub const MAX_SEALED_LEN: usize = crate::link_seal::sealed_len(MAX_WIRE_LEN);
+
+/// Seal a composed capability wire for a `/g/` link under `link_secret` —
+/// the same secret the preview (if any) was sealed under.
+///
+/// # Errors
+///
+/// [`ContactError::InvalidArgument`] for an empty wire; a crypto failure.
+pub fn seal_link(link_secret: &[u8; LINK_SECRET_LEN], capability_wire: &[u8]) -> Result<Vec<u8>> {
+    crate::link_seal::seal(
+        crate::link_seal::LinkKind::Group,
+        link_secret,
+        capability_wire,
+    )
+}
+
+/// Open a sealed `/g/` link blob under the fragment's secret and verify the
+/// capability inside. Returns the capability and its plaintext wire (the
+/// joiner tag and the join attribution are computed over the plaintext). A
+/// `/g/` link without its fragment has nothing to open this with, and is
+/// damaged.
+///
+/// # Errors
+///
+/// [`ContactError::LinkDamaged`] on any failure.
+pub fn open_link(
+    link_secret: &[u8; LINK_SECRET_LEN],
+    sealed: &[u8],
+) -> Result<(GroupInviteCapability, Vec<u8>)> {
+    crate::link_seal::open_and_verify(
+        crate::link_seal::LinkKind::Group,
+        link_secret,
+        sealed,
+        decode_and_verify,
+    )
 }
 
 /// Derive the 32-byte preview AEAD key from the URL-carried link secret:
@@ -616,6 +670,58 @@ mod tests {
         gid[0] = 0xCA;
         gid[31] = 0xFE;
         gid
+    }
+
+    /// A maximal capability is exactly MAX_WIRE_LEN; one secret opens the
+    /// sealed link and then the preview inside it.
+    #[test]
+    fn sealed_link_opens_and_the_same_secret_opens_the_preview() {
+        let long_name = format!("{}{}", "\u{1F600}".repeat(63), '\u{20AC}');
+        let preview = GroupInvitePreview {
+            group_name: Some(long_name.clone()),
+            inviter_name: Some(long_name),
+            member_count: 7,
+        };
+        let secret = generate_link_key();
+        let wire = compose_with_preview(
+            &fixture_signing(),
+            &vec![0x5a; MAX_GROUP_ID_LEN],
+            0,
+            &preview,
+            &secret,
+        )
+        .unwrap();
+        assert_eq!(wire.len(), MAX_WIRE_LEN);
+        let sealed = seal_link(&secret, &wire).unwrap();
+        assert_eq!(sealed.len(), MAX_SEALED_LEN);
+        let (cap, opened) = open_link(&secret, &sealed).unwrap();
+        assert_eq!(opened, wire);
+        assert_eq!(cap.open_preview(&secret).unwrap(), Some(preview));
+    }
+
+    /// A `/g/` link without the right fragment opens nothing: neither a
+    /// wrong secret nor another issuer's valid capability under the id.
+    #[test]
+    fn a_group_link_without_its_secret_is_damaged() {
+        let secret = generate_link_key();
+        let sealed = seal_link(
+            &secret,
+            &compose(&fixture_signing(), &fixture_group_id(), 0).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            open_link(&generate_link_key(), &sealed),
+            Err(ContactError::LinkDamaged)
+        ));
+        let theirs = seal_link(
+            &generate_link_key(),
+            &compose(&SigningKey::generate(), &fixture_group_id(), 0).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            open_link(&secret, &theirs),
+            Err(ContactError::LinkDamaged)
+        ));
     }
 
     /// The fuzz hook reaches the plaintext decoder directly: a real preview

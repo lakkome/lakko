@@ -43,6 +43,14 @@ pub enum ContactError {
     /// Caller-side argument validation.
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
+
+    /// A sealed invite link (`/i/`, `/c/`, `/g/`) did not open: a missing or
+    /// wrong link secret, a blob of another kind, a truncated, tampered or
+    /// swapped blob, or a capability that does not verify inside it. One
+    /// variant on purpose — the page says "this link is damaged" for all of
+    /// them (see [`crate::link_seal`]).
+    #[error("invite link is damaged")]
+    LinkDamaged,
 }
 
 /// Result alias used throughout the crate.
