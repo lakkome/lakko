@@ -96,7 +96,7 @@ internal interface KeyPackageRepublishPorts<S : Any> {
  *
  * A failed run still marks its requests served: the next trigger (the next
  * session start or the next Welcome join) retries, instead of every queued
- * request re-running a failing PoW + upload in a row.
+ * request re-running a failing upload in a row.
  */
 internal class KeyPackageRepublisher<S : Any>(
     private val ports: KeyPackageRepublishPorts<S>,

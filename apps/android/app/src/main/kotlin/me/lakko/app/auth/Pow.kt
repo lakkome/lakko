@@ -3,57 +3,105 @@
 
 package me.lakko.app.auth
 
-import kotlinx.coroutines.CoroutineDispatcher
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import uniffi.lakko_ffi_uniffi.powSolve
+import java.util.concurrent.Executor
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CompletableDeferred
+import kotlin.coroutines.cancellation.CancellationException
+import uniffi.lakko_ffi_uniffi.PowProof
+import uniffi.lakko_ffi_uniffi.powSolveChunk
 
 /**
- * PoW solver glue — wraps the UniFFI `powSolve` free function into
- * a coroutine-friendly suspend helper.
+ * The one proof of work left (ADR-0054 S4): a single solve before
+ * `/signup/start`, the challenge from auth's `POST /pow/challenge`. Nothing
+ * else in the app pays one.
  *
- * Mirror of `apps/web/src/auth/pow.ts`. The Rust solver is
- * **blocking**: at the server-default `effort_bits = 8` it takes
- * 100–500 ms on a 2024+ phone; at higher difficulties it can take
- * seconds. We push the call to `Dispatchers.Default` (CPU-bound
- * worker pool) so the main thread never blocks during a signup /
- * login flow.
+ * ## Cancellable (ADR-0054 S5)
  *
- * The function is parameterised by [dispatcher] for two reasons:
- *
- *   1. Tests can pass `Dispatchers.Unconfined` (or a `TestDispatcher`)
- *      to keep `runTest` deterministic.
- *   2. Future-us may want to swap in a dedicated solver pool if
- *      the default-dispatcher concurrency cap (one thread per
- *      core, shared with every other CPU-bound coroutine in the
- *      app) becomes a bottleneck. Today's signup / login flows
- *      call this exactly twice and once respectively per
- *      operation, so the default is fine.
+ * The solve runs OFF the main thread on its own executor as a loop of short
+ * native chunks (`powSolveChunk`, at most [chunkAttempts] nonces each), and
+ * the loop checks a cancel flag between chunks. Cancelling the caller (the UX
+ * `Cancel`, leaving the screen) therefore does two things: the caller's wait
+ * returns at once, and the CPU work stops at the end of the chunk in flight
+ * rather than running on to a proof nobody will send. The server holds
+ * nothing until a proof is spent, so a cancelled solve leaves no half-created
+ * account.
  */
 public suspend fun solvePow(
     seedB64: String,
     effortBits: Int,
-    dispatcher: CoroutineDispatcher = Dispatchers.Default,
-): PowProofPayload =
-    withContext(dispatcher) {
-        // UniFFI surfaces `effort_bits` as `kotlin.UByte` per the
-        // Rust-side `u8`. The wire DTO stays `Int` to mirror the
-        // server JSON shape (`serde` emits a JSON number); convert
-        // at the FFI boundary.
-        val proof = powSolve(seedB64, effortBits.toUByte())
+    solver: PowSolver = UniffiPowSolver,
+    executor: Executor = powExecutor,
+    chunkAttempts: Int = POW_CHUNK_ATTEMPTS,
+): PowProofPayload {
+    val result = CompletableDeferred<PowProofPayload>()
+    val cancelled = AtomicBoolean(false)
+    executor.execute {
         try {
-            PowProofPayload(
+            while (!cancelled.get() && !result.isCompleted) {
+                val proof = solver.solveChunk(seedB64, effortBits, chunkAttempts)
+                if (proof != null) {
+                    result.complete(proof)
+                    return@execute
+                }
+            }
+        } catch (t: Throwable) {
+            result.completeExceptionally(t)
+        }
+    }
+    try {
+        return result.await()
+    } catch (e: CancellationException) {
+        // Stop the loop at the next chunk boundary, and make a late proof a
+        // no-op: nobody will read it.
+        cancelled.set(true)
+        result.cancel(e)
+        throw e
+    }
+}
+
+/**
+ * Nonces per native chunk.
+ *
+ * Chosen from the only per-attempt figure measured so far: about 16 ms per
+ * Equix attempt with the JIT on the Android emulator (2026-09-27, the
+ * `lakko-pow` JIT change). Four attempts is then about 64 ms, inside the
+ * roughly 100 ms a Cancel should take to stop the CPU work, with headroom for
+ * a slower phone. Not measured on a physical phone. A smaller chunk only adds
+ * per-call overhead (each call sets up its solver memory once); the search is
+ * the same, since every chunk draws fresh random nonces.
+ */
+public const val POW_CHUNK_ATTEMPTS: Int = 4
+
+/** The native solver, behind an interface so the loop and its cancellation are
+ *  host-testable. */
+public fun interface PowSolver {
+    /** Blocking. At most [maxAttempts] nonces; `null` when none of them
+     *  produced a proof. */
+    public fun solveChunk(seedB64: String, effortBits: Int, maxAttempts: Int): PowProofPayload?
+}
+
+/** [PowSolver] over the UniFFI `powSolveChunk`. */
+public object UniffiPowSolver : PowSolver {
+    override fun solveChunk(seedB64: String, effortBits: Int, maxAttempts: Int): PowProofPayload? {
+        // UniFFI surfaces `effort_bits` as `UByte` (the Rust `u8`) and the
+        // attempt budget as `UInt`.
+        val proof: PowProof = powSolveChunk(seedB64, effortBits.toUByte(), maxAttempts.toUInt())
+            ?: return null
+        try {
+            return PowProofPayload(
                 seed = proof.seedB64(),
                 nonce = proof.nonceB64(),
                 solution = proof.solutionB64(),
             )
         } finally {
-            // UniFFI `Object`-typed handles hold a Rust-side `Arc`
-            // that the auto-cleaner will release eventually, but
-            // PoW proofs are tiny short-lived objects we don't
-            // want backing up the cleaner's queue under heavy
-            // signup load. Closing here is a small but explicit
-            // gesture.
             proof.close()
         }
     }
+}
+
+/** Daemon threads, so a solve winding down after a cancel never holds the
+ *  process open, and a retry never queues behind it. */
+private val powExecutor: Executor = Executors.newCachedThreadPool { runnable ->
+    Thread(runnable, "lakko-pow").apply { isDaemon = true }
+}

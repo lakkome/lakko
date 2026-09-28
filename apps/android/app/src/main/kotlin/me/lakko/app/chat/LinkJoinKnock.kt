@@ -8,8 +8,8 @@ package me.lakko.app.chat
  * join a claimed journal.
  *
  * The joiner no longer reads the group journal at all: a claimed journal
- * answers only its members. It knocks twice, each knock paying its own proof
- * of work:
+ * answers only its members. It knocks twice, each knock spending its own
+ * `ds-knock` anonymous token (ADR-0054):
  *
  *   1. an EMPTY knock — a probe that stores nothing and returns the group's
  *      latest registered access epoch, which IS the group's epoch;
@@ -30,16 +30,12 @@ public class GroupNotAcceptingRequests :
     IllegalStateException("the group has no registered epoch yet; nothing was sent")
 
 /**
- * Run the two knocks. [knock] posts its payloads (after solving a FRESH
- * challenge on every call) and returns the epoch the server reports;
- * [buildProposal] builds the external-join proposal for that epoch (and makes
- * its KeyPackage durable); [buildAttribution] is best effort — `null` when it
- * cannot be composed, and the request goes without it.
- *
- * A knock refused because its proof of work expired while it was being solved
- * (a challenge lives 300 s; a slow phone can take longer) is retried ONCE,
- * which fetches and solves a new challenge ([isExpiredPow] decides; a `401`
- * on the knock by default). A second refusal propagates.
+ * Run the two knocks. [knock] posts its payloads (spending a fresh token on
+ * every call; a refused token is retried inside the client) and returns the
+ * epoch the server reports; [buildProposal] builds the external-join proposal
+ * for that epoch (and makes its KeyPackage durable); [buildAttribution] is
+ * best effort — `null` when it cannot be composed, and the request goes
+ * without it.
  *
  * @return the epoch the proposal targets.
  * @throws GroupNotAcceptingRequests when the probe returns no epoch; no
@@ -49,33 +45,17 @@ public suspend fun runLinkJoinKnock(
     knock: suspend (payloads: List<ByteArray>) -> ULong?,
     buildProposal: suspend (epoch: ULong) -> ByteArray,
     buildAttribution: () -> ByteArray?,
-    isExpiredPow: (Throwable) -> Boolean = ::isKnockPowExpired,
 ): ULong {
-    suspend fun knockOnce(payloads: List<ByteArray>): ULong? =
-        try {
-            knock(payloads)
-        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
-            throw e
-        } catch (e: Throwable) {
-            if (!isExpiredPow(e)) throw e
-            knock(payloads)
-        }
-
-    val epoch = knockOnce(emptyList()) ?: throw GroupNotAcceptingRequests()
+    val epoch = knock(emptyList()) ?: throw GroupNotAcceptingRequests()
     val proposal = buildProposal(epoch)
     val attribution = try {
         buildAttribution()
     } catch (_: Throwable) {
         null
     }
-    knockOnce(listOfNotNull(attribution, proposal))
+    knock(listOfNotNull(attribution, proposal))
     return epoch
 }
-
-/** A knock POST refused with `401`: the server no longer knows the
- *  challenge, i.e. its proof of work expired before it was sent. */
-public fun isKnockPowExpired(error: Throwable): Boolean =
-    error is me.lakko.app.ds.DsHttpError && error.status == 401
 
 /** What the joiner reads when the group cannot take requests yet. */
 public const val GROUP_NOT_ACCEPTING_REQUESTS: String =
@@ -100,7 +80,9 @@ public const val JOIN_TRY_AGAIN: String = "Try again"
  * cause chain: [GROUP_NOT_ACCEPTING_REQUESTS] when the probe learned no epoch,
  * [me.lakko.app.ds.DS_CLOCK_SKEW_COPY] when a proof refusal is explained by the
  * device clock, [me.lakko.app.discovery.INVITE_RATE_LIMITED_COPY] when the
- * ledger consume answered `429`, [JOIN_FAILED_COPY] for everything else.
+ * ledger consume answered `429`, [me.lakko.app.anon.ACTION_ALLOWANCE_USED_COPY]
+ * when the day's allowance of invite-consume or knock tokens is used up,
+ * [JOIN_FAILED_COPY] for everything else.
  * Never a raw message.
  */
 public fun joinFailureCopy(error: Throwable): String {
@@ -108,6 +90,9 @@ public fun joinFailureCopy(error: Throwable): String {
     val seen = HashSet<Throwable>()
     while (cause != null && seen.add(cause)) {
         if (cause is GroupNotAcceptingRequests) return GROUP_NOT_ACCEPTING_REQUESTS
+        if (cause is me.lakko.app.anon.AnonTokenQuotaExhausted) {
+            return me.lakko.app.anon.ACTION_ALLOWANCE_USED_COPY
+        }
         if (cause is me.lakko.app.ds.DsProofRefusedError && cause.clockSkewed) {
             return me.lakko.app.ds.DS_CLOCK_SKEW_COPY
         }

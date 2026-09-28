@@ -276,6 +276,7 @@ mod tests {
             }),
         );
         let state = AppState {
+            anon_tokens: lakko_anon_token_server::TokenVerifier::new(db.clone(), None),
             db: db.clone(),
             providers: Arc::new(providers),
             internal_secret: Some(Arc::new(B64.decode(SECRET_B64).unwrap())),

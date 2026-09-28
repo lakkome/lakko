@@ -450,7 +450,7 @@ export interface AnonymousJoinSession {
  * the full recovery cascade entry). The DS rendezvous mailbox is
  * pseudonym-keyed and auth-free, so the whole pairing round-trip
  * runs anonymously; only the grant redeem inside `accept` touches
- * the auth service (PoW-gated, anonymous by design).
+ * the auth service (anonymous by design, limited server-side).
  *
  * Because no device root key exists yet, the DeviceIdentity seed is
  * generated IN MEMORY here and persisted later via
@@ -660,7 +660,7 @@ export async function runScanFlow(args: {
   readonly recovery?: {
     readonly accountIdentitySeed: Uint8Array;
     /** Mint a fresh grant via `POST /device/authorize/start`
-     *  (bearer + PoW) and return its URL-safe-base64 raw token —
+     *  (bearer) and return its URL-safe-base64 raw token —
      *  typically `(t) => new AuthClient().deviceAuthorizeStart(t)`
      *  closed over the live session token. */
     readonly deviceAuthorizeStart: () => Promise<string>;
@@ -756,7 +756,7 @@ export async function runScanFlow(args: {
     }
 
     // ADR-0018 factor (a) — best-effort recovery payload. Mint a
-    // single-use device grant (bearer + PoW), derive the
+    // single-use device grant (bearer), derive the
     // per-pairing exporter key at the POST-ADD epoch (the joiner
     // ratchets to the same epoch from the Welcome, so it derives
     // identical bytes), seal `grant(32) ‖ phrase_seed(64)`, and

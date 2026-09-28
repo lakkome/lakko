@@ -37,7 +37,8 @@ import kotlinx.serialization.Serializable
  */
 
 // ----------------------------------------------------------------------------
-// PoW (services/auth/src/pow.rs)
+// PoW (services/auth/src/pow.rs) - since ADR-0054 S4 only `/signup/start`
+// carries one.
 // ----------------------------------------------------------------------------
 
 /** Body of `POST /pow/challenge`. The endpoint takes no input. */
@@ -53,8 +54,8 @@ data class PowChallengeResponse(
     val expires_in: Int,
 )
 
-/** Embedded `pow` object on every expensive endpoint. All three
- *  fields are base64-encoded 16-byte values. */
+/** The `pow` object `/signup/start` carries. All three fields are
+ *  base64-encoded 16-byte values. */
 @Serializable
 data class PowProofPayload(
     val seed: String,
@@ -89,10 +90,10 @@ data class SignupStartResponse(
     val recovery_response: String? = null,
 )
 
-/** `POST /signup/finish` request body. */
+/** `POST /signup/finish` request body. No proof: it must follow a start
+ *  for the same account within 600 s (`410` otherwise). */
 @Serializable
 data class SignupFinishRequest(
-    val pow: PowProofPayload,
     val account_id: String,
     val password_upload: String,
     val recovery_upload: String? = null,
@@ -114,11 +115,13 @@ data class SignupFinishResponse(
 // Login (services/auth/src/opaque.rs)
 // ----------------------------------------------------------------------------
 
-/** Shared by `/login/start` and `/recovery/login/start`. */
+/** Shared by `/login/start` and `/recovery/login/start`. ADR-0054 S5: the
+ *  account is named by its login handle, never by its id; the id comes back
+ *  in the finish, after the proof. */
 @Serializable
 data class LoginStartRequest(
-    val pow: PowProofPayload,
-    val account_id: String,
+    /** base64url (no padding) of the 32-byte login handle (`loginHandle`). */
+    val handle: String,
     /** base64(CredentialRequest). */
     val request: String,
 )
@@ -132,8 +135,7 @@ data class LoginStartResponse(
     val response: String,
 )
 
-/** Shared by `/login/finish` and `/recovery/login/finish`. No `pow`
- *  field — the server only requires PoW on the start endpoints. */
+/** Shared by `/login/finish` and `/recovery/login/finish`. */
 @Serializable
 data class LoginFinishRequest(
     val session_id: String,
@@ -165,9 +167,8 @@ data class LoginFinishResponse(
  */
 @Serializable
 data class PasswordResetStartRequest(
-    val pow: PowProofPayload,
-    /** base64(account_id). */
-    val account_id: String,
+    /** base64url (no padding) of the 32-byte login handle (ADR-0054 S5). */
+    val handle: String,
     /** base64(CredentialRequest) from `OpaqueLogin.startRecovery(seed)`. */
     val recovery_request: String,
     /** base64(RegistrationRequest) from `OpaqueRegister.startPassword(newPassword)`. */
@@ -185,9 +186,7 @@ data class PasswordResetStartResponse(
     val new_password_response: String,
 )
 
-/** `POST /password/reset/finish` request body. No `pow` field —
- *  the server only requires PoW on the start endpoints, by analogy
- *  with `/login/{start,finish}`. */
+/** `POST /password/reset/finish` request body. */
 @Serializable
 data class PasswordResetFinishRequest(
     val session_id: String,
@@ -214,14 +213,6 @@ data class PasswordResetFinishResponse(
 // ADR-0018 factor (a), "another-device" recovery)
 // ----------------------------------------------------------------------------
 
-/** `POST /device/authorize/start` request body. Bearer-authenticated
- *  (the EXISTING device's session token rides the `Authorization`
- *  header, not the body). */
-@Serializable
-data class DeviceAuthorizeStartRequest(
-    val pow: PowProofPayload,
-)
-
 /** `POST /device/authorize/start` response body. */
 @Serializable
 data class DeviceAuthorizeStartResponse(
@@ -233,11 +224,10 @@ data class DeviceAuthorizeStartResponse(
 )
 
 /** `POST /device/authorize/redeem` request body. Anonymous — the
- *  fresh device has no token yet; the PoW is the only anti-spam
- *  gate. */
+ *  fresh device has no token yet; the grant token is the
+ *  authorization and the server's counters the anti-spam gate. */
 @Serializable
 data class DeviceAuthorizeRedeemRequest(
-    val pow: PowProofPayload,
     /** URL-safe base64 (no pad) of the 16-byte account id the fresh
      *  device learned from the pairing QR. */
     val account_id_b64: String,
@@ -292,14 +282,6 @@ data class GenesisAttestResponse(
 // authenticator-code recovery)
 // ----------------------------------------------------------------------------
 
-/** `POST /totp/enroll/start` request body. Bearer-authenticated
- *  (the already-logged-in account's session token rides the
- *  `Authorization` header) + PoW. */
-@Serializable
-data class TotpEnrollStartRequest(
-    val pow: PowProofPayload,
-)
-
 /** `POST /totp/enroll/start` response body — the provisioning
  *  material the authenticator app consumes. The raw secret leaves
  *  the server exactly once, here. */
@@ -322,12 +304,11 @@ data class TotpEnrollFinishRequest(
 )
 
 /** `POST /totp/recover` request body. Anonymous (the caller lost
- *  their device) + PoW. */
+ *  their device); per-name + per-address limited server-side. */
 @Serializable
 data class TotpRecoverRequest(
-    val pow: PowProofPayload,
-    /** URL-safe base64 (no pad) of the 16-byte account_id. */
-    val account_id_b64: String,
+    /** base64url (no padding) of the 32-byte login handle (ADR-0054 S5). */
+    val handle: String,
     /** Current 6-digit authenticator code. */
     val code: String,
 )
@@ -368,10 +349,9 @@ public object ContactKind {
 
 /** `POST /recovery-contact/enroll/start` request body.
  *  Bearer-authenticated (the already-logged-in account's session
- *  token rides the `Authorization` header) + PoW. */
+ *  token rides the `Authorization` header). */
 @Serializable
 data class RecoveryContactEnrollStartRequest(
-    val pow: PowProofPayload,
     /** `1 = email`, `2 = phone` (see [ContactKind]). */
     val kind: Int,
     /** The raw phone / email plaintext. Used transiently server-side
@@ -400,27 +380,24 @@ data class RecoveryContactEnrollFinishRequest(
 )
 
 /** `POST /recovery-contact/recover/start` request body. Anonymous
- *  (the caller lost their device) + PoW. ENUMERATION-SAFE: the server
+ *  (the caller lost their device). ENUMERATION-SAFE: the server
  *  returns the same `{ sent: true }` whether or not the contact
  *  matches a confirmed row. */
 @Serializable
 data class RecoveryContactRecoverStartRequest(
-    val pow: PowProofPayload,
-    /** URL-safe base64 (no pad) of the 16-byte account_id. */
-    val account_id_b64: String,
+    /** base64url (no padding) of the 32-byte login handle (ADR-0054 S5). */
+    val handle: String,
     /** `1 = email`, `2 = phone` (see [ContactKind]). */
     val kind: Int,
     /** The raw phone / email plaintext. */
     val contact: String,
 )
 
-/** `POST /recovery-contact/recover/finish` request body. Anonymous
- *  + PoW. */
+/** `POST /recovery-contact/recover/finish` request body. Anonymous. */
 @Serializable
 data class RecoveryContactRecoverFinishRequest(
-    val pow: PowProofPayload,
-    /** URL-safe base64 (no pad) of the 16-byte account_id. */
-    val account_id_b64: String,
+    /** base64url (no padding) of the 32-byte login handle (ADR-0054 S5). */
+    val handle: String,
     /** `1 = email`, `2 = phone` (see [ContactKind]). */
     val kind: Int,
     /** The 6-digit code that was delivered to the contact. */
@@ -436,4 +413,27 @@ data class RecoveryContactRecoverFinishResponse(
     val account_id_b64: String,
     val session_token: String,
     val session_expires_at_ms: Long,
+)
+
+// ----------------------------------------------------------------------------
+// Login handle (services/auth/src/login_handle.rs - ADR-0054 S5)
+// ----------------------------------------------------------------------------
+
+/** `PUT /auth/login-handle` request body. Bearer-authenticated. */
+@Serializable
+data class LoginHandleRequest(
+    /** base64url (no padding) of the 32-byte login handle. */
+    val handle: String,
+)
+
+/** `PUT /auth/login-handle` 200 body. */
+@Serializable
+data class LoginHandleBoundResponse(
+    val bound: Boolean,
+)
+
+/** `DELETE /auth/login-handle` 200 body. */
+@Serializable
+data class LoginHandleRemovedResponse(
+    val removed: Boolean,
 )

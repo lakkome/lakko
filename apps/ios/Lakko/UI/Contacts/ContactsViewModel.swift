@@ -533,6 +533,8 @@ public final class ContactsViewModel: ObservableObject {
         case .noIdentityBundle:
             return "That account has no identity bundle yet — ask them to open the app once."
         case .wrapped(let cause):
+            // ADR-0054 S3 — a lookup refused for the day's allowance.
+            if let search = AnonTokenCopy.searchMessage(for: cause) { return search }
             return (cause as? LocalizedError)?.errorDescription
                 ?? String(describing: cause)
         }

@@ -32,6 +32,17 @@ sqlx = { version = "0.9", default-features = false, features = [
     "mysql",
 ] }
 
+# The spend gate every verifying service mounts (`gate.rs`): the axum
+# middleware and the JSON refusal body. The same axum major the services use;
+# no default features, only the JSON response the refusal needs.
+axum = { version = "0.8", default-features = false, features = ["json"] }
+serde_json.workspace = true
+
+[features]
+# `testing::mint_header` for other crates' tests (mint a spendable token
+# in-process). Never enabled by a production build.
+testing = []
+
 [dev-dependencies]
 # Random account ids / spend ids so the DB-gated tests are re-runnable against
 # a persistent dev database.

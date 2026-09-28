@@ -13,11 +13,21 @@
  *
  *   2. **High-level `register(accountId, username)` and
  *      `lookup(username)`** orchestrate the full multi-round-trip
- *      flow: PoW → OPRF blind → POST `/discovery/oprf` → finalize
- *      → second PoW → POST `/discovery/{register, lookup}`. Both
+ *      flow: OPRF blind → POST `/discovery/oprf` (one anonymous
+ *      `discovery-lookup` token) → finalize → POST
+ *      `/discovery/{register, lookup}`. Both
  *      orchestrators handle username normalisation internally
  *      (via the WASM `OprfBlinder`); callers pass the raw typed
  *      string.
+ *
+ * ADR-0054 S3: no route here takes a proof of work any more. The anonymous
+ * routes a signed-in person uses - the OPRF evaluation, the channel-name
+ * register and the three invite consumes - each spend one anonymous token
+ * (`../tokens/anon-token-pool.ts`) and carry NO session: they are sent with
+ * `anonymousFetchInit`, never through `authHeaders()`. The bearer routes
+ * (register, identity, KeyPackage, the invite uploads) carry only the
+ * session and can answer `429 {"code": "rate-limited"}`. `/discovery/lookup`
+ * and `/discovery/channel/lookup` carry neither.
  *
  * Errors mirror the auth-side surface — `DiscoveryClientArgError` /
  * `DiscoveryHttpError` / `DiscoveryNetworkError` — so the UI can
@@ -32,7 +42,12 @@ import {
   base64UrlDecodeNoPad,
   base64UrlEncodeNoPad,
 } from "../auth/account-id";
-import { solvePow } from "../auth/pow";
+import {
+  anonTokens,
+  anonymousFetchInit,
+  type AnonTokenContext,
+  type AnonTokenPool,
+} from "../tokens/anon-token-pool";
 import { inviteLinkWidths } from "../contacts/invite-link";
 import type {
   ChannelLookupRequest,
@@ -308,9 +323,8 @@ export class DiscoveryClient {
    * `Authorization: Bearer <token>` header on every protected
    * `lakko-svc-discovery` write (register, identity upload,
    * keypackage upload, invite upload, invite revoke). `null`
-   * means "anonymous" — protected endpoints will return 401,
-   * unauthenticated paths (`/pow/challenge`, `/discovery/oprf`,
-   * `/discovery/lookup`, all GETs, invite consume) still work.
+   * means "anonymous" — protected endpoints will return 401. The
+   * anonymous-token routes never carry it (ADR-0054 S3).
    */
   private sessionToken: string | null = null;
 
@@ -320,11 +334,18 @@ export class DiscoveryClient {
    *  {@link setSessionToken}. */
   private readonly sessionTokenProvider: (() => string | null) | undefined;
 
+  /** The anonymous-token pool the token routes spend from. */
+  private readonly tokens: AnonTokenPool;
+
   constructor(
     public readonly baseUrl: string = DEFAULT_BASE_URL,
-    options: { readonly sessionToken?: () => string | null } = {},
+    options: {
+      readonly sessionToken?: () => string | null;
+      readonly tokens?: AnonTokenPool;
+    } = {},
   ) {
     this.sessionTokenProvider = options.sessionToken;
+    this.tokens = options.tokens ?? anonTokens;
   }
 
   /** Update the bearer token in-place. Mirror of the iOS +
@@ -346,8 +367,10 @@ export class DiscoveryClient {
   // Low-level: 1:1 HTTP endpoints
   // -----------------------------------------------------------------
 
+  /** `POST /discovery/oprf` — spends one `discovery-lookup` token, no
+   *  session. */
   async oprfEvaluate(req: OprfRequest): Promise<OprfResponse> {
-    return this.post("/discovery/oprf", req);
+    return this.tokenPostJson("discovery-lookup", "/discovery/oprf", req);
   }
 
   async register(req: RegisterRequest): Promise<RegisterResponse> {
@@ -372,21 +395,21 @@ export class DiscoveryClient {
   /** `POST /discovery/invite` — upload a verified
    *  `InviteCapability` blob, get the server-assigned
    *  `blob_id` back (Phase 1.18d1). The high-level
-   *  [`uploadInvite`] wrapper drives the PoW solve. */
+   *  [`uploadInvite`] wrapper validates the input. */
   async inviteUpload(req: InviteUploadRequest): Promise<InviteUploadResponse> {
     return this.post("/discovery/invite", req);
   }
 
   /** `POST /discovery/invite/{blob_id}/consume` — atomic
    *  `max_uses` enforcement (Phase 1.18d2a). The high-level
-   *  [`consumeInvite`] wrapper drives the PoW solve and folds
+   *  [`consumeInvite`] wrapper computes the joiner tag and folds
    *  the 200 / 404 / 410 status trifecta into a discriminated
    *  [`ConsumeInviteResult`]. */
   async inviteConsume(
     blobIdSlug: string,
     req: InviteConsumeRequest,
   ): Promise<InviteConsumeResponse> {
-    return this.post(`/discovery/invite/${blobIdSlug}/consume`, req);
+    return this.tokenPostJson("invite-consume", `/discovery/invite/${blobIdSlug}/consume`, req);
   }
 
   /** `POST /discovery/call-invite` — upload a verified
@@ -395,7 +418,7 @@ export class DiscoveryClient {
    *  [`inviteUpload`]; wire shape (`InviteUploadRequest`) is
    *  shared with the contact-invite endpoint — only the URL
    *  path differs. The high-level [`uploadCallInvite`] wrapper
-   *  drives the PoW solve. */
+   *  validates the input. */
   async callInviteUpload(
     req: InviteUploadRequest,
   ): Promise<InviteUploadResponse> {
@@ -405,14 +428,18 @@ export class DiscoveryClient {
   /** `POST /discovery/call-invite/{blob_id}/consume` — atomic
    *  `max_uses` enforcement against the call-invite ledger
    *  (Phase 3c3-multi-use). The high-level
-   *  [`consumeCallInvite`] wrapper drives the PoW solve + the
+   *  [`consumeCallInvite`] wrapper drives the
    *  per-joiner tag computation and folds 200 / 404 / 410 into
    *  a discriminated [`ConsumeInviteResult`]. */
   async callInviteConsume(
     blobIdSlug: string,
     req: InviteConsumeRequest,
   ): Promise<InviteConsumeResponse> {
-    return this.post(`/discovery/call-invite/${blobIdSlug}/consume`, req);
+    return this.tokenPostJson(
+      "invite-consume",
+      `/discovery/call-invite/${blobIdSlug}/consume`,
+      req,
+    );
   }
 
   /** `DELETE /discovery/invite/{blob_id}` — owner-signed
@@ -629,13 +656,12 @@ export class DiscoveryClient {
   }
 
   /** `POST /discovery/channel/register` — bind an OPRF-hashed
-   *  `@channelname` to a `channel_id`. Session-token-gated write
-   *  (DoS rate-limit role); the low-level POST threads the bearer
-   *  token via `this.post`. */
+   *  `@channelname` to a `channel_id`. Spends one `discovery-register`
+   *  anonymous token and carries no session (ADR-0054 S3). */
   async channelRegister(
     req: ChannelRegisterRequest,
   ): Promise<ChannelRegisterResponse> {
-    return this.post("/discovery/channel/register", req);
+    return this.tokenPostJson("discovery-register", "/discovery/channel/register", req);
   }
 
   /**
@@ -679,8 +705,8 @@ export class DiscoveryClient {
   /**
    * Bind `@username` to `accountId` server-side.
    *
-   * Flow: PoW₁ → OPRF blind → POST `/discovery/oprf` → finalize →
-   * PoW₂ → POST `/discovery/register`.
+   * Flow: OPRF blind → POST `/discovery/oprf` (one anonymous token) →
+   * finalize → POST `/discovery/register` (bearer).
    *
    * Username normalisation is handled inside `OprfBlinder.blind`
    * (the WASM helper); the result is also surfaced back via
@@ -703,23 +729,12 @@ export class DiscoveryClient {
     const blinder = wasm.OprfBlinder.blind(username);
     const normalisedUsername = blinder.normalizedUsername;
 
-    // PoW₁ for /discovery/oprf.
-    const challenge1 = await this.fetchChallenge();
-    const pow1 = await solvePow(challenge1.seed, challenge1.effort_bits);
-    const oprfResp = await this.oprfEvaluate({
-      pow: pow1,
-      blinded: blinder.blindedB64,
-    });
+    const oprfResp = await this.oprfEvaluate({ blinded: blinder.blindedB64 });
 
     const oprfHashBytes = blinder.finalize(oprfResp.evaluated);
     const oprfHashB64 = base64Encode(oprfHashBytes);
 
-    // PoW₂ for /discovery/register.
-    const challenge2 = await this.fetchChallenge();
-    const pow2 = await solvePow(challenge2.seed, challenge2.effort_bits);
-
     const registerResp = await this.register({
-      pow: pow2,
       account_id: base64Encode(accountId),
       oprf_hash: oprfHashB64,
     });
@@ -735,7 +750,7 @@ export class DiscoveryClient {
 
   /**
    * Upload (or replace) the identity bundle for the given
-   * account. Drives one PoW solve + `POST /discovery/identity`.
+   * account. Drives one bearer `POST /discovery/identity`.
    *
    * Idempotent — the server upserts via
    * `INSERT … ON DUPLICATE KEY UPDATE`. Calling this on every
@@ -825,11 +840,8 @@ export class DiscoveryClient {
           : base64Encode(genesisAttest);
     }
 
-    const challenge = await this.fetchChallenge();
-    const pow = await solvePow(challenge.seed, challenge.effort_bits);
 
     const resp = await this.identityUpload({
-      pow,
       account_id: base64Encode(accountId),
       signature_pubkey: base64Encode(signaturePubkey),
       x25519_pubkey: base64Encode(x25519Pubkey),
@@ -850,7 +862,7 @@ export class DiscoveryClient {
 
   /**
    * Upload (or replace) the user's MLS KeyPackage. Drives one
-   * PoW solve + `POST /discovery/keypackage`.
+   * bearer `POST /discovery/keypackage`.
    *
    * Unlike the identity bundle, KeyPackages are **not**
    * deterministic — `Identity::create_key_package()` generates
@@ -889,11 +901,8 @@ export class DiscoveryClient {
       );
     }
 
-    const challenge = await this.fetchChallenge();
-    const pow = await solvePow(challenge.seed, challenge.effort_bits);
 
     const resp = await this.keypackageUpload({
-      pow,
       account_id: base64Encode(accountId),
       device_id: base64Encode(deviceId),
       keypackage: base64Encode(keyPackageBytes),
@@ -950,7 +959,7 @@ export class DiscoveryClient {
   /**
    * Upload a freshly-composed `InviteCapability` blob and
    * receive the server-assigned `blob_id` (6 random bytes,
-   * ADR-0028 short-link amendment). Phase 1.18d1: drives one PoW
+   * ADR-0028 short-link amendment). Phase 1.18d1: drives one bearer
    * solve + `POST /discovery/invite`. Not idempotent — every
    * upload mints a fresh id.
    *
@@ -964,7 +973,7 @@ export class DiscoveryClient {
    *          pointer URL via `composePointerInviteUrl`.
    *
    * @throws `DiscoveryClientArgError` on local input validation,
-   *         `DiscoveryHttpError` on server rejection (PoW /
+   *         `DiscoveryHttpError` on server rejection (rate limit /
    *         malformed bytes / failed verify),
    *         `DiscoveryNetworkError` on transport failure.
    */
@@ -985,11 +994,8 @@ export class DiscoveryClient {
       );
     }
 
-    const challenge = await this.fetchChallenge();
-    const pow = await solvePow(challenge.seed, challenge.effort_bits);
 
     const resp = await this.inviteUpload({
-      pow,
       capability: base64Encode(capabilityBytes),
     });
 
@@ -1062,9 +1068,8 @@ export class DiscoveryClient {
    * shapes the joiner is supposed to act on without a developer
    * involved.
    *
-   * Drives one PoW solve over `services/discovery`'s
-   * `/pow/challenge` (rate-limit on consume; same shape as
-   * upload), plus one WASM call to compute the per-joiner
+   * Spends one anonymous `invite-consume` token and carries no
+   * session (ADR-0054 S3), plus one WASM call to compute the per-joiner
    * dedup tag locally before posting.
    *
    * @param blobId            6-byte ledger id
@@ -1094,7 +1099,7 @@ export class DiscoveryClient {
 
     // Compute the per-joiner dedup tag locally before any
     // network call — keeps the joiner_account_id off the wire
-    // and lets a slow PoW solve happen in parallel with the
+    // and lets the token wait happen in parallel with the
     // tag derivation in future iterations.
     const wasm = await loadWasm();
     const joinerTag = wasm.computeJoinerInviteTag(
@@ -1103,41 +1108,7 @@ export class DiscoveryClient {
     );
 
     const slug = base64UrlEncodeNoPad(blobId);
-
-    const challenge = await this.fetchChallenge();
-    const pow = await solvePow(challenge.seed, challenge.effort_bits);
-
-    const endpoint = `/discovery/invite/${slug}/consume`;
-    const url = `${this.baseUrl}${endpoint}`;
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...this.authHeaders(),
-        },
-        body: JSON.stringify({
-          pow,
-          joiner_tag: base64Encode(joinerTag),
-        } satisfies InviteConsumeRequest),
-      });
-    } catch (err) {
-      throw new DiscoveryNetworkError(endpoint, err);
-    }
-    if (response.status === 429) throw DiscoveryRateLimitedError.from(response, endpoint);
-    if (response.status === 404) return { kind: "not-found" };
-    if (response.status === 410) return { kind: "exhausted" };
-    if (!response.ok) {
-      const text = await safeReadBody(response);
-      throw new DiscoveryHttpError(response.status, endpoint, text);
-    }
-    const raw = (await response.json()) as InviteConsumeResponse;
-    return {
-      kind: raw.already_consumed ? "already-consumed" : "consumed",
-      usedCount: raw.used_count,
-      maxUses: raw.max_uses,
-    };
+    return this.consumeLedger(`/discovery/invite/${slug}/consume`, joinerTag);
   }
 
   /**
@@ -1145,7 +1116,7 @@ export class DiscoveryClient {
    * server-assigned `blob_id` back (Phase 3c3-client).
    *
    * Sibling of [`uploadInvite`] for the call-invite ecosystem.
-   * Drives one PoW solve + `POST /discovery/call-invite`.
+   * Drives one bearer `POST /discovery/call-invite`.
    * Every upload mints a fresh 6-byte id (ADR-0028 short-link amendment).
    *
    * Caller responsibility: feed `capabilityBytes` straight from
@@ -1182,11 +1153,8 @@ export class DiscoveryClient {
       );
     }
 
-    const challenge = await this.fetchChallenge();
-    const pow = await solvePow(challenge.seed, challenge.effort_bits);
 
     const resp = await this.callInviteUpload({
-      pow,
       capability: base64Encode(capabilityBytes),
     });
 
@@ -1281,46 +1249,14 @@ export class DiscoveryClient {
     );
 
     const slug = base64UrlEncodeNoPad(blobId);
-    const challenge = await this.fetchChallenge();
-    const pow = await solvePow(challenge.seed, challenge.effort_bits);
 
-    const endpoint = `/discovery/call-invite/${slug}/consume`;
-    const url = `${this.baseUrl}${endpoint}`;
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...this.authHeaders(),
-        },
-        body: JSON.stringify({
-          pow,
-          joiner_tag: base64Encode(joinerTag),
-        } satisfies InviteConsumeRequest),
-      });
-    } catch (err) {
-      throw new DiscoveryNetworkError(endpoint, err);
-    }
-    if (response.status === 429) throw DiscoveryRateLimitedError.from(response, endpoint);
-    if (response.status === 404) return { kind: "not-found" };
-    if (response.status === 410) return { kind: "exhausted" };
-    if (!response.ok) {
-      const text = await safeReadBody(response);
-      throw new DiscoveryHttpError(response.status, endpoint, text);
-    }
-    const raw = (await response.json()) as InviteConsumeResponse;
-    return {
-      kind: raw.already_consumed ? "already-consumed" : "consumed",
-      usedCount: raw.used_count,
-      maxUses: raw.max_uses,
-    };
+    return this.consumeLedger(`/discovery/call-invite/${slug}/consume`, joinerTag);
   }
 
   /** `POST /discovery/group-invite` — upload a verified
    *  `GroupInviteCapability` blob, get the server-assigned
    *  `blob_id` back (ADR-0028, G-3). The high-level
-   *  [`uploadGroupInvite`] wrapper drives the PoW solve. */
+   *  [`uploadGroupInvite`] wrapper validates the input. */
   async groupInviteUpload(
     req: GroupInviteUploadRequest,
   ): Promise<InviteUploadResponse> {
@@ -1332,7 +1268,7 @@ export class DiscoveryClient {
    * server-assigned `blob_id` back (ADR-0028, G-3).
    *
    * Sibling of [`uploadCallInvite`] for the group join-ticket ledger.
-   * Drives one PoW solve + `POST /discovery/group-invite`. Every upload
+   * Drives one bearer `POST /discovery/group-invite`. Every upload
    * mints a fresh 6-byte id (ADR-0028 short-link amendment).
    *
    * `maxUses` is a SOFT anti-spam throttle (NOT part of the signed
@@ -1362,11 +1298,8 @@ export class DiscoveryClient {
       );
     }
 
-    const challenge = await this.fetchChallenge();
-    const pow = await solvePow(challenge.seed, challenge.effort_bits);
 
     const resp = await this.groupInviteUpload({
-      pow,
       capability: base64Encode(capabilityBytes),
       max_uses: maxUses,
     });
@@ -1444,40 +1377,8 @@ export class DiscoveryClient {
     );
 
     const slug = base64UrlEncodeNoPad(blobId);
-    const challenge = await this.fetchChallenge();
-    const pow = await solvePow(challenge.seed, challenge.effort_bits);
 
-    const endpoint = `/discovery/group-invite/${slug}/consume`;
-    const url = `${this.baseUrl}${endpoint}`;
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...this.authHeaders(),
-        },
-        body: JSON.stringify({
-          pow,
-          joiner_tag: base64Encode(joinerTag),
-        } satisfies InviteConsumeRequest),
-      });
-    } catch (err) {
-      throw new DiscoveryNetworkError(endpoint, err);
-    }
-    if (response.status === 429) throw DiscoveryRateLimitedError.from(response, endpoint);
-    if (response.status === 404) return { kind: "not-found" };
-    if (response.status === 410) return { kind: "exhausted" };
-    if (!response.ok) {
-      const text = await safeReadBody(response);
-      throw new DiscoveryHttpError(response.status, endpoint, text);
-    }
-    const raw = (await response.json()) as InviteConsumeResponse;
-    return {
-      kind: raw.already_consumed ? "already-consumed" : "consumed",
-      usedCount: raw.used_count,
-      maxUses: raw.max_uses,
-    };
+    return this.consumeLedger(`/discovery/group-invite/${slug}/consume`, joinerTag);
   }
 
   /**
@@ -1745,28 +1646,19 @@ export class DiscoveryClient {
    * `null` when the username is not registered.
    *
    * Same flow as `registerUsername` modulo the second endpoint:
-   * PoW₁ → OPRF → PoW₂ → POST `/discovery/lookup`.
+   * OPRF (one anonymous token) → POST `/discovery/lookup`.
    */
   async lookup(username: string): Promise<LookupResult> {
     const wasm = await loadWasm();
     const blinder = wasm.OprfBlinder.blind(username);
     const normalisedUsername = blinder.normalizedUsername;
 
-    const challenge1 = await this.fetchChallenge();
-    const pow1 = await solvePow(challenge1.seed, challenge1.effort_bits);
-    const oprfResp = await this.oprfEvaluate({
-      pow: pow1,
-      blinded: blinder.blindedB64,
-    });
+    const oprfResp = await this.oprfEvaluate({ blinded: blinder.blindedB64 });
 
     const oprfHashBytes = blinder.finalize(oprfResp.evaluated);
     const oprfHashB64 = base64Encode(oprfHashBytes);
 
-    const challenge2 = await this.fetchChallenge();
-    const pow2 = await solvePow(challenge2.seed, challenge2.effort_bits);
-
     const lookupResp = await this.lookupRaw({
-      pow: pow2,
       oprf_hash: oprfHashB64,
     });
     if (lookupResp === null) {
@@ -1793,8 +1685,9 @@ export class DiscoveryClient {
   /**
    * Bind `@channelname` to a 16-byte `channel_id`.
    *
-   * Flow: PoW₁ → OPRF blind → POST `/discovery/oprf` → finalize →
-   * PoW₂ → POST `/discovery/channel/register`. Identical to
+   * Flow: OPRF blind → POST `/discovery/oprf` (one `discovery-lookup`
+   * token) → finalize → POST `/discovery/channel/register` (one
+   * `discovery-register` token). Identical to
    * [`registerUsername`] modulo the id type + second endpoint.
    *
    * Handle normalisation (NFKC + lowercase + trim + leading-`@`
@@ -1817,23 +1710,12 @@ export class DiscoveryClient {
     const blinder = wasm.OprfBlinder.blindChannel(handle);
     const normalisedHandle = blinder.normalizedUsername;
 
-    // PoW₁ for /discovery/oprf.
-    const challenge1 = await this.fetchChallenge();
-    const pow1 = await solvePow(challenge1.seed, challenge1.effort_bits);
-    const oprfResp = await this.oprfEvaluate({
-      pow: pow1,
-      blinded: blinder.blindedB64,
-    });
+    const oprfResp = await this.oprfEvaluate({ blinded: blinder.blindedB64 });
 
     const oprfHashBytes = blinder.finalize(oprfResp.evaluated);
     const oprfHashB64 = base64Encode(oprfHashBytes);
 
-    // PoW₂ for /discovery/channel/register.
-    const challenge2 = await this.fetchChallenge();
-    const pow2 = await solvePow(challenge2.seed, challenge2.effort_bits);
-
     const registerResp = await this.channelRegister({
-      pow: pow2,
       oprf_hash: oprfHashB64,
       channel_id: base64Encode(channelId),
     });
@@ -1852,7 +1734,7 @@ export class DiscoveryClient {
    * `null` when the handle is not registered.
    *
    * Same flow as [`registerChannelName`] modulo the second
-   * endpoint: PoW₁ → OPRF → PoW₂ → POST `/discovery/channel/lookup`.
+   * endpoint: OPRF → POST `/discovery/channel/lookup`.
    * Exact-match only (the server does no prefix search).
    */
   async lookupChannel(handle: string): Promise<ChannelLookupResult> {
@@ -1860,21 +1742,12 @@ export class DiscoveryClient {
     const blinder = wasm.OprfBlinder.blindChannel(handle);
     const normalisedHandle = blinder.normalizedUsername;
 
-    const challenge1 = await this.fetchChallenge();
-    const pow1 = await solvePow(challenge1.seed, challenge1.effort_bits);
-    const oprfResp = await this.oprfEvaluate({
-      pow: pow1,
-      blinded: blinder.blindedB64,
-    });
+    const oprfResp = await this.oprfEvaluate({ blinded: blinder.blindedB64 });
 
     const oprfHashBytes = blinder.finalize(oprfResp.evaluated);
     const oprfHashB64 = base64Encode(oprfHashBytes);
 
-    const challenge2 = await this.fetchChallenge();
-    const pow2 = await solvePow(challenge2.seed, challenge2.effort_bits);
-
     const lookupResp = await this.channelLookupRaw({
-      pow: pow2,
       oprf_hash: oprfHashB64,
     });
     if (lookupResp === null) {
@@ -1891,31 +1764,81 @@ export class DiscoveryClient {
   // -----------------------------------------------------------------
 
   /**
-   * Fetch a fresh PoW challenge from the discovery service.
-   * `services/discovery` exposes its own `/pow/challenge` (the
-   * shape matches `lakko-svc-auth`'s but the seed lives in a
-   * separate DB table). We don't reuse the auth service's
-   * challenges — the server-side verifier looks up the seed in
-   * its own table.
+   * One request on an anonymous-token route: spends one token of `context`
+   * from the pool, sends NO session (`anonymousFetchInit`), and retries once
+   * with another token when the route refuses the first as spent / invalid /
+   * expired. Returns the final response; transport failures become
+   * `DiscoveryNetworkError`.
    */
-  private async fetchChallenge(): Promise<{
-    seed: string;
-    effort_bits: number;
-  }> {
-    return this.post<undefined, { seed: string; effort_bits: number }>(
-      "/pow/challenge",
-      undefined,
-    );
+  private async tokenPost(
+    context: AnonTokenContext,
+    endpoint: string,
+    body: unknown,
+  ): Promise<Response> {
+    const url = `${this.baseUrl}${endpoint}`;
+    const json = JSON.stringify(body);
+    try {
+      return await this.tokens.spend(context, (headerName, headerValue) =>
+        fetch(
+          url,
+          anonymousFetchInit({
+            method: "POST",
+            headers: { "content-type": "application/json", [headerName]: headerValue },
+            body: json,
+          }),
+        ),
+      );
+    } catch (err) {
+      if (err instanceof TypeError) throw new DiscoveryNetworkError(endpoint, err);
+      throw err;
+    }
+  }
+
+  /** {@link tokenPost} for a route whose 2xx is JSON. */
+  private async tokenPostJson<Res>(
+    context: AnonTokenContext,
+    endpoint: string,
+    body: unknown,
+  ): Promise<Res> {
+    const response = await this.tokenPost(context, endpoint, body);
+    if (!response.ok) {
+      const text = await safeReadBody(response);
+      throw new DiscoveryHttpError(response.status, endpoint, text);
+    }
+    return (await response.json()) as Res;
+  }
+
+  /** The three ledger consumes (ADR-0028): one `invite-consume` token, the
+   *  joiner tag, and the 200 / 404 / 410 / 429 fold. */
+  private async consumeLedger(
+    endpoint: string,
+    joinerTag: Uint8Array,
+  ): Promise<ConsumeInviteResult> {
+    const response = await this.tokenPost("invite-consume", endpoint, {
+      joiner_tag: base64Encode(joinerTag),
+    } satisfies InviteConsumeRequest);
+    if (response.status === 429) throw DiscoveryRateLimitedError.from(response, endpoint);
+    if (response.status === 404) return { kind: "not-found" };
+    if (response.status === 410) return { kind: "exhausted" };
+    if (!response.ok) {
+      const text = await safeReadBody(response);
+      throw new DiscoveryHttpError(response.status, endpoint, text);
+    }
+    const raw = (await response.json()) as InviteConsumeResponse;
+    return {
+      kind: raw.already_consumed ? "already-consumed" : "consumed",
+      usedCount: raw.used_count,
+      maxUses: raw.max_uses,
+    };
   }
 
   private async post<Req, Res>(endpoint: string, body: Req): Promise<Res> {
     const url = `${this.baseUrl}${endpoint}`;
     let response: Response;
     try {
-      // Phase 1.5b: every POST carries the Authorization header
-      // when a session token is set. Unauthenticated POSTs
-      // (`/pow/challenge`, `/discovery/oprf`, `/discovery/lookup`)
-      // silently ignore the header server-side.
+      // Phase 1.5b: every POST through here carries the Authorization
+      // header when a session token is set. The anonymous-token routes
+      // never come through here (ADR-0054 S3, see `tokenPost`).
       const baseHeaders =
         body === undefined ? {} : { "content-type": "application/json" };
       response = await fetch(url, {

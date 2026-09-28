@@ -11,6 +11,7 @@
 import { createSignal, Show, type JSX } from "solid-js";
 import { useAuth } from "../AuthContext";
 import { AuthHttpError } from "../client";
+import { authLimitMessage } from "../auth-error-copy";
 import { normalizeTotpCode } from "../totp-code";
 import { requireValidUsername } from "../../profile/username-field";
 import { UsernameField } from "./UsernameField";
@@ -18,12 +19,11 @@ import { UsernameField } from "./UsernameField";
 /** The server is enumeration-safe: 401 covers an unknown account, an
  *  unconfirmed enrolment, a wrong code and a replayed code alike. */
 export function totpRecoverErrorMessage(err: unknown): string {
+  const limit = authLimitMessage(err);
+  if (limit !== null) return limit;
   if (err instanceof AuthHttpError) {
     if (err.status === 401) {
       return "That code did not work. Check the app and try the next one.";
-    }
-    if (err.status === 429) {
-      return "Too many attempts. Wait 15 minutes and try again.";
     }
     if (err.status === 503) {
       return "Authenticator recovery is not available here. Use another way in.";

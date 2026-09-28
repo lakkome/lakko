@@ -37,6 +37,10 @@
 //! token = version(1) || context(1) || epoch(8, BE) || nonce(32) || output(64)
 //! ```
 //!
+//! A spending request carries it as `x-lakko-anon-token: <base64url, no
+//! padding>` ([`TOKEN_HEADER`]); every binary field of the issuance exchange
+//! travels as base64url without padding too ([`encode_b64url`]).
+//!
 //! [ADR-0054]: ../../../docs/adr/0054-anti-abuse-without-client-work.md
 
 #![forbid(unsafe_code)]
@@ -46,12 +50,16 @@ mod context;
 mod error;
 mod issuer;
 mod token;
+mod wire;
 
 pub use client::TokenRequest;
 pub use context::{epoch_accepted, epoch_at, TokenContext, DEFAULT_WINDOW_SECS};
 pub use error::{AnonTokenError, Result};
 pub use issuer::{validate_blinded_batch, Issuance, IssuerKey, MasterSecret, MASTER_SECRET_LEN};
 pub use token::{token_input, verify_token, SpendId, Token, VerifiedToken, SPEND_ID_LEN};
+pub use wire::{
+    decode_b64url_fixed, decode_header_value, encode_b64url, TOKEN_HEADER, TOKEN_HEADER_VALUE_LEN,
+};
 
 /// Token wire version.
 pub const TOKEN_VERSION: u8 = 1;
@@ -76,7 +84,7 @@ pub const MAX_BATCH: usize = 32;
 /// Fuzzing entry points. Not part of the supported API.
 #[doc(hidden)]
 pub mod fuzz_api {
-    use super::{verify_token, MasterSecret, Token, TokenContext};
+    use super::{decode_header_value, verify_token, MasterSecret, Token, TokenContext};
 
     /// Fixed master secret for the fuzz harness.
     const FUZZ_MASTER: [u8; 32] = [0x5A; 32];
@@ -90,6 +98,17 @@ pub mod fuzz_api {
     #[must_use]
     pub fn decode_and_verify(data: &[u8]) -> bool {
         let master = MasterSecret::from_bytes(FUZZ_MASTER);
+        // The header decoder runs on the same bytes read as text: it is the
+        // first thing a verifying service does with an anonymous request.
+        if let Ok(text) = core::str::from_utf8(data) {
+            if let Ok(bytes) = decode_header_value(text) {
+                assert_eq!(
+                    super::encode_b64url(&bytes),
+                    text,
+                    "header decode is not canonical"
+                );
+            }
+        }
         for ctx in TokenContext::ALL {
             let _ = verify_token(&master, data, ctx, FUZZ_NOW, super::DEFAULT_WINDOW_SECS);
         }

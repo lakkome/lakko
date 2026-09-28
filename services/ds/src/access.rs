@@ -12,7 +12,8 @@
 //! What is gated: a claimed group's `GET`/`POST messages`, `GET knocks` and
 //! every registration after the first; a claimed mailbox's `GET messages`.
 //! What is not: a mailbox `POST` (the cold inbox strangers are meant to
-//! reach), a group's `POST knock` (PoW-gated instead), and the first claim of
+//! reach), a group's `POST knock` (it spends an anonymous token instead,
+//! ADR-0054 S3), and the first claim of
 //! an unclaimed journal (a 256-bit name cannot be probed, and the flag day has
 //! no production data).
 //!
@@ -43,6 +44,7 @@ use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Json, Response};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
+use lakko_anon_token::TokenContext;
 use lakko_ds_proof::{Proof, RequestParts, VerifyingKey, MAILBOX_EPOCH, PROOF_HEADER_NAME};
 use serde::{Deserialize, Serialize};
 use sqlx::MySqlPool;
@@ -83,9 +85,6 @@ pub(crate) enum Access {
     /// A write: only the two newest epochs.
     Write,
 }
-
-/// Effort env var for the knock's proof of work.
-const EFFORT_VAR: &str = "LAKKO_DS_POW_EFFORT_BITS";
 
 type HandlerError = (StatusCode, String);
 
@@ -398,7 +397,6 @@ pub(crate) async fn put_mailbox_access(
 
 #[derive(Deserialize)]
 pub(crate) struct KnockBody {
-    pub(crate) pow: lakko_pow_server::PowProof,
     /// Standard base64 of each knock row - typically the joiner's attribution
     /// and its external-join proposal - at most [`MAX_KNOCK_PAYLOADS`] and
     /// `MAX_KNOCK_BYTES` decoded in total. **Empty is a probe:** nothing is
@@ -418,9 +416,15 @@ pub(crate) struct KnockResponse {
 }
 
 /// `POST /ds/group/{hex}/knock` - a non-member's request to join.
+///
+/// Spends one `ds-knock` anonymous token (ADR-0054 S3, header
+/// `x-lakko-anon-token`), and only after the body has been validated, so a
+/// malformed knock costs the caller no token. A refused token answers the
+/// gate's stable code (`401 anon-token-*`, or `503 anon-tokens-disabled`).
 pub(crate) async fn post_knock(
     State(state): State<AppState>,
     AxumPath(group_hex): AxumPath<String>,
+    headers: HeaderMap,
     Json(body): Json<KnockBody>,
 ) -> Result<Response, HandlerError> {
     let group_id = journal::decode_pseudonym(&group_hex)?;
@@ -450,9 +454,13 @@ pub(crate) async fn post_knock(
         }
         payloads.push(payload);
     }
-    lakko_pow_server::verify_proof(&state.db, &body.pow)
+    if let Err(refused) = state
+        .anon_tokens
+        .spend_header(&headers, TokenContext::DsKnock)
         .await
-        .map_err(HandlerError::from)?;
+    {
+        return Ok(refused.into_response());
+    }
     let mut ids = Vec::with_capacity(payloads.len());
     for payload in &payloads {
         let published = journal::publish(
@@ -509,17 +517,6 @@ pub(crate) async fn get_knocks(
         header::HeaderValue::from_static("no-store"),
     );
     Ok(response)
-}
-
-/// `POST /pow/challenge` - a fresh proof-of-work challenge for a knock.
-pub(crate) async fn issue_pow_challenge(
-    State(state): State<AppState>,
-) -> Result<Json<lakko_pow_server::ChallengeResponse>, HandlerError> {
-    let effort = lakko_pow_server::configured_effort_bits(EFFORT_VAR);
-    lakko_pow_server::issue_challenge(&state.db, effort)
-        .await
-        .map(Json)
-        .map_err(Into::into)
 }
 
 /// Age out read-tier epoch keys older than the journal's retention window,
@@ -595,8 +592,70 @@ mod tests {
             db: pool.clone(),
             notifiers: journal::Notifiers::default(),
             waker: std::sync::Arc::new(crate::wake::Waker::dormant()),
+            anon_tokens: lakko_anon_token_server::TokenVerifier::new(
+                pool.clone(),
+                Some(
+                    lakko_anon_token_server::AnonTokenServerConfig::from_values(
+                        Some(TOKEN_MASTER_HEX),
+                        None,
+                    )
+                    .unwrap()
+                    .unwrap(),
+                ),
+            ),
         };
         Some((crate::build_app(state), pool))
+    }
+
+    const TOKEN_MASTER_HEX: &str =
+        "6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b";
+
+    /// A spendable anonymous token for `context` at `epochs_ago` epochs
+    /// before the current one, as the `x-lakko-anon-token` header value.
+    fn token_at(context: TokenContext, epochs_ago: u64) -> String {
+        let now = lakko_anon_token_server::current_epoch(lakko_anon_token::DEFAULT_WINDOW_SECS);
+        lakko_anon_token_server::testing::mint_header(
+            &lakko_anon_token::MasterSecret::from_hex(TOKEN_MASTER_HEX).unwrap(),
+            context,
+            now - epochs_ago,
+        )
+    }
+
+    fn knock_token() -> String {
+        token_at(TokenContext::DsKnock, 0)
+    }
+
+    fn error_code(body: &[u8]) -> String {
+        serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| v["error"].as_str().map(str::to_owned))
+            .unwrap_or_default()
+    }
+
+    async fn knock(
+        app: &Router,
+        uri: &str,
+        payloads: &[&[u8]],
+        token: Option<&str>,
+    ) -> (StatusCode, Vec<u8>) {
+        let payloads: Vec<String> = payloads.iter().map(|p| B64.encode(p)).collect();
+        let body = serde_json::json!({ "payloads_b64": payloads })
+            .to_string()
+            .into_bytes();
+        let headers: Vec<(&str, &str)> = token
+            .map(|t| vec![(lakko_anon_token::TOKEN_HEADER, t)])
+            .unwrap_or_default();
+        send_with(
+            app,
+            Req {
+                method: "POST",
+                uri,
+                body,
+                proof: None,
+            },
+            &headers,
+        )
+        .await
     }
 
     static COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -1195,20 +1254,9 @@ mod tests {
         assert_eq!(parsed["messages"].as_array().map(Vec::len), Some(1));
     }
 
-    async fn fresh_pow(pool: &MySqlPool) -> serde_json::Value {
-        let challenge = lakko_pow_server::issue_challenge(pool, 0).await.unwrap();
-        let seed: [u8; 16] = B64.decode(&challenge.seed).unwrap().try_into().unwrap();
-        let solved = lakko_pow::solve(&seed, 0).unwrap();
-        serde_json::json!({
-            "seed": challenge.seed,
-            "nonce": B64.encode(solved.nonce),
-            "solution": B64.encode(solved.solution),
-        })
-    }
-
     #[tokio::test]
     async fn an_empty_knock_is_a_probe_that_stores_nothing() {
-        let Some((app, pool)) = app().await else {
+        let Some((app, _pool)) = app().await else {
             return;
         };
         let gid = fresh_name(8);
@@ -1218,19 +1266,7 @@ mod tests {
             StatusCode::NO_CONTENT
         );
         let knock_uri = format!("/ds/group/{}/knock", hex::encode(gid));
-        let body = serde_json::json!({ "pow": fresh_pow(&pool).await, "payloads_b64": [] })
-            .to_string()
-            .into_bytes();
-        let (status, resp) = send(
-            &app,
-            Req {
-                method: "POST",
-                uri: &knock_uri,
-                body,
-                proof: None,
-            },
-        )
-        .await;
+        let (status, resp) = knock(&app, &knock_uri, &[], Some(&knock_token())).await;
         assert_eq!(status, StatusCode::CREATED);
         let parsed: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(parsed["epoch"], 7);
@@ -1249,27 +1285,19 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed["messages"].as_array().map(Vec::len), Some(0));
-        // Too many payloads is refused before any PoW is spent.
-        let many: Vec<String> = (0..5).map(|_| B64.encode(b"x")).collect();
-        let body = serde_json::json!({ "pow": fresh_pow(&pool).await, "payloads_b64": many })
-            .to_string()
-            .into_bytes();
-        let (status, _) = send(
-            &app,
-            Req {
-                method: "POST",
-                uri: &knock_uri,
-                body,
-                proof: None,
-            },
-        )
-        .await;
+        // Too many payloads is refused before the token is spent: the same
+        // token then pays for a well-formed knock.
+        let t = knock_token();
+        let many: Vec<&[u8]> = (0..5).map(|_| &b"x"[..]).collect();
+        let (status, _) = knock(&app, &knock_uri, &many, Some(&t)).await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        let (status, _) = knock(&app, &knock_uri, &[], Some(&t)).await;
+        assert_eq!(status, StatusCode::CREATED);
     }
 
     #[tokio::test]
-    async fn a_knock_pays_proof_of_work_and_learns_the_epoch() {
-        let Some((app, pool)) = app().await else {
+    async fn a_knock_spends_a_token_once_and_learns_the_epoch() {
+        let Some((app, _pool)) = app().await else {
             return;
         };
         let gid = fresh_name(7);
@@ -1280,28 +1308,8 @@ mod tests {
         );
         let knock_uri = format!("/ds/group/{}/knock", hex::encode(gid));
 
-        // Effort 0 so the solver returns at once; the row still has to exist.
-        let challenge = lakko_pow_server::issue_challenge(&pool, 0).await.unwrap();
-        let seed: [u8; 16] = B64.decode(&challenge.seed).unwrap().try_into().unwrap();
-        let solved = lakko_pow::solve(&seed, 0).unwrap();
-        let pow = serde_json::json!({
-            "seed": challenge.seed,
-            "nonce": B64.encode(solved.nonce),
-            "solution": B64.encode(solved.solution),
-        });
-        let body = serde_json::json!({ "pow": pow, "payloads_b64": [B64.encode(b"join me")] })
-            .to_string()
-            .into_bytes();
-        let (status, resp) = send(
-            &app,
-            Req {
-                method: "POST",
-                uri: &knock_uri,
-                body: body.clone(),
-                proof: None,
-            },
-        )
-        .await;
+        let t = knock_token();
+        let (status, resp) = knock(&app, &knock_uri, &[b"join me"], Some(&t)).await;
         assert_eq!(
             status,
             StatusCode::CREATED,
@@ -1310,18 +1318,10 @@ mod tests {
         );
         let parsed: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(parsed["epoch"], 4);
-        // The same proof of work does not pay twice.
-        let (status, _) = send(
-            &app,
-            Req {
-                method: "POST",
-                uri: &knock_uri,
-                body,
-                proof: None,
-            },
-        )
-        .await;
-        assert_ne!(status, StatusCode::CREATED);
+        // The same token does not pay twice.
+        let (status, resp) = knock(&app, &knock_uri, &[b"join me"], Some(&t)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error_code(&resp), "anon-token-spent");
 
         // The members read it under the group key; a stranger does not.
         let read_uri = format!("/ds/group/{}/knocks?after=0", hex::encode(gid));
@@ -1351,5 +1351,64 @@ mod tests {
         let msgs = parsed["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0]["payload_b64"], B64.encode(b"join me"));
+    }
+
+    #[tokio::test]
+    async fn a_knock_refuses_a_missing_foreign_or_stale_token() {
+        let Some((app, _pool)) = app().await else {
+            return;
+        };
+        let gid = fresh_name(9);
+        let k = key(51);
+        assert_eq!(
+            claim_group(&app, &gid, 2, &k, None).await,
+            StatusCode::NO_CONTENT
+        );
+        let knock_uri = format!("/ds/group/{}/knock", hex::encode(gid));
+
+        let (status, resp) = knock(&app, &knock_uri, &[], None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error_code(&resp), "anon-token-required");
+
+        let wrong = token_at(TokenContext::PushRegister, 0);
+        let (status, resp) = knock(&app, &knock_uri, &[], Some(&wrong)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error_code(&resp), "anon-token-wrong-context");
+
+        let previous = token_at(TokenContext::DsKnock, 1);
+        let (status, _) = knock(&app, &knock_uri, &[], Some(&previous)).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let older = token_at(TokenContext::DsKnock, 2);
+        let (status, resp) = knock(&app, &knock_uri, &[], Some(&older)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error_code(&resp), "anon-token-expired");
+    }
+
+    /// No database: the refusal happens before any store is touched.
+    #[tokio::test]
+    async fn a_knock_answers_503_when_tokens_are_disabled() {
+        let db = MySqlPoolOptions::new()
+            .connect_lazy("mysql://nobody@127.0.0.1:1/none")
+            .unwrap();
+        let state = AppState {
+            db: db.clone(),
+            notifiers: journal::Notifiers::default(),
+            waker: std::sync::Arc::new(crate::wake::Waker::dormant()),
+            anon_tokens: lakko_anon_token_server::TokenVerifier::new(db, None),
+        };
+        let app = crate::build_app(state);
+        let uri = format!("/ds/group/{}/knock", hex::encode([3u8; PSEUDONYM_LEN]));
+        let (status, resp) = knock(&app, &uri, &[b"x"], Some(&knock_token())).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error_code(&resp), "anon-tokens-disabled");
+    }
+
+    #[test]
+    fn the_spent_set_migration_is_the_shared_crate_schema_byte_for_byte() {
+        assert_eq!(
+            include_str!("../migrations/0003_anon_token_spent.sql"),
+            lakko_anon_token_server::SPENT_SET_MIGRATION_SQL
+        );
     }
 }

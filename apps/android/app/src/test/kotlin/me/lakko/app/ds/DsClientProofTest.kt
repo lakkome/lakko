@@ -14,7 +14,8 @@ import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.test.runTest
-import me.lakko.app.auth.PowProofPayload
+import me.lakko.app.anon.AnonTokenContext
+import me.lakko.app.anon.FakeAnonTokenSource
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -54,6 +55,8 @@ class DsClientProofTest {
         val proof: String?,
         val body: ByteArray?,
         val contentType: String?,
+        val token: String? = null,
+        val authorization: String? = null,
     )
 
     private data class Reply(
@@ -71,6 +74,7 @@ class DsClientProofTest {
         seen: MutableList<Seen>,
         registry: DsSignerRegistry = DsSignerRegistry(),
         nowMs: Long = 1_800_000_000_000L,
+        tokens: FakeAnonTokenSource = FakeAnonTokenSource(),
     ): DsClient {
         var index = 0
         val engine = MockEngine { request ->
@@ -86,6 +90,8 @@ class DsClientProofTest {
                 proof = request.headers[DS_PROOF_HEADER],
                 body = body,
                 contentType = request.body.contentType?.toString(),
+                token = request.headers["x-lakko-anon-token"],
+                authorization = request.headers[HttpHeaders.Authorization],
             )
             val reply = replies[index++]
             val headers = if (reply.date != null) {
@@ -96,7 +102,13 @@ class DsClientProofTest {
             respond(content = reply.body, status = reply.status, headers = headers)
         }
         // A base URL WITH an nginx-style prefix: the proof must never cover it.
-        return DsClient(baseUrl = "https://test.invalid/native/ds", engine = engine, signers = registry, nowMs = { nowMs })
+        return DsClient(
+            baseUrl = "https://test.invalid/native/ds",
+            engine = engine,
+            signers = registry,
+            nowMs = { nowMs },
+            anonTokens = tokens,
+        )
     }
 
     private val emptyFetch = """{"messages":[],"has_more":false}"""
@@ -352,29 +364,41 @@ class DsClientProofTest {
     // ------------------------------------------------------------ knock
 
     @Test
-    fun `a knock carries the solved pow and standard base64 payloads, unsigned`() = runTest {
+    fun `a knock spends a ds-knock token, carries standard base64 payloads, unsigned, no session`() = runTest {
         val seen = mutableListOf<Seen>()
+        val tokens = FakeAnonTokenSource()
         val result = client(
-            listOf(
-                Reply(HttpStatusCode.OK, """{"seed":"c2VlZA==","effort_bits":8,"expires_in":60}"""),
-                Reply(HttpStatusCode.Created, """{"ids":[11,12],"epoch":42}"""),
-            ),
+            listOf(Reply(HttpStatusCode.Created, """{"ids":[11,12],"epoch":42}""")),
             seen,
+            tokens = tokens,
         ).use { client ->
-            client.knockWithPow(groupId, listOf(byteArrayOf(1, 2), byteArrayOf(3))) { seed, bits ->
-                assertEquals("c2VlZA==", seed)
-                assertEquals(8, bits)
-                PowProofPayload(seed = seed, nonce = "bm9uY2U=", solution = "c29s")
-            }
+            client.knock(groupId, listOf(byteArrayOf(1, 2), byteArrayOf(3)))
         }
         assertEquals(listOf(11L, 12L), result.ids)
         assertEquals(42uL, result.epoch)
-        assertEquals("/native/ds/pow/challenge", seen[0].encodedPath)
-        assertEquals("/native/ds/ds/group/$groupHex/knock", seen[1].encodedPath)
-        val json = String(seen[1].body!!, Charsets.UTF_8)
+        assertEquals(1, seen.size)
+        assertEquals("/native/ds/ds/group/$groupHex/knock", seen[0].encodedPath)
+        val json = String(seen[0].body!!, Charsets.UTF_8)
         assertTrue(json, json.contains("\"payloads_b64\":[\"AQI=\",\"Aw==\"]"))
-        assertTrue(json, json.contains("\"seed\":\"c2VlZA==\""))
-        assertNull(seen[1].proof)
+        assertTrue(json, !json.contains("pow"))
+        assertNull(seen[0].proof)
+        assertNull(seen[0].authorization)
+        assertEquals("tok-1", seen[0].token)
+        assertEquals(listOf(AnonTokenContext.DS_KNOCK), tokens.taken)
+    }
+
+    @Test
+    fun `a knock whose token was spent is retried once with another`() = runTest {
+        val seen = mutableListOf<Seen>()
+        val result = client(
+            listOf(
+                Reply(HttpStatusCode.Unauthorized, """{"error":"anon-token-spent"}"""),
+                Reply(HttpStatusCode.Created, """{"ids":[],"epoch":3}"""),
+            ),
+            seen,
+        ).use { it.knock(groupId, emptyList()) }
+        assertEquals(3uL, result.epoch)
+        assertEquals(listOf("tok-1", "tok-2"), seen.map { it.token })
     }
 
     @Test
@@ -383,7 +407,7 @@ class DsClientProofTest {
         val result = client(
             listOf(Reply(HttpStatusCode.Created, """{"ids":[],"epoch":null}""")),
             seen,
-        ).use { it.knock(groupId, emptyList(), PowProofPayload("a", "b", "c")) }
+        ).use { it.knock(groupId, emptyList()) }
         assertTrue(result.ids.isEmpty())
         assertNull(result.epoch)
     }

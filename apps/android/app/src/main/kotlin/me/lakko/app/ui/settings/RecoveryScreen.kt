@@ -279,6 +279,10 @@ private fun TotpEnrollSection(sessionToken: String) {
                             )
                         } catch (err: me.lakko.app.auth.AuthHttpError) {
                             when (err.status) {
+                                429 -> TotpUi.Error(
+                                    me.lakko.app.auth.authLimitCopy(err)
+                                        ?: me.lakko.app.auth.TOO_MANY_ATTEMPTS_COPY,
+                                )
                                 409 -> TotpUi.AlreadyEnabled
                                 503 -> TotpUi.Unavailable
                                 else -> TotpUi.Error(
@@ -344,6 +348,11 @@ private fun TotpEnrollSection(sessionToken: String) {
                                 TotpUi.Done
                             } catch (err: me.lakko.app.auth.AuthHttpError) {
                                 when (err.status) {
+                                    429 -> s.copy(
+                                        busy = false,
+                                        error = me.lakko.app.auth.authLimitCopy(err)
+                                            ?: me.lakko.app.auth.TOO_MANY_ATTEMPTS_COPY,
+                                    )
                                     401 -> s.copy(
                                         busy = false,
                                         error = "Wrong code. Check the app and try again.",
@@ -512,8 +521,8 @@ private fun ContactEnrollSection(sessionToken: String) {
                 }
                 Button(
                     onClick = {
-                        // Light client-side shape check — saves a PoW
-                        // solve on an obviously-malformed contact. The
+                        // Light client-side shape check — saves a round
+                        // trip on an obviously-malformed contact. The
                         // server is authoritative.
                         if (!isPlausibleContact(s.kind, s.contact)) {
                             ui = s.copy(
@@ -547,6 +556,12 @@ private fun ContactEnrollSection(sessionToken: String) {
                                 )
                             } catch (err: me.lakko.app.auth.AuthHttpError) {
                                 when (err.status) {
+                                    429 -> ContactUi.Idle(
+                                        kind = kind,
+                                        contact = contact,
+                                        error = me.lakko.app.auth.authLimitCopy(err)
+                                            ?: me.lakko.app.auth.TOO_MANY_ATTEMPTS_COPY,
+                                    )
                                     409 -> ContactUi.AlreadyEnabled
                                     503 -> ContactUi.Unavailable
                                     400 -> ContactUi.Idle(
@@ -617,6 +632,11 @@ private fun ContactEnrollSection(sessionToken: String) {
                                 ContactUi.Done
                             } catch (err: me.lakko.app.auth.AuthHttpError) {
                                 when (err.status) {
+                                    429 -> s.copy(
+                                        busy = false,
+                                        error = me.lakko.app.auth.authLimitCopy(err)
+                                            ?: me.lakko.app.auth.TOO_MANY_ATTEMPTS_COPY,
+                                    )
                                     401 -> s.copy(
                                         busy = false,
                                         error = "Wrong or expired code. Check " +

@@ -100,6 +100,7 @@ public class InviteLandingViewModel(
             AcceptInviteResult.NotFound -> InviteLandingState.NotFound
             AcceptInviteResult.MalformedSlug -> InviteLandingState.MalformedSlug
             AcceptInviteResult.RateLimited -> InviteLandingState.RateLimited
+            AcceptInviteResult.AllowanceUsed -> InviteLandingState.AllowanceUsed
             AcceptInviteResult.RequiresReauth -> InviteLandingState.RequiresReauth
             is AcceptInviteResult.Failed -> InviteLandingState.Failed(result.message)
         }
@@ -142,6 +143,9 @@ public sealed interface InviteLandingState {
     public data object MalformedSlug : InviteLandingState
     /** The discovery service answered `429`; the link may be fine. */
     public data object RateLimited : InviteLandingState
+
+    /** ADR-0054 UX section 3 - the day's allowance is used up. */
+    public data object AllowanceUsed : InviteLandingState
     public data object RequiresReauth : InviteLandingState
 
     public data class Failed(val message: String) : InviteLandingState

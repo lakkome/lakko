@@ -26,8 +26,9 @@
 //!     the normalisation rules.
 
 use lakko_discovery_client::{
-    normalize_username as inner_normalize, validate_username as inner_validate,
-    DiscoveryClientError, OprfBlinder as InnerBlinder, UsernameError, OPRF_HASH_LEN,
+    login_handle as inner_login_handle, normalize_username as inner_normalize,
+    validate_username as inner_validate, DiscoveryClientError, OprfBlinder as InnerBlinder,
+    UsernameError, OPRF_HASH_LEN,
 };
 use std::sync::Mutex;
 use wasm_bindgen::prelude::*;
@@ -99,6 +100,23 @@ pub fn normalize_username(input: &str) -> String {
 #[wasm_bindgen(js_name = validateUsername)]
 pub fn validate_username(input: &str) -> Result<String, JsValue> {
     inner_validate(input).map_err(username_error_value)
+}
+
+/// The login handle for a typed username (ADR-0054 S5): normalise, apply
+/// the username rule, then `BLAKE3-derive-key("lakko/auth/login-handle/v1",
+/// canonical)`. 32 bytes; sent base64url (no padding) as `handle` to the
+/// pre-session sign-in and recovery routes of `services/auth`, and bound to
+/// the signed-in account with `PUT /auth/login-handle`.
+///
+/// # Errors
+///
+/// Throws the same `Error` as [`validate_username`], with its
+/// `usernameError` code property.
+#[wasm_bindgen(js_name = loginHandle)]
+pub fn login_handle(username: &str) -> Result<Vec<u8>, JsValue> {
+    inner_login_handle(username)
+        .map(|h| h.to_vec())
+        .map_err(username_error_value)
 }
 
 /// Client-side OPRF blinder — JS handle.

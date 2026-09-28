@@ -83,7 +83,6 @@ pub(crate) async fn load_or_init_server_setup(pool: &MySqlPool) -> Result<LakkoO
 
 #[derive(Deserialize)]
 pub(crate) struct OprfRequest {
-    pub(crate) pow: crate::pow::PowProof,
     /// Base64-encoded serialised `BlindedElement<Ristretto255-SHA512>`
     /// produced by the client's `OprfClient::blind(...)`.
     pub(crate) blinded: String,
@@ -104,8 +103,6 @@ pub(crate) async fn evaluate(
     State(state): State<crate::AppState>,
     Json(payload): Json<OprfRequest>,
 ) -> Result<Json<OprfResponse>, (StatusCode, String)> {
-    crate::pow::verify_proof(&state.db, &payload.pow).await?;
-
     let blinded_bytes = B64.decode(&payload.blinded).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,

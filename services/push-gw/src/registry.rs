@@ -8,6 +8,11 @@
 //! FCM token after app update, etc.). The PK is composite so a single
 //! device can be reachable through multiple providers (e.g. Web Push
 //! on desktop browser plus FCM on the Android companion app).
+//!
+//! Every route here is anonymous by design (invariant #5: a session would
+//! name the account behind a device pseudonym). Since ADR-0054 S3 each
+//! request spends one `push-register` anonymous token, checked by the
+//! router's gate (`x-lakko-anon-token`) before the handler runs.
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -77,7 +82,6 @@ fn decode_token(b64: &str) -> Result<Vec<u8>, (StatusCode, String)> {
 
 #[derive(Deserialize)]
 pub(crate) struct RegisterRequest {
-    pub(crate) pow: crate::pow::PowProof,
     /// 32-byte device pseudonym, lowercase hex.
     pub(crate) device_pseudonym: String,
     /// Which platform this token is for.
@@ -99,8 +103,6 @@ pub(crate) async fn register(
     State(state): State<AppState>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<RegisterResponse>, (StatusCode, String)> {
-    crate::pow::verify_proof(&state.db, &payload.pow).await?;
-
     let device = decode_device(&payload.device_pseudonym)?;
     let token = decode_token(&payload.token)?;
     let provider_db = payload.provider.as_db();
@@ -139,7 +141,6 @@ pub(crate) async fn register(
 
 #[derive(Deserialize)]
 pub(crate) struct UnregisterRequest {
-    pub(crate) pow: crate::pow::PowProof,
     pub(crate) device_pseudonym: String,
     pub(crate) provider: ProviderKind,
 }
@@ -158,8 +159,6 @@ pub(crate) async fn unregister(
     State(state): State<AppState>,
     Json(payload): Json<UnregisterRequest>,
 ) -> Result<Json<UnregisterResponse>, (StatusCode, String)> {
-    crate::pow::verify_proof(&state.db, &payload.pow).await?;
-
     let device = decode_device(&payload.device_pseudonym)?;
     let provider_db = payload.provider.as_db();
 
@@ -193,7 +192,6 @@ pub(crate) async fn unregister(
 
 #[derive(Deserialize)]
 pub(crate) struct GroupSubscribeRequest {
-    pub(crate) pow: crate::pow::PowProof,
     /// 32-byte device pseudonym, lowercase hex.
     pub(crate) device_pseudonym: String,
     /// 32-byte group pseudonym, lowercase hex. Same handle the
@@ -217,8 +215,6 @@ pub(crate) async fn group_subscribe(
     State(state): State<AppState>,
     Json(payload): Json<GroupSubscribeRequest>,
 ) -> Result<Json<GroupSubscribeResponse>, (StatusCode, String)> {
-    crate::pow::verify_proof(&state.db, &payload.pow).await?;
-
     let device = decode_device(&payload.device_pseudonym)?;
     let group = decode_device(&payload.group_pseudonym)?;
 
@@ -257,7 +253,6 @@ pub(crate) async fn group_subscribe(
 
 #[derive(Deserialize)]
 pub(crate) struct GroupUnsubscribeRequest {
-    pub(crate) pow: crate::pow::PowProof,
     pub(crate) device_pseudonym: String,
     pub(crate) group_pseudonym: String,
 }
@@ -276,8 +271,6 @@ pub(crate) async fn group_unsubscribe(
     State(state): State<AppState>,
     Json(payload): Json<GroupUnsubscribeRequest>,
 ) -> Result<Json<GroupUnsubscribeResponse>, (StatusCode, String)> {
-    crate::pow::verify_proof(&state.db, &payload.pow).await?;
-
     let device = decode_device(&payload.device_pseudonym)?;
     let group = decode_device(&payload.group_pseudonym)?;
 
@@ -319,8 +312,7 @@ mod tests {
 
     fn register_body(provider: &str) -> String {
         format!(
-            r#"{{"pow":{{"seed":"AA","nonce":"BB","solution":"CC"}},
-                 "device_pseudonym":"{}","provider":"{provider}","token":"{}"}}"#,
+            r#"{{"device_pseudonym":"{}","provider":"{provider}","token":"{}"}}"#,
             "ab".repeat(32),
             B64.encode([7u8; 32]),
         )
@@ -359,8 +351,7 @@ mod tests {
     fn every_provider_kind_can_be_unregistered() {
         for (wire, kind, _) in WIRE_NAMES {
             let body = format!(
-                r#"{{"pow":{{"seed":"AA","nonce":"BB","solution":"CC"}},
-                     "device_pseudonym":"{}","provider":"{wire}"}}"#,
+                r#"{{"device_pseudonym":"{}","provider":"{wire}"}}"#,
                 "ab".repeat(32),
             );
             let req: UnregisterRequest = serde_json::from_str(&body)

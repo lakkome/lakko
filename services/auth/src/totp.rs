@@ -7,16 +7,19 @@
 //! that, at recovery time, can stand in for the password to grant ACCESS:
 //!
 //! - **`POST /totp/enroll/start`** — bearer-authenticated (the caller is an
-//!   already-logged-in account) + PoW. Generates a fresh 20-byte secret,
+//!   already-logged-in account); no body. Generates a fresh 20-byte secret,
 //!   stores it ENCRYPTED + UNCONFIRMED, and returns the `otpauth://` URI +
 //!   base32 secret the authenticator app scans.
 //! - **`POST /totp/enroll/finish`** — bearer-auth. Proves the authenticator
 //!   actually holds the secret (a correct current code) before the factor
 //!   becomes usable; sets `confirmed_at`.
-//! - **`POST /totp/recover`** — anonymous (the caller lost their device) +
-//!   PoW. Verifies a code against the confirmed secret with a ±1-step window,
-//!   replay protection (the matched step must be strictly newer), and a
-//!   5-failures-in-15-minutes lockout, then issues the session-token triple.
+//! - **`POST /totp/recover`** — anonymous (the caller lost their device).
+//!   Names the account by login handle (ADR-0054 S5). Charged to the named
+//!   handle's attempt counter (ADR-0054 S4, default 5
+//!   per 15 minutes, `429` `too-many-attempts`) and the per-address bucket,
+//!   then verifies a code against the confirmed secret with a ±1-step window
+//!   and replay protection (the matched step must be strictly newer), and
+//!   issues the session-token triple.
 //!
 //! **Trust class.** The TOTP secret is a server-held ACCESS verifier in the
 //! same trust class as the OPAQUE password envelope — it authenticates the
@@ -35,10 +38,13 @@
 //! residual is inherent to any server-verified OTP factor.
 //!
 //! **Enumeration safety.** `/totp/recover` returns the SAME generic `401`
-//! (or `429` under lockout) whether the account is unknown, has no confirmed
-//! TOTP, or supplied a wrong code — and performs a dummy HMAC verification on
-//! the unknown-account path so the timing/shape does not distinguish the
-//! cases.
+//! whether the account is unknown, has no confirmed TOTP, or supplied a
+//! wrong code — and performs a dummy HMAC verification on the
+//! unknown-account path so the timing/shape does not distinguish the cases.
+//! The `429` comes from a counter keyed on the login handle the request names
+//! (ADR-0054 S5), charged before the lookup, so it trips for an unknown account exactly as
+//! for a known one. (The per-row lockout it replaced answered `429` only for
+//! an existing confirmed row, which told the caller the account existed.)
 
 use axum::extract::State;
 use axum::response::Json;
@@ -72,24 +78,14 @@ const DIGITS: u32 = 6;
 /// ±1 tolerates a 30 s clock skew between the authenticator and the server.
 const STEP_SKEW: i64 = 1;
 
-/// Consecutive failed `/totp/recover` attempts that trigger the lockout.
-const LOCKOUT_THRESHOLD: u32 = 5;
-
-/// Lockout window, in seconds (15 minutes). After [`LOCKOUT_THRESHOLD`]
-/// failures within this window, `/totp/recover` returns `429` until the
-/// window since the last failure elapses.
-const LOCKOUT_WINDOW_SECS: i64 = 900;
-
 type HmacSha1 = Hmac<Sha1>;
 
 /// The `/totp/recover` row shape: `(secret_enc, confirmed_at,
-/// last_accepted_step, failed_attempts, last_failed_at)`.
+/// last_accepted_step)`.
 type RecoverRow = (
     Vec<u8>,
     Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
     i64,
-    u8,
-    Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
 );
 
 // ---------------------------------------------------------------------------
@@ -244,17 +240,6 @@ fn parse_code(code: &str) -> Result<u32, ApiError> {
         .map_err(|_| ApiError::BadInput("code must be 6 digits"))
 }
 
-/// Decode the URL-safe base64 16-byte `account_id`.
-fn decode_account_id(b64: &str) -> Result<[u8; ACCOUNT_ID_LEN], ApiError> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(b64)
-        .map_err(|_| ApiError::BadInput("account_id_b64 not URL-safe base64"))?;
-    bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| ApiError::BadInput("account_id must decode to 16 bytes"))
-}
-
 fn now_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -285,12 +270,6 @@ fn issue_session_token(
 // Wire types
 // ---------------------------------------------------------------------------
 
-/// `POST /totp/enroll/start` request.
-#[derive(Deserialize)]
-pub(crate) struct EnrollStartReq {
-    pub pow: crate::pow::PowProof,
-}
-
 /// `POST /totp/enroll/start` response — the provisioning material the
 /// authenticator app consumes. The raw secret leaves the server exactly once,
 /// here, base32-encoded inside the URI (+ standalone for manual entry).
@@ -310,8 +289,9 @@ pub(crate) struct EnrollFinishReq {
 /// `POST /totp/recover` request.
 #[derive(Deserialize)]
 pub(crate) struct RecoverReq {
-    pub pow: crate::pow::PowProof,
-    pub account_id_b64: String,
+    /// The login handle of the account (ADR-0054 S5): 32 bytes, base64url
+    /// without padding.
+    pub handle: String,
     pub code: String,
 }
 
@@ -330,7 +310,8 @@ pub(crate) struct RecoverRes {
 
 /// `POST /totp/enroll/start` — mint + store an unconfirmed TOTP secret.
 ///
-/// Bearer-auth (the already-logged-in account) + PoW. Re-enrolling BEFORE
+/// Bearer-auth (the already-logged-in account); the body is ignored.
+/// Re-enrolling BEFORE
 /// confirmation replaces the pending secret; re-enrolling AFTER confirmation
 /// is refused (`409`) so a stolen session cannot silently swap the
 /// authenticator out from under the user.
@@ -338,10 +319,8 @@ pub(crate) struct RecoverRes {
 pub(crate) async fn enroll_start(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthenticatedAccount>,
-    Json(req): Json<EnrollStartReq>,
 ) -> Result<Json<EnrollStartRes>, ApiError> {
     let key = require_key(&state)?;
-    crate::pow::verify_proof(&state.db, &req.pow).await?;
     let account_id = auth.0;
 
     // Refuse a swap of an ALREADY-confirmed authenticator.
@@ -366,11 +345,10 @@ pub(crate) async fn enroll_start(
     secret.fill(0);
 
     sqlx::query(
-        "INSERT INTO totp_secrets (account_id, secret_enc, confirmed_at, last_accepted_step, \
-         failed_attempts, last_failed_at) \
-         VALUES (?, ?, NULL, 0, 0, NULL) \
+        "INSERT INTO totp_secrets (account_id, secret_enc, confirmed_at, last_accepted_step) \
+         VALUES (?, ?, NULL, 0) \
          ON DUPLICATE KEY UPDATE secret_enc = VALUES(secret_enc), confirmed_at = NULL, \
-         last_accepted_step = 0, failed_attempts = 0, last_failed_at = NULL",
+         last_accepted_step = 0",
     )
     .bind(account_id.as_slice())
     .bind(secret_enc.as_slice())
@@ -442,8 +420,9 @@ pub(crate) async fn enroll_finish(
 
 /// `POST /totp/recover` — recover ACCESS with an authenticator code.
 ///
-/// Anonymous + PoW. Lockout (5 failures / 15 min) → `429`; otherwise verify
-/// the code (±1 window) AND that the matched step is strictly newer than the
+/// Anonymous; names the account by login handle (ADR-0054 S5). The named
+/// handle's attempt counter and the per-address bucket
+/// → `429` `too-many-attempts`; otherwise verify the code (±1 window) AND that the matched step is strictly newer than the
 /// last accepted step (replay protection), then issue the session triple. The
 /// unknown-account / unconfirmed paths run a dummy HMAC verify and return the
 /// SAME generic shapes (no enumeration).
@@ -453,13 +432,25 @@ pub(crate) async fn recover(
     Json(req): Json<RecoverReq>,
 ) -> Result<Json<RecoverRes>, ApiError> {
     let key = require_key(&state)?;
-    crate::pow::verify_proof(&state.db, &req.pow).await?;
-    let account_id = decode_account_id(&req.account_id_b64)?;
+    let pepper = crate::login_handle::pepper(&state)?;
+    let handle = crate::login_handle::decode_handle(&req.handle)?;
     let code = parse_code(&req.code)?;
+    crate::limits::charge_name(
+        &state.db,
+        &state.limits,
+        crate::limits::Scope::TotpRecover,
+        &handle,
+    )
+    .await?;
+    // An unknown handle resolves to its stand-in id, whose lookup below
+    // misses exactly like an account without an authenticator.
+    let account_id = crate::login_handle::resolve(&state.db, &pepper, &handle)
+        .await?
+        .account_id;
     let now = now_unix_secs();
 
     let row: Option<RecoverRow> = sqlx::query_as(
-        "SELECT secret_enc, confirmed_at, last_accepted_step, failed_attempts, last_failed_at \
+        "SELECT secret_enc, confirmed_at, last_accepted_step \
          FROM totp_secrets WHERE account_id = ?",
     )
     .bind(account_id.as_slice())
@@ -469,29 +460,12 @@ pub(crate) async fn recover(
 
     // Unknown account OR unconfirmed enrollment: run a dummy verify against a
     // fixed secret so the timing/shape matches the wrong-code path, then
-    // return the SAME generic 401. (No DB write — nothing to rate-limit on a
-    // non-existent row, and writing would itself be an oracle.)
-    let Some((secret_enc, Some(_confirmed_at), last_step, failed, last_failed)) =
-        row.filter(|r| r.1.is_some())
-    else {
+    // return the SAME generic 401. (The attempt was already counted against
+    // the named handle above, for known and unknown alike.)
+    let Some((secret_enc, Some(_confirmed_at), last_step)) = row.filter(|r| r.1.is_some()) else {
         let _ = verify_code(&[0u8; SECRET_LEN], now, code);
         return Err(ApiError::InvalidCredential);
     };
-
-    // Lockout: >= threshold failures within the window since the last failure.
-    if u32::from(failed) >= LOCKOUT_THRESHOLD {
-        if let Some(last) = last_failed {
-            let last_secs = last.timestamp();
-            let now_secs = i64::try_from(now).unwrap_or(i64::MAX);
-            if now_secs - last_secs < LOCKOUT_WINDOW_SECS {
-                tracing::warn!(
-                    account_id = %URL_SAFE_NO_PAD.encode(account_id),
-                    "totp: recover rejected (locked out)"
-                );
-                return Err(ApiError::RateLimited);
-            }
-        }
-    }
 
     let secret = lakko_crypto::aead::open_with_key(&key, &secret_enc).map_err(|e| {
         tracing::error!(error = %e, "totp: secret open failed (recover)");
@@ -500,16 +474,7 @@ pub(crate) async fn recover(
 
     let matched = verify_code(&secret, now, code).filter(|&step| step > last_step);
     let Some(step) = matched else {
-        // Wrong code OR a replayed (not-strictly-newer) code: bump the
-        // failure counter + return the generic 401.
-        sqlx::query(
-            "UPDATE totp_secrets SET failed_attempts = failed_attempts + 1, last_failed_at = NOW(3) \
-             WHERE account_id = ?",
-        )
-        .bind(account_id.as_slice())
-        .execute(&state.db)
-        .await
-        .map_err(ApiError::Db)?;
+        // Wrong code OR a replayed (not-strictly-newer) code: the generic 401.
         return Err(ApiError::InvalidCredential);
     };
 
@@ -517,7 +482,7 @@ pub(crate) async fn recover(
     // matched step beats the stored `last_accepted_step` wins (`rows_affected
     // == 1`). A duplicate that read the same old value loses the CAS.
     let consumed = sqlx::query(
-        "UPDATE totp_secrets SET last_accepted_step = ?, failed_attempts = 0, last_failed_at = NULL \
+        "UPDATE totp_secrets SET last_accepted_step = ? \
          WHERE account_id = ? AND last_accepted_step < ?",
     )
     .bind(step)
@@ -746,6 +711,8 @@ mod totp_e2e_tests {
             throttle: crate::throttle::ThrottleConfig::disabled(),
             backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
             anon_tokens: None,
+            handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
+            limits: Arc::new(crate::limits::Limits::defaults()),
         };
         (state, token_secret)
     }
@@ -767,41 +734,6 @@ mod totp_e2e_tests {
                 .map_or(0, |d| d.as_millis()),
         )
         .unwrap_or(i64::MAX)
-    }
-
-    async fn fresh_pow(state: &crate::AppState) -> serde_json::Value {
-        let (st, body) = send(
-            state,
-            Request::builder()
-                .method(Method::POST)
-                .uri("/pow/challenge")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(st, StatusCode::OK);
-        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let seed_b64 = v["seed"].as_str().unwrap().to_string();
-        let seed = STANDARD.decode(&seed_b64).unwrap();
-        let mut nonce = [0u8; 16];
-        loop {
-            let mut challenge = Vec::with_capacity(32);
-            challenge.extend_from_slice(&seed);
-            challenge.extend_from_slice(&nonce);
-            if let Ok(eq) = equix::EquiX::new(&challenge) {
-                if let Some(sol) = eq.solve().first() {
-                    return serde_json::json!({
-                        "seed": seed_b64,
-                        "nonce": STANDARD.encode(nonce),
-                        "solution": STANDARD.encode(sol.to_bytes()),
-                    });
-                }
-            }
-            nonce[0] = nonce[0].wrapping_add(1);
-            if nonce[0] == 0 {
-                nonce[1] = nonce[1].wrapping_add(1);
-            }
-        }
     }
 
     fn bearer_for(token_secret: &lakko_auth_token::TokenSecret, account_id: &[u8; 16]) -> String {
@@ -841,7 +773,6 @@ mod totp_e2e_tests {
             eprintln!("skipping totp_enroll_and_state_machine: LAKKO_AUTH_TEST_DATABASE_URL unset");
             return;
         };
-        std::env::set_var("LAKKO_POW_EFFORT_BITS", "0");
         let _ = tracing_subscriber::fmt()
             .with_env_filter("lakko_svc_auth=debug")
             .with_test_writer()
@@ -863,12 +794,11 @@ mod totp_e2e_tests {
                 .await
                 .unwrap();
             let bearer = bearer_for(&ts, &account_id);
-            let pow = fresh_pow(&state_off).await;
             let (st, _) = json_post(
                 &state_off,
                 "/totp/enroll/start",
                 Some(&bearer),
-                serde_json::json!({ "pow": pow }),
+                serde_json::json!({}),
             )
             .await;
             assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "503 when key unset");
@@ -882,15 +812,16 @@ mod totp_e2e_tests {
             .await
             .unwrap();
         let bearer = bearer_for(&ts, &account_id);
-        let account_id_b64 = URL_SAFE_NO_PAD.encode(account_id);
+        // ADR-0054 S5: recovery names the account by its login handle.
+        let (handle, known_b64) = crate::login_handle::random_handle();
+        crate::login_handle::bind_for_test(&pool, &account_id, &handle).await;
 
         // (2) enroll/start -> secret; compute the current code; enroll/finish.
-        let pow = fresh_pow(&state).await;
         let (st, body) = json_post(
             &state,
             "/totp/enroll/start",
             Some(&bearer),
-            serde_json::json!({ "pow": pow }),
+            serde_json::json!({}),
         )
         .await;
         assert_eq!(st, StatusCode::OK);
@@ -909,65 +840,73 @@ mod totp_e2e_tests {
         assert_eq!(st, StatusCode::OK, "enroll/finish confirms");
 
         // (3) re-enroll after confirmation -> 409.
-        let pow = fresh_pow(&state).await;
         let (st, _) = json_post(
             &state,
             "/totp/enroll/start",
             Some(&bearer),
-            serde_json::json!({ "pow": pow }),
+            serde_json::json!({}),
         )
         .await;
         assert_eq!(st, StatusCode::CONFLICT, "swap of confirmed TOTP refused");
 
         // (4) recover with the SAME code -> 401 (replay: enroll consumed this step).
-        let pow = fresh_pow(&state).await;
         let (st, _) = json_post(
             &state,
             "/totp/recover",
             None,
-            serde_json::json!({ "pow": pow, "account_id_b64": account_id_b64, "code": code }),
+            serde_json::json!({ "handle": known_b64, "code": code }),
         )
         .await;
         assert_eq!(st, StatusCode::UNAUTHORIZED, "replayed step refused");
 
         // (5) unknown account -> enumeration-safe 401 (same shape).
-        let unknown_b64 = URL_SAFE_NO_PAD.encode(Uuid::new_v4().into_bytes());
-        let pow = fresh_pow(&state).await;
+        let (_, unknown_b64) = crate::login_handle::random_handle();
         let (st, _) = json_post(
             &state,
             "/totp/recover",
             None,
-            serde_json::json!({ "pow": pow, "account_id_b64": unknown_b64, "code": "000000" }),
+            serde_json::json!({ "handle": unknown_b64, "code": "000000" }),
         )
         .await;
         assert_eq!(st, StatusCode::UNAUTHORIZED, "unknown account enum-safe");
 
-        // (6) lockout: 5 wrong codes -> the 6th is 429. Use a deliberately
-        // wrong code ("000000" is overwhelmingly unlikely to be the live one;
-        // if it happens to match it would 401 on the replay step anyway).
-        for _ in 0..LOCKOUT_THRESHOLD {
-            let pow = fresh_pow(&state).await;
-            let _ = json_post(
+        // (6) the attempt limit (5 per 15 min by default) trips for the known
+        // account and for the unknown one at the same count, with the same
+        // 429 body. Each has one attempt spent above; "000000" is
+        // overwhelmingly unlikely to be the live code (and would 401 as a
+        // replay anyway).
+        let limit = state
+            .limits
+            .name_window(crate::limits::Scope::TotpRecover)
+            .limit;
+        for id in [&known_b64, &unknown_b64] {
+            for _ in 1..limit {
+                let (st, _) = json_post(
+                    &state,
+                    "/totp/recover",
+                    None,
+                    serde_json::json!({ "handle": id, "code": "000000" }),
+                )
+                .await;
+                assert_eq!(st, StatusCode::UNAUTHORIZED, "under the limit: plain 401");
+            }
+        }
+        let mut refusals = Vec::new();
+        for id in [&known_b64, &unknown_b64] {
+            let (st, body) = json_post(
                 &state,
                 "/totp/recover",
                 None,
-                serde_json::json!({ "pow": pow, "account_id_b64": account_id_b64, "code": "000000" }),
+                serde_json::json!({ "handle": id, "code": "000000" }),
             )
             .await;
+            assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "limit reached");
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(v["error"], crate::limits::CODE_TOO_MANY_ATTEMPTS);
+            assert!(v["retry_after_secs"].as_u64().unwrap() >= 1);
+            refusals.push(v["error"].clone());
         }
-        let pow = fresh_pow(&state).await;
-        let (st, _) = json_post(
-            &state,
-            "/totp/recover",
-            None,
-            serde_json::json!({ "pow": pow, "account_id_b64": account_id_b64, "code": "000000" }),
-        )
-        .await;
-        assert_eq!(
-            st,
-            StatusCode::TOO_MANY_REQUESTS,
-            "locked out after threshold"
-        );
+        assert_eq!(refusals[0], refusals[1], "known and unknown refused alike");
     }
 
     /// The 6-digit code for `secret` at the server's current step.

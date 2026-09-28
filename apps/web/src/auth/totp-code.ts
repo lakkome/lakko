@@ -7,7 +7,7 @@
  * Client-side mirror of the server's `parse_code` gate
  * (`services/auth/src/totp.rs`): a code is exactly 6 ASCII digits
  * after trimming surrounding whitespace. Validating before the
- * network call saves a PoW solve on `/totp/recover` and lets the
+ * network call saves an attempt on `/totp/recover` and lets the
  * forms surface a precise message instead of the server's generic
  * 400/401.
  */

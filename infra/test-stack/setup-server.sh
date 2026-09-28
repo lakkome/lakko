@@ -58,6 +58,7 @@ LAKKO_TOTP_ENC_KEY=$(openssl rand -base64 32)
 LAKKO_VAULT_ENC_KEY=$(openssl rand -base64 32)
 LAKKO_RECOVERY_CONTACT_PEPPER=$(openssl rand -base64 32)
 LAKKO_ANON_TOKEN_MASTER_SECRET=$(openssl rand -hex 32)
+LAKKO_AUTH_HANDLE_PEPPER=$(openssl rand -hex 32)
 
 LAKKO_WEBAUTHN_RP_ID=${DOMAIN}
 LAKKO_WEBAUTHN_RP_NAME=Lakko (test)
@@ -66,10 +67,9 @@ LAKKO_WEBAUTHN_RP_ORIGIN=https://${DOMAIN}
 ${TURN_LINES}
 
 # Proof-of-work difficulty 0 for manual testing (the proof is still requested and verified).
-LAKKO_POW_EFFORT_BITS=0
-LAKKO_DISCOVERY_POW_EFFORT_BITS=0
-LAKKO_PUSH_GW_POW_EFFORT_BITS=0
-LAKKO_DS_POW_EFFORT_BITS=0
+# Since ADR-0054 S4 the only proof left is on auth /signup/start; the other services spend
+# anonymous tokens and every other auth route is limited server-side.
+LAKKO_SIGNUP_POW_EFFORT_BITS=0
 LAKKO_DISCOVERY_FRESH_IDENTITY_COOLDOWN_SECS=3600
 
 LAKKO_BLOB_DIR=/var/lib/lakko-test/blobs
@@ -142,6 +142,14 @@ fi
 if ! grep -q '^LAKKO_ANON_TOKEN_MASTER_SECRET=' $ENV_FILE; then
   echo "LAKKO_ANON_TOKEN_MASTER_SECRET=$(openssl rand -hex 32)" >> $ENV_FILE
   echo "anonymous-token master secret added to the env file"
+fi
+
+# Sign-in by name (ADR-0054 S5) arrived later: an older env file gains the
+# login-handle pepper here, generated once and then kept (regenerating it
+# unbinds every login handle on this stack).
+if ! grep -q '^LAKKO_AUTH_HANDLE_PEPPER=' $ENV_FILE; then
+  echo "LAKKO_AUTH_HANDLE_PEPPER=$(openssl rand -hex 32)" >> $ENV_FILE
+  echo "login-handle pepper added to the env file"
 fi
 
 # The DS -> push-gw wake forward (ADR-0054) arrived later: an older env file

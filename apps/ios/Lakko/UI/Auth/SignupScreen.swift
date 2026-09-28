@@ -84,12 +84,21 @@ public struct SignupScreen: View {
                 AuthHint(text: error, isError: true)
             }
 
+            // ADR-0054 S4 / `docs/ux/anti-abuse.md` section 1: the one heavy
+            // wait in the app. The button becomes a disabled working row, one
+            // line below it, and `Cancel` back to the filled-in form.
             AuthPrimaryButton(
-                title: "Create account",
+                title: viewModel.rateLimited ? "Try again" : "Create account",
                 busy: viewModel.busy,
-                busyTitle: "Creating account...",
-                action: viewModel.onSubmit
+                busyTitle: SignupViewModel.workingTitle,
+                action: viewModel.rateLimited ? viewModel.onTryAgain : viewModel.onSubmit
             )
+            if viewModel.busy {
+                AuthHint(text: SignupViewModel.workingNote)
+                if viewModel.cancellable {
+                    AuthSecondaryButton(title: "Cancel", action: viewModel.onCancel)
+                }
+            }
 
             AuthLinkRow(
                 lead: "Already have an account?",
@@ -100,6 +109,8 @@ public struct SignupScreen: View {
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
+        // Leaving the screen while working cancels the work.
+        .onDisappear { viewModel.onCancel() }
     }
 }
 

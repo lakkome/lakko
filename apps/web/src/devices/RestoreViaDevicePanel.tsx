@@ -19,6 +19,7 @@
  * diverge (authenticated vs anonymous join, `completeFromPairing`
  * vs `completeFromDeviceRestore`).
  */
+import { authLimitMessage } from "../auth/auth-error-copy";
 import { createSignal, onCleanup, Show, Switch, Match, type JSX } from "solid-js";
 import QRCode from "qrcode";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
@@ -111,9 +112,12 @@ export default function RestoreViaDevicePanel(props: {
     try {
       requestId = (await client.deviceRequestCreate(account, flow.qrPayload)).requestId;
     } catch (err) {
+      // ADR-0054 S4: `device-request-limited` has its own copy.
+      const limit = authLimitMessage(err);
       setRequestNote(
-        "Could not reach the server to ask your other device; the QR code still works. " +
-          (err instanceof Error ? err.message : String(err)),
+        limit ??
+          "Could not reach the server to ask your other device; the QR code still works. " +
+            (err instanceof Error ? err.message : String(err)),
       );
       setShowQr(true);
       return;

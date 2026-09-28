@@ -49,6 +49,10 @@ public sealed interface FoundByName {
 
     /** Neither namespace answered. NOT the same fact as [NothingFound]. */
     public data object Unreachable : FoundByName
+
+    /** The day's allowance of lookups (ADR-0054 anonymous tokens) is used
+     *  up; not an answer about the name. */
+    public data object AllowanceUsed : FoundByName
 }
 
 /**
@@ -91,14 +95,16 @@ public suspend fun findByName(
     val name = bareName(typed)
     if (!looksLikeAName(name)) return FoundByName.NothingFound
     var reachedTheServer = false
+    var allowanceUsed = false
     try {
         val channelIdHex = lookups.channel(name)
         reachedTheServer = true
         if (channelIdHex != null) return FoundByName.Channel(channelIdHex, name)
     } catch (cancelled: CancellationException) {
         throw cancelled
-    } catch (_: Throwable) {
+    } catch (e: Throwable) {
         // Fall through: the other namespace may still answer.
+        if (me.lakko.app.anon.isAnonTokenQuotaExhausted(e)) allowanceUsed = true
     }
     try {
         val username = lookups.person(name)
@@ -106,10 +112,15 @@ public suspend fun findByName(
         if (username != null) return FoundByName.Person(username)
     } catch (cancelled: CancellationException) {
         throw cancelled
-    } catch (_: Throwable) {
+    } catch (e: Throwable) {
         // Handled below.
+        if (me.lakko.app.anon.isAnonTokenQuotaExhausted(e)) allowanceUsed = true
     }
-    return if (reachedTheServer) FoundByName.NothingFound else FoundByName.Unreachable
+    return when {
+        reachedTheServer -> FoundByName.NothingFound
+        allowanceUsed -> FoundByName.AllowanceUsed
+        else -> FoundByName.Unreachable
+    }
 }
 
 /**
@@ -124,6 +135,7 @@ public fun findByNameMessage(
 ): String? = when (result) {
     is FoundByName.NothingFound -> "Nothing found for @${bareName(typed)}."
     is FoundByName.Unreachable -> "Could not look that up. Check your connection and try again."
+    is FoundByName.AllowanceUsed -> me.lakko.app.anon.LOOKUP_ALLOWANCE_USED_COPY
     else -> null
 }
 

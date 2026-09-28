@@ -439,6 +439,11 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 // ADR-0051 — a channel metadata record out of bounds; not a
                 // membership refusal.
                 is FfiException.ChannelMeta -> null
+                // ADR-0054 - an anonymous-token issuance refusal; not a
+                // membership refusal.
+                is FfiException.AnonToken,
+                is FfiException.AnonTokenAlreadyFinalized,
+                -> null
 
                 // Everything that is NOT a membership refusal. Enumerated
                 // rather than defaulted, so a new `FfiException` subclass has

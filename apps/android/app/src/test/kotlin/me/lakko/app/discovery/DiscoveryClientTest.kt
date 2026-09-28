@@ -17,8 +17,9 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import me.lakko.app.auth.PowProofPayload
+import me.lakko.app.anon.FakeAnonTokenSource
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
@@ -34,7 +35,7 @@ import org.junit.Test
  * Mirror of [me.lakko.app.auth.AuthClientTest] (1.15d2). Same
  * scope and constraints — the high-level `registerUsername` /
  * `lookup` / `uploadIdentityBundle` flows drive UniFFI-bound
- * [uniffi.lakko_ffi_uniffi.OprfBlinder] and `powSolve` calls
+ * [uniffi.lakko_ffi_uniffi.OprfBlinder] calls
  * which load `liblakko_ffi_uniffi.so` via JNA, so they don't
  * run on the host JVM. Validation gates inside those high-level
  * methods get coverage via cheap arg-shape tests (no FFI reached).
@@ -97,31 +98,12 @@ class DiscoveryClientTest {
                 headers = headersOf(HttpHeaders.ContentType, "application/json"),
             )
         }
-        return DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS })
-    }
-
-    // ===================================================================
-    // /pow/challenge
-    // ===================================================================
-
-    @Test
-    fun `powChallenge parses response`() = runTest {
-        val captured = mutableListOf<CapturedRequest>()
-        client(
-            responses = listOf(
-                HttpStatusCode.OK to
-                    """{"seed":"AAAAAAAAAAAAAAAAAAAAAA==","effort_bits":4,"expires_in":120}""",
-            ),
-            captured = captured,
-        ).use { client ->
-            val resp = client.powChallenge()
-            assertEquals("AAAAAAAAAAAAAAAAAAAAAA==", resp.seed)
-            assertEquals(4, resp.effort_bits)
-            assertEquals(120, resp.expires_in)
-        }
-        assertEquals(1, captured.size)
-        assertTrue(captured[0].url.endsWith("/pow/challenge"))
-        assertNull(captured[0].body)  // POST with no body
+        return DiscoveryClient(
+            baseUrl = "http://test.invalid",
+            engine = engine,
+            inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS },
+            anonTokens = FakeAnonTokenSource(),
+        )
     }
 
     // ===================================================================
@@ -137,7 +119,6 @@ class DiscoveryClientTest {
         ).use { client ->
             val resp = client.oprfEvaluate(
                 OprfRequest(
-                    pow = PowProofPayload(seed = "S", nonce = "N", solution = "X"),
                     blinded = "BLINDED_B64",
                 ),
             )
@@ -146,11 +127,8 @@ class DiscoveryClientTest {
         val body = captured[0].body
         assertNotNull(body)
         assertEquals("BLINDED_B64", body!!["blinded"]!!.jsonPrimitive.content)
-        // Nested pow object came through with snake_case fields.
-        val pow = body["pow"]!!.jsonObject
-        assertEquals("S", pow["seed"]!!.jsonPrimitive.content)
-        assertEquals("N", pow["nonce"]!!.jsonPrimitive.content)
-        assertEquals("X", pow["solution"]!!.jsonPrimitive.content)
+        // ADR-0054 - no proof of work in the body any more.
+        assertFalse(body.containsKey("pow"))
     }
 
     // ===================================================================
@@ -166,7 +144,6 @@ class DiscoveryClientTest {
         ).use { client ->
             val resp = client.register(
                 RegisterRequest(
-                    pow = PowProofPayload("S", "N", "X"),
                     account_id = "ACC_B64",
                     oprf_hash = "HASH_B64",
                 ),
@@ -187,7 +164,6 @@ class DiscoveryClientTest {
                 ).use { client ->
                     client.register(
                         RegisterRequest(
-                            pow = PowProofPayload("S", "N", "X"),
                             account_id = "ACC",
                             oprf_hash = "HASH",
                         ),
@@ -211,7 +187,6 @@ class DiscoveryClientTest {
         ).use { client ->
             val resp = client.lookupRaw(
                 LookupRequest(
-                    pow = PowProofPayload("S", "N", "X"),
                     oprf_hash = "HASH",
                 ),
             )
@@ -227,7 +202,6 @@ class DiscoveryClientTest {
         ).use { client ->
             val resp = client.lookupRaw(
                 LookupRequest(
-                    pow = PowProofPayload("S", "N", "X"),
                     oprf_hash = "HASH",
                 ),
             )
@@ -244,7 +218,6 @@ class DiscoveryClientTest {
                 ).use { client ->
                     client.lookupRaw(
                         LookupRequest(
-                            pow = PowProofPayload("S", "N", "X"),
                             oprf_hash = "HASH",
                         ),
                     )
@@ -267,7 +240,6 @@ class DiscoveryClientTest {
         ).use { client ->
             val resp = client.identityUpload(
                 IdentityUploadRequest(
-                    pow = PowProofPayload("S", "N", "X"),
                     account_id = "ACC_B64",
                     signature_pubkey = "SIG_B64",
                     x25519_pubkey = "X25_B64",
@@ -337,11 +309,11 @@ class DiscoveryClientTest {
         val err = assertThrows(DiscoveryNetworkError::class.java) {
             runTest {
                 DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
-                    client.powChallenge()
+                    client.lookupRaw(LookupRequest(oprf_hash = "AA=="))
                 }
             }
         }
-        assertEquals("/pow/challenge", err.endpoint)
+        assertEquals("/discovery/lookup", err.endpoint)
         assertTrue(err.message!!.contains("simulated DNS failure"))
     }
 
@@ -406,7 +378,6 @@ class DiscoveryClientTest {
         ).use { client ->
             val resp = client.keypackageUpload(
                 KeyPackageUploadRequest(
-                    pow = me.lakko.app.auth.PowProofPayload("S", "N", "X"),
                     account_id = "ACC_B64",
                     device_id = "DEV_B64",
                     keypackage = "KP_B64",
@@ -560,7 +531,6 @@ class DiscoveryClientTest {
         ).use { client ->
             val resp = client.inviteUpload(
                 InviteUploadRequest(
-                    pow = me.lakko.app.auth.PowProofPayload("S", "N", "X"),
                     capability = "CAP_B64",
                 ),
             )
@@ -623,7 +593,6 @@ class DiscoveryClientTest {
             val resp = client.inviteConsume(
                 blobIdSlug = "BLOB_SLUG",
                 req = InviteConsumeRequest(
-                    pow = me.lakko.app.auth.PowProofPayload("S", "N", "X"),
                     joiner_tag = "TAG_B64",
                 ),
             )

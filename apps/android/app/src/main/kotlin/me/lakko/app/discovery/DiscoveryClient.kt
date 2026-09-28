@@ -21,15 +21,17 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
-import kotlinx.coroutines.CoroutineDispatcher
-import kotlinx.coroutines.Dispatchers
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.serialization.json.Json
-import me.lakko.app.auth.PowChallengeResponse
+import me.lakko.app.anon.AnonTokenContext
+import me.lakko.app.anon.AnonTokenSource
+import me.lakko.app.anon.AnonTokens
+import me.lakko.app.anon.AnonymousHttp
+import me.lakko.app.anon.sendWithToken
 import me.lakko.app.auth.base64Decode
 import me.lakko.app.auth.base64Encode
 import me.lakko.app.auth.base64UrlEncodeNoPad
 import me.lakko.app.auth.base64UrlDecodeNoPad
-import me.lakko.app.auth.solvePow
 import me.lakko.app.config.ApiEndpoints
 import me.lakko.app.config.ApiService
 import me.lakko.app.transport.AntiCensorshipEngine
@@ -56,17 +58,18 @@ import uniffi.lakko_ffi_uniffi.signOwnerListQuery
  *      the documented 404 path), do nothing else.
  *   2. **High-level [registerUsername] / [lookup] /
  *      [uploadIdentityBundle]** orchestrate the multi-round-trip
- *      flows: PoW₁ → OPRF blind → POST `/oprf` → finalize →
- *      PoW₂ → POST `/register` (or `/lookup`); and the simpler
- *      one-PoW identity-bundle upload.
+ *      flows: OPRF blind → POST `/oprf` → finalize → POST
+ *      `/register` (or `/lookup`).
  *
- * ## Why a separate PoW challenge?
+ * ## Anonymous tokens, no proof of work (ADR-0054 S3)
  *
- * `services/discovery` keeps its own PoW challenge table; the
- * auth service's seeds are not accepted here. We call
- * `POST /pow/challenge` on the discovery base URL (not the auth
- * one) — the JSON shape happens to match, so we reuse
- * [PowChallengeResponse] from `me.lakko.app.auth.Wire`.
+ * The OPRF evaluation spends a `discovery-lookup` token, a channel-name
+ * registration a `discovery-register` token, and each of the three invite
+ * consumes an `invite-consume` token, drawn from [anonTokens]. Those routes,
+ * and the two lookups that follow an evaluation, go out on a SEPARATE HTTP
+ * client ([AnonymousHttp]) that never carries `Authorization`: a session on
+ * them would name the account next to what it looked up. The bearer routes
+ * (register, identity, KeyPackage, invite uploads) carry only the session.
  *
  * ## Default base URL
  *
@@ -82,17 +85,12 @@ public class DiscoveryClient(
      *  `MockEngine` for deterministic responses without a
      *  network. */
     engine: HttpClientEngine? = null,
-    /** Dispatcher for the PoW solver. Defaults to
-     *  [Dispatchers.Default]; override to a `TestDispatcher`
-     *  inside `runTest`. */
-    private val powDispatcher: CoroutineDispatcher = Dispatchers.Default,
-    /** The signed-in session's token for the three rate-limited reads
-     *  (`/discovery/oprf`, `/discovery/lookup`, `/discovery/channel/lookup`)
-     *  when this client carries no [sessionToken] of its own. Discovery only
-     *  uses it to charge those reads to the account instead of the shared
-     *  per-IP bucket; it is never attached to any other request. Defaults to
-     *  [AmbientSessionToken]. */
-    private val rateLimitToken: () -> String? = { AmbientSessionToken.current },
+    /** Engine for the anonymous routes (the token routes and the two
+     *  lookups). Production: [AnonymousHttp.engine], its own connection pool.
+     *  Tests: `null` reuses [engine] (a `MockEngine`). */
+    anonEngine: HttpClientEngine? = null,
+    /** Where the token routes draw their anonymous token (ADR-0054). */
+    anonTokens: AnonTokenSource = AnonTokens.shared,
     /** The short-link widths (ADR-0028 amendment of 2026-09-27): the 6-byte
      *  ledger id every invite route takes. Defaults to the core's values;
      *  a host JVM test (no native library) passes them in. */
@@ -132,12 +130,20 @@ public class DiscoveryClient(
         }
     }
 
+    /** The client for every anonymous route. It never attaches
+     *  `Authorization`, and in production it has its own connection pool, so
+     *  a token route cannot ride a connection an authenticated call used. */
+    private val anonClient: HttpClient =
+        HttpClient(anonEngine ?: engine ?: AnonymousHttp.engine) {
+            install(ContentNegotiation) { json(json) }
+        }
+
     /**
      * Phase 1.5b: bearer token threaded into the
      * `Authorization: Bearer <token>` header on every protected
      * `lakko-svc-discovery` write. `null` means "anonymous";
-     * unauthenticated paths (`/pow/challenge`, `/discovery/oprf`,
-     * `/discovery/lookup`, all GETs, invite consume) still work.
+     * the anonymous routes never carry it (they go out on the
+     * anonymous client), and the GETs work without it.
      *
      * Volatile so a `setSessionToken` from one coroutine is
      * immediately visible to a concurrent request on another.
@@ -154,21 +160,31 @@ public class DiscoveryClient(
         sessionToken = token
     }
 
+    @Volatile
+    private var anonTokens: AnonTokenSource = anonTokens
+
+    /**
+     * Draw this client's anonymous tokens with [session] rather than the live
+     * one: signup claims its username before the new session is installed.
+     * The tokens still go out on the anonymous client; only who they are
+     * ISSUED to changes.
+     */
+    public fun useTokenSession(session: me.lakko.app.anon.AnonSession) {
+        anonTokens = me.lakko.app.anon.DetachedAnonTokenSource(anonTokens, session)
+    }
+
     override fun close() {
         client.close()
+        anonClient.close()
     }
 
     // -----------------------------------------------------------------
     // Low-level: 1:1 HTTP endpoints
     // -----------------------------------------------------------------
 
-    /** `POST /pow/challenge`. */
-    public suspend fun powChallenge(): PowChallengeResponse =
-        doPost("/pow/challenge") { /* no body */ }
-
-    /** `POST /discovery/oprf`. */
+    /** `POST /discovery/oprf`, spending one `discovery-lookup` token. */
     public suspend fun oprfEvaluate(req: OprfRequest): OprfResponse =
-        doPost("/discovery/oprf", rateLimited = true) {
+        tokenPost("/discovery/oprf", AnonTokenContext.DISCOVERY_LOOKUP) {
             contentType(ContentType.Application.Json)
             setBody(req)
         }
@@ -186,17 +202,16 @@ public class DiscoveryClient(
      * any other non-2xx.
      */
     public suspend fun lookupRaw(req: LookupRequest): LookupResponse? =
-        doPostNullableOn404("/discovery/lookup", rateLimited = true) {
+        doPostNullableOn404("/discovery/lookup", anonymous = true) {
             contentType(ContentType.Application.Json)
             setBody(req)
         }
 
     /** `POST /discovery/channel/register` — bind an OPRF-hashed
-     *  `@channelname` to a `channel_id` (G4-5, ADR-0010).
-     *  Session-token-gated write; the high-level
-     *  [registerChannelName] drives the PoW + OPRF flow. */
+     *  `@channelname` to a `channel_id` (G4-5, ADR-0010). Anonymous: spends
+     *  one `discovery-register` token (ADR-0054). */
     public suspend fun channelRegister(req: ChannelRegisterRequest): ChannelRegisterResponse =
-        doPost("/discovery/channel/register") {
+        tokenPost("/discovery/channel/register", AnonTokenContext.DISCOVERY_REGISTER) {
             contentType(ContentType.Application.Json)
             setBody(req)
         }
@@ -208,7 +223,7 @@ public class DiscoveryClient(
      * namespace (G4-5, ADR-0010).
      */
     public suspend fun channelLookupRaw(req: ChannelLookupRequest): ChannelLookupResponse? =
-        doPostNullableOn404("/discovery/channel/lookup", rateLimited = true) {
+        doPostNullableOn404("/discovery/channel/lookup", anonymous = true) {
             contentType(ContentType.Application.Json)
             setBody(req)
         }
@@ -293,7 +308,7 @@ public class DiscoveryClient(
      * `POST /discovery/invite/{blob_id_b64url}/consume` —
      * atomic `max_uses` enforcement + per-joiner dedup
      * (Phase 1.18d2a + 1.18d3b). The high-level [consumeInvite]
-     * wrapper drives the PoW solve + the local
+     * wrapper draws the `invite-consume` token + the local
      * [computeJoinerInviteTag] call + folds the 200 / 404 / 410
      * status trifecta into a discriminated [ConsumeInviteResult].
      *
@@ -304,7 +319,7 @@ public class DiscoveryClient(
         blobIdSlug: String,
         req: InviteConsumeRequest,
     ): InviteConsumeResponse =
-        doPost("/discovery/invite/$blobIdSlug/consume") {
+        tokenPost("/discovery/invite/$blobIdSlug/consume", AnonTokenContext.INVITE_CONSUME) {
             contentType(ContentType.Application.Json)
             setBody(req)
         }
@@ -313,7 +328,7 @@ public class DiscoveryClient(
      *  `CallInviteCapability` blob, get the server-assigned
      *  `blob_id` back (Phase 3c3-server). Sibling of
      *  [inviteUpload]; wire shape is shared. The high-level
-     *  [uploadCallInvite] wrapper drives the PoW solve. */
+     *  [uploadCallInvite] wrapper is the session-gated write. */
     public suspend fun callInviteUpload(req: InviteUploadRequest): InviteUploadResponse =
         doPost("/discovery/call-invite") {
             contentType(ContentType.Application.Json)
@@ -339,7 +354,7 @@ public class DiscoveryClient(
      * `POST /discovery/call-invite/{blob_id_b64url}/consume` —
      * atomic `max_uses` enforcement + per-joiner dedup against
      * the call-invite ledger (Phase 3c3-multi-use). The high-
-     * level [consumeCallInvite] wrapper drives the PoW solve +
+     * level [consumeCallInvite] wrapper draws the token +
      * the local `computeJoinerInviteTag` call + folds the 200 /
      * 404 / 410 status trifecta into a discriminated
      * [ConsumeInviteResult].
@@ -348,7 +363,7 @@ public class DiscoveryClient(
         blobIdSlug: String,
         req: InviteConsumeRequest,
     ): InviteConsumeResponse =
-        doPost("/discovery/call-invite/$blobIdSlug/consume") {
+        tokenPost("/discovery/call-invite/$blobIdSlug/consume", AnonTokenContext.INVITE_CONSUME) {
             contentType(ContentType.Application.Json)
             setBody(req)
         }
@@ -361,7 +376,7 @@ public class DiscoveryClient(
      *  `GroupInviteCapability` blob, get the server-assigned `blob_id` back
      *  (ADR-0028, G-3). Distinct from [callInviteUpload] because the
      *  group-invite request carries a `max_uses` the capability does NOT embed.
-     *  The high-level [uploadGroupInvite] wrapper drives the PoW solve. */
+     *  The high-level [uploadGroupInvite] wrapper is the session-gated write. */
     public suspend fun groupInviteUpload(req: GroupInviteUploadRequest): InviteUploadResponse =
         doPost("/discovery/group-invite") {
             contentType(ContentType.Application.Json)
@@ -517,8 +532,8 @@ public class DiscoveryClient(
     /**
      * Bind `@username` to [accountId] server-side.
      *
-     * Flow: PoW₁ → OPRF blind → `POST /discovery/oprf` → finalize
-     * → PoW₂ → `POST /discovery/register`.
+     * Flow: OPRF blind → `POST /discovery/oprf` (one `discovery-lookup`
+     * token) → finalize → `POST /discovery/register` (the session).
      *
      * Username normalisation is handled inside [OprfBlinder.blind]
      * (the UniFFI helper); the canonical form is surfaced back
@@ -542,21 +557,13 @@ public class DiscoveryClient(
             // DiscoveryAlreadyFinalized).
             val normalisedUsername = blinder.normalizedUsername()
 
-            val challenge1 = powChallenge()
-            val pow1 = solvePow(challenge1.seed, challenge1.effort_bits, powDispatcher)
-            val oprfResp = oprfEvaluate(
-                OprfRequest(pow = pow1, blinded = blinder.blindedB64()),
-            )
+            val oprfResp = oprfEvaluate(OprfRequest(blinded = blinder.blindedB64()))
 
             val oprfHashBytes = blinder.finalize(oprfResp.evaluated)
             val oprfHashB64 = base64Encode(oprfHashBytes)
 
-            val challenge2 = powChallenge()
-            val pow2 = solvePow(challenge2.seed, challenge2.effort_bits, powDispatcher)
-
             val resp = register(
                 RegisterRequest(
-                    pow = pow2,
                     account_id = base64Encode(accountId),
                     oprf_hash = oprfHashB64,
                 ),
@@ -577,26 +584,19 @@ public class DiscoveryClient(
      * when the username is not registered.
      *
      * Same flow as [registerUsername] modulo the second endpoint:
-     * PoW₁ → OPRF blind → `POST /discovery/oprf` → finalize →
-     * PoW₂ → `POST /discovery/lookup`.
+     * OPRF blind → `POST /discovery/oprf` (one token) → finalize →
+     * `POST /discovery/lookup` (anonymous, no token).
      */
     public suspend fun lookup(username: String): LookupResult {
         return OprfBlinder.blind(username).use { blinder ->
             val normalisedUsername = blinder.normalizedUsername()
 
-            val challenge1 = powChallenge()
-            val pow1 = solvePow(challenge1.seed, challenge1.effort_bits, powDispatcher)
-            val oprfResp = oprfEvaluate(
-                OprfRequest(pow = pow1, blinded = blinder.blindedB64()),
-            )
+            val oprfResp = oprfEvaluate(OprfRequest(blinded = blinder.blindedB64()))
 
             val oprfHashBytes = blinder.finalize(oprfResp.evaluated)
             val oprfHashB64 = base64Encode(oprfHashBytes)
 
-            val challenge2 = powChallenge()
-            val pow2 = solvePow(challenge2.seed, challenge2.effort_bits, powDispatcher)
-
-            val resp = lookupRaw(LookupRequest(pow = pow2, oprf_hash = oprfHashB64))
+            val resp = lookupRaw(LookupRequest(oprf_hash = oprfHashB64))
             if (resp == null) {
                 LookupResult(normalisedUsername = normalisedUsername, account = null)
             } else {
@@ -622,15 +622,16 @@ public class DiscoveryClient(
     /**
      * Bind `@channelname` to a 16-byte `channel_id`.
      *
-     * Flow: PoW₁ → OPRF blind → `POST /discovery/oprf` → finalize →
-     * PoW₂ → `POST /discovery/channel/register`. Identical to
+     * Flow: OPRF blind → `POST /discovery/oprf` (a `discovery-lookup`
+     * token) → finalize → `POST /discovery/channel/register` (a
+     * `discovery-register` token). Identical to
      * [registerUsername] modulo the id type + second endpoint.
      *
      * Handle normalisation (NFKC + lowercase + trim + leading-`@`
      * strip) happens inside [OprfBlinder.blind]. The write is
-     * session-token-gated (a DoS rate-limit role, NOT an ownership
-     * proof — see `services/discovery/src/channel_names.rs`); the
-     * caller must have set the bearer via [setSessionToken].
+     * anonymous and rationed by the token (NOT an ownership proof —
+     * see `services/discovery/src/channel_names.rs`); no session rides
+     * on it.
      *
      * @return `true` once the server bound the handle. A `!ok` reply
      *   or any non-2xx status throws [DiscoveryHttpError] instead —
@@ -645,20 +646,12 @@ public class DiscoveryClient(
             throw DiscoveryClientArgError("channelId must be $CHANNEL_ID_LEN bytes")
         }
         return OprfBlinder.blindChannel(handle).use { blinder ->
-            val challenge1 = powChallenge()
-            val pow1 = solvePow(challenge1.seed, challenge1.effort_bits, powDispatcher)
-            val oprfResp = oprfEvaluate(
-                OprfRequest(pow = pow1, blinded = blinder.blindedB64()),
-            )
+            val oprfResp = oprfEvaluate(OprfRequest(blinded = blinder.blindedB64()))
 
             val oprfHashB64 = base64Encode(blinder.finalize(oprfResp.evaluated))
 
-            val challenge2 = powChallenge()
-            val pow2 = solvePow(challenge2.seed, challenge2.effort_bits, powDispatcher)
-
             val resp = channelRegister(
                 ChannelRegisterRequest(
-                    pow = pow2,
                     oprf_hash = oprfHashB64,
                     channel_id = base64Encode(channelId),
                 ),
@@ -680,24 +673,17 @@ public class DiscoveryClient(
      * the handle (the server's 404 not-found path).
      *
      * Same flow as [registerChannelName] modulo the second
-     * endpoint: PoW₁ → OPRF → PoW₂ → `POST /discovery/channel/lookup`.
+     * endpoint: OPRF (one token) → `POST /discovery/channel/lookup`.
      * Unauthenticated (the lookup path is open); anonymous-safe.
      */
     public suspend fun lookupChannel(handle: String): String? {
         return OprfBlinder.blindChannel(handle).use { blinder ->
-            val challenge1 = powChallenge()
-            val pow1 = solvePow(challenge1.seed, challenge1.effort_bits, powDispatcher)
-            val oprfResp = oprfEvaluate(
-                OprfRequest(pow = pow1, blinded = blinder.blindedB64()),
-            )
+            val oprfResp = oprfEvaluate(OprfRequest(blinded = blinder.blindedB64()))
 
             val oprfHashB64 = base64Encode(blinder.finalize(oprfResp.evaluated))
 
-            val challenge2 = powChallenge()
-            val pow2 = solvePow(challenge2.seed, challenge2.effort_bits, powDispatcher)
-
             val resp = channelLookupRaw(
-                ChannelLookupRequest(pow = pow2, oprf_hash = oprfHashB64),
+                ChannelLookupRequest(oprf_hash = oprfHashB64),
             ) ?: return@use null
             bytesToHexLower(base64Decode(resp.channel_id))
         }
@@ -705,7 +691,7 @@ public class DiscoveryClient(
 
     /**
      * Upload (or replace) the user's MLS KeyPackage. Drives one
-     * PoW solve + `POST /discovery/keypackage`.
+     * `POST /discovery/keypackage` (session-gated).
      *
      * Unlike the identity bundle, KeyPackages are **not**
      * deterministic — `Identity.createKeyPackage()` generates
@@ -745,12 +731,8 @@ public class DiscoveryClient(
             )
         }
 
-        val challenge = powChallenge()
-        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
-
         val resp = keypackageUpload(
             KeyPackageUploadRequest(
-                pow = pow,
                 account_id = base64Encode(accountId),
                 device_id = base64Encode(deviceId),
                 keypackage = base64Encode(keyPackageBytes),
@@ -813,7 +795,7 @@ public class DiscoveryClient(
      * Upload a freshly-composed [InviteCapability] blob and
      * receive the server-assigned `blobId` (a random 6-byte
      * ledger id, ADR-0028 amendment of 2026-09-27). Drives one
-     * PoW solve + `POST /discovery/invite`. NOT idempotent: the
+     * `POST /discovery/invite` (session-gated). NOT idempotent: the
      * same bytes uploaded twice get two ids.
      *
      * Feed `capabilityBytes` straight from
@@ -839,11 +821,8 @@ public class DiscoveryClient(
             )
         }
 
-        val challenge = powChallenge()
-        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
-
         val resp = inviteUpload(
-            InviteUploadRequest(pow = pow, capability = base64Encode(capabilityBytes)),
+            InviteUploadRequest(capability = base64Encode(capabilityBytes)),
         )
         // Server returns the 8-character base64url id; decode it
         // back to the raw 6 bytes.
@@ -874,7 +853,7 @@ public class DiscoveryClient(
      * four observable outcomes without exception-walking the
      * underlying [DiscoveryHttpError] hierarchy.
      *
-     * Drives one PoW solve + one
+     * Draws one `invite-consume` token + one
      * [uniffi.lakko_ffi_uniffi.computeJoinerInviteTag] call
      * locally before posting; the joiner's `accountId` never
      * crosses the wire in plaintext.
@@ -901,28 +880,8 @@ public class DiscoveryClient(
         val joinerTag = computeJoinerInviteTag(capabilityBytes, joinerAccountId)
         val slug = base64UrlEncodeNoPad(blobId)
 
-        val challenge = powChallenge()
-        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
-
         val endpoint = "/discovery/invite/$slug/consume"
-        val url = "$baseUrl$endpoint"
-        val authHeader = sessionToken?.let { "Bearer $it" }
-        val response: HttpResponse = try {
-            client.post(url) {
-                if (authHeader != null) {
-                    header(io.ktor.http.HttpHeaders.Authorization, authHeader)
-                }
-                contentType(ContentType.Application.Json)
-                setBody(
-                    InviteConsumeRequest(
-                        pow = pow,
-                        joiner_tag = base64Encode(joinerTag),
-                    ),
-                )
-            }
-        } catch (cause: Throwable) {
-            throw DiscoveryNetworkError(endpoint, cause)
-        }
+        val response: HttpResponse = consumeRequest(endpoint, joinerTag)
         return when (response.status) {
             HttpStatusCode.NotFound -> ConsumeInviteResult.NotFound
             HttpStatusCode.Gone -> ConsumeInviteResult.Exhausted
@@ -1010,7 +969,7 @@ public class DiscoveryClient(
     /**
      * Upload a freshly-composed `CallInviteCapability` blob and
      * receive the server-assigned 6-byte `blobId` (a fresh
-     * random ledger id per upload). Drives one PoW solve +
+     * random ledger id per upload). Session-gated
      * `POST /discovery/call-invite`.
      *
      * Sibling of [uploadInvite]; the client-side ceiling is
@@ -1033,11 +992,8 @@ public class DiscoveryClient(
             )
         }
 
-        val challenge = powChallenge()
-        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
-
         val resp = callInviteUpload(
-            InviteUploadRequest(pow = pow, capability = base64Encode(capabilityBytes)),
+            InviteUploadRequest(capability = base64Encode(capabilityBytes)),
         )
         return uploadedBlobId(resp.blob_id, "/discovery/call-invite")
     }
@@ -1085,28 +1041,8 @@ public class DiscoveryClient(
         val joinerTag = computeJoinerInviteTag(capabilityBytes, joinerAccountId)
         val slug = base64UrlEncodeNoPad(blobId)
 
-        val challenge = powChallenge()
-        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
-
         val endpoint = "/discovery/call-invite/$slug/consume"
-        val url = "$baseUrl$endpoint"
-        val authHeader = sessionToken?.let { "Bearer $it" }
-        val response: HttpResponse = try {
-            client.post(url) {
-                if (authHeader != null) {
-                    header(io.ktor.http.HttpHeaders.Authorization, authHeader)
-                }
-                contentType(ContentType.Application.Json)
-                setBody(
-                    InviteConsumeRequest(
-                        pow = pow,
-                        joiner_tag = base64Encode(joinerTag),
-                    ),
-                )
-            }
-        } catch (cause: Throwable) {
-            throw DiscoveryNetworkError(endpoint, cause)
-        }
+        val response: HttpResponse = consumeRequest(endpoint, joinerTag)
         return when (response.status) {
             HttpStatusCode.NotFound -> ConsumeInviteResult.NotFound
             HttpStatusCode.Gone -> ConsumeInviteResult.Exhausted
@@ -1137,7 +1073,7 @@ public class DiscoveryClient(
     /**
      * Upload a freshly-composed `GroupInviteCapability` blob and receive the
      * server-assigned 6-byte `blobId` (a fresh random ledger id per upload).
-     * Drives one PoW solve + `POST /discovery/group-invite`.
+     * Session-gated `POST /discovery/group-invite`.
      *
      * `maxUses` is a SOFT anti-spam throttle (NOT part of the signed capability,
      * NOT an access control — the admin approval gate is the security
@@ -1160,12 +1096,8 @@ public class DiscoveryClient(
             )
         }
 
-        val challenge = powChallenge()
-        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
-
         val resp = groupInviteUpload(
             GroupInviteUploadRequest(
-                pow = pow,
                 capability = base64Encode(capabilityBytes),
                 max_uses = maxUses,
             ),
@@ -1214,28 +1146,8 @@ public class DiscoveryClient(
         val joinerTag = computeJoinerInviteTag(capabilityBytes, joinerAccountId)
         val slug = base64UrlEncodeNoPad(blobId)
 
-        val challenge = powChallenge()
-        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
-
         val endpoint = "/discovery/group-invite/$slug/consume"
-        val url = "$baseUrl$endpoint"
-        val authHeader = sessionToken?.let { "Bearer $it" }
-        val response: HttpResponse = try {
-            client.post(url) {
-                if (authHeader != null) {
-                    header(io.ktor.http.HttpHeaders.Authorization, authHeader)
-                }
-                contentType(ContentType.Application.Json)
-                setBody(
-                    InviteConsumeRequest(
-                        pow = pow,
-                        joiner_tag = base64Encode(joinerTag),
-                    ),
-                )
-            }
-        } catch (cause: Throwable) {
-            throw DiscoveryNetworkError(endpoint, cause)
-        }
+        val response: HttpResponse = consumeRequest(endpoint, joinerTag)
         return when (response.status) {
             HttpStatusCode.NotFound -> ConsumeInviteResult.NotFound
             HttpStatusCode.Gone -> ConsumeInviteResult.Exhausted
@@ -1430,7 +1342,7 @@ public class DiscoveryClient(
 
     /**
      * Upload (or replace) the identity bundle for [accountId].
-     * Drives one PoW solve + `POST /discovery/identity`.
+     * Session-gated `POST /discovery/identity`.
      *
      * Idempotent — the server upserts via
      * `INSERT … ON DUPLICATE KEY UPDATE`. Calling this on every
@@ -1479,12 +1391,8 @@ public class DiscoveryClient(
             )
         }
 
-        val challenge = powChallenge()
-        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
-
         val resp = identityUpload(
             IdentityUploadRequest(
-                pow = pow,
                 account_id = base64Encode(accountId),
                 signature_pubkey = base64Encode(signaturePubkey),
                 x25519_pubkey = base64Encode(x25519Pubkey),
@@ -1509,19 +1417,57 @@ public class DiscoveryClient(
     // -----------------------------------------------------------------
 
     /**
-     * The `Authorization` header value for a request, or `null`.
-     *
-     * The client's own [sessionToken] always wins. [rateLimited] marks the
-     * three reads discovery rate-limits (`/discovery/oprf`,
-     * `/discovery/lookup`, `/discovery/channel/lookup`): with a token the
-     * server charges the account, without one the source IP, which everyone
-     * behind a NAT shares. For those, a client carrying no token of its own
-     * falls back to the signed-in session's ([rateLimitToken]). Protected
-     * writes never take that fallback.
+     * One ledger consume on the anonymous client with an `invite-consume`
+     * token and one retry on a token refusal. No session: the joiner is named
+     * only by the server-blind dedup tag.
      */
-    private fun bearerHeader(rateLimited: Boolean): String? {
-        val token = sessionToken ?: if (rateLimited) rateLimitToken() else null
-        return token?.let { "Bearer $it" }
+    private suspend fun consumeRequest(endpoint: String, joinerTag: ByteArray): HttpResponse {
+        val url = "$baseUrl$endpoint"
+        return anonTokens.sendWithToken(AnonTokenContext.INVITE_CONSUME) { name, value ->
+            try {
+                anonClient.post(url) {
+                    header(name, value)
+                    contentType(ContentType.Application.Json)
+                    setBody(InviteConsumeRequest(joiner_tag = base64Encode(joinerTag)))
+                }
+            } catch (cause: CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                throw DiscoveryNetworkError(endpoint, cause)
+            }
+        }
+    }
+
+    /**
+     * One POST on a token route: the anonymous client, the token header, one
+     * retry on a token refusal, never `Authorization`.
+     */
+    private suspend inline fun <reified Res : Any> tokenPost(
+        endpoint: String,
+        context: AnonTokenContext,
+        crossinline configure: HttpRequestBuilder.() -> Unit,
+    ): Res {
+        val url = "$baseUrl$endpoint"
+        val response: HttpResponse = anonTokens.sendWithToken(context) { name, value ->
+            try {
+                anonClient.post(url) {
+                    header(name, value)
+                    configure()
+                }
+            } catch (cause: CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                throw DiscoveryNetworkError(endpoint, cause)
+            }
+        }
+        if (!response.status.isSuccess()) {
+            throw DiscoveryHttpError(
+                status = response.status.value,
+                endpoint = endpoint,
+                body = response.safeReadBody(),
+            )
+        }
+        return response.body()
     }
 
     /**
@@ -1531,7 +1477,6 @@ public class DiscoveryClient(
      */
     private suspend inline fun <reified Res : Any> doPost(
         endpoint: String,
-        rateLimited: Boolean = false,
         crossinline configure: HttpRequestBuilder.() -> Unit,
     ): Res {
         val url = "$baseUrl$endpoint"
@@ -1540,7 +1485,7 @@ public class DiscoveryClient(
         // the inline lambda doesn't try to capture `this` —
         // `@Volatile` reads are atomic but the field-access
         // shape still confuses inlining.
-        val authHeader = bearerHeader(rateLimited)
+        val authHeader = sessionToken?.let { "Bearer $it" }
         val response: HttpResponse = try {
             client.post(url) {
                 if (authHeader != null) {
@@ -1570,13 +1515,16 @@ public class DiscoveryClient(
      */
     private suspend inline fun <reified Res : Any> doPostNullableOn404(
         endpoint: String,
-        rateLimited: Boolean = false,
+        anonymous: Boolean = false,
         crossinline configure: HttpRequestBuilder.() -> Unit,
     ): Res? {
         val url = "$baseUrl$endpoint"
-        val authHeader = bearerHeader(rateLimited)
+        // The lookups that follow an OPRF evaluation go out anonymously: a
+        // session there would name who looked up whom.
+        val authHeader = if (anonymous) null else sessionToken?.let { "Bearer $it" }
+        val http = if (anonymous) anonClient else client
         val response: HttpResponse = try {
-            client.post(url) {
+            http.post(url) {
                 if (authHeader != null) {
                     header(io.ktor.http.HttpHeaders.Authorization, authHeader)
                 }

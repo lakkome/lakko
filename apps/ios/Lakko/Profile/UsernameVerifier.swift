@@ -20,7 +20,7 @@ enum UsernameVerificationState: Equatable, Codable {
     /// Discovery resolves the username to a different key, or to nobody. The
     /// username is never shown for this key.
     case mismatch
-    /// The lookup could not complete (network, proof-of-work, a refused
+    /// The lookup could not complete (network, no anonymous token, a refused
     /// identity gate). Not shown either; retried after
     /// ``UsernameVerifier/retryAfterMs``.
     case failed(atMs: Int64)
@@ -46,7 +46,7 @@ enum UsernameVerificationState: Equatable, Codable {
 ///   from scratch; the old verdict never carries over.
 /// * **Single-flight.** Every surface that renders a name may ask at once; a
 ///   pair already being resolved joins the in-flight lookup instead of paying
-///   a second proof-of-work round-trip.
+///   a second lookup (and a second anonymous token).
 /// * **Definitive verdicts persist**, transient failures do not survive a
 ///   retry window — a phone that was offline must not permanently lose a
 ///   contact's `@username`.

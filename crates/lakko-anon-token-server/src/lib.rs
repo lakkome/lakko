@@ -12,7 +12,10 @@
 //! - the issuer's per-account quota counter ([`reserve_issuance`]), used by
 //!   `services/auth` only;
 //! - a verifier's spent-set ([`spend`]), one table per consuming service;
-//! - pruners for both, and the migration SQL both tables are created from.
+//! - pruners for both, and the migration SQL both tables are created from;
+//! - [`TokenVerifier`] / [`require_token`] ([`gate`]): the axum side of a
+//!   spend - read the `x-lakko-anon-token` header, verify, record, and refuse
+//!   with a stable code - so the three verifying services share one gate.
 //!
 //! # Including the tables in a service
 //!
@@ -41,6 +44,11 @@
 //! [ADR-0054]: ../../../docs/adr/0054-anti-abuse-without-client-work.md
 
 #![forbid(unsafe_code)]
+
+pub mod gate;
+
+pub use gate::{require_token, TokenGate, TokenRejection, TokenVerifier};
+pub use lakko_anon_token::TOKEN_HEADER;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -346,6 +354,36 @@ pub fn spawn_spent_pruner(pool: MySqlPool, window_secs: u64) -> tokio::task::Joi
             }
         }
     })
+}
+
+/// Mint a spendable token in-process, for other crates' tests. Behind the
+/// `testing` feature; never part of a production build.
+#[cfg(any(test, feature = "testing"))]
+pub mod testing {
+    use lakko_anon_token::{IssuerKey, MasterSecret, Token, TokenContext, TokenRequest};
+
+    /// Run the whole client + issuer exchange for one token of
+    /// `(context, epoch)` under `master` and return it.
+    ///
+    /// # Panics
+    ///
+    /// On any issuance failure (a test helper).
+    #[must_use]
+    #[allow(clippy::expect_used)]
+    pub fn mint(master: &MasterSecret, context: TokenContext, epoch: u64) -> Token {
+        let req = TokenRequest::new(context, epoch, 1).expect("request");
+        let key = IssuerKey::derive(master, context, epoch).expect("key");
+        let issuance = key.issue(req.blinded_elements()).expect("issue");
+        req.finalize(&issuance.evaluations, &issuance.proof, &key.public_key())
+            .expect("finalize")
+            .remove(0)
+    }
+
+    /// [`mint`], returned as the `x-lakko-anon-token` header value.
+    #[must_use]
+    pub fn mint_header(master: &MasterSecret, context: TokenContext, epoch: u64) -> String {
+        mint(master, context, epoch).to_header_value()
+    }
 }
 
 #[cfg(test)]

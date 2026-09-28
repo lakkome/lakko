@@ -30,8 +30,9 @@
 //! signed with a key it was claimed under (a per-epoch key every member of a
 //! group derives from the MLS exporter; the identity key a mailbox is named
 //! after), a failed proof is one uniform 401, and the one act a non-member
-//! has - asking to join - is a PoW-gated knock. An unclaimed journal keeps
-//! the old posture. Anti-DoS beyond that is the nginx-layer rate limit.
+//! has - asking to join - is a knock that spends one anonymous token
+//! (ADR-0054 S3, context `ds-knock`, header `x-lakko-anon-token`). An
+//! unclaimed journal keeps the old posture. Anti-DoS beyond that is the nginx-layer rate limit.
 //!
 //! Configuration via environment variables (loaded by systemd from
 //! `/etc/lakko/lakko.env`):
@@ -46,6 +47,11 @@
 //!   carries `x-lakko-wake` is forwarded there. Both unset: the header is
 //!   still validated but every wake is dropped (one startup warning). Only
 //!   one set: the service refuses to start.
+//! - `LAKKO_ANON_TOKEN_MASTER_SECRET` — 64 hex characters, the SAME value
+//!   `services/auth` issues under (ADR-0054). Unset: the knock answers 503
+//!   `anon-tokens-disabled` (loud startup warning). Malformed: startup fails.
+//! - `LAKKO_ANON_TOKEN_WINDOW_SECS` — the token epoch window (default 86400);
+//!   must match auth.
 //! - `LAKKO_DS_WAKE_BURST` / `LAKKO_DS_WAKE_PER_MINUTE` — the wake cap, per
 //!   journal and per woken `push_gid` (defaults 30 and 60; see
 //!   `src/wake.rs` for why). Over the cap the message is still appended, the
@@ -63,9 +69,8 @@
 //! - `GET    /ds/mailbox/{device_id_hex}/messages` — `?after=<id>&limit=<n>&wait=<secs>`
 //! - `PUT    /ds/group/{group_id_hex}/access`      — register an epoch's access key (ADR-0053)
 //! - `PUT    /ds/mailbox/{device_id_hex}/access`   — claim a mailbox under its identity key
-//! - `POST   /ds/group/{group_id_hex}/knock`       — a non-member's request to join (PoW)
+//! - `POST   /ds/group/{group_id_hex}/knock`       — a non-member's request to join (token)
 //! - `GET    /ds/group/{group_id_hex}/knocks`      — the members read the knocks
-//! - `POST   /pow/challenge`                       — a proof-of-work challenge for a knock
 //!
 //! See `~/.claude/plans/1-nested-wreath.md` §4 (MLS Delivery Service).
 
@@ -85,6 +90,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
 use axum::routing::{get, post, put};
 use axum::Router;
+use lakko_anon_token_server::{AnonTokenServerConfig, TokenVerifier};
 use serde_json::json;
 use sqlx::mysql::MySqlPoolOptions;
 use sqlx::MySqlPool;
@@ -111,6 +117,10 @@ pub(crate) struct AppState {
     pub(crate) notifiers: journal::Notifiers,
     /// ADR-0054 - the wake caps and the forwarder to push-gw.
     pub(crate) waker: Arc<wake::Waker>,
+    /// ADR-0054 S3 - the anonymous-token verifier the knock spends through,
+    /// over this service's spent-set (`anon_token_spent`). Dormant (the knock
+    /// answers 503) when `LAKKO_ANON_TOKEN_MASTER_SECRET` is unset.
+    pub(crate) anon_tokens: TokenVerifier,
 }
 
 #[tokio::main]
@@ -165,14 +175,23 @@ async fn main() -> Result<()> {
 
     MIGRATIONS.run(&pool).await.context("run sqlx migrations")?;
 
+    // ADR-0054 S3 - a malformed secret or window refuses startup; an unset
+    // secret leaves the knock answering 503.
+    let anon_tokens = TokenVerifier::new(
+        pool.clone(),
+        AnonTokenServerConfig::from_env().context("anonymous-token configuration")?,
+    );
+    anon_tokens.log_startup("ds");
+
     let state = AppState {
         db: pool.clone(),
         notifiers: journal::Notifiers::default(),
         waker: Arc::new(waker),
+        anon_tokens,
     };
 
     let _pruner = journal::spawn_pruner(pool.clone());
-    let _pow_pruner = lakko_pow_server::spawn_pruner(pool.clone());
+    let _spent_pruner = state.anon_tokens.spawn_pruner();
 
     let app = build_app(state);
 
@@ -216,7 +235,6 @@ pub(crate) fn build_app(state: AppState) -> Router {
         )
         .route("/ds/group/{group_hex}/knock", post(access::post_knock))
         .route("/ds/group/{group_hex}/knocks", get(access::get_knocks))
-        .route("/pow/challenge", post(access::issue_pow_challenge))
         .layer(DefaultBodyLimit::max(journal::MAX_MESSAGE_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)

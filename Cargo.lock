@@ -2464,6 +2464,7 @@ dependencies = [
 name = "lakko-anon-token"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "getrandom 0.2.17",
  "lakko-crypto",
  "proptest",
@@ -2478,8 +2479,10 @@ dependencies = [
 name = "lakko-anon-token-server"
 version = "0.0.0"
 dependencies = [
+ "axum",
  "lakko-anon-token",
  "lakko-crypto",
+ "serde_json",
  "sqlx",
  "thiserror 1.0.69",
  "tokio",
@@ -2658,6 +2661,7 @@ version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
  "futures",
+ "lakko-anon-token",
  "lakko-attachments",
  "lakko-attest",
  "lakko-auth-client",
@@ -2693,6 +2697,7 @@ dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
  "js-sys",
+ "lakko-anon-token",
  "lakko-attachments",
  "lakko-attest",
  "lakko-auth-client",
@@ -2934,12 +2939,12 @@ dependencies = [
  "generic-array",
  "hex",
  "http-body-util",
+ "lakko-anon-token",
+ "lakko-anon-token-server",
  "lakko-auth-token",
  "lakko-contacts",
  "lakko-crypto",
  "lakko-mls",
- "lakko-pow",
- "lakko-pow-server",
  "lakko-transparency",
  "rand 0.8.6",
  "reqwest",
@@ -2965,9 +2970,9 @@ dependencies = [
  "dotenvy",
  "hex",
  "http-body-util",
+ "lakko-anon-token",
+ "lakko-anon-token-server",
  "lakko-ds-proof",
- "lakko-pow",
- "lakko-pow-server",
  "reqwest",
  "serde",
  "serde_json",
@@ -3045,7 +3050,8 @@ dependencies = [
  "hkdf 0.12.4",
  "http-body-util",
  "jsonwebtoken",
- "lakko-pow-server",
+ "lakko-anon-token",
+ "lakko-anon-token-server",
  "p256",
  "parking_lot",
  "rand 0.8.6",

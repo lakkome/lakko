@@ -13,17 +13,16 @@ import me.lakko.app.transport.AntiCensorshipEngine
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.client.request.header
-import io.ktor.client.request.post
+import io.ktor.client.request.request
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpMethod
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
-import kotlinx.coroutines.CoroutineDispatcher
-import kotlinx.coroutines.Dispatchers
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import uniffi.lakko_ffi_uniffi.OpaqueLogin
@@ -49,11 +48,13 @@ import uniffi.lakko_ffi_uniffi.RecoveryMnemonic
  *
  *   2. **High-level [signup] / [login] / [recover]** orchestrate
  *      the full multi-round-trip flow:
- *      `/pow/challenge` → `/signup/start` → `/pow/challenge` →
- *      `/signup/finish` (and the equivalent for login and
+ *      `/pow/challenge` → `/signup/start` → `/signup/finish`
+ *      (and the equivalent, with no proof of work, for login and
  *      recover). They drive the UniFFI OPAQUE handles
  *      ([OpaqueRegister] / [OpaqueLogin]), the BIP39
- *      [RecoveryMnemonic], and the [solvePow] helper.
+ *      [RecoveryMnemonic], and the [solvePow] helper. Since
+ *      ADR-0054 S4 signup start is the ONLY request that pays a
+ *      proof of work.
  *
  * ## Lifecycle
  *
@@ -78,7 +79,8 @@ import uniffi.lakko_ffi_uniffi.RecoveryMnemonic
  *   wrong-length account-id). Surface as a form validation message.
  * * [AuthHttpError] — server returned a non-2xx, or `ok=false` on
  *   a `/finish` endpoint. Status + truncated body are exposed for
- *   diagnostics.
+ *   diagnostics, plus the body's `error` code and the wait a `429`
+ *   states (ADR-0054 S4; a `429` is never a sign-out).
  * * [AuthNetworkError] — transport failure (DNS, TLS, connection
  *   refused). Distinct from HTTP errors so the UI can suggest
  *   "check connection" rather than "wrong credentials".
@@ -89,9 +91,8 @@ public class AuthClient(
     /** Ktor engine. Production: `OkHttp` (default below). Tests:
      *  `MockEngine` for deterministic responses without a network. */
     engine: HttpClientEngine? = null,
-    /** Dispatcher for the PoW solver. Defaults to [Dispatchers.Default];
-     *  override to `UnconfinedTestDispatcher` in `runTest` blocks. */
-    private val powDispatcher: CoroutineDispatcher = Dispatchers.Default,
+    /** The signup proof-of-work solver. Tests pass a fake (no native lib). */
+    private val powSolver: PowSolver = UniffiPowSolver,
 ) : AutoCloseable {
 
     /**
@@ -131,7 +132,7 @@ public class AuthClient(
     // Low-level: 1:1 HTTP endpoints
     // -----------------------------------------------------------------
 
-    /** `POST /pow/challenge`. The only endpoint that takes no body. */
+    /** `POST /pow/challenge`. Since ADR-0054 S4 only signup start spends one. */
     public suspend fun powChallenge(): PowChallengeResponse =
         postNoBody("/pow/challenge")
 
@@ -183,7 +184,7 @@ public class AuthClient(
      * `AuthClient.deviceAuthorizeStart`.
      *
      * Bearer-authenticated (the EXISTING device proves it already
-     * holds a session) + PoW-gated. Returns the URL-safe base64
+     * holds a session); the request has no body. Returns the URL-safe base64
      * (no pad) of the RAW grant token — the server stores only its
      * SHA-256. The caller seals it (together with the phrase seed)
      * to the fresh device over the E2EE pairing channel; it never
@@ -193,13 +194,8 @@ public class AuthClient(
         if (sessionToken.isEmpty()) {
             throw AuthClientArgError("sessionToken must be non-empty")
         }
-        val challenge = powChallenge()
-        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
-        val resp: DeviceAuthorizeStartResponse = post(
-            "/device/authorize/start",
-            DeviceAuthorizeStartRequest(pow = pow),
-            bearer = sessionToken,
-        )
+        val resp: DeviceAuthorizeStartResponse =
+            postNoBody("/device/authorize/start", bearer = sessionToken)
         return resp.grant_token_b64
     }
 
@@ -209,7 +205,7 @@ public class AuthClient(
      * factor (a), fresh-device side). Mirror of the web
      * `AuthClient.deviceAuthorizeRedeem`.
      *
-     * Anonymous (the fresh device has no token yet) + PoW-gated. A
+     * Anonymous (the fresh device has no token yet). A
      * missing / expired / already-consumed grant fails as an
      * enumeration-safe 401 ([AuthHttpError]), indistinguishable from
      * a wrong credential by design.
@@ -229,12 +225,9 @@ public class AuthClient(
         if (grantTokenB64.isEmpty()) {
             throw AuthClientArgError("grantTokenB64 must be non-empty")
         }
-        val challenge = powChallenge()
-        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
         val resp: DeviceAuthorizeRedeemResponse = post(
             "/device/authorize/redeem",
             DeviceAuthorizeRedeemRequest(
-                pow = pow,
                 account_id_b64 = base64UrlEncodeNoPad(accountId),
                 grant_token_b64 = grantTokenB64,
             ),
@@ -288,7 +281,7 @@ public class AuthClient(
      * secret for this account (ADR-0018 factor (c), enrollment step
      * 1). Mirror of the web `AuthClient.totpEnrollStart`.
      *
-     * Bearer-authenticated (the already-logged-in account) + PoW.
+     * Bearer-authenticated (the already-logged-in account); no body.
      * Returns the `otpauth://` provisioning URI (QR) + the base32
      * secret (manual entry). The enrollment only becomes usable for
      * recovery after [totpEnrollFinish] confirms it with a live code.
@@ -301,13 +294,8 @@ public class AuthClient(
         if (sessionToken.isEmpty()) {
             throw AuthClientArgError("sessionToken must be non-empty")
         }
-        val challenge = powChallenge()
-        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
-        val resp: TotpEnrollStartResponse = post(
-            "/totp/enroll/start",
-            TotpEnrollStartRequest(pow = pow),
-            bearer = sessionToken,
-        )
+        val resp: TotpEnrollStartResponse =
+            postNoBody("/totp/enroll/start", bearer = sessionToken)
         return TotpEnrollStartResult(
             otpauthUri = resp.otpauth_uri,
             secretB32 = resp.secret_b32,
@@ -347,38 +335,36 @@ public class AuthClient(
      * code (ADR-0018 factor (c), recovery side). Mirror of the web
      * `AuthClient.totpRecover`.
      *
-     * Anonymous (the caller lost their device) + PoW. The server is
+     * Anonymous (the caller lost their device). The server is
      * enumeration-safe by design: unknown account, unconfirmed
      * enrollment, wrong code, and replayed code all surface the SAME
-     * generic 401 [AuthHttpError]; 429 signals the
-     * 5-failures-in-15-minutes lockout; 503 means TOTP is disabled
-     * server-side.
+     * generic 401 [AuthHttpError]; 429 `too-many-attempts` signals the
+     * per-name limit (charged identically for any name); 503 means
+     * TOTP is disabled server-side.
      *
      * TOTP grants ACCESS only — the result carries no key material.
      * Identity acquisition is the caller's job (ADR-0017 state
      * machine in [AuthRepository.recoverWithTotp]).
+     *
+     * ADR-0054 S5: the account is named by its 32-byte login [handle]; the
+     * account id is learned only from this response.
      */
     public suspend fun totpRecover(
-        accountId: ByteArray,
+        handle: ByteArray,
         code: String,
     ): TotpRecoverResult {
-        if (accountId.size != ACCOUNT_ID_LEN) {
-            throw AuthClientArgError("accountId must be $ACCOUNT_ID_LEN bytes")
-        }
+        requireHandle(handle)
         val normalized = normalizeTotpCode(code)
             ?: throw AuthClientArgError("code must be 6 digits")
-        val challenge = powChallenge()
-        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
         val resp: TotpRecoverResponse = post(
             "/totp/recover",
             TotpRecoverRequest(
-                pow = pow,
-                account_id_b64 = base64UrlEncodeNoPad(accountId),
+                handle = base64UrlEncodeNoPad(handle),
                 code = normalized,
             ),
         )
         return TotpRecoverResult(
-            accountId = base64UrlDecodeNoPad(resp.account_id_b64),
+            accountId = accountIdFromFinish(base64UrlDecodeNoPad(resp.account_id_b64), "/totp/recover"),
             sessionToken = resp.session_token,
             sessionExpiresAtMs = resp.session_expires_at_ms,
         )
@@ -396,7 +382,7 @@ public class AuthClient(
      * `AuthClient.recoveryContactEnrollStart`.
      *
      * Bearer-authenticated (the already-logged-in account's session
-     * token rides the `Authorization` header) + PoW. The enrollment
+     * token rides the `Authorization` header). The enrollment
      * only becomes usable for recovery after [recoveryContactEnrollFinish]
      * confirms the code.
      *
@@ -420,15 +406,12 @@ public class AuthClient(
         if (contact.trim().isEmpty()) {
             throw AuthClientArgError("contact must be non-empty")
         }
-        val challenge = powChallenge()
-        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
         // The body is `{"sent": true}` — a typed response keeps the
         // post helper's non-null contract; the caller ignores it (the
         // enroll path has no enumeration concern).
         post<RecoveryContactEnrollStartRequest, RecoveryContactSentResponse>(
             "/recovery-contact/enroll/start",
             RecoveryContactEnrollStartRequest(
-                pow = pow,
                 kind = kind,
                 contact = contact.trim(),
             ),
@@ -469,7 +452,7 @@ public class AuthClient(
      * (ADR-0018 factor (d), recovery step 1). Mirror of the web
      * `AuthClient.recoveryContactRecoverStart`.
      *
-     * Anonymous (the caller lost their device) + PoW. The server is
+     * Anonymous (the caller lost their device). The server is
      * ENUMERATION-SAFE by design: it returns the same `{ sent: true }`
      * whether or not the supplied contact matches a confirmed row, so
      * a non-throwing return here reveals nothing about account /
@@ -478,23 +461,18 @@ public class AuthClient(
      * malformed contact.
      */
     public suspend fun recoveryContactRecoverStart(
-        accountId: ByteArray,
+        handle: ByteArray,
         kind: Int,
         contact: String,
     ) {
-        if (accountId.size != ACCOUNT_ID_LEN) {
-            throw AuthClientArgError("accountId must be $ACCOUNT_ID_LEN bytes")
-        }
+        requireHandle(handle)
         if (contact.trim().isEmpty()) {
             throw AuthClientArgError("contact must be non-empty")
         }
-        val challenge = powChallenge()
-        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
         post<RecoveryContactRecoverStartRequest, RecoveryContactSentResponse>(
             "/recovery-contact/recover/start",
             RecoveryContactRecoverStartRequest(
-                pow = pow,
-                account_id_b64 = base64UrlEncodeNoPad(accountId),
+                handle = base64UrlEncodeNoPad(handle),
                 kind = kind,
                 contact = contact.trim(),
             ),
@@ -506,7 +484,7 @@ public class AuthClient(
      * the code that was delivered (ADR-0018 factor (d), recovery
      * step 2). Mirror of the web `AuthClient.recoveryContactRecoverFinish`.
      *
-     * Anonymous + PoW. Enumeration-safe: unknown account, no live
+     * Anonymous. Enumeration-safe: unknown account, no live
      * challenge, wrong code and replayed code all surface the SAME
      * generic 401 [AuthHttpError]; 429 signals the attempt-cap
      * lockout; 503 means the factor is disabled server-side.
@@ -516,28 +494,26 @@ public class AuthClient(
      * machine in [AuthRepository.recoverWithContactFinish]).
      */
     public suspend fun recoveryContactRecoverFinish(
-        accountId: ByteArray,
+        handle: ByteArray,
         kind: Int,
         code: String,
     ): RecoveryContactRecoverResult {
-        if (accountId.size != ACCOUNT_ID_LEN) {
-            throw AuthClientArgError("accountId must be $ACCOUNT_ID_LEN bytes")
-        }
+        requireHandle(handle)
         val normalized = normalizeTotpCode(code)
             ?: throw AuthClientArgError("code must be 6 digits")
-        val challenge = powChallenge()
-        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
         val resp: RecoveryContactRecoverFinishResponse = post(
             "/recovery-contact/recover/finish",
             RecoveryContactRecoverFinishRequest(
-                pow = pow,
-                account_id_b64 = base64UrlEncodeNoPad(accountId),
+                handle = base64UrlEncodeNoPad(handle),
                 kind = kind,
                 code = normalized,
             ),
         )
         return RecoveryContactRecoverResult(
-            accountId = base64UrlDecodeNoPad(resp.account_id_b64),
+            accountId = accountIdFromFinish(
+                base64UrlDecodeNoPad(resp.account_id_b64),
+                "/recovery-contact/recover/finish",
+            ),
             sessionToken = resp.session_token,
             sessionExpiresAtMs = resp.session_expires_at_ms,
         )
@@ -551,14 +527,22 @@ public class AuthClient(
      * Drive the full signup flow:
      *
      * ```text
-     *   POST /pow/challenge   →  seed₁
-     *   client: solve PoW + OPAQUE password start [+ recovery start]
+     *   POST /pow/challenge   →  seed
+     *   client: solve PoW (off the main thread, cancellable)
+     *   client: OPAQUE password start [+ recovery start]
      *   POST /signup/start    →  password_response [+ recovery_response]
      *   client: OPAQUE finish (both flows)
-     *   POST /pow/challenge   →  seed₂
-     *   client: solve PoW
      *   POST /signup/finish   →  ok
      * ```
+     *
+     * ADR-0054 S4: the start's proof is the ONE proof of work left in the
+     * app, and the finish carries none; it must follow a start for the same
+     * account within 600 s. A finish refused with `410` (the start expired)
+     * restarts the whole signup once, from a fresh challenge and a fresh
+     * account id.
+     *
+     * [onProofSolved] runs once the proof is ready, before anything is sent:
+     * up to then cancelling leaves nothing on the server (the UX `Cancel`).
      *
      * When [enrolRecovery] is `true` (the default), the method also
      * generates a fresh BIP39 24-word mnemonic, enrols it as a
@@ -574,17 +558,31 @@ public class AuthClient(
     public suspend fun signup(
         password: ByteArray,
         enrolRecovery: Boolean = true,
+        onProofSolved: () -> Unit = {},
     ): SignupResult {
         if (password.isEmpty()) {
             throw AuthClientArgError("password must be non-empty")
         }
+        return try {
+            signupOnce(password, enrolRecovery, onProofSolved)
+        } catch (e: AuthHttpError) {
+            if (e.status != HTTP_GONE || e.endpoint != "/signup/finish") throw e
+            signupOnce(password, enrolRecovery, onProofSolved)
+        }
+    }
 
+    private suspend fun signupOnce(
+        password: ByteArray,
+        enrolRecovery: Boolean,
+        onProofSolved: () -> Unit,
+    ): SignupResult {
         val accountId = generateAccountId()
         val accountIdB64 = base64Encode(accountId)
 
         // ------------- start
-        val challenge1 = powChallenge()
-        val pow1 = solvePow(challenge1.seed, challenge1.effort_bits, powDispatcher)
+        val challenge = powChallenge()
+        val pow = solvePow(challenge.seed, challenge.effort_bits, powSolver)
+        onProofSolved()
 
         // Password OPAQUE start. UniFFI handles are AutoCloseable
         // — `use` guarantees Rust-side cleanup on every code path,
@@ -606,7 +604,7 @@ public class AuthClient(
             try {
                 val startResp = signupStart(
                     SignupStartRequest(
-                        pow = pow1,
+                        pow = pow,
                         account_id = accountIdB64,
                         password_request = passwordReg.requestB64(),
                         recovery_request = recovery?.opaque?.requestB64(),
@@ -636,12 +634,8 @@ public class AuthClient(
                             null
                         }
 
-                    val challenge2 = powChallenge()
-                    val pow2 = solvePow(challenge2.seed, challenge2.effort_bits, powDispatcher)
-
                     val finishResp = signupFinish(
                         SignupFinishRequest(
-                            pow = pow2,
                             account_id = accountIdB64,
                             password_upload = passwordOut.uploadB64(),
                             recovery_upload = recoveryUploadB64,
@@ -671,40 +665,35 @@ public class AuthClient(
      * Drive the full password-login flow:
      *
      * ```text
-     *   POST /pow/challenge  →  seed
-     *   client: solve PoW + OPAQUE start
+     *   client: OPAQUE start
      *   POST /login/start    →  session_id, response
      *   client: OPAQUE finish
      *   POST /login/finish   →  ok, account_id
      * ```
      *
-     * [accountId] MUST be the raw 16-byte id the server gave back
-     * at signup time. The Compose side will pin it in
-     * `EncryptedSharedPreferences` keyed by username (1.15d3).
+     * ADR-0054 S5: the account is named by its 32-byte login [handle]
+     * (`loginHandle(username)`), never by its id; the account id is
+     * learned from `/login/finish`, after the proof. No discovery lookup
+     * runs before a session.
      *
      * Wrong passwords surface as an [AuthHttpError] with status
-     * 401 — by design, indistinguishable from "unknown account".
+     * 401 — by design, indistinguishable from "unknown account" (an
+     * unknown handle takes the server's ordinary path on a stand-in
+     * account).
      */
     public suspend fun login(
-        accountId: ByteArray,
+        handle: ByteArray,
         password: ByteArray,
     ): LoginResult {
         if (password.isEmpty()) {
             throw AuthClientArgError("password must be non-empty")
         }
-        if (accountId.size != ACCOUNT_ID_LEN) {
-            throw AuthClientArgError("accountId must be $ACCOUNT_ID_LEN bytes")
-        }
-
-        val accountIdB64 = base64Encode(accountId)
-        val challenge = powChallenge()
-        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
+        requireHandle(handle)
 
         OpaqueLogin.startPassword(password).use { login ->
             val startResp = loginStart(
                 LoginStartRequest(
-                    pow = pow,
-                    account_id = accountIdB64,
+                    handle = base64UrlEncodeNoPad(handle),
                     request = login.requestB64(),
                 ),
             )
@@ -721,7 +710,7 @@ public class AuthClient(
                     throw AuthHttpError(200, "/login/finish", "server reported ok=false")
                 }
                 return LoginResult(
-                    accountId = accountId,
+                    accountId = accountIdFromFinish(base64Decode(finishResp.account_id), "/login/finish"),
                     sessionKey = out.sessionKey(),
                     exportKey = out.exportKey(),
                     sessionToken = finishResp.session_token,
@@ -737,8 +726,6 @@ public class AuthClient(
      * Drive the full recover-from-mnemonic flow:
      *
      * ```text
-     *   POST /pow/challenge          →  seed
-     *   client: solve PoW
      *   client: OPAQUE recovery start (seed)
      *   client: OPAQUE password start (newPassword)
      *   POST /password/reset/start   →  session_id, recovery_response,
@@ -753,16 +740,14 @@ public class AuthClient(
      * new one — the `KIND_RECOVERY` envelope stays intact, so the
      * same 24 words work for future resets.
      *
-     * Note: the recovery flow only requires **one** PoW solve
-     * (gating `/start`), unlike signup which needs two.
+     * No proof of work (ADR-0054 S4): the server's per-name and
+     * per-address counters bound the guesses.
      * Wrong-mnemonic attempts fail at the AKE finalization with
      * the same indistinguishable response as `/recovery/login/finish`.
      *
-     * @param accountId    Raw 16-byte UUIDv7. The recovery flow can
-     *                     only target an account whose id is known
-     *                     locally; until 1.16d's discovery service
-     *                     lands, that means the account that signed
-     *                     up on this device.
+     * @param handle       The 32-byte login handle of the account
+     *                     (ADR-0054 S5); the account id comes back in
+     *                     `/password/reset/finish`.
      * @param mnemonicSeed The 64-byte BIP39 seed derived from the
      *                     user's typed phrase via
      *                     `RecoveryMnemonic.fromPhrase(phrase).toSeed()`.
@@ -772,25 +757,17 @@ public class AuthClient(
      * @param newPassword  The replacement password as raw UTF-8 bytes.
      */
     public suspend fun recover(
-        accountId: ByteArray,
+        handle: ByteArray,
         mnemonicSeed: ByteArray,
         newPassword: ByteArray,
     ): RecoverResult {
-        if (accountId.size != ACCOUNT_ID_LEN) {
-            throw AuthClientArgError("accountId must be $ACCOUNT_ID_LEN bytes")
-        }
+        requireHandle(handle)
         if (mnemonicSeed.isEmpty()) {
             throw AuthClientArgError("mnemonicSeed must be non-empty")
         }
         if (newPassword.isEmpty()) {
             throw AuthClientArgError("newPassword must be non-empty")
         }
-
-        val accountIdB64 = base64Encode(accountId)
-
-        // Single PoW solve — the server only gates /start.
-        val challenge = powChallenge()
-        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
 
         // Two parallel OPAQUE flows: recovery login proves the user
         // knows the mnemonic; password registration enrols the new
@@ -800,8 +777,7 @@ public class AuthClient(
             OpaqueRegister.startPassword(newPassword).use { newPasswordReg ->
                 val startResp = passwordResetStart(
                     PasswordResetStartRequest(
-                        pow = pow,
-                        account_id = accountIdB64,
+                        handle = base64UrlEncodeNoPad(handle),
                         recovery_request = recoveryLogin.requestB64(),
                         new_password_request = newPasswordReg.requestB64(),
                     ),
@@ -835,7 +811,10 @@ public class AuthClient(
                             )
                         }
                         return RecoverResult(
-                            accountId = accountId,
+                            accountId = accountIdFromFinish(
+                                base64Decode(finishResp.account_id),
+                                "/password/reset/finish",
+                            ),
                             exportKey = passwordOut.exportKey(),
                             sessionToken = finishResp.session_token,
                             sessionExpiresAtMs = finishResp.session_expires_at_ms,
@@ -848,6 +827,65 @@ public class AuthClient(
                 }
             }
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Login handle - ADR-0054 S5
+    // -----------------------------------------------------------------
+
+    /**
+     * `PUT /auth/login-handle` - bind the signed-in account to [handle]
+     * (replacing its previous handle). Idempotent for a handle the account
+     * already holds.
+     *
+     * @return [LoginHandleBinding.Taken] when another account holds the
+     *   handle (`409 handle-taken`; nothing changed server-side).
+     * @throws AuthHttpError on any other refusal (`503
+     *   login-by-name-disabled` included).
+     */
+    public suspend fun bindLoginHandle(sessionToken: String, handle: ByteArray): LoginHandleBinding {
+        if (sessionToken.isEmpty()) {
+            throw AuthClientArgError("sessionToken must be non-empty")
+        }
+        requireHandle(handle)
+        return try {
+            sendJson<LoginHandleRequest, LoginHandleBoundResponse>(
+                HttpMethod.Put,
+                LOGIN_HANDLE_PATH,
+                LoginHandleRequest(handle = base64UrlEncodeNoPad(handle)),
+                bearer = sessionToken,
+            )
+            LoginHandleBinding.Bound
+        } catch (e: AuthHttpError) {
+            if (e.status == HTTP_CONFLICT) LoginHandleBinding.Taken else throw e
+        }
+    }
+
+    /** `DELETE /auth/login-handle` - remove the signed-in account's handle.
+     *  @return whether a handle was removed. */
+    public suspend fun unbindLoginHandle(sessionToken: String): Boolean {
+        if (sessionToken.isEmpty()) {
+            throw AuthClientArgError("sessionToken must be non-empty")
+        }
+        val resp: LoginHandleRemovedResponse = doRequest(HttpMethod.Delete, LOGIN_HANDLE_PATH) {
+            header(HttpHeaders.Authorization, "Bearer $sessionToken")
+        }
+        return resp.removed
+    }
+
+    private fun requireHandle(handle: ByteArray) {
+        if (handle.size != LOGIN_HANDLE_LEN) {
+            throw AuthClientArgError("handle must be $LOGIN_HANDLE_LEN bytes")
+        }
+    }
+
+    /** The account id a finish response names; a wrong length is a server
+     *  wiring fault, never trusted. */
+    private fun accountIdFromFinish(accountId: ByteArray, endpoint: String): ByteArray {
+        if (accountId.size != ACCOUNT_ID_LEN) {
+            throw AuthHttpError(200, endpoint, "account id of ${accountId.size} bytes")
+        }
+        return accountId
     }
 
     // -----------------------------------------------------------------
@@ -864,7 +902,15 @@ public class AuthClient(
         endpoint: String,
         body: Req,
         bearer: String? = null,
-    ): Res = doPost(endpoint) {
+    ): Res = sendJson(HttpMethod.Post, endpoint, body, bearer)
+
+    /** One-shot request of [method] with a JSON body. */
+    private suspend inline fun <reified Req : Any, reified Res : Any> sendJson(
+        method: HttpMethod,
+        endpoint: String,
+        body: Req,
+        bearer: String? = null,
+    ): Res = doRequest(method, endpoint) {
         contentType(ContentType.Application.Json)
         if (bearer != null) {
             header(HttpHeaders.Authorization, "Bearer $bearer")
@@ -873,13 +919,18 @@ public class AuthClient(
     }
 
     /**
-     * One-shot POST with no body. Used only for `/pow/challenge`,
-     * the single endpoint the server accepts without an
-     * application/json body.
+     * One-shot POST with no body: `/pow/challenge`, and the two
+     * bearer routes that read none (`/totp/enroll/start`,
+     * `/device/authorize/start`).
      */
     private suspend inline fun <reified Res : Any> postNoBody(
         endpoint: String,
-    ): Res = doPost(endpoint) { /* no body */ }
+        bearer: String? = null,
+    ): Res = doRequest(HttpMethod.Post, endpoint) {
+        if (bearer != null) {
+            header(HttpHeaders.Authorization, "Bearer $bearer")
+        }
+    }
 
     /**
      * Shared HTTP plumbing — opens the connection, maps transport
@@ -890,20 +941,31 @@ public class AuthClient(
      * Inlined so [Res] stays reified through to `response.body()`,
      * which is the only place Ktor needs the type witness.
      */
-    private suspend inline fun <reified Res : Any> doPost(
+    private suspend inline fun <reified Res : Any> doRequest(
+        method: HttpMethod,
         endpoint: String,
         crossinline configure: HttpRequestBuilder.() -> Unit,
     ): Res {
         val url = "$baseUrl$endpoint"
         val response: HttpResponse = try {
-            client.post(url) { configure() }
+            client.request(url) {
+                this.method = method
+                configure()
+            }
         } catch (cause: Throwable) {
             throw AuthNetworkError(endpoint, cause)
         }
 
         if (!response.status.isSuccess()) {
             val text = response.safeReadBody()
-            throw AuthHttpError(response.status.value, endpoint, text)
+            throw AuthHttpError(
+                status = response.status.value,
+                endpoint = endpoint,
+                body = text,
+                code = me.lakko.app.anon.errorCodeOf(text),
+                retryAfterSecs = me.lakko.app.anon.longFieldOf(text, "retry_after_secs")
+                    ?: response.headers[HttpHeaders.RetryAfter]?.trim()?.toLongOrNull(),
+            )
         }
         return response.body()
     }
@@ -934,6 +996,17 @@ public class AuthClient(
 
         /** Ed25519 identity pubkey length (ADR-0036 genesis-attest mint). */
         private const val PUBKEY_LEN: Int = 32
+
+        /** `/signup/finish` without a live start (ADR-0054 S4). */
+        private const val HTTP_GONE: Int = 410
+
+        /** `PUT /auth/login-handle` for a handle another account holds. */
+        private const val HTTP_CONFLICT: Int = 409
+
+        /** ADR-0054 S5 login handle length. */
+        public const val LOGIN_HANDLE_LEN: Int = 32
+
+        private const val LOGIN_HANDLE_PATH: String = "/auth/login-handle"
     }
 }
 
@@ -1152,6 +1225,15 @@ public data class RecoveryContactRecoverResult(
     }
 }
 
+/** Outcome of [AuthClient.bindLoginHandle]. */
+public enum class LoginHandleBinding {
+    /** The account now holds the handle. */
+    Bound,
+
+    /** Another account holds it (`409 handle-taken`): the name is taken. */
+    Taken,
+}
+
 // -----------------------------------------------------------------
 // Errors
 // -----------------------------------------------------------------
@@ -1171,6 +1253,11 @@ public class AuthHttpError(
     /** Truncated server body (max 512 chars to keep stack traces
      *  tractable). */
     public val body: String,
+    /** The body's `error` code (`too-many-attempts`,
+     *  `signup-rate-limited`, ...), when it carried one. */
+    public val code: String? = null,
+    /** The wait a `429` states (`retry_after_secs` or `Retry-After`). */
+    public val retryAfterSecs: Long? = null,
 ) : RuntimeException("auth $endpoint → $status: $body")
 
 /** Network failure (DNS / connectivity / TLS). Distinct from

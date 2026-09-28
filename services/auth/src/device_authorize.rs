@@ -8,12 +8,14 @@
 //! password or recovery phrase. The two halves are:
 //!
 //! - **`POST /device/authorize/start`** — bearer-authenticated (the
-//!   existing device proves it already holds a session) + PoW. Mints a
+//!   existing device proves it already holds a session); limited per account
+//!   and per address (ADR-0054 S4), no body. Mints a
 //!   random 32-byte `grant_token` bound to the session's `account_id`,
 //!   stores only its SHA-256 hash, and returns the raw token to the
 //!   existing device.
 //! - **`POST /device/authorize/redeem`** — anonymous (the fresh device has
-//!   no token yet) + PoW. The fresh device submits the `grant_token` (which
+//!   no token yet); per-address limited — the 256-bit grant token is not
+//!   guessable, so there is no name counter to add. The fresh device submits the `grant_token` (which
 //!   it received over the existing E2EE pairing / rendezvous channel) plus
 //!   the `account_id` it learned from the pairing QR. The server recomputes
 //!   `SHA-256(grant_token)`, **atomically consumes** the matching grant (a
@@ -26,7 +28,7 @@
 //! the auth service is never in the MLS path, so only an
 //! already-authenticated device can authorize the auth service to mint a
 //! token for a new device. The grant is that authorization — short-lived,
-//! single-use, PoW-gated, account-bound.
+//! single-use, rate-limited, account-bound.
 //!
 //! **Server opacity (invariant #2).** This module handles only the
 //! ACCESS-side grant + the session token. The E2EE phrase seed (IDENTITY)
@@ -144,19 +146,25 @@ fn issue_session_token(
 
 /// `POST /device/authorize/start` — mint a single-use device grant.
 ///
-/// Bearer-authenticated (the already-logged-in existing device) + PoW. The
-/// grant is bound to the session's `account_id`; only its SHA-256 hash is
+/// Bearer-authenticated (the already-logged-in existing device); the body is
+/// ignored. Charged to the account's grant counter (`429`
+/// `too-many-attempts`) and the per-address bucket. The grant is bound to the session's `account_id`; only its SHA-256 hash is
 /// stored. The raw token is returned to the existing device, which seals it
 /// to the fresh device over the pairing channel.
 #[axum::debug_handler]
 pub(crate) async fn start(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthenticatedAccount>,
-    Json(req): Json<DeviceAuthorizeStartReq>,
 ) -> Result<Json<DeviceAuthorizeStartRes>, ApiError> {
-    crate::pow::verify_proof(&state.db, &req.pow).await?;
-
     let account_id = auth.0;
+    crate::limits::charge_name(
+        &state.db,
+        &state.limits,
+        crate::limits::Scope::DeviceGrantMint,
+        &account_id,
+    )
+    .await?;
+
     let token = random_grant_token();
     let hash = grant_hash(&token);
 
@@ -187,7 +195,8 @@ pub(crate) async fn start(
 /// `POST /device/authorize/redeem` — consume a device grant for a session
 /// token.
 ///
-/// Anonymous (the fresh device has no token yet) + PoW. The fresh device
+/// Anonymous (the fresh device has no token yet), per-address limited. The
+/// fresh device
 /// submits the `grant_token` (received over the rendezvous channel) plus the
 /// `account_id` (from the pairing QR). The server recomputes
 /// `SHA-256(grant_token)` and atomically consumes the matching live grant. A
@@ -198,8 +207,6 @@ pub(crate) async fn redeem(
     State(state): State<AppState>,
     Json(req): Json<DeviceAuthorizeRedeemReq>,
 ) -> Result<Json<DeviceAuthorizeRedeemRes>, ApiError> {
-    crate::pow::verify_proof(&state.db, &req.pow).await?;
-
     let account_id = decode_account_id(&req.account_id_b64)?;
     let token = decode_grant_token(&req.grant_token_b64)?;
     let hash = grant_hash(&token);
@@ -248,14 +255,6 @@ pub(crate) async fn redeem(
 // Wire shapes — /device/authorize/{start,redeem}
 // ----------------------------------------------------------------
 
-/// `POST /device/authorize/start` request body.
-#[derive(Deserialize)]
-pub(crate) struct DeviceAuthorizeStartReq {
-    /// PoW proof obtained via `POST /pow/challenge`. Verified and consumed
-    /// before any DB write.
-    pub pow: crate::pow::PowProof,
-}
-
 /// `POST /device/authorize/start` response body.
 #[derive(Serialize)]
 pub(crate) struct DeviceAuthorizeStartRes {
@@ -268,9 +267,6 @@ pub(crate) struct DeviceAuthorizeStartRes {
 /// `POST /device/authorize/redeem` request body.
 #[derive(Deserialize)]
 pub(crate) struct DeviceAuthorizeRedeemReq {
-    /// PoW proof obtained via `POST /pow/challenge`. The fresh device is
-    /// anonymous, so the PoW is the only anti-spam gate on this endpoint.
-    pub pow: crate::pow::PowProof,
     /// URL-safe base64 of the 16-byte `account_id` the fresh device learned
     /// from the pairing QR.
     pub account_id_b64: String,
@@ -362,9 +358,9 @@ mod tests {
 
 /// End-to-end HTTP tests of the device-authorization grant flow (ADR-0018,
 /// factor (a)). Drives the production router + a live MariaDB: mint a grant
-/// (bearer + PoW), redeem it (anonymous + PoW) for a session token that
-/// verifies, and prove single-use / expiry / unknown-grant / missing-PoW /
-/// missing-bearer rejections.
+/// (bearer), redeem it (anonymous) for a session token that verifies, and
+/// prove single-use / expiry / unknown-grant / missing-bearer rejections and
+/// that a legacy `pow` field is ignored.
 ///
 /// Gated on `LAKKO_AUTH_TEST_DATABASE_URL` — skips (does not fail) when no
 /// test database is provided, so `cargo test` stays green in DB-less CI.
@@ -410,6 +406,8 @@ mod device_authorize_e2e_tests {
             throttle: crate::throttle::ThrottleConfig::disabled(),
             backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
             anon_tokens: None,
+            handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
+            limits: Arc::new(crate::limits::Limits::defaults()),
         };
         (state, token_secret)
     }
@@ -433,50 +431,6 @@ mod device_authorize_e2e_tests {
         .unwrap_or(i64::MAX)
     }
 
-    /// Mint a real PoW proof by hitting `/pow/challenge` then solving Equix.
-    /// `LAKKO_POW_EFFORT_BITS=0` (set by the test) makes the first solution
-    /// satisfy the difficulty so this is fast.
-    async fn fresh_pow(state: &crate::AppState) -> serde_json::Value {
-        let (st, body) = send(
-            state,
-            Request::builder()
-                .method(Method::POST)
-                .uri("/pow/challenge")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(st, StatusCode::OK, "pow/challenge must serve");
-        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let seed_b64 = v["seed"].as_str().unwrap().to_string();
-        let seed = base64::engine::general_purpose::STANDARD
-            .decode(&seed_b64)
-            .unwrap();
-
-        // Solve Equix over seed || nonce. Walk nonces until a solution is
-        // found (Equix has no solution for ~5% of challenges).
-        let mut nonce = [0u8; 16];
-        loop {
-            let mut challenge = Vec::with_capacity(32);
-            challenge.extend_from_slice(&seed);
-            challenge.extend_from_slice(&nonce);
-            if let Ok(eq) = equix::EquiX::new(&challenge) {
-                if let Some(sol) = eq.solve().first() {
-                    let solution = sol.to_bytes();
-                    return serde_json::json!({
-                        "seed": seed_b64,
-                        "nonce": base64::engine::general_purpose::STANDARD.encode(nonce),
-                        "solution": base64::engine::general_purpose::STANDARD.encode(solution),
-                    });
-                }
-            }
-            nonce[0] = nonce[0].wrapping_add(1);
-            if nonce[0] == 0 {
-                nonce[1] = nonce[1].wrapping_add(1);
-            }
-        }
-    }
-
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn device_authorize_grant_round_trip() {
@@ -486,8 +440,6 @@ mod device_authorize_e2e_tests {
             );
             return;
         };
-        // Make PoW trivially solvable for the test.
-        std::env::set_var("LAKKO_POW_EFFORT_BITS", "0");
 
         let pool = MySqlPoolOptions::new()
             .max_connections(4)
@@ -515,7 +467,6 @@ mod device_authorize_e2e_tests {
 
         // (vi) /start WITHOUT a bearer must 401 (route is behind the
         // require_session middleware).
-        let pow = fresh_pow(&state).await;
         let (st, _b) = send(
             &state,
             Request::builder()
@@ -523,7 +474,7 @@ mod device_authorize_e2e_tests {
                 .uri("/device/authorize/start")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    serde_json::to_vec(&serde_json::json!({ "pow": pow })).unwrap(),
+                    serde_json::to_vec(&serde_json::json!({})).unwrap(),
                 ))
                 .unwrap(),
         )
@@ -534,8 +485,7 @@ mod device_authorize_e2e_tests {
             "device/authorize/start without a bearer must 401"
         );
 
-        // (i) /start (bearer + PoW) mints a grant + returns the raw token.
-        let pow = fresh_pow(&state).await;
+        // (i) /start (bearer, empty body) mints a grant + returns the raw token.
         let (st, body) = send(
             &state,
             Request::builder()
@@ -544,7 +494,7 @@ mod device_authorize_e2e_tests {
                 .header(header::AUTHORIZATION, &bearer)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    serde_json::to_vec(&serde_json::json!({ "pow": pow })).unwrap(),
+                    serde_json::to_vec(&serde_json::json!({})).unwrap(),
                 ))
                 .unwrap(),
         )
@@ -569,10 +519,11 @@ mod device_authorize_e2e_tests {
         assert_ne!(stored_hash, raw_token, "the raw token must not be stored");
         assert_eq!(stored_hash, super::grant_hash(&raw_token).to_vec());
 
-        // (v) /redeem with a BAD PoW (reusing the already-consumed proof)
-        // must fail before any grant work — 401 (pow: unknown or expired).
-        let stale_pow = fresh_pow(&state).await; // mint then deliberately consume
-        let _ = send(
+        // (v) /redeem still carrying a legacy `pow` field (ADR-0054 S4
+        // removed it): the field is ignored — serde drops unknown fields — so
+        // the request reaches the consume and a wrong token is the plain
+        // generic 401, not a proof-of-work error. The real grant is untouched.
+        let (st, body) = send(
             &state,
             Request::builder()
                 .method(Method::POST)
@@ -580,52 +531,31 @@ mod device_authorize_e2e_tests {
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
-                        "pow": stale_pow,
+                        "pow": { "seed": "junk", "nonce": "junk", "solution": "junk" },
                         "account_id_b64": account_id_b64,
-                        "grant_token_b64": "AAAA",
+                        "grant_token_b64": URL_SAFE_NO_PAD.encode([0x55u8; 32]),
                     }))
                     .unwrap(),
                 ))
                 .unwrap(),
         )
         .await;
-        // Re-submitting the SAME (now-consumed) PoW must 401.
-        let (st, _b) = send(
-            &state,
-            Request::builder()
-                .method(Method::POST)
-                .uri("/device/authorize/redeem")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::to_vec(&serde_json::json!({
-                        "pow": stale_pow,
-                        "account_id_b64": account_id_b64,
-                        "grant_token_b64": grant_token_b64,
-                    }))
-                    .unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
         assert_eq!(
-            st,
-            StatusCode::UNAUTHORIZED,
-            "redeem with a stale/consumed PoW must 401"
+            &body[..],
+            b"invalid credentials",
+            "a credential miss, not a pow error"
         );
-
-        // The grant is still present — the failed redeem (PoW failure
-        // before the consume) did not touch it.
         let live: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM device_grants WHERE account_id = ?")
                 .bind(account_id.as_slice())
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(live, 1, "a PoW-failed redeem must not consume the grant");
+        assert_eq!(live, 1, "a missed redeem must not consume the grant");
 
         // (iv) /redeem with an UNKNOWN grant token must fail enumeration-safe
-        // (401, generic). Fresh PoW so we reach the consume.
-        let pow = fresh_pow(&state).await;
+        // (401, generic).
         let bogus = URL_SAFE_NO_PAD.encode([0x99u8; 32]);
         let (st, _b) = send(
             &state,
@@ -635,7 +565,6 @@ mod device_authorize_e2e_tests {
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
-                        "pow": pow,
                         "account_id_b64": account_id_b64,
                         "grant_token_b64": bogus,
                     }))
@@ -650,9 +579,8 @@ mod device_authorize_e2e_tests {
             "redeem with an unknown grant must 401 enumeration-safe"
         );
 
-        // (i continued) /redeem the REAL grant (anonymous + fresh PoW)
+        // (i continued) /redeem the REAL grant (anonymous)
         // succeeds and returns a verifiable session token.
-        let pow = fresh_pow(&state).await;
         let (st, body) = send(
             &state,
             Request::builder()
@@ -661,7 +589,6 @@ mod device_authorize_e2e_tests {
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
-                        "pow": pow,
                         "account_id_b64": account_id_b64,
                         "grant_token_b64": grant_token_b64,
                     }))
@@ -686,7 +613,6 @@ mod device_authorize_e2e_tests {
         assert_eq!(verified.as_slice(), account_id.as_slice());
 
         // (ii) single-use: a SECOND redeem of the same grant fails 401.
-        let pow = fresh_pow(&state).await;
         let (st, _b) = send(
             &state,
             Request::builder()
@@ -695,7 +621,6 @@ mod device_authorize_e2e_tests {
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
-                        "pow": pow,
                         "account_id_b64": account_id_b64,
                         "grant_token_b64": grant_token_b64,
                     }))
@@ -711,7 +636,6 @@ mod device_authorize_e2e_tests {
         );
 
         // (iii) expired grant fails. Mint a fresh grant then force-expire it.
-        let pow = fresh_pow(&state).await;
         let (st, body) = send(
             &state,
             Request::builder()
@@ -720,7 +644,7 @@ mod device_authorize_e2e_tests {
                 .header(header::AUTHORIZATION, &bearer)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    serde_json::to_vec(&serde_json::json!({ "pow": pow })).unwrap(),
+                    serde_json::to_vec(&serde_json::json!({})).unwrap(),
                 ))
                 .unwrap(),
         )
@@ -739,7 +663,6 @@ mod device_authorize_e2e_tests {
         .await
         .unwrap();
 
-        let pow = fresh_pow(&state).await;
         let (st, _b) = send(
             &state,
             Request::builder()
@@ -748,7 +671,6 @@ mod device_authorize_e2e_tests {
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
-                        "pow": pow,
                         "account_id_b64": account_id_b64,
                         "grant_token_b64": grant2_b64,
                     }))

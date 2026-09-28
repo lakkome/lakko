@@ -33,8 +33,12 @@
 //! - `LAKKO_PUSH_GW_DATABASE_URL` (or `DATABASE_URL` fallback) —
 //!   sqlx-style MariaDB DSN; the database must be exclusive to this
 //!   service per the per-service DB isolation rule.
-//! - `LAKKO_PUSH_GW_POW_EFFORT_BITS` — PoW difficulty (default 8;
-//!   0 in tests).
+//! - `LAKKO_ANON_TOKEN_MASTER_SECRET` — 64 hex characters, the SAME value
+//!   `services/auth` issues under (ADR-0054). Unset: every registration
+//!   route answers 503 `anon-tokens-disabled` (loud startup warning).
+//!   Malformed: startup fails.
+//! - `LAKKO_ANON_TOKEN_WINDOW_SECS` — the token epoch window (default 86400);
+//!   must match auth.
 //! - `LAKKO_PUSH_GW_INTERNAL_BIND` — the internal listener (default
 //!   `127.0.0.1:8092`). Not proxied by nginx; bind it to loopback or a
 //!   private interface only.
@@ -50,11 +54,14 @@
 //! - `GET    /health`                — liveness, 200 OK
 //! - `GET    /ready`                 — readiness (DB ping), 200 / 503
 //! - `GET    /version`
-//! - `POST   /pow/challenge`         — Equix PoW challenge (1.1e-style)
 //! - `POST   /push/register`         — bind `(device_pseudonym, provider) → token`
 //! - `POST   /push/unregister`       — drop a token
 //! - `POST   /push/group/subscribe`  — subscribe a device to a `push_gid`
 //! - `POST   /push/group/unsubscribe`
+//!
+//! The four registration routes each spend one `push-register` anonymous
+//! token (ADR-0054 S3, header `x-lakko-anon-token`); none asks for a proof
+//! of work any more.
 //!
 //! Internal listener (`LAKKO_PUSH_GW_INTERNAL_BIND`, shared-secret gated,
 //! ADR-0054 decision 1 — see `src/internal.rs`):
@@ -69,7 +76,6 @@
 
 mod internal;
 mod notify;
-mod pow;
 mod provider;
 mod providers;
 mod registry;
@@ -85,6 +91,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
 use axum::routing::{get, post};
 use axum::Router;
+use lakko_anon_token::TokenContext;
+use lakko_anon_token_server::{require_token, AnonTokenServerConfig, TokenVerifier};
 use serde_json::json;
 use sqlx::mysql::MySqlPoolOptions;
 use sqlx::MySqlPool;
@@ -106,8 +114,8 @@ const DEFAULT_BIND: &str = "127.0.0.1:8085";
 /// Migrations directory (relative to crate root).
 const MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-/// Per-request body limit. Push-gw payloads are small JSON (PoW proof
-/// + a couple of base64 fields + maybe a 2 KiB token), 64 KiB is plenty.
+/// Per-request body limit. Push-gw payloads are small JSON (a couple of
+/// base64 fields + maybe a 2 KiB token), 64 KiB is plenty.
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
 /// Shared application state.
@@ -122,6 +130,11 @@ pub(crate) struct AppState {
     /// ADR-0054 - the secret the internal listener checks. `None` when
     /// `LAKKO_PUSH_GW_INTERNAL_SECRET` is unset (the listener is then off).
     pub(crate) internal_secret: Option<Arc<Vec<u8>>>,
+    /// ADR-0054 S3 - the anonymous-token verifier the registration routes
+    /// spend through, over this service's spent-set (`anon_token_spent`).
+    /// Dormant (those routes answer 503) when
+    /// `LAKKO_ANON_TOKEN_MASTER_SECRET` is unset.
+    pub(crate) anon_tokens: TokenVerifier,
 }
 
 #[tokio::main]
@@ -163,14 +176,23 @@ async fn main() -> Result<()> {
 
     MIGRATIONS.run(&pool).await.context("run sqlx migrations")?;
 
+    // ADR-0054 S3 - a malformed secret or window refuses startup; an unset
+    // secret leaves the registration routes answering 503.
+    let anon_tokens = TokenVerifier::new(
+        pool.clone(),
+        AnonTokenServerConfig::from_env().context("anonymous-token configuration")?,
+    );
+    anon_tokens.log_startup("push-gw");
+
     let providers = resolve_providers();
     let state = AppState {
         db: pool.clone(),
         providers: Arc::new(providers),
         internal_secret,
+        anon_tokens,
     };
 
-    let _pow_pruner = pow::spawn_pruner(pool.clone());
+    let _spent_pruner = state.anon_tokens.spawn_pruner();
 
     // One shutdown signal, observed by both listeners.
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
@@ -343,11 +365,9 @@ fn resolve_providers() -> HashMap<ProviderKind, Box<dyn Provider>> {
 /// Build the public router. Extracted so tests can drive it directly
 /// without binding a TCP listener.
 pub(crate) fn build_app(state: AppState) -> Router {
-    Router::new()
-        .route("/health", get(health))
-        .route("/ready", get(ready))
-        .route("/version", get(version))
-        .route("/pow/challenge", post(pow::issue_challenge))
+    // ADR-0054 S3 - every registration route spends one `push-register`
+    // anonymous token before its handler runs.
+    let registration = Router::new()
         .route("/push/register", post(registry::register))
         .route("/push/unregister", post(registry::unregister))
         // 1.20e — group fan-out. Devices subscribe to the groups
@@ -356,6 +376,15 @@ pub(crate) fn build_app(state: AppState) -> Router {
         // listener (`src/internal.rs`), never a public route.
         .route("/push/group/subscribe", post(registry::group_subscribe))
         .route("/push/group/unsubscribe", post(registry::group_unsubscribe))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.anon_tokens.gate(TokenContext::PushRegister),
+            require_token,
+        ));
+    Router::new()
+        .route("/health", get(health))
+        .route("/ready", get(ready))
+        .route("/version", get(version))
+        .merge(registration)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -419,6 +448,9 @@ async fn shutdown_signal() {
 }
 
 #[cfg(test)]
+mod anon_token_route_tests;
+
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use axum::body::Body;
@@ -434,6 +466,7 @@ pub(crate) mod tests {
             .connect_lazy("mysql://nobody:nothing@127.0.0.1:1/none")
             .expect("lazy pool");
         AppState {
+            anon_tokens: TokenVerifier::new(db.clone(), None),
             db,
             providers: Arc::new(HashMap::new()),
             internal_secret,

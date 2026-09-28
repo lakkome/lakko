@@ -31,7 +31,8 @@
  * never the `/api/ds` prefix, and the query is signed exactly as sent. A
  * refused group request is retried under the previous epoch's key, then once
  * after a claim (contract point 5). Mailbox writes and the knock stay
- * unsigned; the knock is PoW-gated instead.
+ * unsigned; the knock spends one anonymous `ds-knock` token instead
+ * (ADR-0054 S3) and carries no credentials.
  *
  * ADR-0054 - a group publish that should wake the recipients carries an
  * `x-lakko-wake` header (built by `./wake`); the DS forwards the wake to
@@ -48,6 +49,11 @@ import {
   type ProofSigner,
 } from "./access";
 import { DS_WAKE_HEADER, dsWakeHeaderValue, type DsWake } from "./wake";
+import {
+  anonTokens,
+  anonymousFetchInit,
+  type AnonTokenPool,
+} from "../tokens/anon-token-pool";
 
 export { DS_WAKE_HEADER, dsWakeHeaderValue, type DsWake, type DsWakeKind } from "./wake";
 
@@ -186,12 +192,15 @@ export interface DsClientOptions {
   readonly fetchImpl?: typeof fetch;
   /** The device clock in unix ms (the skew check). */
   readonly now?: () => number;
+  /** The anonymous-token pool the knock spends from. Defaults to the app's. */
+  readonly tokens?: AnonTokenPool;
 }
 
 export class DsClient {
   private readonly access: DsAccessRegistry;
   private readonly fetchImpl: typeof fetch;
   private readonly now: () => number;
+  private readonly tokens: AnonTokenPool;
 
   constructor(
     public readonly baseUrl: string = DEFAULT_BASE_URL,
@@ -201,6 +210,7 @@ export class DsClient {
     this.fetchImpl =
       options.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
     this.now = options.now ?? (() => Date.now());
+    this.tokens = options.tokens ?? anonTokens;
   }
 
   // -----------------------------------------------------------------
@@ -283,6 +293,8 @@ export class DsClient {
       readonly contentType?: string;
       readonly extraHeaders?: Readonly<Record<string, string>>;
       readonly signal?: AbortSignal | undefined;
+      /** An anonymous-token route: no credentials, no referrer. */
+      readonly anonymous?: boolean;
     },
     signer: ProofSigner | null,
   ): Promise<Response> {
@@ -293,7 +305,10 @@ export class DsClient {
     }
     const url = `${this.baseUrl}${req.path}${req.query.length === 0 ? "" : `?${req.query}`}`;
     const endpoint = `${req.path}${req.query.length === 0 ? "" : `?${req.query}`}`;
-    const init: RequestInit = { method: req.method, headers };
+    const init: RequestInit =
+      req.anonymous === true
+        ? anonymousFetchInit({ method: req.method, headers })
+        : { method: req.method, headers };
     if (req.method !== "GET") {
       // `.slice()` ensures the buffer is an `ArrayBuffer` (not
       // SharedArrayBuffer) - TS strict mode demands the narrower type for
@@ -386,45 +401,25 @@ export class DsClient {
   // The knock (ADR-0053 section 4, contract points 6 + 7)
   // -----------------------------------------------------------------
 
-  /** `POST /pow/challenge` on the DS - a fresh challenge for one knock. */
-  async powChallenge(): Promise<{ seed: string; effortBits: number }> {
-    const response = await this.send({
-      method: "POST",
-      path: "/pow/challenge",
-      query: "",
-      body: new Uint8Array(0),
-      plan: { kind: "none" },
-    });
-    const json = (await response.json()) as { seed: string; effort_bits: number };
-    return { seed: json.seed, effortBits: json.effort_bits };
-  }
-
   /**
-   * `POST /ds/group/{hex}/knock` - a non-member's request to join, PoW-gated
-   * and never signed. An empty `payloads` is a probe: nothing is stored and
-   * the response carries the epoch.
+   * `POST /ds/group/{hex}/knock` - a non-member's request to join. Never
+   * signed; spends one anonymous `ds-knock` token (ADR-0054 S3) and carries
+   * no credentials, retried once with another token when the DS refuses the
+   * first as spent / invalid / expired. An empty `payloads` is a probe:
+   * nothing is stored and the response carries the epoch.
    */
-  async knock(
-    groupId: Uint8Array,
-    pow: { readonly seed: string; readonly nonce: string; readonly solution: string },
-    payloads: readonly Uint8Array[],
-  ): Promise<KnockResult> {
+  async knock(groupId: Uint8Array, payloads: readonly Uint8Array[]): Promise<KnockResult> {
     if (groupId.length === 0) throw new DsClientArgError("groupId must be non-empty");
     const body = new TextEncoder().encode(
-      JSON.stringify({
-        pow: { seed: pow.seed, nonce: pow.nonce, solution: pow.solution },
-        payloads_b64: payloads.map((p) => base64Encode(p)),
-      }),
+      JSON.stringify({ payloads_b64: payloads.map((p) => base64Encode(p)) }),
     );
-    const response = await this.send({
-      method: "POST",
-      path: `/ds/group/${pseudonymHex(groupId)}/knock`,
-      query: "",
-      body,
-      contentType: "application/json",
-      plan: { kind: "none" },
-    });
-    const json = (await response.json()) as { ids: number[]; epoch: number | null };
+    const path = `/ds/group/${pseudonymHex(groupId)}/knock`;
+    const req = { method: "POST" as const, path, query: "", body, contentType: "application/json" };
+    const response = await this.tokens.spend("ds-knock", (headerName, headerValue) =>
+      this.attempt({ ...req, extraHeaders: { [headerName]: headerValue }, anonymous: true }, null),
+    );
+    const ok = await this.finish(req, response);
+    const json = (await ok.json()) as { ids: number[]; epoch: number | null };
     return { ids: json.ids ?? [], epoch: json.epoch ?? null };
   }
 

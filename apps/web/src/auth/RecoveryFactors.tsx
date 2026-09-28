@@ -303,7 +303,7 @@ export function ContactEnrollView(): JSX.Element {
     e.preventDefault();
     setRequestError(null);
     const k = contactKind();
-    // Light client-side shape check — saves a PoW solve on an
+    // Light client-side shape check — saves a limited attempt on an
     // obviously-malformed contact. The server is authoritative.
     if (!isPlausibleContact(k, contact())) {
       setRequestError(

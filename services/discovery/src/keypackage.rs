@@ -98,7 +98,6 @@ fn decode_account_id(b64: &str) -> Result<[u8; ACCOUNT_ID_LEN], (StatusCode, Str
 
 #[derive(Deserialize)]
 pub(crate) struct UploadRequest {
-    pub(crate) pow: crate::pow::PowProof,
     pub(crate) account_id: String,
     /// Base64 of the device leaf's 32-byte Ed25519 signature key (ADR-0050).
     pub(crate) device_id: String,
@@ -119,8 +118,6 @@ pub(crate) async fn upload(
     axum::Extension(authed): axum::Extension<crate::auth::AuthenticatedAccount>,
     Json(payload): Json<UploadRequest>,
 ) -> Result<Json<UploadResponse>, (StatusCode, String)> {
-    crate::pow::verify_proof(&state.db, &payload.pow).await?;
-
     let account_id = decode_account_id(&payload.account_id)?;
     let device_id = decode_device_id(&payload.device_id)?;
 

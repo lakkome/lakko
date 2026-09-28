@@ -14,8 +14,6 @@ import me.lakko.app.auth.AuthClientArgError
 import me.lakko.app.auth.AuthHttpError
 import me.lakko.app.auth.AuthNetworkError
 import me.lakko.app.auth.AuthRepository
-import me.lakko.app.discovery.DiscoveryHttpError
-import me.lakko.app.discovery.DiscoveryNetworkError
 
 /**
  * State + dispatcher for the [LoginScreen].
@@ -65,7 +63,8 @@ public class LoginViewModel(
         val snapshot = mutableState.value
         if (snapshot.busy) return  // ignore double-tap
         // ADR-0048 §4 — a username failing the rule cannot exist, so no
-        // lookup and no OPAQUE round-trip is spent on it.
+        // OPAQUE round-trip is spent on it. ADR-0054 S5: no lookup either; the
+        // login goes by the login handle of the name.
         val username = when (val decision = me.lakko.app.profile.searchDecision(snapshot.username, validateUsername)) {
             is me.lakko.app.profile.SearchDecision.Refuse -> {
                 mutableState.update { it.copy(error = decision.message) }
@@ -103,26 +102,6 @@ public class LoginViewModel(
                     it.copy(
                         busy = false,
                         error = "No connection. Check your network and try again.",
-                    )
-                }
-            } catch (_: DiscoveryNetworkError) {
-                // A device that does not know the account resolves the username
-                // through discovery first; its transport failure reads the same.
-                mutableState.update {
-                    it.copy(
-                        busy = false,
-                        error = "No connection. Check your network and try again.",
-                    )
-                }
-            } catch (err: DiscoveryHttpError) {
-                mutableState.update {
-                    it.copy(
-                        busy = false,
-                        error = when (err.status) {
-                            429 -> "Too many attempts. Wait a moment, then try again."
-                            in 500..599 -> "Something went wrong on our side. Try again in a moment."
-                            else -> "Could not log in. Try again."
-                        },
                     )
                 }
             } catch (err: Throwable) {
@@ -166,6 +145,12 @@ public class LoginViewModel(
                         error = "No connection. Check your network and try again.",
                     )
                 }
+            } catch (_: me.lakko.app.anon.AnonTokenException) {
+                // ADR-0054 - a username lookup spends an anonymous token; one
+                // that could not be drawn reads as the network failure.
+                mutableState.update {
+                    it.copy(busy = false, error = me.lakko.app.anon.ANON_TOKEN_NETWORK_COPY)
+                }
             } catch (err: Throwable) {
                 mutableState.update {
                     it.copy(
@@ -183,7 +168,7 @@ public class LoginViewModel(
      *  property + the username-resolution layer can't leak
      *  account existence). */
     private fun userFacingHttpError(err: AuthHttpError): String =
-        when (err.status) {
+        me.lakko.app.auth.authLimitCopy(err) ?: when (err.status) {
             401 -> "Wrong username or password. Check both and try again."
             429 -> "Too many attempts. Wait a moment, then try again."
             in 500..599 -> "Something went wrong on our side. Try again in a moment."

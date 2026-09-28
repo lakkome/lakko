@@ -16,8 +16,8 @@ import Security
 /// ## Why a fresh random value, not derived from identity
 ///
 /// The push server sees `(device_pseudonym, provider) → token`.
-/// Anyone who knows the pseudonym can post `/push/notify` against
-/// it (gated by PoW). To minimise what the server can link:
+/// `/push/notify` is gone (ADR-0054 decision 1: the DS forwards the wake),
+/// and every push-gw route spends an anonymous token. To minimise what the server can link:
 ///
 ///   * Deriving from `identity_pubkey` would let the server
 ///     correlate identity uploads with push registrations the

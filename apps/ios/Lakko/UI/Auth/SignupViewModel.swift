@@ -38,6 +38,20 @@ public final class SignupViewModel: ObservableObject {
 
     @Published public private(set) var busy: Bool = false
     @Published public private(set) var error: String?
+    /// ADR-0054 S4 — the last attempt was refused by the sign-up limit
+    /// (`429 signup-rate-limited`): the screen offers `Try again`, the form
+    /// keeps its contents.
+    @Published public private(set) var rateLimited: Bool = false
+    /// Whether the working state still offers `Cancel`. `false` once the
+    /// account is being created (right before `/signup/finish`).
+    @Published public private(set) var cancellable: Bool = false
+
+    /// The sign-up in flight, cancelled by ``onCancel()`` and when the screen
+    /// goes away.
+    private var signupTask: Task<Void, Never>?
+    /// Bumped per submit and per cancel, so a cancelled attempt that returns
+    /// late never touches the state of the next one.
+    private var attempt = 0
 
     /// Two-stage signup state machine. ``Stage/form`` collects the
     /// username + password; ``Stage/phrase(_:)`` displays the BIP39
@@ -100,25 +114,26 @@ public final class SignupViewModel: ObservableObject {
         }
 
         busy = true
+        cancellable = true
         error = nil
+        rateLimited = false
 
         let usernameSnapshot = username
         let displayNameSnapshot = displayName
         let passwordBytes = Data(password.utf8)
 
-        Task {
-            defer {
-                // SwiftUI `@Published` writes hop to the main actor
-                // automatically; the buffer reset is local-state
-                // mechanics, not security-sensitive on its own — the
-                // copy that crossed the FFI boundary is the one we
-                // care about (see `AuthRepository.signup`).
-            }
+        attempt += 1
+        let thisAttempt = attempt
+        signupTask = Task {
             do {
                 let outcome = try await repository.signup(
                     username: usernameSnapshot,
-                    password: passwordBytes
+                    password: passwordBytes,
+                    onCommitting: {
+                        if self.attempt == thisAttempt { self.cancellable = false }
+                    }
                 )
+                cancellable = false
                 busy = false
                 error = nil
                 password = ""
@@ -130,19 +145,53 @@ public final class SignupViewModel: ObservableObject {
                 } else {
                     stage = .phrase(outcome.recoveryPhrase)
                 }
-            } catch let err as AuthClientError {
-                busy = false
-                error = userFacing(err)
-            } catch let err as DiscoveryClientError {
-                busy = false
-                error = err.authFormMessage
             } catch {
+                guard attempt == thisAttempt else { return }
+                cancellable = false
                 busy = false
-                self.error = (error as? LocalizedError)?.errorDescription
-                    ?? "Could not create the account. Try again."
+                // `Cancel` or leaving the screen: back to the filled-in form,
+                // no message. A cancelled network call surfaces as a network
+                // error, so the task's flag decides, not the error type.
+                if Task.isCancelled || error is CancellationError { return }
+                switch error {
+                case let err as AuthClientError:
+                    if let refusal = AuthRateLimit.refusal(in: err),
+                       refusal.code == AuthRateLimit.signupRateLimited {
+                        rateLimited = true
+                    }
+                    self.error = userFacing(err)
+                case let err as DiscoveryClientError:
+                    self.error = err.authFormMessage
+                default:
+                    self.error = (error as? LocalizedError)?.errorDescription
+                        ?? "Could not create the account. Try again."
+                }
             }
         }
     }
+
+    /// `Cancel` in the working state (and leaving the screen): stop the
+    /// proof of work and return to the filled-in form. Ignored once the
+    /// account is being created.
+    public func onCancel() {
+        guard busy, cancellable else { return }
+        attempt += 1
+        signupTask?.cancel()
+        signupTask = nil
+        cancellable = false
+        busy = false
+        error = nil
+    }
+
+    /// `Try again` after the sign-up limit: the same form, submitted again.
+    public func onTryAgain() {
+        rateLimited = false
+        onSubmit()
+    }
+
+    /// The working-state copy (`docs/ux/anti-abuse.md` section 1).
+    public static let workingTitle = "Creating your account..."
+    public static let workingNote = "This takes a little while, once. You will not wait like this again."
 
     /// Called when the user has confirmed they wrote the recovery
     /// phrase down. Drops the in-memory phrase reference + signals
@@ -197,6 +246,7 @@ public final class SignupViewModel: ObservableObject {
     /// Indistinguishable-failure cases (login 401) stay generic on
     /// purpose.
     private func userFacing(_ err: AuthClientError) -> String {
+        if let limit = AuthRateLimit.copy(for: err) { return limit }
         switch err {
         case .argument(let message):
             return message

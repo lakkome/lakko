@@ -13,6 +13,7 @@
 import { createSignal, Show, type JSX } from "solid-js";
 import { useAuth } from "../AuthContext";
 import { AuthHttpError } from "../client";
+import { authLimitMessage } from "../auth-error-copy";
 import { isPlausibleContact } from "../contact-shape";
 import { normalizeTotpCode } from "../totp-code";
 import { ContactKind } from "../wire";
@@ -22,12 +23,11 @@ import { UsernameField } from "./UsernameField";
 /** 401 covers an unknown account, no live code, a wrong code and a replayed
  *  code alike. */
 export function contactRecoverErrorMessage(err: unknown): string {
+  const limit = authLimitMessage(err);
+  if (limit !== null) return limit;
   if (err instanceof AuthHttpError) {
     if (err.status === 401) {
       return "That code did not work. Check the code we sent and try again.";
-    }
-    if (err.status === 429) {
-      return "Too many attempts. Wait a while, then request a new code.";
     }
     if (err.status === 503) {
       return "Email and phone recovery are not available here. Use another way in.";

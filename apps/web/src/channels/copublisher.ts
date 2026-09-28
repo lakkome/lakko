@@ -57,7 +57,6 @@ import {
   registerBeforePublish,
   takeSigner,
 } from "../ds/access";
-import { solvePow } from "../auth/pow";
 import { KIND_WELCOME, parseEnvelope, wrapEnvelope } from "../contacts/envelope";
 import { takeKnockReadSlot } from "../chat/knock-cursor";
 import { base64Encode } from "../auth/account-id";
@@ -309,7 +308,7 @@ export function rejectCoPublisher(
 /** ADR-0028 OQ3 — joiner side: request to become a co-publisher of a channel
  *  from a `/g/` co-publisher link. Decodes + verifies the capability, recovers
  *  the channel id from the PublisherGroup `group_id` (the link conveys only the
- *  `group_id`), and knocks (ADR-0053 contract point 6): a PoW-gated probe
+ *  `group_id`), and knocks (ADR-0053 contract point 6): a token-gated probe
  *  returns the group's epoch, the external-join proposal (ADR-0027) is built
  *  for it, and a second knock carries a self-signed join-attribution (OQ2) and
  *  the proposal. No journal read. Returns the handles the caller polls with
@@ -347,9 +346,7 @@ export async function requestToCoPublish(
   }
   const channelIdHex = bytesToHex(channelIdBytes);
   await knockToJoin({
-    challenge: () => ds.powChallenge(),
-    solve: (seed, effortBits) => solvePow(seed, effortBits),
-    knock: (pow, payloads) => ds.knock(groupId, pow, payloads),
+    knock: (payloads) => ds.knock(groupId, payloads),
     buildProposal: (epoch) => identity.createExternalJoinProposal(groupId, epoch),
     // Self-signed join attribution (OQ2) — advisory; a failure to build it
     // never blocks the request.

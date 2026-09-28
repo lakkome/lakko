@@ -825,8 +825,13 @@ public class ContactsRepository(
                 if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) {
                     return@use AcceptInviteResult.RateLimited
                 }
+                // ADR-0054 - the consume spends an `invite-consume` token.
+                if (me.lakko.app.anon.isAnonTokenQuotaExhausted(e)) {
+                    return@use AcceptInviteResult.AllowanceUsed
+                }
                 return@use AcceptInviteResult.Failed(
-                    message = e.message ?: "consume failed",
+                    message = me.lakko.app.anon.anonTokenFailureCopy(e, "")
+                        ?: e.message ?: "consume failed",
                 )
             }
             when (consumeResult) {
@@ -1239,7 +1244,7 @@ public data class ContactsState(
  *     `null`. The UI surfaces a "please re-enter your
  *     password" panel + a Login deep-link.
  *   * [Failed] — any other underlying failure (transport,
- *     OPAQUE / OPRF wire-format mismatch on the consume PoW,
+ *     OPAQUE / OPRF wire-format mismatch, no consume token,
  *     MLS group creation throwing). Carries the inner error
  *     message for diagnostics.
  */
@@ -1277,6 +1282,9 @@ public sealed interface AcceptInviteResult {
     public data object NotFound : AcceptInviteResult
     public data object MalformedSlug : AcceptInviteResult
     public data object RateLimited : AcceptInviteResult
+
+    /** ADR-0054 - today's allowance of invite-consume tokens is used up. */
+    public data object AllowanceUsed : AcceptInviteResult
     public data object RequiresReauth : AcceptInviteResult
 
     public data class Failed(val message: String) : AcceptInviteResult

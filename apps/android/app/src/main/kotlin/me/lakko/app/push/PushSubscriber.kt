@@ -52,6 +52,16 @@ import me.lakko.app.BuildConfig
 public class PushSubscriber(
     private val context: Context,
     private val client: PushClient = PushClient(),
+    /** The client for an unregister that outlives the live session
+     *  (logout): it spends a token drawn with that departing session. */
+    private val detachedClient: (me.lakko.app.anon.AnonSession) -> PushClient = { session ->
+        PushClient(
+            anonTokens = me.lakko.app.anon.DetachedAnonTokenSource(
+                me.lakko.app.anon.AnonTokens.shared,
+                session,
+            ),
+        )
+    },
 ) {
 
     /**
@@ -132,17 +142,24 @@ public class PushSubscriber(
      * Drop the push registration locally + tell `push-gw` to
      * forget the token. Called on logout + forgetDevice.
      * Idempotent + best-effort: failures are logged.
+     *
+     * ADR-0054: the unregister spends a `push-register` token. Logout calls
+     * this after the live session is gone, so it passes the departing
+     * [session] and the token is drawn with it.
      */
-    public suspend fun unsubscribe() {
+    public suspend fun unsubscribe(session: me.lakko.app.anon.AnonSession? = null) {
         val pseudonym = DevicePushId.peek(context)
         if (pseudonym != null) {
+            val unregisterClient = if (session != null) detachedClient(session) else client
             try {
-                client.unregister(
+                unregisterClient.unregister(
                     devicePseudonym = pseudonym,
                     provider = PushClient.Provider.FCM,
                 )
             } catch (cause: Throwable) {
                 Log.w(TAG, "push-gw unregister failed", cause)
+            } finally {
+                if (unregisterClient !== client) unregisterClient.close()
             }
         }
         // Firebase doesn't expose a `deleteToken()` in the

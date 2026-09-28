@@ -262,8 +262,6 @@ services:
       # Fast reconciler so a best-effort-missed append lands within a poll
       # cycle.
       LAKKO_DISCOVERY_TRANSPARENCY_RECONCILE_SECS: "2"
-      # Trivial PoW so the host-side driver solves instantly.
-      LAKKO_DISCOVERY_POW_EFFORT_BITS: "0"
       RUST_LOG: "info,lakko_svc_discovery=debug"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8084/ready || exit 1"]

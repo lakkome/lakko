@@ -35,16 +35,16 @@
  * ## What is wired and what is not
  *
  *   * Recover-from-mnemonic — DONE. `recover()` drives the
- *     `/recover` route + `AuthClient.recover`, and resolves the
- *     target account_id the same way `login()` does: a local
- *     `(accountId, username)` cache hit wins, else a
- *     `discovery.lookup(username)` round-trip — so recover works
- *     on a FRESH device given the username + phrase (the optional
- *     `username` arg is required only when no account is cached).
- *   * `username → accountId` lookup for first-time login on a
- *     fresh device — DONE. `login()` resolves the typed username
- *     via `discovery.lookup()` on a local-cache miss. The same
- *     resolution is shared by every ADR-0018 recovery factor.
+ *     `/recover` route + `AuthClient.recover`, addressed by name
+ *     like `login()` — so recover works on a FRESH device given the
+ *     username + phrase (the optional `username` arg is required only
+ *     when no named account is cached).
+ *   * Sign in and recover by name (ADR-0054 S5) — DONE. `login()` and
+ *     every ADR-0018 recovery factor send the login handle of the typed
+ *     name (`login-handle.ts`) in place of an account id; nothing is
+ *     looked up before a session, and the account id comes back in the
+ *     finish. A signup claims the name handle-first (auth, then
+ *     discovery) and every sign-in by name re-binds the handle.
  *
  * Still not here:
  *
@@ -52,6 +52,7 @@
  */
 import {
   createContext,
+  createEffect,
   createSignal,
   onCleanup,
   onMount,
@@ -63,7 +64,16 @@ import {
 import { AuthClient } from "./client";
 import type { ContactKind } from "./wire";
 import { base64Decode, base64Encode } from "./account-id";
-import { resolveRecoverAccount } from "./recover-resolution";
+import { resolveRecoverUsername } from "./recover-resolution";
+import {
+  accessByName,
+  claimUsername,
+  loginHandleFor,
+  nameTargetFor,
+  nameTargetWith,
+  type NameTarget,
+} from "./login-handle";
+import { createLoginHandleSync } from "./login-handle-sync";
 import { decideSilentRestore } from "./silent-restore";
 import { createKeyPackagePublisher } from "../chat/keypackage-publisher";
 import {
@@ -103,10 +113,7 @@ import {
 } from "./webauthn-client";
 import { loadWasm, type Wasm } from "../wasm";
 import { accountKey as transparencyAccountKey } from "../transparency/account-key";
-import {
-  DiscoveryClient,
-  DiscoveryHttpError,
-} from "../discovery/client";
+import { DiscoveryClient } from "../discovery/client";
 import { clearAll as clearContactsStore } from "../contacts/local-store";
 import { useChats } from "../chat/ChatContext";
 import { deleteMlsSnapshot, saveMlsSnapshot } from "../chat/mls-store";
@@ -141,6 +148,7 @@ import { deleteCallLogRow } from "../calls/call-log-idb";
 import { clearOwnProfile } from "../profile/own-profile";
 import { rehydrateMlsState } from "../chat/rehydrate";
 import { subscribeToPush, unsubscribeFromPush } from "../push/subscribe";
+import { anonTokens } from "../tokens/anon-token-pool";
 import { bootstrapBackupFromPhraseString } from "../backup/bootstrap";
 import { startAutoBackup } from "../backup/auto-backup-driver";
 import { clearAutoBackupState } from "../backup/auto-backup";
@@ -351,7 +359,14 @@ export interface AuthApi {
    *  flips state to `session`. The returned [`SignupOutcome`]
    *  carries the BIP39 recovery phrase that the UI MUST display
    *  exactly once. */
-  signup(username: string, password: string): Promise<SignupOutcome>;
+  /** `options.signal` cancels the account-creation proof of work (ADR-0054
+   *  S4) and everything after it; the abort rejects with an `AbortError`
+   *  (`auth/pow.ts` `isAbortError`) and nothing is created server-side. */
+  signup(
+    username: string,
+    password: string,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<SignupOutcome>;
   /** ADR-0032 guest join — create a FULL account with NO username and no
    *  user-chosen password, so an anonymous `/c/<slug>` visitor can join a
    *  call without a login. Reuses the `signup` machinery verbatim: OPAQUE
@@ -364,15 +379,14 @@ export interface AuthApi {
    *  `confirmFreshPhraseSaved` then lands the session. Claiming a username
    *  (`registerUsername`) is a later onboarding step. Returns the recovery
    *  phrase (the caller shows it / it is surfaced by the prompt). */
-  signupGuest(): Promise<SignupOutcome>;
+  signupGuest(options?: { readonly signal?: AbortSignal }): Promise<SignupOutcome>;
   /** Run the OPAQUE-PAKE login flow.
    *
-   *  Resolves the typed `username` to an account_id from the local
-   *  `(accountId, username)` cache, falling back to a
-   *  `discovery.lookup()` round-trip on a cache miss — so a fresh
-   *  browser can log in to any account whose username is
-   *  registered (1.16d2). Throws on unknown username or wrong
-   *  password (both surface the same error — by design). */
+   *  ADR-0054 S5: signs in by name. The start carries the login handle of
+   *  the typed `username`, nothing is looked up before the session, and
+   *  the account id comes back in the finish — so a fresh browser can log
+   *  in to any account whose handle is bound. Throws on unknown username
+   *  or wrong password (both surface the same error — by design). */
   login(username: string, password: string): Promise<void>;
   /** Run the recover-from-mnemonic flow.
    *
@@ -382,11 +396,10 @@ export interface AuthApi {
    *  export key, persists it via the IDB pipeline, and flips
    *  state to `session`.
    *
-   *  Resolves the account_id like `login`: a local cache hit, else
-   *  a `discovery.lookup(username)` round-trip — so recover works
-   *  on a FRESH device given the username + phrase. `username` is
-   *  required only when no account is cached on this device; when a
-   *  cached account exists it is optional (and the cached id wins).
+   *  Addressed by name like `login` (ADR-0054 S5): the typed `username`,
+   *  else the account cached on this device; the account id comes back in
+   *  the finish. `username` is required only when no named account is
+   *  cached on this device.
    *
    *  ADR-0017: the canonical AccountIdentity is derived from the
    *  (unchanged) BIP39 phrase seed, so a routine recover preserves
@@ -401,9 +414,8 @@ export interface AuthApi {
     username?: string,
   ): Promise<void>;
   /** ADR-0018 factor (c) — recover ACCESS with a TOTP authenticator
-   *  code. Resolves `username` → account_id like `login` (local
-   *  cache hit, else `discovery.lookup`), drives
-   *  `AuthClient.totpRecover` for the session triple, and lands in
+   *  code. Addressed by `username`'s login handle like `login`
+   *  (ADR-0054 S5), drives `AuthClient.totpRecover` for the session triple, and lands in
    *  the EXISTING ADR-0017 post-ACCESS identity-acquisition state
    *  machine: a cached AccountIdentity seed (decryptable under a
    *  stored device key) finishes the session directly; otherwise the
@@ -420,11 +432,10 @@ export interface AuthApi {
    *  maps the `AuthHttpError` statuses to friendly messages. */
   recoverWithTotp(username: string, code: string): Promise<void>;
   /** ADR-0018 factor (d), step 1 — request a one-time recovery code
-   *  be sent to a previously-enrolled phone / email. Resolves
-   *  `username` → account_id like `login` (local cache hit, else
-   *  `discovery.lookup`), drives
+   *  be sent to a previously-enrolled phone / email. Addressed by
+   *  `username`'s login handle like `login` (ADR-0054 S5), drives
    *  `AuthClient.recoveryContactRecoverStart`, and STASHES the
-   *  resolved `(accountId, username, kind)` so `recoverWithContactFinish`
+   *  `(name, handle, kind)` so `recoverWithContactFinish`
    *  can submit the code without re-resolving.
    *
    *  ENUMERATION-SAFE: the server returns the same `{ sent: true }`
@@ -484,20 +495,18 @@ export interface AuthApi {
    *  bundle) so the user cannot silently fork their identity. */
   provideRecoveryPhrase(mnemonicPhrase: string): Promise<void>;
   /** ADR-0049 three-word recovery, step 1: which words to type and how to
-   *  stretch them. Anonymous; an unknown account gets stable decoys. */
-  wordVaultStart(accountIdB64: string): Promise<WordVaultChallenge>;
+   *  stretch them. Anonymous, addressed by the name's login handle
+   *  (ADR-0054 S5); an unknown name gets stable decoys. */
+  wordVaultStart(username: string): Promise<WordVaultChallenge>;
   /** ADR-0049 three-word recovery, step 2: stretch the typed words, submit
    *  the guess, open the sealed entropy, and return the FULL 24-word phrase
    *  for the existing phrase paths (`provideRecoveryPhrase` / `recover`).
    *  Throws an `AuthHttpError` 401 on a wrong answer, 429 when locked. */
   wordVaultOpen(
-    accountIdB64: string,
+    username: string,
     challenge: WordVaultChallenge,
     words: readonly string[],
   ): Promise<string>;
-  /** Resolve a username to the account id the recovery endpoints take,
-   *  through the device cache or a discovery lookup. */
-  resolveRecoverAccountId(username: string): Promise<string>;
   /** The three positions the signup phrase was enrolled under, once the
    *  enrollment lands (so the phrase screen can highlight them); `null`
    *  before that or when enrollment was not possible. */
@@ -744,17 +753,54 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // about whether a code was actually delivered (the server returns
   // the same response either way).
   const [pendingContactRecover, setPendingContactRecover] = createSignal<{
-    readonly accountIdBytes: Uint8Array;
-    readonly accountIdB64: string;
-    readonly username: string;
+    /** The name (and its login handle, ADR-0054 S5) the code was sent for. */
+    readonly target: NameTarget;
     readonly kind: ContactKind;
   } | null>(null);
 
   const client = new AuthClient();
   const discovery = new DiscoveryClient();
+  /**
+   * Install (or drop) the session everywhere a request draws on it: the
+   * discovery client's bearer header and the anonymous-token pool (ADR-0054
+   * S3), which draws its tokens WITH this session and spends them without
+   * it. A different account clears the pool; `null` stops drawing but keeps
+   * what is held until the sign-out has spent its push unregister.
+   */
+  function installSessionToken(token: string | null): void {
+    discovery.setSessionToken(token);
+    anonTokens.setSessionToken(token);
+  }
+  // ADR-0054 S5: sign-in by name needs the account's login handle bound at
+  // auth. Signup and a sign-in by name bind it themselves (and record that
+  // here); every other way a session lands - reload restore, passkey, device
+  // pairing, another-device confirmation, word vault, recovery phrase - is
+  // covered by the effect below, which binds the handle of the session's
+  // username once per session in this page. Best-effort and invisible: a
+  // 409, a 503 or a network error changes nothing for the user.
+  const loginHandleSync = createLoginHandleSync({
+    handleFor: loginHandleFor,
+    bind: (token, handle) => client.bindLoginHandle(token, handle),
+  });
+  /** The re-bind a sign-in by name runs, recorded so the effect does not
+   *  repeat it for the same session. */
+  function bindByName(token: string, handle: string): Promise<void> {
+    loginHandleSync.markBound(token, handle);
+    return client.bindLoginHandle(token, handle);
+  }
   // 1.16e5: drop active groups on logout/forgetDevice so MLS
   // state doesn't bleed across user sessions on the same tab.
   const chats = useChats();
+
+  // Whatever path installed the session, bind its username's login handle
+  // (see `loginHandleSync` above). Runs when the session lands and whenever
+  // the token or the username changes; a guest (no username) binds nothing.
+  createEffect(() => {
+    const s = state();
+    const secrets = identitySecrets();
+    if (s.kind !== "session" || secrets === null) return;
+    void loginHandleSync.ensure(secrets.sessionToken, s.account.username);
+  });
 
   // Keep the encrypted backup current. Until this ran, the blob was written
   // exactly twice in an account's life - an empty baseline at signup and one
@@ -1018,7 +1064,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       accountIdBytes: args.accountIdBytes,
       accountIdB64: args.accountIdB64,
     };
-    discovery.setSessionToken(args.sessionToken);
+    installSessionToken(args.sessionToken);
 
     // Rehydrate BEFORE any KeyPackage is minted: `restoreStorage` REPLACES the
     // provider storage, so a KeyPackage created earlier would lose its private
@@ -1127,7 +1173,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   ): Promise<void> {
     // Phase 1.5b: install the fresh bearer token on the
     // DiscoveryClient for any protected reads/writes that follow.
-    discovery.setSessionToken(triple.sessionToken);
+    installSessionToken(triple.sessionToken);
     // Persist the localStorage account marker so a reload knows
     // the account (important on a fresh browser where no row
     // existed).
@@ -1298,7 +1344,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       keyPackageAccount = null;
       chats.clear();
       setIdentitySecrets(null);
-      discovery.setSessionToken(null);
+      installSessionToken(null);
       seed.fill(0);
       setState({ kind: "anon", cachedUsername: decision.username });
     }
@@ -1322,43 +1368,41 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     identityAlert,
     dismissIdentityAlert: () => setIdentityAlert(null),
     republishKeyPackage: () => keyPackagePublisher.publish(),
-    async signup(username, password) {
+    async signup(username, password, options) {
       const trimmed = username.trim();
       if (trimmed.length === 0) {
         throw new Error("username must be non-empty");
       }
-      const result = await client.signup(utf8(password));
+      const result = await client.signup(
+        utf8(password),
+        options?.signal !== undefined ? { signal: options.signal } : {},
+      );
       const accountIdB64 = base64Encode(result.accountId);
       // Phase 1.5b: install the fresh bearer token on the
       // DiscoveryClient so the registerUsername /
       // uploadIdentityBundle / uploadKeyPackage round-trip below
       // sails through the auth::require_session middleware.
-      discovery.setSessionToken(result.sessionToken);
+      installSessionToken(result.sessionToken);
 
-      // 1.16d2: claim the username server-side. We do this AFTER
-      // the OPAQUE flow commits — if /discovery/register fails
-      // the account still exists but the username is unbound,
-      // which is recoverable on a future signup attempt with the
-      // same desired handle (the user picks a different name)
-      // or via a "set username" UI later. We ALSO surface the
-      // failure rather than silently continuing — a 409 (taken)
-      // is meaningful for the form.
-      let normalisedUsername: string;
-      try {
-        const reg = await discovery.registerUsername(
-          result.accountId,
-          trimmed,
-        );
-        normalisedUsername = reg.normalisedUsername;
-      } catch (err) {
-        // Re-throw a friendlier message for the common case.
-        if (err instanceof DiscoveryHttpError && err.status === 409) {
-          throw new Error(
-            `username @${trimmed} is already taken — pick another`,
-          );
-        }
-        throw err;
-      }
+      // 1.16d2 + ADR-0054 S5: claim the username server-side, AFTER the
+      // OPAQUE flow commits, in the load-bearing order: bind the login
+      // handle at auth FIRST, then register the name at discovery. An auth
+      // 409 stops before discovery; a discovery failure releases the handle
+      // again (so a retry is not refused by our own half claim). Either
+      // "taken" surfaces as the form's taken copy.
+      const handle = await loginHandleFor(trimmed);
+      const reg = await claimUsername({
+        username: trimmed,
+        bind: async () => {
+          await client.bindLoginHandle(result.sessionToken, handle.wire);
+          loginHandleSync.markBound(result.sessionToken, handle.wire);
+        },
+        register: () => discovery.registerUsername(result.accountId, trimmed),
+        release: async () => {
+          await client.releaseLoginHandle(result.sessionToken);
+        },
+      });
+      const normalisedUsername = reg.normalisedUsername;
 
       savePersisted({
         v: 1,
@@ -1582,7 +1626,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       });
       return { recoveryPhrase: result.recoveryPhrase };
     },
-    async signupGuest() {
+    async signupGuest(options) {
       // ADR-0032 guest join. This is the `signup` flow VERBATIM up to (but
       // NOT including) the username claim: OPAQUE registration under a
       // RANDOM password, a device root key derived from the resulting
@@ -1599,10 +1643,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const randomPassword = base64Encode(
         crypto.getRandomValues(new Uint8Array(32)),
       );
-      const result = await client.signup(utf8(randomPassword));
+      const result = await client.signup(
+        utf8(randomPassword),
+        options?.signal !== undefined ? { signal: options.signal } : {},
+      );
       const accountIdB64 = base64Encode(result.accountId);
       // Install the fresh bearer token for the protected writes below.
-      discovery.setSessionToken(result.sessionToken);
+      installSessionToken(result.sessionToken);
 
       // TODO(ADR-0032 onboarding): claiming a username is a LATER step —
       // the user calls `discovery.registerUsername(accountId, chosenName)`
@@ -1715,39 +1762,23 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       return { recoveryPhrase: result.recoveryPhrase };
     },
     async login(username, password) {
-      const trimmed = username.trim();
-      const cached = loadPersisted();
-
-      // Resolve the typed username to an account_id. Two paths:
-      //   1. Cache hit on this device — same username as cached:
-      //      use the cached id directly. Saves one round-trip
-      //      and works offline (well, against a cached id; the
-      //      OPAQUE flow itself still needs the server).
-      //   2. Cache miss OR mismatch — call discovery.lookup. The
-      //      result either binds the typed username to its
-      //      account_id (cross-device login from a fresh browser)
-      //      or returns null (unknown username).
-      let accountIdBytes: Uint8Array;
-      let resolvedUsername: string;
-      if (cached !== null && cached.username === trimmed) {
-        accountIdBytes = base64Decode(cached.accountIdB64);
-        resolvedUsername = cached.username;
-      } else {
-        const lookup = await discovery.lookup(trimmed);
-        if (lookup.account === null) {
-          // Indistinguishable from "wrong password" — we don't
-          // help an attacker probe the username space.
-          throw new Error("invalid credentials");
-        }
-        accountIdBytes = lookup.account;
-        resolvedUsername = lookup.normalisedUsername;
-      }
-
-      const result = await client.login(accountIdBytes, utf8(password));
+      // ADR-0054 S5: sign in by name. The start carries the login handle
+      // of the typed name, never an account id, and nothing is looked up
+      // before the session exists: the account id comes back in the finish.
+      // An unknown name reads as a wrong password (the server's stand-in).
+      // The handle is re-bound once the session exists (idempotent).
+      const target = await nameTargetFor(username);
+      const resolvedUsername = target.username;
+      const result = await accessByName({
+        target,
+        run: (handle) => client.login(handle, utf8(password)),
+        bind: bindByName,
+      });
+      const accountIdBytes = result.accountId;
       const accountIdB64 = base64Encode(accountIdBytes);
       // Phase 1.5b: install the fresh bearer token on the
       // DiscoveryClient for any protected writes that follow.
-      discovery.setSessionToken(result.sessionToken);
+      installSessionToken(result.sessionToken);
 
       // ADR-0018: PREFER an already-stored device root key over
       // re-deriving from the export key. On a password-bootstrapped
@@ -1914,7 +1945,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         const username = sameDevice
           ? cachedAny.username
           : (usernameHint ?? "").trim().toLowerCase();
-        discovery.setSessionToken(assertion.session_token);
+        installSessionToken(assertion.session_token);
         savePersisted({ v: 1, accountIdB64, username });
         setPendingRecovery({
           accountIdBytes,
@@ -1978,7 +2009,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
 
       // Phase 1.5b: install the fresh bearer token from the
       // WebAuthn /finish response on the DiscoveryClient.
-      discovery.setSessionToken(assertion.session_token);
+      installSessionToken(assertion.session_token);
 
       // ADR-0018: PREFER the stored device root key (we already
       // loaded it above — it just decrypted the export-key cache,
@@ -2071,27 +2102,21 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         });
       }
     },
-    async wordVaultStart(accountIdB64) {
-      return startWordVault(client, base64Decode(accountIdB64));
+    async wordVaultStart(username) {
+      // ADR-0054 S5: the vault is addressed by the name's login handle.
+      const target = await nameTargetFor(username);
+      return startWordVault(client, target.handle.wire);
     },
-    async wordVaultOpen(accountIdB64, challenge, words) {
+    async wordVaultOpen(username, challenge, words) {
       const wasm = await loadWasm();
+      const target = nameTargetWith(wasm, username);
       return openWordVault({
         wasm,
         client,
-        accountId: base64Decode(accountIdB64),
+        handle: target.handle.wire,
         challenge,
         words,
       });
-    },
-    async resolveRecoverAccountId(username) {
-      const { accountIdB64 } = await resolveRecoverAccount({
-        cached: loadPersisted(),
-        username,
-        lookup: (u) => discovery.lookup(u),
-        encodeAccountId: base64Encode,
-      });
-      return accountIdB64;
     },
     signupVaultPositions,
     async provideRecoveryPhrase(mnemonicPhrase) {
@@ -2254,7 +2279,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       if (sessionToken !== undefined && sessionExpiresAtMs !== undefined) {
         effectiveToken = sessionToken;
         effectiveExpiry = sessionExpiresAtMs;
-        discovery.setSessionToken(sessionToken);
+        installSessionToken(sessionToken);
       }
       // Persist the effective token when a fresh one arrived (the
       // pre-existing behavior) OR when the key was just bootstrapped
@@ -2376,7 +2401,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         }
       }
 
-      discovery.setSessionToken(sessionToken);
+      installSessionToken(sessionToken);
       setPendingRecovery(null);
       await finishCanonicalSession({
         wasm,
@@ -2579,18 +2604,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // Shamir shares), so this is where a phrase-based restore is recorded
       // for the chat list's honest empty state (ADR-0049 section 5).
       markRestored("phrase");
-      // Resolve the account_id the same way `login` does so recover works on a
-      // FRESH device: a local cache hit wins; otherwise a discovery.lookup on
-      // the supplied username binds it (extracted to `resolveRecoverAccount`
-      // so the cross-device behaviour is unit-tested — G-29).
-      const { accountIdB64, resolvedUsername } = await resolveRecoverAccount({
-        cached: loadPersisted(),
-        username,
-        lookup: (u) => discovery.lookup(u),
-        encodeAccountId: base64Encode,
-      });
+      // ADR-0054 S5: the reset is addressed by the name's login handle (the
+      // typed name, else the account cached on this device) and the account
+      // id comes back in the finish. No lookup runs before the session.
+      const target = await nameTargetFor(
+        resolveRecoverUsername({ cached: loadPersisted(), username }),
+      );
+      const resolvedUsername = target.username;
       // Parse the phrase up front so a bad mnemonic surfaces
-      // before we burn a PoW solve. `fromPhrase` collapses
+      // before we spend a limited attempt. `fromPhrase` collapses
       // unknown-word and bad-checksum into one error message —
       // by design (preserves BIP39's no-probing property).
       const wasm = await loadWasm();
@@ -2619,15 +2641,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       oldIdentity.free();
 
       try {
-        const accountIdBytes = base64Decode(accountIdB64);
-        const result = await client.recover(
-          accountIdBytes,
-          seed,
-          utf8(newPassword),
-        );
+        const result = await accessByName({
+          target,
+          run: (handle) => client.recover(handle, seed, utf8(newPassword)),
+          bind: bindByName,
+        });
+        const accountIdBytes = result.accountId;
+        const accountIdB64 = base64Encode(accountIdBytes);
         // Phase 1.5b: install the fresh bearer token on the
         // DiscoveryClient.
-        discovery.setSessionToken(result.sessionToken);
+        installSessionToken(result.sessionToken);
         // Re-derive the device root key from the NEW export key.
         // The previous device key (if any) is no longer reachable
         // from the new password; the upsert in IDB drops it.
@@ -3023,25 +3046,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           "enter the username of the account to recover",
         );
       }
-      // Resolve the username → account_id exactly like `login` /
-      // `recover`: a local cache hit wins, else a discovery.lookup
-      // round-trip binds it.
-      const cached = loadPersisted();
-      let accountIdBytes: Uint8Array;
-      let resolvedUsername: string;
-      if (cached !== null && cached.username === trimmed) {
-        accountIdBytes = base64Decode(cached.accountIdB64);
-        resolvedUsername = cached.username;
-      } else {
-        const lookup = await discovery.lookup(trimmed);
-        if (lookup.account === null) {
-          throw new Error("username not found");
-        }
-        accountIdBytes = lookup.account;
-        resolvedUsername = lookup.normalisedUsername;
-      }
-
-      const result = await client.totpRecover(accountIdBytes, code);
+      // ADR-0054 S5: addressed by the name's login handle; the account id
+      // comes back in the response, after the code verified. No lookup.
+      const target = await nameTargetFor(trimmed);
+      const resolvedUsername = target.username;
+      const result = await accessByName({
+        target,
+        run: (handle) => client.totpRecover(handle, code),
+        bind: bindByName,
+      });
+      const accountIdBytes = result.accountId;
       const accountIdB64 = base64Encode(accountIdBytes);
       // Shared ADR-0018 ACCESS-only landing (warm cached-seed finish
       // OR cold fail-safe park) — identical to the cascade's other
@@ -3060,39 +3074,20 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       if (trimmed.length === 0) {
         throw new Error("enter the username of the account to recover");
       }
-      // Resolve the username → account_id exactly like `login` /
-      // `recover` / `recoverWithTotp`: a local cache hit wins, else a
-      // discovery.lookup round-trip binds it.
-      const cached = loadPersisted();
-      let accountIdBytes: Uint8Array;
-      let resolvedUsername: string;
-      if (cached !== null && cached.username === trimmed) {
-        accountIdBytes = base64Decode(cached.accountIdB64);
-        resolvedUsername = cached.username;
-      } else {
-        const lookup = await discovery.lookup(trimmed);
-        if (lookup.account === null) {
-          throw new Error("username not found");
-        }
-        accountIdBytes = lookup.account;
-        resolvedUsername = lookup.normalisedUsername;
-      }
+      // ADR-0054 S5: addressed by the name's login handle; the account id
+      // comes back in the finish. No lookup runs before the session.
+      const target = await nameTargetFor(trimmed);
 
       // Send the code. ENUMERATION-SAFE server-side: the response is
       // the same `{ sent: true }` whether or not the contact matches a
       // confirmed row, so a non-throwing return here only means
       // "advance to the code step".
-      await client.recoveryContactRecoverStart(accountIdBytes, kind, contact);
+      await client.recoveryContactRecoverStart(target.handle.wire, kind, contact);
 
       // Stash the resolved context so `…Finish` can submit the code
       // without re-resolving. The kind is carried verbatim so the
-      // finish targets the exact (account, kind) the code was sent for.
-      setPendingContactRecover({
-        accountIdBytes,
-        accountIdB64: base64Encode(accountIdBytes),
-        username: resolvedUsername,
-        kind,
-      });
+      // finish targets the exact (name, kind) the code was sent for.
+      setPendingContactRecover({ target, kind });
     },
     async recoverWithContactFinish(code) {
       // ADR-0018 factor (d), step 2 — submit the delivered code.
@@ -3102,20 +3097,20 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           "request a code first (no pending phone / email recovery)",
         );
       }
-      const result = await client.recoveryContactRecoverFinish(
-        pending.accountIdBytes,
-        pending.kind,
-        code,
-      );
+      const result = await accessByName({
+        target: pending.target,
+        run: (handle) => client.recoveryContactRecoverFinish(handle, pending.kind, code),
+        bind: bindByName,
+      });
       // Consume the stash — the code is single-use server-side; a
       // retry must re-send.
       setPendingContactRecover(null);
       // Shared ADR-0018 ACCESS-only landing — identical to the
       // cascade's other ACCESS factor (factor (c) TOTP).
       await landAfterAccessRecovery(
-        pending.username,
-        pending.accountIdBytes,
-        pending.accountIdB64,
+        pending.target.username,
+        result.accountId,
+        base64Encode(result.accountId),
         {
           sessionToken: result.sessionToken,
           sessionExpiresAtMs: result.sessionExpiresAtMs,
@@ -3148,7 +3143,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // Phase 1.5b: drop the bearer token so a subsequent
       // protected write surfaces a clean 401 instead of silently
       // using a stale token.
-      discovery.setSessionToken(null);
+      installSessionToken(null);
       // Phase 1.13c: ALSO drop the IDB-persisted token. Keeping
       // it would defeat the user's "I just logged out" intent on
       // the next page reload (we'd silently re-attach to a live
@@ -3166,10 +3161,18 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // device key + push pseudonym stay on this browser for a
       // cheap re-login, but the server-side token row goes.
       // Fire-and-forget; failures are non-blocking.
-      void unsubscribeFromPush().catch((err) => {
+      const unsubscribed = unsubscribeFromPush().catch((err) => {
         // eslint-disable-next-line no-console
         console.warn("push unsubscribe (logout) failed", err);
       });
+      // ADR-0054 S3: the token pool is cleared on logout, once the push
+      // unregister above has spent its token (bounded, so a hung request
+      // cannot keep tokens alive). A sign-in in the meantime installs a new
+      // session, and `clearIfNoSession` then leaves that one alone.
+      void Promise.race([
+        unsubscribed,
+        new Promise<void>((resolve) => setTimeout(resolve, 10_000)),
+      ]).finally(() => anonTokens.clearIfNoSession());
       chats.clear();
       setIdentityAlert(null);
       setState({
@@ -3189,7 +3192,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         const own = chats.identity()?.signaturePublicKey;
         const secrets = identitySecrets();
         if (own !== undefined && secrets !== null) {
-          discovery.setSessionToken(secrets.sessionToken);
+          installSessionToken(secrets.sessionToken);
           try {
             await discovery.deleteKeyPackage(own);
           } catch (err) {
@@ -3416,7 +3419,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         setPendingFreshPhrase(null);
       }
       // Phase 1.5b: drop the bearer token.
-      discovery.setSessionToken(null);
+      installSessionToken(null);
+      // ADR-0054 S3: nothing of this account's token pool survives.
+      anonTokens.clear();
       setState({ kind: "anon" });
     },
   };

@@ -847,6 +847,7 @@ private struct TotpEnrollView: View {
     }
 
     private func mapStartError(_ err: AuthClientError) -> UiState {
+        if let limit = AuthRateLimit.copy(for: err) { return .error(limit) }
         if case .http(let status, _, _) = err {
             switch status {
             case 409: return .alreadyEnabled
@@ -996,7 +997,7 @@ private struct ContactEnrollView: View {
 
     private func start() {
         requestError = nil
-        // Light client-side shape check — saves a PoW solve on an
+        // Light client-side shape check — saves a round trip on an
         // obviously-malformed contact. The server is authoritative.
         guard isPlausibleContact(kind: contactKind, contact: contact) else {
             requestError = contactKind == .email
@@ -1071,6 +1072,7 @@ private struct ContactEnrollView: View {
         kind: ContactKind,
         contact contactValue: String
     ) -> UiState {
+        if let limit = AuthRateLimit.copy(for: err) { return .error(limit) }
         if case .http(let status, _, _) = err {
             switch status {
             case 409:

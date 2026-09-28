@@ -168,4 +168,7 @@ pub use safety::{
     safety_number, safety_number_bytes, SAFETY_NUMBER_DIGITS, SAFETY_NUMBER_DIGITS_PER_GROUP,
     SAFETY_NUMBER_GROUPS,
 };
-pub use username::{check_canonical_username, UsernameError, USERNAME_MAX_LEN, USERNAME_MIN_LEN};
+pub use username::{
+    check_canonical_username, login_handle, UsernameError, LOGIN_HANDLE_DOMAIN, LOGIN_HANDLE_LEN,
+    USERNAME_MAX_LEN, USERNAME_MIN_LEN,
+};

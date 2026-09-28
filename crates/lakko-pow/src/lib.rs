@@ -208,6 +208,19 @@ pub fn solve_with_budget(
     Err(PowError::BudgetExhausted)
 }
 
+/// One cancellable slice of a solve: at most `max_attempts` nonces, then
+/// `None` if none of them produced a proof.
+///
+/// For a caller that must be able to stop the work (a signup the person
+/// cancelled): it loops over chunks on a worker thread and checks its cancel
+/// flag between them. Each chunk samples fresh nonces, so a loop of chunks
+/// is the same search as one [`solve_with_budget`] call of the summed budget;
+/// `max_attempts = 0` returns `None` without trying.
+#[must_use]
+pub fn solve_chunk(seed: &[u8; SEED_LEN], effort_bits: u8, max_attempts: u32) -> Option<PowProof> {
+    solve_with_budget(seed, effort_bits, max_attempts).ok()
+}
+
 /// Check the leading-zero-bits gate. Pure function, exposed for
 /// tests and for callers that want to verify a proof locally
 /// before sending it.
@@ -314,6 +327,30 @@ mod tests {
         let a = solve(&seed, 0).expect("solve a");
         let b = solve(&seed, 0).expect("solve b");
         assert_ne!(a.nonce, b.nonce, "nonces must be independent");
+    }
+
+    /// A loop of small chunks finds a proof the server's checks accept, and
+    /// a chunk that finds nothing says so instead of failing.
+    #[test]
+    fn chunk_loop_finds_a_verifiable_proof_and_an_empty_chunk_is_none() {
+        let seed = [0x6Du8; SEED_LEN];
+        assert_eq!(solve_chunk(&seed, 0, 0), None, "zero attempts");
+        // 30 leading zero bits in one attempt: about one chance in 2^29.
+        assert_eq!(solve_chunk(&seed, 30, 1), None, "tiny chunk, heavy effort");
+
+        let mut proof = None;
+        for _ in 0..10_000 {
+            proof = solve_chunk(&seed, 6, 4);
+            if proof.is_some() {
+                break;
+            }
+        }
+        let proof = proof.expect("a chunk loop at 6 bits finds a proof");
+        let mut challenge = [0u8; SEED_LEN + NONCE_LEN];
+        challenge[..SEED_LEN].copy_from_slice(&proof.seed);
+        challenge[SEED_LEN..].copy_from_slice(&proof.nonce);
+        equix::verify_bytes(&challenge, &proof.solution).expect("equix verify");
+        assert!(meets_effort(&proof.seed, &proof.nonce, &proof.solution, 6));
     }
 
     /// Budget = 0 means we never even try — must return

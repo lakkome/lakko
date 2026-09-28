@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Forgot-password recovery with three words (ADR-0049). Step 1 resolves the
- * username to an account and asks the server which words to type; step 2
+ * Forgot-password recovery with three words (ADR-0049). Step 1 asks the
+ * server, by the username's login handle (ADR-0054 S5), which words to type; step 2
  * takes the three words plus a new password, opens the vault into the full
  * phrase, and runs the SAME `auth.recover` the phrase form runs, so the
  * published-identity check and the password rotation are unchanged.
@@ -38,7 +38,6 @@ export function WordsRecover(props: {
   readonly onUnavailable: (notice: string) => void;
 }): JSX.Element {
   const auth = useAuth();
-  const [accountIdB64, setAccountIdB64] = createSignal<string | null>(null);
   const [canonicalUsername, setCanonicalUsername] = createSignal("");
   const [challenge, setChallenge] = createSignal<WordVaultChallenge | null>(null);
   const [words, setWords] = createSignal<string[]>(["", "", ""]);
@@ -58,10 +57,9 @@ export function WordsRecover(props: {
     setBusy(true);
     try {
       const canonical = await requireValidUsername(props.username());
-      const id = await auth.resolveRecoverAccountId(canonical);
-      const c = await auth.wordVaultStart(id);
+      // ADR-0054 S5: addressed by the name's login handle, no lookup.
+      const c = await auth.wordVaultStart(canonical);
       setCanonicalUsername(canonical);
-      setAccountIdB64(id);
       setChallenge(c);
     } catch (err) {
       if (err instanceof AuthHttpError && err.status === 503) {
@@ -77,9 +75,9 @@ export function WordsRecover(props: {
   async function onAnswer(e: SubmitEvent): Promise<void> {
     e.preventDefault();
     setError(null);
-    const id = accountIdB64();
+    const name = canonicalUsername();
     const c = challenge();
-    if (id === null || c === null) return;
+    if (name.length === 0 || c === null) return;
     const problem = newPasswordProblem(password(), confirm());
     if (problem !== null) {
       setError(problem);
@@ -87,7 +85,7 @@ export function WordsRecover(props: {
     }
     setBusy(true);
     try {
-      const fullPhrase = await auth.wordVaultOpen(id, c, words());
+      const fullPhrase = await auth.wordVaultOpen(name, c, words());
       await auth.recover(fullPhrase, password(), canonicalUsername());
       setWords(["", "", ""]);
       setPassword("");

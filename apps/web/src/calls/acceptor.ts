@@ -75,9 +75,10 @@ export interface AcceptCallInviteOptions {
    *  bootstraps the fresh call MLS group with joiner as
    *  founder + owner added via the embedded KP. */
   readonly joinerIdentity: unknown;
-  /** Discovery client bound to the joiner's session token
-   *  (or anonymous — only consume + fetch need session, and
-   *  consume is anonymous-friendly via PoW). */
+  /** Discovery client of the joiner. The consume spends one anonymous
+   *  `invite-consume` token drawn with the joiner's session (ADR-0054 S3),
+   *  so the joiner is signed in (a guest account on a `/c/` link) before
+   *  this runs; the request itself carries no session. */
   readonly discoveryClient: DiscoveryClient;
   /** UNIX millis the acceptor uses for the
    *  `capability.isValidNow(...)` check. Defaults to

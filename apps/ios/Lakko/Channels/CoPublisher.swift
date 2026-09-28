@@ -282,12 +282,8 @@ public enum CoPublisher {
         // the proposal is built for it, a second knock carries the self-signed
         // attribution (OQ2, advisory) and the proposal. No journal read.
         try await DsKnockJoin(
-            solvePow: {
-                let challenge = try await ds.powChallenge()
-                return try await solvePow(seedB64: challenge.seed, effortBits: challenge.effortBits)
-            },
-            knock: { pow, payloads in
-                try await ds.knock(groupId: groupId, pow: pow, payloads: payloads).epoch
+            knock: { payloads in
+                try await ds.knock(groupId: groupId, payloads: payloads).epoch
             },
             createProposal: { epoch in
                 try identity.createExternalJoinProposal(groupId: groupId, epoch: epoch)

@@ -80,8 +80,8 @@ import uniffi.lakko_ffi_uniffi.Identity
  *
  * An anonymous visitor (no session) can join WITHOUT logging in: on tapping
  * Join we auto-create a FULL, username-less account via
- * [AuthRepository.signupGuest] (reusing the audited PoW-gated signup
- * machinery). That flips auth to [AuthState.SaveFreshPhrase], so [JoinCallRoot]
+ * [AuthRepository.signupGuest] (reusing the audited signup machinery, whose
+ * start pays the one proof of work left, ADR-0054). That flips auth to [AuthState.SaveFreshPhrase], so [JoinCallRoot]
  * renders the existing [SaveFreshPhraseScreen] for the guest to save their
  * recovery phrase; on acknowledgement [AuthRepository.confirmFreshPhraseSaved]
  * lands the session and the join resumes automatically ([JoinCallViewModel.onSessionLanded]).
@@ -143,6 +143,11 @@ data class JoinCallUiState(
     val guestNameError: String? = null,
     /** Why Join was refused while another call holds the one call slot. */
     val busyMessage: String? = null,
+    /** ADR-0054 UX section 1 - the guest account is being created (the one
+     *  heavy proof of work): `Getting you into the call...`. */
+    val guestWorking: Boolean = false,
+    /** The guest solve is still running, so the row offers `Cancel`. */
+    val guestSolving: Boolean = false,
 )
 
 /** ADR-0048 UX §4 — the guest name field's prefill. */
@@ -173,6 +178,9 @@ class JoinCallViewModel(
     // rapid second tap can't mint a SECOND guest account. A second call is
     // prevented by the host, which refuses a call while one holds the slot.
     private var mintingGuest = false
+
+    /** The guest sign-up in flight, so its solve can be cancelled. */
+    private var guestJob: kotlinx.coroutines.Job? = null
 
     /** Set by [decode] when the ledger answered `429`. */
     private var lastDecodeRateLimited = false
@@ -314,16 +322,41 @@ class JoinCallViewModel(
         // makes a rapid double-tap idempotent — never two guest accounts.
         if (mintingGuest) return
         mintingGuest = true
-        local.update { it.copy(phase = JoinCallPhase.Starting, error = null) }
+        local.update {
+            it.copy(phase = JoinCallPhase.Starting, error = null, guestWorking = true, guestSolving = true)
+        }
         pendingJoin = d
-        viewModelScope.launch {
+        guestJob = viewModelScope.launch {
             try {
-                authRepository.signupGuest()
+                authRepository.signupGuest(onProofSolved = {
+                    local.update { it.copy(guestSolving = false) }
+                })
+                local.update { it.copy(guestWorking = false, guestSolving = false) }
+            } catch (err: kotlin.coroutines.cancellation.CancellationException) {
+                throw err
             } catch (err: Throwable) {
                 mintingGuest = false // allow a retry after a failed mint
                 pendingJoin = null
-                local.update { it.copy(phase = JoinCallPhase.Error, error = err.message ?: err.toString()) }
+                val copy = (err as? me.lakko.app.auth.AuthHttpError)
+                    ?.let { me.lakko.app.auth.authLimitCopy(it) }
+                    ?: err.message ?: err.toString()
+                local.update {
+                    it.copy(phase = JoinCallPhase.Error, error = copy, guestWorking = false, guestSolving = false)
+                }
             }
+        }
+    }
+
+    /** `Cancel` while the guest account's proof of work runs: back to Join,
+     *  nothing was sent. */
+    fun onCancelGuest() {
+        if (!local.value.guestSolving) return
+        guestJob?.cancel()
+        guestJob = null
+        mintingGuest = false
+        pendingJoin = null
+        local.update {
+            it.copy(phase = JoinCallPhase.Idle, error = null, guestWorking = false, guestSolving = false)
         }
     }
 
@@ -560,11 +593,25 @@ fun JoinCallScreen(
                         }
                     }
                     JoinCallPhase.Starting -> {
-                        Text("Connecting…")
-                        // Only once the host holds the call; a guest sign-up in
-                        // flight has nothing to cancel yet.
-                        if (viewModel.hostHoldsThisCall(ui)) {
-                            TextButton(onClick = viewModel::onCancel) { Text("Cancel") }
+                        if (ui.guestWorking) {
+                            // ADR-0054 UX section 1 - the guest account's one
+                            // heavy piece of work.
+                            androidx.compose.material3.CircularProgressIndicator()
+                            Text(me.lakko.app.auth.GUEST_JOIN_WORKING_COPY)
+                            Text(
+                                text = me.lakko.app.auth.SIGNUP_WORKING_LINE,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            if (ui.guestSolving) {
+                                TextButton(onClick = viewModel::onCancelGuest) { Text("Cancel") }
+                            }
+                        } else {
+                            Text("Connecting…")
+                            // Only once the host holds the call.
+                            if (viewModel.hostHoldsThisCall(ui)) {
+                                TextButton(onClick = viewModel::onCancel) { Text("Cancel") }
+                            }
                         }
                     }
                     JoinCallPhase.Waiting -> {

@@ -208,7 +208,7 @@ type ReconcileRow = (Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>);
 /// eventually appends every account's CURRENT published identity to the
 /// transparency log, closing the S2 best-effort-append fail-open gap.
 ///
-/// Mirrors [`crate::pow::spawn_pruner`]'s shape: `tokio::spawn` + a
+/// The usual pruner shape: `tokio::spawn` + a
 /// `tokio::time::interval`, first tick skipped, then tick-then-loop. The
 /// task is aborted when the service stops (the returned handle is held in
 /// `main`).

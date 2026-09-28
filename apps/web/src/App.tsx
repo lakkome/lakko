@@ -41,7 +41,6 @@ import {
   MailboxProvider,
 } from "./contacts/MailboxContext";
 import { OneToOneContactAdoption } from "./contacts/OneToOneContactAdoption";
-import { PowActivityIndicator } from "./ui/PowActivityIndicator";
 import { ProfileProvider } from "./profile/ProfileContext";
 import { GroupNameProvider } from "./chat/GroupNameContext";
 import { PinProvider } from "./chat/PinContext";
@@ -173,11 +172,6 @@ const App: Component = () => (
            * hold the person before it is first opened.
            */}
           <OneToOneContactAdoption />
-          {/*
-           * Proof-of-work runs in a Web Worker and can take a long time at the
-           * production effort; this says the app is working rather than hung.
-           */}
-          <PowActivityIndicator />
           {/*
            * 1.18f — "new version available" toast. Mounted at
            * the top level so it overlays every route (auth shell

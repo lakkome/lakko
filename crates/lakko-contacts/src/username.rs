@@ -147,6 +147,37 @@ pub fn check_canonical_username(candidate: &str) -> Result<(), UsernameError> {
     Ok(())
 }
 
+/// BLAKE3 derive-key context of the login handle (ADR-0054 S5). Frozen: a
+/// change makes every bound handle unreachable.
+pub const LOGIN_HANDLE_DOMAIN: &str = "lakko/auth/login-handle/v1";
+
+/// Length of a login handle, in bytes.
+pub const LOGIN_HANDLE_LEN: usize = 32;
+
+/// The login handle of a **canonical** username (ADR-0054 S5):
+/// `BLAKE3-derive-key("lakko/auth/login-handle/v1", username)`.
+///
+/// What a client sends `services/auth` to sign in or recover by name before
+/// it holds a session, in place of the account id it could only have learned
+/// through a (now token-gated) discovery lookup. The handle is a public,
+/// unkeyed function of the name, so it hides nothing from someone who
+/// guesses the name; the auth service stores it only under its own pepper.
+///
+/// Refuses a non-canonical input with the same reasons as
+/// [`check_canonical_username`]: a caller holding user input runs
+/// `lakko_discovery_client::login_handle`, which normalises first.
+///
+/// # Errors
+///
+/// The first [`UsernameError`] that applies.
+pub fn login_handle(canonical: &str) -> Result<[u8; LOGIN_HANDLE_LEN], UsernameError> {
+    check_canonical_username(canonical)?;
+    Ok(lakko_crypto::hash::blake3_derive_key_from_material(
+        LOGIN_HANDLE_DOMAIN,
+        canonical.as_bytes(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,5 +260,38 @@ mod tests {
         assert_eq!(UsernameError::TooShort { min: 3 }.code(), "tooShort");
         assert_eq!(UsernameError::TooLong { max: 32 }.code(), "tooLong");
         assert_eq!(UsernameError::InvalidCharacters.code(), "invalidCharacters");
+    }
+
+    #[test]
+    fn login_handle_golden() {
+        // Pinned: every client and the auth service must agree on these
+        // bytes, and a drift would strand every bound handle.
+        let h = login_handle("alice").unwrap();
+        assert_eq!(
+            h,
+            lakko_crypto::hash::blake3_derive_key_from_material(
+                "lakko/auth/login-handle/v1",
+                b"alice"
+            )
+        );
+        assert_eq!(hex(&h), GOLDEN_ALICE);
+        assert_ne!(login_handle("alice_").unwrap(), h);
+    }
+
+    #[test]
+    fn login_handle_refuses_non_canonical_input() {
+        assert_eq!(login_handle("Alice"), Err(UsernameError::InvalidCharacters));
+        assert_eq!(login_handle("ab"), Err(UsernameError::TooShort { min: 3 }));
+        assert_eq!(login_handle(""), Err(UsernameError::Empty));
+    }
+
+    const GOLDEN_ALICE: &str = "e9f42c220b79dab0807424ce51dfc32037114e6c9668690f4a4d78b39658320d";
+
+    fn hex(b: &[u8]) -> String {
+        use std::fmt::Write as _;
+        b.iter().fold(String::new(), |mut s, x| {
+            let _ = write!(s, "{x:02x}");
+            s
+        })
     }
 }

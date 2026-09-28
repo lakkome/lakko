@@ -12,6 +12,7 @@
  * match looks the text up as an `@handle` (OPRF discovery) and opens the
  * subscribe page, which is how a channel someone else runs is found.
  */
+import { anonTokenMessage } from "../tokens/token-copy";
 import { createMemo, createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { useLocation, useNavigate, useParams, type RouteSectionProps } from "@solidjs/router";
 
@@ -102,7 +103,11 @@ export default function ChannelsLayout(props: RouteSectionProps): JSX.Element {
         state: /^[0-9a-f]{32}$/i.test(handle) ? {} : { handle },
       });
     } catch (err) {
-      setFindError(`Could not look that up. Check your connection and try again. (${String(err)})`);
+      setFindError(
+        // ADR-0054 S3: a handle lookup spends an anonymous token.
+        anonTokenMessage(err, "Could not look that up. Check your connection and try again.") ??
+          `Could not look that up. Check your connection and try again. (${String(err)})`,
+      );
     } finally {
       setFindBusy(false);
     }

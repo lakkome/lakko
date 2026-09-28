@@ -100,7 +100,6 @@ const MAX_CAPABILITY_BYTES: usize = 2048;
 
 #[derive(Deserialize)]
 pub(crate) struct UploadRequest {
-    pub(crate) pow: crate::pow::PowProof,
     /// Standard-alphabet base64 of `lakko_contacts::invite::compose(...)`
     /// output. Server decodes + verifies the wire signature
     /// before storing.
@@ -122,8 +121,6 @@ pub(crate) async fn upload(
     axum::Extension(authed): axum::Extension<crate::auth::AuthenticatedAccount>,
     Json(payload): Json<UploadRequest>,
 ) -> Result<Json<UploadResponse>, (StatusCode, String)> {
-    crate::pow::verify_proof(&state.db, &payload.pow).await?;
-
     let bytes = B64.decode(&payload.capability).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -295,7 +292,6 @@ const MAX_USES_UNLIMITED: u32 = u32::MAX;
 
 #[derive(Deserialize)]
 pub(crate) struct ConsumeRequest {
-    pub(crate) pow: crate::pow::PowProof,
     /// Standard-alphabet base64 of the 32-byte
     /// `compute_joiner_tag(capability_bytes,
     /// joiner_account_id)` output (1.18d3a). Server stores
@@ -382,8 +378,6 @@ pub(crate) async fn consume(
     Path(blob_id_b64url): Path<String>,
     Json(payload): Json<ConsumeRequest>,
 ) -> Result<Json<ConsumeResponse>, (StatusCode, String)> {
-    crate::pow::verify_proof(&state.db, &payload.pow).await?;
-
     let blob_id = crate::ledger_id::parse_blob_id(&blob_id_b64url)?;
 
     let joiner_tag = B64.decode(&payload.joiner_tag).map_err(|e| {
@@ -464,6 +458,14 @@ pub(crate) async fn consume(
                 .await;
         let (used_count, max_uses) = match row_result {
             Ok(r) => r,
+            // MariaDB's INSERT IGNORE downgrades the foreign-key violation of
+            // a consume against an absent invite to a warning with zero rows
+            // affected, so "no such invite" arrives here rather than in the
+            // error arm above: fold it into the documented 404.
+            Err(sqlx::Error::RowNotFound) => {
+                let _ = tx.rollback().await;
+                return Err((StatusCode::NOT_FOUND, "invite not found".to_string()));
+            },
             Err(e) => {
                 let _ = tx.rollback().await;
                 tracing::error!(error = %e, "consume invites read-back (already-consumed)");
@@ -1096,8 +1098,6 @@ fn within_replay_window(signed_at_ms: u64, now_ms: u64) -> bool {
 /// 7d / 30d), so an hourly sweep is proportionate — much
 /// shorter and we'd be hammering the DB for little value, much
 /// longer and the storage-bloat side leaks across deploys.
-/// the `lakko-pow-server` challenge prune is 60 s for the
-/// short-lived PoW challenges; the asymmetry is deliberate.
 const PRUNE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 /// Spawn a background task that periodically deletes expired
@@ -1114,9 +1114,8 @@ const PRUNE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 
 /// surfaces a UI warning, the storage layer does not
 /// second-guess).
 ///
-/// Mirror of `pow::spawn_pruner` — same shape (interval +
-/// loop + log + carry on), different cadence (1 h vs 60 s) to
-/// match the typical invite lifetime. Aborted when the
+/// Shape: interval + loop + log + carry on, at a cadence
+/// matched to the typical invite lifetime. Aborted when the
 /// service stops; the `_invite_pruner` handle in `main.rs`
 /// owns the abort.
 pub(crate) fn spawn_pruner(pool: sqlx::MySqlPool) -> tokio::task::JoinHandle<()> {

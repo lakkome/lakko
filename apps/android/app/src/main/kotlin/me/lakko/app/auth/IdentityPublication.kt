@@ -76,7 +76,7 @@ internal enum class IdentityPublication {
     /**
      * As [REFRESH], but publish only when the directory is missing the bundle
      * or holds different keys, and skip when it could not be read — a relaunch
-     * must not pay a proof-of-work solve for a no-op.
+     * must not pay an upload for a no-op.
      */
     REFRESH_IF_CHANGED,
 

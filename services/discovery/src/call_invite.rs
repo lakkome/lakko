@@ -79,7 +79,6 @@ const MAX_USES_UNLIMITED: u32 = u32::MAX;
 
 #[derive(Deserialize)]
 pub(crate) struct UploadRequest {
-    pub(crate) pow: crate::pow::PowProof,
     /// Standard-alphabet base64 of `lakko_contacts::call_invite::compose(...)`
     /// output. Server decodes + verifies the wire signature
     /// before storing.
@@ -102,8 +101,6 @@ pub(crate) async fn upload(
     axum::Extension(authed): axum::Extension<crate::auth::AuthenticatedAccount>,
     Json(payload): Json<UploadRequest>,
 ) -> Result<Json<UploadResponse>, (StatusCode, String)> {
-    crate::pow::verify_proof(&state.db, &payload.pow).await?;
-
     let bytes = B64.decode(&payload.capability).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -253,7 +250,6 @@ pub(crate) async fn fetch(
 
 #[derive(Deserialize)]
 pub(crate) struct ConsumeRequest {
-    pub(crate) pow: crate::pow::PowProof,
     /// Standard-alphabet base64 of the 32-byte joiner_tag.
     /// Joiner computes via `lakko_contacts::invite::compute_joiner_tag(
     /// capability_bytes, joiner_account_id)` (the same helper
@@ -310,8 +306,6 @@ pub(crate) async fn consume(
     Path(blob_id_b64url): Path<String>,
     Json(payload): Json<ConsumeRequest>,
 ) -> Result<Json<ConsumeResponse>, (StatusCode, String)> {
-    crate::pow::verify_proof(&state.db, &payload.pow).await?;
-
     let blob_id = crate::ledger_id::parse_blob_id(&blob_id_b64url)?;
 
     let joiner_tag = B64.decode(&payload.joiner_tag).map_err(|e| {

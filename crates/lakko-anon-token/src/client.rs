@@ -17,6 +17,7 @@ use voprf::{EvaluationElement, Group, Proof, Ristretto255, VoprfClient};
 use crate::context::TokenContext;
 use crate::error::{AnonTokenError, Result};
 use crate::token::{token_input, Token};
+use crate::wire::{decode_b64url_fixed, encode_b64url};
 use crate::{
     BLINDED_ELEMENT_LEN, EVALUATION_ELEMENT_LEN, MAX_BATCH, NONCE_LEN, PROOF_LEN, PUBLIC_KEY_LEN,
 };
@@ -95,6 +96,42 @@ impl TokenRequest {
     #[must_use]
     pub fn blinded_elements(&self) -> &[[u8; BLINDED_ELEMENT_LEN]] {
         &self.blinded
+    }
+
+    /// The blinded elements as base64url without padding - the
+    /// `blinded_elements` field of `POST /auth/tokens`, in order.
+    #[must_use]
+    pub fn blinded_elements_b64url(&self) -> Vec<String> {
+        self.blinded.iter().map(|b| encode_b64url(b)).collect()
+    }
+
+    /// [`Self::finalize`] over the text the issuer and the key route send:
+    /// every field base64url without padding.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::finalize`]; an evaluation that does not decode to 32 bytes
+    /// is [`AnonTokenError::BadElement`], a proof that does not decode to 64
+    /// bytes [`AnonTokenError::ProofVerification`], a public key that does not
+    /// decode to 32 bytes [`AnonTokenError::BadPublicKey`].
+    pub fn finalize_b64url<S: AsRef<str>>(
+        self,
+        evaluations: &[S],
+        proof: &str,
+        public_key: &str,
+    ) -> Result<Vec<Token>> {
+        let evaluations = evaluations
+            .iter()
+            .map(|e| {
+                decode_b64url_fixed::<EVALUATION_ELEMENT_LEN>(e.as_ref())
+                    .ok_or(AnonTokenError::BadElement)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let proof =
+            decode_b64url_fixed::<PROOF_LEN>(proof).ok_or(AnonTokenError::ProofVerification)?;
+        let public_key = decode_b64url_fixed::<PUBLIC_KEY_LEN>(public_key)
+            .ok_or(AnonTokenError::BadPublicKey)?;
+        self.finalize(&evaluations, &proof, &public_key)
     }
 
     /// Check the issuer's proof against `public_key` and unblind every

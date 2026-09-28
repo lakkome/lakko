@@ -97,9 +97,38 @@ pub fn validate_username(input: &str) -> Result<String, UsernameError> {
     Ok(normalised)
 }
 
+/// The login handle for what the user typed (ADR-0054 S5): normalise,
+/// apply the username rule, then
+/// [`lakko_contacts::username::login_handle`] —
+/// `BLAKE3-derive-key("lakko/auth/login-handle/v1", canonical)`.
+///
+/// What a client sends `services/auth` to sign in or recover by name on a
+/// device that holds no account id. `"@Alice"` and `"alice"` give the same
+/// handle.
+///
+/// # Errors
+///
+/// The same [`UsernameError`] reasons as [`validate_username`].
+pub fn login_handle(
+    input: &str,
+) -> Result<[u8; lakko_contacts::username::LOGIN_HANDLE_LEN], UsernameError> {
+    lakko_contacts::username::login_handle(&validate_username(input)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn login_handle_normalises_then_derives() {
+        let h = login_handle("  @Alice ").unwrap();
+        assert_eq!(h, lakko_contacts::username::login_handle("alice").unwrap());
+        assert_eq!(login_handle("al"), Err(UsernameError::TooShort { min: 3 }));
+        assert_eq!(
+            login_handle("p\u{430}vel"),
+            Err(UsernameError::InvalidCharacters)
+        );
+    }
 
     #[test]
     fn validate_accepts_and_normalises() {

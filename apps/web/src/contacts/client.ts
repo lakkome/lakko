@@ -118,7 +118,6 @@ import {
   takeSigner,
   type ProofSigner,
 } from "../ds/access";
-import { solvePow } from "../auth/pow";
 import { resolveLeafSignatureKey, resolveMemberIdentity } from "../chat/author-identity";
 import type { IncomingChatEvent } from "../chat/client";
 // ADR-0045 UX §6 — the seventh refusal string, defined ONCE beside the rest of
@@ -3570,15 +3569,14 @@ export class ContactsClient {
     }
     const groupId = cap.groupId;
     // ADR-0053 contract point 6 — the knock. A claimed journal answers only
-    // its members, so the joiner never reads it: a PoW-gated probe knock
+    // its members, so the joiner never reads it: a probe knock (one anonymous
+    // token, ADR-0054 S3)
     // returns the group's latest registered epoch, the proposal is built for
     // that epoch, and a second knock carries the attribution and the proposal
     // into the group's knock queue, which the owner and admins read.
     try {
       await knockToJoin({
-        challenge: () => this.ds.powChallenge(),
-        solve: (seed, effortBits) => solvePow(seed, effortBits),
-        knock: (pow, payloads) => this.ds.knock(groupId, pow, payloads),
+        knock: (payloads) => this.ds.knock(groupId, payloads),
         buildProposal: (epoch) => myIdentity.createExternalJoinProposal(groupId, epoch),
         // ADR-0028 OQ2 — the self-signed join attribution tells the approving
         // admin which member's link this request arrived on. Advisory: a

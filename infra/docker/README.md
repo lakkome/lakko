@@ -73,18 +73,19 @@ production values. Override per run via the environment (the compose reads
 `${VAR:-default}`):
 
 ```bash
-LAKKO_POW_EFFORT_BITS=1 LAKKO_DISCOVERY_POW_EFFORT_BITS=1 \
+LAKKO_SIGNUP_POW_EFFORT_BITS=1 LAKKO_DISCOVERY_POW_EFFORT_BITS=1 \
   docker compose -f infra/docker/docker-compose.yml up --build
 ```
 
 | Variable | Default | Notes |
 |---|---|---|
 | `LAKKO_SESSION_TOKEN_SECRET` | dev fixture (base64) | MUST be identical across auth + discovery + storage + push-gw (auth mints, the rest verify) |
-| `LAKKO_POW_EFFORT_BITS` / `LAKKO_DISCOVERY_POW_EFFORT_BITS` / `LAKKO_PUSH_GW_POW_EFFORT_BITS` | 8 | proof-of-work cost; set to `1` for fast scripted tests |
+| `LAKKO_SIGNUP_POW_EFFORT_BITS` / `LAKKO_DISCOVERY_POW_EFFORT_BITS` / `LAKKO_PUSH_GW_POW_EFFORT_BITS` | 8 | proof-of-work cost; set to `1` for fast scripted tests |
 | `LAKKO_TURN_SHARED_SECRET` / `LAKKO_TURN_URIS` | dev fixtures | base64 secret; only used by the call-credential endpoint |
 | `LAKKO_TOTP_ENC_KEY` | dev fixture (base64, 32 B) | encrypts TOTP secrets at rest (ADR-0018 factor (c)); unset disables the `/totp/*` routes (503). A DB-only leak defence, not a host-compromise one |
 | `LAKKO_VAULT_ENC_KEY` | dev fixture (base64, 32 B) | wraps each account's word-vault row at rest (ADR-0049); unset disables the `/vault/*` routes (503) and clients fall back to the 24 words. Losing it destroys every vault |
 | `LAKKO_RECOVERY_CONTACT_PEPPER` | dev fixture (base64, 32 B) | keys the phone/email contact + OTP-code hashes (ADR-0018 factor (d)); unset disables the `/recovery-contact/*` routes (503). The contact plaintext is NEVER stored/logged (invariant #1) — only a keyed hash. A DB-only leak defence, not a host-compromise one |
+| `LAKKO_AUTH_HANDLE_PEPPER` | dev fixture (hex, 32 B) | keys the stored login handles (ADR-0054 S5); unset makes every route that names an account by login handle (login, recovery, reset, TOTP, word vault, phone/email recovery) answer 503. Losing or rotating it unbinds every handle |
 | `LAKKO_SMTP_*` / `LAKKO_SMS_*` | unset (LogOnly) | OTP delivery adapters (ADR-0018 factor (d)). Email + SMS both default to a log-only sender in the dev stack (the code is written to the auth log, never sent). Set `LAKKO_SMTP_{HOST,PORT,USERNAME,PASSWORD,FROM}` to arm real SMTP email (lettre, rustls); set `LAKKO_SMS_{API_URL,ACCOUNT_SID,AUTH_TOKEN,FROM}` to arm a Twilio-shaped SMS adapter (reqwest, rustls) |
 | `LAKKO_PUSH_GW_INTERNAL_SECRET` | dev fixture (base64, 32 B) | ADR-0054: the shared secret the DS presents when it forwards a group wake to push-gw's internal listener (`push-gw:8092`, on the compose network only, not published). The compose file feeds the same value to the DS as `LAKKO_DS_PUSH_GW_SECRET` |
 | `LAKKO_DISCOVERY_FRESH_IDENTITY_COOLDOWN_SECS` | 3600 | per-account cool-down (seconds) on UNPROVEN AccountIdentity changes to a NEW key — the lost-everything publish (ADR-0017 (ii)). Blunts a compromised-ACCESS attacker churning fresh identities; `0` disables. A heal-back to the previous key and a proven rotation are never gated, so the cool-down can never lock a legitimate owner out |

@@ -76,6 +76,13 @@ public final class JoinCallLandingViewModel: ObservableObject {
     /// ADR-0048 / UX spec §4 — a guest (no session) is asked for a name here,
     /// prefilled `Guest`. It becomes the new account's own profile.
     @Published public var guestName: String = "Guest"
+    /// ADR-0054 S4 — the guest account is being created (the one heavy proof
+    /// of work): `Getting you into the call...` with the signup line below.
+    @Published public private(set) var creatingGuest = false
+    /// The guest sign-up in flight; cancelled on Back / Cancel until the
+    /// account is being committed.
+    private var guestTask: Task<SignupOutcome, Error>?
+    private var guestCommitting = false
 
     private let slug: String
     private let authRepository: AuthRepository
@@ -140,6 +147,9 @@ public final class JoinCallLandingViewModel: ObservableObject {
     /// The landing appeared / disappeared — while it shows the call's state, no
     /// status line for it is shown anywhere else.
     func setVisible(_ visible: Bool) {
+        // Leaving the screen while the guest account is being worked on
+        // cancels that work (`docs/ux/anti-abuse.md` section 1).
+        if !visible { cancelGuestSignup() }
         linkCallHost.noteLanding(landingToken, visible: visible)
     }
 
@@ -174,8 +184,20 @@ public final class JoinCallLandingViewModel: ObservableObject {
         localPhase = .starting
         // Arm auto-resume BEFORE the await so the re-mounted landing continues.
         intake.armCallJoinAutoResume()
+        creatingGuest = true
+        guestCommitting = false
+        let task = Task { @MainActor [authRepository] in
+            try await authRepository.signupGuest(onCommitting: {
+                self.guestCommitting = true
+            })
+        }
+        guestTask = task
+        defer {
+            guestTask = nil
+            creatingGuest = false
+        }
         do {
-            _ = try await authRepository.signupGuest()
+            _ = try await task.value
             // The guest account exists from here (its session lands once the
             // phrase is acknowledged), so its id is known: keep the name as its
             // own profile, published into every group it later joins.
@@ -190,8 +212,17 @@ public final class JoinCallLandingViewModel: ObservableObject {
         } catch {
             mintingGuest = false // allow a retry after a failed mint
             intake.clearCallJoin() // clears the auto-resume flag too
+            if task.isCancelled || error is CancellationError {
+                // Back / Cancel while the account was being created.
+                localPhase = .idle
+                return
+            }
             // Re-park the slug so the landing stays reachable for the retry.
-            localPhase = .error(error.localizedDescription)
+            if let err = error as? AuthClientError, let limit = AuthRateLimit.copy(for: err) {
+                localPhase = .error(limit)
+            } else {
+                localPhase = .error(error.localizedDescription)
+            }
         }
     }
 
@@ -212,6 +243,7 @@ public final class JoinCallLandingViewModel: ObservableObject {
     /// going (its status shows on every other screen); an outcome already shown
     /// here is forgotten.
     public func exit() {
+        cancelGuestSignup()
         if let decoded, let slot = linkCallHost.slot(forCallIdHex: decoded.callIdHex),
            !LinkCallHostRules.occupiesSlot(slot.phase) {
             linkCallHost.dismissOutcome()
@@ -221,10 +253,18 @@ public final class JoinCallLandingViewModel: ObservableObject {
 
     /// Cancel this link's call and leave the screen.
     public func cancelCall() {
+        cancelGuestSignup()
         if let decoded, linkCallHost.slot(forCallIdHex: decoded.callIdHex) != nil {
             linkCallHost.leave()
         }
         intake.clearCallJoin()
+    }
+
+    /// Stop the guest sign-up while it is still only working (before the
+    /// account is committed); nothing on the server is left behind.
+    private func cancelGuestSignup() {
+        guard let guestTask, !guestCommitting else { return }
+        guestTask.cancel()
     }
 
     /// End the call that holds the slot, after a busy refusal, and offer this
@@ -417,7 +457,17 @@ public struct JoinCallLandingScreen: View {
             // username-less guest account (signupGuest) on tap.
             closeButton
         case .starting:
-            ProgressView("Connecting…")
+            if viewModel.creatingGuest {
+                // `docs/ux/anti-abuse.md` section 1 — the guest account's one
+                // heavy piece of work.
+                ProgressView("Getting you into the call...")
+                Text(SignupViewModel.workingNote)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            } else {
+                ProgressView("Connecting…")
+            }
             runningButtons
         case .waiting:
             ProgressView("Waiting for the owner to admit you…")

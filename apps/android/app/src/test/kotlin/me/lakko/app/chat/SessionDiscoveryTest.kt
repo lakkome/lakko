@@ -10,7 +10,6 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import java.io.IOException
 import kotlinx.coroutines.test.runTest
-import me.lakko.app.auth.PowProofPayload
 import me.lakko.app.auth.base64UrlDecodeNoPad
 import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.discovery.GroupInviteUploadRequest
@@ -30,7 +29,6 @@ import org.junit.Test
  */
 class SessionDiscoveryTest {
 
-    private val pow = PowProofPayload(seed = "AA==", nonce = "AA==", solution = "AA==")
     private val blobIdB64 = "A".repeat(8)
 
     private fun factory(
@@ -50,16 +48,14 @@ class SessionDiscoveryTest {
         DiscoveryClient(
             baseUrl = "http://test.invalid",
             engine = engine,
-            rateLimitToken = { null },
             inviteLinkLengths = { me.lakko.app.discovery.TEST_INVITE_LINK_LENGTHS },
         )
     }
 
-    /** The wire half of `uploadGroupInvite` (the PoW solve needs the native
-     *  library, which the host JVM does not load). */
+    /** The wire half of `uploadGroupInvite`. */
     private val upload: suspend (DiscoveryClient) -> ByteArray = { client ->
         base64UrlDecodeNoPad(
-            client.groupInviteUpload(GroupInviteUploadRequest(pow = pow, capability = "AA==", max_uses = 1L)).blob_id,
+            client.groupInviteUpload(GroupInviteUploadRequest(capability = "AA==", max_uses = 1L)).blob_id,
         )
     }
 

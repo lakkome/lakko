@@ -17,21 +17,28 @@
  *   * `POST /push/group/{subscribe,unsubscribe}` — (un)bind this device to
  *     a group's `push_gid`.
  *
- * Plus `/pow/challenge` for the per-call PoW seed (same shape as the
- * auth + discovery PoW path).
+ * ADR-0054 S3: each of the four routes spends one anonymous `push-register`
+ * token (`../tokens/anon-token-pool.ts`) and carries no session - the device
+ * pseudonym must never be linkable to an account (invariant #5). No proof of
+ * work any more. A `429 anon-token-quota-exhausted` from the pool is silent
+ * at the callers: registration is retried at the next launch and the app
+ * keeps working by polling.
  *
  * Errors mirror the auth + discovery client surface:
  *
  *   * [`PushClientArgError`] — local input validation (wrong-length
  *     pseudonym, empty token) caught before any round-trip.
  *   * [`PushHttpError`] — server returned non-2xx; carries the status
- *     + endpoint so the UI can branch on 400 (rejection / PoW fail)
+ *     + endpoint so the UI can branch on 400 (rejection)
  *     vs 5xx.
  *   * [`PushNetworkError`] — DNS / TLS / transport failure.
  */
 import { base64Encode } from "../auth/account-id";
-import { solvePow } from "../auth/pow";
-import type { PowProofPayload } from "../auth/wire";
+import {
+  anonTokens,
+  anonymousFetchInit,
+  type AnonTokenPool,
+} from "../tokens/anon-token-pool";
 
 /** Default base URL — Vite dev proxy
  *  (`/api/push` → `127.0.0.1:8085`). Production nginx routes the
@@ -72,13 +79,7 @@ export class PushNetworkError extends Error {
   }
 }
 
-interface PowChallengeResponse {
-  seed: string;
-  effort_bits: number;
-}
-
 interface RegisterRequest {
-  pow: PowProofPayload;
   device_pseudonym: string;
   provider: ProviderKind;
   token: string;
@@ -89,7 +90,6 @@ interface RegisterResponse {
 }
 
 interface UnregisterRequest {
-  pow: PowProofPayload;
   device_pseudonym: string;
   provider: ProviderKind;
 }
@@ -121,7 +121,14 @@ function pseudonymHex(bytes: Uint8Array, name: string): string {
 }
 
 export class PushClient {
-  constructor(public readonly baseUrl: string = DEFAULT_BASE_URL) {}
+  private readonly tokens: AnonTokenPool;
+
+  constructor(
+    public readonly baseUrl: string = DEFAULT_BASE_URL,
+    options: { readonly tokens?: AnonTokenPool } = {},
+  ) {
+    this.tokens = options.tokens ?? anonTokens;
+  }
 
   /**
    * Bind a push token to `(devicePseudonym, provider)`. Idempotent:
@@ -148,11 +155,7 @@ export class PushClient {
     }
     const deviceHex = devicePseudonymHex(devicePseudonym);
 
-    const challenge = await this.fetchChallenge();
-    const pow = await solvePow(challenge.seed, challenge.effort_bits);
-
     const req: RegisterRequest = {
-      pow,
       device_pseudonym: deviceHex,
       provider,
       token: base64Encode(tokenBytes),
@@ -182,14 +185,10 @@ export class PushClient {
     const deviceHex = devicePseudonymHex(devicePseudonym);
     const groupHex = pseudonymHex(groupPseudonym, "groupPseudonym");
 
-    const challenge = await this.fetchChallenge();
-    const pow = await solvePow(challenge.seed, challenge.effort_bits);
-
     const resp = await this.post<
-      { pow: PowProofPayload; device_pseudonym: string; group_pseudonym: string },
+      { device_pseudonym: string; group_pseudonym: string },
       { ok: boolean; inserted: boolean }
     >("/push/group/subscribe", {
-      pow,
       device_pseudonym: deviceHex,
       group_pseudonym: groupHex,
     });
@@ -211,14 +210,10 @@ export class PushClient {
     const deviceHex = devicePseudonymHex(devicePseudonym);
     const groupHex = pseudonymHex(groupPseudonym, "groupPseudonym");
 
-    const challenge = await this.fetchChallenge();
-    const pow = await solvePow(challenge.seed, challenge.effort_bits);
-
     const resp = await this.post<
-      { pow: PowProofPayload; device_pseudonym: string; group_pseudonym: string },
+      { device_pseudonym: string; group_pseudonym: string },
       { ok: boolean; removed: boolean }
     >("/push/group/unsubscribe", {
-      pow,
       device_pseudonym: deviceHex,
       group_pseudonym: groupHex,
     });
@@ -243,11 +238,7 @@ export class PushClient {
   ): Promise<{ removed: boolean }> {
     const deviceHex = devicePseudonymHex(devicePseudonym);
 
-    const challenge = await this.fetchChallenge();
-    const pow = await solvePow(challenge.seed, challenge.effort_bits);
-
     const req: UnregisterRequest = {
-      pow,
       device_pseudonym: deviceHex,
       provider,
     };
@@ -261,22 +252,26 @@ export class PushClient {
     return { removed: resp.removed };
   }
 
-  private async fetchChallenge(): Promise<PowChallengeResponse> {
-    return this.post<undefined, PowChallengeResponse>("/pow/challenge", undefined);
-  }
-
+  /** One registration request: spends one `push-register` token, carries
+   *  no session, retried once with another token on a spent / invalid one. */
   private async post<Req, Res>(endpoint: string, body: Req): Promise<Res> {
     const url = `${this.baseUrl}${endpoint}`;
+    const json = JSON.stringify(body);
     let response: Response;
     try {
-      response = await fetch(url, {
-        method: "POST",
-        headers:
-          body === undefined ? {} : { "content-type": "application/json" },
-        body: body === undefined ? null : JSON.stringify(body),
-      });
+      response = await this.tokens.spend("push-register", (headerName, headerValue) =>
+        fetch(
+          url,
+          anonymousFetchInit({
+            method: "POST",
+            headers: { "content-type": "application/json", [headerName]: headerValue },
+            body: json,
+          }),
+        ),
+      );
     } catch (err) {
-      throw new PushNetworkError(endpoint, err);
+      if (err instanceof TypeError) throw new PushNetworkError(endpoint, err);
+      throw err;
     }
     if (!response.ok) {
       const text = await safeReadBody(response);

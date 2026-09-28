@@ -68,11 +68,11 @@ public final class RecoverViewModel: ObservableObject {
     @Published public var sharesInput: String = ""
     @Published public var password: String = ""
     @Published public var confirm: String = ""
-    /// ADR-0017 — username for the fresh-device recover path. When no
-    /// account is cached on this device, the recover flow resolves the
-    /// account_id via `DiscoveryClient.lookup(username)`, so the user
-    /// must type their handle. Pre-filled with ``cachedUsername`` when
-    /// present (a cached account wins and ignores this field).
+    /// ADR-0017 — username for the fresh-device recover path. Every
+    /// recovery factor names the account by the login handle of this name
+    /// (ADR-0054 S5; no discovery lookup before a session), so on a device
+    /// with no cached account the user must type it. Pre-filled with
+    /// ``cachedUsername`` when present.
     @Published public var username: String = ""
 
     // MARK: - Internal status
@@ -142,8 +142,8 @@ public final class RecoverViewModel: ObservableObject {
             error = "Use at least \(Self.minPasswordLength) characters for the new password."
             return
         }
-        // ADR-0017 — on a fresh device (no cached account) the username
-        // is required to resolve the account_id via discovery.
+        // ADR-0017 / ADR-0054 S5 — on a fresh device (no cached account)
+        // the username is required: the account is named by its handle.
         let trimmedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
         if cachedUsername == nil && trimmedUsername.isEmpty {
             error = "Enter your username so Lakko can find your account."
@@ -376,6 +376,9 @@ public final class RecoverViewModel: ObservableObject {
     /// unconfirmed-enrollment / wrong-code / replayed-code uniformly
     /// (mirror of Android's `totpUserFacingHttpError`).
     private func totpUserFacing(_ err: AuthClientError) -> String {
+        // ADR-0054 S4 — a limit is the server's decision, never a wrong
+        // credential: its own copy, with the minutes when it says so.
+        if let limit = AuthRateLimit.copy(for: err) { return limit }
         switch err {
         case .argument(let message):
             return message
@@ -412,7 +415,7 @@ public final class RecoverViewModel: ObservableObject {
             error = "Enter the username of the account to recover."
             return
         }
-        // Light client-side shape check — saves a PoW solve on an
+        // Light client-side shape check — saves a round trip on an
         // obviously-malformed contact. The server is authoritative.
         guard isPlausibleContact(kind: contactKind, contact: contact) else {
             error = contactKind == .email
@@ -485,6 +488,9 @@ public final class RecoverViewModel: ObservableObject {
     /// / no-live-challenge / wrong-code / replayed-code uniformly.
     /// Mirror of the web `contactRecoverErrorMessage`.
     private func contactUserFacing(_ err: AuthClientError) -> String {
+        // ADR-0054 S4 — a limit is the server's decision, never a wrong
+        // credential: its own copy, with the minutes when it says so.
+        if let limit = AuthRateLimit.copy(for: err) { return limit }
         switch err {
         case .argument(let message):
             return message
@@ -516,6 +522,9 @@ public final class RecoverViewModel: ObservableObject {
     /// finalisation). Surface generic copy — wrong-mnemonic and
     /// wrong-account collapse into the same response by design.
     private func userFacing(_ err: AuthClientError) -> String {
+        // ADR-0054 S4 — a limit is the server's decision, never a wrong
+        // credential: its own copy, with the minutes when it says so.
+        if let limit = AuthRateLimit.copy(for: err) { return limit }
         switch err {
         case .argument(let message):
             return message

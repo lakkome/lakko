@@ -304,3 +304,116 @@ async fn pruning_keeps_the_current_and_previous_epoch() {
         .unwrap();
     prune_spent(&pool, base + 2).await.unwrap();
 }
+
+// ---- The spend gate ----------------------------------------------------------
+
+fn gate_config() -> AnonTokenServerConfig {
+    // A one-second window lets the tests pick any epoch as "now" without the
+    // clock: epoch == unix second. Epochs sit above HIGH, clear of the prune
+    // test's range.
+    AnonTokenServerConfig::from_values(Some(HEX), Some("1"))
+        .unwrap()
+        .unwrap()
+}
+
+fn header(value: &str) -> axum::http::HeaderMap {
+    let mut h = axum::http::HeaderMap::new();
+    h.insert(TOKEN_HEADER, value.parse().unwrap());
+    h
+}
+
+#[tokio::test]
+async fn the_gate_refuses_before_the_store_when_disabled_or_malformed() {
+    // A pool that is never reached: every refusal here happens before a spend.
+    let pool = sqlx::mysql::MySqlPoolOptions::new()
+        .connect_lazy("mysql://nobody@127.0.0.1:1/none")
+        .unwrap();
+    let cfg = gate_config();
+    let master = cfg.master.clone();
+    let now = HIGH + 500;
+    let good = testing::mint_header(&master, TokenContext::DsKnock, now);
+
+    let disabled = TokenVerifier::new(pool.clone(), None);
+    assert_eq!(
+        disabled
+            .spend_header_at(&header(&good), TokenContext::DsKnock, now)
+            .await
+            .unwrap_err(),
+        TokenRejection::Disabled
+    );
+    assert_eq!(
+        disabled
+            .spend_header_at(&axum::http::HeaderMap::new(), TokenContext::DsKnock, now)
+            .await
+            .unwrap_err(),
+        TokenRejection::Disabled
+    );
+
+    let v = TokenVerifier::new(pool, Some(cfg));
+    let refuse = |h: axum::http::HeaderMap, ctx: TokenContext, now: u64| {
+        let v = v.clone();
+        async move { v.spend_header_at(&h, ctx, now).await.unwrap_err() }
+    };
+    assert_eq!(
+        refuse(axum::http::HeaderMap::new(), TokenContext::DsKnock, now).await,
+        TokenRejection::Missing
+    );
+    assert_eq!(
+        refuse(header("not-a-token"), TokenContext::DsKnock, now).await,
+        TokenRejection::Malformed
+    );
+    assert_eq!(
+        refuse(header(&good), TokenContext::PushRegister, now).await,
+        TokenRejection::WrongContext
+    );
+    assert_eq!(
+        refuse(header(&good), TokenContext::DsKnock, now + 2).await,
+        TokenRejection::Expired
+    );
+    let other = testing::mint_header(
+        &lakko_anon_token::MasterSecret::from_bytes([9; 32]),
+        TokenContext::DsKnock,
+        now,
+    );
+    assert_eq!(
+        refuse(header(&other), TokenContext::DsKnock, now).await,
+        TokenRejection::Invalid
+    );
+}
+
+#[tokio::test]
+async fn the_gate_spends_once_and_accepts_the_previous_epoch() {
+    let Some(pool) = test_pool("the_gate_spends_once").await else {
+        return;
+    };
+    let cfg = gate_config();
+    let master = cfg.master.clone();
+    let v = TokenVerifier::new(pool, Some(cfg));
+    let now = HIGH + 1_000_000 + u64::from(random::<2>()[0]) * 10;
+
+    let t = testing::mint_header(&master, TokenContext::InviteConsume, now);
+    let ok = v
+        .spend_header_at(&header(&t), TokenContext::InviteConsume, now)
+        .await
+        .unwrap();
+    assert_eq!(ok.epoch, now);
+    assert_eq!(
+        v.spend_header_at(&header(&t), TokenContext::InviteConsume, now)
+            .await
+            .unwrap_err(),
+        TokenRejection::Spent
+    );
+
+    let prev = testing::mint_header(&master, TokenContext::InviteConsume, now - 1);
+    assert!(v
+        .spend_header_at(&header(&prev), TokenContext::InviteConsume, now)
+        .await
+        .is_ok());
+    let older = testing::mint_header(&master, TokenContext::InviteConsume, now - 2);
+    assert_eq!(
+        v.spend_header_at(&header(&older), TokenContext::InviteConsume, now)
+            .await
+            .unwrap_err(),
+        TokenRejection::Expired
+    );
+}

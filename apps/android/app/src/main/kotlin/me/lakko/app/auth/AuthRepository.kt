@@ -12,6 +12,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.push.PushSubscriber
@@ -55,9 +56,10 @@ import java.util.concurrent.atomic.AtomicReference
  *
  * ## Discovery
  *
- * Like the web `AuthContext`, signup claims the `@username` in discovery
- * ([claimUsernameAtSignup]), login on a device that does not know the account
- * resolves the username there ([resolveLoginAccount]), and every landing that
+ * Like the web `AuthContext`, signup claims the `@username` (the login handle at
+ * auth first, then discovery: [claimUsernameAtSignup]), login and recovery name
+ * the account by its login handle with no lookup before a session
+ * ([signInByName], ADR-0054 S5), and every landing that
  * holds the phrase seed publishes the identity bundle
  * ([identityPublicationFor]). KeyPackage upload and MLS state live in
  * `ChatRepository`, not here.
@@ -75,6 +77,8 @@ public class AuthRepository(
      *  recover. Lazy for the same reason as [authClientFactory].
      *  Overridable so tests can supply a stub. */
     private val discoveryClientFactory: () -> DiscoveryClient = { DiscoveryClient() },
+    /** ADR-0054 S5 - username to login handle (the native core). */
+    private val loginHandleSource: LoginHandleSource = UniffiLoginHandleSource,
 ) {
     /** 1.20d — dedicated scope for fire-and-forget push
      *  subscribe / unsubscribe coroutines. `SupervisorJob` so
@@ -85,10 +89,24 @@ public class AuthRepository(
     private val pushScope: CoroutineScope =
         CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    /** `@username` register (signup) and lookup (login on a device that does
-     *  not know the account), over short-lived discovery clients. */
+    /** `@username` register (signup), over short-lived discovery clients.
+     *  Nothing here looks a name up: sign-in and recovery go by login handle. */
     private val accountDirectory: AccountDirectory =
         DiscoveryAccountDirectory(discoveryClientFactory)
+
+    /** ADR-0054 S5 - `PUT` / `DELETE /auth/login-handle`. */
+    private val loginHandleBinder: LoginHandleBinder =
+        AuthClientLoginHandleBinder(authClientFactory)
+
+    /** ADR-0054 S5 - re-bind the login handle once per (session, username)
+     *  per process, whichever path landed the session. */
+    private val loginHandleRebinder: LoginHandleSessionRebinder =
+        LoginHandleSessionRebinder(
+            source = loginHandleSource,
+            binder = loginHandleBinder,
+            launch = { block -> pushScope.launch { block() } },
+            log = { message -> Log.w("lakko-auth", message) },
+        )
 
     private val mutableState: MutableStateFlow<AuthState> =
         MutableStateFlow(AuthState.Loading)
@@ -216,12 +234,31 @@ public class AuthRepository(
         // state flow, in one coroutine, and nothing observes `Session` until
         // the state flips. `AppRoot` renders its loading screen meanwhile.
         restoreScope.launch { rehydrate() }
-        // Discovery's rate-limited reads (OPRF / lookup / channel lookup) are
-        // charged per account when they carry this session's token, per IP
-        // otherwise; most discovery clients are built without a token, so
-        // they read it from here. Only those three reads use it.
-        me.lakko.app.discovery.AmbientSessionToken.install {
-            identitySecrets.value?.sessionToken
+        // ADR-0054 S5 - every landed session whose username this device knows
+        // binds its login handle (restore, passkey, pairing, another-device
+        // confirmation, ...), not only signup and sign-in by name; otherwise
+        // an account that never signed in by name could not do so after a
+        // logout. The rebinder dedupes per (session, username).
+        pushScope.launch {
+            combine(state, identitySecrets, ::loginHandleBindTarget).collect { target ->
+                if (target != null) loginHandleRebinder.onSessionAvailable(target)
+            }
+        }
+        // ADR-0054 S3 - the anonymous-token pool draws its batches WITH this
+        // session (the tokens it hands out carry nothing about the account).
+        // Keyed on the account, so a switch never reuses another account's
+        // tokens; logout and forget-device clear it. S5: the pool persists
+        // under noBackupFilesDir between launches.
+        me.lakko.app.anon.AnonTokens.installStore(
+            me.lakko.app.anon.FileAnonTokenStore.under(applicationContext.noBackupFilesDir),
+        )
+        me.lakko.app.anon.AnonTokens.installSession {
+            identitySecrets.value?.let {
+                me.lakko.app.anon.AnonSession(
+                    accountKey = base64Encode(it.accountId),
+                    bearer = it.sessionToken,
+                )
+            }
         }
     }
 
@@ -261,11 +298,15 @@ public class AuthRepository(
                 // Session flip must already find the secrets it needs.
                 mutableIdentitySecrets.value = decision.secrets
                 mutableState.value = AuthState.Session(account = decision.account)
+                // ADR-0054 UX section 3 - a push registration that failed
+                // (a used-up allowance, no network) is retried silently at the
+                // next launch, which is this restore.
+                subscribePushBestEffort("restore")
                 // ADR-0017 defence-in-depth — the same background self-check a
                 // password login runs (is the published identity still ours?),
                 // re-publishing only when the directory is missing the bundle
-                // or holds other keys, so a relaunch does not pay a
-                // proof-of-work solve for a no-op.
+                // or holds other keys, so a relaunch does not pay an
+                // upload for a no-op.
                 refreshPublishedIdentityInBackground(
                     landing = IdentityLanding.SESSION_RESTORE,
                     accountIdBytes = decision.secrets.accountId,
@@ -345,8 +386,9 @@ public class AuthRepository(
      * Steps:
      *   1. Validate the username (non-empty after trim).
      *   2. Call [AuthClient.signup] with `enrolRecovery = true`.
-     *   2a. Claim the username in discovery ([claimUsernameAtSignup]); a
-     *      taken name fails signup with the form's message.
+     *   2a. Claim the username ([claimUsernameAtSignup]): bind the login
+     *      handle at auth, then register at discovery; a taken name fails
+     *      signup with the form's message.
      *   3. Save the `(accountId, normalisedUsername)` marker to [SessionStore].
      *   4. Derive the device root key via [deriveDeviceRootKey].
      *   5. Wrap + persist via [DeviceKeyStore.putDeviceKey].
@@ -370,17 +412,19 @@ public class AuthRepository(
     public suspend fun signup(
         username: String,
         password: ByteArray,
+        onProofSolved: () -> Unit = {},
     ): SignupOutcome {
         val trimmed = username.trim()
         if (trimmed.isEmpty()) {
             throw AuthClientArgError("username must be non-empty")
         }
         return authClientFactory().use { client ->
-            val result = client.signup(password, enrolRecovery = true)
+            val result = client.signup(password, enrolRecovery = true, onProofSolved = onProofSolved)
             try {
                 val accountIdB64 = base64Encode(result.accountId)
-                // Claim the username in discovery FIRST, before anything is
-                // persisted on this device (web order). Without this binding
+                // Claim the username FIRST, before anything is persisted on
+                // this device (web order): the login handle at auth, then the
+                // name at discovery (ADR-0054 S5 claim order). Without this binding
                 // nobody can find the account by name — no contact request,
                 // no add-to-group, no sign-in on another device. A taken name
                 // fails the signup with the form's message; the OPAQUE account
@@ -388,10 +432,15 @@ public class AuthRepository(
                 // too (the user retries with another name).
                 val normalisedUsername = claimUsernameAtSignup(
                     directory = accountDirectory,
+                    binder = loginHandleBinder,
+                    handles = loginHandleSource,
                     sessionToken = result.sessionToken,
                     accountId = result.accountId,
                     username = trimmed,
                 )
+                // The claim above bound the handle for this session; the
+                // session landing below need not repeat it.
+                loginHandleRebinder.markBound(result.sessionToken, normalisedUsername)
                 sessionStore.save(
                     PersistedSession(
                         accountIdB64 = accountIdB64,
@@ -565,12 +614,12 @@ public class AuthRepository(
      *
      * @return the 24-word recovery phrase (also surfaced by [freshPhrase]).
      */
-    public suspend fun signupGuest(): SignupOutcome {
+    public suspend fun signupGuest(onProofSolved: () -> Unit = {}): SignupOutcome {
         // 32 random bytes the user NEVER sees — recovery is phrase-only.
         val randomPassword = ByteArray(32).also { SecureRandom().nextBytes(it) }
         return authClientFactory().use { client ->
             // Same PoW-gated OPAQUE registration signup uses — no bypass.
-            val result = client.signup(randomPassword, enrolRecovery = true)
+            val result = client.signup(randomPassword, enrolRecovery = true, onProofSolved = onProofSolved)
             try {
                 val accountIdB64 = base64Encode(result.accountId)
                 // ADR-0032: NO username claim — the account stays username-less
@@ -658,16 +707,12 @@ public class AuthRepository(
      * Drive the full OPAQUE-PAKE login flow.
      *
      * Mirror of `apps/web/src/auth/AuthContext.tsx::login`. Steps:
-     *   1. Resolve the typed username to an `accountId`
-     *      ([resolveLoginAccount]): the on-device [SessionStore] marker
-     *      answers when its username equals the typed one (no round
-     *      trip); otherwise — a fresh device, or a different account —
-     *      a discovery lookup binds it. An unregistered username fails
-     *      as `invalid credentials`, the same error as a wrong password.
-     *      (This used to refuse whenever the device held no cached
-     *      account, so an account could only ever be used on the device
-     *      that created it.)
-     *   2. Call [AuthClient.login] with `(accountId, password)`.
+     *   1. Derive the login handle of the typed username (ADR-0054 S5).
+     *      No discovery lookup runs: the account id comes back from
+     *      `/login/finish`. An unregistered username fails as a wrong
+     *      password (the server takes its ordinary path on a stand-in).
+     *   2. Call [AuthClient.login] with `(handle, password)`; afterwards
+     *      re-bind the handle in the background (idempotent).
      *   3. Re-derive the device root key from the OPAQUE export
      *      key. The derivation is deterministic for the same
      *      password, so re-running it on every login produces the
@@ -697,25 +742,22 @@ public class AuthRepository(
         if (password.isEmpty()) {
             throw AuthClientArgError("password must be non-empty")
         }
-        // The marker answers a same-account sign-in without a round trip; a
-        // fresh device (or another account) resolves the typed username
-        // through discovery. Only the TARGET account is decided here — the
+        // ADR-0054 S5 - the request names the account by the login handle of
+        // the typed name; the account id is learned from the finish. The
         // ADR-0017 identity acquisition below is unchanged, so a device with
         // no cached phrase seed still lands in NeedsRecoveryPhrase.
-        val account = resolveLoginAccount(
-            cached = sessionStore.load()?.let {
-                CachedAccount(accountIdB64 = it.accountIdB64, username = it.username)
-            },
-            username = trimmed,
-            directory = accountDirectory,
-            encodeAccountId = ::base64Encode,
-        )
-        val accountIdB64 = account.accountIdB64
-        val resolvedUsername = account.username
-        val accountIdBytes = base64Decode(accountIdB64)
-
         authClientFactory().use { client ->
-            val result = client.login(accountIdBytes, password)
+            val (named, result) = signInByName(
+                cached = null,
+                typed = trimmed,
+                source = loginHandleSource,
+                call = { client.login(it.handle, password) },
+                sessionTokenOf = { it.sessionToken },
+                rebind = ::rebindLoginHandleInBackground,
+            )
+            val accountIdBytes = result.accountId
+            val accountIdB64 = base64Encode(accountIdBytes)
+            val resolvedUsername = named.username
             try {
                 // Re-derive + upsert the device key. Deterministic
                 // for the same password — the on-disk envelope is
@@ -757,9 +799,9 @@ public class AuthRepository(
                 } catch (cause: Throwable) {
                     Log.w("lakko-auth", "device-identity ensure (login) failed", cause)
                 }
-                // Upsert the marker with the RESOLVED account, so the next sign-in on
-                // this device skips the lookup (and a cross-device first sign-in
-                // leaves the device knowing whose account it holds).
+                // Upsert the marker with the account the finish named, so a
+                // cross-device first sign-in leaves the device knowing whose
+                // account it holds.
                 sessionStore.save(
                     PersistedSession(accountIdB64 = accountIdB64, username = resolvedUsername),
                 )
@@ -878,7 +920,7 @@ public class AuthRepository(
      *      its "secret"; a wrong word or a checksum failure
      *      surfaces here before the network call.
      *   3. Call [AuthClient.recover] with `(accountId, seed,
-     *      newPasswordBytes)` — one PoW solve, parallel OPAQUE
+     *      newPasswordBytes)` — no proof of work, parallel OPAQUE
      *      recovery-login + new-password-registration round.
      *   4. Re-derive the device root key from the **new** export
      *      key. The previous key (if any) is no longer reachable
@@ -915,40 +957,16 @@ public class AuthRepository(
         if (newPassword.isEmpty()) {
             throw AuthClientArgError("new password must be non-empty")
         }
-        // Resolve the account_id the same way `login` does (web parity)
-        // so recover works on a FRESH device: a local cache hit wins;
-        // otherwise a discovery.lookup on the supplied username binds
-        // it. Without either we cannot target the recover. Extracted to
-        // the pure [resolveRecoverAccount] helper (G-29) so the
-        // cross-device behaviour is locked by a unit test.
+        // ADR-0054 S5 - the recover names the account by the login handle
+        // of the typed name, or of the name cached on this device when the
+        // field is blank; the account id is learned from the reset finish.
+        // No discovery lookup runs before the session. (The old export key
+        // the G-4 path used to capture here needed the account id before the
+        // call; under ADR-0017 it was only ever wiped, so it is gone.)
         val cached = sessionStore.load()?.let {
             CachedAccount(accountIdB64 = it.accountIdB64, username = it.username)
         }
-        val (accountIdB64, resolvedUsername) = resolveRecoverAccount(
-            cached = cached,
-            username = username,
-            lookup = { name ->
-                val result = discoveryClientFactory().use { it.lookup(name) }
-                RecoverAccountLookup(
-                    account = result.account,
-                    normalisedUsername = result.normalisedUsername,
-                )
-            },
-            encodeAccountId = ::base64Encode,
-        )
-        val accountIdBytes = base64Decode(accountIdB64)
-
-        // G-4 (ADR-0016 / ADR-0017) — capture the OLD OPAQUE export
-        // key BEFORE the recover rotates the device key + overwrites
-        // the cached export key (the `ExportKeyStore.putExportKey`
-        // below). Retained for diagnostics + symmetry with the iOS /
-        // web flow; under ADR-0017 the canonical AccountIdentity is
-        // phrase-seeded, so a routine recover does NOT rotate the
-        // account key and no supersession proof is minted (the G-4
-        // emit below compares old-vs-new account pubkeys and SKIPS the
-        // proof when equal — the routine case).
-        val oldExportKey: ByteArray? =
-            ExportKeyStore.getExportKey(applicationContext, accountIdB64)
+        val named = resolveNamedSignIn(cached, username, loginHandleSource)
 
         // Parse the mnemonic up front. `fromPhrase` collapses
         // unknown-word and bad-checksum into one FfiException by
@@ -971,7 +989,15 @@ public class AuthRepository(
         var seedHandedOff = false
         try {
             authClientFactory().use { client ->
-                val result = client.recover(accountIdBytes, seed, newPassword)
+                val result = signInByName(
+                    named = named,
+                    call = { client.recover(it.handle, seed, newPassword) },
+                    sessionTokenOf = { it.sessionToken },
+                    rebind = ::rebindLoginHandleInBackground,
+                )
+                val accountIdBytes = result.accountId
+                val accountIdB64 = base64Encode(accountIdBytes)
+                val resolvedUsername = named.username
                 try {
                     val deviceRootKey =
                         deriveDeviceRootKey(result.exportKey, accountIdB64)
@@ -1216,9 +1242,6 @@ public class AuthRepository(
             if (!seedHandedOff) {
                 accountIdentitySeed.fill(0)
             }
-            // G-4 — the captured OLD export key is secret material
-            // (the seed for the old AccountIdentity); wipe it too.
-            oldExportKey?.fill(0)
         }
     }
 
@@ -1246,8 +1269,9 @@ public class AuthRepository(
      *     [completeFromPairing] complete the identity restore (and
      *     bootstrap the device key from the VERIFIED seed).
      *
-     * @throws AuthClientArgError on a blank username or an unknown
-     *         username ("username not found"), or a malformed code.
+     * @throws AuthClientArgError on a blank username, a name failing the
+     *         username rule, or a malformed code. An unknown name is not
+     *         told apart: it fails as a wrong code (ADR-0054 S5).
      * @throws AuthHttpError 401 on a wrong/expired/replayed code
      *         (enumeration-safe), 429 under lockout, 503 when TOTP is
      *         disabled server-side.
@@ -1260,27 +1284,21 @@ public class AuthRepository(
                 "enter the username of the account to recover",
             )
         }
-        // Resolve the username -> account_id exactly like the Recover
-        // AnotherDevice mode: a local cache hit wins, else a
-        // discovery.lookup round-trip binds it.
-        val cached = sessionStore.load()
-        val accountIdBytes: ByteArray
-        val resolvedUsername: String
-        if (cached != null && cached.username == trimmed) {
-            accountIdBytes = base64Decode(cached.accountIdB64)
-            resolvedUsername = cached.username
-        } else {
-            val lookup = discoveryClientFactory().use { it.lookup(trimmed) }
-            val account = lookup.account
-                ?: throw AuthClientArgError("username not found")
-            accountIdBytes = account
-            resolvedUsername = lookup.normalisedUsername
+        // ADR-0054 S5 - the code goes with the login handle of the name; the
+        // account id comes back in the response. No lookup before a session.
+        val (named, result) = authClientFactory().use { client ->
+            signInByName(
+                cached = null,
+                typed = trimmed,
+                source = loginHandleSource,
+                call = { client.totpRecover(it.handle, code) },
+                sessionTokenOf = { it.sessionToken },
+                rebind = ::rebindLoginHandleInBackground,
+            )
         }
+        val accountIdBytes = result.accountId
         val accountIdB64 = base64Encode(accountIdBytes)
-
-        val result = authClientFactory().use { client ->
-            client.totpRecover(accountIdBytes, code)
-        }
+        val resolvedUsername = named.username
 
         // Shared ADR-0018 ACCESS-only landing (warm cached-seed finish
         // OR cold fail-safe park) — identical to the cascade's other
@@ -1329,27 +1347,15 @@ public class AuthRepository(
                 "enter the username of the account to recover",
             )
         }
-        // Resolve the username -> account_id exactly like
-        // [recoverWithTotp]: a local cache hit wins, else a
-        // discovery.lookup round-trip binds it.
-        val cached = sessionStore.load()
-        val accountIdBytes: ByteArray
-        val resolvedUsername: String
-        if (cached != null && cached.username == trimmed) {
-            accountIdBytes = base64Decode(cached.accountIdB64)
-            resolvedUsername = cached.username
-        } else {
-            val lookup = discoveryClientFactory().use { it.lookup(trimmed) }
-            val account = lookup.account
-                ?: throw AuthClientArgError("username not found")
-            accountIdBytes = account
-            resolvedUsername = lookup.normalisedUsername
-        }
+        // ADR-0054 S5 - the request names the account by the login handle of
+        // the name; no lookup before a session, and the account id is only
+        // learned from the finish.
+        val named = resolveNamedSignIn(cached = null, typed = trimmed, source = loginHandleSource)
 
         // Send the code. ENUMERATION-SAFE server-side: a non-throwing
         // return only means "advance to the code step".
         authClientFactory().use { client ->
-            client.recoveryContactRecoverStart(accountIdBytes, kind, contact)
+            client.recoveryContactRecoverStart(named.handle, kind, contact)
         }
 
         // Stash the resolved context so [recoverWithContactFinish] can
@@ -1358,9 +1364,8 @@ public class AuthRepository(
         // code was sent for.
         pendingContactRecover.set(
             PendingContactRecover(
-                accountIdBytes = accountIdBytes,
-                accountIdB64 = base64Encode(accountIdBytes),
-                username = resolvedUsername,
+                handle = named.handle,
+                username = named.username,
                 kind = kind,
             ),
         )
@@ -1388,10 +1393,11 @@ public class AuthRepository(
                 "request a code first (no pending phone / email recovery)",
             )
         val result = authClientFactory().use { client ->
-            client.recoveryContactRecoverFinish(
-                pending.accountIdBytes,
-                pending.kind,
-                code,
+            signInByName(
+                named = NamedHandle(pending.username, pending.handle),
+                call = { client.recoveryContactRecoverFinish(it.handle, pending.kind, code) },
+                sessionTokenOf = { it.sessionToken },
+                rebind = ::rebindLoginHandleInBackground,
             )
         }
         // Consume the stash — the code is single-use server-side.
@@ -1400,12 +1406,24 @@ public class AuthRepository(
         // cascade's other ACCESS factor (factor (c) TOTP).
         landAfterAccessRecovery(
             username = pending.username,
-            accountIdBytes = pending.accountIdBytes,
-            accountIdB64 = pending.accountIdB64,
+            accountIdBytes = result.accountId,
+            accountIdB64 = base64Encode(result.accountId),
             sessionToken = result.sessionToken,
             sessionExpiresAtMs = result.sessionExpiresAtMs,
             pushContext = "contact-recover",
         )
+    }
+
+    /**
+     * ADR-0054 S5 - re-`PUT` the login handle after a successful sign-in by
+     * name, in the background (idempotent: keeps a device that bound before a
+     * rename in step). Never fails the sign-in; a `409` (another account holds
+     * the handle) or any other failure is only logged, by status. Shares the
+     * per-process (session, handle) dedup of [loginHandleRebinder], so the
+     * session landing that follows does not bind the same pair again.
+     */
+    private fun rebindLoginHandleInBackground(sessionToken: String, handle: ByteArray) {
+        loginHandleRebinder.bind(sessionToken, handle)
     }
 
     /**
@@ -2473,7 +2491,11 @@ public class AuthRepository(
         // signed out of this session. The on-disk Keystore
         // envelope (device root key) survives; re-login on the
         // same device repopulates `identitySecrets` cheaply.
+        // ADR-0054 - the push unregister below spends one push-register
+        // token, drawn with THIS session after the live one is gone.
+        val departingSession = currentAnonSession()
         clearIdentitySecrets()
+        me.lakko.app.anon.AnonTokens.clear()
         // ADR-0017: drop any parked fresh-device fail-safe context
         // (a NeedsRecoveryPhrase user who backed out via Sign out).
         clearPendingRecovery()
@@ -2482,7 +2504,7 @@ public class AuthRepository(
         // EncryptedSharedPreferences pseudonym + the server-
         // side token row both go; subsequent FCM wakes for
         // this device are no-ops until the next subscribe.
-        unsubscribePushBestEffort("logout")
+        unsubscribePushBestEffort("logout", departingSession)
     }
 
     /**
@@ -2585,7 +2607,11 @@ public class AuthRepository(
             }
         }
         sessionStore.clear()
+        // ADR-0054 - the push unregister below spends one push-register
+        // token, drawn with THIS session after the live one is gone.
+        val departingSession = currentAnonSession()
         clearIdentitySecrets()
+        me.lakko.app.anon.AnonTokens.clear()
         // ADR-0017: drop any parked fresh-device fail-safe context.
         clearPendingRecovery()
         mutableState.value = AuthState.Anon()
@@ -2594,7 +2620,7 @@ public class AuthRepository(
         // regardless of the server leg outcome, honouring
         // forgetDevice's "leave NOTHING per-account behind"
         // contract.
-        unsubscribePushBestEffort("forgetDevice")
+        unsubscribePushBestEffort("forgetDevice", departingSession)
     }
 
     /**
@@ -2951,10 +2977,13 @@ public class AuthRepository(
 
     /** 1.20d — Mirror of [subscribePushBestEffort] for the
      *  unregister path. */
-    private fun unsubscribePushBestEffort(context: String) {
+    private fun unsubscribePushBestEffort(
+        context: String,
+        session: me.lakko.app.anon.AnonSession?,
+    ) {
         pushScope.launch {
             try {
-                PushSubscriber(applicationContext).unsubscribe()
+                PushSubscriber(applicationContext).unsubscribe(session)
             } catch (cause: Throwable) {
                 Log.w("lakko-auth", "push unsubscribe ($context) failed", cause)
             }
@@ -2966,6 +2995,15 @@ public class AuthRepository(
      *  best-effort: the buffer may still live elsewhere in heap
      *  if callers cloned it, but our local copy goes away
      *  promptly. */
+    /** The anonymous-token session of the signed-in account, or `null`. */
+    private fun currentAnonSession(): me.lakko.app.anon.AnonSession? =
+        identitySecrets.value?.let {
+            me.lakko.app.anon.AnonSession(
+                accountKey = base64Encode(it.accountId),
+                bearer = it.sessionToken,
+            )
+        }
+
     private fun clearIdentitySecrets() {
         mutableIdentitySecrets.value?.let { secrets ->
             secrets.exportKey.fill(0)
@@ -3196,7 +3234,7 @@ internal data class PendingRecovery(
 }
 
 /**
- * ADR-0018 factor (d) — the resolved `(accountId, username, kind)`
+ * ADR-0018 factor (d) — the resolved `(handle, username, kind)`
  * stashed between [AuthRepository.recoverWithContactStart] (which
  * sends the one-time code) and [AuthRepository.recoverWithContactFinish]
  * (which submits it). Carries NO secret material — just the routing
@@ -3205,8 +3243,9 @@ internal data class PendingRecovery(
  * Mirror of the web `AuthContext`'s `pendingContactRecover` signal.
  */
 internal data class PendingContactRecover(
-    val accountIdBytes: ByteArray,
-    val accountIdB64: String,
+    /** ADR-0054 S5 - the login handle of [username]; the account id is
+     *  learned from the finish. */
+    val handle: ByteArray,
     val username: String,
     /** [ContactKind.EMAIL] (1) or [ContactKind.PHONE] (2). */
     val kind: Int,
@@ -3214,15 +3253,13 @@ internal data class PendingContactRecover(
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is PendingContactRecover) return false
-        return accountIdBytes.contentEquals(other.accountIdBytes) &&
-            accountIdB64 == other.accountIdB64 &&
+        return handle.contentEquals(other.handle) &&
             username == other.username &&
             kind == other.kind
     }
 
     override fun hashCode(): Int {
-        var h = accountIdBytes.contentHashCode()
-        h = 31 * h + accountIdB64.hashCode()
+        var h = handle.contentHashCode()
         h = 31 * h + username.hashCode()
         h = 31 * h + kind
         return h

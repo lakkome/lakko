@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0054: Anti-abuse is decided by the server, not paid for by the phone
 
-- **Status:** Accepted (2026-09-27, the maintainer's call; S1 and S2 built the same day and host-tested, not yet deployed)
+- **Status:** Accepted (2026-09-27, the maintainer's call; S1-S5 built and deployed to the test stack 2026-09-28, walked live in part; security pass open)
 - **Date:** 2026-09-27
 - **Context:** Phase 3 (product hardening)
 - **Supersedes:** the per-request proof-of-work gate on `services/discovery`,
@@ -244,6 +244,181 @@ residual.
 - **Invite links got shorter in the same pass** (ADR-0028 amendment): the
   discovery ledgers moved their open fetch / consume routes behind the existing
   per-IP rate limit, because a 6-byte id is no longer unguessable on its own.
+
+## What S3 built, Rust and services half (2026-09-28)
+
+Host-tested against a local MariaDB; not deployed, no client moved yet.
+
+- **One gate, one header.** `x-lakko-anon-token: <base64url token, no
+  padding>` (`lakko_anon_token::TOKEN_HEADER`). `lakko-anon-token-server::gate`
+  reads it, verifies for the route's context, records the spend, and refuses
+  with `{"error": code}`: `503 anon-tokens-disabled` when the service has no
+  master secret (checked first, so a dormant service never serves a token
+  route without a token), `401 anon-token-required` / `-malformed` /
+  `-wrong-context` / `-expired` / `-invalid` / `-spent`, `500 internal` on a
+  spent-set store error (fail closed). A `401` there never means a lost
+  session: none of these routes carries one.
+- **Where tokens are spent.** Discovery: `POST /discovery/oprf`
+  (`discovery-lookup`; the evaluation is the enumeration step, and a channel
+  lookup passes through the same namespace-agnostic OPRF route, so
+  `/discovery/lookup` and `/discovery/channel/lookup` carry no token and keep
+  the per-IP limiter), `POST /discovery/channel/register`
+  (`discovery-register`), the three ledger consumes (`invite-consume`). The DS
+  knock (`ds-knock`), spent after the body validates so a malformed knock
+  costs nothing. push-gw register, unregister, group subscribe, group
+  unsubscribe (`push-register`). A consequence worth stating: a joiner
+  opening an invite link must now hold a token, so it signs up before the
+  consume.
+- **Proof of work is gone from discovery, the DS and push-gw**: the
+  `/pow/challenge` routes, the `lakko-pow-server` dependency, the effort knobs
+  and the `pow_challenges` tables (a drop migration per service, after the
+  byte-identical spent-set migration). The bearer routes lost theirs too and
+  are now counted per account by a separate write bucket the same size as
+  discovery's per-account lookup bucket (they had no per-account limit
+  before).
+- **FFI.** Both surfaces expose `AnonTokenRequest(context, epoch, count)` ->
+  `issueBodyJson()` / `finalize(evaluations, proof, publicKey)` ->
+  `AnonToken { context, epoch, headerValue }`, plus the header name, the
+  contexts, the default window, the batch cap, `epochAt` and `isLive`. The
+  public key is taken from the key route, never from the issuance response.
+- **Found on the way:** a contact-invite consume against an absent invite
+  answered `500`, because MariaDB's `INSERT IGNORE` downgrades the foreign-key
+  violation to a warning; it now answers the documented `404`.
+
+## What S4 found (2026-09-28)
+
+Built in `services/auth` (`src/limits.rs`, migration `0020`) and host-tested
+against a local MariaDB; not deployed, no client moved yet.
+
+- **The per-row lockouts were existence oracles.** The TOTP lockout, the vault
+  lockout and the recovery-code attempt cap each answered `429` only when the
+  named account had a row (a confirmed authenticator, a vault, a live
+  challenge); an unknown account always got `401`. Five wrong guesses then
+  told a caller whether the account had that factor. They are replaced by one
+  counter per (scope, named value), keyed on a BLAKE3 of the account id or
+  contact hash the request names and charged before any lookup, so the sixth
+  guess is refused identically for any name. The vault's 10-strike destruction
+  cap stays (it answers `401` either way).
+- **Signup finish was not bound to anything.** Registration was stateless
+  between start and finish and `ServerRegistration::finish` verifies nothing,
+  so without its own proof a finish alone could create an account. Start now
+  writes a `signup_states` row after its proof verifies; finish must consume it
+  in the account-creating transaction (`410` without one, `400` when the
+  recovery upload does not match what the start carried). One proof, at most
+  one account; guest signup (ADR-0032) uses the same start route.
+- **Signup effort** is `LAKKO_SIGNUP_POW_EFFORT_BITS`, default 8 (the previous
+  `LAKKO_POW_EFFORT_BITS` default), still to be set by measurement on the
+  slowest supported phone (open question 1). The challenge TTL in
+  `lakko-pow-server` is 300 s and bounds how heavy that effort can be.
+- **Limits and failure mode.** A limit answers `429 {"error", "retry_after_secs"}`
+  with `Retry-After`, never `401`. The name counters fail closed (`503`) on a
+  store error, on the send routes and the guessing routes alike; nothing fails
+  open. Per-address buckets are in memory, so addresses are never stored and
+  a restart refills them. Defaults are chosen, not measured (knobs
+  `LAKKO_AUTH_LIMIT_*`, `LAKKO_AUTH_IP_LIMIT_*`).
+- **A name counter can be spent by someone else.** Anyone who knows an account
+  id can use up its login or recovery budget for the window; the per-address
+  bucket bounds how fast one address can do it, and each factor has its own
+  scope so another recovery route stays open. Stated, accepted.
+
+## S5, login by name (2026-09-28)
+
+Built in `services/auth` (`src/login_handle.rs`, migration `0021`), the core
+and both FFI surfaces, host-tested against a local MariaDB; not deployed, no
+client moved yet. The maintainer's call: sign in by name directly at auth,
+with no discovery lookup before a session.
+
+- **The problem S3 created.** A username lookup (`/discovery/oprf`) spends an
+  anonymous token and a token needs a session, so a device with no cached
+  account id could no longer find the account to sign into or recover.
+- **The handle.** `login_handle = BLAKE3-derive-key("lakko/auth/login-handle/v1",
+  canonical_username)`, 32 bytes, where the canonical username is the output
+  of the one username rule (normalise, then `[a-z0-9_]{3,32}`). Defined once
+  in `lakko_contacts::username::login_handle` (beside the rule; the crate is
+  light and every FFI crate already links it), with the normalising entry
+  `lakko_discovery_client::login_handle` (which owns NFKC); golden-pinned;
+  `loginHandle(username)` on UniFFI and wasm, refusing a non-conforming name
+  with the existing typed username errors.
+- **Storage.** `login_handles(handle_key PK, account_id UNIQUE, FK cascade)`,
+  `handle_key = keyed-BLAKE3(LAKKO_AUTH_HANDLE_PEPPER, handle)`. One handle
+  per account; bearer `PUT /auth/login-handle` binds (replacing the
+  account's previous handle), `DELETE` removes, a handle another account
+  holds is `409 handle-taken` and changes nothing, account deletion removes
+  it. Pepper unset: every name route and both handle routes answer
+  `503 login-by-name-disabled`, with a loud startup warning.
+- **Flag day.** Login start, recovery login start, password reset start,
+  TOTP recover, word-vault recover start and finish, recovery-contact
+  recover start and finish take `handle` in place of `account_id`. Signup,
+  device authorize and redeem keep `account_id`. The account id reaches the
+  client only in a finish response, after a successful proof (login,
+  recovery login and reset finish; TOTP and recovery-contact recover; the
+  vault releases the phrase, whose reset finish then returns it).
+- **Enumeration safety.** A handle nobody holds resolves to a stand-in
+  account id derived from its `handle_key`, stable per handle, and the
+  handler runs its ordinary path on it: the same queries, the dummy verify,
+  the vault decoys (now stable per handle). OPAQUE takes its fake-credentials
+  path with the credential identifier `stand_in || kind`, so a repeated
+  unknown name meets the same OPRF key every time, as a real name does (the
+  test compares the OPRF evaluation under a fixed blind; the rest of a
+  credential response carries fresh nonces for a real account too). The
+  per-name counters of S4 key on the handle, charged before the lookup.
+- **Invariants.** Auth now holds a peppered handle to account mapping. The
+  operator gains nothing it lacked: discovery's OPRF key already lets it map
+  any guessed name to its account, and the handle is itself a public
+  function of the name. A database leak without the pepper is not a
+  dictionary over usernames. Guest accounts (ADR-0032) have no username and
+  so no handle. #1, #2 and #5 unchanged; no `lakko-mls` change.
+- **A handle can be squatted.** Neither server knows the name (discovery
+  holds an OPRF output, auth a peppered hash), so auth cannot check that the
+  account binding a handle owns that name at discovery. A signed-in account
+  can bind the handle of a name it does not own: it gains no access to the
+  owner's account (OPAQUE still needs the owner's password), but the owner's
+  sign-in by name then fails as a wrong password and the owner's bind answers
+  `409`. Each squat costs an account (the signup proof). Honest clients bind
+  right after registering the username, so the two first-come registries
+  agree unless someone races them. Recorded for the security pass; a fix
+  needs one first-come registry that holds both, or a binding the name's
+  owner can prove.
+- **Not moved: `/device/request`.** Another-device recovery needs the account
+  id before any session, not only for this route: the pairing payload binds
+  it (the scanner-side decode in `lakko-mls` checks it) and the DeviceGroup
+  join takes it. Changing the route alone would not make that path work
+  from a name, so it keeps `account_id`, and a device with no cached id
+  cannot start it. Open, needs a design (for example, the fresh device learns
+  the id from the confirming device inside the E2EE channel).
+- **Not moved: the passkey allow-list start** (`/webauthn/auth/start` with an
+  account id). The web client uses the discoverable path, which names no
+  account.
+- **Signup cancel.** Both FFI surfaces gained a chunked solver
+  (`powSolveChunk` on UniFFI, `PowSolver.solveChunk` on wasm: at most
+  `maxAttempts` nonces, none when nothing was found), so a client can stop
+  the signup proof of work between chunks.
+
+
+### Claim order (added 2026-09-28, the coordinator's call on the squatting finding)
+
+The handle and the discovery name live in two first-come registries that
+cannot check each other (neither server knows the name). An honest client
+therefore claims a name in one order: bind the handle at auth first, then
+register at discovery; an auth 409 stops the claim before discovery, and a
+discovery "taken" releases the handle again (or re-binds the previous one on a
+rename). With every honest client following that order, a squatter can only
+take a name nobody has claimed anywhere yet, which is ordinary first-come
+naming. The residual: a modified client can still register a name at
+discovery without the handle, if nobody holds the name at discovery yet; the
+owner of the handle then signs in fine but is not findable under that name.
+Recorded for the security pass.
+
+### Another-device recovery on a fresh device (open)
+
+`/device/request` still takes `account_id`, and the pairing payload carries
+it and is checked by the confirming device (`lakko-mls` pairing decode). Before
+S3 a fresh device learned the id by a username lookup; since S3 that lookup
+needs a token, so a device with no cached id cannot start this path. Open for
+the maintainer: a pre-session resolve that returns real or stand-in ids (a
+stand-in must be indistinguishable from a UUIDv7, including its timestamp,
+which is hard), or a pairing change so the confirming device supplies the id
+(an `lakko-mls` change, invariant #3).
 
 ## References
 

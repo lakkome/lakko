@@ -16,8 +16,8 @@
  *
  * This module is a thin channel-facing wrapper over
  * `DiscoveryClient.registerChannelName` / `lookupChannel` (which
- * own the multi-round-trip PoW → blind → evaluate → finalize →
- * PoW → register/lookup dance and reuse the wasm `OprfBlinder`
+ * own the multi-round-trip blind → evaluate (one anonymous token) → finalize →
+ * register/lookup dance and reuse the wasm `OprfBlinder`
  * blind/finalize primitives — no OPRF is reimplemented here). It
  * only bridges the hex `channel_id` the channels UI speaks to the
  * raw-16-byte form the discovery client speaks.
@@ -49,15 +49,16 @@ export function looksLikeChannelIdHex(input: string): boolean {
 
 /**
  * Register the `@handle → channel_id` mapping at channel-create
- * time. Session-token-gated write (a DoS rate-limit role — the
- * token's account is NOT compared against the channel; ownership
- * lives at the PublisherGroup layer, see the service module docs).
+ * time. Since ADR-0054 S3 the write carries NO session: it spends one
+ * anonymous `discovery-register` token (the OPRF evaluation before it one
+ * `discovery-lookup` token), drawn with the session the app installed.
+ * Ownership lives at the PublisherGroup layer, see the service module docs.
  *
  * @param handle       User-typed handle, with or without a leading
  *                     `@` — normalised inside `OprfBlinder.blind`.
  * @param channelIdHex The freshly-minted 32-char hex channel id.
- * @param sessionToken Bearer token for the gated write (from
- *                     `IdentitySecrets.sessionToken`).
+ * @param sessionToken Kept for the callers; the register itself sends no
+ *                     session (ADR-0054 S3).
  * @returns The canonical normalised handle actually claimed, so
  *          the UI can echo it back.
  * @throws  `DiscoveryHttpError` with `status === 409` when the

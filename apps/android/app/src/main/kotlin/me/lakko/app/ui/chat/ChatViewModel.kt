@@ -1023,7 +1023,10 @@ public class ChatViewModel(
             me.lakko.app.chat.membershipRefusalMessage(
                 e,
                 ::membershipRefusalRetryMaySucceed,
-            ) ?: (e.message ?: e.toString())
+            )
+                // ADR-0054 - adding by username spends a lookup token.
+                ?: me.lakko.app.anon.anonTokenFailureCopy(e, me.lakko.app.anon.LOOKUP_ALLOWANCE_USED_COPY)
+                ?: (e.message ?: e.toString())
         android.util.Log.w("ChatViewModel", "$op failed", e)
     }
 

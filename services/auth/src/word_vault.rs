@@ -13,13 +13,18 @@
 //!   Replaces an existing vault (an availability-only residual, ADR-0049).
 //! - **`GET /vault`** — bearer-auth. Whether this account has a vault, and
 //!   its positions (for Settings and for the signup screen's highlight).
-//! - **`POST /vault/recover/start`** — anonymous + PoW. Serves `positions`,
-//!   `salt` and the cost. An unknown account gets pepper-derived decoys so
-//!   the response shape is identical.
-//! - **`POST /vault/recover/finish`** — anonymous + PoW. Constant-time
-//!   compare of the guess against the stored verifier; a match returns the
-//!   sealed entropy; a miss counts toward the 5-in-15-minutes lockout (429)
-//!   and the 10-strike destruction of the row.
+//! - **`POST /vault/recover/start`** — anonymous, per-address limited
+//!   (ADR-0054 S4); names the account by login handle (ADR-0054 S5). Serves
+//!   `positions`, `salt` and the cost. A handle no account holds, and an
+//!   account without a vault, get pepper-derived decoys, stable per handle,
+//!   so the response shape is identical.
+//! - **`POST /vault/recover/finish`** — anonymous. Every guess is charged to
+//!   a counter keyed on the login handle it names (ADR-0054 S5; default 5
+//!   per 15 minutes, `429` `too-many-attempts`, unknown and known alike) and to the
+//!   per-address bucket; then a constant-time compare of the guess against
+//!   the stored verifier; a match returns the sealed entropy; a miss counts
+//!   toward the 10-strike destruction of the row (answered with the same
+//!   `401` as any miss).
 //!
 //! **Trust class — the stated invariant-#2 exception.** An operator who
 //! ignores the counter and holds `LAKKO_VAULT_ENC_KEY` can search the 2^33
@@ -36,19 +41,12 @@ use lakko_mnemonic::vault::{
     positions_are_valid, Positions, DEFAULT_PARAMS, SALT_LEN, VERIFIER_LEN,
 };
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::webauthn::{ApiError, AuthenticatedAccount};
 use crate::AppState;
 
 /// Length of the `account_id` (16-byte UUIDv7 raw form).
 const ACCOUNT_ID_LEN: usize = 16;
-
-/// Consecutive failed guesses that trigger the lockout (same as TOTP).
-const LOCKOUT_THRESHOLD: u32 = 5;
-
-/// Lockout window, in seconds (15 minutes, same as TOTP).
-const LOCKOUT_WINDOW_SECS: i64 = 900;
 
 /// Consecutive failed guesses after which the vault row is deleted.
 const DESTRUCTION_CAP: u32 = 10;
@@ -63,13 +61,8 @@ const MAX_M_KIB: u32 = 1 << 20;
 const MAX_T: u32 = 16;
 const MAX_P: u32 = 8;
 
-/// The `/vault/recover/finish` row shape:
-/// `(body_enc, failed_attempts, last_failed_at)`.
-type FinishRow = (
-    Vec<u8>,
-    u8,
-    Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>,
-);
+/// The `/vault/recover/finish` row shape: `(body_enc, failed_attempts)`.
+type FinishRow = (Vec<u8>, u8);
 
 /// The `/vault/recover/start` row shape:
 /// `(positions, salt, argon2_m_kib, argon2_t, argon2_p)`.
@@ -140,8 +133,9 @@ pub(crate) struct StatusRes {
 /// `POST /vault/recover/start` request.
 #[derive(Deserialize)]
 pub(crate) struct RecoverStartReq {
-    pub pow: crate::pow::PowProof,
-    pub account_id_b64: String,
+    /// The login handle of the account (ADR-0054 S5): 32 bytes, base64url
+    /// without padding.
+    pub handle: String,
 }
 
 /// `POST /vault/recover/start` response — what the client needs to stretch
@@ -158,8 +152,8 @@ pub(crate) struct RecoverStartRes {
 /// `POST /vault/recover/finish` request.
 #[derive(Deserialize)]
 pub(crate) struct RecoverFinishReq {
-    pub pow: crate::pow::PowProof,
-    pub account_id_b64: String,
+    /// The login handle of the account (ADR-0054 S5).
+    pub handle: String,
     pub verifier_b64: String,
 }
 
@@ -218,12 +212,12 @@ pub(crate) async fn enroll(
 
     sqlx::query(
         "INSERT INTO word_vaults (account_id, positions, salt, argon2_m_kib, argon2_t, argon2_p, \
-         body_enc, failed_attempts, last_failed_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL) \
+         body_enc, failed_attempts) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0) \
          ON DUPLICATE KEY UPDATE positions = VALUES(positions), salt = VALUES(salt), \
          argon2_m_kib = VALUES(argon2_m_kib), argon2_t = VALUES(argon2_t), \
          argon2_p = VALUES(argon2_p), body_enc = VALUES(body_enc), \
-         failed_attempts = 0, last_failed_at = NULL",
+         failed_attempts = 0",
     )
     .bind(account_id.as_slice())
     .bind(positions.as_slice())
@@ -261,7 +255,8 @@ pub(crate) async fn status(
 
 /// `POST /vault/recover/start` — the positions, salt and cost to answer with.
 ///
-/// Anonymous + PoW. An unknown account gets decoys derived from a pepper
+/// Anonymous, per-address limited. An unknown account gets decoys derived
+/// from a pepper
 /// over the presented id, so the response is indistinguishable from a real
 /// one and stable across calls.
 #[axum::debug_handler]
@@ -270,8 +265,13 @@ pub(crate) async fn recover_start(
     Json(req): Json<RecoverStartReq>,
 ) -> Result<Json<RecoverStartRes>, ApiError> {
     let key = require_key(&state)?;
-    crate::pow::verify_proof(&state.db, &req.pow).await?;
-    let account_id = decode_account_id(&req.account_id_b64)?;
+    let pepper = crate::login_handle::pepper(&state)?;
+    let handle = crate::login_handle::decode_handle(&req.handle)?;
+    // An unknown handle resolves to its stand-in id, which has no vault, so
+    // it gets decoys stable per handle.
+    let account_id = crate::login_handle::resolve(&state.db, &pepper, &handle)
+        .await?
+        .account_id;
 
     let row: Option<StartRow> = sqlx::query_as(
         "SELECT positions, salt, argon2_m_kib, argon2_t, argon2_p FROM word_vaults \
@@ -306,48 +306,48 @@ pub(crate) async fn recover_start(
 /// `POST /vault/recover/finish` — compare the guess, release the sealed
 /// entropy on a match.
 ///
-/// Anonymous + PoW. Lockout (5 failures / 15 min) → `429`; a miss bumps the
-/// counter and deletes the row on the 10th consecutive miss; an unknown
-/// account runs a dummy compare and returns the same generic `401`.
+/// Anonymous; names the account by login handle (ADR-0054 S5). The named
+/// handle's attempt counter and the per-address bucket
+/// → `429` `too-many-attempts` (charged before the lookup, so unknown and
+/// known ids trip alike); a miss bumps the row's counter and deletes the row
+/// on the 10th consecutive miss; an unknown account runs a dummy compare and
+/// returns the same generic `401`.
 #[axum::debug_handler]
 pub(crate) async fn recover_finish(
     State(state): State<AppState>,
     Json(req): Json<RecoverFinishReq>,
 ) -> Result<Json<RecoverFinishRes>, ApiError> {
     let key = require_key(&state)?;
-    crate::pow::verify_proof(&state.db, &req.pow).await?;
-    let account_id = decode_account_id(&req.account_id_b64)?;
+    let pepper = crate::login_handle::pepper(&state)?;
+    let handle = crate::login_handle::decode_handle(&req.handle)?;
     let guess =
         decode_fixed::<VERIFIER_LEN>(&req.verifier_b64, "verifier_b64 must decode to 32 bytes")?;
-    let now_secs = i64::try_from(now_unix_secs()).unwrap_or(i64::MAX);
-
-    let row: Option<FinishRow> = sqlx::query_as(
-        "SELECT body_enc, failed_attempts, last_failed_at FROM word_vaults WHERE account_id = ?",
+    crate::limits::charge_name(
+        &state.db,
+        &state.limits,
+        crate::limits::Scope::VaultGuess,
+        &handle,
     )
-    .bind(account_id.as_slice())
-    .fetch_optional(&state.db)
-    .await
-    .map_err(ApiError::Db)?;
+    .await?;
+    let account_id = crate::login_handle::resolve(&state.db, &pepper, &handle)
+        .await?
+        .account_id;
+
+    let row: Option<FinishRow> =
+        sqlx::query_as("SELECT body_enc, failed_attempts FROM word_vaults WHERE account_id = ?")
+            .bind(account_id.as_slice())
+            .fetch_optional(&state.db)
+            .await
+            .map_err(ApiError::Db)?;
 
     // Unknown account (or a destroyed vault): a dummy compare so the shape
     // and timing match a miss, then the same generic 401. No DB write.
-    let Some((body_enc, failed, last_failed)) = row else {
+    let Some((body_enc, failed)) = row else {
         let _ = constant_time_eq(&guess, &[0u8; VERIFIER_LEN]);
         return Err(ApiError::InvalidCredential);
     };
 
     let failed = u32::from(failed);
-    if failed >= LOCKOUT_THRESHOLD {
-        if let Some(last) = last_failed {
-            if now_secs - last.timestamp() < LOCKOUT_WINDOW_SECS {
-                tracing::warn!(
-                    account_id = %URL_SAFE_NO_PAD.encode(account_id),
-                    "vault: guess rejected (locked out)"
-                );
-                return Err(ApiError::RateLimited);
-            }
-        }
-    }
 
     let body = lakko_crypto::aead::open_with_key(&key, &body_enc).map_err(|e| {
         tracing::error!(error = %e, "vault: body open failed");
@@ -370,8 +370,7 @@ pub(crate) async fn recover_finish(
             tracing::warn!(account_id = %account_id_b64, "vault: destroyed after repeated wrong guesses");
         } else {
             sqlx::query(
-                "UPDATE word_vaults SET failed_attempts = failed_attempts + 1, last_failed_at = NOW(3) \
-                 WHERE account_id = ?",
+                "UPDATE word_vaults SET failed_attempts = failed_attempts + 1 WHERE account_id = ?",
             )
             .bind(account_id.as_slice())
             .execute(&state.db)
@@ -381,13 +380,11 @@ pub(crate) async fn recover_finish(
         return Err(ApiError::InvalidCredential);
     }
 
-    sqlx::query(
-        "UPDATE word_vaults SET failed_attempts = 0, last_failed_at = NULL WHERE account_id = ?",
-    )
-    .bind(account_id.as_slice())
-    .execute(&state.db)
-    .await
-    .map_err(ApiError::Db)?;
+    sqlx::query("UPDATE word_vaults SET failed_attempts = 0 WHERE account_id = ?")
+        .bind(account_id.as_slice())
+        .execute(&state.db)
+        .await
+        .map_err(ApiError::Db)?;
     sqlx::query("INSERT INTO vault_opens (account_id) VALUES (?)")
         .bind(account_id.as_slice())
         .execute(&state.db)
@@ -561,22 +558,6 @@ fn decode_fixed<const N: usize>(b64: &str, msg: &'static str) -> Result<[u8; N],
         .map_err(|_| ApiError::BadInput(msg))
 }
 
-fn decode_account_id(b64: &str) -> Result<[u8; ACCOUNT_ID_LEN], ApiError> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(b64)
-        .map_err(|_| ApiError::BadInput("account_id_b64 not URL-safe base64"))?;
-    bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| ApiError::BadInput("account_id must decode to 16 bytes"))
-}
-
-fn now_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
-
 /// Constant-time byte equality; the length is folded in rather than
 /// early-returned so timing does not branch on it.
 fn constant_time_eq(candidate: &[u8; VERIFIER_LEN], stored: &[u8]) -> bool {
@@ -674,6 +655,7 @@ mod vault_e2e_tests {
     use sqlx::mysql::MySqlPoolOptions;
     use sqlx::MySqlPool;
     use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
     use tower::ServiceExt as _;
     use uuid::Uuid;
 
@@ -709,6 +691,8 @@ mod vault_e2e_tests {
             throttle: crate::throttle::ThrottleConfig::disabled(),
             backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
             anon_tokens: None,
+            handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
+            limits: Arc::new(crate::limits::Limits::defaults()),
         };
         (state, token_secret)
     }
@@ -730,46 +714,6 @@ mod vault_e2e_tests {
                 .map_or(0, |d| d.as_millis()),
         )
         .unwrap_or(i64::MAX)
-    }
-
-    async fn fresh_pow(state: &crate::AppState) -> serde_json::Value {
-        let (st, body) = send(
-            state,
-            Request::builder()
-                .method(Method::POST)
-                .uri("/pow/challenge")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(
-            st,
-            StatusCode::OK,
-            "body: {}",
-            String::from_utf8_lossy(&body)
-        );
-        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let seed_b64 = v["seed"].as_str().unwrap().to_string();
-        let seed = STANDARD.decode(&seed_b64).unwrap();
-        let mut nonce = [0u8; 16];
-        loop {
-            let mut challenge = Vec::with_capacity(32);
-            challenge.extend_from_slice(&seed);
-            challenge.extend_from_slice(&nonce);
-            if let Ok(eq) = equix::EquiX::new(&challenge) {
-                if let Some(sol) = eq.solve().first() {
-                    return serde_json::json!({
-                        "seed": seed_b64,
-                        "nonce": STANDARD.encode(nonce),
-                        "solution": STANDARD.encode(sol.to_bytes()),
-                    });
-                }
-            }
-            nonce[0] = nonce[0].wrapping_add(1);
-            if nonce[0] == 0 {
-                nonce[1] = nonce[1].wrapping_add(1);
-            }
-        }
     }
 
     fn bearer_for(token_secret: &lakko_auth_token::TokenSecret, account_id: &[u8; 16]) -> String {
@@ -812,18 +756,16 @@ mod vault_e2e_tests {
 
     async fn guess(
         state: &crate::AppState,
-        account_id_b64: &str,
+        handle_b64: &str,
         verifier: &[u8; 32],
     ) -> (StatusCode, Bytes) {
-        let pow = fresh_pow(state).await;
         json_req(
             state,
             Method::POST,
             "/vault/recover/finish",
             None,
             Some(serde_json::json!({
-                "pow": pow,
-                "account_id_b64": account_id_b64,
+                "handle": handle_b64,
                 "verifier_b64": STANDARD.encode(verifier),
             })),
         )
@@ -837,7 +779,6 @@ mod vault_e2e_tests {
             eprintln!("skipping vault_state_machine: LAKKO_AUTH_TEST_DATABASE_URL unset");
             return;
         };
-        std::env::set_var("LAKKO_POW_EFFORT_BITS", "0");
         let _ = tracing_subscriber::fmt()
             .with_env_filter("lakko_svc_auth=debug")
             .with_test_writer()
@@ -850,12 +791,14 @@ mod vault_e2e_tests {
         crate::MIGRATIONS.run(&pool).await.expect("migrate");
 
         let account_id: [u8; 16] = *Uuid::now_v7().as_bytes();
-        let account_id_b64 = URL_SAFE_NO_PAD.encode(account_id);
         sqlx::query("INSERT INTO accounts (id) VALUES (?)")
             .bind(account_id.as_slice())
             .execute(&pool)
             .await
             .expect("insert account");
+        // ADR-0054 S5: recovery names the account by its login handle.
+        let (handle, handle_b64) = crate::login_handle::random_handle();
+        crate::login_handle::bind_for_test(&pool, &account_id, &handle).await;
 
         // 503 when the key is not configured.
         let (state_off, secret) = build_state(pool.clone(), false);
@@ -884,13 +827,12 @@ mod vault_e2e_tests {
         // /recover/start for the not-yet-enrolled account answers with decoys,
         // stable across calls and shaped like a real row.
         let start = |state: crate::AppState, id: String| async move {
-            let pow = fresh_pow(&state).await;
             let (st, body) = json_req(
                 &state,
                 Method::POST,
                 "/vault/recover/start",
                 None,
-                Some(serde_json::json!({ "pow": pow, "account_id_b64": id })),
+                Some(serde_json::json!({ "handle": id })),
             )
             .await;
             assert_eq!(
@@ -901,14 +843,24 @@ mod vault_e2e_tests {
             );
             serde_json::from_slice::<serde_json::Value>(&body).unwrap()
         };
-        let d1 = start(state.clone(), account_id_b64.clone()).await;
-        let d2 = start(state.clone(), account_id_b64.clone()).await;
+        let d1 = start(state.clone(), handle_b64.clone()).await;
+        let d2 = start(state.clone(), handle_b64.clone()).await;
         assert_eq!(d1, d2);
         assert_eq!(d1["positions"].as_array().unwrap().len(), 3);
         assert_eq!(d1["argon2_m_kib"], DEFAULT_PARAMS.m_kib);
+        // A handle nobody holds gets decoys of the same shape, stable per
+        // handle and different from another handle's.
+        let (_, unknown_b64) = crate::login_handle::random_handle();
+        let u1 = start(state.clone(), unknown_b64.clone()).await;
+        assert_eq!(u1, start(state.clone(), unknown_b64.clone()).await);
+        assert_ne!(u1["salt_b64"], d1["salt_b64"]);
+        assert_eq!(
+            u1.as_object().unwrap().keys().collect::<Vec<_>>(),
+            d1.as_object().unwrap().keys().collect::<Vec<_>>()
+        );
 
         // A guess against a decoy is a plain 401.
-        let (st, body) = guess(&state, &account_id_b64, &[0u8; 32]).await;
+        let (st, body) = guess(&state, &handle_b64, &[0u8; 32]).await;
         assert_eq!(
             st,
             StatusCode::UNAUTHORIZED,
@@ -974,7 +926,7 @@ mod vault_e2e_tests {
         assert_eq!(v["positions"], serde_json::json!([3, 11, 20]));
 
         // /recover/start now serves the real row.
-        let s = start(state.clone(), account_id_b64.clone()).await;
+        let s = start(state.clone(), handle_b64.clone()).await;
         assert_eq!(s["positions"], serde_json::json!([3, 11, 20]));
         assert_eq!(s["argon2_m_kib"], FAST.m_kib);
         let salt = STANDARD.decode(s["salt_b64"].as_str().unwrap()).unwrap();
@@ -984,7 +936,7 @@ mod vault_e2e_tests {
         let words = picked(&m, &e.positions);
         let refs: Vec<&str> = words.iter().map(String::as_str).collect();
         let keys = vault::answer(&refs, &salt, FAST).unwrap();
-        let (st, body) = guess(&state, &account_id_b64, keys.verifier()).await;
+        let (st, body) = guess(&state, &handle_b64, keys.verifier()).await;
         assert_eq!(
             st,
             StatusCode::OK,
@@ -1005,10 +957,20 @@ mod vault_e2e_tests {
                 .unwrap();
         assert_eq!(opens, 1);
 
-        // Five wrong guesses: 401 x5, then 429 (locked), even for the right one.
+        // Five wrong guesses: 401 x5, then 429 (the attempt limit), even for
+        // the right one. The counter already holds this test's two earlier
+        // guesses; start it from zero.
+        let reset = || {
+            crate::limits::reset_name(&pool, crate::limits::Scope::VaultGuess, handle.as_slice())
+        };
+        reset().await;
+        let limit = state
+            .limits
+            .name_window(crate::limits::Scope::VaultGuess)
+            .limit;
         let wrong = [0xEEu8; 32];
-        for _ in 0..LOCKOUT_THRESHOLD {
-            let (st, body) = guess(&state, &account_id_b64, &wrong).await;
+        for _ in 0..limit {
+            let (st, body) = guess(&state, &handle_b64, &wrong).await;
             assert_eq!(
                 st,
                 StatusCode::UNAUTHORIZED,
@@ -1016,7 +978,7 @@ mod vault_e2e_tests {
                 String::from_utf8_lossy(&body)
             );
         }
-        let (st, body) = guess(&state, &account_id_b64, keys.verifier()).await;
+        let (st, body) = guess(&state, &handle_b64, keys.verifier()).await;
         assert_eq!(
             st,
             StatusCode::TOO_MANY_REQUESTS,
@@ -1024,28 +986,20 @@ mod vault_e2e_tests {
             String::from_utf8_lossy(&body)
         );
 
-        // Age the lockout out (the test cannot wait 15 minutes).
-        sqlx::query("UPDATE word_vaults SET last_failed_at = DATE_SUB(NOW(3), INTERVAL 16 MINUTE) WHERE account_id = ?")
-            .bind(account_id.as_slice())
-            .execute(&pool)
-            .await
-            .unwrap();
+        // Let the window pass (the test cannot wait 15 minutes).
+        reset().await;
         // Misses 6..=9 are 401s; the 10th destroys the row.
-        for _ in LOCKOUT_THRESHOLD..DESTRUCTION_CAP - 1 {
-            let (st, body) = guess(&state, &account_id_b64, &wrong).await;
+        for _ in limit..DESTRUCTION_CAP - 1 {
+            let (st, body) = guess(&state, &handle_b64, &wrong).await;
             assert_eq!(
                 st,
                 StatusCode::UNAUTHORIZED,
                 "body: {}",
                 String::from_utf8_lossy(&body)
             );
-            sqlx::query("UPDATE word_vaults SET last_failed_at = DATE_SUB(NOW(3), INTERVAL 16 MINUTE) WHERE account_id = ?")
-                .bind(account_id.as_slice())
-                .execute(&pool)
-                .await
-                .unwrap();
+            reset().await;
         }
-        let (st, body) = guess(&state, &account_id_b64, &wrong).await;
+        let (st, body) = guess(&state, &handle_b64, &wrong).await;
         assert_eq!(
             st,
             StatusCode::UNAUTHORIZED,
@@ -1065,7 +1019,7 @@ mod vault_e2e_tests {
             "the vault is destroyed after the 10th miss"
         );
         // The right words no longer open anything: same 401 as an unknown account.
-        let (st, body) = guess(&state, &account_id_b64, keys.verifier()).await;
+        let (st, body) = guess(&state, &handle_b64, keys.verifier()).await;
         assert_eq!(
             st,
             StatusCode::UNAUTHORIZED,
@@ -1088,7 +1042,7 @@ mod vault_e2e_tests {
             "body: {}",
             String::from_utf8_lossy(&body)
         );
-        let (st, body) = guess(&state, &account_id_b64, keys.verifier()).await;
+        let (st, body) = guess(&state, &handle_b64, keys.verifier()).await;
         assert_eq!(
             st,
             StatusCode::OK,

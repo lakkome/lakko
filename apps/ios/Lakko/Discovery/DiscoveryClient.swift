@@ -24,17 +24,25 @@ import LakkoCore
 ///   2. **High-level ``registerUsername(accountId:username:)`` /
 ///      ``lookup(username:)`` /
 ///      ``uploadIdentityBundle(accountId:signaturePubkey:x25519Pubkey:)``** —
-///      orchestrate the multi-round-trip flows: PoW₁ → OPRF blind
-///      → POST `/oprf` → finalize → PoW₂ → POST `/register` (or
-///      `/lookup`); and the one-PoW identity-bundle upload.
+///      orchestrate the multi-round-trip flows: OPRF blind → POST
+///      `/oprf` → finalize → POST `/register` (or `/lookup`); and the
+///      identity-bundle upload.
 ///
-/// ## Why a separate PoW challenge?
+/// ## Anonymous tokens, not proof of work (ADR-0054 S3)
 ///
-/// `services/discovery` keeps its own PoW challenge table; the auth
-/// service's seeds are not accepted here. We call
-/// `POST /pow/challenge` on the discovery base URL (not the auth
-/// one) — the JSON shape happens to match, so we reuse
-/// ``PowChallengeResponse`` from `apps/ios/Lakko/Auth/Wire.swift`.
+/// No request here carries a proof of work any more. The anonymous routes
+/// spend one anonymous token each (``AnonTokenPool``, header
+/// `x-lakko-anon-token`): `/discovery/oprf` (`discovery-lookup` - every
+/// username or channel lookup, and the OPRF step of a registration),
+/// `/discovery/channel/register` (`discovery-register`) and the three
+/// consumes (`invite-consume`). Those routes, and the two token-free lookups
+/// `/discovery/lookup` + `/discovery/channel/lookup`, NEVER carry the
+/// session token (not even this client's ``sessionToken``), a cookie or any
+/// account identifier, and travel on their own connection pool
+/// (``AnonymousHTTP``): a lookup must not be linkable to the account that
+/// made it (invariant #5). The bearer routes (register, identity,
+/// keypackage, the invite uploads) need only the session and may answer
+/// `429 {"code": "rate-limited"}`.
 ///
 /// ## Default base URL
 ///
@@ -67,35 +75,31 @@ public final class DiscoveryClient {
     /// `lakko-svc-discovery` write (register, identity upload,
     /// keypackage upload, invite upload, invite revoke). `nil`
     /// means "anonymous" — every protected endpoint will return
-    /// 401 in that mode, but unauthenticated paths (`/pow/challenge`,
-    /// `/discovery/oprf`, `/discovery/lookup`, all GETs, invite
-    /// consume) still work.
+    /// 401 in that mode. The anonymous routes never carry it.
     ///
     /// `private(set)` so callers update via ``setSessionToken(_:)``;
     /// reads are non-blocking from any actor (the underlying
     /// `URLSession` is thread-safe).
     public private(set) var sessionToken: String?
 
-    /// The signed-in session's token for the three rate-limited reads
-    /// (`/discovery/oprf`, `/discovery/lookup`, `/discovery/channel/lookup`)
-    /// when this client carries no ``sessionToken`` of its own. Discovery
-    /// only uses it to charge those reads to the account instead of the
-    /// shared per-IP bucket; it is never attached to any other request.
-    /// Defaults to ``AmbientSessionToken/shared``.
-    private let rateLimitToken: () -> String?
+    /// ADR-0054 S3 - the session the anonymous routes travel on (its own
+    /// connection pool, no cookies), and where their tokens come from.
+    private let anonymousSession: URLSession
+    private let tokens: AnonTokenSource
 
     public init(
         baseURL: String = DiscoveryClient.defaultBaseURL,
         session: URLSession = .shared,
         sessionToken: String? = nil,
         antiCensorship: AntiCensorshipConfig = .current,
-        rateLimitToken: @escaping () -> String? = { AmbientSessionToken.shared.current }
+        tokens: AnonTokenSource = AnonTokenPool.shared
     ) {
         self.baseURL = baseURL
         self.session = session
+        self.anonymousSession = AnonymousHTTP.session(pairedWith: session)
         self.sessionToken = sessionToken
         self.antiCensorship = antiCensorship
-        self.rateLimitToken = rateLimitToken
+        self.tokens = tokens
         self.encoder = JSONEncoder()
         self.decoder = JSONDecoder()
     }
@@ -109,7 +113,7 @@ public final class DiscoveryClient {
     }
 
     /// A copy of this client carrying `token` as its bearer, over the same
-    /// base URL, session, transport and rate-limit source.
+    /// base URL, session, transport and token source.
     ///
     /// For a caller that holds a long-lived ANONYMOUS client (its reads -
     /// KeyPackage fetches, invite fetch / consume - must stay unlinked from
@@ -122,20 +126,16 @@ public final class DiscoveryClient {
             session: session,
             sessionToken: token,
             antiCensorship: antiCensorship,
-            rateLimitToken: rateLimitToken
+            tokens: tokens
         )
     }
 
     // MARK: - Low-level: 1:1 HTTP endpoints
 
-    /// `POST /pow/challenge`.
-    public func powChallenge() async throws -> PowChallengeResponse {
-        try await postNoBody(endpoint: "/pow/challenge")
-    }
-
-    /// `POST /discovery/oprf`.
+    /// `POST /discovery/oprf` - spends one `discovery-lookup` token; anonymous.
     public func oprfEvaluate(_ request: OprfRequest) async throws -> OprfResponse {
-        try await post(endpoint: "/discovery/oprf", body: request, rateLimited: true)
+        try await postAnonymous(
+            endpoint: "/discovery/oprf", body: request, context: .discoveryLookup)
     }
 
     /// `POST /discovery/register`.
@@ -145,33 +145,31 @@ public final class DiscoveryClient {
 
     /// `POST /discovery/lookup`. Returns the typed response on 200,
     /// `nil` on 404 (the typed not-found path), throws on any
-    /// other non-2xx.
+    /// other non-2xx. Anonymous, no token (the per-IP limiter only).
     public func lookupRaw(_ request: LookupRequest) async throws -> LookupResponse? {
-        try await postNullableOn404(endpoint: "/discovery/lookup", body: request, rateLimited: true)
+        try await postAnonymousNullableOn404(endpoint: "/discovery/lookup", body: request)
     }
 
     /// `POST /discovery/channel/register` (G4-5, ADR-0010) — bind an
-    /// OPRF-hashed `@channelname` to a `channel_id`. Session-token-gated
-    /// write (a DoS rate-limit role — the token's account is NOT compared
-    /// against the channel; ownership lives at the PublisherGroup layer).
-    /// The low-level POST threads the bearer token via
-    /// ``post(endpoint:body:rateLimited:)``.
+    /// OPRF-hashed `@channelname` to a `channel_id`. Since ADR-0054 S3 an
+    /// anonymous route spending one `discovery-register` token (ownership
+    /// lives at the PublisherGroup layer); never carries the session.
     public func channelRegister(
         _ request: ChannelRegisterRequest
     ) async throws -> ChannelRegisterResponse {
-        try await post(endpoint: "/discovery/channel/register", body: request)
+        try await postAnonymous(
+            endpoint: "/discovery/channel/register", body: request, context: .discoveryRegister)
     }
 
     /// `POST /discovery/channel/lookup` (G4-5, ADR-0010). Returns the
     /// typed response on 200, `nil` on 404 (the typed not-found path),
     /// throws on any other non-2xx. Mirror of ``lookupRaw(_:)`` for the
-    /// channel namespace — unauthenticated; the bearer header only keys the
-    /// rate limiter (see ``attachAuthorizationHeader(to:rateLimited:)``).
+    /// channel namespace — anonymous, no token (the per-IP limiter only).
     public func channelLookupRaw(
         _ request: ChannelLookupRequest
     ) async throws -> ChannelLookupResponse? {
-        try await postNullableOn404(
-            endpoint: "/discovery/channel/lookup", body: request, rateLimited: true)
+        try await postAnonymousNullableOn404(
+            endpoint: "/discovery/channel/lookup", body: request)
     }
 
     /// `POST /discovery/identity` — upsert the identity bundle.
@@ -226,8 +224,9 @@ public final class DiscoveryClient {
 
     /// Bind `@username` to `accountId` server-side.
     ///
-    /// Flow: PoW₁ → OPRF blind → `POST /discovery/oprf` → finalize
-    /// → PoW₂ → `POST /discovery/register`.
+    /// Flow: OPRF blind → `POST /discovery/oprf` (anonymous, one
+    /// `discovery-lookup` token) → finalize → `POST /discovery/register`
+    /// (bearer).
     ///
     /// Username normalisation is handled inside `OprfBlinder.blind`
     /// (the UniFFI helper); the canonical form is surfaced back via
@@ -257,27 +256,15 @@ public final class DiscoveryClient {
         // `DiscoveryAlreadyFinalized`).
         let normalisedUsername = try blinder.normalizedUsername()
 
-        let challenge1 = try await powChallenge()
-        let pow1 = try await solvePow(
-            seedB64: challenge1.seed,
-            effortBits: challenge1.effortBits
-        )
         let oprfResp = try await oprfEvaluate(
-            OprfRequest(pow: pow1, blinded: blinder.blindedB64())
+            OprfRequest(blinded: blinder.blindedB64())
         )
 
         let oprfHashBytes = try blinder.finalize(evaluatedB64: oprfResp.evaluated)
         let oprfHashB64 = base64Encode(oprfHashBytes)
 
-        let challenge2 = try await powChallenge()
-        let pow2 = try await solvePow(
-            seedB64: challenge2.seed,
-            effortBits: challenge2.effortBits
-        )
-
         let resp = try await register(
             RegisterRequest(
-                pow: pow2,
                 accountId: base64Encode(accountId),
                 oprfHash: oprfHashB64
             )
@@ -296,8 +283,10 @@ public final class DiscoveryClient {
     /// when the username is not registered.
     ///
     /// Same flow as ``registerUsername(accountId:username:)`` modulo
-    /// the second endpoint: PoW₁ → OPRF blind → `POST /discovery/oprf`
-    /// → finalize → PoW₂ → `POST /discovery/lookup`.
+    /// the second endpoint: OPRF blind → `POST /discovery/oprf` (one
+    /// `discovery-lookup` token) → finalize → `POST /discovery/lookup`.
+    /// Both requests anonymous; with no session there is no token, and the
+    /// lookup fails with ``AnonTokenUnavailable/noSession``.
     public func lookup(username: String) async throws -> LookupResult {
         // ADR-0048 §4 — never send a lookup for a name that fails the rule.
         _ = try requireValidUsername(
@@ -305,26 +294,15 @@ public final class DiscoveryClient {
         let blinder = try OprfBlinder.blind(username: username)
         let normalisedUsername = try blinder.normalizedUsername()
 
-        let challenge1 = try await powChallenge()
-        let pow1 = try await solvePow(
-            seedB64: challenge1.seed,
-            effortBits: challenge1.effortBits
-        )
         let oprfResp = try await oprfEvaluate(
-            OprfRequest(pow: pow1, blinded: blinder.blindedB64())
+            OprfRequest(blinded: blinder.blindedB64())
         )
 
         let oprfHashBytes = try blinder.finalize(evaluatedB64: oprfResp.evaluated)
         let oprfHashB64 = base64Encode(oprfHashBytes)
 
-        let challenge2 = try await powChallenge()
-        let pow2 = try await solvePow(
-            seedB64: challenge2.seed,
-            effortBits: challenge2.effortBits
-        )
-
         guard let resp = try await lookupRaw(
-            LookupRequest(pow: pow2, oprfHash: oprfHashB64)
+            LookupRequest(oprfHash: oprfHashB64)
         ) else {
             return LookupResult(
                 normalisedUsername: normalisedUsername,
@@ -350,8 +328,9 @@ public final class DiscoveryClient {
 
     /// Bind `@channelname` to a 16-byte `channel_id`.
     ///
-    /// Flow: PoW₁ → OPRF blind → `POST /discovery/oprf` → finalize →
-    /// PoW₂ → `POST /discovery/channel/register`. Identical to
+    /// Flow: OPRF blind → `POST /discovery/oprf` (one `discovery-lookup`
+    /// token) → finalize → `POST /discovery/channel/register` (one
+    /// `discovery-register` token). Identical to
     /// ``registerUsername(accountId:username:)`` modulo the id type +
     /// the second endpoint. Handle normalisation (NFKC + lowercase +
     /// trim + leading-`@` strip) happens inside `OprfBlinder.blind`.
@@ -372,27 +351,15 @@ public final class DiscoveryClient {
         }
         let blinder = try OprfBlinder.blindChannel(handle: handle)
 
-        let challenge1 = try await powChallenge()
-        let pow1 = try await solvePow(
-            seedB64: challenge1.seed,
-            effortBits: challenge1.effortBits
-        )
         let oprfResp = try await oprfEvaluate(
-            OprfRequest(pow: pow1, blinded: blinder.blindedB64())
+            OprfRequest(blinded: blinder.blindedB64())
         )
 
         let oprfHashBytes = try blinder.finalize(evaluatedB64: oprfResp.evaluated)
         let oprfHashB64 = base64Encode(oprfHashBytes)
 
-        let challenge2 = try await powChallenge()
-        let pow2 = try await solvePow(
-            seedB64: challenge2.seed,
-            effortBits: challenge2.effortBits
-        )
-
         let resp = try await channelRegister(
             ChannelRegisterRequest(
-                pow: pow2,
                 oprfHash: oprfHashB64,
                 channelId: base64Encode(channelId)
             )
@@ -404,33 +371,22 @@ public final class DiscoveryClient {
     /// when the handle is not registered.
     ///
     /// Same flow as ``registerChannelName(channelId:handle:)`` modulo the
-    /// second endpoint: PoW₁ → OPRF → PoW₂ → `POST /discovery/channel/lookup`.
+    /// second endpoint: OPRF (one `discovery-lookup` token) → `POST /discovery/channel/lookup`.
     /// Exact-match only (the server does no prefix search). The 404
     /// not-found path is folded into a `nil` return so a not-found is
     /// visible in the type rather than an exception.
     public func lookupChannel(handle: String) async throws -> String? {
         let blinder = try OprfBlinder.blindChannel(handle: handle)
 
-        let challenge1 = try await powChallenge()
-        let pow1 = try await solvePow(
-            seedB64: challenge1.seed,
-            effortBits: challenge1.effortBits
-        )
         let oprfResp = try await oprfEvaluate(
-            OprfRequest(pow: pow1, blinded: blinder.blindedB64())
+            OprfRequest(blinded: blinder.blindedB64())
         )
 
         let oprfHashBytes = try blinder.finalize(evaluatedB64: oprfResp.evaluated)
         let oprfHashB64 = base64Encode(oprfHashBytes)
 
-        let challenge2 = try await powChallenge()
-        let pow2 = try await solvePow(
-            seedB64: challenge2.seed,
-            effortBits: challenge2.effortBits
-        )
-
         guard let resp = try await channelLookupRaw(
-            ChannelLookupRequest(pow: pow2, oprfHash: oprfHashB64)
+            ChannelLookupRequest(oprfHash: oprfHashB64)
         ) else {
             return nil
         }
@@ -445,8 +401,8 @@ public final class DiscoveryClient {
         return Self.hexEncode(channelBytes)
     }
 
-    /// Upload (or replace) THIS device's MLS KeyPackage. Drives one PoW solve
-    /// + `POST /discovery/keypackage`.
+    /// Upload (or replace) THIS device's MLS KeyPackage. Drives
+    /// `POST /discovery/keypackage`.
     ///
     /// ADR-0050 — discovery keeps one row per `(account_id, device_id)`, where
     /// `deviceId` is the device leaf's 32-byte signature key, and caps distinct
@@ -475,15 +431,8 @@ public final class DiscoveryClient {
             )
         }
 
-        let challenge = try await powChallenge()
-        let pow = try await solvePow(
-            seedB64: challenge.seed,
-            effortBits: challenge.effortBits
-        )
-
         let resp = try await keypackageUpload(
             KeyPackageUploadRequest(
-                pow: pow,
                 accountId: base64Encode(accountId),
                 deviceId: base64Encode(deviceId),
                 keypackage: base64Encode(keyPackageBytes)
@@ -555,7 +504,7 @@ public final class DiscoveryClient {
     }
 
     /// Upload (or replace) the identity bundle for `accountId`.
-    /// Drives one PoW solve + `POST /discovery/identity`.
+    /// Drives `POST /discovery/identity` (bearer).
     ///
     /// Idempotent — the server upserts via
     /// `INSERT … ON DUPLICATE KEY UPDATE`. Calling this on every
@@ -604,15 +553,8 @@ public final class DiscoveryClient {
             )
         }
 
-        let challenge = try await powChallenge()
-        let pow = try await solvePow(
-            seedB64: challenge.seed,
-            effortBits: challenge.effortBits
-        )
-
         let resp = try await identityUpload(
             IdentityUploadRequest(
-                pow: pow,
                 accountId: base64Encode(accountId),
                 signaturePubkey: base64Encode(signaturePubkey),
                 x25519Pubkey: base64Encode(x25519Pubkey),
@@ -658,26 +600,11 @@ public final class DiscoveryClient {
         )
     }
 
-    /// `POST /discovery/invite/{blob_id_b64url}/consume`. The
-    /// high-level ``consumeInvite(blobId:capabilityBytes:joinerAccountId:)``
-    /// wrapper drives the PoW solve + the local
-    /// `computeJoinerInviteTag` call + folds the 200 / 404 / 410
-    /// status trifecta into a discriminated ``ConsumeInviteResult``.
-    public func inviteConsume(
-        blobIdSlug: String,
-        request: InviteConsumeRequest
-    ) async throws -> InviteConsumeResponse {
-        try await post(
-            endpoint: "/discovery/invite/\(blobIdSlug)/consume",
-            body: request
-        )
-    }
-
     // MARK: - High-level invite flows
 
     /// Upload a freshly-composed `InviteCapability` blob and
     /// receive the server-minted `blobId` (6 random bytes,
-    /// ADR-0028 amendment of 2026-09-27). Drives one PoW solve +
+    /// ADR-0028 amendment of 2026-09-27). Drives
     /// `POST /discovery/invite`. A second upload of the same
     /// bytes gets a second id.
     public func uploadInvite(capabilityBytes: Data) async throws -> Data {
@@ -693,15 +620,8 @@ public final class DiscoveryClient {
             )
         }
 
-        let challenge = try await powChallenge()
-        let pow = try await solvePow(
-            seedB64: challenge.seed,
-            effortBits: challenge.effortBits
-        )
-
         let resp = try await inviteUpload(
             InviteUploadRequest(
-                pow: pow,
                 capability: base64Encode(capabilityBytes)
             )
         )
@@ -754,49 +674,15 @@ public final class DiscoveryClient {
         )
         let slug = base64UrlEncodeNoPad(blobId)
 
-        let challenge = try await powChallenge()
-        let pow = try await solvePow(
-            seedB64: challenge.seed,
-            effortBits: challenge.effortBits
-        )
-
         let endpoint = "/discovery/invite/\(slug)/consume"
-        let url = try buildURL(endpoint: endpoint)
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        attachAuthorizationHeader(to: &request)
-        let body = InviteConsumeRequest(
-            pow: pow,
-            joinerTag: base64Encode(joinerTag)
+        // ADR-0054 S3 - one `invite-consume` anonymous token, no
+        // `Authorization`, the anonymous session.
+        let raw = try await postAnonymousRaw(
+            endpoint: endpoint,
+            body: InviteConsumeRequest(joinerTag: base64Encode(joinerTag)),
+            context: .inviteConsume
         )
-        do {
-            request.httpBody = try encoder.encode(body)
-        } catch {
-            throw DiscoveryClientError.argument(
-                "failed to encode \(endpoint) body: \(error)"
-            )
-        }
-
-        // Bypass `execute(...)` so we can branch on the 404/410
-        // status codes without taking the error path.
-        let raw: (Data, URLResponse)
-        do {
-            raw = try await AntiCensorshipTransport.perform(
-                request, session: session, config: antiCensorship)
-        } catch {
-            throw DiscoveryClientError.network(
-                endpoint: endpoint,
-                underlying: error
-            )
-        }
-        guard let httpResponse = raw.1 as? HTTPURLResponse else {
-            throw DiscoveryClientError.http(
-                status: 0,
-                endpoint: endpoint,
-                body: "non-HTTP response"
-            )
-        }
+        let httpResponse = raw.1
         switch httpResponse.statusCode {
         case 404:
             return .notFound
@@ -974,7 +860,7 @@ public final class DiscoveryClient {
     /// ``InviteUploadRequest`` is shared; only the URL path
     /// differs. The high-level
     /// ``uploadCallInvite(capabilityBytes:)`` wrapper drives
-    /// the PoW solve.
+    /// the token.
     public func callInviteUpload(
         _ request: InviteUploadRequest
     ) async throws -> InviteUploadResponse {
@@ -997,24 +883,9 @@ public final class DiscoveryClient {
         )
     }
 
-    /// `POST /discovery/call-invite/{blob_id_b64url}/consume`.
-    /// The high-level ``consumeCallInvite(blobId:capabilityBytes:joinerAccountId:)``
-    /// wrapper drives the PoW solve + the local
-    /// `computeJoinerInviteTag` call + folds the 200 / 404 /
-    /// 410 trifecta into a discriminated ``ConsumeInviteResult``.
-    public func callInviteConsume(
-        blobIdSlug: String,
-        request: InviteConsumeRequest
-    ) async throws -> InviteConsumeResponse {
-        try await post(
-            endpoint: "/discovery/call-invite/\(blobIdSlug)/consume",
-            body: request
-        )
-    }
-
     /// Upload a freshly-composed `CallInviteCapability` blob and
     /// receive the server-minted `blobId` (6 random bytes).
-    /// Drives one PoW solve + `POST /discovery/call-invite`.
+    /// Drives `POST /discovery/call-invite`.
     /// Every upload gets a fresh id.
     ///
     /// Sibling of ``uploadInvite(capabilityBytes:)``; the
@@ -1034,15 +905,8 @@ public final class DiscoveryClient {
             )
         }
 
-        let challenge = try await powChallenge()
-        let pow = try await solvePow(
-            seedB64: challenge.seed,
-            effortBits: challenge.effortBits
-        )
-
         let resp = try await callInviteUpload(
             InviteUploadRequest(
-                pow: pow,
                 capability: base64Encode(capabilityBytes)
             )
         )
@@ -1101,47 +965,15 @@ public final class DiscoveryClient {
         )
         let slug = base64UrlEncodeNoPad(blobId)
 
-        let challenge = try await powChallenge()
-        let pow = try await solvePow(
-            seedB64: challenge.seed,
-            effortBits: challenge.effortBits
-        )
-
         let endpoint = "/discovery/call-invite/\(slug)/consume"
-        let url = try buildURL(endpoint: endpoint)
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        attachAuthorizationHeader(to: &request)
-        let body = InviteConsumeRequest(
-            pow: pow,
-            joinerTag: base64Encode(joinerTag)
+        // ADR-0054 S3 - one `invite-consume` anonymous token, no
+        // `Authorization`, the anonymous session.
+        let raw = try await postAnonymousRaw(
+            endpoint: endpoint,
+            body: InviteConsumeRequest(joinerTag: base64Encode(joinerTag)),
+            context: .inviteConsume
         )
-        do {
-            request.httpBody = try encoder.encode(body)
-        } catch {
-            throw DiscoveryClientError.argument(
-                "failed to encode \(endpoint) body: \(error)"
-            )
-        }
-
-        let raw: (Data, URLResponse)
-        do {
-            raw = try await AntiCensorshipTransport.perform(
-                request, session: session, config: antiCensorship)
-        } catch {
-            throw DiscoveryClientError.network(
-                endpoint: endpoint,
-                underlying: error
-            )
-        }
-        guard let httpResponse = raw.1 as? HTTPURLResponse else {
-            throw DiscoveryClientError.http(
-                status: 0,
-                endpoint: endpoint,
-                body: "non-HTTP response"
-            )
-        }
+        let httpResponse = raw.1
         switch httpResponse.statusCode {
         case 404:
             return .notFound
@@ -1215,7 +1047,7 @@ public final class DiscoveryClient {
     }
 
     /// Upload a freshly-composed `GroupInviteCapability` blob and receive the
-    /// server-minted `blobId` (6 random bytes). Drives one PoW solve + `POST
+    /// server-minted `blobId` (6 random bytes). Drives `POST
     /// /discovery/group-invite`. Every upload gets a fresh id.
     ///
     /// `maxUses` is a SOFT anti-spam throttle (NOT part of the signed
@@ -1235,15 +1067,8 @@ public final class DiscoveryClient {
             )
         }
 
-        let challenge = try await powChallenge()
-        let pow = try await solvePow(
-            seedB64: challenge.seed,
-            effortBits: challenge.effortBits
-        )
-
         let resp = try await groupInviteUpload(
             GroupInviteUploadRequest(
-                pow: pow,
                 capability: base64Encode(capabilityBytes),
                 maxUses: maxUses
             )
@@ -1300,47 +1125,15 @@ public final class DiscoveryClient {
         )
         let slug = base64UrlEncodeNoPad(blobId)
 
-        let challenge = try await powChallenge()
-        let pow = try await solvePow(
-            seedB64: challenge.seed,
-            effortBits: challenge.effortBits
-        )
-
         let endpoint = "/discovery/group-invite/\(slug)/consume"
-        let url = try buildURL(endpoint: endpoint)
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        attachAuthorizationHeader(to: &request)
-        let body = InviteConsumeRequest(
-            pow: pow,
-            joinerTag: base64Encode(joinerTag)
+        // ADR-0054 S3 - one `invite-consume` anonymous token, no
+        // `Authorization`, the anonymous session.
+        let raw = try await postAnonymousRaw(
+            endpoint: endpoint,
+            body: InviteConsumeRequest(joinerTag: base64Encode(joinerTag)),
+            context: .inviteConsume
         )
-        do {
-            request.httpBody = try encoder.encode(body)
-        } catch {
-            throw DiscoveryClientError.argument(
-                "failed to encode \(endpoint) body: \(error)"
-            )
-        }
-
-        let raw: (Data, URLResponse)
-        do {
-            raw = try await AntiCensorshipTransport.perform(
-                request, session: session, config: antiCensorship)
-        } catch {
-            throw DiscoveryClientError.network(
-                endpoint: endpoint,
-                underlying: error
-            )
-        }
-        guard let httpResponse = raw.1 as? HTTPURLResponse else {
-            throw DiscoveryClientError.http(
-                status: 0,
-                endpoint: endpoint,
-                body: "non-HTTP response"
-            )
-        }
+        let httpResponse = raw.1
         switch httpResponse.statusCode {
         case 404:
             return .notFound
@@ -1662,8 +1455,8 @@ public final class DiscoveryClient {
         return .list(mapped)
     }
 
-    /// Public-facing 404→nil GET fetch, the only difference from
-    /// the private ``getNullableOn404(endpoint:)`` is callability.
+    /// Public-facing 404→nil GET fetch of a ledger blob. Carries no session and
+    /// travels on the anonymous session like the consume that follows it.
     /// Pulled out so the invite-fetch implementation can reuse the
     /// existing helper without exposing it broadly.
     private func getNullableOn404Public<Res: Decodable>(
@@ -1675,7 +1468,7 @@ public final class DiscoveryClient {
         let raw: (Data, URLResponse)
         do {
             raw = try await AntiCensorshipTransport.perform(
-                request, session: session, config: antiCensorship)
+                request, session: anonymousSession, config: antiCensorship)
         } catch {
             throw DiscoveryClientError.network(
                 endpoint: "\(endpoint) (GET)",
@@ -1710,18 +1503,17 @@ public final class DiscoveryClient {
 
     // MARK: - Internal HTTP helpers
 
-    /// One-shot POST + decode. Used by every endpoint method that
-    /// expects a non-nullable typed response.
+    /// One-shot bearer POST + decode. Used by every protected endpoint
+    /// method that expects a non-nullable typed response.
     fileprivate func post<Req: Encodable, Res: Decodable>(
         endpoint: String,
-        body: Req,
-        rateLimited: Bool = false
+        body: Req
     ) async throws -> Res {
         let url = try buildURL(endpoint: endpoint)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        attachAuthorizationHeader(to: &request, rateLimited: rateLimited)
+        attachAuthorizationHeader(to: &request)
         do {
             request.httpBody = try encoder.encode(body)
         } catch {
@@ -1732,63 +1524,112 @@ public final class DiscoveryClient {
         return try await execute(endpoint: endpoint, request: request)
     }
 
-    /// `POST` with no body — used by `/pow/challenge`.
-    fileprivate func postNoBody<Res: Decodable>(
-        endpoint: String
-    ) async throws -> Res {
-        let url = try buildURL(endpoint: endpoint)
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        attachAuthorizationHeader(to: &request)
-        return try await execute(endpoint: endpoint, request: request)
-    }
-
-    /// Attach the `Authorization: Bearer <token>` header when a
-    /// session token is set. Unauthenticated POSTs (`/pow/challenge`,
-    /// `invite/{}/consume`) silently ignore the header server-side
-    /// — adding it unconditionally simplifies the call sites at
-    /// the cost of a few bytes per request.
-    ///
-    /// `rateLimited` marks the three reads discovery rate-limits
-    /// (`/discovery/oprf`, `/discovery/lookup`, `/discovery/channel/lookup`):
-    /// with a token the server charges the account, without one the source
-    /// IP, which everyone behind a NAT shares. For those, a client that
-    /// carries no token of its own falls back to the signed-in session's
-    /// (``rateLimitToken``). Protected writes never take that fallback.
-    fileprivate func attachAuthorizationHeader(
-        to request: inout URLRequest,
-        rateLimited: Bool = false
-    ) {
-        let token = sessionToken ?? (rateLimited ? rateLimitToken() : nil)
-        if let token {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    /// Attach the `Authorization: Bearer <token>` header when a session token
+    /// is set. Only the protected (bearer) routes call this; the anonymous
+    /// routes go through ``postAnonymousRaw(endpoint:body:context:)``, which
+    /// never does.
+    fileprivate func attachAuthorizationHeader(to request: inout URLRequest) {
+        if let sessionToken {
+            request.setValue("Bearer \(sessionToken)", forHTTPHeaderField: "Authorization")
         }
     }
 
-    /// Variant of ``post(endpoint:body:rateLimited:)`` that folds a documented
-    /// 404 into a `nil` return. Used by `/discovery/lookup`.
-    private func postNullableOn404<Req: Encodable, Res: Decodable>(
+    // MARK: - Anonymous routes (ADR-0054 S3)
+
+    /// POST on an anonymous route: no `Authorization` (not even this client's
+    /// own session), on ``anonymousSession``, spending one token of
+    /// `context` when one is given (retried once with a second token on a
+    /// token refusal). Returns the raw response whatever its status.
+    fileprivate func postAnonymousRaw<Req: Encodable>(
         endpoint: String,
         body: Req,
-        rateLimited: Bool = false
-    ) async throws -> Res? {
+        context: AnonTokenContext?
+    ) async throws -> (Data, HTTPURLResponse) {
         let url = try buildURL(endpoint: endpoint)
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        attachAuthorizationHeader(to: &request, rateLimited: rateLimited)
+        let encoded: Data
         do {
-            request.httpBody = try encoder.encode(body)
+            encoded = try encoder.encode(body)
         } catch {
             throw DiscoveryClientError.argument(
                 "failed to encode \(endpoint) body: \(error)"
             )
         }
-        return try await executeNullableOn404(endpoint: endpoint, request: request)
+        let perform: (String?) async throws -> (Data, HTTPURLResponse) = { tokenHeader in
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            if let tokenHeader {
+                request.setValue(tokenHeader, forHTTPHeaderField: AnonTokenRoute.headerName)
+            }
+            request.httpBody = encoded
+            let raw: (Data, URLResponse)
+            do {
+                raw = try await AntiCensorshipTransport.perform(
+                    request, session: self.anonymousSession, config: self.antiCensorship)
+            } catch {
+                throw DiscoveryClientError.network(endpoint: endpoint, underlying: error)
+            }
+            guard let http = raw.1 as? HTTPURLResponse else {
+                throw DiscoveryClientError.http(
+                    status: 0, endpoint: endpoint, body: "non-HTTP response")
+            }
+            return (raw.0, http)
+        }
+        guard let context else { return try await perform(nil) }
+        return try await AnonTokenRoute.send(context: context, tokens: tokens) { header in
+            try await perform(header)
+        }
     }
 
-    /// `GET` variant of ``postNullableOn404(endpoint:body:rateLimited:)``. Same
-    /// 404→nil fold, no request body — used by the
+    /// ``postAnonymousRaw(endpoint:body:context:)`` + the typed decode.
+    private func postAnonymous<Req: Encodable, Res: Decodable>(
+        endpoint: String,
+        body: Req,
+        context: AnonTokenContext?
+    ) async throws -> Res {
+        let (data, http) = try await postAnonymousRaw(
+            endpoint: endpoint, body: body, context: context)
+        guard let decoded: Res = try decodeAnonymous(endpoint: endpoint, data: data, http: http) else {
+            throw DiscoveryClientError.http(status: 404, endpoint: endpoint, body: "not found")
+        }
+        return decoded
+    }
+
+    /// The anonymous token-free lookups: 404 folds into `nil`.
+    private func postAnonymousNullableOn404<Req: Encodable, Res: Decodable>(
+        endpoint: String,
+        body: Req
+    ) async throws -> Res? {
+        let (data, http) = try await postAnonymousRaw(endpoint: endpoint, body: body, context: nil)
+        return try decodeAnonymous(endpoint: endpoint, data: data, http: http)
+    }
+
+    private func decodeAnonymous<Res: Decodable>(
+        endpoint: String,
+        data: Data,
+        http: HTTPURLResponse
+    ) throws -> Res? {
+        if http.statusCode == 404 { return nil }
+        if http.statusCode == 429 { throw DiscoveryClientError.rateLimited(endpoint: endpoint) }
+        guard (200..<300).contains(http.statusCode) else {
+            throw DiscoveryClientError.http(
+                status: http.statusCode,
+                endpoint: endpoint,
+                body: Self.truncate(String(data: data, encoding: .utf8) ?? "<binary>")
+            )
+        }
+        do {
+            return try decoder.decode(Res.self, from: data)
+        } catch {
+            throw DiscoveryClientError.http(
+                status: http.statusCode,
+                endpoint: endpoint,
+                body: "decode failed: \(error)"
+            )
+        }
+    }
+
+    /// `GET` with a 404→nil fold, no request body — used by the
     /// `/discovery/identity/{slug}` and `/discovery/keypackage/{slug}`
     /// fetch paths.
     private func getNullableOn404<Res: Decodable>(

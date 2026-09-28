@@ -4,12 +4,20 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  authLimitMessage,
+  isSignupRateLimited,
   loginErrorMessage,
   passkeyErrorMessage,
+  RECOVERY_CODE_SEND_LIMITED,
   recoverErrorMessage,
   signupErrorMessage,
+  TOO_MANY_ATTEMPTS,
+  tooManyAttemptsMessage,
   WRONG_CREDENTIALS,
 } from "./auth-error-copy";
+import { totpRecoverErrorMessage } from "./recover/TotpRecover";
+import { contactRecoverErrorMessage } from "./recover/ContactRecover";
+import { wordVaultErrorMessage } from "../recovery/word-vault";
 import { AuthHttpError, AuthNetworkError } from "./client";
 import { DiscoveryHttpError, DiscoveryNetworkError } from "../discovery/client";
 
@@ -83,5 +91,96 @@ describe("DiscoveryNetworkError constructor shape", () => {
   it("is constructible the way the tests above assume", () => {
     // Guards the assumption, so a signature change fails here and not silently.
     expect(new DiscoveryNetworkError("/lookup", "x")).toBeInstanceOf(Error);
+  });
+});
+
+describe("ADR-0054 S4 limits (docs/ux/anti-abuse.md section 2)", () => {
+  function limited(code: string, retryAfterSecs: number | null, headerSecs: number | null = null): AuthHttpError {
+    const body =
+      retryAfterSecs === null
+        ? JSON.stringify({ error: code })
+        : JSON.stringify({ error: code, retry_after_secs: retryAfterSecs });
+    return new AuthHttpError(429, "/login/start", body, headerSecs);
+  }
+
+  it("too-many-attempts: a moment, or minutes when the server asks for more than one", () => {
+    expect(authLimitMessage(limited("too-many-attempts", 30))).toBe(
+      "Too many attempts. Wait a moment, then try again.",
+    );
+    expect(authLimitMessage(limited("too-many-attempts", 60))).toBe(
+      "Too many attempts. Wait a moment, then try again.",
+    );
+    expect(authLimitMessage(limited("too-many-attempts", 61))).toBe(
+      "Too many attempts. Try again in 2 minutes.",
+    );
+    expect(authLimitMessage(limited("too-many-attempts", 900))).toBe(
+      "Too many attempts. Try again in 15 minutes.",
+    );
+    // The header alone, when the body has no number.
+    expect(authLimitMessage(limited("too-many-attempts", null, 300))).toBe(
+      "Too many attempts. Try again in 5 minutes.",
+    );
+    expect(tooManyAttemptsMessage(null)).toBe(TOO_MANY_ATTEMPTS);
+  });
+
+  it("recovery-code-send-limited", () => {
+    expect(authLimitMessage(limited("recovery-code-send-limited", 600))).toBe(
+      "We sent a code recently. Wait a few minutes before asking for another.",
+    );
+  });
+
+  it("device-request-limited", () => {
+    expect(authLimitMessage(limited("device-request-limited", 600))).toBe(
+      "Too many requests to your other devices. Try again in a few minutes.",
+    );
+  });
+
+  it("signup-rate-limited, with Try again on the form", () => {
+    const err = limited("signup-rate-limited", 60);
+    expect(authLimitMessage(err)).toBe(
+      "Too many new accounts from this network right now. Try again later.",
+    );
+    expect(signupErrorMessage(err)).toBe(
+      "Too many new accounts from this network right now. Try again later.",
+    );
+    expect(isSignupRateLimited(err)).toBe(true);
+    expect(isSignupRateLimited(limited("too-many-attempts", 1))).toBe(false);
+  });
+
+  it("503 rate-limiter-unavailable is the generic failure, not a limit", () => {
+    const err = new AuthHttpError(503, "/totp/recover", JSON.stringify({ error: "rate-limiter-unavailable" }));
+    expect(authLimitMessage(err)).toBe("That is not available right now. Try again later.");
+  });
+
+  it("every screen routes the codes through the one mapping", () => {
+    const err = limited("too-many-attempts", 120);
+    const expected = "Too many attempts. Try again in 2 minutes.";
+    expect(loginErrorMessage(err)).toBe(expected);
+    expect(recoverErrorMessage(err)).toBe(expected);
+    expect(totpRecoverErrorMessage(err)).toBe(expected);
+    expect(contactRecoverErrorMessage(err)).toBe(expected);
+    expect(wordVaultErrorMessage(err, 3)).toBe(expected);
+    expect(contactRecoverErrorMessage(limited("recovery-code-send-limited", 60))).toBe(
+      RECOVERY_CODE_SEND_LIMITED,
+    );
+  });
+
+  it("a 429 is never a sign-in failure: no copy mentions the password or a sign-out", () => {
+    for (const code of [
+      "too-many-attempts",
+      "recovery-code-send-limited",
+      "device-request-limited",
+      "signup-rate-limited",
+      "something-new",
+    ]) {
+      const m = authLimitMessage(limited(code, 10)) ?? "";
+      expect(m).not.toMatch(/password|sign in|signed out|invalid/i);
+      expect(m).not.toBe(WRONG_CREDENTIALS);
+    }
+  });
+
+  it("a non-limit error is not claimed", () => {
+    expect(authLimitMessage(new AuthHttpError(401, "/x", "{}"))).toBeNull();
+    expect(authLimitMessage(new Error("x"))).toBeNull();
   });
 });

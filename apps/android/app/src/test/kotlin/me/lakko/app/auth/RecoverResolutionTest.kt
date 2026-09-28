@@ -4,156 +4,101 @@
 package me.lakko.app.auth
 
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 
 /**
- * Locks the cross-device recover-resolution behaviour (G-29) — the
- * Android mirror of `apps/web/src/auth/recover-resolution.test.ts` +
- * the iOS twin. Six cases pin the cache-hit / discovery-lookup /
- * fresh-device branch logic + the two collapsed error messages.
+ * ADR-0054 S5 - sign in and recover by name: which name a flow targets, that
+ * the request carries its login handle (never an account id, never a lookup),
+ * and that a successful sign-in re-binds the handle.
  */
 class RecoverResolutionTest {
 
-    /** Deterministic fake encoder so the test can assert the looked-up
-     *  bytes were passed through it. */
-    private val fakeEncode: (ByteArray) -> String = { bytes ->
-        "enc:" + bytes.joinToString(",")
+    private val asked = mutableListOf<String>()
+
+    private val source = LoginHandleSource { name ->
+        asked += name
+        NamedHandle(username = name.trim().removePrefix("@").lowercase(), handle = ByteArray(32) { name.length.toByte() })
     }
 
-    /** A fake lookup lambda recording whether it was invoked, returning
-     *  a fixed [RecoverAccountLookup]. */
-    private class FakeLookup(private val result: RecoverAccountLookup) {
-        var wasCalled: Boolean = false
-            private set
-        var lastUsername: String? = null
-            private set
+    @Test
+    fun `the typed name wins over the cached account`() {
+        val named = resolveNamedSignIn(CachedAccount("CACHED", "alice"), " Bob ", source)
+        assertEquals(listOf("Bob"), asked)
+        assertEquals("bob", named.username)
+    }
 
-        val fn: suspend (String) -> RecoverAccountLookup = { name ->
-            wasCalled = true
-            lastUsername = name
-            result
+    @Test
+    fun `a blank field falls back to the name cached on this device`() {
+        val named = resolveNamedSignIn(CachedAccount("CACHED", "alice"), "  ", source)
+        assertEquals(listOf("alice"), asked)
+        assertEquals("alice", named.username)
+        assertEquals(32, named.handle.size)
+    }
+
+    @Test
+    fun `a fresh device with a blank field is asked for the name`() {
+        for (cached in listOf(null, CachedAccount("GUEST", ""))) {
+            try {
+                resolveNamedSignIn(cached, null, source)
+                fail("nothing to name the account by")
+            } catch (err: AuthClientArgError) {
+                assertEquals(NO_NAME_COPY, err.message)
+            }
         }
+        assertTrue(asked.isEmpty())
     }
 
     @Test
-    fun `uses the cached account when the typed username is empty (no lookup)`() = runTest {
-        val lookup = FakeLookup(RecoverAccountLookup(account = byteArrayOf(1, 2), "alice"))
-        val resolved = resolveRecoverAccount(
-            cached = CachedAccount(accountIdB64 = "CACHED", username = "alice"),
-            username = null,
-            lookup = lookup.fn,
-            encodeAccountId = fakeEncode,
-        )
-        assertEquals("CACHED", resolved.accountIdB64)
-        assertEquals("alice", resolved.resolvedUsername)
-        assertFalse(lookup.wasCalled)
-    }
-
-    @Test
-    fun `uses the cached account when the typed username matches it (no lookup)`() = runTest {
-        val lookup = FakeLookup(RecoverAccountLookup(account = byteArrayOf(1, 2), "alice"))
-        val resolved = resolveRecoverAccount(
-            cached = CachedAccount(accountIdB64 = "CACHED", username = "alice"),
-            username = "  alice  ", // trimmed before compare
-            lookup = lookup.fn,
-            encodeAccountId = fakeEncode,
-        )
-        assertEquals("CACHED", resolved.accountIdB64)
-        assertEquals("alice", resolved.resolvedUsername)
-        assertFalse(lookup.wasCalled)
-    }
-
-    @Test
-    fun `looks up via discovery on a FRESH device (no cache) given the username`() = runTest {
-        val lookup = FakeLookup(
-            RecoverAccountLookup(account = byteArrayOf(1, 2, 3, 4), normalisedUsername = "alice"),
-        )
-        val resolved = resolveRecoverAccount(
-            cached = null,
-            username = "alice",
-            lookup = lookup.fn,
-            encodeAccountId = fakeEncode,
-        )
-        assertTrue(lookup.wasCalled)
-        assertEquals("alice", lookup.lastUsername)
-        assertEquals("enc:1,2,3,4", resolved.accountIdB64)
-        assertEquals("alice", resolved.resolvedUsername)
-    }
-
-    @Test
-    fun `looks up (not the cache) when the typed username differs from the cached one`() = runTest {
-        val lookup = FakeLookup(
-            RecoverAccountLookup(account = byteArrayOf(9, 9), normalisedUsername = "bob"),
-        )
-        val resolved = resolveRecoverAccount(
-            cached = CachedAccount(accountIdB64 = "CACHED", username = "alice"),
-            username = "bob",
-            lookup = lookup.fn,
-            encodeAccountId = fakeEncode,
-        )
-        assertTrue(lookup.wasCalled)
-        assertEquals("bob", lookup.lastUsername)
-        assertEquals("enc:9,9", resolved.accountIdB64)
-        assertEquals("bob", resolved.resolvedUsername)
-    }
-
-    @Test
-    fun `throws the bad-phrase-collapsed error when the username is unregistered`() = runTest {
-        val lookup = FakeLookup(
-            RecoverAccountLookup(account = null, normalisedUsername = "ghost"),
-        )
-        val error = assertFailsWith {
-            resolveRecoverAccount(
-                cached = null,
-                username = "ghost",
-                lookup = lookup.fn,
-                encodeAccountId = fakeEncode,
-            )
+    fun `a name failing the rule reads as the rule's copy`() {
+        val refusing = LoginHandleSource {
+            throw uniffi.lakko_ffi_uniffi.FfiException.UsernameInvalidCharacters("bad")
         }
-        assertTrue(
-            "expected message to contain \"invalid recovery\", was: ${error.message}",
-            error.message?.contains("invalid recovery") == true,
-        )
-    }
-
-    @Test
-    fun `throws the fresh-device prompt when neither a cache nor a username is given`() = runTest {
-        val lookup = FakeLookup(RecoverAccountLookup(account = byteArrayOf(1), "x"))
-        val error = assertFailsWith {
-            resolveRecoverAccount(
-                cached = null,
-                username = "   ", // whitespace-only -> empty after trim
-                lookup = lookup.fn,
-                encodeAccountId = fakeEncode,
-            )
-        }
-        assertTrue(
-            "expected message to contain \"no account on this device\", was: ${error.message}",
-            error.message?.contains("no account on this device") == true,
-        )
-        assertFalse(lookup.wasCalled)
-    }
-
-    /**
-     * Runs [block] and asserts it throws an [AuthClientArgError],
-     * returning the caught instance for message assertions. JUnit's
-     * `assertThrows` takes a non-suspend `ThrowingRunnable`, so we
-     * capture the throw manually to keep the `suspend` call inside the
-     * coroutine body.
-     */
-    private suspend fun assertFailsWith(
-        block: suspend () -> Unit,
-    ): AuthClientArgError {
         try {
-            block()
-        } catch (e: AuthClientArgError) {
-            return e
+            resolveNamedSignIn(null, "a-b", refusing)
+            fail("refused")
+        } catch (err: AuthClientArgError) {
+            assertEquals(me.lakko.app.profile.UsernameProblem.INVALID_CHARACTERS.copy, err.message)
         }
-        fail("expected AuthClientArgError, but no exception was thrown")
-        error("unreachable")
+    }
+
+    @Test
+    fun `a sign-in by name calls with the handle and then re-binds it with the new session`() = runTest {
+        val sent = mutableListOf<ByteArray>()
+        val rebinds = mutableListOf<Pair<String, ByteArray>>()
+        val (named, result) = signInByName(
+            cached = null,
+            typed = "alice",
+            source = source,
+            call = { sent += it.handle; "session-1" },
+            sessionTokenOf = { it },
+            rebind = { token, handle -> rebinds += token to handle },
+        )
+        assertEquals("session-1", result)
+        assertArrayEquals(named.handle, sent.single())
+        assertEquals("session-1", rebinds.single().first)
+        assertArrayEquals(named.handle, rebinds.single().second)
+    }
+
+    @Test
+    fun `a failed sign-in binds nothing`() = runTest {
+        val rebinds = mutableListOf<String>()
+        try {
+            signInByName(
+                cached = null,
+                typed = "alice",
+                source = source,
+                call = { throw AuthHttpError(401, "/login/finish", "invalid credentials") },
+                sessionTokenOf = { _: String -> "never" },
+                rebind = { token, _ -> rebinds += token },
+            )
+            fail("wrong password")
+        } catch (err: AuthHttpError) {
+            assertEquals(401, err.status)
+        }
+        assertTrue(rebinds.isEmpty())
     }
 }

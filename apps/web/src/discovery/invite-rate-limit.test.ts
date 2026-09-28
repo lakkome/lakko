@@ -13,10 +13,6 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-vi.mock("../auth/pow", () => ({
-  solvePow: async () => ({ seed: "AA==", nonce: 0, solution: "AA==" }),
-}));
-
 import init from "../../wasm/lakko_ffi_wasm";
 import {
   DiscoveryClient,
@@ -30,6 +26,7 @@ import { joinFailureNotice } from "../routes/join-group-failure";
 import { INVITE_LINK_RATE_LIMITED } from "../contacts/invite-link";
 import { acceptCallInviteFromSlug } from "../calls/acceptor";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
+import { fakeTokenPool } from "../tokens/anon-token-test-doubles";
 
 beforeAll(async () => {
   const wasmPath = fileURLToPath(new URL("../../wasm/lakko_ffi_wasm_bg.wasm", import.meta.url));
@@ -45,17 +42,15 @@ const ID = new Uint8Array(6).fill(0x2a);
 const ACCOUNT = new Uint8Array(16).fill(0x01);
 const CAP = new Uint8Array(160).fill(0x41);
 
-/** Stub `fetch`: `/pow/challenge` answers a challenge, everything else the
- *  given status (with an optional JSON body). */
+/** Stub `fetch`: every request answers the given status (with an optional
+ *  JSON body). No route asks for a proof of work any more (ADR-0054 S3). */
 function stubFetch(status: number, body: unknown = {}, headers: Record<string, string> = {}) {
   const calls: string[] = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
       calls.push(url);
-      if (url.endsWith("/pow/challenge")) {
-        return new Response(JSON.stringify({ seed: "AA==", effort_bits: 0 }), { status: 200 });
-      }
+      if (url.endsWith("/pow/challenge")) throw new Error("no route asks for a proof of work");
       return new Response(status === 204 ? null : JSON.stringify(body), { status, headers });
     }),
   );
@@ -99,7 +94,7 @@ describe("fetch answers 429: rate limited, never 'not found'", () => {
 });
 
 describe("consume answers 429: rate limited, never 'not found'", () => {
-  const client = new DiscoveryClient("https://d.test");
+  const client = new DiscoveryClient("https://d.test", { tokens: fakeTokenPool().pool });
 
   it.each([
     ["group", (c: DiscoveryClient) => c.consumeGroupInvite(ID, CAP, ACCOUNT)],
@@ -158,7 +153,7 @@ describe("the surfaces say 'try again later'", () => {
     stubFetch(429);
     const result = await acceptCallInviteFromSlug({
       slug: base64UrlEncodeNoPad(ID),
-      discoveryClient: new DiscoveryClient("https://d.test"),
+      discoveryClient: new DiscoveryClient("https://d.test", { tokens: fakeTokenPool().pool }),
       joinerAccountId: ACCOUNT,
       // The fetch refuses before the identity is touched.
       joinerIdentity: {} as never,

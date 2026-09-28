@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import LakkoCore
 
 /// URLSession-based client for `lakko-svc-push-gw`.
 ///
@@ -24,15 +25,15 @@ import Foundation
 ///   * `POST /push/unregister` — drop a token. Called on
 ///     logout + forgetDevice.
 ///
-/// Plus `/pow/challenge` for the per-call PoW seed, same shape
-/// as the auth + discovery PoW path.
+/// ## Auth posture (ADR-0054 S3)
 ///
-/// ## Auth posture
-///
-/// The endpoints don't require a session token in Phase 1 —
-/// the PoW gate is the per-call anti-spam. A misbehaving caller
-/// fails the verify on the server side; valid PoWs that hit
-/// rate limits get 429.
+/// Every route here spends one anonymous `push-register` token
+/// (``AnonTokenPool``) in the `x-lakko-anon-token` header and carries
+/// nothing else that names the account: no `Authorization`, no cookie, and
+/// its own connection pool (``AnonymousHTTP``). There is no proof of work
+/// and no `/pow/challenge` any more. A used-up allowance
+/// (``AnonTokenUnavailable/quotaExhausted(retryAfterSecs:)``) is silent to
+/// the user: registration is best-effort and runs again at the next launch.
 ///
 /// ## Default base URL
 ///
@@ -78,16 +79,20 @@ public final class PushClient {
     }
 
     public let baseURL: String
+    /// The anonymous session every push-gw route travels on.
     private let session: URLSession
+    private let tokens: AnonTokenSource
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
     public init(
         baseURL: String = PushClient.defaultBaseURL,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        tokens: AnonTokenSource = AnonTokenPool.shared
     ) {
         self.baseURL = baseURL
-        self.session = session
+        self.session = AnonymousHTTP.session(pairedWith: session)
+        self.tokens = tokens
         self.encoder = JSONEncoder()
         self.decoder = JSONDecoder()
     }
@@ -121,13 +126,7 @@ public final class PushClient {
         guard !tokenBytes.isEmpty else {
             throw PushClientError.argument("tokenBytes must be non-empty")
         }
-        let challenge = try await fetchChallenge()
-        let pow = try await solvePow(
-            seedB64: challenge.seed,
-            effortBits: challenge.effortBits
-        )
         let req = PushRegisterRequest(
-            pow: pow,
             device_pseudonym: Self.pseudonymHex(devicePseudonym),
             provider: provider,
             token: tokenBytes.base64EncodedString()
@@ -164,13 +163,7 @@ public final class PushClient {
                 "groupPseudonym must be \(Self.devicePseudonymLength) bytes"
             )
         }
-        let challenge = try await fetchChallenge()
-        let pow = try await solvePow(
-            seedB64: challenge.seed,
-            effortBits: challenge.effortBits
-        )
         let req = GroupSubscribeRequest(
-            pow: pow,
             device_pseudonym: Self.pseudonymHex(devicePseudonym),
             group_pseudonym: Self.pseudonymHex(groupPseudonym)
         )
@@ -191,13 +184,7 @@ public final class PushClient {
         else {
             throw PushClientError.argument("pseudonyms must be 32 bytes")
         }
-        let challenge = try await fetchChallenge()
-        let pow = try await solvePow(
-            seedB64: challenge.seed,
-            effortBits: challenge.effortBits
-        )
         let req = GroupUnsubscribeRequest(
-            pow: pow,
             device_pseudonym: Self.pseudonymHex(devicePseudonym),
             group_pseudonym: Self.pseudonymHex(groupPseudonym)
         )
@@ -212,82 +199,76 @@ public final class PushClient {
 
     /// Drop a previously-registered token. Idempotent: returns
     /// `removed: false` if the row was already gone.
+    ///
+    /// `prepaidToken`: a `push-register` token taken before the session ended
+    /// (logout clears the pool, so the caller takes one first).
     public func unregister(
         devicePseudonym: Data,
-        provider: Provider
+        provider: Provider,
+        prepaidToken: AnonToken? = nil
     ) async throws -> Bool {
         guard devicePseudonym.count == Self.devicePseudonymLength else {
             throw PushClientError.argument(
                 "devicePseudonym must be \(Self.devicePseudonymLength) bytes"
             )
         }
-        let challenge = try await fetchChallenge()
-        let pow = try await solvePow(
-            seedB64: challenge.seed,
-            effortBits: challenge.effortBits
-        )
         let req = UnregisterRequest(
-            pow: pow,
             device_pseudonym: Self.pseudonymHex(devicePseudonym),
             provider: provider
         )
         let resp: UnregisterResponse = try await post(
             endpoint: "/push/unregister",
-            body: req
+            body: req,
+            tokens: prepaidToken.map { PrepaidAnonToken($0, then: tokens) } ?? tokens
         )
         return resp.removed
     }
 
     // MARK: - Internal HTTP
 
-    private func fetchChallenge() async throws -> PowChallenge {
-        let url = try buildURL(endpoint: "/pow/challenge")
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        return try await execute(
-            endpoint: "/pow/challenge",
-            request: request
-        )
-    }
-
+    /// One token route: spend a `push-register` token (retried once with a
+    /// second token on a token refusal), no `Authorization`, the anonymous
+    /// session.
     private func post<Req: Encodable, Res: Decodable>(
         endpoint: String,
-        body: Req
+        body: Req,
+        tokens: AnonTokenSource? = nil
     ) async throws -> Res {
         let url = try buildURL(endpoint: endpoint)
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let encoded: Data
         do {
-            request.httpBody = try encoder.encode(body)
+            encoded = try encoder.encode(body)
         } catch {
             throw PushClientError.argument(
                 "JSON encode failed for \(endpoint): \(error)"
             )
         }
-        return try await execute(endpoint: endpoint, request: request)
-    }
-
-    private func execute<Res: Decodable>(
-        endpoint: String,
-        request: URLRequest
-    ) async throws -> Res {
-        let raw: (Data, URLResponse)
-        do {
-            raw = try await AntiCensorshipTransport.perform(request, session: session, config: .current)
-        } catch {
-            throw PushClientError.network(
-                endpoint: endpoint,
-                underlying: error
-            )
-        }
-        let (data, response) = raw
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw PushClientError.http(
-                status: 0,
-                endpoint: endpoint,
-                body: "non-HTTP response"
-            )
+        let (data, httpResponse) = try await AnonTokenRoute.send(
+            context: .pushRegister,
+            tokens: tokens ?? self.tokens
+        ) { tokenHeader in
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue(tokenHeader, forHTTPHeaderField: AnonTokenRoute.headerName)
+            request.httpBody = encoded
+            let raw: (Data, URLResponse)
+            do {
+                raw = try await AntiCensorshipTransport.perform(request, session: session, config: .current)
+            } catch {
+                throw PushClientError.network(
+                    endpoint: endpoint,
+                    underlying: error
+                )
+            }
+            guard let httpResponse = raw.1 as? HTTPURLResponse else {
+                throw PushClientError.http(
+                    status: 0,
+                    endpoint: endpoint,
+                    body: "non-HTTP response"
+                )
+            }
+            return (raw.0, httpResponse)
         }
         guard (200..<300).contains(httpResponse.statusCode) else {
             let body = Self.truncate(
@@ -348,22 +329,11 @@ public final class PushClient {
 
 // MARK: - Wire shapes
 
-private struct PowChallenge: Decodable {
-    let seed: String
-    let effortBits: Int
-
-    enum CodingKeys: String, CodingKey {
-        case seed
-        case effortBits = "effort_bits"
-    }
-}
-
 // swiftlint:disable identifier_name
 // Snake-case stored properties so the default `JSONEncoder`
 // serialises the field names exactly as the server expects
 // (no `convertToSnakeCase` round-trip ambiguity).
 private struct PushRegisterRequest: Encodable {
-    let pow: PowProofPayload
     let device_pseudonym: String
     let provider: PushClient.Provider
     let token: String
@@ -374,7 +344,6 @@ private struct PushRegisterResponse: Decodable {
 }
 
 private struct UnregisterRequest: Encodable {
-    let pow: PowProofPayload
     let device_pseudonym: String
     let provider: PushClient.Provider
 }
@@ -386,7 +355,6 @@ private struct UnregisterResponse: Decodable {
 
 // 1.20e — group fan-out wire shapes.
 private struct GroupSubscribeRequest: Encodable {
-    let pow: PowProofPayload
     let device_pseudonym: String
     let group_pseudonym: String
 }
@@ -397,7 +365,6 @@ private struct GroupSubscribeResponse: Decodable {
 }
 
 private struct GroupUnsubscribeRequest: Encodable {
-    let pow: PowProofPayload
     let device_pseudonym: String
     let group_pseudonym: String
 }

@@ -12,8 +12,7 @@ import Foundation
 /// A PERMISSIVE mirror of the server's `normalize_contact` gate
 /// (`services/auth/src/recovery_contact.rs`): just enough of a check
 /// to catch an obviously-malformed contact (e.g. an email with no
-/// `@`, a phone with no leading `+`) before spending a PoW solve and
-/// a round-trip. The server is authoritative — it does the full
+/// `@`, a phone with no leading `+`) before spending a round-trip. The server is authoritative — it does the full
 /// E.164 / RFC-ish normalization and rejects with a 400 — so this
 /// deliberately stays loose and never blocks a borderline value the
 /// server might accept.
@@ -28,7 +27,7 @@ import Foundation
 ///     `+` followed by 1..=15 digits (digits only thereafter).
 ///
 /// Whitespace is trimmed first. Anything else returns `false` so the
-/// form can surface a precise message instead of burning a PoW solve.
+/// form can surface a precise message instead of burning a round trip.
 public func isPlausibleContact(kind: ContactKind, contact: String) -> Bool {
     let trimmed = contact.trimmingCharacters(in: .whitespacesAndNewlines)
     if trimmed.isEmpty {

@@ -12,7 +12,8 @@
  * device is the acting committer then sweeps that approval into a commit and
  * sends the Welcome to this device's own mailbox, where the mailbox receive
  * loop joins it; this page waits for the group to appear. Since ADR-0053 the
- * request travels as a PoW-gated knock (the journal of a claimed group answers
+ * request travels as a knock, one anonymous token each since ADR-0054 S3
+ * (the journal of a claimed group answers
  * only its members), and the knock's response is what tells the joiner the
  * epoch its proposal must target.
  *

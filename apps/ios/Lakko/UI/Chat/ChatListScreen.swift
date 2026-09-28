@@ -357,7 +357,7 @@ public struct ChatListScreen: View {
         case .person(let username):
             searchText = ""
             onFoundPerson(username)
-        case .nothing, .unreachable:
+        case .nothing, .unreachable, .allowanceUsed:
             lookupNote = NameLookup.message(for: found, typed: typed)
         }
     }

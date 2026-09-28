@@ -8,7 +8,9 @@
 //! functions on `Object`-typed classes — only `&self` methods and
 //! `#[uniffi::constructor]`s).
 //!
-//! Exposes a top-level [`pow_solve`] function and a `PowProof`
+//! Exposes top-level [`pow_solve`] and [`pow_solve_chunk`] (the
+//! cancellable slice: at most `max_attempts` nonces, `None` when none
+//! produced a proof) and a `PowProof`
 //! handle with three base64 getters. The function takes the
 //! base64 seed and `effort_bits` the server returned from
 //! `/pow/challenge`, runs the solver, and produces a [`PowProof`]
@@ -32,7 +34,9 @@ use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use lakko_pow::{solve, PowError, PowProof as InnerProof, NONCE_LEN, SEED_LEN, SOLUTION_LEN};
+use lakko_pow::{
+    solve, solve_chunk, PowError, PowProof as InnerProof, NONCE_LEN, SEED_LEN, SOLUTION_LEN,
+};
 
 use crate::FfiError;
 
@@ -57,16 +61,43 @@ impl From<PowError> for FfiError {
 ///   should retry with a fresh challenge).
 #[uniffi::export]
 pub fn pow_solve(seed_b64: String, effort_bits: u8) -> Result<Arc<PowProof>, FfiError> {
-    let seed_bytes = B64
-        .decode(&seed_b64)
-        .map_err(|e| FfiError::Pow(format!("invalid seed base64: {e}")))?;
-    let seed: [u8; SEED_LEN] = seed_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| FfiError::Pow("seed must be 16 bytes".to_string()))?;
-
+    let seed = decode_seed(&seed_b64)?;
     let proof: InnerProof = solve(&seed, effort_bits)?;
     Ok(Arc::new(PowProof::from_inner(proof)))
+}
+
+/// One cancellable slice of a solve: at most `max_attempts` nonces, then
+/// `None` if none of them produced a proof.
+///
+/// For a caller that must be able to stop the CPU work (signup cancelled):
+/// call it in a loop on a worker thread and check the cancel flag between
+/// chunks. Each call samples fresh nonces, so the loop is the same search
+/// as one [`pow_solve`]. Blocking for the chunk's duration; at the
+/// interpreter's per-attempt cost (iOS) a chunk of a few attempts keeps the
+/// cancel latency short.
+///
+/// # Errors
+///
+/// [`FfiError::Pow`] for a seed that is not base64 or not 16 bytes. Running
+/// out of attempts is not an error: it is `None`.
+#[uniffi::export]
+pub fn pow_solve_chunk(
+    seed_b64: String,
+    effort_bits: u8,
+    max_attempts: u32,
+) -> Result<Option<Arc<PowProof>>, FfiError> {
+    let seed = decode_seed(&seed_b64)?;
+    Ok(solve_chunk(&seed, effort_bits, max_attempts).map(|p| Arc::new(PowProof::from_inner(p))))
+}
+
+fn decode_seed(seed_b64: &str) -> Result<[u8; SEED_LEN], FfiError> {
+    let seed_bytes = B64
+        .decode(seed_b64)
+        .map_err(|e| FfiError::Pow(format!("invalid seed base64: {e}")))?;
+    seed_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Pow("seed must be 16 bytes".to_string()))
 }
 
 /// Platform-facing PoW proof. Three base64 fields ready to inline
@@ -145,6 +176,32 @@ mod tests {
         assert_eq!(nonce.len(), NONCE_LEN);
         let solution = B64.decode(proof.solution_b64()).expect("decode solution");
         assert_eq!(solution.len(), SOLUTION_LEN);
+    }
+
+    #[test]
+    fn solve_chunk_loop_finds_a_proof_and_an_empty_chunk_is_none() {
+        let seed_b64 = B64.encode([0x45u8; SEED_LEN]);
+        assert!(pow_solve_chunk(seed_b64.clone(), 0, 0).unwrap().is_none());
+        let mut found = None;
+        for _ in 0..10_000 {
+            found = pow_solve_chunk(seed_b64.clone(), 4, 2).unwrap();
+            if found.is_some() {
+                break;
+            }
+        }
+        let proof = found.expect("proof");
+        let seed: [u8; SEED_LEN] = B64.decode(proof.seed_b64()).unwrap().try_into().unwrap();
+        let nonce = B64.decode(proof.nonce_b64()).unwrap();
+        let solution: [u8; SOLUTION_LEN] = B64
+            .decode(proof.solution_b64())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert!(lakko_pow::meets_effort(&seed, &nonce, &solution, 4));
+        assert!(matches!(
+            pow_solve_chunk("x!".to_string(), 0, 1),
+            Err(FfiError::Pow(_))
+        ));
     }
 
     #[test]

@@ -34,6 +34,12 @@ lakko-crypto.workspace = true
 # Already in the tree through `lakko-crypto`.
 subtle = "2"
 
+# Base64url (no padding) text form of a token in the `x-lakko-anon-token`
+# header and of every binary field of the issuance exchange, defined once for
+# the verifying services and both FFI surfaces. Already in the tree (the same
+# version every FFI crate and service pins).
+base64 = "0.22"
+
 # Wipe the master secret on drop. Already in the tree through `lakko-crypto`.
 zeroize = "1"
 

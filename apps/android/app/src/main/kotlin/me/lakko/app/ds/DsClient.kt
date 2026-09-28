@@ -28,8 +28,11 @@ import io.ktor.serialization.kotlinx.json.json
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import me.lakko.app.auth.PowChallengeResponse
-import me.lakko.app.auth.PowProofPayload
+import me.lakko.app.anon.AnonTokenContext
+import me.lakko.app.anon.AnonTokenSource
+import me.lakko.app.anon.AnonTokens
+import me.lakko.app.anon.AnonymousHttp
+import me.lakko.app.anon.sendWithToken
 import me.lakko.app.auth.base64Decode
 import me.lakko.app.auth.base64Encode
 
@@ -71,7 +74,8 @@ import me.lakko.app.auth.base64Encode
  * journal no signer is known for goes out unsigned (an unclaimed journal
  * accepts that, a rendezvous mailbox is never claimed). Mailbox WRITES are
  * never signed: the cold inbox stays open. The non-member's one act is the
- * PoW-gated [knock].
+ * [knock], which spends one `ds-knock` anonymous token (ADR-0054) and goes
+ * out on a separate client with its own connection pool.
  *
  * ## Default base URL
  *
@@ -91,6 +95,11 @@ public class DsClient(
     private val signers: DsSignerRegistry = DsSignerRegistry.shared,
     /** Device clock, injected so the skew rule is testable. */
     private val nowMs: () -> Long = System::currentTimeMillis,
+    /** Engine for the knock (a token route). Production:
+     *  [AnonymousHttp.engine]; tests: `null` reuses [engine]. */
+    anonEngine: HttpClientEngine? = null,
+    /** Where the knock draws its `ds-knock` token. */
+    private val anonTokens: AnonTokenSource = AnonTokens.shared,
 ) : AutoCloseable {
 
     private val json = Json {
@@ -110,8 +119,16 @@ public class DsClient(
         }
     }
 
+    /** The knock's client: no session, no proof, its own pool. */
+    private val anonClient: HttpClient =
+        HttpClient(anonEngine ?: engine ?: AnonymousHttp.engine) {
+            install(ContentNegotiation) { json(json) }
+            installTimeouts()
+        }
+
     override fun close() {
         client.close()
+        anonClient.close()
     }
 
     // -----------------------------------------------------------------
@@ -423,34 +440,15 @@ public class DsClient(
     // ADR-0053 §4: the knock
     // -----------------------------------------------------------------
 
-    /** `POST /pow/challenge` on the DS — a fresh proof-of-work challenge for
-     *  one knock. */
-    public suspend fun powChallenge(): PowChallengeResponse {
-        val endpoint = "/pow/challenge"
-        val response = send(
-            method = HttpMethod.Post,
-            endpoint = endpoint,
-            query = "",
-            body = ByteArray(0),
-            contentType = null,
-            waitSecs = null,
-            signer = null,
-        )
-        if (!response.status.isSuccess()) {
-            throw DsHttpError(response.status.value, endpoint, response.safeReadBody())
-        }
-        return response.body()
-    }
-
     /**
-     * `POST /ds/group/{hex}/knock` with one solved [pow]: [payloads] are the
-     * rows (at most four, 16 KiB in total); an EMPTY list is a probe that
-     * stores nothing and only learns the group's epoch.
+     * `POST /ds/group/{hex}/knock` spending one `ds-knock` token: [payloads]
+     * are the rows (at most four, 16 KiB in total); an EMPTY list is a probe
+     * that stores nothing and only learns the group's epoch. A token refusal
+     * is retried once with another token.
      */
     public suspend fun knock(
         groupId: ByteArray,
         payloads: List<ByteArray>,
-        pow: PowProofPayload,
     ): KnockResult {
         if (groupId.isEmpty()) {
             throw DsClientArgError("groupId must be non-empty")
@@ -458,34 +456,27 @@ public class DsClient(
         val endpoint = "/ds/group/${pseudonymHex(groupId)}/knock"
         val body = json.encodeToString(
             KnockWireRequest.serializer(),
-            KnockWireRequest(pow = pow, payloads_b64 = payloads.map(::base64Encode)),
+            KnockWireRequest(payloads_b64 = payloads.map(::base64Encode)),
         ).toByteArray(Charsets.UTF_8)
-        val response = send(
-            method = HttpMethod.Post,
-            endpoint = endpoint,
-            query = "",
-            body = body,
-            contentType = ContentType.Application.Json,
-            waitSecs = null,
-            signer = null,
-        )
+        val response = anonTokens.sendWithToken(AnonTokenContext.DS_KNOCK) { name, value ->
+            try {
+                anonClient.request("$baseUrl$endpoint") {
+                    method = HttpMethod.Post
+                    header(name, value)
+                    contentType(ContentType.Application.Json)
+                    setBody(body)
+                }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (cause: Throwable) {
+                throw DsNetworkError(endpoint, cause)
+            }
+        }
         if (!response.status.isSuccess()) {
             throw DsHttpError(response.status.value, endpoint, response.safeReadBody())
         }
         val parsed: KnockWireResponse = response.body()
         return KnockResult(ids = parsed.ids, epoch = parsed.epoch?.toULong())
-    }
-
-    /** One knock including its challenge: fetch a challenge, [solve] it,
-     *  knock. Each knock pays its own proof of work. */
-    public suspend fun knockWithPow(
-        groupId: ByteArray,
-        payloads: List<ByteArray>,
-        solve: suspend (seedB64: String, effortBits: Int) -> PowProofPayload,
-    ): KnockResult {
-        val challenge = powChallenge()
-        val pow = solve(challenge.seed, challenge.effort_bits)
-        return knock(groupId, payloads, pow)
     }
 
     // -----------------------------------------------------------------
@@ -773,7 +764,6 @@ private data class FetchWireMessage(
 @Serializable
 @Suppress("ConstructorParameterNaming")
 private data class KnockWireRequest(
-    val pow: PowProofPayload,
     val payloads_b64: List<String>,
 )
 

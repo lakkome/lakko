@@ -102,48 +102,34 @@ final class ApiEndpointsTests: XCTestCase {
         override func stopLoading() {}
     }
 
-    private func discovery(sessionToken: String?, ambient: String?) -> DiscoveryClient {
+    private func discovery(sessionToken: String?) -> DiscoveryClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [HeaderRecorder.self]
-        let holder = AmbientSessionToken()
-        holder.set(ambient)
         return DiscoveryClient(
             baseURL: "https://discovery.test",
             session: URLSession(configuration: configuration),
             sessionToken: sessionToken,
             antiCensorship: .disarmed,
-            rateLimitToken: { holder.current }
+            tokens: FakeAnonTokens()
         )
     }
 
-    private let pow = PowProofPayload(seed: "AA==", nonce: "AA==", solution: "AA==")
-
-    func testRateLimitedReadsCarryTheSignedInTokenWhenTheClientHasNone() async throws {
+    /// ADR-0054 S3 (reversing the old ambient-token rule): the lookup reads
+    /// never carry a session, not even the client's own - a lookup must not
+    /// name the account that made it. A protected write still carries it.
+    func testAnonymousReadsNeverCarryASessionAndWritesStillDo() async throws {
         HeaderRecorder.reset()
-        let client = discovery(sessionToken: nil, ambient: "signed-in")
+        let client = discovery(sessionToken: "own")
 
-        _ = try await client.oprfEvaluate(OprfRequest(pow: pow, blinded: "AA=="))
-        _ = try await client.lookupRaw(LookupRequest(pow: pow, oprfHash: "AA=="))
-        _ = try await client.channelLookupRaw(ChannelLookupRequest(pow: pow, oprfHash: "AA=="))
-        _ = try await client.register(RegisterRequest(pow: pow, accountId: "AA==", oprfHash: "AA=="))
+        _ = try await client.oprfEvaluate(OprfRequest(blinded: "AA=="))
+        _ = try await client.lookupRaw(LookupRequest(oprfHash: "AA=="))
+        _ = try await client.channelLookupRaw(ChannelLookupRequest(oprfHash: "AA=="))
+        _ = try await client.register(RegisterRequest(accountId: "AA==", oprfHash: "AA=="))
 
-        XCTAssertEqual(HeaderRecorder.authorization(for: "/discovery/oprf"), "Bearer signed-in")
-        XCTAssertEqual(HeaderRecorder.authorization(for: "/discovery/lookup"), "Bearer signed-in")
-        XCTAssertEqual(HeaderRecorder.authorization(for: "/discovery/channel/lookup"), "Bearer signed-in")
-        // A protected write never borrows the signed-in session's token.
-        XCTAssertEqual(HeaderRecorder.authorization(for: "/discovery/register"), .some(nil))
-    }
-
-    func testTheClientsOwnTokenWinsAndSignedOutStaysAnonymous() async throws {
-        HeaderRecorder.reset()
-        _ = try await discovery(sessionToken: "own", ambient: "signed-in")
-            .lookupRaw(LookupRequest(pow: pow, oprfHash: "AA=="))
-        XCTAssertEqual(HeaderRecorder.authorization(for: "/discovery/lookup"), "Bearer own")
-
-        HeaderRecorder.reset()
-        _ = try await discovery(sessionToken: nil, ambient: nil)
-            .lookupRaw(LookupRequest(pow: pow, oprfHash: "AA=="))
+        XCTAssertEqual(HeaderRecorder.authorization(for: "/discovery/oprf"), .some(nil))
         XCTAssertEqual(HeaderRecorder.authorization(for: "/discovery/lookup"), .some(nil))
+        XCTAssertEqual(HeaderRecorder.authorization(for: "/discovery/channel/lookup"), .some(nil))
+        XCTAssertEqual(HeaderRecorder.authorization(for: "/discovery/register"), "Bearer own")
     }
 
     func testAmbientTokenTreatsEmptyAsSignedOut() {

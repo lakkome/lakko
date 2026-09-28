@@ -316,6 +316,16 @@ public fun NewChannelScreen(
                                     }
                                     busy = false
                                     return@launch
+                                } catch (e: me.lakko.app.anon.AnonTokenException) {
+                                    // ADR-0054 UX section 3 - the handle costs a
+                                    // lookup and a register token.
+                                    Log.w(TAG, "handle registration: no token", e)
+                                    error = me.lakko.app.anon.anonTokenFailureCopy(
+                                        e,
+                                        me.lakko.app.anon.ACTION_ALLOWANCE_USED_COPY,
+                                    )
+                                    busy = false
+                                    return@launch
                                 }
                             }
                             client.createChannel(id)

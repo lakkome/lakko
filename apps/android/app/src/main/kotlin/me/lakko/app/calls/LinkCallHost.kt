@@ -118,7 +118,7 @@ public interface LinkCallPort {
      * Sign and upload a `/c/` capability for the call [callId] names, and
      * return its URL (`docs/ux/call-links.md` sections 3 and 4).
      *
-     * Costs a network round trip and a proof-of-work solve, which is why it
+     * Costs a network round trip, which is why it
      * runs at the first `Invite` and not at the call's start. May throw; the
      * host turns the cause into the one sentence the user reads.
      */
@@ -291,8 +291,8 @@ public class LinkCallHost(
      * one sentence the user reads. The call is never affected — a failed mint
      * leaves it running and the control live for another try.
      *
-     * Runs on the host's own scope, so leaving the screen mid-solve does not
-     * throw the proof-of-work away.
+     * Runs on the host's own scope, so leaving the screen mid-upload does not
+     * throw the work away.
      */
     public suspend fun inviteLinkUrl(identity: CallInviteIdentity?): String? =
         scope.async { runInvite(identity) }.await()

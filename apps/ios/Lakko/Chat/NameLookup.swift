@@ -43,6 +43,10 @@ public enum FoundByName: Equatable, Sendable {
     case nothing
     /// Neither namespace could be reached. NOT the same as `nothing`.
     case unreachable
+    /// ADR-0054 S3 — a lookup was refused because the account's daily
+    /// allowance of lookups is used up (`anon-token-quota-exhausted`). Not a
+    /// "nothing found": the name was never asked about.
+    case allowanceUsed
 }
 
 /// The two namespaces, as the caller can ask them.
@@ -69,7 +73,7 @@ public enum NameLookup {
     ///
     /// The predicate is the canonical username rule the discovery blinder
     /// itself enforces, so asking first is the difference between a quiet
-    /// "type the whole name" and making a person pay a proof of work to be
+    /// "type the whole name" and making a person spend a lookup token to be
     /// told no.
     public static func looksLikeAName(_ typed: String) -> Bool {
         LakkoCore.looksLikeAName(typed: typed)
@@ -99,6 +103,7 @@ public enum NameLookup {
         let name = bareName(typed)
         if !LakkoCore.looksLikeAName(typed: name) { return .nothing }
         var reachedTheServer = false
+        var allowanceUsed = false
         do {
             if let channelIdHex = try await lookups.channel(name) {
                 return .channel(channelIdHex: channelIdHex, handle: name)
@@ -106,6 +111,7 @@ public enum NameLookup {
             reachedTheServer = true
         } catch {
             // Fall through: the other namespace may still answer.
+            if AnonTokenUnavailable.isQuotaExhausted(error) { allowanceUsed = true }
         }
         do {
             if let username = try await lookups.person(name) {
@@ -114,7 +120,10 @@ public enum NameLookup {
             reachedTheServer = true
         } catch {
             // Handled below.
+            if AnonTokenUnavailable.isQuotaExhausted(error) { allowanceUsed = true }
         }
+        // A namespace that was never asked cannot report "nothing".
+        if allowanceUsed { return .allowanceUsed }
         return reachedTheServer ? .nothing : .unreachable
     }
 
@@ -126,6 +135,8 @@ public enum NameLookup {
             return "Nothing found for @\(bareName(typed)). Check the spelling."
         case .unreachable:
             return "Could not look that up. Check your connection and try again."
+        case .allowanceUsed:
+            return AnonTokenCopy.searchAllowanceUsed
         case .channel, .person:
             return nil
         }

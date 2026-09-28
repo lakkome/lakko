@@ -45,6 +45,7 @@
  * configure VAPID right away.
  */
 
+import { anonTokenQuotaExhausted } from "../tokens/anon-token-pool";
 import { PushClient } from "./client";
 import { clearDevicePushId, getOrCreateDevicePushId } from "./device-id";
 
@@ -158,6 +159,14 @@ export async function subscribeToPush(): Promise<SubscribeResult | null> {
   try {
     await pushClient.register(devicePseudonym, "web_push", tokenBytes);
   } catch (err) {
+    // ADR-0054 S3: registration spends an anonymous token. A day's allowance
+    // used up is silent: the next launch registers again, and the app keeps
+    // working by polling meanwhile (docs/ux/anti-abuse.md section 3).
+    if (anonTokenQuotaExhausted(err) !== null) {
+      // eslint-disable-next-line no-console
+      console.info("push token register deferred to the next launch (token allowance used)");
+      return null;
+    }
     // eslint-disable-next-line no-console
     console.warn("push token register failed", err);
     return null;

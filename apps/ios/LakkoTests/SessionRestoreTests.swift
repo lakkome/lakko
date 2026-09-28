@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import LakkoCore
 import XCTest
 @testable import Lakko
 
@@ -159,6 +160,7 @@ final class SessionRestoreTests: XCTestCase {
         let persistence = FakePersistence()
         let repo = AuthRepository(
             sessionStore: makeSessionStore(with: marker),
+            authClientFactory: { NameRouteStub.client(NameRouteStub.scope { _, _, _ in (503, "") }) },
             persistence: persistence,
             nowMs: { self.now }
         )
@@ -175,6 +177,7 @@ final class SessionRestoreTests: XCTestCase {
         persistence.token = nil
         let repo = AuthRepository(
             sessionStore: makeSessionStore(with: marker),
+            authClientFactory: { NameRouteStub.client(NameRouteStub.scope { _, _, _ in (503, "") }) },
             persistence: persistence,
             nowMs: { self.now }
         )
@@ -187,6 +190,7 @@ final class SessionRestoreTests: XCTestCase {
         persistence.token = PersistedSessionToken(sessionToken: "tok-old", sessionExpiresAtMs: now - 1)
         let repo = AuthRepository(
             sessionStore: makeSessionStore(with: marker),
+            authClientFactory: { NameRouteStub.client(NameRouteStub.scope { _, _, _ in (503, "") }) },
             persistence: persistence,
             nowMs: { self.now }
         )
@@ -201,5 +205,177 @@ final class SessionRestoreTests: XCTestCase {
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(Set(json.keys), ["token", "expires_at_ms"])
         XCTAssertEqual(try JSONDecoder().decode(PersistedSessionToken.self, from: data), token)
+    }
+}
+
+/// ADR-0054 S5 - a session that lands on a path that never names the account
+/// by its login handle (here: the relaunch restore) still binds the handle,
+/// so the person can sign in by name after a logout. One `PUT` per
+/// `(session, username)` per process; a failure changes nothing.
+@MainActor
+final class LoginHandleRebindOnLandingTests: XCTestCase {
+
+    private final class RestorablePersistence: SessionPersistence {
+        let token: String
+        private(set) var putTokens = 0
+        private(set) var deletedTokens = 0
+
+        init(token: String) { self.token = token }
+
+        func hasDeviceKey(accountIdB64: String) -> Bool { true }
+        func accountIdentitySeed(accountIdB64: String) -> Data? { Data(repeating: 0x5A, count: 64) }
+        func exportKey(accountIdB64: String) -> Data? { Data(repeating: 0xE7, count: 32) }
+        func sessionToken(accountIdB64: String) -> PersistedSessionToken? {
+            PersistedSessionToken(sessionToken: token, sessionExpiresAtMs: 2_000_000)
+        }
+        func putSessionToken(_ token: PersistedSessionToken, accountIdB64: String) throws { putTokens += 1 }
+        func deleteSessionToken(accountIdB64: String) { deletedTokens += 1 }
+    }
+
+    /// Any discovery call fails the test: a restore reaches auth only.
+    private final class NoDirectory: AccountDirectory {
+        private(set) var calls = 0
+        func registerUsername(accountId: Data, username: String, sessionToken: String) async throws -> RegisterResult {
+            calls += 1
+            throw AuthClientError.argument("discovery must not be reached")
+        }
+        func publishIdentityBundle(
+            accountId: Data, signaturePubkey: Data, x25519Pubkey: Data,
+            leafAuth: Data?, genesisAttest: Data?, sessionToken: String
+        ) async throws {
+            calls += 1
+            throw AuthClientError.argument("discovery must not be reached")
+        }
+    }
+
+    private let accountIdB64 = base64Encode(Data((0..<16).map { UInt8($0) }))
+
+    private func store(username: String) -> SessionStore {
+        let store = SessionStore(defaults: UserDefaults(suiteName: "handle-rebind-\(UUID().uuidString)")!)
+        store.save(PersistedSession(accountIdB64: accountIdB64, username: username))
+        return store
+    }
+
+    private func restore(
+        host: String,
+        store: SessionStore,
+        persistence: RestorablePersistence,
+        ledger: LoginHandleBindLedger,
+        directory: NoDirectory = NoDirectory()
+    ) -> AuthRepository {
+        AuthRepository(
+            sessionStore: store,
+            authClientFactory: { NameRouteStub.client(host) },
+            persistence: persistence,
+            nowMs: { 1_000_000 },
+            accountDirectory: directory,
+            loginHandleBinds: ledger
+        )
+    }
+
+    private func binds(_ host: String) -> [RecordedAuthRequest] {
+        NameRouteStub.requests(host).filter { $0.method == "PUT" && $0.path == "/auth/login-handle" }
+    }
+
+    private func waitUntil(_ condition: () -> Bool, timeout: TimeInterval = 5) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return condition()
+    }
+
+    /// Give a fire-and-forget bind that should NOT happen time to show up.
+    private func settle() async {
+        try? await Task.sleep(nanoseconds: 300_000_000)
+    }
+
+    func testARestoredSessionBindsTheHandleOfItsCanonicalNameOnce() async throws {
+        let host = NameRouteStub.scope { method, path, _ in
+            method == "PUT" && path == "/auth/login-handle" ? (200, #"{"bound":true}"#) : (503, "")
+        }
+        let directory = NoDirectory()
+        let repo = restore(
+            host: host, store: store(username: "alice"),
+            persistence: RestorablePersistence(token: "tok-restored"),
+            ledger: LoginHandleBindLedger(), directory: directory)
+
+        XCTAssertEqual(repo.state, .session(SessionAccount(accountIdB64: accountIdB64, username: "alice")))
+        let bound = await waitUntil { !binds(host).isEmpty }
+        XCTAssertTrue(bound, "a restored session binds the login handle")
+        await settle()
+
+        let requests = NameRouteStub.requests(host)
+        XCTAssertEqual(requests.map { "\($0.method) \($0.path)" }, ["PUT /auth/login-handle"])
+        XCTAssertEqual(requests.first?.authorization, "Bearer tok-restored")
+        let expected = base64UrlEncodeNoPad(try loginHandle(username: "alice"))
+        XCTAssertEqual(requests.first?.json["handle"] as? String, expected)
+        XCTAssertEqual(directory.calls, 0)
+    }
+
+    func testAGuestWithNoUsernameBindsNothing() async {
+        let host = NameRouteStub.scope { _, _, _ in (200, #"{"bound":true}"#) }
+        let repo = restore(
+            host: host, store: store(username: ""),
+            persistence: RestorablePersistence(token: "tok-guest"),
+            ledger: LoginHandleBindLedger())
+
+        XCTAssertEqual(repo.state, .session(SessionAccount(accountIdB64: accountIdB64, username: "")))
+        XCTAssertNotNil(repo.identitySecrets)
+        await settle()
+        XCTAssertTrue(NameRouteStub.requests(host).isEmpty, "a guest has no handle to bind")
+    }
+
+    func testATakenHandleChangesNothing() async {
+        let host = NameRouteStub.scope { method, path, _ in
+            method == "PUT" && path == "/auth/login-handle" ? (409, #"{"error":"handle-taken"}"#) : (503, "")
+        }
+        let sessionStore = store(username: "alice")
+        let persistence = RestorablePersistence(token: "tok-409")
+        let repo = restore(host: host, store: sessionStore, persistence: persistence, ledger: LoginHandleBindLedger())
+        let secretsBefore = repo.identitySecrets
+
+        let tried = await waitUntil { !binds(host).isEmpty }
+        XCTAssertTrue(tried)
+        await settle()
+
+        XCTAssertEqual(repo.state, .session(SessionAccount(accountIdB64: accountIdB64, username: "alice")))
+        XCTAssertEqual(repo.identitySecrets?.sessionToken, secretsBefore?.sessionToken)
+        XCTAssertEqual(repo.identitySecrets?.accountIdentitySeed, secretsBefore?.accountIdentitySeed)
+        XCTAssertEqual(sessionStore.load(), PersistedSession(accountIdB64: accountIdB64, username: "alice"))
+        XCTAssertEqual(persistence.deletedTokens, 0)
+        XCTAssertEqual(persistence.putTokens, 0)
+        XCTAssertEqual(binds(host).count, 1, "a 409 is not retried")
+    }
+
+    func testTheSameSessionInstalledTwiceBindsOnce() async {
+        let host = NameRouteStub.scope { method, path, _ in
+            method == "PUT" && path == "/auth/login-handle" ? (200, #"{"bound":true}"#) : (503, "")
+        }
+        let ledger = LoginHandleBindLedger()
+        let sessionStore = store(username: "alice")
+        let first = restore(
+            host: host, store: sessionStore,
+            persistence: RestorablePersistence(token: "tok-twice"), ledger: ledger)
+        let second = restore(
+            host: host, store: sessionStore,
+            persistence: RestorablePersistence(token: "tok-twice"), ledger: ledger)
+        XCTAssertEqual(first.state, second.state)
+
+        // The same pair offered again through the repository hook.
+        first.ensureLoginHandleBound(username: "alice", sessionToken: "tok-twice", context: "test")
+        second.ensureLoginHandleBound(username: "@Alice", sessionToken: "tok-twice", context: "test")
+
+        let bound = await waitUntil { !binds(host).isEmpty }
+        XCTAssertTrue(bound)
+        await settle()
+        XCTAssertEqual(binds(host).count, 1, "one bind per (session, username) per process")
+
+        // A different session for the same name is a new pair.
+        first.ensureLoginHandleBound(username: "alice", sessionToken: "tok-next", context: "test")
+        let rebound = await waitUntil { binds(host).count == 2 }
+        XCTAssertTrue(rebound)
+        XCTAssertEqual(binds(host).last?.authorization, "Bearer tok-next")
     }
 }

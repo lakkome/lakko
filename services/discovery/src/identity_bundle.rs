@@ -19,15 +19,13 @@
 //! no secret. One row per `account_id`; uploaded at signup,
 //! replaceable via UPSERT on key rotation (Phase 1.16d3c+).
 //!
-//! ## Known Phase-1 trust gap
+//! ## Authorisation
 //!
-//! `POST /discovery/identity` currently TRUSTS the client's
-//! claim of `account_id`, same as `POST /discovery/register`.
-//! A PoW token is required, but no proof of ownership beyond
-//! that. Phase 1.5b will gate this endpoint on an auth-issued
-//! session token; until then, the squatting risk is identical
-//! to `/discovery/register` and recoverable by table reset
-//! before beta launch.
+//! `POST /discovery/identity` is session-token-gated (Phase 1.5b)
+//! and the handler requires the body's `account_id` to equal the
+//! token's. It is counted per account by the write limiter
+//! (`rate_limit::write_middleware`); since ADR-0054 S3 it carries
+//! no proof of work.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -183,11 +181,10 @@ fn decode_optional_genesis_attest(
 // ============================================================================
 
 /// Upload (or replace) the identity bundle for the claimed
-/// `account_id`. PoW-gated, claim-trusting (see file-level
-/// docstring for the Phase-1 caveat).
+/// `account_id`. Session-gated and counted per account (see the
+/// file-level docstring).
 #[derive(Deserialize)]
 pub(crate) struct UploadRequest {
-    pub(crate) pow: crate::pow::PowProof,
     /// Base64 of the raw 16-byte UUIDv7.
     pub(crate) account_id: String,
     /// Base64 of the 32-byte Ed25519 public key.
@@ -234,8 +231,6 @@ pub(crate) async fn upload(
     axum::Extension(authed): axum::Extension<crate::auth::AuthenticatedAccount>,
     Json(payload): Json<UploadRequest>,
 ) -> Result<Json<UploadResponse>, (StatusCode, String)> {
-    crate::pow::verify_proof(&state.db, &payload.pow).await?;
-
     let account_id = decode_fixed::<ACCOUNT_ID_LEN>(&payload.account_id, "account_id")?;
     let signature_pubkey =
         decode_fixed::<SIGNATURE_PUBKEY_LEN>(&payload.signature_pubkey, "signature_pubkey")?;

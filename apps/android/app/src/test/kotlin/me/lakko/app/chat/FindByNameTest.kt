@@ -93,6 +93,20 @@ class FindByNameTest {
     }
 
     @Test
+    fun `a used-up lookup allowance is its own result with the spec's sentence`() = runTest {
+        val quota = me.lakko.app.anon.AnonTokenQuotaExhausted(
+            me.lakko.app.anon.AnonTokenContext.DISCOVERY_LOOKUP,
+            retryAfterSecs = 3600,
+        )
+        val found = find("@anna", Lookups(channelResult = quota, personResult = quota))
+        assertEquals(FoundByName.AllowanceUsed, found)
+        assertEquals(
+            "You have looked up a lot of people today. Try again tomorrow.",
+            findByNameMessage(found, "@anna", bare),
+        )
+    }
+
+    @Test
     fun `one namespace failing does not stop the other answering`() = runTest {
         val found = find(
             "@anna",

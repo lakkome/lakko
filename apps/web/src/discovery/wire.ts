@@ -18,7 +18,6 @@
  *     bodies pass straight to `JSON.stringify`.
  */
 
-import type { PowProofPayload } from "../auth/wire";
 
 // ----------------------------------------------------------------------------
 // /discovery/oprf  (services/discovery/src/oprf.rs)
@@ -26,7 +25,6 @@ import type { PowProofPayload } from "../auth/wire";
 
 /** Body of `POST /discovery/oprf`. */
 export interface OprfRequest {
-  pow: PowProofPayload;
   /** base64(BlindedElement<Ristretto255-SHA512>) — produced by
    *  `OprfBlinder.blind(username).blindedB64`. */
   blinded: string;
@@ -45,7 +43,6 @@ export interface OprfResponse {
 
 /** Body of `POST /discovery/register`. */
 export interface RegisterRequest {
-  pow: PowProofPayload;
   /** base64(account_id) — raw 16 bytes, same shape as
    *  `auth/wire.ts`. */
   account_id: string;
@@ -66,7 +63,6 @@ export interface RegisterResponse {
 
 /** Body of `POST /discovery/lookup`. */
 export interface LookupRequest {
-  pow: PowProofPayload;
   /** Same shape as `RegisterRequest.oprf_hash`. */
   oprf_hash: string;
 }
@@ -84,7 +80,6 @@ export interface LookupResponse {
 
 /** Body of `POST /discovery/identity`. */
 export interface IdentityUploadRequest {
-  pow: PowProofPayload;
   account_id: string;
   /** base64(Ed25519 public key) — 32 bytes after decode. */
   signature_pubkey: string;
@@ -136,7 +131,6 @@ export interface IdentityFetchResponse {
 
 /** Body of `POST /discovery/keypackage` (ADR-0050: one row per device). */
 export interface KeyPackageUploadRequest {
-  pow: PowProofPayload;
   account_id: string;
   /** base64 of the device leaf's 32-byte Ed25519 signature key. */
   device_id: string;
@@ -176,7 +170,6 @@ export interface KeyPackageFetchResponse {
  *  POST succeeds is if `capability` is a real, signature-valid
  *  invite the client just composed. */
 export interface InviteUploadRequest {
-  pow: PowProofPayload;
   /** Standard-alphabet base64 of `wasm.InviteCapability.compose(...)`
    *  output — same wire format as 1.18a / 1.18b / 1.18c. Server
    *  caps decoded size at 2048 bytes. */
@@ -209,7 +202,6 @@ export interface InviteFetchResponse {
  *  joiner_account_id)`; the server stores it keyed by
  *  `(blob_id, joiner_tag)` to dedup repeats. */
 export interface InviteConsumeRequest {
-  pow: PowProofPayload;
   /** Standard-alphabet base64 of the 32-byte joiner-tag. */
   joiner_tag: string;
 }
@@ -244,7 +236,6 @@ export interface InviteConsumeResponse {
  *  not an access control — the security boundary is the admin approval gate
  *  (ADR-0027). The response reuses [`InviteUploadResponse`] (`blob_id`). */
 export interface GroupInviteUploadRequest {
-  pow: PowProofPayload;
   /** Standard-alphabet base64 of `wasm.composeGroupInviteCapability(...)`
    *  output. Server runs `decode_and_verify` at ingress + caps decoded size at
    *  512 bytes. */
@@ -348,7 +339,6 @@ export interface InviteOwnerListResponse {
  *  via a UNIQUE on `oprf_hash`; a repeat of the same hash with a
  *  different channel id is 409 Conflict. */
 export interface ChannelRegisterRequest {
-  pow: PowProofPayload;
   /** base64(VOPRF output) — exactly 64 bytes, from
    *  `blinder.finalize`. */
   oprf_hash: string;
@@ -366,7 +356,6 @@ export interface ChannelRegisterResponse {
 /** Body of `POST /discovery/channel/lookup`. Resolves an OPRF-
  *  hashed `@channelname` to its `channel_id`. */
 export interface ChannelLookupRequest {
-  pow: PowProofPayload;
   /** Same shape as `ChannelRegisterRequest.oprf_hash`. */
   oprf_hash: string;
 }

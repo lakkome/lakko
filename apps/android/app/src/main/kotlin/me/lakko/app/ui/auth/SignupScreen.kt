@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
@@ -17,6 +18,9 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import me.lakko.app.auth.SIGNUP_TRY_AGAIN
+import me.lakko.app.auth.SIGNUP_WORKING_COPY
+import me.lakko.app.auth.SIGNUP_WORKING_LINE
 
 /**
  * Create account (docs/ux/client-redesign.md section 5.6): username with the
@@ -93,12 +97,25 @@ public fun SignupScreen(
         )
         FormError(state.error)
         Spacer(Modifier.height(24.dp))
+        // ADR-0054 UX section 1 - the working row: a disabled row with a
+        // spinner, one line below it, and Cancel while the one heavy piece of
+        // work runs. A network-wide signup limit turns the button into
+        // `Try again`; the form keeps its contents either way.
         BusyButton(
-            label = "Create account",
+            label = if (state.rateLimited) SIGNUP_TRY_AGAIN else "Create account",
             busy = state.busy,
-            busyLabel = "Creating account...",
+            busyLabel = SIGNUP_WORKING_COPY,
             onClick = viewModel::onSubmit,
         )
+        if (state.busy) {
+            Spacer(Modifier.height(8.dp))
+            Lead(SIGNUP_WORKING_LINE)
+            if (state.solving) {
+                TextButton(onClick = viewModel::onCancel, modifier = Modifier.fillMaxWidth()) {
+                    Text("Cancel")
+                }
+            }
+        }
         Spacer(Modifier.height(12.dp))
         Lead("You will get a 24-word recovery phrase next. It is the only way back in if you lose this phone and your password.")
         Spacer(Modifier.height(16.dp))

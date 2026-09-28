@@ -1085,20 +1085,24 @@ pub(crate) enum ApiError {
     /// exist" / "grant expired" / "grant never existed" — the same
     /// enumeration-safe shape an OPAQUE bad-credential login returns.
     InvalidCredential,
-    /// ADR-0018 factor (c) (`/totp/recover`): too many consecutive failed
-    /// code attempts — the account is in its lockout window. Surfaced as a
-    /// generic `429` carrying no account-existence information.
+    /// ADR-0037 F5b (`/auth/backup/head`): the per-account mint rate-limit
+    /// is spent. Surfaced as a generic `429`.
     RateLimited,
     /// ADR-0018 factor (c) (`/totp/enroll/start`): the account already has a
     /// CONFIRMED authenticator. Surfaced as `409` so a stolen session cannot
     /// silently swap the authenticator (the user must disable it first).
     TotpAlreadyEnabled,
-    /// ADR-0018: a PoW-gated endpoint in this module (`/device/authorize/*`)
-    /// rejected the proof. Delegates to [`crate::pow::PowError`]'s existing
-    /// `(StatusCode, String)` mapping so the HTTP response is byte-identical
-    /// to every other PoW-gated endpoint (400 bad encoding / 401 unknown,
-    /// expired, insufficient, invalid / 500 db).
-    Pow(crate::pow::PowError),
+    /// ADR-0054 S4: an attempt limit refused the request — `429` with a
+    /// stable body code and `Retry-After`, or `503` when the counter store
+    /// failed (fail closed). Never `401`: a limit is not a bad credential.
+    Limit(crate::limits::LimitError),
+    /// ADR-0054 S5: `LAKKO_AUTH_HANDLE_PEPPER` is unset, so no route that
+    /// names an account by login handle can resolve it. `503` with the JSON
+    /// body `{"error":"login-by-name-disabled"}`.
+    LoginByNameDisabled,
+    /// ADR-0054 S5 (`PUT /auth/login-handle`): another account holds the
+    /// handle. `409` with the JSON body `{"error":"handle-taken"}`.
+    HandleTaken,
     /// 2a2b: catch-all for unrecoverable server-side errors
     /// (session-token issuance failures). The OPAQUE module
     /// folds the same case into a tuple-StatusCode; we keep an
@@ -1127,10 +1131,20 @@ impl IntoResponse for ApiError {
                 StatusCode::CONFLICT,
                 "authenticator already enabled; disable it first",
             ),
-            Self::Pow(e) => {
-                // Reuse PoW's own status+message mapping verbatim.
-                let (code, msg): (StatusCode, String) = e.into();
-                return (code, msg).into_response();
+            Self::Limit(e) => return e.into_response(),
+            Self::LoginByNameDisabled => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    axum::Json(serde_json::json!({ "error": "login-by-name-disabled" })),
+                )
+                    .into_response();
+            },
+            Self::HandleTaken => {
+                return (
+                    StatusCode::CONFLICT,
+                    axum::Json(serde_json::json!({ "error": "handle-taken" })),
+                )
+                    .into_response();
             },
             Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
             Self::Db(e) => {
@@ -1150,8 +1164,8 @@ impl IntoResponse for ApiError {
     }
 }
 
-impl From<crate::pow::PowError> for ApiError {
-    fn from(e: crate::pow::PowError) -> Self {
-        Self::Pow(e)
+impl From<crate::limits::LimitError> for ApiError {
+    fn from(e: crate::limits::LimitError) -> Self {
+        Self::Limit(e)
     }
 }

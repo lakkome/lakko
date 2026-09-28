@@ -17,6 +17,7 @@
  */
 import type { AuthClient } from "../auth/client";
 import { AuthHttpError, AuthNetworkError } from "../auth/client";
+import { authLimitMessage } from "../auth/auth-error-copy";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
 import { getPhrase } from "../backup/phrase-store";
@@ -121,12 +122,13 @@ export async function ensureWordVaultEnrolled(args: {
   }
 }
 
-/** Ask the server which words to type and how to stretch them. */
+/** Ask the server which words to type and how to stretch them. `handle` is
+ *  the account's login handle (ADR-0054 S5, `auth/login-handle.ts`). */
 export async function startWordVault(
   client: AuthClient,
-  accountId: Uint8Array,
+  handle: string,
 ): Promise<WordVaultChallenge> {
-  const resp = await client.wordVaultRecoverStart(accountId);
+  const resp = await client.wordVaultRecoverStart(handle);
   return {
     positions: resp.positions,
     salt: base64Decode(resp.salt_b64),
@@ -155,7 +157,8 @@ export function wordsAreAnswerable(words: readonly string[]): boolean {
 export async function openWordVault(args: {
   readonly wasm: Wasm;
   readonly client: AuthClient;
-  readonly accountId: Uint8Array;
+  /** The account's login handle (ADR-0054 S5). */
+  readonly handle: string;
   readonly challenge: WordVaultChallenge;
   readonly words: readonly string[];
 }): Promise<string> {
@@ -167,7 +170,7 @@ export async function openWordVault(args: {
     args.challenge.argon2P,
   );
   try {
-    const sealed = await args.client.wordVaultRecoverFinish(args.accountId, answer.verifier);
+    const sealed = await args.client.wordVaultRecoverFinish(args.handle, answer.verifier);
     let mnemonic;
     try {
       mnemonic = answer.open(sealed);
@@ -197,14 +200,13 @@ export class WordVaultOpenError extends Error {
  *  count (the server never reports one, so an unknown account cannot be
  *  told apart from a real one). */
 export function wordVaultErrorMessage(err: unknown, triesLeft: number | null): string {
+  const limit = authLimitMessage(err);
+  if (limit !== null) return limit;
   if (err instanceof AuthHttpError) {
     if (err.status === 401) {
       return triesLeft === null || triesLeft <= 0
         ? "Those words did not match."
         : `Those words did not match. ${triesLeft} ${triesLeft === 1 ? "try" : "tries"} left before the three-word shortcut is switched off.`;
-    }
-    if (err.status === 429) {
-      return "Too many attempts. Wait 15 minutes, or use another way in.";
     }
     if (err.status === 503) {
       return "Three-word recovery is not available on this server.";

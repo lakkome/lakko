@@ -233,10 +233,15 @@ public class ContactsViewModel(
                     it.copy(sending = false, sendError = userFacingError(err))
                 }
             } catch (err: Throwable) {
+                // ADR-0054 - the username lookup spends an anonymous token.
+                val tokenCopy = me.lakko.app.anon.anonTokenFailureCopy(
+                    err,
+                    me.lakko.app.anon.LOOKUP_ALLOWANCE_USED_COPY,
+                )
                 mutableUi.update {
                     it.copy(
                         sending = false,
-                        sendError = err.message ?: "Send failed.",
+                        sendError = tokenCopy ?: err.message ?: "Send failed.",
                     )
                 }
             }

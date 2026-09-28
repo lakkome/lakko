@@ -19,9 +19,16 @@ import me.lakko.app.discovery.DiscoveryHttpError
  * refused outright when the device held no cached account, where web resolves
  * the typed username through discovery.
  *
- * Narrowed to an interface so the rules below — which account a sign-in
- * targets, what a taken name looks like to the user — are unit-testable. The
+ * Narrowed to an interface so the claim rule below (auth handle first, then
+ * discovery; what a taken name looks like to the user) is unit-testable. The
  * production implementation drives the OPRF flow, which needs the native core.
+ *
+ * ## No lookup before a session (ADR-0054 S5)
+ *
+ * Sign-in and recovery no longer resolve a name here: a username lookup spends
+ * an anonymous token, a token needs a session, and the auth routes now take
+ * the login handle of the name instead ([resolveNamedSignIn]). This interface
+ * therefore has no lookup at all, so no pre-session flow can reach one.
  *
  * ## Normalisation
  *
@@ -39,9 +46,6 @@ internal interface AccountDirectory {
      * @throws DiscoveryHttpError with `status == 409` when the name is taken.
      */
     suspend fun registerUsername(sessionToken: String, accountId: ByteArray, username: String): String
-
-    /** Resolve [username] to its account; `account == null` when unregistered. */
-    suspend fun lookup(username: String): RecoverAccountLookup
 }
 
 /** [AccountDirectory] over a short-lived [DiscoveryClient] per call. */
@@ -56,23 +60,35 @@ internal class DiscoveryAccountDirectory(
         // A fresh client per call, so the bearer is never left attached to a
         // client some other flow reuses.
         client.setSessionToken(sessionToken)
+        // ADR-0054 - the OPRF evaluation spends a `discovery-lookup` token.
+        // Signup claims the name before its session is installed, so the
+        // token is drawn with this session explicitly.
+        client.useTokenSession(
+            me.lakko.app.anon.AnonSession(
+                accountKey = base64Encode(accountId),
+                bearer = sessionToken,
+            ),
+        )
         client.registerUsername(accountId, username).normalisedUsername
     }
-
-    override suspend fun lookup(username: String): RecoverAccountLookup =
-        clientFactory().use { client ->
-            val result = client.lookup(username)
-            RecoverAccountLookup(
-                account = result.account,
-                normalisedUsername = result.normalisedUsername,
-            )
-        }
 }
 
 /**
  * Claim [username] for the account signup just created. Mirror of the web
  * `signup` (`apps/web/src/auth/AuthContext.tsx`), which does this right after
  * the OPAQUE registration commits and before anything is persisted locally.
+ *
+ * ## Claim order (ADR-0054 S5, load-bearing)
+ *
+ * The login handle at auth and the name at discovery are two first-come
+ * registries that cannot check each other, so an honest client claims in one
+ * order:
+ *
+ *   1. bind the handle at auth (`PUT /auth/login-handle`); a `409` means the
+ *      name is taken and discovery is never asked;
+ *   2. register the name at discovery; if that fails (taken or otherwise) the
+ *      handle is released again (`DELETE /auth/login-handle`), so the name is
+ *      not left held at auth by an account that never got it.
  *
  * A taken name becomes an [AuthClientArgError] carrying the sentence the form
  * shows; every other failure propagates unchanged, so a network error still
@@ -84,72 +100,34 @@ internal class DiscoveryAccountDirectory(
  */
 internal suspend fun claimUsernameAtSignup(
     directory: AccountDirectory,
+    binder: LoginHandleBinder,
+    handles: LoginHandleSource,
     sessionToken: String,
     accountId: ByteArray,
     username: String,
 ): String {
     val trimmed = username.trim()
+    val named = namedHandleOrRefuse(handles, trimmed)
+    if (binder.bind(sessionToken, named.handle) == LoginHandleBinding.Taken) {
+        throw AuthClientArgError(takenCopy(trimmed))
+    }
     try {
         return directory.registerUsername(sessionToken, accountId, trimmed)
-    } catch (err: DiscoveryHttpError) {
-        if (err.status == HTTP_CONFLICT) {
-            throw AuthClientArgError("username @$trimmed is already taken — pick another")
+    } catch (err: Throwable) {
+        // The name did not land at discovery: give the handle back. A failed
+        // release must not mask the reason the claim failed.
+        try {
+            binder.unbind(sessionToken)
+        } catch (release: Throwable) {
+            err.addSuppressed(release)
+        }
+        if (err is DiscoveryHttpError && err.status == HTTP_CONFLICT) {
+            throw AuthClientArgError(takenCopy(trimmed))
         }
         throw err
     }
 }
 
-/** The account a password sign-in targets. */
-internal data class ResolvedLoginAccount(
-    val accountIdB64: String,
-    /** The username to persist and show: the cached one, or the normalised form discovery returned. */
-    val username: String,
-    /** `true` when the on-device cache answered and no lookup was made. */
-    val fromCache: Boolean,
-)
-
-/**
- * Resolve the typed [username] to the account a password login targets. Mirror
- * of the web `login`:
- *
- *   * the on-device marker answers when its username equals the typed one —
- *     no round trip;
- *   * otherwise (no marker, or a different name) discovery resolves it, which
- *     is what makes signing in on a second device possible;
- *   * an unregistered name fails exactly like a wrong password (401
- *     `invalid credentials`), so the sign-in form does not become a tool for
- *     telling registered names from unregistered ones.
- *
- * This only picks the account. The OPAQUE login and the ADR-0017 identity
- * acquisition that follow are unchanged: a device with no cached phrase seed
- * still lands in `NeedsRecoveryPhrase`.
- */
-internal suspend fun resolveLoginAccount(
-    cached: CachedAccount?,
-    username: String,
-    directory: AccountDirectory,
-    encodeAccountId: (ByteArray) -> String,
-): ResolvedLoginAccount {
-    val trimmed = username.trim()
-    if (cached != null && cached.username == trimmed) {
-        return ResolvedLoginAccount(
-            accountIdB64 = cached.accountIdB64,
-            username = cached.username,
-            fromCache = true,
-        )
-    }
-    val result = directory.lookup(trimmed)
-    val account = result.account
-        ?: throw AuthHttpError(
-            status = 401,
-            endpoint = "/discovery/lookup",
-            body = "invalid credentials",
-        )
-    return ResolvedLoginAccount(
-        accountIdB64 = encodeAccountId(account),
-        username = result.normalisedUsername,
-        fromCache = false,
-    )
-}
+private fun takenCopy(trimmed: String): String = "username @$trimmed is already taken — pick another"
 
 private const val HTTP_CONFLICT = 409

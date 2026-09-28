@@ -5,8 +5,8 @@ import XCTest
 @testable import Lakko
 import LakkoCore
 
-/// A discovery stand-in keyed on the request host. Answers `/pow/challenge`
-/// with a zero-effort challenge and `/discovery/group-invite` per the scope's
+/// A discovery stand-in keyed on the request host. Answers
+/// `/discovery/group-invite` per the scope's
 /// scripted mode, recording each request's path and `Authorization` header.
 final class GroupInviteDiscoveryURLProtocol: URLProtocol {
     enum Mode {
@@ -45,7 +45,7 @@ final class GroupInviteDiscoveryURLProtocol: URLProtocol {
         return DiscoveryClient(
             baseURL: "http://\(scope):9",
             session: URLSession(configuration: config),
-            rateLimitToken: { nil })
+            tokens: FakeAnonTokens())
     }
 
     static func requests(_ scope: String) -> [Seen] {
@@ -72,11 +72,7 @@ final class GroupInviteDiscoveryURLProtocol: URLProtocol {
 
         let status: Int
         let body: Data
-        if url.path == "/pow/challenge" {
-            status = 200
-            let seed = Data((0..<16).map { UInt8($0) }).base64EncodedString()
-            body = Data(#"{"seed":"\#(seed)","effort_bits":0,"expires_in":60}"#.utf8)
-        } else {
+        do {
             switch mode {
             case .network:
                 client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))

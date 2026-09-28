@@ -6,9 +6,9 @@ import XCTest
 
 @testable import Lakko
 
-/// iOS registers the signup username in discovery, resolves a login username
-/// through discovery when this device holds no marker for it, and publishes
-/// the identity bundle at signup.
+/// iOS claims the signup username (the auth login handle first, then the
+/// discovery name, ADR-0054 S5) and publishes the identity bundle at signup.
+/// Sign-in by name is in `LoginByNameTests`.
 ///
 /// The defect: `DiscoveryClient.registerUsername` had no call site, login
 /// refused any username the on-device marker did not already hold, and signup
@@ -23,16 +23,15 @@ final class UsernameDirectoryTests: XCTestCase {
     /// Records every directory call, in order, and answers from its script.
     private final class FakeDirectory: AccountDirectory {
         enum Call: Equatable {
+            case bind(handle: Data, sessionToken: String)
+            case release(sessionToken: String)
             case register(accountId: Data, username: String, sessionToken: String)
-            case lookup(username: String)
             case publish(accountId: Data, signaturePubkey: Data, hasLeafAuth: Bool, sessionToken: String)
         }
 
-        private(set) var calls: [Call] = []
+        var calls: [Call] = []
         var registerOutcome: Result<RegisterResult, Error> =
             .success(RegisterResult(normalisedUsername: "alice"))
-        var lookupOutcome: Result<LookupResult, Error> =
-            .success(LookupResult(normalisedUsername: "alice", account: nil))
         var publishError: Error?
 
         func registerUsername(
@@ -42,11 +41,6 @@ final class UsernameDirectoryTests: XCTestCase {
         ) async throws -> RegisterResult {
             calls.append(.register(accountId: accountId, username: username, sessionToken: sessionToken))
             return try registerOutcome.get()
-        }
-
-        func lookup(username: String) async throws -> LookupResult {
-            calls.append(.lookup(username: username))
-            return try lookupOutcome.get()
         }
 
         func publishIdentityBundle(
@@ -65,34 +59,49 @@ final class UsernameDirectoryTests: XCTestCase {
             ))
             if let publishError { throw publishError }
         }
+    }
 
-        var lookupCount: Int {
-            calls.filter { if case .lookup = $0 { return true } else { return false } }.count
+    /// Records the auth half of a claim into the directory's call log, so one
+    /// ordered list shows both registries.
+    private final class FakeBinder: LoginHandleBinder {
+        let log: FakeDirectory
+        var bindError: Error?
+
+        init(log: FakeDirectory) { self.log = log }
+
+        func bindLoginHandle(handle: Data, sessionToken: String) async throws {
+            log.calls.append(.bind(handle: handle, sessionToken: sessionToken))
+            if let bindError { throw bindError }
+        }
+
+        func removeLoginHandle(sessionToken: String) async throws -> Bool {
+            log.calls.append(.release(sessionToken: sessionToken))
+            return true
         }
     }
 
-    /// Answers the auth service: a zero-effort PoW challenge, then 503 for
-    /// everything else, recording the `/login/start` body so a test can read
-    /// which account the login targeted.
+    /// Answers the auth service: the login-handle binding routes succeed
+    /// (`PUT` answers ``bindStatus``), everything else is 503. Records
+    /// `METHOD path` per request.
     final class StubAuthProtocol: URLProtocol {
         private static let lock = NSLock()
-        private static var _paths: [String] = []
-        private static var _loginStartAccountIdB64: String?
+        private static var _requests: [String] = []
+        private static var _bindStatus = 200
 
         static func reset() {
             lock.lock(); defer { lock.unlock() }
-            _paths = []
-            _loginStartAccountIdB64 = nil
+            _requests = []
+            _bindStatus = 200
         }
 
-        static var paths: [String] {
+        static var requests: [String] {
             lock.lock(); defer { lock.unlock() }
-            return _paths
+            return _requests
         }
 
-        static var loginStartAccountIdB64: String? {
-            lock.lock(); defer { lock.unlock() }
-            return _loginStartAccountIdB64
+        static var bindStatus: Int {
+            get { lock.lock(); defer { lock.unlock() }; return _bindStatus }
+            set { lock.lock(); defer { lock.unlock() }; _bindStatus = newValue }
         }
 
         override class func canInit(with request: URLRequest) -> Bool { true }
@@ -100,22 +109,22 @@ final class UsernameDirectoryTests: XCTestCase {
 
         override func startLoading() {
             let path = request.url?.path ?? ""
-            let body = Self.readBody(request)
+            let method = request.httpMethod ?? "GET"
             Self.lock.lock()
-            Self._paths.append(path)
-            if path == "/login/start",
-               let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] {
-                Self._loginStartAccountIdB64 = json["account_id"] as? String
-            }
+            Self._requests.append("\(method) \(path)")
+            let bind = Self._bindStatus
             Self.lock.unlock()
 
             let status: Int
             let payload: Data
-            if path == "/pow/challenge" {
+            switch (method, path) {
+            case ("PUT", "/auth/login-handle"):
+                status = bind
+                payload = Data((bind == 200 ? #"{"bound":true}"# : #"{"error":"handle-taken"}"#).utf8)
+            case ("DELETE", "/auth/login-handle"):
                 status = 200
-                let seed = Data((0..<16).map { UInt8($0) }).base64EncodedString()
-                payload = Data(#"{"seed":"\#(seed)","effort_bits":0,"expires_in":60}"#.utf8)
-            } else {
+                payload = Data(#"{"removed":true}"#.utf8)
+            default:
                 status = 503
                 payload = Data("unavailable".utf8)
             }
@@ -129,21 +138,6 @@ final class UsernameDirectoryTests: XCTestCase {
         }
 
         override func stopLoading() {}
-
-        private static func readBody(_ request: URLRequest) -> Data {
-            if let body = request.httpBody { return body }
-            guard let stream = request.httpBodyStream else { return Data() }
-            stream.open()
-            defer { stream.close() }
-            var data = Data()
-            var buffer = [UInt8](repeating: 0, count: 4096)
-            while stream.hasBytesAvailable {
-                let read = stream.read(&buffer, maxLength: buffer.count)
-                if read <= 0 { break }
-                data.append(buffer, count: read)
-            }
-            return data
-        }
     }
 
     private final class NoopPersistence: SessionPersistence {
@@ -218,47 +212,85 @@ final class UsernameDirectoryTests: XCTestCase {
         return (result, mnemonic.toSeed())
     }
 
-    // MARK: - Signup claim (the pure step)
+    // MARK: - Signup claim (the pure step): auth first, then discovery
 
-    func testClaimRegistersWithTheSessionTokenAndReturnsTheBoundName() async throws {
+    private func handle(_ name: String) -> Data {
+        (try? loginHandle(username: name)) ?? Data()
+    }
+
+    func testClaimBindsTheHandleAtAuthBeforeRegisteringAtDiscovery() async throws {
         let directory = FakeDirectory()
+        let binder = FakeBinder(log: directory)
         let accountId = randomAccountId()
         let bound = try await claimSignupUsername(
             accountId: accountId,
             username: "@Alice",
             sessionToken: "tok-signup",
-            directory: directory
+            directory: directory,
+            binder: binder
         )
         XCTAssertEqual(bound, "alice")
-        XCTAssertEqual(
-            directory.calls,
-            [.register(accountId: accountId, username: "@Alice", sessionToken: "tok-signup")]
-        )
+        XCTAssertEqual(directory.calls, [
+            .bind(handle: handle("alice"), sessionToken: "tok-signup"),
+            .register(accountId: accountId, username: "alice", sessionToken: "tok-signup"),
+        ])
+        XCTAssertEqual(handle("alice").count, 32)
     }
 
-    func testClaimTurnsAConflictIntoUsernameTakenWithTheCanonicalName() async {
+    func testAnAuthConflictIsTakenAndDiscoveryIsNeverAsked() async {
         let directory = FakeDirectory()
-        directory.registerOutcome = .failure(
-            DiscoveryClientError.http(status: 409, endpoint: "/discovery/register", body: "taken")
-        )
+        let binder = FakeBinder(log: directory)
+        binder.bindError = AuthClientError.http(
+            status: 409, endpoint: "/auth/login-handle", body: #"{"error":"handle-taken"}"#)
         do {
             _ = try await claimSignupUsername(
                 accountId: randomAccountId(),
                 username: "  @Alice ",
                 sessionToken: "tok-signup",
-                directory: directory
+                directory: directory,
+                binder: binder
             )
-            XCTFail("a taken username must not claim")
+            XCTFail("a taken handle must not claim")
         } catch let taken as UsernameTaken {
             XCTAssertEqual(taken, UsernameTaken(username: "alice"))
             XCTAssertEqual(taken.errorDescription, "The username @alice is already taken. Pick another.")
         } catch {
             XCTFail("expected UsernameTaken, got \(error)")
         }
+        XCTAssertEqual(directory.calls, [.bind(handle: handle("alice"), sessionToken: "tok-signup")])
     }
 
-    func testClaimPassesOtherDirectoryFailuresThrough() async {
+    func testADiscoveryConflictReleasesTheHandleAndIsTaken() async {
         let directory = FakeDirectory()
+        let binder = FakeBinder(log: directory)
+        directory.registerOutcome = .failure(
+            DiscoveryClientError.http(status: 409, endpoint: "/discovery/register", body: "taken")
+        )
+        let accountId = randomAccountId()
+        do {
+            _ = try await claimSignupUsername(
+                accountId: accountId,
+                username: "alice",
+                sessionToken: "tok-signup",
+                directory: directory,
+                binder: binder
+            )
+            XCTFail("a taken name must not claim")
+        } catch let taken as UsernameTaken {
+            XCTAssertEqual(taken, UsernameTaken(username: "alice"))
+        } catch {
+            XCTFail("expected UsernameTaken, got \(error)")
+        }
+        XCTAssertEqual(directory.calls, [
+            .bind(handle: handle("alice"), sessionToken: "tok-signup"),
+            .register(accountId: accountId, username: "alice", sessionToken: "tok-signup"),
+            .release(sessionToken: "tok-signup"),
+        ])
+    }
+
+    func testAnyOtherDiscoveryFailureReleasesTheHandleAndPassesThrough() async {
+        let directory = FakeDirectory()
+        let binder = FakeBinder(log: directory)
         directory.registerOutcome = .failure(
             DiscoveryClientError.http(status: 500, endpoint: "/discovery/register", body: "boom")
         )
@@ -267,7 +299,8 @@ final class UsernameDirectoryTests: XCTestCase {
                 accountId: randomAccountId(),
                 username: "alice",
                 sessionToken: "tok-signup",
-                directory: directory
+                directory: directory,
+                binder: binder
             )
             XCTFail("a failed claim must throw")
         } catch DiscoveryClientError.http(let status, _, _) {
@@ -275,6 +308,27 @@ final class UsernameDirectoryTests: XCTestCase {
         } catch {
             XCTFail("expected the directory error unchanged, got \(error)")
         }
+        XCTAssertEqual(directory.calls.last, .release(sessionToken: "tok-signup"))
+    }
+
+    func testANameThatFailsTheRuleClaimsNothing() async {
+        let directory = FakeDirectory()
+        let binder = FakeBinder(log: directory)
+        do {
+            _ = try await claimSignupUsername(
+                accountId: randomAccountId(),
+                username: "p\u{0430}vel",
+                sessionToken: "tok-signup",
+                directory: directory,
+                binder: binder
+            )
+            XCTFail("an invalid name must not claim")
+        } catch let violation as UsernameRuleViolation {
+            XCTAssertEqual(violation.reason, .invalidCharacters)
+        } catch {
+            XCTFail("expected a UsernameRuleViolation, got \(error)")
+        }
+        XCTAssertTrue(directory.calls.isEmpty)
     }
 
     // MARK: - Signup through the repository
@@ -303,6 +357,11 @@ final class UsernameDirectoryTests: XCTestCase {
             directory.calls,
             [.register(accountId: accountId, username: "alice", sessionToken: "tok-signup")],
             "nothing past the claim may run — in particular no bundle publish"
+        )
+        XCTAssertEqual(
+            StubAuthProtocol.requests,
+            ["PUT /auth/login-handle", "DELETE /auth/login-handle"],
+            "the handle is bound first and released when discovery refuses the name"
         )
         XCTAssertEqual(repo.state, .anon(cachedUsername: nil))
         XCTAssertNil(repo.identitySecrets)
@@ -333,8 +392,12 @@ final class UsernameDirectoryTests: XCTestCase {
             XCTAssertEqual(status, 503)
         }
 
+        XCTAssertEqual(StubAuthProtocol.requests.first, "PUT /auth/login-handle",
+                       "the handle is bound before anything else")
+        XCTAssertFalse(StubAuthProtocol.requests.contains("DELETE /auth/login-handle"),
+                       "a claim that succeeded keeps its handle")
         XCTAssertEqual(directory.calls, [
-            .register(accountId: accountId, username: "@Alice", sessionToken: "tok-signup"),
+            .register(accountId: accountId, username: "alice", sessionToken: "tok-signup"),
             .publish(
                 accountId: accountId,
                 signaturePubkey: expectedPubkey,
@@ -352,117 +415,25 @@ final class UsernameDirectoryTests: XCTestCase {
         XCTAssertEqual(store.load(), PersistedSession(accountIdB64: accountIdB64, username: "alice"))
     }
 
-    // MARK: - Login resolution (the pure step)
-
-    private let fakeEncode: (Data) -> String = { "enc:" + $0.map { String($0) }.joined(separator: ",") }
-
-    func testLoginWithAMatchingMarkerSkipsTheLookup() async throws {
-        var lookups = 0
-        let resolved = try await resolveLoginAccount(
-            cached: CachedAccount(accountIdB64: "CACHED", username: "alice"),
-            typedUsername: "@Alice",
-            lookup: { _ in
-                lookups += 1
-                return LookupResult(normalisedUsername: "alice", account: Data([1]))
-            },
-            encodeAccountId: fakeEncode
-        )
-        XCTAssertEqual(resolved, ResolvedLoginAccount(accountIdB64: "CACHED", username: "alice", fromCache: true))
-        XCTAssertEqual(lookups, 0)
-    }
-
-    func testLoginWithADifferentMarkerLooksTheUsernameUp() async throws {
-        let resolved = try await resolveLoginAccount(
-            cached: CachedAccount(accountIdB64: "CACHED", username: "alice"),
-            typedUsername: "bob",
-            lookup: { LookupResult(normalisedUsername: $0, account: Data([7, 8])) },
-            encodeAccountId: fakeEncode
-        )
-        XCTAssertEqual(resolved, ResolvedLoginAccount(accountIdB64: "enc:7,8", username: "bob", fromCache: false))
-    }
-
-    func testAnEmptyCanonicalUsernameNeverMatchesAGuestMarker() async {
-        do {
-            _ = try await resolveLoginAccount(
-                cached: CachedAccount(accountIdB64: "GUEST", username: ""),
-                typedUsername: "@",
-                lookup: { _ in XCTFail("no lookup for an empty name"); return LookupResult(normalisedUsername: "", account: nil) },
-                encodeAccountId: fakeEncode
-            )
-            XCTFail("an empty canonical username must be refused")
-        } catch AuthClientError.argument {
-            // expected
-        } catch {
-            XCTFail("expected an argument error, got \(error)")
-        }
-    }
-
-    // MARK: - Login through the repository
-
-    func testLoginOnADeviceWithNoMarkerResolvesTheUsernameThroughTheDirectory() async {
+    func testATakenHandleAtAuthAbortsSignupBeforeDiscovery() async throws {
         let directory = FakeDirectory()
         let accountId = randomAccountId()
-        directory.lookupOutcome = .success(LookupResult(normalisedUsername: "alice", account: accountId))
+        accountIdsToWipe.append(base64Encode(accountId))
         let store = makeSessionStore()
         let repo = makeRepository(sessionStore: store, directory: directory)
+        StubAuthProtocol.bindStatus = 409
+        let (result, _) = signupResult(accountId: accountId)
 
         do {
-            try await repo.login(username: "@Alice", password: Data("password".utf8))
-            XCTFail("the stubbed auth service refuses the login")
-        } catch AuthClientError.http(let status, let endpoint, _) {
-            XCTAssertEqual(status, 503)
-            XCTAssertEqual(endpoint, "/login/start")
-        } catch {
-            XCTFail("expected the auth service's refusal, got \(error)")
+            _ = try await repo.completeSignup(result: result, username: "alice")
+            XCTFail("a taken handle must fail signup")
+        } catch is UsernameTaken {
+            // expected
         }
-
-        XCTAssertEqual(directory.calls, [.lookup(username: "@Alice")])
-        XCTAssertEqual(
-            StubAuthProtocol.loginStartAccountIdB64, base64Encode(accountId),
-            "OPAQUE login must target the account the lookup resolved"
-        )
-        XCTAssertNil(store.load(), "no marker is written for a login that did not succeed")
-    }
-
-    func testLoginWithAMatchingMarkerDoesNotLookUp() async {
-        let directory = FakeDirectory()
-        let accountId = randomAccountId()
-        let store = makeSessionStore(
-            with: PersistedSession(accountIdB64: base64Encode(accountId), username: "alice")
-        )
-        let repo = makeRepository(sessionStore: store, directory: directory)
-
-        do {
-            try await repo.login(username: "alice", password: Data("password".utf8))
-            XCTFail("the stubbed auth service refuses the login")
-        } catch AuthClientError.http(let status, _, _) {
-            XCTAssertEqual(status, 503)
-        } catch {
-            XCTFail("expected the auth service's refusal, got \(error)")
-        }
-
-        XCTAssertEqual(directory.lookupCount, 0)
-        XCTAssertEqual(StubAuthProtocol.loginStartAccountIdB64, base64Encode(accountId))
-    }
-
-    func testAnUnknownUsernameOnAFreshDeviceFailsAsInvalidCredentialsWithoutContactingAuth() async {
-        let directory = FakeDirectory()
-        directory.lookupOutcome = .success(LookupResult(normalisedUsername: "nobody", account: nil))
-        let repo = makeRepository(sessionStore: makeSessionStore(), directory: directory)
-
-        do {
-            try await repo.login(username: "nobody", password: Data("password".utf8))
-            XCTFail("an unregistered username must not log in")
-        } catch AuthClientError.http(let status, _, let body) {
-            XCTAssertEqual(status, 401)
-            XCTAssertEqual(body, "invalid credentials")
-            XCTAssertNotEqual(body, "no account on this device — sign up first")
-        } catch {
-            XCTFail("expected invalid credentials, got \(error)")
-        }
-
-        XCTAssertEqual(directory.calls, [.lookup(username: "nobody")])
-        XCTAssertTrue(StubAuthProtocol.paths.isEmpty, "the auth service is never contacted")
+        XCTAssertTrue(directory.calls.isEmpty, "discovery is never asked")
+        XCTAssertEqual(StubAuthProtocol.requests, ["PUT /auth/login-handle"])
+        XCTAssertNil(store.load())
+        XCTAssertNil(repo.identitySecrets)
     }
 
     // MARK: - Sign-in bundle refresh plan

@@ -17,12 +17,10 @@ import Foundation
 /// bundle (upload + fetch) + KeyPackage (upload + fetch). The
 /// invite codec endpoints land with 1.14e6.
 ///
-/// Reuses ``PowProofPayload`` from `apps/ios/Lakko/Auth/Wire.swift`
-/// — the wire shape is byte-identical to what the auth service
-/// expects (it's the same Equix proof carried by every expensive
-/// endpoint). The **server** keeps its PoW challenge table separate
-/// (`services/discovery` has its own `/pow/challenge`); the JSON
-/// shape is identical so the Swift struct is shared.
+/// No body carries a proof of work since ADR-0054 S3: the anonymous routes
+/// (`/discovery/oprf`, `/discovery/channel/register`, the three consumes)
+/// spend an anonymous token in the `x-lakko-anon-token` header instead, and
+/// the bearer routes are counted per account server-side.
 
 // ----------------------------------------------------------------------------
 // /discovery/oprf  (services/discovery/src/oprf.rs)
@@ -30,13 +28,11 @@ import Foundation
 
 /// Body of `POST /discovery/oprf`.
 public struct OprfRequest: Codable, Equatable {
-    public let pow: PowProofPayload
     /// base64(BlindedElement<Ristretto255-SHA512>) — produced by
     /// `OprfBlinder.blind(username).blindedB64()`.
     public let blinded: String
 
-    public init(pow: PowProofPayload, blinded: String) {
-        self.pow = pow
+    public init(blinded: String) {
         self.blinded = blinded
     }
 }
@@ -57,21 +53,18 @@ public struct OprfResponse: Codable, Equatable {
 
 /// Body of `POST /discovery/register`.
 public struct RegisterRequest: Codable, Equatable {
-    public let pow: PowProofPayload
     /// base64(account_id) — raw 16 bytes.
     public let accountId: String
     /// base64(VOPRF output) — exactly 64 bytes, the OPRF hash the
     /// client just computed via `blinder.finalize(evaluated:)`.
     public let oprfHash: String
 
-    public init(pow: PowProofPayload, accountId: String, oprfHash: String) {
-        self.pow = pow
+    public init(accountId: String, oprfHash: String) {
         self.accountId = accountId
         self.oprfHash = oprfHash
     }
 
     enum CodingKeys: String, CodingKey {
-        case pow
         case accountId = "account_id"
         case oprfHash = "oprf_hash"
     }
@@ -95,17 +88,14 @@ public struct RegisterResponse: Codable, Equatable {
 
 /// Body of `POST /discovery/lookup`.
 public struct LookupRequest: Codable, Equatable {
-    public let pow: PowProofPayload
     /// Same shape as ``RegisterRequest/oprfHash``.
     public let oprfHash: String
 
-    public init(pow: PowProofPayload, oprfHash: String) {
-        self.pow = pow
+    public init(oprfHash: String) {
         self.oprfHash = oprfHash
     }
 
     enum CodingKeys: String, CodingKey {
-        case pow
         case oprfHash = "oprf_hash"
     }
 }
@@ -132,7 +122,6 @@ public struct LookupResponse: Codable, Equatable {
 
 /// Body of `POST /discovery/identity`.
 public struct IdentityUploadRequest: Codable, Equatable {
-    public let pow: PowProofPayload
     public let accountId: String
     /// base64(Ed25519 public key) — 32 bytes after decode.
     public let signaturePubkey: String
@@ -159,7 +148,6 @@ public struct IdentityUploadRequest: Codable, Equatable {
     public let genesisAttest: String?
 
     public init(
-        pow: PowProofPayload,
         accountId: String,
         signaturePubkey: String,
         x25519Pubkey: String,
@@ -167,7 +155,6 @@ public struct IdentityUploadRequest: Codable, Equatable {
         leafAuth: String? = nil,
         genesisAttest: String? = nil
     ) {
-        self.pow = pow
         self.accountId = accountId
         self.signaturePubkey = signaturePubkey
         self.x25519Pubkey = x25519Pubkey
@@ -177,7 +164,6 @@ public struct IdentityUploadRequest: Codable, Equatable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case pow
         case accountId = "account_id"
         case signaturePubkey = "signature_pubkey"
         case x25519Pubkey = "x25519_pubkey"
@@ -229,7 +215,6 @@ public struct IdentityFetchResponse: Codable, Equatable {
 
 /// Body of `POST /discovery/keypackage`.
 public struct KeyPackageUploadRequest: Codable, Equatable {
-    public let pow: PowProofPayload
     public let accountId: String
     /// ADR-0050 — base64 of the device leaf's 32-byte Ed25519 signature key.
     /// Discovery keeps one KeyPackage row per `(account_id, device_id)`.
@@ -239,15 +224,13 @@ public struct KeyPackageUploadRequest: Codable, Equatable {
     /// handler.
     public let keypackage: String
 
-    public init(pow: PowProofPayload, accountId: String, deviceId: String, keypackage: String) {
-        self.pow = pow
+    public init(accountId: String, deviceId: String, keypackage: String) {
         self.accountId = accountId
         self.deviceId = deviceId
         self.keypackage = keypackage
     }
 
     enum CodingKeys: String, CodingKey {
-        case pow
         case accountId = "account_id"
         case deviceId = "device_id"
         case keypackage
@@ -300,15 +283,13 @@ public struct KeyPackageFetchResponse: Codable, Equatable {
 
 /// Body of `POST /discovery/invite`.
 public struct InviteUploadRequest: Codable, Equatable {
-    public let pow: PowProofPayload
     /// Standard-alphabet base64 of the `composeInviteCapability(...)`
     /// output. Server caps decoded size at 2048 bytes (mirrored
     /// client-side in ``DiscoveryClient/uploadInvite(capabilityBytes:)``
     /// so a misbehaving caller fails fast).
     public let capability: String
 
-    public init(pow: PowProofPayload, capability: String) {
-        self.pow = pow
+    public init(capability: String) {
         self.capability = capability
     }
 }
@@ -348,7 +329,6 @@ public struct InviteFetchResponse: Codable, Equatable {
 /// not an access control — the security boundary is the admin approval gate
 /// (ADR-0027). The response reuses ``InviteUploadResponse`` (`blob_id`).
 public struct GroupInviteUploadRequest: Codable, Equatable {
-    public let pow: PowProofPayload
     /// Standard-alphabet base64 of the `composeGroupInviteCapability(...)`
     /// output. Server runs `decode_and_verify` at ingress + caps decoded size
     /// at 512 bytes.
@@ -357,14 +337,12 @@ public struct GroupInviteUploadRequest: Codable, Equatable {
     /// other N = at most N consumes. NOT part of the signed capability.
     public let maxUses: UInt32
 
-    public init(pow: PowProofPayload, capability: String, maxUses: UInt32) {
-        self.pow = pow
+    public init(capability: String, maxUses: UInt32) {
         self.capability = capability
         self.maxUses = maxUses
     }
 
     enum CodingKeys: String, CodingKey {
-        case pow
         case capability
         case maxUses = "max_uses"
     }
@@ -373,18 +351,15 @@ public struct GroupInviteUploadRequest: Codable, Equatable {
 /// Body of `POST /discovery/invite/{blob_id_b64url}/consume`
 /// (Phase 1.18d3b mandatory shape).
 public struct InviteConsumeRequest: Codable, Equatable {
-    public let pow: PowProofPayload
     /// Standard-alphabet base64 of the 32-byte joiner-tag from
     /// `computeJoinerInviteTag`.
     public let joinerTag: String
 
-    public init(pow: PowProofPayload, joinerTag: String) {
-        self.pow = pow
+    public init(joinerTag: String) {
         self.joinerTag = joinerTag
     }
 
     enum CodingKeys: String, CodingKey {
-        case pow
         case joinerTag = "joiner_tag"
     }
 }
@@ -544,20 +519,17 @@ public struct InviteOwnerListResponse: Codable, Equatable {
 /// first-served via a UNIQUE on `oprf_hash`; a repeat of the same hash
 /// with a different channel id is 409 Conflict.
 public struct ChannelRegisterRequest: Codable, Equatable {
-    public let pow: PowProofPayload
     /// base64(VOPRF output) — exactly 64 bytes, from `blinder.finalize`.
     public let oprfHash: String
     /// base64(channel_id) — raw 16 bytes (ADR-0010 §"Wire surfaces").
     public let channelId: String
 
-    public init(pow: PowProofPayload, oprfHash: String, channelId: String) {
-        self.pow = pow
+    public init(oprfHash: String, channelId: String) {
         self.oprfHash = oprfHash
         self.channelId = channelId
     }
 
     enum CodingKeys: String, CodingKey {
-        case pow
         case oprfHash = "oprf_hash"
         case channelId = "channel_id"
     }
@@ -578,17 +550,14 @@ public struct ChannelRegisterResponse: Codable, Equatable {
 /// Body of `POST /discovery/channel/lookup`. Resolves an OPRF-hashed
 /// `@channelname` to its `channel_id`. Exact-match only.
 public struct ChannelLookupRequest: Codable, Equatable {
-    public let pow: PowProofPayload
     /// Same shape as ``ChannelRegisterRequest/oprfHash``.
     public let oprfHash: String
 
-    public init(pow: PowProofPayload, oprfHash: String) {
-        self.pow = pow
+    public init(oprfHash: String) {
         self.oprfHash = oprfHash
     }
 
     enum CodingKeys: String, CodingKey {
-        case pow
         case oprfHash = "oprf_hash"
     }
 }

@@ -33,6 +33,23 @@
 //! anything they couldn't do by knowing the public account_id or
 //! blob_id anyway.
 //!
+//! ## ADR-0054 S3 — anonymous tokens instead of proof of work
+//!
+//! No route here asks for a proof of work any more. The anonymous
+//! actions that were rationed by one spend an anonymous token, carried
+//! as `x-lakko-anon-token` and checked by `lakko_anon_token_server`'s
+//! gate before the handler runs:
+//!
+//! - `POST /discovery/oprf` — context `discovery-lookup` (the OPRF
+//!   evaluation is the enumeration step; `lookup` and `channel/lookup`
+//!   follow it and keep only the per-IP limiter);
+//! - `POST /discovery/channel/register` — context `discovery-register`;
+//! - the three `POST .../{blob_id}/consume` routes — context
+//!   `invite-consume`.
+//!
+//! The session-gated writes carry no proof of work either; they are
+//! counted per account (`rate_limit::write_middleware`).
+//!
 //! ## Configuration
 //!
 //! Loaded from `/etc/lakko/lakko.env` via systemd `EnvironmentFile=`
@@ -42,8 +59,12 @@
 //! - `LAKKO_DISCOVERY_DATABASE_URL` (or `DATABASE_URL` fallback) —
 //!   sqlx-style MariaDB DSN; the database must be exclusive to this
 //!   service per the per-service DB isolation rule.
-//! - `LAKKO_DISCOVERY_POW_EFFORT_BITS` — PoW difficulty (default 8;
-//!   0 in tests).
+//! - `LAKKO_ANON_TOKEN_MASTER_SECRET` — 64 hex characters, the SAME value
+//!   `services/auth` issues under. Unset: every token route answers
+//!   503 `anon-tokens-disabled` (loud startup warning). Malformed:
+//!   startup fails.
+//! - `LAKKO_ANON_TOKEN_WINDOW_SECS` — the token epoch window (default
+//!   86400); must match auth.
 //! - `LAKKO_SESSION_TOKEN_SECRET` — base64-encoded HMAC-SHA256 key
 //!   shared with `services/auth`. **Required** — middleware
 //!   fails fast at startup if missing or shorter than 32 bytes
@@ -68,7 +89,8 @@
 //!   requests without a valid session token on the OPRF / lookup endpoints
 //!   (default 60 / 10).
 //! - `LAKKO_DISCOVERY_ACCOUNT_RATE_LIMIT_PER_MINUTE` / `_BURST` — per-account
-//!   bucket for requests with one (default 60 / 10).
+//!   bucket for requests with one (default 60 / 10); the session-gated writes
+//!   get a separate bucket of the same size.
 //! - `LAKKO_DISCOVERY_AUTHENTICATED_IP_RATE_LIMIT_PER_MINUTE` / `_BURST` —
 //!   per-IP ceiling for requests with one (default 600 / 100).
 //! - `RUST_LOG` — `tracing-subscriber` env-filter spec.
@@ -78,8 +100,7 @@
 //! - `GET    /health`              — liveness, 200 OK
 //! - `GET    /ready`               — readiness (DB ping), 200 / 503
 //! - `GET    /version`
-//! - `POST   /pow/challenge`       — Equix PoW challenge (1.1e-style)
-//! - `POST   /discovery/oprf`      — apply server static `K` to a blinded element
+//! - `POST   /discovery/oprf`      — apply server static `K` to a blinded element (token)
 //! - `POST   /discovery/register`  — bind OPRF-hashed username to account_id
 //! - `POST   /discovery/lookup`    — resolve OPRF-hashed username → account_id
 //! - `POST   /discovery/identity`           — upsert public identity bundle (Phase 1.16d3a)
@@ -89,15 +110,17 @@
 //! - `GET    /discovery/keypackage/{acct}`  — fetch every device's KeyPackage (ADR-0050)
 //! - `POST   /discovery/invite`             — upload InviteCapability blob (Phase 1.18d1)
 //! - `GET    /discovery/invite/{blob_id}`   — fetch InviteCapability blob (Phase 1.18d1)
-//! - `POST   /discovery/invite/{blob_id}/consume` — atomic max_uses bump (Phase 1.18d2a)
+//! - `POST   /discovery/invite/{blob_id}/consume` — atomic max_uses bump (Phase 1.18d2a, token)
 //! - `DELETE /discovery/invite/{blob_id}`           — owner-signed revocation (Phase 1.18d2b)
 //! - `POST   /discovery/call-invite`             — upload CallInviteCapability blob (Phase 3c3-server)
 //! - `GET    /discovery/call-invite/{blob_id}`   — fetch CallInviteCapability blob (Phase 3c3-server)
-//! - `POST   /discovery/call-invite/{blob_id}/consume` — atomic max_uses bump (Phase 3c3-server)
+//! - `POST   /discovery/call-invite/{blob_id}/consume` — atomic max_uses bump (Phase 3c3-server, token)
 //! - `DELETE /discovery/call-invite/{blob_id}`         — owner-signed revocation (Phase 3c3-revoke)
 //! - `POST   /discovery/group-invite`             — upload GroupInviteCapability blob (ADR-0028, G-3)
 //! - `GET    /discovery/group-invite/{blob_id}`   — fetch GroupInviteCapability blob (ADR-0028, G-3)
-//! - `POST   /discovery/group-invite/{blob_id}/consume` — atomic per-joiner consume (ADR-0028, G-3)
+//! - `POST   /discovery/group-invite/{blob_id}/consume` — atomic per-joiner consume (ADR-0028, G-3, token)
+//! - `POST   /discovery/channel/register`     — bind an OPRF-hashed channel name (G4-5, token)
+//! - `POST   /discovery/channel/lookup`       — resolve an OPRF-hashed channel name (G4-5)
 
 #![forbid(unsafe_code)]
 
@@ -111,7 +134,6 @@ mod invite;
 mod keypackage;
 mod ledger_id;
 mod oprf;
-mod pow;
 mod rate_limit;
 mod registry;
 mod transparency_log;
@@ -126,6 +148,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
 use axum::routing::{get, post};
 use axum::Router;
+use lakko_anon_token::TokenContext;
+use lakko_anon_token_server::{require_token, AnonTokenServerConfig, TokenVerifier};
 use lakko_auth_token::TokenSecret;
 use serde_json::json;
 use sqlx::mysql::MySqlPoolOptions;
@@ -142,7 +166,7 @@ const DEFAULT_BIND: &str = "127.0.0.1:8084";
 const MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// Per-request body limit. Discovery endpoints carry small JSON
-/// (PoW proof + a couple of base64 fields) so 64 KB is plenty.
+/// (a couple of base64 fields) so 64 KB is plenty.
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
 /// Shared application state.
@@ -160,7 +184,7 @@ pub(crate) struct AppState {
     /// G-discovery-ratelimit: token-bucket limits for the
     /// anonymous OPRF + lookup endpoints — per account plus a
     /// per-IP ceiling with a session token, per IP without one.
-    /// Defense in depth on top of the existing PoW gate.
+    /// Plus the per-account bucket of the session-gated writes.
     pub(crate) rate_limits: Arc<rate_limit::DiscoveryLimits>,
     /// ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (ii))
     /// — the per-account cool-down (seconds) between UNPROVEN
@@ -174,6 +198,10 @@ pub(crate) struct AppState {
     /// entirely). A best-effort POST on every identity-key CHANGE; never
     /// fails the discovery upload (decision E, fail-open).
     pub(crate) transparency: Option<transparency_log::TransparencyClient>,
+    /// ADR-0054 S3 — the anonymous-token verifier and this service's
+    /// spent-set (`anon_token_spent`). Dormant (every token route 503)
+    /// when `LAKKO_ANON_TOKEN_MASTER_SECRET` is unset.
+    pub(crate) anon_tokens: TokenVerifier,
 }
 
 /// G-discovery-ratelimit: token buckets on the anonymous OPRF / lookup
@@ -294,6 +322,14 @@ async fn main() -> Result<()> {
     let session_token_secret = Arc::new(session_token_secret);
     let rate_limits = Arc::new(rate_limits_from_env(Arc::clone(&session_token_secret)));
 
+    // ADR-0054 S3 — anonymous tokens. A malformed secret or window refuses
+    // startup; an unset secret leaves the token routes answering 503.
+    let anon_tokens = TokenVerifier::new(
+        pool.clone(),
+        AnonTokenServerConfig::from_env().context("anonymous-token configuration")?,
+    );
+    anon_tokens.log_startup("discovery");
+
     let state = AppState {
         db: pool.clone(),
         oprf: Arc::new(oprf_server),
@@ -301,9 +337,10 @@ async fn main() -> Result<()> {
         rate_limits: Arc::clone(&rate_limits),
         fresh_identity_cooldown_secs,
         transparency,
+        anon_tokens,
     };
 
-    let _pow_pruner = pow::spawn_pruner(pool.clone());
+    let _spent_pruner = state.anon_tokens.spawn_pruner();
     // Phase 1.18d2c — hourly sweep of expired invite blobs.
     // The `idx_expiry` index from migration 0004 keeps the
     // recurring DELETE cheap; `expiry_ms = 0` (NEVER_EXPIRES)
@@ -352,21 +389,32 @@ async fn main() -> Result<()> {
 /// Build the public router. Extracted so tests can drive it directly
 /// without binding a TCP listener.
 ///
-/// Phase 1.5b: protected routes (state-mutating writes that bind
-/// to a specific account_id) sit behind the `require_session`
-/// middleware. Read paths + `/pow/challenge` + `/discovery/oprf`
-/// (which takes no account_id and is cheap-by-PoW) stay open.
-/// `invite::consume` is also open — anyone holding the URL can
-/// already exercise the consume counter, and the joiner doesn't
-/// necessarily have an auth token yet (a fresh-install joiner
-/// taps a Universal Link before they've signed up).
+/// Three kinds of route:
+///
+/// - **protected** — state-mutating writes bound to an account sit behind
+///   the `require_session` middleware and the per-account write limiter;
+/// - **rate-limited** — the anonymous enumeration vectors, behind the per-IP
+///   bucket; of these the OPRF evaluation and the three invite consumes
+///   also spend an anonymous token (ADR-0054 S3);
+/// - **open** — by-id reads and health, plus the channel-name registration,
+///   which spends a `discovery-register` token.
+///
+/// The consumes stay unauthenticated by design: a fresh-install joiner taps
+/// a link before it has a session - but it must hold a token, so it signs
+/// up first.
 pub(crate) fn build_app(state: AppState) -> Router {
     use axum::middleware;
+
+    let gate = |context: TokenContext| {
+        middleware::from_fn_with_state(state.anon_tokens.gate(context), require_token)
+    };
 
     // Protected routes — every write that binds to a specific
     // account_id requires a valid session token. The handler is
     // additionally responsible for checking the body's account_id
-    // matches the token's (anti-impersonation).
+    // matches the token's (anti-impersonation). Layer order: the
+    // session layer is added last so it runs first and hands the
+    // write limiter the verified account.
     let protected = Router::new()
         .route("/discovery/register", post(registry::register))
         // A3 (GDPR erasure) — purge this account's discovery footprint
@@ -433,20 +481,47 @@ pub(crate) fn build_app(state: AppState) -> Router {
             post(invite::list_by_owner),
         )
         .route_layer(middleware::from_fn_with_state(
+            Arc::clone(&state.rate_limits),
+            rate_limit::write_middleware,
+        ))
+        .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_session,
         ));
 
-    // G-discovery-ratelimit — per-IP token bucket on the
-    // enumeration-vector endpoints. PoW remains the
-    // primary work proof; rate limiting is defense in
-    // depth that caps per-IP server CPU regardless of
-    // how many PoW tokens an attacker mints.
-    let rate_limited = Router::new()
+    // ADR-0054 S3 — the OPRF evaluation spends a `discovery-lookup` token.
+    let oprf = Router::new()
         .route("/discovery/oprf", post(oprf::evaluate))
+        .route_layer(gate(TokenContext::DiscoveryLookup));
+
+    // ADR-0054 S3 — the three ledgers' consumes spend an `invite-consume`
+    // token. The dedup tag in the body stays server-blind.
+    let consumes = Router::new()
+        .route(
+            "/discovery/invite/{blob_id}/consume",
+            post(invite::consume),
+        )
+        // Phase 3c3-server — call-invite consume.
+        .route(
+            "/discovery/call-invite/{blob_id}/consume",
+            post(call_invite::consume),
+        )
+        // ADR-0028 (G-3) — group join-ticket consume.
+        .route(
+            "/discovery/group-invite/{blob_id}/consume",
+            post(group_invite::consume),
+        )
+        .route_layer(gate(TokenContext::InviteConsume));
+
+    // G-discovery-ratelimit — per-IP token bucket on the enumeration-vector
+    // endpoints, the outer layer: an address over its bucket is refused
+    // before a token is spent or any OPRF compute runs. `lookup` and
+    // `channel/lookup` carry no token of their own (their enumeration step
+    // is the OPRF evaluation above).
+    let rate_limited = Router::new()
         .route("/discovery/lookup", post(registry::lookup))
         .route("/discovery/channel/lookup", post(channel_names::lookup))
-        // The three invite ledgers' open fetch + consume routes. Since the
+        // The three invite ledgers' open fetch routes. Since the
         // short-link amendment of ADR-0028 (2026-09-27) a ledger id is a
         // random 6-byte handle (2^48), so guessing live ids is an
         // enumeration vector and the per-IP bucket is what bounds it. All
@@ -454,69 +529,42 @@ pub(crate) fn build_app(state: AppState) -> Router {
         // fresh install may not be signed up yet.
         .route("/discovery/invite/{blob_id}", get(invite::fetch))
         .route(
-            "/discovery/invite/{blob_id}/consume",
-            post(invite::consume),
-        )
-        // Phase 3c3-server — call-invite fetch + consume.
-        // Anonymous mirror of the contact-invite open routes
-        // above; joiner needs to access the capability before
-        // they have an account-bound session.
-        .route(
             "/discovery/call-invite/{blob_id}",
             get(call_invite::fetch),
         )
         .route(
-            "/discovery/call-invite/{blob_id}/consume",
-            post(call_invite::consume),
-        )
-        // ADR-0028 (G-3) — group join-ticket fetch + consume.
-        // Anonymous mirror of the call-invite open routes above; a
-        // joiner needs the capability before they have an
-        // account-bound session, and the consume dedup tag is
-        // self-authenticating (PoW-gated, server-blind).
-        .route(
             "/discovery/group-invite/{blob_id}",
             get(group_invite::fetch),
         )
-        .route(
-            "/discovery/group-invite/{blob_id}/consume",
-            post(group_invite::consume),
-        )
+        .merge(oprf)
+        .merge(consumes)
         .route_layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state.rate_limits),
             rate_limit::middleware,
         ));
 
+    // G4-5 — channel @name registration: anonymous, spends a
+    // `discovery-register` token (ADR-0054 S3). UNIQUE(oprf_hash) gates
+    // squatting; the token rations it per account.
+    let channel_register = Router::new()
+        .route("/discovery/channel/register", post(channel_names::register))
+        .route_layer(gate(TokenContext::DiscoveryRegister));
+
     // Open routes — no auth required, no rate limit.
-    // Endpoints excluded from the limiter above:
     //   * /health, /ready, /version — no compute.
-    //   * /pow/challenge — itself the primary anti-spam
-    //     layer; rate-limiting it would interfere with
-    //     legitimate retries on poor networks.
     //   * /discovery/identity/{id} + keypackage/{id} —
     //     by-id reads, no enumeration vector (the id is
     //     a 32-byte pseudonym).
-    //   * /discovery/channel/register — write that's
-    //     UNIQUE-key-gated server-side.
     let open = Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/version", get(version))
-        .route("/pow/challenge", post(pow::issue_challenge))
         .route(
             "/discovery/identity/{account_id}",
             get(identity_bundle::fetch),
         )
         .route("/discovery/keypackage/{account_id}", get(keypackage::fetch))
-        // G4-5 — channel @name discovery via OPRF.
-        // Register stays on the open path (no
-        // enumeration vector — UNIQUE(oprf_hash) gates
-        // anti-squatting). Lookup moved to `rate_limited`
-        // above.
-        .route(
-            "/discovery/channel/register",
-            post(channel_names::register),
-        );
+        .merge(channel_register);
 
     open.merge(rate_limited)
         .merge(protected)
@@ -689,6 +737,9 @@ async fn shutdown_signal() {
 }
 
 #[cfg(test)]
+mod anon_token_route_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::Body;
@@ -717,10 +768,12 @@ mod tests {
             per_minute: 60.0,
             burst: 3.0,
         };
+        let db = MySqlPoolOptions::new()
+            .connect_lazy("mysql://nobody:nothing@127.0.0.1:1/none")
+            .unwrap();
         let state = AppState {
-            db: MySqlPoolOptions::new()
-                .connect_lazy("mysql://nobody:nothing@127.0.0.1:1/none")
-                .unwrap(),
+            anon_tokens: TokenVerifier::new(db.clone(), None),
+            db,
             oprf: Arc::new(
                 oprf::LakkoOprfServer::new_from_seed(&[1u8; 32], b"lakko/oprf/v1").unwrap(),
             ),
@@ -749,9 +802,7 @@ mod tests {
                     .uri(uri)
                     .header("x-real-ip", ip)
                     .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"pow":{"challenge":"","solution":""},"joiner_tag":""}"#,
-                    ))
+                    .body(Body::from(r#"{"joiner_tag":""}"#))
                     .unwrap()
             };
             // A fresh address per route so the buckets do not interfere.

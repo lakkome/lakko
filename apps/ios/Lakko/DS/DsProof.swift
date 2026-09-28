@@ -255,44 +255,26 @@ public func dsHealRegistration(
 /// proposal. No journal read. Each step injected, so the sequence is pinned by
 /// a test with fakes.
 ///
-/// A knock POST refused with `401` means its proof of work expired while it
-/// was being solved (a challenge lives 300 s and a phone may take minutes at
-/// a higher effort): the knock is retried ONCE with a freshly fetched and
-/// solved challenge before the failure surfaces.
+/// Each knock (the probe included) spends one `ds-knock` anonymous token
+/// (ADR-0054 S3); ``DsClient/knock(groupId:payloads:)`` retries once with a
+/// second token on a token refusal, so nothing is retried here.
 public struct DsKnockJoin {
-    /// A fresh PoW proof for one knock (challenge + solve).
-    public var solvePow: () async throws -> PowProofPayload
     /// `POST /ds/group/<hex>/knock`; returns the epoch the response carries.
-    public var knock: (PowProofPayload, [Data]) async throws -> UInt64?
+    public var knock: ([Data]) async throws -> UInt64?
     /// Build the external-join proposal for an epoch.
     public var createProposal: (UInt64) throws -> Data
     /// The join attribution, or `nil` when it could not be composed (it is
     /// advisory; the proposal goes regardless).
     public var attribution: () -> Data?
-    /// Whether a knock failure is an expired proof of work.
-    public var isPowExpired: (Error) -> Bool
 
     public init(
-        solvePow: @escaping () async throws -> PowProofPayload,
-        knock: @escaping (PowProofPayload, [Data]) async throws -> UInt64?,
+        knock: @escaping ([Data]) async throws -> UInt64?,
         createProposal: @escaping (UInt64) throws -> Data,
-        attribution: @escaping () -> Data?,
-        isPowExpired: @escaping (Error) -> Bool = DsKnockJoin.isUnauthorized
+        attribution: @escaping () -> Data?
     ) {
-        self.solvePow = solvePow
         self.knock = knock
         self.createProposal = createProposal
         self.attribution = attribution
-        self.isPowExpired = isPowExpired
-    }
-
-    /// A knock carries no proof header, so the only `401` it can get is the
-    /// PoW verifier's (an expired or already-used challenge).
-    public static func isUnauthorized(_ error: Error) -> Bool {
-        if let ds = error as? DsClientError, case .http(let status, _, _) = ds {
-            return status == 401
-        }
-        return false
     }
 
     /// Run the sequence. Returns the epoch the proposal targets.
@@ -302,26 +284,15 @@ public struct DsKnockJoin {
     /// by every member in silence and the joiner would wait forever.
     @discardableResult
     public func run() async throws -> UInt64 {
-        guard let epoch = try await knockPaying([]) else {
+        guard let epoch = try await knock([]) else {
             throw DsKnockJoinError.groupNotClaimed
         }
         let proposal = try createProposal(epoch)
         var rows: [Data] = []
         if let attribution = attribution() { rows.append(attribution) }
         rows.append(proposal)
-        _ = try await knockPaying(rows)
+        _ = try await knock(rows)
         return epoch
-    }
-
-    /// One knock with its own proof of work, retried once on an expired one.
-    private func knockPaying(_ payloads: [Data]) async throws -> UInt64? {
-        let pow = try await solvePow()
-        do {
-            return try await knock(pow, payloads)
-        } catch let error where isPowExpired(error) {
-            let fresh = try await solvePow()
-            return try await knock(fresh, payloads)
-        }
     }
 }
 
@@ -411,6 +382,9 @@ public enum JoinRequestFailure: Equatable {
     /// The discovery ledger answered `429` on the invite fetch or consume:
     /// the link may be fine, the server asked this network to slow down.
     case tryLater
+    /// ADR-0054 S3 — today's allowance of link consumes / knocks is used up
+    /// (`anon-token-quota-exhausted`); nothing to retry until tomorrow.
+    case allowanceUsed
     /// Anything else.
     case generic
 
@@ -422,6 +396,8 @@ public enum JoinRequestFailure: Equatable {
             return DsClockSkew.copy
         case .tryLater:
             return inviteRateLimitedMessage
+        case .allowanceUsed:
+            return AnonTokenCopy.allowanceUsed
         case .generic:
             return "Your request didn't go through. Check your connection and try again."
         }
@@ -438,6 +414,7 @@ public enum JoinRequestFailure: Equatable {
         }
         if DsClientError.clockSkewCopy(in: error) != nil { return .clockSkew }
         if DiscoveryClientError.isRateLimited(error) { return .tryLater }
+        if AnonTokenUnavailable.isQuotaExhausted(error) { return .allowanceUsed }
         return .generic
     }
 }

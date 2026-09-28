@@ -12,10 +12,13 @@
 //! on Confirm runs the unchanged ADR-0018 add-device flow against the
 //! payload it fetched.
 //!
-//! - **`POST /device/request`** — anonymous + PoW. Stores the payload for
-//!   the account (one open request per account; a newer one replaces the
-//!   older) and returns a random `request_id`.
-//! - **`POST /device/request/status`** — anonymous, no PoW (the id is a
+//! - **`POST /device/request`** — anonymous. Charged to the target
+//!   account's prompt counter and the per-address bucket (ADR-0054 S4, `429`
+//!   `device-request-limited`: every request puts a prompt on that account's
+//!   signed-in devices, and a newer one replaces the older). Stores the
+//!   payload for the account (one open request per account) and returns a
+//!   random `request_id`.
+//! - **`POST /device/request/status`** — anonymous, unlimited (the id is a
 //!   128-bit secret; the answer is one bit). Lets the fresh device notice
 //!   a decline.
 //! - **`GET /device/requests`** — bearer. The pending request for the
@@ -57,7 +60,6 @@ const REQUEST_TTL_SECS: i64 = 600;
 /// `POST /device/request` body.
 #[derive(Deserialize)]
 pub(crate) struct CreateReq {
-    pub pow: crate::pow::PowProof,
     pub account_id_b64: String,
     /// Standard base64 of the pairing payload bytes.
     pub pairing_payload_b64: String,
@@ -102,7 +104,6 @@ pub(crate) async fn create(
     State(state): State<AppState>,
     Json(req): Json<CreateReq>,
 ) -> Result<Json<CreateRes>, ApiError> {
-    crate::pow::verify_proof(&state.db, &req.pow).await?;
     let account_id = decode_account_id(&req.account_id_b64)?;
     let payload = STANDARD
         .decode(&req.pairing_payload_b64)
@@ -112,6 +113,15 @@ pub(crate) async fn create(
             "pairing payload has an impossible length",
         ));
     }
+    // Counted against the named account before anything is looked up, so an
+    // unknown account trips the limit exactly like a known one.
+    crate::limits::charge_name(
+        &state.db,
+        &state.limits,
+        crate::limits::Scope::DeviceRequestTarget,
+        &account_id,
+    )
+    .await?;
     let mut request_id = [0u8; REQUEST_ID_LEN];
     OsRng.fill_bytes(&mut request_id);
 
@@ -283,41 +293,6 @@ mod device_request_e2e_tests {
         (status, bytes)
     }
 
-    async fn fresh_pow(state: &crate::AppState) -> serde_json::Value {
-        let (st, body) = send(
-            state,
-            Request::builder()
-                .method(Method::POST)
-                .uri("/pow/challenge")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(st, StatusCode::OK);
-        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let seed_b64 = v["seed"].as_str().unwrap().to_string();
-        let seed = STANDARD.decode(&seed_b64).unwrap();
-        let mut nonce = [0u8; 16];
-        loop {
-            let mut challenge = Vec::with_capacity(32);
-            challenge.extend_from_slice(&seed);
-            challenge.extend_from_slice(&nonce);
-            if let Ok(eq) = equix::EquiX::new(&challenge) {
-                if let Some(sol) = eq.solve().first() {
-                    return serde_json::json!({
-                        "seed": seed_b64,
-                        "nonce": STANDARD.encode(nonce),
-                        "solution": STANDARD.encode(sol.to_bytes()),
-                    });
-                }
-            }
-            nonce[0] = nonce[0].wrapping_add(1);
-            if nonce[0] == 0 {
-                nonce[1] = nonce[1].wrapping_add(1);
-            }
-        }
-    }
-
     async fn json_req(
         state: &crate::AppState,
         method: Method,
@@ -346,7 +321,6 @@ mod device_request_e2e_tests {
             eprintln!("skipping device_request_round_trip: LAKKO_AUTH_TEST_DATABASE_URL unset");
             return;
         };
-        std::env::set_var("LAKKO_POW_EFFORT_BITS", "0");
         let pool = MySqlPoolOptions::new()
             .max_connections(4)
             .connect(&url)
@@ -382,6 +356,13 @@ mod device_request_e2e_tests {
             throttle: crate::throttle::ThrottleConfig::disabled(),
             backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
             anon_tokens: None,
+            // Room for every post below on the one shared test address; the
+            // per-target counter is what this test exercises.
+            handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
+            limits: Arc::new(crate::limits::Limits::defaults().with_ip_window(
+                crate::limits::Category::DeviceRequest,
+                crate::limits::Window::new(100, 3600),
+            )),
         };
         let now_ms = i64::try_from(
             SystemTime::now()
@@ -410,14 +391,12 @@ mod device_request_e2e_tests {
 
         // Post a request.
         let payload = vec![0x5Au8; 300];
-        let pow = fresh_pow(&state).await;
         let (st, body) = json_req(
             &state,
             Method::POST,
             "/device/request",
             None,
             Some(serde_json::json!({
-                "pow": pow,
                 "account_id_b64": account_id_b64,
                 "pairing_payload_b64": STANDARD.encode(&payload),
             })),
@@ -434,14 +413,12 @@ mod device_request_e2e_tests {
 
         // An unknown account answers identically (200 + an id) and stores nothing.
         let ghost = URL_SAFE_NO_PAD.encode(Uuid::now_v7().as_bytes());
-        let pow = fresh_pow(&state).await;
         let (st, body) = json_req(
             &state,
             Method::POST,
             "/device/request",
             None,
             Some(serde_json::json!({
-                "pow": pow,
                 "account_id_b64": ghost,
                 "pairing_payload_b64": STANDARD.encode(&payload),
             })),
@@ -524,6 +501,49 @@ mod device_request_e2e_tests {
         assert_eq!(st, StatusCode::OK);
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["pending"], false);
+
+        // Per-target limit: the account and the ghost have one post each in
+        // the window; both trip at the same count with the same 429 body.
+        let limit = state
+            .limits
+            .name_window(crate::limits::Scope::DeviceRequestTarget)
+            .limit;
+        let post = |id: String| {
+            let state = state.clone();
+            let payload = payload.clone();
+            async move {
+                json_req(
+                    &state,
+                    Method::POST,
+                    "/device/request",
+                    None,
+                    Some(serde_json::json!({
+                        "account_id_b64": id,
+                        "pairing_payload_b64": STANDARD.encode(&payload),
+                    })),
+                )
+                .await
+            }
+        };
+        for id in [&account_id_b64, &ghost] {
+            for _ in 1..limit {
+                let (st, _) = post(id.clone()).await;
+                assert_eq!(st, StatusCode::OK, "under the limit");
+            }
+        }
+        let mut refusals = Vec::new();
+        for id in [&account_id_b64, &ghost] {
+            let (st, body) = post(id.clone()).await;
+            assert_eq!(
+                st,
+                StatusCode::TOO_MANY_REQUESTS,
+                "per-target limit reached"
+            );
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(v["error"], crate::limits::CODE_DEVICE_REQUEST_LIMITED);
+            refusals.push(v["error"].clone());
+        }
+        assert_eq!(refusals[0], refusals[1], "known and unknown refused alike");
 
         sqlx::query("DELETE FROM accounts WHERE id = ?")
             .bind(account_id.as_slice())

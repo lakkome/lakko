@@ -6,11 +6,10 @@ package me.lakko.app.push
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.HttpClientEngine
-import io.ktor.client.engine.okhttp.OkHttp
 import me.lakko.app.config.ApiEndpoints
 import me.lakko.app.config.ApiService
-import me.lakko.app.transport.AntiCensorshipEngine
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
@@ -22,9 +21,13 @@ import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import me.lakko.app.auth.PowProofPayload
+import me.lakko.app.anon.AnonTokenContext
+import me.lakko.app.anon.AnonTokenSource
+import me.lakko.app.anon.AnonTokens
+import me.lakko.app.anon.AnonymousHttp
+import me.lakko.app.anon.sendWithToken
 import me.lakko.app.auth.base64Encode
-import me.lakko.app.auth.solvePow
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * Ktor-based client for `lakko-svc-push-gw`.
@@ -43,7 +46,12 @@ import me.lakko.app.auth.solvePow
  *     logout + forgetDevice.
  *
  * Plus `/push/group/subscribe` / `/push/group/unsubscribe` (ADR-0042 /
- * ADR-0043) and `/pow/challenge` for the per-call PoW seed.
+ * ADR-0043).
+ *
+ * Every one of the four spends one `push-register` anonymous token
+ * (ADR-0054 S3) and goes out on the anonymous client: no session, no
+ * cookie, its own connection pool. push-gw stays anonymous by design
+ * (invariant #5).
  *
  * It never WAKES anyone: since ADR-0054 a group wake is the
  * `x-lakko-wake` header on the signed DS publish (see
@@ -59,10 +67,12 @@ import me.lakko.app.auth.solvePow
  */
 public class PushClient(
     public val baseUrl: String = DEFAULT_BASE_URL,
-    /** Ktor engine. Production: `OkHttp` (default below). Tests:
+    /** Ktor engine. Production: [AnonymousHttp.engine] (its own pool). Tests:
      *  `MockEngine` for deterministic responses without a
      *  network. */
     engine: HttpClientEngine? = null,
+    /** Where the four routes draw their `push-register` token. */
+    private val anonTokens: AnonTokenSource = AnonTokens.shared,
 ) : AutoCloseable {
 
     private val json = Json {
@@ -75,7 +85,7 @@ public class PushClient(
             install(ContentNegotiation) { json(json) }
         }
     } else {
-        HttpClient(AntiCensorshipEngine(OkHttp.create {})) {
+        HttpClient(AnonymousHttp.engine) {
             install(ContentNegotiation) { json(json) }
         }
     }
@@ -123,23 +133,12 @@ public class PushClient(
         }
         require(tokenBytes.isNotEmpty()) { "tokenBytes must be non-empty" }
 
-        val challenge = fetchChallenge()
-        val pow = solvePow(seedB64 = challenge.seed, effortBits = challenge.effortBits)
-
         val req = RegisterRequest(
-            pow = pow,
             device_pseudonym = pseudonymHex(devicePseudonym),
             provider = provider,
             token = base64Encode(tokenBytes),
         )
-        val response: HttpResponse = try {
-            client.post("$baseUrl/push/register") {
-                contentType(ContentType.Application.Json)
-                setBody(req)
-            }
-        } catch (cause: Throwable) {
-            throw PushNetworkError("/push/register", cause)
-        }
+        val response: HttpResponse = tokenPost("/push/register") { setBody(req) }
         if (!response.status.isSuccess()) {
             throw PushHttpError(
                 status = response.status.value,
@@ -176,21 +175,11 @@ public class PushClient(
         require(groupPseudonym.size == PSEUDONYM_LEN) {
             "groupPseudonym must be $PSEUDONYM_LEN bytes"
         }
-        val challenge = fetchChallenge()
-        val pow = solvePow(seedB64 = challenge.seed, effortBits = challenge.effortBits)
         val req = GroupSubscribeRequest(
-            pow = pow,
             device_pseudonym = pseudonymHex(devicePseudonym),
             group_pseudonym = pseudonymHex(groupPseudonym),
         )
-        val response: HttpResponse = try {
-            client.post("$baseUrl/push/group/subscribe") {
-                contentType(ContentType.Application.Json)
-                setBody(req)
-            }
-        } catch (cause: Throwable) {
-            throw PushNetworkError("/push/group/subscribe", cause)
-        }
+        val response: HttpResponse = tokenPost("/push/group/subscribe") { setBody(req) }
         if (!response.status.isSuccess()) {
             throw PushHttpError(
                 status = response.status.value,
@@ -208,21 +197,11 @@ public class PushClient(
     ): Boolean {
         require(devicePseudonym.size == PSEUDONYM_LEN)
         require(groupPseudonym.size == PSEUDONYM_LEN)
-        val challenge = fetchChallenge()
-        val pow = solvePow(seedB64 = challenge.seed, effortBits = challenge.effortBits)
         val req = GroupUnsubscribeRequest(
-            pow = pow,
             device_pseudonym = pseudonymHex(devicePseudonym),
             group_pseudonym = pseudonymHex(groupPseudonym),
         )
-        val response: HttpResponse = try {
-            client.post("$baseUrl/push/group/unsubscribe") {
-                contentType(ContentType.Application.Json)
-                setBody(req)
-            }
-        } catch (cause: Throwable) {
-            throw PushNetworkError("/push/group/unsubscribe", cause)
-        }
+        val response: HttpResponse = tokenPost("/push/group/unsubscribe") { setBody(req) }
         if (!response.status.isSuccess()) {
             throw PushHttpError(
                 status = response.status.value,
@@ -244,22 +223,11 @@ public class PushClient(
         require(devicePseudonym.size == PSEUDONYM_LEN) {
             "devicePseudonym must be $PSEUDONYM_LEN bytes"
         }
-        val challenge = fetchChallenge()
-        val pow = solvePow(seedB64 = challenge.seed, effortBits = challenge.effortBits)
-
         val req = UnregisterRequest(
-            pow = pow,
             device_pseudonym = pseudonymHex(devicePseudonym),
             provider = provider,
         )
-        val response: HttpResponse = try {
-            client.post("$baseUrl/push/unregister") {
-                contentType(ContentType.Application.Json)
-                setBody(req)
-            }
-        } catch (cause: Throwable) {
-            throw PushNetworkError("/push/unregister", cause)
-        }
+        val response: HttpResponse = tokenPost("/push/unregister") { setBody(req) }
         if (!response.status.isSuccess()) {
             throw PushHttpError(
                 status = response.status.value,
@@ -282,21 +250,25 @@ public class PushClient(
     // Internal
     // -----------------------------------------------------------------
 
-    private suspend fun fetchChallenge(): PowChallenge {
-        val response: HttpResponse = try {
-            client.post("$baseUrl/pow/challenge")
-        } catch (cause: Throwable) {
-            throw PushNetworkError("/pow/challenge", cause)
+    /** One POST with a `push-register` token, one retry on a token refusal,
+     *  never a session. */
+    private suspend fun tokenPost(
+        endpoint: String,
+        body: io.ktor.client.request.HttpRequestBuilder.() -> Unit,
+    ): HttpResponse =
+        anonTokens.sendWithToken(AnonTokenContext.PUSH_REGISTER) { name, value ->
+            try {
+                client.post("$baseUrl$endpoint") {
+                    header(name, value)
+                    contentType(ContentType.Application.Json)
+                    body()
+                }
+            } catch (cause: CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                throw PushNetworkError(endpoint, cause)
+            }
         }
-        if (!response.status.isSuccess()) {
-            throw PushHttpError(
-                status = response.status.value,
-                endpoint = "/pow/challenge",
-                body = response.safeReadBody(),
-            )
-        }
-        return response.body()
-    }
 
     public companion object {
         /** Default URL — `<LAKKO_API_BASE_URL>/push-gw` ([ApiEndpoints]),
@@ -331,15 +303,7 @@ public class PushClient(
 
 @Serializable
 @Suppress("ConstructorParameterNaming")
-private data class PowChallenge(
-    val seed: String,
-    @SerialName("effort_bits") val effortBits: Int,
-)
-
-@Serializable
-@Suppress("ConstructorParameterNaming")
 private data class RegisterRequest(
-    val pow: PowProofPayload,
     val device_pseudonym: String,
     val provider: PushClient.Provider,
     val token: String,
@@ -353,7 +317,6 @@ private data class RegisterResponse(
 @Serializable
 @Suppress("ConstructorParameterNaming")
 private data class UnregisterRequest(
-    val pow: PowProofPayload,
     val device_pseudonym: String,
     val provider: PushClient.Provider,
 )
@@ -369,7 +332,6 @@ private data class UnregisterResponse(
 @Serializable
 @Suppress("ConstructorParameterNaming")
 private data class GroupSubscribeRequest(
-    val pow: PowProofPayload,
     val device_pseudonym: String,
     val group_pseudonym: String,
 )
@@ -383,7 +345,6 @@ private data class GroupSubscribeResponse(
 @Serializable
 @Suppress("ConstructorParameterNaming")
 private data class GroupUnsubscribeRequest(
-    val pow: PowProofPayload,
     val device_pseudonym: String,
     val group_pseudonym: String,
 )

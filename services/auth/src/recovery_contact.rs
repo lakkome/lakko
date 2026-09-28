@@ -8,21 +8,28 @@
 //! can stand in for the password by receiving a fresh code:
 //!
 //! - **`POST /recovery-contact/enroll/start`** — bearer-auth (already
-//!   logged in) + PoW. Normalizes + hashes the supplied contact, generates a
+//!   logged in); send-limited per account, per contact hash and per address
+//!   (ADR-0054 S4, `429` `recovery-code-send-limited`). Normalizes + hashes the supplied contact, generates a
 //!   6-digit code, stores its hash + a 10-minute expiry (UPSERT, attempts=0),
 //!   UPSERTs the contact (keeping any existing confirmation), and sends the
 //!   code via the configured [`OtpSender`].
 //! - **`POST /recovery-contact/enroll/finish`** — bearer-auth. Verifies the
 //!   code (attempt-capped + expiry-gated), and on match stamps
 //!   `confirmed_at` + deletes the challenge (single-use).
-//! - **`POST /recovery-contact/recover/start`** — anonymous + PoW. Hashes the
-//!   supplied contact, and only if it matches a CONFIRMED row generates +
-//!   stores + sends a code. ENUMERATION-SAFE: always returns the same
-//!   `{ "sent": true }` whether or not it matched.
-//! - **`POST /recovery-contact/recover/finish`** — anonymous + PoW. Verifies
-//!   the code (attempt cap -> 429, expiry, single-use delete-on-success) and
-//!   on match issues the standard session-token triple. Wrong code ->
-//!   attempts+1 + generic 401.
+//! - Both recover routes name the account by login handle (ADR-0054 S5); a
+//!   handle nobody holds resolves to a stand-in account with no contact.
+//! - **`POST /recovery-contact/recover/start`** — anonymous. Hashes the
+//!   supplied contact, charges that hash's send counter and the per-address
+//!   bucket (`429` `recovery-code-send-limited` — every message costs the
+//!   operator), and only if it matches a CONFIRMED row generates + stores +
+//!   sends a code. ENUMERATION-SAFE: the counter is charged whether or not
+//!   the contact matches, and the answer is always the same
+//!   `{ "sent": true }`.
+//! - **`POST /recovery-contact/recover/finish`** — anonymous. Charges the
+//!   named (handle, kind) attempt counter and the per-address bucket (`429`
+//!   `too-many-attempts`), then verifies the code (per-challenge attempt
+//!   cap, expiry, single-use delete-on-success) and on match issues the
+//!   standard session-token triple. Wrong code -> attempts+1 + generic 401.
 //!
 //! ## Invariant #1 (no plaintext PII on the server)
 //!
@@ -223,17 +230,6 @@ fn generate_code() -> String {
     format!("{n:06}")
 }
 
-/// Decode the URL-safe base64 16-byte `account_id`.
-fn decode_account_id(b64: &str) -> Result<[u8; ACCOUNT_ID_LEN], ApiError> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(b64)
-        .map_err(|_| ApiError::BadInput("account_id_b64 not URL-safe base64"))?;
-    bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| ApiError::BadInput("account_id must decode to 16 bytes"))
-}
-
 /// Parse the wire `kind` integer (1 = email, 2 = phone) into a [`ContactKind`].
 fn parse_kind(kind: u8) -> Result<ContactKind, ApiError> {
     ContactKind::try_from(kind)
@@ -291,7 +287,6 @@ async fn upsert_challenge(
 /// `POST /recovery-contact/enroll/start` request.
 #[derive(Deserialize)]
 pub(crate) struct EnrollStartReq {
-    pub pow: crate::pow::PowProof,
     /// 1 = email, 2 = phone.
     pub kind: u8,
     /// The raw phone / email plaintext. Used transiently to hash + address
@@ -309,8 +304,9 @@ pub(crate) struct EnrollFinishReq {
 /// `POST /recovery-contact/recover/start` request.
 #[derive(Deserialize)]
 pub(crate) struct RecoverStartReq {
-    pub pow: crate::pow::PowProof,
-    pub account_id_b64: String,
+    /// The login handle of the account (ADR-0054 S5): 32 bytes, base64url
+    /// without padding.
+    pub handle: String,
     pub kind: u8,
     /// The raw phone / email plaintext. Hashed + (on a confirmed match) used
     /// to address the message; never stored, never logged (invariant #1).
@@ -320,8 +316,8 @@ pub(crate) struct RecoverStartReq {
 /// `POST /recovery-contact/recover/finish` request.
 #[derive(Deserialize)]
 pub(crate) struct RecoverFinishReq {
-    pub pow: crate::pow::PowProof,
-    pub account_id_b64: String,
+    /// The login handle of the account (ADR-0054 S5).
+    pub handle: String,
     pub kind: u8,
     pub code: String,
 }
@@ -350,7 +346,8 @@ pub(crate) struct RecoverRes {
 
 /// `POST /recovery-contact/enroll/start` — store a contact + send a code.
 ///
-/// Bearer-auth (already logged in) + PoW. UPSERTs the contact (keeping any
+/// Bearer-auth (already logged in), send-limited per account and per
+/// contact hash. UPSERTs the contact (keeping any
 /// prior confirmation so a re-send does not un-confirm it) and a fresh
 /// challenge, then sends the code. Returns `{ "sent": true }`.
 #[axum::debug_handler]
@@ -360,11 +357,24 @@ pub(crate) async fn enroll_start(
     Json(req): Json<EnrollStartReq>,
 ) -> Result<Json<SentRes>, ApiError> {
     let pepper = require_pepper(&state)?;
-    crate::pow::verify_proof(&state.db, &req.pow).await?;
     let account_id = auth.0;
     let kind = parse_kind(req.kind)?;
     let normalized = normalize_contact(kind, &req.contact)?;
     let ch = contact_hash(&pepper, kind, &normalized);
+    crate::limits::charge_name(
+        &state.db,
+        &state.limits,
+        crate::limits::Scope::CodeSendAccount,
+        &account_id,
+    )
+    .await?;
+    crate::limits::charge_name(
+        &state.db,
+        &state.limits,
+        crate::limits::Scope::CodeSendContact,
+        &ch,
+    )
+    .await?;
 
     // UPSERT the contact. `confirmed_at` is left UNCHANGED on a conflict (we
     // only ever overwrite it via /finish), so re-sending to an already-
@@ -448,21 +458,34 @@ pub(crate) async fn enroll_finish(
 /// `POST /recovery-contact/recover/start` — send a recovery code if the
 /// contact matches a CONFIRMED row.
 ///
-/// Anonymous + PoW. ENUMERATION-SAFE: always returns `{ "sent": true }`
-/// whether or not the supplied contact matches a confirmed row. The
-/// no-match path still hashes the contact (the expensive comparable step) and
-/// simply skips the actual send.
+/// Anonymous. ENUMERATION-SAFE: always returns `{ "sent": true }`
+/// whether or not the supplied contact matches a confirmed row, and charges
+/// the contact hash's send counter on both paths (a `429` therefore says
+/// nothing about a match). The no-match path still hashes the contact (the
+/// expensive comparable step) and simply skips the actual send.
 #[axum::debug_handler]
 pub(crate) async fn recover_start(
     State(state): State<AppState>,
     Json(req): Json<RecoverStartReq>,
 ) -> Result<Json<SentRes>, ApiError> {
     let pepper = require_pepper(&state)?;
-    crate::pow::verify_proof(&state.db, &req.pow).await?;
-    let account_id = decode_account_id(&req.account_id_b64)?;
+    let handle_pepper = crate::login_handle::pepper(&state)?;
+    let handle = crate::login_handle::decode_handle(&req.handle)?;
     let kind = parse_kind(req.kind)?;
     let normalized = normalize_contact(kind, &req.contact)?;
     let ch = contact_hash(&pepper, kind, &normalized);
+    crate::limits::charge_name(
+        &state.db,
+        &state.limits,
+        crate::limits::Scope::CodeSendContact,
+        &ch,
+    )
+    .await?;
+    // An unknown handle resolves to its stand-in id; the match below misses
+    // exactly as for a contact the account never confirmed.
+    let account_id = crate::login_handle::resolve(&state.db, &handle_pepper, &handle)
+        .await?
+        .account_id;
 
     // Does a CONFIRMED contact with this exact hash exist for this account?
     let matched: Option<(Vec<u8>,)> = sqlx::query_as(
@@ -507,41 +530,39 @@ pub(crate) async fn recover_start(
 
 /// `POST /recovery-contact/recover/finish` — recover ACCESS with a code.
 ///
-/// Anonymous + PoW. Refuses with `429` when the challenge is at/over the
-/// attempt cap; `401` when missing / expired / wrong (enumeration-safe). On a
-/// match: deletes the challenge (single-use) + issues the session triple.
+/// Anonymous. Refuses with `429` `too-many-attempts` once the named
+/// (account, kind) counter or the per-address bucket is spent — charged
+/// before any lookup, so it trips alike whether or not a challenge exists;
+/// `401` when missing / expired / wrong / at the per-challenge attempt cap
+/// (enumeration-safe). On a match: deletes the challenge (single-use) +
+/// issues the session triple.
 #[axum::debug_handler]
 pub(crate) async fn recover_finish(
     State(state): State<AppState>,
     Json(req): Json<RecoverFinishReq>,
 ) -> Result<Json<RecoverRes>, ApiError> {
     let pepper = require_pepper(&state)?;
-    crate::pow::verify_proof(&state.db, &req.pow).await?;
-    let account_id = decode_account_id(&req.account_id_b64)?;
+    let handle_pepper = crate::login_handle::pepper(&state)?;
+    let handle = crate::login_handle::decode_handle(&req.handle)?;
     let kind = parse_kind(req.kind)?;
 
-    // Lockout check first: at/over the cap -> 429 (carries no
-    // account-existence info — a non-existent challenge is below the cap and
-    // falls through to the generic 401).
-    let row: Option<(u8,)> = sqlx::query_as(
-        "SELECT attempts FROM otp_challenges \
-         WHERE account_id = ? AND kind = ? AND expires_at > NOW(3)",
+    // The attempt counter is keyed on what the request names (the handle and
+    // the kind), charged before any lookup. (The per-challenge cap it
+    // replaced answered 429 only when a challenge existed, i.e. only for an
+    // account with a confirmed contact that had just been sent a code.)
+    let mut name = [0u8; crate::login_handle::HANDLE_LEN + 1];
+    name[..crate::login_handle::HANDLE_LEN].copy_from_slice(&handle);
+    name[crate::login_handle::HANDLE_LEN] = kind.as_db();
+    crate::limits::charge_name(
+        &state.db,
+        &state.limits,
+        crate::limits::Scope::RecoveryCodeGuess,
+        &name,
     )
-    .bind(account_id.as_slice())
-    .bind(kind.as_db())
-    .fetch_optional(&state.db)
-    .await
-    .map_err(ApiError::Db)?;
-    if let Some((attempts,)) = row {
-        if attempts >= MAX_OTP_ATTEMPTS {
-            tracing::warn!(
-                account_id = %URL_SAFE_NO_PAD.encode(account_id),
-                kind = kind.as_str(),
-                "recovery-contact: recover rejected (attempt cap)",
-            );
-            return Err(ApiError::RateLimited);
-        }
-    }
+    .await?;
+    let account_id = crate::login_handle::resolve(&state.db, &handle_pepper, &handle)
+        .await?
+        .account_id;
 
     let verified = verify_challenge(&state, &pepper, &account_id, kind, &req.code).await?;
     if !verified {
@@ -597,9 +618,8 @@ async fn verify_challenge(
         return Ok(false);
     };
     if attempts >= MAX_OTP_ATTEMPTS {
-        // Defence in depth: recover_finish already checks the cap, but
-        // enroll_finish routes here too. Treat as a failure without a further
-        // bump.
+        // The challenge is spent: a failure without a further bump. The
+        // caller answers the same generic 401 as for any miss.
         return Ok(false);
     }
 
@@ -792,7 +812,6 @@ mod recovery_contact_e2e_tests {
     use async_trait::async_trait;
     use axum::body::{Body, Bytes};
     use axum::http::{header, Method, Request, StatusCode};
-    use base64::engine::general_purpose::STANDARD;
     use http_body_util::BodyExt as _;
     use sqlx::mysql::MySqlPoolOptions;
     use sqlx::MySqlPool;
@@ -867,6 +886,8 @@ mod recovery_contact_e2e_tests {
             throttle: crate::throttle::ThrottleConfig::disabled(),
             backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
             anon_tokens: None,
+            handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
+            limits: Arc::new(crate::limits::Limits::defaults()),
         };
         (state, token_secret)
     }
@@ -888,41 +909,6 @@ mod recovery_contact_e2e_tests {
                 .map_or(0, |d| d.as_millis()),
         )
         .unwrap_or(i64::MAX)
-    }
-
-    async fn fresh_pow(state: &crate::AppState) -> serde_json::Value {
-        let (st, body) = send(
-            state,
-            Request::builder()
-                .method(Method::POST)
-                .uri("/pow/challenge")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(st, StatusCode::OK);
-        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let seed_b64 = v["seed"].as_str().unwrap().to_string();
-        let seed = STANDARD.decode(&seed_b64).unwrap();
-        let mut nonce = [0u8; 16];
-        loop {
-            let mut challenge = Vec::with_capacity(32);
-            challenge.extend_from_slice(&seed);
-            challenge.extend_from_slice(&nonce);
-            if let Ok(eq) = equix::EquiX::new(&challenge) {
-                if let Some(sol) = eq.solve().first() {
-                    return serde_json::json!({
-                        "seed": seed_b64,
-                        "nonce": STANDARD.encode(nonce),
-                        "solution": STANDARD.encode(sol.to_bytes()),
-                    });
-                }
-            }
-            nonce[0] = nonce[0].wrapping_add(1);
-            if nonce[0] == 0 {
-                nonce[1] = nonce[1].wrapping_add(1);
-            }
-        }
     }
 
     fn bearer_for(token_secret: &lakko_auth_token::TokenSecret, account_id: &[u8; 16]) -> String {
@@ -958,12 +944,15 @@ mod recovery_contact_e2e_tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn recovery_contact_full_flow() {
-        const CONTACT: &str = "alice@example.com";
+        // Unique per run: the send counter is keyed on the contact hash and
+        // lives in the (shared) test database.
+        let contact_owned = format!("alice-{}@example.com", Uuid::new_v4().simple());
+        let wrong_contact = format!("wrong-{}@example.com", Uuid::new_v4().simple());
+        let contact: &str = &contact_owned;
         let Ok(url) = std::env::var("LAKKO_AUTH_TEST_DATABASE_URL") else {
             eprintln!("skipping recovery_contact_full_flow: LAKKO_AUTH_TEST_DATABASE_URL unset");
             return;
         };
-        std::env::set_var("LAKKO_POW_EFFORT_BITS", "0");
         let pool = MySqlPoolOptions::new()
             .max_connections(4)
             .connect(&url)
@@ -982,12 +971,11 @@ mod recovery_contact_e2e_tests {
                 .await
                 .unwrap();
             let bearer = bearer_for(&ts, &account_id);
-            let pow = fresh_pow(&state_off).await;
             let (st, _) = json_post(
                 &state_off,
                 "/recovery-contact/enroll/start",
                 Some(&bearer),
-                serde_json::json!({ "pow": pow, "kind": 1, "contact": "alice@example.com" }),
+                serde_json::json!({ "kind": 1, "contact": "alice@example.com" }),
             )
             .await;
             assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "503 when pepper unset");
@@ -1003,14 +991,16 @@ mod recovery_contact_e2e_tests {
             .unwrap();
         let bearer = bearer_for(&ts, &account_id);
         let account_id_b64 = URL_SAFE_NO_PAD.encode(account_id);
+        // ADR-0054 S5: recovery names the account by its login handle.
+        let (handle, handle_b64) = crate::login_handle::random_handle();
+        crate::login_handle::bind_for_test(&pool, &account_id, &handle).await;
 
         // (2) enroll/start -> a code is sent + recorded.
-        let pow = fresh_pow(&state).await;
         let (st, _) = json_post(
             &state,
             "/recovery-contact/enroll/start",
             Some(&bearer),
-            serde_json::json!({ "pow": pow, "kind": 1, "contact": CONTACT }),
+            serde_json::json!({ "kind": 1, "contact": contact }),
         )
         .await;
         assert_eq!(st, StatusCode::OK, "enroll/start sends");
@@ -1027,12 +1017,12 @@ mod recovery_contact_e2e_tests {
         .unwrap();
         assert_ne!(
             stored_hash,
-            CONTACT.as_bytes(),
+            contact.as_bytes(),
             "the contact plaintext must not be stored"
         );
         assert_eq!(
             stored_hash,
-            super::contact_hash(&PEPPER, ContactKind::Email, CONTACT).to_vec()
+            super::contact_hash(&PEPPER, ContactKind::Email, contact).to_vec()
         );
 
         // (3) enroll/finish with the recorded code -> confirmed.
@@ -1056,12 +1046,11 @@ mod recovery_contact_e2e_tests {
 
         // (4) recover/start (anonymous) -> a fresh code is sent + recorded.
         let sends_before = recorder.send_count();
-        let pow = fresh_pow(&state).await;
         let (st, body) = json_post(
             &state,
             "/recovery-contact/recover/start",
             None,
-            serde_json::json!({ "pow": pow, "account_id_b64": account_id_b64, "kind": 1, "contact": CONTACT }),
+            serde_json::json!({ "handle": handle_b64, "kind": 1, "contact": contact }),
         )
         .await;
         assert_eq!(
@@ -1079,12 +1068,11 @@ mod recovery_contact_e2e_tests {
         let recover_code = recorder.last_code();
 
         // (5) recover/finish with the recovered code -> session triple.
-        let pow = fresh_pow(&state).await;
         let (st, body) = json_post(
             &state,
             "/recovery-contact/recover/finish",
             None,
-            serde_json::json!({ "pow": pow, "account_id_b64": account_id_b64, "kind": 1, "code": recover_code }),
+            serde_json::json!({ "handle": handle_b64, "kind": 1, "code": recover_code }),
         )
         .await;
         assert_eq!(
@@ -1104,13 +1092,12 @@ mod recovery_contact_e2e_tests {
         // (6) ENUMERATION SAFETY: recover/start for an UNKNOWN account returns
         // the SAME {sent:true} with NO send recorded.
         let sends_before = recorder.send_count();
-        let unknown_b64 = URL_SAFE_NO_PAD.encode(Uuid::new_v4().into_bytes());
-        let pow = fresh_pow(&state).await;
+        let (_, unknown_b64) = crate::login_handle::random_handle();
         let (st, body) = json_post(
             &state,
             "/recovery-contact/recover/start",
             None,
-            serde_json::json!({ "pow": pow, "account_id_b64": unknown_b64, "kind": 1, "contact": CONTACT }),
+            serde_json::json!({ "handle": unknown_b64, "kind": 1, "contact": contact }),
         )
         .await;
         assert_eq!(
@@ -1129,12 +1116,11 @@ mod recovery_contact_e2e_tests {
         // Also enumeration-safe: a confirmed account but a WRONG contact does
         // not send.
         let sends_before = recorder.send_count();
-        let pow = fresh_pow(&state).await;
         let (st, _) = json_post(
             &state,
             "/recovery-contact/recover/start",
             None,
-            serde_json::json!({ "pow": pow, "account_id_b64": account_id_b64, "kind": 1, "contact": "wrong@example.com" }),
+            serde_json::json!({ "handle": handle_b64, "kind": 1, "contact": wrong_contact }),
         )
         .await;
         assert_eq!(st, StatusCode::OK);
@@ -1144,40 +1130,77 @@ mod recovery_contact_e2e_tests {
             "a wrong contact for a real account does not send"
         );
 
-        // (7) LOCKOUT: send a fresh code, then exhaust the attempt cap with a
-        // wrong code -> 429.
-        let pow = fresh_pow(&state).await;
+        // (7) SEND LIMIT: this contact has had three sends in the window
+        // (enroll, the real recover, the unknown-account recover — the
+        // counter is keyed on the contact alone, so the unknown account
+        // charged it too). The next send is refused with 429 + Retry-After,
+        // for the real account and for an unknown one alike.
+        let send_limit = state
+            .limits
+            .name_window(crate::limits::Scope::CodeSendContact)
+            .limit;
+        assert_eq!(send_limit, 3, "default send limit");
+        let mut refusals = Vec::new();
+        for id in [&handle_b64, &unknown_b64] {
+            let sends_before = recorder.send_count();
+            let (st, body) = json_post(
+                &state,
+                "/recovery-contact/recover/start",
+                None,
+                serde_json::json!({ "handle": id, "kind": 1, "contact": contact }),
+            )
+            .await;
+            assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "send limit reached");
+            assert_eq!(
+                recorder.send_count(),
+                sends_before,
+                "a refused send sends nothing"
+            );
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(v["error"], crate::limits::CODE_RECOVERY_CODE_SEND_LIMITED);
+            refusals.push(body);
+        }
+        assert_eq!(refusals[0], refusals[1], "known and unknown refused alike");
+        // Let the window pass.
+        crate::limits::reset_name(
+            &pool,
+            crate::limits::Scope::CodeSendContact,
+            &super::contact_hash(&PEPPER, ContactKind::Email, contact),
+        )
+        .await;
+
+        // (8) ATTEMPT LIMIT: send a fresh code, then exhaust the attempt limit
+        // with a wrong code -> 429.
         let (st, _) = json_post(
             &state,
             "/recovery-contact/recover/start",
             None,
-            serde_json::json!({ "pow": pow, "account_id_b64": account_id_b64, "kind": 1, "contact": CONTACT }),
+            serde_json::json!({ "handle": handle_b64, "kind": 1, "contact": contact }),
         )
         .await;
         assert_eq!(st, StatusCode::OK, "fresh code for the lockout test");
 
         // MAX_OTP_ATTEMPTS wrong submissions bump the counter; the next is 429.
         for _ in 0..super::MAX_OTP_ATTEMPTS {
-            let pow = fresh_pow(&state).await;
             let (st, _) = json_post(
                 &state,
                 "/recovery-contact/recover/finish",
                 None,
-                serde_json::json!({ "pow": pow, "account_id_b64": account_id_b64, "kind": 1, "code": "000000" }),
+                serde_json::json!({ "handle": handle_b64, "kind": 1, "code": "000000" }),
             )
             .await;
-            // Each wrong code is a generic 401 (until the cap is hit).
+            // Each wrong code is a generic 401 until the limit (5 per window,
+            // one already spent by the successful finish above) is reached.
             assert!(
                 st == StatusCode::UNAUTHORIZED || st == StatusCode::TOO_MANY_REQUESTS,
-                "wrong code is 401 (or 429 once capped), got {st}"
+                "wrong code is 401 (or 429 once limited), got {st}"
             );
         }
-        let pow = fresh_pow(&state).await;
         let (st, _) = json_post(
             &state,
             "/recovery-contact/recover/finish",
             None,
-            serde_json::json!({ "pow": pow, "account_id_b64": account_id_b64, "kind": 1, "code": "000000" }),
+            serde_json::json!({ "handle": handle_b64, "kind": 1, "code": "000000" }),
         )
         .await;
         assert_eq!(

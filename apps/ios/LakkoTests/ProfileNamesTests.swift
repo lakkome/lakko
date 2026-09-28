@@ -62,25 +62,24 @@ final class ProfileNamesTests: XCTestCase {
         XCTAssertEqual(UsernameCheck.invalid(.tooLong).inlineMessage, "At most 32 characters")
     }
 
-    func testLoginRefusesAnInvalidNameBeforeAnyLookup() async {
-        var lookups = 0
+    func testLoginRefusesAnInvalidNameBeforeDerivingAHandle() {
+        var derived = 0
         do {
-            _ = try await resolveLoginAccount(
-                cached: nil,
-                typedUsername: "p\u{0430}vel",
-                lookup: { _ in
-                    lookups += 1
-                    return LookupResult(normalisedUsername: "pavel", account: Data([1]))
-                },
-                encodeAccountId: { _ in "x" }
+            _ = try LoginName.make(
+                "p\u{0430}vel",
+                emptyError: AuthClientError.argument("empty"),
+                derive: { _ in
+                    derived += 1
+                    return Data(count: 32)
+                }
             )
-            XCTFail("an invalid username must not resolve")
+            XCTFail("an invalid username must not produce a handle")
         } catch let violation as UsernameRuleViolation {
             XCTAssertEqual(violation.reason, .invalidCharacters)
         } catch {
             XCTFail("expected a UsernameRuleViolation, got \(error)")
         }
-        XCTAssertEqual(lookups, 0)
+        XCTAssertEqual(derived, 0)
     }
 
     // MARK: - Resolver precedence

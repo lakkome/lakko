@@ -11,11 +11,13 @@
  * route guards render `auth/SignupPhrasePrompt.tsx` for as long as
  * `auth.signupPhrase()` is unacknowledged (`auth/phrase-gate.ts`).
  */
-import { createSignal, Show, type JSX } from "solid-js";
+import { createSignal, onCleanup, Show, type JSX } from "solid-js";
 import { A } from "@solidjs/router";
 import { paths } from "./paths";
 import { useAuth } from "../auth/AuthContext";
-import { signupErrorMessage } from "../auth/auth-error-copy";
+import { isSignupRateLimited, signupErrorMessage } from "../auth/auth-error-copy";
+import { isAbortError } from "../auth/pow";
+import { SIGNUP_WORKING_LINE, SIGNUP_WORKING_TITLE } from "../auth/signup-working";
 import { PasswordExplainer } from "../auth/PasswordExplainer";
 import { useProfiles } from "../profile/ProfileContext";
 import {
@@ -47,6 +49,13 @@ export default function Signup(): JSX.Element {
   const [confirm, setConfirm] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  /** ADR-0054 S4: the signup's network limit, which offers `Try again`. */
+  const [rateLimited, setRateLimited] = createSignal(false);
+  /** Cancels the account-creation proof of work (docs/ux/anti-abuse.md
+   *  section 1): `Cancel` returns to the filled-in form, and leaving the
+   *  screen cancels too. The server holds nothing until the proof is spent. */
+  let running: AbortController | null = null;
+  onCleanup(() => running?.abort());
 
   const normalised = (): string | null => {
     const c = usernameCheck();
@@ -57,9 +66,19 @@ export default function Signup(): JSX.Element {
     return c.kind === "invalid" ? c.reason : null;
   };
 
+  function onCancel(): void {
+    running?.abort();
+  }
+
   async function onSubmit(e: SubmitEvent): Promise<void> {
     e.preventDefault();
+    await submit();
+  }
+
+  async function submit(): Promise<void> {
+    if (busy()) return;
     setError(null);
+    setRateLimited(false);
     const checked = usernameCheck();
     if (!mayLookUp(checked)) {
       setError(usernameReason(checked) ?? "Enter a username.");
@@ -75,10 +94,12 @@ export default function Signup(): JSX.Element {
       return;
     }
     setBusy(true);
+    const controller = new AbortController();
+    running = controller;
     try {
       // Resolving lands the session with the phrase pending; the guard around
       // this route switches to the phrase screen on that transition.
-      await auth.signup(checked.normalised, password());
+      await auth.signup(checked.normalised, password(), { signal: controller.signal });
       // ADR-0048: the name is local until there is something to publish it
       // into; a failure to save it never fails the signup.
       const name = savedDisplayName(displayNameCheck());
@@ -94,8 +115,12 @@ export default function Signup(): JSX.Element {
       setPassword("");
       setConfirm("");
     } catch (err) {
+      // Cancelled: back to the filled-in form, nothing to say.
+      if (isAbortError(err)) return;
+      setRateLimited(isSignupRateLimited(err));
       setError(signupErrorMessage(err));
     } finally {
+      if (running === controller) running = null;
       setBusy(false);
     }
   }
@@ -174,18 +199,38 @@ export default function Signup(): JSX.Element {
           <div class="form-error" role="alert">
             {error()}
           </div>
+          <Show when={rateLimited()}>
+            <button type="button" onClick={() => void submit()}>
+              Try again
+            </button>
+          </Show>
         </Show>
-        <button
-          class="primary"
-          type="submit"
-          disabled={
-            busy() ||
-            !mayLookUp(usernameCheck()) ||
-            !maySaveDisplayName(displayNameCheck())
+        <Show
+          when={busy()}
+          fallback={
+            <button
+              class="primary"
+              type="submit"
+              disabled={!mayLookUp(usernameCheck()) || !maySaveDisplayName(displayNameCheck())}
+            >
+              Create account
+            </button>
           }
         >
-          {busy() ? "Creating account..." : "Create account"}
-        </button>
+          {/* docs/ux/anti-abuse.md section 1: a disabled row with a spinner,
+              one line below, and Cancel. No percentage, no time estimate. */}
+          <div role="status" aria-live="polite" class="lk-stack" style={{ gap: "8px" }}>
+            <button class="primary" type="button" disabled aria-busy="true">
+              <span class="lakko-spinner" aria-hidden="true" /> {SIGNUP_WORKING_TITLE}
+            </button>
+            <p class="form-info" style={{ margin: 0 }}>
+              {SIGNUP_WORKING_LINE}
+            </p>
+            <button type="button" onClick={onCancel}>
+              Cancel
+            </button>
+          </div>
+        </Show>
       </form>
       <p class="lk-auth-foot">
         Already have an account? <A href={paths.login}>Log in</A>

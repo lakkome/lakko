@@ -43,11 +43,12 @@ sqlx = { version = "0.9", default-features = false, features = [
 # .env loading — debug builds only.
 dotenvy = "0.15"
 
-# Server-side PoW verify/issue/consume/prune moved to the shared
-# `lakko-pow-server` crate (G-29 dedup; `src/pow.rs` is now a thin shim), so
-# `equix` is no longer a direct dep here — it comes in transitively. `sha2`
-# stays for the webpush provider's own hashing.
-lakko-pow-server.workspace = true
+# ADR-0054 S3 - the registration routes spend an anonymous token (context
+# `push-register`) through the shared spend gate and spent-set; there is no
+# proof of work on this service any more. `sha2` stays for the webpush
+# provider's own hashing.
+lakko-anon-token.workspace = true
+lakko-anon-token-server.workspace = true
 sha2 = "0.10"
 
 base64 = "0.22"
@@ -112,3 +113,5 @@ url = "2"
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+# Mint spendable tokens in-process for the registration route tests.
+lakko-anon-token-server = { workspace = true, features = ["testing"] }

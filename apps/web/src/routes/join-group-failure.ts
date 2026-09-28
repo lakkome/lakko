@@ -12,6 +12,8 @@
 import { CLOCK_SKEW_NOTICE, GROUP_NOT_TAKING_REQUESTS, dsClockSkewNotice } from "../ds/access";
 import { INVITE_LINK_RATE_LIMITED } from "../contacts/invite-link";
 import { isDiscoveryRateLimited } from "../discovery/client";
+import { anonTokenQuotaExhausted } from "../tokens/anon-token-pool";
+import { ACTION_ALLOWANCE_USED } from "../tokens/token-copy";
 
 /** The join landed. */
 export const JOIN_SUCCEEDED = "You joined the group.";
@@ -48,5 +50,11 @@ export function joinFailureNotice(err: unknown): JoinFailureNotice {
   // The ledger's consume answered 429: the link is fine, the request can be
   // sent again after a pause (ADR-0028 short-link amendment).
   if (isDiscoveryRateLimited(err)) return { message: INVITE_LINK_RATE_LIMITED, offerRetry: true };
+  // ADR-0054 S3: the consume and the knock each spend an anonymous token. A
+  // day's allowance used up says so, without a retry; tokens off or none to
+  // be had is the ordinary network failure.
+  if (anonTokenQuotaExhausted(err) !== null) {
+    return { message: ACTION_ALLOWANCE_USED, offerRetry: false };
+  }
   return { message: JOIN_REQUEST_FAILED, offerRetry: true };
 }

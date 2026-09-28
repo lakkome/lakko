@@ -99,58 +99,19 @@ class LinkJoinKnockTest {
         assertEquals(false, built)
     }
 
-    // ------------------------------------------------ expired proof of work
+    // ------------------------------------------------ no proof of work, no pow retry
 
-    private fun expired() = me.lakko.app.ds.DsHttpError(401, "/ds/group/x/knock", "pow")
-
-    @Test
-    fun `a knock refused because its pow expired is retried once with a fresh challenge`() = runTest {
-        val knocks = mutableListOf<List<ByteArray>>()
-        var failSecondKnock = true
-        runLinkJoinKnock(
-            knock = { payloads ->
-                knocks += payloads
-                // Each call models fetch-challenge, solve, POST: the retry is
-                // a whole new call, so it solves a new challenge.
-                if (payloads.isNotEmpty() && failSecondKnock) {
-                    failSecondKnock = false
-                    throw expired()
-                }
-                5uL
-            },
-            buildProposal = { byteArrayOf(0x50) },
-            buildAttribution = { null },
-        )
-        assertEquals(3, knocks.size)
-        assertTrue(knocks[0].isEmpty())
-        assertArrayEquals(knocks[1][0], knocks[2][0])
-    }
+    private fun refused() = me.lakko.app.ds.DsHttpError(401, "/ds/group/x/knock", "")
 
     @Test
-    fun `an expired probe is retried once too`() = runTest {
-        var calls = 0
-        val epoch = runLinkJoinKnock(
-            knock = { payloads ->
-                calls++
-                if (calls == 1) throw expired()
-                if (payloads.isEmpty()) 9uL else 9uL
-            },
-            buildProposal = { byteArrayOf(1) },
-            buildAttribution = { null },
-        )
-        assertEquals(9uL, epoch)
-        assertEquals(3, calls)
-    }
-
-    @Test
-    fun `a second expiry on the same knock propagates`() {
+    fun `a refused knock is not retried here - token refusals are retried inside the client`() {
         var calls = 0
         assertThrows(me.lakko.app.ds.DsHttpError::class.java) {
             runBlocking {
                 runLinkJoinKnock(
                     knock = { payloads ->
                         calls++
-                        if (payloads.isNotEmpty()) throw expired()
+                        if (payloads.isNotEmpty()) throw refused()
                         1uL
                     },
                     buildProposal = { byteArrayOf(1) },
@@ -158,27 +119,20 @@ class LinkJoinKnockTest {
                 )
             }
         }
-        assertEquals("probe + knock + one retry", 3, calls)
+        assertEquals("probe + knock, no retry", 2, calls)
     }
 
     @Test
-    fun `a failure that is not an expired pow is not retried`() {
-        var calls = 0
-        assertThrows(IllegalStateException::class.java) {
-            runBlocking {
-                runLinkJoinKnock(
-                    knock = {
-                        calls++
-                        throw IllegalStateException("offline")
-                    },
-                    buildProposal = { byteArrayOf(1) },
-                    buildAttribution = { null },
-                )
-            }
-        }
-        assertEquals(1, calls)
-        assertTrue(isKnockPowExpired(expired()))
-        assertTrue(!isKnockPowExpired(me.lakko.app.ds.DsHttpError(429, "/x", "")))
+    fun `a used-up knock allowance reads as the allowance sentence`() {
+        val quota = me.lakko.app.anon.AnonTokenQuotaExhausted(
+            me.lakko.app.anon.AnonTokenContext.DS_KNOCK,
+            retryAfterSecs = 3600,
+        )
+        assertEquals(
+            "You have used today's allowance for this. Try again tomorrow.",
+            joinFailureCopy(ChatError("DS knock (external-join request) failed", quota)),
+        )
+        assertTrue(!joinFailureOffersRetry(joinFailureCopy(quota)))
     }
 
     // ------------------------------------------------ join screen copy
@@ -194,7 +148,7 @@ class LinkJoinKnockTest {
             joinFailureCopy(ChatError("x", me.lakko.app.ds.DsProofRefusedError("/ds/x", clockSkewed = true, body = ""))),
         )
         val generic = "Your request didn't go through. Check your connection and try again."
-        assertEquals(generic, joinFailureCopy(ChatError("DS knock (external-join request) failed", expired())))
+        assertEquals(generic, joinFailureCopy(ChatError("DS knock (external-join request) failed", refused())))
         assertEquals(generic, joinFailureCopy(me.lakko.app.ds.DsProofRefusedError("/ds/x", clockSkewed = false, body = "")))
         assertEquals(generic, joinFailureCopy(RuntimeException("raw protocol text")))
         assertEquals("You joined the group.", JOIN_SUCCESS_COPY)

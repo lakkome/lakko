@@ -57,15 +57,22 @@ public final class DsClient {
 
     public let baseURL: String
     private let session: URLSession
+    /// ADR-0054 S3 - the knock travels on its own connection pool, unlinked
+    /// from this device's signed journal and mailbox requests.
+    private let anonymousSession: URLSession
+    private let tokens: AnonTokenSource
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
     public init(
         baseURL: String = DsClient.defaultBaseURL,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        tokens: AnonTokenSource = AnonTokenPool.shared
     ) {
         self.baseURL = baseURL
         self.session = session
+        self.anonymousSession = AnonymousHTTP.session(pairedWith: session)
+        self.tokens = tokens
         self.encoder = JSONEncoder()
         self.decoder = JSONDecoder()
     }
@@ -264,7 +271,7 @@ public final class DsClient {
         return FetchResult(messages: messages, hasMore: parsed.hasMore)
     }
 
-    // MARK: - ADR-0053 claim, knock, PoW
+    // MARK: - ADR-0053 claim and knock
 
     /// `PUT /ds/group/{group_id_hex}/access` — register the access key of one
     /// epoch. `bodyJson` is the signer's `groupClaimBodyJson()` verbatim.
@@ -310,39 +317,51 @@ public final class DsClient {
         )
     }
 
-    /// `POST /ds/group/{group_id_hex}/knock` — a non-member's request, PoW
-    /// gated. An empty `payloads` list is a PROBE: nothing is stored and the
-    /// response carries the group's latest registered epoch.
+    /// `POST /ds/group/{group_id_hex}/knock` — a non-member's request. Spends
+    /// one `ds-knock` anonymous token (ADR-0054 S3), retried once with a
+    /// second token on a token refusal, on the anonymous session. An empty
+    /// `payloads` list is a PROBE: nothing is stored and the response carries
+    /// the group's latest registered epoch; it costs a token too.
     public func knock(
         groupId: Data,
-        pow: PowProofPayload,
         payloads: [Data]
     ) async throws -> KnockResult {
         guard !groupId.isEmpty else {
             throw DsClientError.argument("groupId must be non-empty")
         }
         let body = try encoder.encode(
-            KnockWireRequest(pow: pow, payloadsB64: payloads.map { base64Encode($0) })
+            KnockWireRequest(payloadsB64: payloads.map { base64Encode($0) })
         )
-        let parsed: KnockWireResponse = try await sendDecoding(
-            method: "POST",
-            endpoint: "/ds/group/\(Self.pseudonymHex(groupId))/knock",
-            body: body,
-            contentType: "application/json",
-            auth: nil
-        )
+        let endpoint = "/ds/group/\(Self.pseudonymHex(groupId))/knock"
+        let (data, http) = try await AnonTokenRoute.send(
+            context: .dsKnock, tokens: tokens
+        ) { tokenHeader in
+            try await send(
+                method: "POST",
+                endpoint: endpoint,
+                body: body,
+                contentType: "application/json",
+                extraHeaders: [AnonTokenRoute.headerName: tokenHeader],
+                auth: nil,
+                over: anonymousSession,
+                acceptAnyStatus: true
+            )
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw DsClientError.http(
+                status: http.statusCode,
+                endpoint: endpoint,
+                body: Self.truncate(String(data: data, encoding: .utf8) ?? "<binary>")
+            )
+        }
+        let parsed: KnockWireResponse
+        do {
+            parsed = try decoder.decode(KnockWireResponse.self, from: data)
+        } catch {
+            throw DsClientError.http(
+                status: http.statusCode, endpoint: endpoint, body: "decode failed: \(error)")
+        }
         return KnockResult(ids: parsed.ids, epoch: parsed.epoch)
-    }
-
-    /// `POST /pow/challenge` on the DS — a fresh challenge for one knock.
-    public func powChallenge() async throws -> PowChallengeResponse {
-        try await sendDecoding(
-            method: "POST",
-            endpoint: "/pow/challenge",
-            body: Data(),
-            contentType: nil,
-            auth: nil
-        )
     }
 
     // MARK: - Internal HTTP
@@ -385,7 +404,9 @@ public final class DsClient {
         contentType: String? = nil,
         extraHeaders: [String: String] = [:],
         timeout: TimeInterval? = nil,
-        auth: DsAuth?
+        auth: DsAuth?,
+        over sessionOverride: URLSession? = nil,
+        acceptAnyStatus: Bool = false
     ) async throws -> (Data, HTTPURLResponse) {
         let target = try Self.requestTarget(
             baseURL: baseURL, endpoint: endpoint, queryItems: queryItems)
@@ -416,7 +437,8 @@ public final class DsClient {
             }
             let raw: (Data, URLResponse)
             do {
-                raw = try await AntiCensorshipTransport.perform(request, session: session, config: .current)
+                raw = try await AntiCensorshipTransport.perform(
+                    request, session: sessionOverride ?? session, config: .current)
             } catch {
                 throw DsClientError.network(endpoint: endpoint, underlying: error)
             }
@@ -449,6 +471,7 @@ public final class DsClient {
         }
 
         let (data, http) = result
+        if acceptAnyStatus { return (data, http) }
         guard (200..<300).contains(http.statusCode) else {
             if http.statusCode == 401, auth != nil,
                DsClockSkew.isSkewed(
@@ -571,11 +594,9 @@ private struct FetchWireMessage: Decodable {
 }
 
 private struct KnockWireRequest: Encodable {
-    let pow: PowProofPayload
     let payloadsB64: [String]
 
     enum CodingKeys: String, CodingKey {
-        case pow
         case payloadsB64 = "payloads_b64"
     }
 }
@@ -587,7 +608,7 @@ private struct KnockWireResponse: Decodable {
 
 // MARK: - Public result types
 
-/// Result of ``DsClient/knock(groupId:pow:payloads:)``.
+/// Result of ``DsClient/knock(groupId:payloads:)``.
 public struct KnockResult: Equatable {
     /// The ids of the stored knock rows (empty for a probe).
     public let ids: [Int64]

@@ -30,10 +30,13 @@
 //! round-trip.
 //!
 //! Each service supplies its own effort env-var name (auth
-//! `LAKKO_POW_EFFORT_BITS`, discovery `LAKKO_DISCOVERY_POW_EFFORT_BITS`,
-//! push-gw `LAKKO_PUSH_GW_POW_EFFORT_BITS`) to [`configured_effort_bits`], and
-//! its own thin axum handler over [`issue_challenge`] (which needs the
-//! service's `AppState` to reach the DB pool).
+//! `LAKKO_POW_EFFORT_BITS`) to [`configured_effort_bits`], and its own thin
+//! axum handler over [`issue_challenge`] (which needs the service's
+//! `AppState` to reach the DB pool).
+//!
+//! Since ADR-0054 S3 `services/auth` is the only user: discovery, push-gw and
+//! the DS spend anonymous tokens (`lakko-anon-token-server`) instead, and
+//! their `pow_challenges` tables are dropped.
 
 #![forbid(unsafe_code)]
 
@@ -72,9 +75,9 @@ pub const DEFAULT_EFFORT_BITS: u8 = 8;
 
 /// Read the configured effort from a named env var.
 ///
-/// Each service has its own knob (auth uses `LAKKO_POW_EFFORT_BITS`, discovery
-/// uses `LAKKO_DISCOVERY_POW_EFFORT_BITS`, push-gw uses
-/// `LAKKO_PUSH_GW_POW_EFFORT_BITS`) so they can be tuned independently. Tests
+/// Each service has its own knob (auth, the only remaining user since
+/// ADR-0054 S3, uses `LAKKO_POW_EFFORT_BITS`) so they can be tuned
+/// independently. Tests
 /// override to `0`. An unset or unparseable value falls back to
 /// [`DEFAULT_EFFORT_BITS`].
 #[must_use]

@@ -15,10 +15,67 @@
  */
 import { AuthHttpError, AuthNetworkError } from "./client";
 import { DiscoveryHttpError, DiscoveryNetworkError } from "../discovery/client";
+import { isAnonTokenNetworkFailure } from "../tokens/anon-token-pool";
 
 const OFFLINE = "Could not reach Lakko. Check your connection and try again.";
-const TOO_MANY = "Too many attempts. Wait a few minutes and try again.";
 const UNAVAILABLE = "That is not available right now. Try again later.";
+
+// ---------------------------------------------------------------------------
+// Server limits (ADR-0054 S4, docs/ux/anti-abuse.md section 2)
+//
+// Every auth limit answers `429 {"error": code, "retry_after_secs": N}` with
+// `Retry-After: N`. A limit is the server's decision: it never signs anyone
+// out, never reads as "invalid", and says when to try again.
+// ---------------------------------------------------------------------------
+
+/** `too-many-attempts`: login, recovery login, reset, TOTP, three words,
+ *  device authorize. */
+export const TOO_MANY_ATTEMPTS = "Too many attempts. Wait a moment, then try again.";
+/** `recovery-code-send-limited`: the email / SMS code send. */
+export const RECOVERY_CODE_SEND_LIMITED =
+  "We sent a code recently. Wait a few minutes before asking for another.";
+/** `device-request-limited`: "Is this you?" prompts on the other devices. */
+export const DEVICE_REQUEST_LIMITED =
+  "Too many requests to your other devices. Try again in a few minutes.";
+/** `signup-rate-limited`: signup start or its challenge. */
+export const SIGNUP_RATE_LIMITED =
+  "Too many new accounts from this network right now. Try again later.";
+
+/** The attempts copy, in minutes when the server asks for more than one. */
+export function tooManyAttemptsMessage(retryAfterSecs: number | null): string {
+  if (retryAfterSecs !== null && retryAfterSecs > 60) {
+    return `Too many attempts. Try again in ${Math.ceil(retryAfterSecs / 60)} minutes.`;
+  }
+  return TOO_MANY_ATTEMPTS;
+}
+
+/**
+ * The copy for a server limit, or `null` when `err` is not one. Covers the
+ * 429 codes and the `503 rate-limiter-unavailable` (the limiter's store is
+ * down: fail closed, shown as the generic failure).
+ */
+export function authLimitMessage(err: unknown): string | null {
+  if (!(err instanceof AuthHttpError)) return null;
+  const code = err.errorCode;
+  if (err.status === 503 && code === "rate-limiter-unavailable") return UNAVAILABLE;
+  if (err.status !== 429) return null;
+  switch (code) {
+    case "recovery-code-send-limited":
+      return RECOVERY_CODE_SEND_LIMITED;
+    case "device-request-limited":
+      return DEVICE_REQUEST_LIMITED;
+    case "signup-rate-limited":
+      return SIGNUP_RATE_LIMITED;
+    default:
+      return tooManyAttemptsMessage(err.retryAfter);
+  }
+}
+
+/** `true` when `err` is the signup's own network limit, so the form offers
+ *  `Try again` and keeps its contents. */
+export function isSignupRateLimited(err: unknown): boolean {
+  return err instanceof AuthHttpError && err.status === 429 && err.errorCode === "signup-rate-limited";
+}
 
 /** The one sentence a failed password login shows, whatever failed. */
 export const WRONG_CREDENTIALS = "Wrong username or password. Check them and try again.";
@@ -41,8 +98,11 @@ function isScreenCopy(message: string): boolean {
 /** The login form. */
 export function loginErrorMessage(err: unknown): string {
   if (isOffline(err)) return OFFLINE;
+  const limit = authLimitMessage(err);
+  if (limit !== null) return limit;
+  // The username lookup could not get an anonymous token (ADR-0054 S3).
+  if (isAnonTokenNetworkFailure(err)) return OFFLINE;
   const s = status(err);
-  if (s === 429) return TOO_MANY;
   if (s === 503) return UNAVAILABLE;
   // 401 / 404 / a lookup miss / "invalid credentials": all the same sentence.
   if (s === 401 || s === 404 || s === 400) return WRONG_CREDENTIALS;
@@ -64,8 +124,10 @@ export function passkeyErrorMessage(err: unknown): string {
 /** The signup form. */
 export function signupErrorMessage(err: unknown): string {
   if (isOffline(err)) return OFFLINE;
+  const limit = authLimitMessage(err);
+  if (limit !== null) return limit;
+  if (isAnonTokenNetworkFailure(err)) return OFFLINE;
   const s = status(err);
-  if (s === 429) return TOO_MANY;
   if (s === 503) return UNAVAILABLE;
   if (s === 409 || (err instanceof Error && /already taken/.test(err.message))) {
     return "That username is taken. Choose another one.";
@@ -78,8 +140,10 @@ export function signupErrorMessage(err: unknown): string {
  *  password. A wrong phrase and an unknown username are one sentence. */
 export function recoverErrorMessage(err: unknown): string {
   if (isOffline(err)) return OFFLINE;
+  const limit = authLimitMessage(err);
+  if (limit !== null) return limit;
+  if (isAnonTokenNetworkFailure(err)) return OFFLINE;
   const s = status(err);
-  if (s === 429) return TOO_MANY;
   if (s === 503) return UNAVAILABLE;
   if (s === 401 || s === 404 || s === 400) {
     return "That did not match this account. Check the words and the username, then try again.";

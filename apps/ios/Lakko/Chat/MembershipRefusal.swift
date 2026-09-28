@@ -33,7 +33,7 @@ import LakkoCore
 // ## The `default` arms that are deliberately absent
 //
 // Both switches below are exhaustive with **no wildcard**, so a nineteenth
-// `FfiRefusalReason` or a forty-fourth `FfiError` case fails the BUILD. That
+// `FfiRefusalReason` or a fifty-seventh `FfiError` case fails the BUILD. That
 // is the whole "a new core reason cannot silently render blank" guarantee on
 // this platform, and it evaporates the moment somebody adds a `default:` to
 // quiet the compiler. Do not.
@@ -378,7 +378,7 @@ private let maxWrapDepth = 4
 /// error would make this whole table dead code on the one route that reaches
 /// the UI.
 ///
-/// The `FfiError` switch is exhaustive with **no `default`**: a forty-fourth
+/// The `FfiError` switch is exhaustive with **no `default`**: a fifty-seventh
 /// variant fails the build, which is what stops a future `MembershipX` case
 /// from silently falling through to "not a refusal".
 public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
@@ -416,7 +416,8 @@ public func membershipRefusalReason(of error: Error) -> FfiRefusalReason? {
                 .BackupHeadStale, .Channels, .Call, .Sfu, .Transport, .Release, .LockPoisoned,
                 .UsernameEmpty, .UsernameTooShort, .UsernameTooLong, .UsernameInvalidCharacters,
                 .DisplayNameLineBreak, .DisplayNameControlOrFormatCharacter,
-                .DisplayNameTooLong, .DisplayNameTooManyBytes, .ChannelMeta:
+                .DisplayNameTooLong, .DisplayNameTooManyBytes, .ChannelMeta,
+                .AnonToken, .AnonTokenAlreadyFinalized:
                 return nil
             }
         }

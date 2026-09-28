@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Proof-of-work worker — runs the blocking `PowSolver.solve` off the main
- * thread. Companion to `./pow.ts`, which owns the pool, the queue and the
+ * Proof-of-work worker — runs the chunked `PowSolver.solveChunk` search
+ * (`solveInChunks`) off the main thread. The page cancels by terminating the
+ * worker. Companion to `./pow.ts`, which owns the pool, the queue and the
  * main-thread fallback; this script only answers one request at a time.
  *
  * Loads the same wasm core as the page (`vite.config.ts` repeats
@@ -12,6 +13,7 @@
  * nonce and a solution — so nothing secret crosses the message boundary.
  */
 import { loadWasm } from "../wasm";
+import { solveInChunks } from "./pow-chunks";
 import type { PowProofPayload } from "./wire";
 
 export interface PowWorkerRequest {
@@ -48,13 +50,11 @@ if (typeof scope.WorkerGlobalScope !== "undefined") {
         return;
       }
       try {
-        const proof = wasm.PowSolver.solve(seedB64, effortBits);
-        const payload: PowProofPayload = {
-          seed: proof.seedB64,
-          nonce: proof.nonceB64,
-          solution: proof.solutionB64,
-        };
-        proof.free();
+        const payload: PowProofPayload = await solveInChunks(
+          (seed, effort, max) => wasm.PowSolver.solveChunk(seed, effort, max),
+          seedB64,
+          effortBits,
+        );
         scope.postMessage({ id, kind: "proof", proof: payload });
       } catch (err) {
         scope.postMessage({ id, kind: "error", message: messageOf(err) });

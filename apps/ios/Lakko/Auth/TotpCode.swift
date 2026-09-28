@@ -11,7 +11,7 @@ import Foundation
 ///   * the server's `parse_code` gate (`services/auth/src/totp.rs`)
 ///
 /// A code is exactly 6 ASCII digits after trimming surrounding
-/// whitespace. Validating before the network call saves a PoW solve
+/// whitespace. Validating before the network call saves a round trip
 /// on `/totp/recover` and lets the forms surface a precise message
 /// instead of the server's generic 400/401.
 

@@ -66,7 +66,6 @@ const MAX_USES_UNLIMITED: u32 = u32::MAX;
 
 #[derive(Deserialize)]
 pub(crate) struct UploadRequest {
-    pub(crate) pow: crate::pow::PowProof,
     /// Standard-alphabet base64 of `lakko_contacts::group_invite::compose(...)`
     /// output. The server decodes + verifies the wire signature before storing.
     pub(crate) capability: String,
@@ -96,8 +95,6 @@ pub(crate) async fn upload(
     axum::Extension(authed): axum::Extension<crate::auth::AuthenticatedAccount>,
     Json(payload): Json<UploadRequest>,
 ) -> Result<Json<UploadResponse>, (StatusCode, String)> {
-    crate::pow::verify_proof(&state.db, &payload.pow).await?;
-
     let bytes = B64.decode(&payload.capability).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -231,7 +228,6 @@ pub(crate) async fn fetch(
 
 #[derive(Deserialize)]
 pub(crate) struct ConsumeRequest {
-    pub(crate) pow: crate::pow::PowProof,
     /// Standard-alphabet base64 of the 32-byte joiner_tag. The joiner computes
     /// it via `lakko_contacts::invite::compute_joiner_tag(capability_bytes,
     /// joiner_account_id)` — the same helper the contact- and call-invite
@@ -281,8 +277,6 @@ pub(crate) async fn consume(
     Path(blob_id_b64url): Path<String>,
     Json(payload): Json<ConsumeRequest>,
 ) -> Result<Json<ConsumeResponse>, (StatusCode, String)> {
-    crate::pow::verify_proof(&state.db, &payload.pow).await?;
-
     let blob_id = crate::ledger_id::parse_blob_id(&blob_id_b64url)?;
 
     let joiner_tag = B64.decode(&payload.joiner_tag).map_err(|e| {
@@ -607,8 +601,7 @@ fn current_unix_ms() -> u64 {
 
 /// How often the group-invite-expiry pruner wakes up. Matches the
 /// `invite::spawn_pruner` cadence (1 h) — a group-invite link lives about as
-/// long as a contact invite, so the same asymmetry versus the 60 s PoW-challenge
-/// prune applies.
+/// long as a contact invite.
 const PRUNE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 /// Spawn a background task that periodically deletes expired group-invite blobs.

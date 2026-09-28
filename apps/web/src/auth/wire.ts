@@ -21,10 +21,11 @@
  */
 
 // ----------------------------------------------------------------------------
-// PoW (services/auth/src/pow.rs)
+// Proof of work (services/auth/src/pow.rs) - signup start only
 // ----------------------------------------------------------------------------
 
-/** Body of `POST /pow/challenge`. The endpoint takes no input. */
+/** Body of `POST /pow/challenge` (auth, signup only). The endpoint takes
+ *  no input. */
 export interface PowChallengeResponse {
   /** base64(seed) — 16 random bytes the server will recognise on
    *  the matching expensive request. */
@@ -36,8 +37,8 @@ export interface PowChallengeResponse {
   expires_in: number;
 }
 
-/** Embedded `pow` object on every expensive endpoint. All three
- *  fields are base64-encoded 16-byte values. */
+/** Embedded `pow` object. Since ADR-0054 S4 only `/signup/start`
+ *  carries one. All three fields are base64-encoded. */
 export interface PowProofPayload {
   seed: string;
   nonce: string;
@@ -69,7 +70,6 @@ export interface SignupStartResponse {
 
 /** `POST /signup/finish` request body. */
 export interface SignupFinishRequest {
-  pow: PowProofPayload;
   account_id: string;
   password_upload: string;
   recovery_upload?: string;
@@ -93,8 +93,9 @@ export interface SignupFinishResponse {
 
 /** Shared by `/login/start` and `/recovery/login/start`. */
 export interface LoginStartRequest {
-  pow: PowProofPayload;
-  account_id: string;
+  /** ADR-0054 S5: the login handle, base64url (no pad) of the 32 bytes
+   *  `loginHandle(username)` returns. Never an account id. */
+  handle: string;
   /** base64(CredentialRequest). */
   request: string;
 }
@@ -107,8 +108,7 @@ export interface LoginStartResponse {
   response: string;
 }
 
-/** Shared by `/login/finish` and `/recovery/login/finish`. No `pow`
- *  field — the server only requires PoW on the start endpoints. */
+/** Shared by `/login/finish` and `/recovery/login/finish`. */
 export interface LoginFinishRequest {
   session_id: string;
   /** base64(CredentialFinalization). */
@@ -137,9 +137,9 @@ export interface LoginFinishResponse {
  * registration) start in this single round trip.
  */
 export interface PasswordResetStartRequest {
-  pow: PowProofPayload;
-  /** base64(account_id). */
-  account_id: string;
+  /** ADR-0054 S5: the login handle, base64url (no pad) of the 32 bytes
+   *  `loginHandle(username)` returns. Never an account id. */
+  handle: string;
   /** base64(CredentialRequest) from `OpaqueLogin.startRecovery(seed)`. */
   recovery_request: string;
   /** base64(RegistrationRequest) from `OpaqueRegister.startPassword(newPassword)`. */
@@ -156,9 +156,7 @@ export interface PasswordResetStartResponse {
   new_password_response: string;
 }
 
-/** `POST /password/reset/finish` request body. No `pow` field —
- *  the server only requires PoW on the start endpoints, by analogy
- *  with `/login/{start,finish}`. */
+/** `POST /password/reset/finish` request body. */
 export interface PasswordResetFinishRequest {
   session_id: string;
   /** base64(CredentialFinalization) — proves recovery ownership. */
@@ -183,13 +181,6 @@ export interface PasswordResetFinishResponse {
 // factor (a), "another-device" recovery)
 // ----------------------------------------------------------------------------
 
-/** `POST /device/authorize/start` request body. Bearer-authenticated
- *  (the EXISTING device's session token rides the `Authorization`
- *  header, not the body) + PoW. */
-export interface DeviceAuthorizeStartRequest {
-  pow: PowProofPayload;
-}
-
 /** `POST /device/authorize/start` response body. */
 export interface DeviceAuthorizeStartResponse {
   /** URL-safe base64 (no pad) of the RAW 32-byte single-use grant
@@ -200,9 +191,8 @@ export interface DeviceAuthorizeStartResponse {
 }
 
 /** `POST /device/authorize/redeem` request body. Anonymous (the
- *  fresh device has no token yet) + PoW. */
+ *  fresh device has no token yet) (no proof of work since ADR-0054 S4). */
 export interface DeviceAuthorizeRedeemRequest {
-  pow: PowProofPayload;
   /** URL-safe base64 (no pad) of the 16-byte account_id the fresh
    *  device learned from the pairing QR. */
   account_id_b64: string;
@@ -226,13 +216,6 @@ export interface DeviceAuthorizeRedeemResponse {
 // authenticator-code recovery)
 // ----------------------------------------------------------------------------
 
-/** `POST /totp/enroll/start` request body. Bearer-authenticated (the
- *  already-logged-in account's session token rides the
- *  `Authorization` header) + PoW. */
-export interface TotpEnrollStartRequest {
-  pow: PowProofPayload;
-}
-
 /** `POST /totp/enroll/start` response body — the provisioning
  *  material the authenticator app consumes. The raw secret leaves
  *  the server exactly once, here. */
@@ -244,8 +227,7 @@ export interface TotpEnrollStartResponse {
   secret_b32: string;
 }
 
-/** `POST /totp/enroll/finish` request body. Bearer-auth, NO `pow`
- *  — the server does not gate finish. */
+/** `POST /totp/enroll/finish` request body. Bearer-auth. */
 export interface TotpEnrollFinishRequest {
   /** The first 6-digit code the authenticator produced, proving it
    *  holds the secret. */
@@ -253,11 +235,11 @@ export interface TotpEnrollFinishRequest {
 }
 
 /** `POST /totp/recover` request body. Anonymous (the caller lost
- *  their device) + PoW. */
+ *  their device) (no proof of work since ADR-0054 S4). */
 export interface TotpRecoverRequest {
-  pow: PowProofPayload;
-  /** URL-safe base64 (no pad) of the 16-byte account_id. */
-  account_id_b64: string;
+  /** ADR-0054 S5: the login handle, base64url (no pad) of the 32 bytes
+   *  `loginHandle(username)` returns. Never an account id. */
+  handle: string;
   /** Current 6-digit authenticator code. */
   code: string;
 }
@@ -292,9 +274,8 @@ export type ContactKind = (typeof ContactKind)[keyof typeof ContactKind];
 
 /** `POST /recovery-contact/enroll/start` request body. Bearer-authenticated
  *  (the already-logged-in account's session token rides the `Authorization`
- *  header) + PoW. */
+ *  header) (no proof of work since ADR-0054 S4). */
 export interface RecoveryContactEnrollStartRequest {
-  pow: PowProofPayload;
   /** `1 = email`, `2 = phone` (see [`ContactKind`]). */
   kind: ContactKind;
   /** The raw phone / email plaintext. Used transiently server-side to hash +
@@ -308,8 +289,7 @@ export interface RecoveryContactSentResponse {
   sent: boolean;
 }
 
-/** `POST /recovery-contact/enroll/finish` request body. Bearer-auth, NO `pow`
- *  — the server does not gate finish. */
+/** `POST /recovery-contact/enroll/finish` request body. Bearer-auth. */
 export interface RecoveryContactEnrollFinishRequest {
   kind: ContactKind;
   /** The 6-digit code that was delivered to the contact. */
@@ -317,22 +297,22 @@ export interface RecoveryContactEnrollFinishRequest {
 }
 
 /** `POST /recovery-contact/recover/start` request body. Anonymous (the caller
- *  lost their device) + PoW. ENUMERATION-SAFE: the server returns the same
+ *  lost their device) (no proof of work since ADR-0054 S4). ENUMERATION-SAFE: the server returns the same
  *  `{ sent: true }` whether or not the contact matches a confirmed row. */
 export interface RecoveryContactRecoverStartRequest {
-  pow: PowProofPayload;
-  /** URL-safe base64 (no pad) of the 16-byte account_id. */
-  account_id_b64: string;
+  /** ADR-0054 S5: the login handle, base64url (no pad) of the 32 bytes
+   *  `loginHandle(username)` returns. Never an account id. */
+  handle: string;
   kind: ContactKind;
   /** The raw phone / email plaintext. */
   contact: string;
 }
 
-/** `POST /recovery-contact/recover/finish` request body. Anonymous + PoW. */
+/** `POST /recovery-contact/recover/finish` request body. Anonymous (no proof of work since ADR-0054 S4). */
 export interface RecoveryContactRecoverFinishRequest {
-  pow: PowProofPayload;
-  /** URL-safe base64 (no pad) of the 16-byte account_id. */
-  account_id_b64: string;
+  /** ADR-0054 S5: the login handle, base64url (no pad) of the 32 bytes
+   *  `loginHandle(username)` returns. Never an account id. */
+  handle: string;
   kind: ContactKind;
   /** The 6-digit code that was delivered to the contact. */
   code: string;
@@ -398,11 +378,11 @@ export interface WordVaultStatusResponse {
   positions: number[] | null;
 }
 
-/** `POST /vault/recover/start` request body. Anonymous + PoW. */
+/** `POST /vault/recover/start` request body. Anonymous (no proof of work since ADR-0054 S4). */
 export interface WordVaultRecoverStartRequest {
-  pow: PowProofPayload;
-  /** URL-safe base64 (no pad) of the 16-byte account_id. */
-  account_id_b64: string;
+  /** ADR-0054 S5: the login handle, base64url (no pad) of the 32 bytes
+   *  `loginHandle(username)` returns. Never an account id. */
+  handle: string;
 }
 
 /** `POST /vault/recover/start` response body — identical in shape for a
@@ -415,10 +395,11 @@ export interface WordVaultRecoverStartResponse {
   argon2_p: number;
 }
 
-/** `POST /vault/recover/finish` request body. Anonymous + PoW. */
+/** `POST /vault/recover/finish` request body. Anonymous (no proof of work since ADR-0054 S4). */
 export interface WordVaultRecoverFinishRequest {
-  pow: PowProofPayload;
-  account_id_b64: string;
+  /** ADR-0054 S5: the login handle, base64url (no pad) of the 32 bytes
+   *  `loginHandle(username)` returns. Never an account id. */
+  handle: string;
   /** The guess: `SHA-256(K_verify)` for the typed words, 32 bytes. */
   verifier_b64: string;
 }
@@ -450,9 +431,8 @@ export interface PasskeyVaultGetResponse {
 // Device requests — ADR-0049 section 2 (services/auth/src/device_request.rs)
 // ----------------------------------------------------------------------------
 
-/** `POST /device/request` request body. Anonymous + PoW. */
+/** `POST /device/request` request body. Anonymous (no proof of work since ADR-0054 S4). */
 export interface DeviceRequestCreateRequest {
-  pow: PowProofPayload;
   account_id_b64: string;
   /** Standard base64 of the pairing payload (the bytes the QR carries). */
   pairing_payload_b64: string;
@@ -479,4 +459,25 @@ export interface DeviceRequestsListResponse {
     pairing_payload_b64: string;
     created_at_ms: number;
   } | null;
+}
+
+// ----------------------------------------------------------------------------
+// /auth/login-handle   (ADR-0054 S5, sign in by name)
+// ----------------------------------------------------------------------------
+
+/** `PUT /auth/login-handle` request body. Bearer-authenticated; binds the
+ *  caller's account to the handle (one per account, replacing the previous
+ *  one). `409 {"error":"handle-taken"}` when another account holds it. */
+export interface LoginHandlePutRequest {
+  handle: string;
+}
+
+/** `PUT /auth/login-handle` response body. */
+export interface LoginHandlePutResponse {
+  bound: boolean;
+}
+
+/** `DELETE /auth/login-handle` response body. */
+export interface LoginHandleDeleteResponse {
+  removed: boolean;
 }

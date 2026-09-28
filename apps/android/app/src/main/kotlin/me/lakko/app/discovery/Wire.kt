@@ -9,7 +9,6 @@
 package me.lakko.app.discovery
 
 import kotlinx.serialization.Serializable
-import me.lakko.app.auth.PowProofPayload
 
 /**
  * Kotlin-side mirror of the JSON shapes consumed and produced by
@@ -24,12 +23,9 @@ import me.lakko.app.auth.PowProofPayload
  * bundle (upload + fetch). The KeyPackage endpoints and the invite
  * codec live in their own files when 1.15f / 1.15e6 land.
  *
- * Reuses [PowProofPayload] from `me.lakko.app.auth` — the wire
- * shape is byte-identical to what the auth service expects (it's
- * the same Equix proof carried by every expensive endpoint). The
- * **server** keeps its PoW challenge table separate
- * (`services/discovery` has its own `/pow/challenge`); the JSON
- * shape is identical so the Kotlin DTO is shared.
+ * No body carries a proof of work any more (ADR-0054): the anonymous
+ * routes spend a token in the `x-lakko-anon-token` header, the rest
+ * carry the session.
  */
 
 // ----------------------------------------------------------------------------
@@ -39,7 +35,6 @@ import me.lakko.app.auth.PowProofPayload
 /** Body of `POST /discovery/oprf`. */
 @Serializable
 data class OprfRequest(
-    val pow: PowProofPayload,
     /** base64(BlindedElement<Ristretto255-SHA512>) — produced by
      *  `OprfBlinder.blind(username).blindedB64()`. */
     val blinded: String,
@@ -59,7 +54,6 @@ data class OprfResponse(
 /** Body of `POST /discovery/register`. */
 @Serializable
 data class RegisterRequest(
-    val pow: PowProofPayload,
     /** base64(account_id) — raw 16 bytes. */
     val account_id: String,
     /** base64(VOPRF output) — exactly 64 bytes, the OPRF hash the
@@ -82,7 +76,6 @@ data class RegisterResponse(
 /** Body of `POST /discovery/lookup`. */
 @Serializable
 data class LookupRequest(
-    val pow: PowProofPayload,
     /** Same shape as [RegisterRequest.oprf_hash]. */
     val oprf_hash: String,
 )
@@ -110,7 +103,6 @@ data class LookupResponse(
  *  different channel id is 409 Conflict. */
 @Serializable
 data class ChannelRegisterRequest(
-    val pow: PowProofPayload,
     /** base64(VOPRF output) — exactly 64 bytes, from
      *  `blinder.finalize`. */
     val oprf_hash: String,
@@ -131,7 +123,6 @@ data class ChannelRegisterResponse(
  *  hashed `@channelname` to its `channel_id`. */
 @Serializable
 data class ChannelLookupRequest(
-    val pow: PowProofPayload,
     /** Same shape as [ChannelRegisterRequest.oprf_hash]. */
     val oprf_hash: String,
 )
@@ -152,7 +143,6 @@ data class ChannelLookupResponse(
 /** Body of `POST /discovery/identity`. */
 @Serializable
 data class IdentityUploadRequest(
-    val pow: PowProofPayload,
     val account_id: String,
     /** base64(Ed25519 public key) — 32 bytes after decode. */
     val signature_pubkey: String,
@@ -205,7 +195,6 @@ data class IdentityFetchResponse(
 /** Body of `POST /discovery/keypackage` (ADR-0050: one row per device). */
 @Serializable
 data class KeyPackageUploadRequest(
-    val pow: PowProofPayload,
     val account_id: String,
     /** base64 of the device leaf's 32-byte Ed25519 signature key. */
     val device_id: String,
@@ -245,7 +234,6 @@ data class KeyPackageFetchResponse(
 /** Body of `POST /discovery/invite`. */
 @Serializable
 data class InviteUploadRequest(
-    val pow: PowProofPayload,
     /** Standard-alphabet base64 of the
      *  `composeInviteCapability(...)` output. Server caps
      *  decoded size at 2048 bytes (mirrored client-side in
@@ -278,7 +266,6 @@ data class InviteFetchResponse(
  *  (Phase 1.18d3b mandatory shape). */
 @Serializable
 data class InviteConsumeRequest(
-    val pow: PowProofPayload,
     /** Standard-alphabet base64 of the 32-byte joiner-tag from
      *  [uniffi.lakko_ffi_uniffi.computeJoinerInviteTag]. */
     val joiner_tag: String,
@@ -317,7 +304,6 @@ data class InviteConsumeResponse(
  *  security boundary — the admin approval gate (ADR-0027) is the boundary. */
 @Serializable
 data class GroupInviteUploadRequest(
-    val pow: PowProofPayload,
     /** Standard-alphabet base64 of the
      *  `composeGroupInviteCapability(...)` output. The server decodes + verifies
      *  the Ed25519 wire signature before storing. */

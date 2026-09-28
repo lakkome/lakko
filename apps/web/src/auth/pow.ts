@@ -2,233 +2,219 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * PoW solver glue — wraps the WASM `PowSolver` into a small
- * promise-returning helper.
+ * Proof-of-work solver glue — wraps the WASM `PowSolver` into a small,
+ * cancellable, promise-returning helper.
  *
- * ## Off the main thread
+ * Since ADR-0054 S4 exactly one request pays a proof of work: `/signup/start`
+ * (the ordinary signup and the guest signup of a call link). Discovery, the
+ * DS and push-gw take anonymous tokens instead, and every other auth route is
+ * limited server-side.
  *
- * `PowSolver.solve` is one synchronous call that does not return until it
- * has found a proof. It used to run on the main thread, on the assumption
- * that the default effort would take well under a second. It does not: a
- * single signup at the production default effort was measured at 224 s with
- * the page frozen the whole time — no repaint, no input, no way to tell the
- * app from a hung tab. Every call now goes to a small pool of module Web
- * Workers (`pow-worker.ts`), so the UI stays live and
- * `PowActivityIndicator` can say that work is in progress.
+ * ## Off the main thread, and cancellable
  *
- * The pool size is small and bounded: several solves can be in flight at
- * once (an identity-bundle upload and a KeyPackage upload are independent),
- * and each worker instantiates its own copy of the wasm core, which costs
- * memory, so there is no point in more workers than spare cores.
+ * `PowSolver.solve` is one synchronous call that does not return until it has
+ * found a proof, and at the signup effort it runs for a noticeable time. Each
+ * solve gets its own module Web Worker (`pow-worker.ts`), created for the
+ * solve and terminated when it ends. Terminating is also how a solve is
+ * cancelled: the wasm call cannot be interrupted from inside, but a worker can
+ * be killed from outside. Leaving the signup screen, or tapping `Cancel`,
+ * aborts the signal and the worker dies with the solve (docs/ux/anti-abuse.md
+ * section 1).
+ *
+ * ## Chunks (ADR-0054 S5)
+ *
+ * The search runs as a loop of `PowSolver.solveChunk` calls
+ * ({@link solveInChunks}): at most {@link POW_CHUNK_ATTEMPTS} nonces per call,
+ * `undefined` when none of them produced a proof, the cancel signal checked
+ * between calls. In the worker the loop is only the search (cancelling
+ * terminates the worker, which is immediate and needs no cooperation). On the
+ * calling thread it is what makes the fallback cancellable at all: the loop
+ * yields to the event loop between chunks, so a `Cancel` tap and leaving the
+ * screen are seen within one chunk and the CPU work stops there.
+ *
+ * The chunk is one attempt. Measured on the maintainer's Mac (node, this wasm
+ * build): one Equix attempt takes about 260 ms, so no chunk can meet the
+ * brief's "about 100 ms" and the smallest one is the closest; a phone is
+ * slower still. Nothing is lost by the small chunk: each call samples fresh
+ * nonces, so the loop is the same search as one `solve`.
  *
  * ## Fallback
  *
  * Environments without `Worker` (the vitest `node` environment) solve on the
- * calling thread, as before. So does a browser whose worker fails to START
- * (the script or the wasm cannot load in a worker): that is a missing
- * capability, and freezing the page is better than failing every PoW-gated
- * request. A solve that fails INSIDE a working worker is a real error (a bad
- * seed, an exhausted solver budget) and is re-thrown, not retried here.
- *
- * The server effort defaults are untouched.
+ * calling thread. So does a browser whose worker fails to START (the script
+ * or the wasm cannot load in a worker): that is a missing capability, and a
+ * frozen page is better than no signup at all. A solve that fails INSIDE a
+ * working worker is a real error (a bad seed, an exhausted solver budget) and
+ * is re-thrown, not retried here.
  */
 import { loadWasm } from "../wasm";
 import type { PowProofPayload } from "./wire";
 import type { PowWorkerRequest, PowWorkerResponse } from "./pow-worker";
+import { solveInChunks, type PowChunkSolver } from "./pow-chunks";
 
-// ---------------------------------------------------------------------------
-// Activity (for the UI)
-// ---------------------------------------------------------------------------
+export {
+  POW_CHUNK_ATTEMPTS,
+  POW_MAX_ATTEMPTS,
+  solveInChunks,
+  type PowChunkSolver,
+  type WasmPowProof,
+} from "./pow-chunks";
 
-type ActivityListener = (inFlight: number) => void;
-let inFlight = 0;
-const listeners = new Set<ActivityListener>();
-
-function setInFlight(next: number): void {
-  inFlight = next;
-  for (const listener of listeners) listener(inFlight);
+/** A macrotask yield: lets the page run input and timers between chunks. */
+function macrotask(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-/** Subscribe to the number of PoW solves in flight. Called immediately with
- *  the current value. Returns the unsubscribe function. */
-export function subscribePowActivity(listener: ActivityListener): () => void {
-  listeners.add(listener);
-  listener(inFlight);
-  return () => {
-    listeners.delete(listener);
-  };
+/** Tests only: replace the calling thread's chunk solver (`null` = wasm). */
+let chunkSolverOverride: PowChunkSolver | null = null;
+export function setPowChunkSolverForTests(solver: PowChunkSolver | null): void {
+  chunkSolverOverride = solver;
 }
 
-// ---------------------------------------------------------------------------
-// Worker pool
-// ---------------------------------------------------------------------------
-
-/** Thrown when a worker could not be started or died outside a solve. */
+/** Thrown when a worker could not be started. */
 class PowWorkerUnavailable extends Error {
   override name = "PowWorkerUnavailable";
 }
 
-interface Slot {
-  readonly worker: Worker;
-  busy: boolean;
-  settle: ((response: PowWorkerResponse | PowWorkerUnavailable) => void) | null;
+/** Read through a function so TypeScript does not narrow `aborted` across
+ *  the blocking call in between two checks. */
+function isAborted(signal: AbortSignal | undefined): boolean {
+  return signal !== undefined && signal.aborted;
 }
 
-const slots: Slot[] = [];
-const queue: Array<() => void> = [];
+/** The standard abort error a cancelled solve rejects with. */
+function abortError(): DOMException {
+  return new DOMException("proof of work cancelled", "AbortError");
+}
+
+/** The subset of `Worker` this module drives (a test can supply a fake). */
+export interface PowWorkerLike {
+  onmessage: ((ev: MessageEvent<PowWorkerResponse>) => void) | null;
+  onerror: ((ev: ErrorEvent) => void) | null;
+  onmessageerror: ((ev: MessageEvent) => void) | null;
+  postMessage(message: PowWorkerRequest): void;
+  terminate(): void;
+}
+
+let workerFactory: (() => PowWorkerLike) | null =
+  typeof Worker === "undefined"
+    ? null
+    : () =>
+        new Worker(new URL("./pow-worker.ts", import.meta.url), {
+          type: "module",
+          name: "lakko-pow",
+        }) as unknown as PowWorkerLike;
 let workersBroken = false;
 let nextRequestId = 1;
 
-function poolSize(): number {
-  const cores =
-    typeof navigator !== "undefined" && typeof navigator.hardwareConcurrency === "number"
-      ? navigator.hardwareConcurrency
-      : 2;
-  return Math.max(1, Math.min(3, cores - 1));
+/** Tests only: replace how a solve worker is made (`null` = no workers). */
+export function setPowWorkerFactoryForTests(factory: (() => PowWorkerLike) | null): void {
+  workerFactory = factory;
+  workersBroken = false;
 }
 
-function createSlot(): Slot {
-  const worker = new Worker(new URL("./pow-worker.ts", import.meta.url), {
-    type: "module",
-    name: "lakko-pow",
-  });
-  const slot: Slot = { worker, busy: false, settle: null };
-  worker.onmessage = (ev: MessageEvent<PowWorkerResponse>) => {
-    const settle = slot.settle;
-    slot.settle = null;
-    settle?.(ev.data);
-  };
-  const fail = (): void => {
-    // A worker that errors outside a solve's own try/catch (a script or wasm
-    // load failure) is unusable; retire the whole pool and fall back.
-    workersBroken = true;
-    const settle = slot.settle;
-    slot.settle = null;
-    settle?.(new PowWorkerUnavailable("PoW worker failed to start"));
-    worker.terminate();
-    const index = slots.indexOf(slot);
-    if (index >= 0) slots.splice(index, 1);
-  };
-  worker.onerror = (ev) => {
-    ev.preventDefault();
-    fail();
-  };
-  worker.onmessageerror = fail;
-  return slot;
-}
-
-function acquireSlot(): Promise<Slot> {
-  return new Promise((resolve, reject) => {
-    const attempt = (): void => {
-      if (workersBroken) {
-        reject(new PowWorkerUnavailable("PoW workers unavailable"));
-        return;
-      }
-      let slot = slots.find((s) => !s.busy);
-      if (slot === undefined && slots.length < poolSize()) {
-        try {
-          slot = createSlot();
-          slots.push(slot);
-        } catch {
-          workersBroken = true;
-          reject(new PowWorkerUnavailable("PoW worker could not be created"));
-          return;
-        }
-      }
-      if (slot === undefined) {
-        queue.push(attempt);
-        return;
-      }
-      slot.busy = true;
-      resolve(slot);
-    };
-    attempt();
-  });
-}
-
-function releaseSlot(slot: Slot): void {
-  slot.busy = false;
-  const next = queue.shift();
-  next?.();
-}
-
-async function solveInWorker(
+function solveInWorker(
+  make: () => PowWorkerLike,
   seedB64: string,
   effortBits: number,
+  signal: AbortSignal | undefined,
 ): Promise<PowProofPayload> {
-  const slot = await acquireSlot();
-  try {
-    const request: PowWorkerRequest = {
-      id: nextRequestId++,
-      seedB64,
-      effortBits,
+  return new Promise((resolve, reject) => {
+    let worker: PowWorkerLike;
+    try {
+      worker = make();
+    } catch {
+      reject(new PowWorkerUnavailable("PoW worker could not be created"));
+      return;
+    }
+    let settled = false;
+    const finish = (): void => {
+      settled = true;
+      signal?.removeEventListener("abort", onAbort);
+      worker.terminate();
     };
-    const response = await new Promise<PowWorkerResponse | PowWorkerUnavailable>(
-      (resolve) => {
-        slot.settle = resolve;
-        slot.worker.postMessage(request);
-      },
-    );
-    if (response instanceof PowWorkerUnavailable) throw response;
-    if (response.kind === "unavailable") {
-      workersBroken = true;
-      throw new PowWorkerUnavailable(response.message);
-    }
-    if (response.kind === "error") throw new Error(response.message);
-    return response.proof;
-  } finally {
-    releaseSlot(slot);
-    if (workersBroken) {
-      // Anything still queued would wait forever for a pool that is gone.
-      while (queue.length > 0) queue.shift()?.();
-    }
-  }
+    const onAbort = (): void => {
+      if (settled) return;
+      finish();
+      reject(abortError());
+    };
+    signal?.addEventListener("abort", onAbort);
+    worker.onmessage = (ev) => {
+      if (settled) return;
+      finish();
+      const response = ev.data;
+      if (response.kind === "proof") resolve(response.proof);
+      else if (response.kind === "unavailable") reject(new PowWorkerUnavailable(response.message));
+      else reject(new Error(response.message));
+    };
+    const failed = (): void => {
+      if (settled) return;
+      finish();
+      reject(new PowWorkerUnavailable("PoW worker failed to start"));
+    };
+    worker.onerror = (ev) => {
+      ev.preventDefault();
+      failed();
+    };
+    worker.onmessageerror = failed;
+    worker.postMessage({ id: nextRequestId++, seedB64, effortBits });
+  });
 }
-
-// ---------------------------------------------------------------------------
-// Public entry point
-// ---------------------------------------------------------------------------
 
 async function solveOnCallingThread(
   seedB64: string,
   effortBits: number,
+  signal: AbortSignal | undefined,
 ): Promise<PowProofPayload> {
-  const wasm = await loadWasm();
-  // Blocking call — only reached where no worker can run it.
-  const proof = wasm.PowSolver.solve(seedB64, effortBits);
-  return {
-    seed: proof.seedB64,
-    nonce: proof.nonceB64,
-    solution: proof.solutionB64,
-  };
+  let solveChunk = chunkSolverOverride;
+  if (solveChunk === null) {
+    const wasm = await loadWasm();
+    solveChunk = (seed, effort, max) => wasm.PowSolver.solveChunk(seed, effort, max);
+  }
+  // Only reached where no worker can run it: chunked, yielding between
+  // chunks, so a cancel stops the work within one chunk.
+  return solveInChunks(solveChunk, seedB64, effortBits, {
+    ...(signal !== undefined ? { signal } : {}),
+    yieldBetween: macrotask,
+  });
 }
 
 /**
- * Solve the PoW for the given challenge and return a proof object
- * ready to drop into the `pow` field of any expensive auth body.
+ * Solve the PoW for the given challenge and return a proof object ready to
+ * drop into the `pow` field of `/signup/start`.
  *
- * @param seedB64       base64-encoded 16-byte server seed
- * @param effortBits    leading zero bits required on
- *                      SHA-256(seed || nonce || solution); the server
- *                      controls this knob via `LAKKO_POW_EFFORT_BITS`.
+ * @param seedB64     base64-encoded 16-byte server seed
+ * @param effortBits  leading zero bits required on
+ *                    SHA-256(seed || nonce || solution); the server
+ *                    controls this knob (`LAKKO_SIGNUP_POW_EFFORT_BITS`).
+ * @param signal      aborting it terminates the solve's worker and rejects
+ *                    with a `DOMException` named `AbortError`.
  */
 export async function solvePow(
   seedB64: string,
   effortBits: number,
+  signal?: AbortSignal,
 ): Promise<PowProofPayload> {
-  setInFlight(inFlight + 1);
-  try {
-    if (typeof Worker !== "undefined" && !workersBroken) {
-      try {
-        return await solveInWorker(seedB64, effortBits);
-      } catch (err) {
-        if (!(err instanceof PowWorkerUnavailable)) throw err;
-        // eslint-disable-next-line no-console
-        console.warn("PoW worker unavailable; solving on the main thread", err);
-      }
+  if (isAborted(signal)) throw abortError();
+  const make = workerFactory;
+  if (make !== null && !workersBroken) {
+    try {
+      return await solveInWorker(make, seedB64, effortBits, signal);
+    } catch (err) {
+      if (!(err instanceof PowWorkerUnavailable)) throw err;
+      workersBroken = true;
+      // eslint-disable-next-line no-console
+      console.warn("PoW worker unavailable; solving on the main thread", err);
     }
-    return await solveOnCallingThread(seedB64, effortBits);
-  } finally {
-    setInFlight(inFlight - 1);
   }
+  return solveOnCallingThread(seedB64, effortBits, signal);
+}
+
+/** `true` when `err` is the abort a cancelled solve (or signup) throws. */
+export function isAbortError(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { name?: unknown }).name === "AbortError"
+  );
 }

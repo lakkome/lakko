@@ -124,6 +124,9 @@ public final class LoginViewModel: ObservableObject {
     /// property + the username-resolution layer can't leak account
     /// existence).
     private func userFacing(_ err: AuthClientError) -> String {
+        // ADR-0054 S4 — a limit is the server's decision, never a wrong
+        // credential: its own copy, with the minutes when it says so.
+        if let limit = AuthRateLimit.copy(for: err) { return limit }
         switch err {
         case .argument(let message):
             return message

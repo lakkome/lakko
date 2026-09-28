@@ -68,6 +68,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod anon_token;
 pub mod attachments;
 pub mod auth;
 pub mod backup;
@@ -112,7 +113,7 @@ pub use contacts::{
     ContactRequest, Direction, IdentityPseudonym, InviteCapability, OpenedContactRequest,
     PerRelationship, StrangerInbox, WasmProfile,
 };
-pub use discovery::{normalize_username, validate_username, OprfBlinder};
+pub use discovery::{login_handle, normalize_username, validate_username, OprfBlinder};
 pub use mls::{AddMember, Group, Identity, ProcessedMessage, ProcessedMessageKind};
 pub use mnemonic::RecoveryMnemonic;
 pub use pow_solver::{PowProof, PowSolver};

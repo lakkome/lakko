@@ -57,6 +57,7 @@ class AuthClientTest {
         val method: HttpMethod,
         val url: String,
         val body: JsonObject?,
+        val authorization: String? = null,
     )
 
     /** Convenience: build an [AuthClient] backed by a [MockEngine]
@@ -91,6 +92,7 @@ class AuthClientTest {
                     method = request.method,
                     url = request.url.toString(),
                     body = parsedBody,
+                    authorization = request.headers[HttpHeaders.Authorization],
                 ),
             )
             val (status, body) = responses[index]
@@ -98,7 +100,10 @@ class AuthClientTest {
             respond(
                 content = body,
                 status = status,
-                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+                headers = headersOf(
+                    HttpHeaders.ContentType to listOf("application/json"),
+                    HttpHeaders.RetryAfter to listOf("120"),
+                ),
             )
         }
         return AuthClient(baseUrl = "http://test.invalid", engine = engine)
@@ -216,7 +221,6 @@ class AuthClientTest {
         ).use { client ->
             val resp = client.signupFinish(
                 SignupFinishRequest(
-                    pow = PowProofPayload("S", "N", "X"),
                     account_id = "ACC",
                     password_upload = "UPLOAD",
                 ),
@@ -242,8 +246,7 @@ class AuthClientTest {
         ).use { client ->
             val start = client.loginStart(
                 LoginStartRequest(
-                    pow = PowProofPayload("S", "N", "X"),
-                    account_id = "ACC",
+                    handle = "HANDLE",
                     request = "CRED_REQ",
                 ),
             )
@@ -274,8 +277,7 @@ class AuthClientTest {
                 ).use { client ->
                     client.loginStart(
                         LoginStartRequest(
-                            pow = PowProofPayload("S", "N", "X"),
-                            account_id = "ACC",
+                            handle = "HANDLE",
                             request = "REQ",
                         ),
                     )
@@ -369,37 +371,263 @@ class AuthClientTest {
         assertThrows(AuthClientArgError::class.java) {
             runTest {
                 AuthClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
-                    client.login(accountId = ByteArray(16), password = ByteArray(0))
+                    client.login(handle = ByteArray(32), password = ByteArray(0))
                 }
             }
         }
     }
 
     @Test
-    fun `login rejects wrong-length accountId before any network call`() {
+    fun `login rejects a wrong-length handle before any network call`() {
         val engine = MockEngine { error("must not reach the network") }
         assertThrows(AuthClientArgError::class.java) {
             runTest {
                 AuthClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
-                    client.login(accountId = ByteArray(8), password = "pw".toByteArray())
+                    client.login(handle = ByteArray(16), password = "pw".toByteArray())
                 }
             }
         }
     }
 
     @Test
-    fun `recover rejects wrong-length accountId before any network call`() {
+    fun `recover rejects a wrong-length handle before any network call`() {
         val engine = MockEngine { error("must not reach the network") }
         assertThrows(AuthClientArgError::class.java) {
             runTest {
                 AuthClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
                     client.recover(
-                        accountId = ByteArray(8),
+                        handle = ByteArray(16),
                         mnemonicSeed = ByteArray(64),
                         newPassword = "pw".toByteArray(),
                     )
                 }
             }
         }
+    }
+
+    // ---------------------------------------------------------------
+    // ADR-0054 S4 — no proof of work outside signup start
+    // ---------------------------------------------------------------
+
+    @Test
+    fun `login start carries no pow field`() = runTest {
+        val captured = mutableListOf<CapturedRequest>()
+        client(
+            responses = listOf(HttpStatusCode.OK to """{"session_id":"S","response":"R"}"""),
+            captured = captured,
+        ).use { client ->
+            client.loginStart(LoginStartRequest(handle = "HANDLE", request = "REQ"))
+        }
+        assertEquals(1, captured.size)
+        assertTrue(captured[0].url.endsWith("/login/start"))
+        assertFalse(captured[0].body!!.containsKey("pow"))
+    }
+
+    @Test
+    fun `totp recover and contact recovery bodies carry no pow and hit no challenge`() = runTest {
+        val captured = mutableListOf<CapturedRequest>()
+        client(
+            responses = listOf(
+                HttpStatusCode.OK to
+                    """{"account_id_b64":"AAAAAAAAAAAAAAAAAAAAAA","session_token":"t","session_expires_at_ms":1}""",
+                HttpStatusCode.OK to """{"sent":true}""",
+                HttpStatusCode.OK to
+                    """{"account_id_b64":"AAAAAAAAAAAAAAAAAAAAAA","session_token":"t","session_expires_at_ms":1}""",
+                HttpStatusCode.OK to """{"sent":true}""",
+                HttpStatusCode.OK to
+                    """{"account_id_b64":"AAAAAAAAAAAAAAAAAAAAAA","session_token":"t","session_expires_at_ms":1}""",
+            ),
+            captured = captured,
+        ).use { client ->
+            client.totpRecover(ByteArray(32), "123456")
+            client.recoveryContactRecoverStart(ByteArray(32), ContactKind.EMAIL, "a@b.c")
+            client.recoveryContactRecoverFinish(ByteArray(32), ContactKind.EMAIL, "123456")
+            client.recoveryContactEnrollStart("tok", ContactKind.EMAIL, "a@b.c")
+            client.deviceAuthorizeRedeem(ByteArray(16), "grant")
+        }
+        assertEquals(5, captured.size)
+        for (req in captured) {
+            assertFalse(req.url, req.url.endsWith("/pow/challenge"))
+            assertFalse(req.url, req.body?.containsKey("pow") ?: false)
+        }
+    }
+
+    @Test
+    fun `totp enroll start and device authorize start send no body but the bearer`() = runTest {
+        val captured = mutableListOf<CapturedRequest>()
+        client(
+            responses = listOf(
+                HttpStatusCode.OK to """{"otpauth_uri":"otpauth://x","secret_b32":"ABC"}""",
+                HttpStatusCode.OK to """{"grant_token_b64":"G"}""",
+            ),
+            captured = captured,
+        ).use { client ->
+            client.totpEnrollStart("tok")
+            assertEquals("G", client.deviceAuthorizeStart("tok"))
+        }
+        assertEquals(2, captured.size)
+        assertTrue(captured[0].url.endsWith("/totp/enroll/start"))
+        assertTrue(captured[1].url.endsWith("/device/authorize/start"))
+        for (req in captured) {
+            assertNull(req.body)
+            assertEquals("Bearer tok", req.authorization)
+        }
+    }
+
+    @Test
+    fun `a 429 carries its code and stated wait`() {
+        val err = assertThrows(AuthHttpError::class.java) {
+            runTest {
+                client(
+                    responses = listOf(
+                        HttpStatusCode.TooManyRequests to
+                            """{"error":"too-many-attempts","retry_after_secs":900}""",
+                    ),
+                ).use { client ->
+                    client.loginStart(LoginStartRequest(handle = "HANDLE", request = "REQ"))
+                }
+            }
+        }
+        assertEquals(429, err.status)
+        assertEquals("too-many-attempts", err.code)
+        assertEquals(900L, err.retryAfterSecs)
+        assertEquals("Too many attempts. Try again in 15 minutes.", authLimitCopy(err))
+    }
+
+    @Test
+    fun `a 429 without a body wait falls back to the Retry-After header`() {
+        val err = assertThrows(AuthHttpError::class.java) {
+            runTest {
+                client(
+                    responses = listOf(
+                        HttpStatusCode.TooManyRequests to """{"error":"signup-rate-limited"}""",
+                    ),
+                ).use { client ->
+                    client.powChallenge()
+                }
+            }
+        }
+        assertEquals("signup-rate-limited", err.code)
+        assertEquals(120L, err.retryAfterSecs)
+        assertEquals(SIGNUP_RATE_LIMITED_COPY, authLimitCopy(err))
+    }
+
+    // ---------------------------------------------------------------
+    // ADR-0054 S5 — sign in and recover by name (login handle)
+    // ---------------------------------------------------------------
+
+    private val handle = ByteArray(32) { (it * 7 + 3).toByte() }
+    private val handleB64 = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(handle)
+    private val accountId = ByteArray(16) { (it + 1).toByte() }
+
+    private fun assertNamesByHandle(req: CapturedRequest) {
+        val body = req.body!!
+        assertEquals(req.url, handleB64, body["handle"]!!.jsonPrimitive.content)
+        assertEquals(43, handleB64.length)
+        assertFalse(req.url, handleB64.contains('=') || handleB64.contains('+') || handleB64.contains('/'))
+        for (key in body.keys) {
+            assertFalse("${req.url} carries $key", key.startsWith("account_id"))
+        }
+    }
+
+    @Test
+    fun `every name route sends the handle and no account id`() = runTest {
+        val captured = mutableListOf<CapturedRequest>()
+        val accountB64Url = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(accountId)
+        client(
+            responses = listOf(
+                HttpStatusCode.OK to """{"session_id":"S","response":"R"}""",
+                HttpStatusCode.OK to """{"session_id":"S","response":"R"}""",
+                HttpStatusCode.OK to
+                    """{"session_id":"S","recovery_response":"R","new_password_response":"N"}""",
+                HttpStatusCode.OK to
+                    """{"account_id_b64":"$accountB64Url","session_token":"t","session_expires_at_ms":1}""",
+                HttpStatusCode.OK to """{"sent":true}""",
+                HttpStatusCode.OK to
+                    """{"account_id_b64":"$accountB64Url","session_token":"t","session_expires_at_ms":1}""",
+            ),
+            captured = captured,
+        ).use { client ->
+            client.loginStart(LoginStartRequest(handle = handleB64, request = "REQ"))
+            client.recoveryLoginStart(LoginStartRequest(handle = handleB64, request = "REQ"))
+            client.passwordResetStart(
+                PasswordResetStartRequest(
+                    handle = handleB64,
+                    recovery_request = "RR",
+                    new_password_request = "NR",
+                ),
+            )
+            val totp = client.totpRecover(handle, "123456")
+            client.recoveryContactRecoverStart(handle, ContactKind.EMAIL, "a@b.c")
+            val contact = client.recoveryContactRecoverFinish(handle, ContactKind.EMAIL, "123456")
+            // The account id is learned from the response, never sent.
+            org.junit.Assert.assertArrayEquals(accountId, totp.accountId)
+            org.junit.Assert.assertArrayEquals(accountId, contact.accountId)
+        }
+        assertEquals(
+            listOf(
+                "/login/start",
+                "/recovery/login/start",
+                "/password/reset/start",
+                "/totp/recover",
+                "/recovery-contact/recover/start",
+                "/recovery-contact/recover/finish",
+            ),
+            captured.map { it.url.removePrefix("http://test.invalid") },
+        )
+        captured.forEach(::assertNamesByHandle)
+    }
+
+    @Test
+    fun `a finish naming an account id of the wrong length is refused`() {
+        val err = assertThrows(AuthHttpError::class.java) {
+            runTest {
+                client(
+                    responses = listOf(
+                        HttpStatusCode.OK to """{"account_id_b64":"AAAA","session_token":"t","session_expires_at_ms":1}""",
+                    ),
+                ).use { client -> client.totpRecover(handle, "123456") }
+            }
+        }
+        assertEquals("/totp/recover", err.endpoint)
+    }
+
+    @Test
+    fun `binding the handle is a bearer PUT and a 409 reads as taken`() = runTest {
+        val captured = mutableListOf<CapturedRequest>()
+        client(
+            responses = listOf(
+                HttpStatusCode.OK to """{"bound":true}""",
+                HttpStatusCode.Conflict to """{"error":"handle-taken"}""",
+                HttpStatusCode.OK to """{"removed":true}""",
+            ),
+            captured = captured,
+        ).use { client ->
+            assertEquals(LoginHandleBinding.Bound, client.bindLoginHandle("tok", handle))
+            assertEquals(LoginHandleBinding.Taken, client.bindLoginHandle("tok", handle))
+            assertTrue(client.unbindLoginHandle("tok"))
+        }
+        assertEquals(listOf(HttpMethod.Put, HttpMethod.Put, HttpMethod.Delete), captured.map { it.method })
+        for (req in captured) {
+            assertTrue(req.url.endsWith("/auth/login-handle"))
+            assertEquals("Bearer tok", req.authorization)
+        }
+        assertEquals(handleB64, captured[0].body!!["handle"]!!.jsonPrimitive.content)
+        assertNull(captured[2].body)
+    }
+
+    @Test
+    fun `login by name disabled is a 503 the copy helpers recognise`() {
+        val err = assertThrows(AuthHttpError::class.java) {
+            runTest {
+                client(
+                    responses = listOf(
+                        HttpStatusCode.ServiceUnavailable to """{"error":"login-by-name-disabled"}""",
+                    ),
+                ).use { client -> client.bindLoginHandle("tok", handle) }
+            }
+        }
+        assertTrue(isLoginByNameDisabled(err))
+        assertNull("not a limit", authLimitCopy(err))
     }
 }

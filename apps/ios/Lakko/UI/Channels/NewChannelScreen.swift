@@ -99,18 +99,23 @@ struct NewChannelScreen: View {
             // channel id still works. The mapping is `@handle -> channel_id`;
             // the OPRF hash is all the server ever sees.
             if !wantedHandle.isEmpty {
-                guard let token = sessionTokenProvider() else {
+                // The tokens the claim spends are drawn with the session.
+                guard sessionTokenProvider() != nil else {
                     errorMessage = "Sign in again to claim a handle, or leave it blank."
                     return
                 }
                 do {
                     _ = try await ChannelDiscovery.registerChannelHandle(
                         handle: wantedHandle,
-                        channelIdHex: id,
-                        sessionToken: token
+                        channelIdHex: id
                     )
                 } catch let DiscoveryClientError.http(status, _, _) where status == 409 {
                     errorMessage = "@\(cleanHandle) is already taken. Pick another or leave it blank."
+                    return
+                } catch let token as AnonTokenUnavailable {
+                    // ADR-0054 S3: the allowance copy, or the network copy.
+                    NSLog("Channels: handle registration token: %@", String(describing: token))
+                    errorMessage = token.errorDescription
                     return
                 } catch {
                     NSLog("Channels: handle registration failed: %@", String(describing: error))

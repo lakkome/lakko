@@ -282,3 +282,72 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn the_base64url_exchange_round_trips_and_the_header_value_verifies() {
+    use lakko_anon_token::{decode_header_value, encode_b64url};
+    let m = master();
+    let ctx = TokenContext::InviteConsume;
+    let req = TokenRequest::new(ctx, 40, 3).expect("request");
+    let blinded = req.blinded_elements_b64url();
+    assert_eq!(blinded.len(), 3);
+    // What the issuer does with the text: decode, evaluate, encode.
+    let raw: Vec<[u8; 32]> = blinded
+        .iter()
+        .map(|b| lakko_anon_token::decode_b64url_fixed::<32>(b).expect("32 bytes"))
+        .collect();
+    let key = IssuerKey::derive(&m, ctx, 40).expect("key");
+    let issuance = key.issue(&raw).expect("issue");
+    let evaluations: Vec<String> = issuance
+        .evaluations
+        .iter()
+        .map(|e| encode_b64url(e))
+        .collect();
+    let tokens = req
+        .finalize_b64url(
+            &evaluations,
+            &encode_b64url(&issuance.proof),
+            &encode_b64url(&key.public_key()),
+        )
+        .expect("finalize");
+    for t in tokens {
+        let bytes = decode_header_value(&t.to_header_value()).expect("header");
+        assert!(verify_token(&m, &bytes, ctx, now_in(40), W).is_ok());
+    }
+}
+
+#[test]
+fn the_base64url_finalize_refuses_bad_text() {
+    use lakko_anon_token::encode_b64url;
+    let m = master();
+    let ctx = TokenContext::DsKnock;
+    let key = IssuerKey::derive(&m, ctx, 1).expect("key");
+    let pk = encode_b64url(&key.public_key());
+    let fresh = || {
+        let req = TokenRequest::new(ctx, 1, 1).expect("request");
+        let issuance = key.issue(req.blinded_elements()).expect("issue");
+        (req, issuance)
+    };
+    let (req, iss) = fresh();
+    assert_eq!(
+        req.finalize_b64url(&["not base64!"], &encode_b64url(&iss.proof), &pk)
+            .unwrap_err(),
+        AnonTokenError::BadElement
+    );
+    let (req, iss) = fresh();
+    assert_eq!(
+        req.finalize_b64url(&[encode_b64url(&iss.evaluations[0])], "short", &pk)
+            .unwrap_err(),
+        AnonTokenError::ProofVerification
+    );
+    let (req, iss) = fresh();
+    assert_eq!(
+        req.finalize_b64url(
+            &[encode_b64url(&iss.evaluations[0])],
+            &encode_b64url(&iss.proof),
+            "short"
+        )
+        .unwrap_err(),
+        AnonTokenError::BadPublicKey
+    );
+}

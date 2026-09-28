@@ -16,11 +16,10 @@
  *      signup + `mintFreshIdentity` publish sites mint) is a 64-byte
  *      blob that round-trips through the request body base64-intact.
  *
- * The PoW solve + `signLeafGenesis` run against the REAL wasm core
- * so the bytes under test are the ones a live publish would emit.
- * `fetchChallenge` is stubbed to a zero-effort challenge so the
- * solver returns instantly, and `identityUpload` is stubbed to
- * CAPTURE the request body without a network round-trip.
+ * `signLeafGenesis` runs against the REAL wasm core so the bytes under
+ * test are the ones a live publish would emit. `identityUpload` is
+ * stubbed to CAPTURE the request body without a network round-trip (no
+ * proof of work since ADR-0054 S3).
  */
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
@@ -49,8 +48,7 @@ const SIG_PUBKEY = new Uint8Array(32).fill(1);
 const X25519_PUBKEY = new Uint8Array(32).fill(2);
 
 /**
- * Build a `DiscoveryClient` whose PoW challenge is zero-effort
- * (instant solve) and whose `identityUpload` captures the request
+ * Build a `DiscoveryClient` whose `identityUpload` captures the request
  * body instead of hitting the network. Returns the client plus an
  * accessor for the last captured body.
  */
@@ -60,18 +58,6 @@ function clientCapturingUpload(): {
 } {
   const client = new DiscoveryClient("http://localhost:0");
   let captured: IdentityUploadRequest | null = null;
-
-  // `fetchChallenge` is private; index-access it for the stub. A
-  // zero-effort challenge makes `solvePow` return on the first nonce.
-  vi.spyOn(
-    client as unknown as {
-      fetchChallenge: () => Promise<{ seed: string; effort_bits: number }>;
-    },
-    "fetchChallenge",
-  ).mockResolvedValue({
-    seed: base64Encode(new Uint8Array(16)),
-    effort_bits: 0,
-  });
 
   vi.spyOn(client, "identityUpload").mockImplementation(async (req) => {
     captured = req;

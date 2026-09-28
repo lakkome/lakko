@@ -36,6 +36,8 @@ final class DsAccessURLProtocol: URLProtocol {
         let url: URL
         let proof: String?
         let body: Data
+        var anonToken: String? = nil
+        var authorization: String? = nil
     }
 
     struct Answer {
@@ -52,10 +54,13 @@ final class DsAccessURLProtocol: URLProtocol {
         "a\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()).test"
     }
 
-    static func client(_ scope: String) -> DsClient {
+    static func client(_ scope: String, tokens: AnonTokenSource = FakeAnonTokens()) -> DsClient {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [DsAccessURLProtocol.self]
-        return DsClient(baseURL: "http://\(scope):9/native/ds", session: URLSession(configuration: config))
+        return DsClient(
+            baseURL: "http://\(scope):9/native/ds",
+            session: URLSession(configuration: config),
+            tokens: tokens)
     }
 
     static func script(_ scope: String, _ answers: [Answer]) {
@@ -81,7 +86,9 @@ final class DsAccessURLProtocol: URLProtocol {
                 method: request.httpMethod ?? "GET",
                 url: url,
                 proof: request.value(forHTTPHeaderField: "x-lakko-ds-proof"),
-                body: Self.bodyData(of: request)))
+                body: Self.bodyData(of: request),
+                anonToken: request.value(forHTTPHeaderField: "x-lakko-anon-token"),
+                authorization: request.value(forHTTPHeaderField: "Authorization")))
         var queue = Self.scripts[scope] ?? []
         answer = queue.isEmpty ? Answer(status: 200) : queue.removeFirst()
         Self.scripts[scope] = queue
@@ -434,18 +441,14 @@ final class DsJournalAccessTests: XCTestCase {
         var log: [String] = []
         var knocked: [[Data]] = []
         let epoch = try await DsKnockJoin(
-            solvePow: {
-                log.append("pow")
-                return PowProofPayload(seed: "s", nonce: "n", solution: "x")
-            },
-            knock: { _, payloads in
+            knock: { payloads in
                 log.append("knock:\(payloads.count)"); knocked.append(payloads); return 7
             },
             createProposal: { e in log.append("proposal@\(e)"); return Data([0xB0]) },
             attribution: { log.append("attribution"); return Data([0xA7]) }
         ).run()
         XCTAssertEqual(epoch, 7)
-        XCTAssertEqual(log, ["pow", "knock:0", "proposal@7", "attribution", "pow", "knock:2"])
+        XCTAssertEqual(log, ["knock:0", "proposal@7", "attribution", "knock:2"])
         XCTAssertEqual(knocked.last, [Data([0xA7]), Data([0xB0])], "attribution first, then the proposal")
     }
 
@@ -453,8 +456,7 @@ final class DsJournalAccessTests: XCTestCase {
         var proposed = false
         do {
             _ = try await DsKnockJoin(
-                solvePow: { PowProofPayload(seed: "s", nonce: "n", solution: "x") },
-                knock: { _, _ in nil },
+                knock: { _ in nil },
                 createProposal: { _ in proposed = true; return Data() },
                 attribution: { nil }
             ).run()
@@ -466,114 +468,73 @@ final class DsJournalAccessTests: XCTestCase {
     func testAMissingAttributionStillSendsTheProposal() async throws {
         var last: [Data] = []
         _ = try await DsKnockJoin(
-            solvePow: { PowProofPayload(seed: "s", nonce: "n", solution: "x") },
-            knock: { _, payloads in last = payloads; return 2 },
+            knock: { payloads in last = payloads; return 2 },
             createProposal: { _ in Data([0xB0]) },
             attribution: { nil }
         ).run()
         XCTAssertEqual(last, [Data([0xB0])])
     }
 
-    func testTheKnockWireCarriesThePowAndBase64Payloads() async throws {
+    /// ADR-0054 S3: the knock spends one `ds-knock` token in its header,
+    /// carries no proof of work, no Authorization and no journal proof.
+    func testTheKnockWireCarriesATokenAndBase64Payloads() async throws {
         let scope = DsAccessURLProtocol.freshScope()
         DsAccessURLProtocol.script(scope, [
             .init(status: 201, body: Data(#"{"ids":[10,11],"epoch":4}"#.utf8)),
         ])
-        let result = try await DsAccessURLProtocol.client(scope).knock(
+        let tokens = FakeAnonTokens()
+        let result = try await DsAccessURLProtocol.client(scope, tokens: tokens).knock(
             groupId: Data([0xEE]),
-            pow: PowProofPayload(seed: "AA==", nonce: "BB==", solution: "CC=="),
             payloads: [Data([1]), Data([2, 3])])
         XCTAssertEqual(result, KnockResult(ids: [10, 11], epoch: 4))
         let seen = try XCTUnwrap(DsAccessURLProtocol.requests(scope).first)
         XCTAssertEqual(seen.url.path, "/native/ds/ds/group/ee/knock")
         XCTAssertNil(seen.proof, "a knock is unauthenticated")
+        XCTAssertNil(seen.authorization, "a token route never carries a session")
+        XCTAssertEqual(seen.anonToken, "ds-knock-1")
+        XCTAssertEqual(tokens.taken, [.dsKnock])
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: seen.body) as? [String: Any])
         XCTAssertEqual(json["payloads_b64"] as? [String], ["AQ==", "AgM="])
-        let pow = try XCTUnwrap(json["pow"] as? [String: String])
-        XCTAssertEqual(pow, ["seed": "AA==", "nonce": "BB==", "solution": "CC=="])
+        XCTAssertNil(json["pow"], "no proof of work any more")
     }
 
-    // MARK: A knock whose proof of work expired mid-solve
-
-    private struct HttpRefusal {
-        static func status(_ code: Int) -> Error {
-            DsClientError.http(status: code, endpoint: "/ds/group/ab/knock", body: "")
-        }
-    }
-
-    /// A 401 on a knock POST is an expired challenge: fetch + solve a fresh one
-    /// and retry that knock once.
-    func testAnExpiredPowIsReSolvedAndTheKnockRetriedOnce() async throws {
-        var log: [String] = []
-        var knocks = 0
-        var solves = 0
-        let epoch = try await DsKnockJoin(
-            solvePow: {
-                solves += 1
-                log.append("pow\(solves)")
-                return PowProofPayload(seed: "s\(solves)", nonce: "n", solution: "x")
-            },
-            knock: { pow, payloads in
-                knocks += 1
-                log.append("knock:\(payloads.count)@\(pow.seed)")
-                if knocks == 1 { throw HttpRefusal.status(401) }
-                return 3
-            },
-            createProposal: { _ in Data([0xB0]) },
-            attribution: { nil }
-        ).run()
-        XCTAssertEqual(epoch, 3)
+    /// A spent token is dropped and the knock retried ONCE with another.
+    func testASpentTokenIsReplacedOnce() async throws {
+        let scope = DsAccessURLProtocol.freshScope()
+        DsAccessURLProtocol.script(scope, [
+            .init(status: 401, body: Data(#"{"error":"anon-token-spent"}"#.utf8)),
+            .init(status: 201, body: Data(#"{"ids":[],"epoch":5}"#.utf8)),
+        ])
+        let result = try await DsAccessURLProtocol.client(scope).knock(
+            groupId: Data([0xEE]), payloads: [])
+        XCTAssertEqual(result.epoch, 5)
         XCTAssertEqual(
-            log, ["pow1", "knock:0@s1", "pow2", "knock:0@s2", "pow3", "knock:1@s3"],
-            "the probe is retried under a FRESH challenge, then the request pays its own")
+            DsAccessURLProtocol.requests(scope).map(\.anonToken), ["ds-knock-1", "ds-knock-2"])
     }
 
-    /// Only once: a second 401 surfaces (as the generic failure).
-    func testASecondExpiredPowSurfaces() async throws {
-        var knocks = 0
+    /// A second refusal surfaces as a token refusal, never retried again.
+    func testASecondTokenRefusalSurfaces() async throws {
+        let scope = DsAccessURLProtocol.freshScope()
+        DsAccessURLProtocol.script(scope, [
+            .init(status: 401, body: Data(#"{"error":"anon-token-expired"}"#.utf8)),
+            .init(status: 401, body: Data(#"{"error":"anon-token-invalid"}"#.utf8)),
+        ])
         do {
-            _ = try await DsKnockJoin(
-                solvePow: { PowProofPayload(seed: "s", nonce: "n", solution: "x") },
-                knock: { _, _ in knocks += 1; throw HttpRefusal.status(401) },
-                createProposal: { _ in Data() },
-                attribution: { nil }
-            ).run()
-            XCTFail("two expired proofs must fail")
-        } catch {
+            _ = try await DsAccessURLProtocol.client(scope).knock(groupId: Data([0xEE]), payloads: [])
+            XCTFail("two refusals must fail")
+        } catch let error as AnonTokenUnavailable {
+            XCTAssertEqual(error, .refused(code: "anon-token-invalid"))
             XCTAssertEqual(JoinRequestFailure.classify(error), .generic)
         }
-        XCTAssertEqual(knocks, 2)
+        XCTAssertEqual(DsAccessURLProtocol.requests(scope).count, 2)
     }
 
-    /// Any other failure is not retried.
-    func testANonPowFailureIsNotRetried() async throws {
-        var knocks = 0
-        do {
-            _ = try await DsKnockJoin(
-                solvePow: { PowProofPayload(seed: "s", nonce: "n", solution: "x") },
-                knock: { _, _ in knocks += 1; throw HttpRefusal.status(503) },
-                createProposal: { _ in Data() },
-                attribution: { nil }
-            ).run()
-            XCTFail("a 503 must fail")
-        } catch {}
-        XCTAssertEqual(knocks, 1)
-    }
-
-    /// The second knock (attribution + proposal) gets the same one retry.
-    func testTheRequestKnockAlsoRetriesAnExpiredPow() async throws {
-        var knocks = 0
-        _ = try await DsKnockJoin(
-            solvePow: { PowProofPayload(seed: "s", nonce: "n", solution: "x") },
-            knock: { _, payloads in
-                knocks += 1
-                if !payloads.isEmpty && knocks == 2 { throw HttpRefusal.status(401) }
-                return 1
-            },
-            createProposal: { _ in Data([0xB0]) },
-            attribution: { nil }
-        ).run()
-        XCTAssertEqual(knocks, 3)
+    /// A used-up allowance reads as the allowance copy on the join screen.
+    func testAUsedUpKnockAllowanceShowsTheAllowanceCopy() {
+        let failure = JoinRequestFailure.classify(AnonTokenUnavailable.quotaExhausted(retryAfterSecs: 100))
+        XCTAssertEqual(failure, .allowanceUsed)
+        XCTAssertEqual(failure.message, "You have used today's allowance for this. Try again tomorrow.")
+        XCTAssertFalse(failure.offersRetry)
     }
 
     // MARK: The knock poll floor

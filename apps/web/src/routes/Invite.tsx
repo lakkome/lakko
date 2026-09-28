@@ -41,6 +41,7 @@
  * URL can be opened by anyone, including users who haven't
  * authenticated yet on this device.
  */
+import { anonTokenMessage } from "../tokens/token-copy";
 import {
   createMemo,
   createResource,
@@ -394,7 +395,13 @@ function ConnectPanel(props: {
       // to /contacts where the accepted-state UI lives.
       window.setTimeout(props.onDone, 1500);
     } catch (err) {
-      setError(isDiscoveryRateLimited(err) ? INVITE_LINK_RATE_LIMITED : formatError(err));
+      setError(
+        isDiscoveryRateLimited(err)
+          ? INVITE_LINK_RATE_LIMITED
+          : // ADR-0054 S3: the consume spends an anonymous token.
+            (anonTokenMessage(err, "Could not reach Lakko. Check your connection and try again.") ??
+            formatError(err)),
+      );
     } finally {
       setBusy(false);
     }

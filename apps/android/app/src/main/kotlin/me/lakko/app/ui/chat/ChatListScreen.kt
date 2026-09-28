@@ -530,7 +530,7 @@ private suspend fun lookUpName(typed: String): FoundByName = try {
  * not there.
  *
  * Failing shut is the honest direction: the gate exists so a name the blinder
- * would refuse never costs a proof of work, and offering a lookup we cannot
+ * would refuse never costs a lookup token, and offering a lookup we cannot
  * even check the shape of would spend one to be told no.
  */
 private fun looksLikeANameSafely(typed: String): Boolean = try {

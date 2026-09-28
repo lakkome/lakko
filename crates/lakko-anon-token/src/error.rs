@@ -57,5 +57,58 @@ pub enum AnonTokenError {
     Internal,
 }
 
+impl AnonTokenError {
+    /// A stable kebab-case code for the variant, the same on every FFI
+    /// surface, so a client branches on it rather than on the prose.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Malformed => "malformed",
+            Self::UnknownVersion => "unknown-version",
+            Self::UnknownContext => "unknown-context",
+            Self::WrongContext => "wrong-context",
+            Self::EpochOutOfWindow => "epoch-out-of-window",
+            Self::InvalidToken => "invalid-token",
+            Self::BadBatchSize => "bad-batch-size",
+            Self::BadElement => "bad-element",
+            Self::BadPublicKey => "bad-public-key",
+            Self::ProofVerification => "proof-verification",
+            Self::CountMismatch => "count-mismatch",
+            Self::InvalidWindow => "invalid-window",
+            Self::InvalidMasterSecret => "invalid-master-secret",
+            Self::Internal => "internal",
+        }
+    }
+}
+
 /// Result alias for this crate.
 pub type Result<T> = core::result::Result<T, AnonTokenError>;
+
+#[cfg(test)]
+mod tests {
+    use super::AnonTokenError as E;
+
+    #[test]
+    fn codes_are_distinct_and_frozen() {
+        let all = [
+            E::Malformed,
+            E::UnknownVersion,
+            E::UnknownContext,
+            E::WrongContext,
+            E::EpochOutOfWindow,
+            E::InvalidToken,
+            E::BadBatchSize,
+            E::BadElement,
+            E::BadPublicKey,
+            E::ProofVerification,
+            E::CountMismatch,
+            E::InvalidWindow,
+            E::InvalidMasterSecret,
+            E::Internal,
+        ];
+        let codes: std::collections::HashSet<_> = all.iter().map(|e| e.code()).collect();
+        assert_eq!(codes.len(), all.len());
+        assert_eq!(E::ProofVerification.code(), "proof-verification");
+        assert_eq!(E::BadBatchSize.code(), "bad-batch-size");
+    }
+}

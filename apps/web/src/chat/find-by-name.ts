@@ -32,13 +32,18 @@
  * no wasm here.
  */
 import type { UiRules } from "./ui-rules";
+import { anonTokenQuotaExhausted } from "../tokens/anon-token-pool";
+import { LOOKUP_ALLOWANCE_USED } from "../tokens/token-copy";
 
 /** What a lookup turned up. */
 export type FoundByName =
   | { readonly kind: "channel"; readonly channelIdHex: string; readonly handle: string }
   | { readonly kind: "person"; readonly username: string }
   | { readonly kind: "nothing" }
-  | { readonly kind: "unreachable" };
+  | { readonly kind: "unreachable" }
+  /** ADR-0054 S3: each lookup spends one anonymous token, and today's are
+   *  used up. Not "nothing": the name may well exist. */
+  | { readonly kind: "allowance-used" };
 
 /** The two namespaces, as the caller can ask them. Each resolves to `null`
  *  when the name is not in that namespace, and throws when the network is
@@ -69,22 +74,27 @@ export async function findByName(
   const name = rules.bareName(typed);
   if (!rules.looksLikeAName(name)) return { kind: "nothing" };
   let reachedTheServer = false;
+  let allowanceUsed = false;
   try {
     const channelIdHex = await lookups.channel(name);
     reachedTheServer = true;
     if (channelIdHex !== null) {
       return { kind: "channel", channelIdHex, handle: name };
     }
-  } catch {
+  } catch (err) {
     // Fall through: the other namespace may still answer.
+    if (anonTokenQuotaExhausted(err) !== null) allowanceUsed = true;
   }
-  try {
-    const username = await lookups.person(name);
-    reachedTheServer = true;
-    if (username !== null) return { kind: "person", username };
-  } catch {
-    // Handled below.
+  if (!allowanceUsed) {
+    try {
+      const username = await lookups.person(name);
+      reachedTheServer = true;
+      if (username !== null) return { kind: "person", username };
+    } catch (err) {
+      if (anonTokenQuotaExhausted(err) !== null) allowanceUsed = true;
+    }
   }
+  if (allowanceUsed) return { kind: "allowance-used" };
   return reachedTheServer ? { kind: "nothing" } : { kind: "unreachable" };
 }
 
@@ -100,6 +110,8 @@ export function findByNameMessage(
       return `Nothing found for ${at}.`;
     case "unreachable":
       return "Could not look that up. Check your connection and try again.";
+    case "allowance-used":
+      return LOOKUP_ALLOWANCE_USED;
     default:
       return "";
   }

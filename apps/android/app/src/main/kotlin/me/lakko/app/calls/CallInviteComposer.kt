@@ -83,8 +83,8 @@ public class CallInviteComposer(
      *   3. [DiscoveryClient.uploadCallInvite] — pushes the bytes to the ledger.
      *   4. [composePointerCallInviteUrl] — builds the `<origin>/c/<slug>` URL.
      *
-     * Must be driven from a background coroutine: the upload solves a
-     * server-issued proof-of-work challenge that takes seconds on slow devices.
+     * Must be driven from a background coroutine: the upload is a network
+     * round trip.
      */
     public suspend fun composeAndUpload(
         ownerSigningSeed: ByteArray,

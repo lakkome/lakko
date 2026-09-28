@@ -5,12 +5,15 @@ import Foundation
 import LakkoCore
 
 /// The discovery round-trips the authenticate flows depend on: the username
-/// claim, the username lookup, and the identity-bundle publish.
+/// claim and the identity-bundle publish.
 ///
 /// A seam, not a new client: production is ``DiscoveryAccountDirectory``,
 /// which forwards to ``DiscoveryClient``; tests inject a fake so the signup
-/// claim, the signup publish and the login resolution can be driven without a
-/// server.
+/// claim and the signup publish can be driven without a server.
+///
+/// There is deliberately no username lookup here (ADR-0054 S5): sign-in and
+/// recovery name the account by its login handle at auth (``LoginName``),
+/// and nothing before a session may ask discovery who a name is.
 ///
 /// Username normalisation is NOT done here. ``DiscoveryClient`` blinds the
 /// username through `OprfBlinder.blind`, which normalises in Rust
@@ -30,10 +33,6 @@ protocol AccountDirectory {
         username: String,
         sessionToken: String
     ) async throws -> RegisterResult
-
-    /// Resolve `username` to its account id (`POST /discovery/lookup`),
-    /// `account == nil` when the name is not registered.
-    func lookup(username: String) async throws -> LookupResult
 
     /// Upsert the account's identity bundle (`POST /discovery/identity`,
     /// session-token gated). See
@@ -58,10 +57,6 @@ struct DiscoveryAccountDirectory: AccountDirectory {
     ) async throws -> RegisterResult {
         try await DiscoveryClient(sessionToken: sessionToken)
             .registerUsername(accountId: accountId, username: username)
-    }
-
-    func lookup(username: String) async throws -> LookupResult {
-        try await DiscoveryClient().lookup(username: username)
     }
 
     func publishIdentityBundle(
@@ -99,112 +94,77 @@ public struct UsernameTaken: Error, LocalizedError, Equatable {
     }
 }
 
-/// Claim the signup username in discovery.
+/// Binding a login handle at auth (ADR-0054 S5). ``AuthClient`` in
+/// production; a fake in tests.
+protocol LoginHandleBinder {
+    /// `PUT /auth/login-handle`. Throws `AuthClientError.http(409, ...)` when
+    /// another account holds the handle.
+    func bindLoginHandle(handle: Data, sessionToken: String) async throws
+    /// `DELETE /auth/login-handle`.
+    @discardableResult
+    func removeLoginHandle(sessionToken: String) async throws -> Bool
+}
+
+extension AuthClient: LoginHandleBinder {}
+
+/// Claim a username: the login handle at auth FIRST, then the name at
+/// discovery (ADR-0054 S5, "Claim order").
 ///
-/// Mirror of the claim step in `apps/web/src/auth/AuthContext.tsx` `signup`
-/// (`discovery.registerUsername` right after the OPAQUE registration). The
-/// web decision this mirrors, and why:
+/// The handle and the discovery name live in two first-come registries that
+/// cannot check each other (neither server knows the name). Claiming in one
+/// order on every honest client leaves a squatter only names nobody claimed
+/// anywhere yet, which is ordinary first-come naming:
 ///
-///   * The claim needs the new account's id AND its session token (the
-///     register endpoint is bearer-gated), and both only exist once the
-///     OPAQUE registration committed. So the server-side account necessarily
-///     exists before the claim can run.
-///   * The claim runs BEFORE anything is persisted on the device and before
-///     the session lands. A refusal (409 taken, or any other failure) is
-///     thrown to the signup form and leaves the device untouched: the user
-///     never ends up signed in to an account nobody can find, and picks
-///     another name.
-///   * The cost, accepted on web and here: the refused attempt leaves an
-///     unreachable server-side account behind (no username, no device holding
-///     its keys). A retry with a different name registers a new account.
+///   1. `PUT /auth/login-handle` with the new account's session. A `409` means
+///      the name is taken: ``UsernameTaken``, and discovery is never asked.
+///   2. `POST /discovery/register`. A `409` there is also ``UsernameTaken``.
+///      ANY failure of this step releases the handle again
+///      (`DELETE /auth/login-handle`, best-effort): the signup form keeps the
+///      device untouched and the account behind it is abandoned, and a handle
+///      left bound to it would answer `409` to the user's own retry.
+///
+/// Mirror of the claim step in `apps/web/src/auth/AuthContext.tsx` `signup`.
+/// The claim needs the new account's id and session token, both of which
+/// exist only once the OPAQUE registration committed, so a refused claim
+/// leaves an unreachable server-side account behind (accepted on every
+/// client). A guest account (ADR-0032) has no username and never calls this.
 ///
 /// - Returns: the canonical username the server bound.
-/// - Throws: ``UsernameTaken`` on a 409; any other error unchanged.
+/// - Throws: ``UsernameTaken``; ``UsernameRuleViolation`` for a name that
+///   fails the rule; any other error unchanged.
 func claimSignupUsername(
     accountId: Data,
     username: String,
     sessionToken: String,
-    directory: AccountDirectory
+    directory: AccountDirectory,
+    binder: LoginHandleBinder,
+    derive: (String) throws -> Data = { try loginHandle(username: $0) }
 ) async throws -> String {
+    let name = try LoginName.make(
+        username,
+        emptyError: AuthClientError.argument("username must be non-empty"),
+        derive: derive
+    )
+    do {
+        try await binder.bindLoginHandle(handle: name.handle, sessionToken: sessionToken)
+    } catch AuthClientError.http(let status, _, _) where status == 409 {
+        throw UsernameTaken(username: name.canonical)
+    }
     do {
         return try await directory
-            .registerUsername(accountId: accountId, username: username, sessionToken: sessionToken)
+            .registerUsername(accountId: accountId, username: name.canonical, sessionToken: sessionToken)
             .normalisedUsername
-    } catch DiscoveryClientError.http(let status, _, _) where status == 409 {
-        throw UsernameTaken(username: checkUsername(username).canonical ?? normalizeUsername(input: username))
+    } catch {
+        do {
+            try await binder.removeLoginHandle(sessionToken: sessionToken)
+        } catch let releaseError {
+            NSLog("[auth] login handle release after a failed claim failed: \(releaseError)")
+        }
+        if case DiscoveryClientError.http(let status, _, _) = error, status == 409 {
+            throw UsernameTaken(username: name.canonical)
+        }
+        throw error
     }
-}
-
-// MARK: - Login: resolve the username
-
-/// The account a password login targets.
-struct ResolvedLoginAccount: Equatable {
-    let accountIdB64: String
-    let username: String
-    /// `true` when the on-device marker answered and no lookup ran.
-    let fromCache: Bool
-}
-
-/// Resolve which account a password login targets.
-///
-/// Mirror of `apps/web/src/auth/AuthContext.tsx` `login`:
-///
-///   1. The on-device `(accountId, username)` marker answers when the typed
-///      username names the same account — the fast path, no round-trip. The
-///      comparison is on the canonical form (the FFI `normalizeUsername`), so
-///      `@Alice` and `alice` both hit a marker holding `alice`.
-///   2. Otherwise — no marker (a fresh device) or a different name — a
-///      discovery lookup resolves the name.
-///   3. An unregistered name fails with the same `invalid credentials` a
-///      wrong password produces, as on web. A distinct message would leak
-///      nothing the public lookup endpoint does not already answer, but the
-///      login form keeps one failure copy on every client.
-///
-/// Identity is untouched by this step: it only picks the account id OPAQUE
-/// authenticates against. The identity still comes from the cached phrase
-/// seed or the recovery-phrase prompt (ADR-0017).
-func resolveLoginAccount(
-    cached: CachedAccount?,
-    typedUsername: String,
-    normalize: (String) -> String = { normalizeUsername(input: $0) },
-    validate: (String) throws -> String = { try validateUsername(input: $0) },
-    lookup: (String) async throws -> LookupResult,
-    encodeAccountId: (Data) -> String
-) async throws -> ResolvedLoginAccount {
-    let canonical = normalize(typedUsername)
-    // `@` alone normalises to nothing — and a guest account's marker holds
-    // the empty username, so an empty canonical form must never match it.
-    guard !canonical.isEmpty else {
-        throw AuthClientError.argument("username must be non-empty")
-    }
-    // ADR-0048 §4 — a name that fails the username rule is refused with its
-    // reason before the marker compare and before any lookup. No conforming
-    // client can register such a name, so there is nothing to sign in to.
-    _ = try requireValidUsername(
-        typedUsername,
-        emptyError: AuthClientError.argument("username must be non-empty"),
-        validate: validate
-    )
-    if let cached, normalize(cached.username) == canonical {
-        return ResolvedLoginAccount(
-            accountIdB64: cached.accountIdB64,
-            username: cached.username,
-            fromCache: true
-        )
-    }
-    let result = try await lookup(typedUsername)
-    guard let account = result.account else {
-        throw AuthClientError.http(
-            status: 401,
-            endpoint: "/login/start",
-            body: "invalid credentials"
-        )
-    }
-    return ResolvedLoginAccount(
-        accountIdB64: encodeAccountId(account),
-        username: result.normalisedUsername,
-        fromCache: false
-    )
 }
 
 // MARK: - Sign-in: refresh the published identity
@@ -260,9 +220,9 @@ func planPublishedIdentityRefresh(
 // MARK: - Form copy
 
 extension DiscoveryClientError {
-    /// The signup / login form message for a directory failure (the username
-    /// claim or the login lookup). A taken name never reaches here — it is
-    /// ``UsernameTaken`` — and an unregistered name is `invalid credentials`.
+    /// The signup form message for a directory failure (the username claim or
+    /// the identity publish). A taken name never reaches here: it is
+    /// ``UsernameTaken``.
     var authFormMessage: String {
         switch self {
         case .argument(let message):

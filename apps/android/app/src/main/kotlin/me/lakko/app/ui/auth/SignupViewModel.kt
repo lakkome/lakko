@@ -5,6 +5,7 @@ package me.lakko.app.ui.auth
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -14,7 +15,9 @@ import me.lakko.app.auth.AuthClientArgError
 import me.lakko.app.auth.AuthHttpError
 import me.lakko.app.auth.AuthNetworkError
 import me.lakko.app.auth.AuthRepository
+import me.lakko.app.auth.SIGNUP_RATE_LIMITED_COPY
 import me.lakko.app.auth.SignupOutcome
+import kotlin.coroutines.cancellation.CancellationException
 import me.lakko.app.discovery.DiscoveryHttpError
 import me.lakko.app.discovery.DiscoveryNetworkError
 import me.lakko.app.profile.DisplayNameCheck
@@ -34,23 +37,45 @@ import me.lakko.app.profile.usernameFieldError
  * phrase screen ([RecoveryPhraseOnboarding]) shows it exactly once
  * before the session is usable.
  */
-public class SignupViewModel(
-    private val repo: AuthRepository,
+public class SignupViewModel internal constructor(
+    /** The signup itself; [AuthRepository.signup] in production, a fake in
+     *  a host test (the proof-of-work solve needs the native library). */
+    private val runSignup: suspend (username: String, password: ByteArray, onProofSolved: () -> Unit) -> SignupOutcome,
+    /** The created account's id once [runSignup] returned. */
+    private val createdAccountId: () -> ByteArray?,
     /** ADR-0048 §4 — the core's username rule (`validateUsername`). */
-    private val validateUsername: (String) -> String =
-        { uniffi.lakko_ffi_uniffi.validateUsername(it) },
+    private val validateUsername: (String) -> String,
     /** ADR-0048 §1 — the core's profile-name rule (`normalizeDisplayName`). */
-    private val normalizeDisplayName: (String) -> String? =
-        { uniffi.lakko_ffi_uniffi.normalizeDisplayName(it) },
-    /** Persist this account's own profile once signup has created it. No-op
-     *  by default (tests); `MainActivity` writes the [OwnProfileStore]. */
-    private val saveOwnProfile: (accountId: ByteArray, profile: OwnProfile) -> Unit = { _, _ -> },
+    private val normalizeDisplayName: (String) -> String?,
+    /** Persist this account's own profile once signup has created it. */
+    private val saveOwnProfile: (accountId: ByteArray, profile: OwnProfile) -> Unit,
     /** Hand the just-minted recovery phrase to the guided phrase step. Sign-up
      *  lands the session inside the repository, which replaces this screen, so
-     *  the phrase is parked for the app root to show (see [SignupPhraseGate]).
-     *  No-op by default (tests). */
-    private val parkRecoveryPhrase: (String) -> Unit = {},
+     *  the phrase is parked for the app root to show (see [SignupPhraseGate]). */
+    private val parkRecoveryPhrase: (String) -> Unit,
 ) : ViewModel() {
+
+    public constructor(
+        repo: AuthRepository,
+        /** ADR-0048 §4 — the core's username rule (`validateUsername`). */
+        validateUsername: (String) -> String = { uniffi.lakko_ffi_uniffi.validateUsername(it) },
+        /** ADR-0048 §1 — the core's profile-name rule (`normalizeDisplayName`). */
+        normalizeDisplayName: (String) -> String? = { uniffi.lakko_ffi_uniffi.normalizeDisplayName(it) },
+        /** No-op by default (tests); `MainActivity` writes the [OwnProfileStore]. */
+        saveOwnProfile: (accountId: ByteArray, profile: OwnProfile) -> Unit = { _, _ -> },
+        /** No-op by default (tests). */
+        parkRecoveryPhrase: (String) -> Unit = {},
+    ) : this(
+        runSignup = { username, password, onProofSolved -> repo.signup(username, password, onProofSolved) },
+        createdAccountId = { repo.identitySecrets.value?.accountId },
+        validateUsername = validateUsername,
+        normalizeDisplayName = normalizeDisplayName,
+        saveOwnProfile = saveOwnProfile,
+        parkRecoveryPhrase = parkRecoveryPhrase,
+    )
+
+    /** The running signup, so [onCancel] can stop it. */
+    private var signupJob: Job? = null
 
     private val mutableState: MutableStateFlow<SignupUiState> =
         MutableStateFlow(SignupUiState())
@@ -134,16 +159,21 @@ public class SignupViewModel(
             return
         }
 
-        mutableState.update { it.copy(busy = true, error = null) }
-        viewModelScope.launch {
+        // ADR-0054 S4 - the working state (UX section 1): the one heavy piece
+        // of work runs off the main thread; until its proof is ready nothing
+        // has been sent, so Cancel returns to the filled-in form.
+        mutableState.update { it.copy(busy = true, solving = true, error = null, rateLimited = false) }
+        signupJob = viewModelScope.launch {
             val passwordBytes = pwd.toByteArray(Charsets.UTF_8)
             try {
-                val outcome: SignupOutcome = repo.signup(normalizedUsername, passwordBytes)
+                val outcome: SignupOutcome = runSignup(normalizedUsername, passwordBytes) {
+                    mutableState.update { it.copy(solving = false) }
+                }
                 // ADR-0048 §4 — the account now exists; record its own
                 // profile (an empty name means others see `@username`).
                 // Best-effort: a failed write only means no name until the
                 // user sets one in Settings -> Profile.
-                repo.identitySecrets.value?.accountId?.let { accountId ->
+                createdAccountId()?.let { accountId ->
                     try {
                         saveOwnProfile(
                             accountId,
@@ -162,6 +192,7 @@ public class SignupViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
+                        solving = false,
                         error = null,
                         // Wipe the password fields from UI state.
                         // The repository has already consumed +
@@ -173,11 +204,29 @@ public class SignupViewModel(
                 }
             } catch (err: AuthClientArgError) {
                 mutableState.update {
-                    it.copy(busy = false, error = err.message ?: "Invalid input.")
+                    it.copy(busy = false, solving = false, error = err.message ?: "Invalid input.")
                 }
+            } catch (err: CancellationException) {
+                throw err
             } catch (err: AuthHttpError) {
+                val copy = userFacingHttpError(err)
                 mutableState.update {
-                    it.copy(busy = false, error = userFacingHttpError(err))
+                    it.copy(
+                        busy = false,
+                        solving = false,
+                        error = copy,
+                        rateLimited = copy == SIGNUP_RATE_LIMITED_COPY,
+                    )
+                }
+            } catch (_: me.lakko.app.anon.AnonTokenException) {
+                // The username claim's OPRF token could not be drawn: the
+                // generic network copy (ADR-0054 UX section 3).
+                mutableState.update {
+                    it.copy(
+                        busy = false,
+                        solving = false,
+                        error = "No connection. Check your network and try again.",
+                    )
                 }
             } catch (_: AuthNetworkError) {
                 // The cause is dropped here on purpose — every
@@ -189,6 +238,7 @@ public class SignupViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
+                        solving = false,
                         error = "No connection. Check your network and try again.",
                     )
                 }
@@ -198,16 +248,17 @@ public class SignupViewModel(
                 mutableState.update {
                     it.copy(
                         busy = false,
+                        solving = false,
                         error = "No connection. Check your network and try again.",
                     )
                 }
             } catch (err: DiscoveryHttpError) {
                 mutableState.update {
-                    it.copy(busy = false, error = userFacingDiscoveryError(err))
+                    it.copy(busy = false, solving = false, error = userFacingDiscoveryError(err))
                 }
             } catch (err: Throwable) {
                 mutableState.update {
-                    it.copy(busy = false, error = err.message ?: "Could not create the account. Try again.")
+                    it.copy(busy = false, solving = false, error = err.message ?: "Could not create the account. Try again.")
                 }
             } finally {
                 // Wipe the local bytes copy. The repo also wiped
@@ -217,6 +268,19 @@ public class SignupViewModel(
         }
     }
 
+    /**
+     * `Cancel` in the working row (UX section 1): stop the proof-of-work solve
+     * and return to the filled-in form. Only while the solve runs - once its
+     * proof is ready the account is being created and the row offers no
+     * Cancel. Leaving the screen cancels too (the ViewModel scope ends).
+     */
+    public fun onCancel() {
+        if (!mutableState.value.solving) return
+        signupJob?.cancel()
+        signupJob = null
+        mutableState.update { it.copy(busy = false, solving = false, error = null) }
+    }
+
 
     /** Map a server-side HTTP error to a user-facing message.
      *  Today's auth service distinguishes a couple of cases by
@@ -224,7 +288,7 @@ public class SignupViewModel(
      *  surface evolves. Indistinguishable-failure cases (login
      *  401) stay generic on purpose. */
     private fun userFacingHttpError(err: AuthHttpError): String =
-        when (err.status) {
+        me.lakko.app.auth.authLimitCopy(err) ?: when (err.status) {
             409 -> "That username is taken. Choose another one."
             429 -> "Too many attempts. Wait a moment, then try again."
             in 500..599 -> "Something went wrong on our side. Try again in a moment."
@@ -267,5 +331,10 @@ public data class SignupUiState(
     val password: String = "",
     val confirm: String = "",
     val busy: Boolean = false,
+    /** The proof-of-work solve is running: the working row offers `Cancel`. */
+    val solving: Boolean = false,
     val error: String? = null,
+    /** The last attempt met `signup-rate-limited`: the button reads
+     *  `Try again`. The form keeps its contents. */
+    val rateLimited: Boolean = false,
 )

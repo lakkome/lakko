@@ -21,7 +21,7 @@ import kotlinx.coroutines.CompletableDeferred
  * ## The state machine
  *
  *  - a cached VERIFIED / FAILED result for `(key, username)` is returned
- *    without a lookup — each lookup costs proof-of-work and tells discovery
+ *    without a lookup — each lookup costs an anonymous token and tells discovery
  *    someone resolved that name, so it is spent once per pair;
  *  - a claim failing the username rule is FAILED without a lookup;
  *  - `Found(key)` equal to the bound key -> VERIFIED; any other key -> FAILED;

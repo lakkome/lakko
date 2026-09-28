@@ -37,6 +37,7 @@ use lakko_mls::{
     RoleTable as MlsRoleTable,
 };
 
+pub mod anon_token;
 pub mod attachments;
 pub mod auth;
 pub mod backup;
@@ -433,6 +434,21 @@ pub enum FfiError {
     /// without parsing prose.
     #[error("{0}")]
     ChannelMeta(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0054 anonymous tokens — appended, for the ordinal reason above.
+    // ------------------------------------------------------------------
+    /// An anonymous-token request, finalize or epoch computation refused.
+    /// The message starts with the frozen `AnonTokenError::code()` (for
+    /// example `proof-verification`, `bad-batch-size`, `unknown-context`)
+    /// followed by `": "` and the reason, so a client branches on the code.
+    #[error("{0}")]
+    AnonToken(String),
+
+    /// `AnonTokenRequest.finalize` was called a second time; the request
+    /// (and the blinding factors it held) is consumed by the first call.
+    #[error("anonymous-token request already finalized")]
+    AnonTokenAlreadyFinalized,
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {

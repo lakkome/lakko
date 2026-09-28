@@ -38,7 +38,7 @@ import Foundation
 ///     unit tests.
 
 // ----------------------------------------------------------------------------
-// PoW (services/auth/src/pow.rs)
+// PoW (services/auth/src/pow.rs) - signup start only since ADR-0054 S4
 // ----------------------------------------------------------------------------
 
 /// Body of `POST /pow/challenge`. The endpoint takes no input.
@@ -65,9 +65,11 @@ public struct PowChallengeResponse: Codable, Equatable {
     }
 }
 
-/// Embedded `pow` object on every expensive endpoint. All three
+/// Embedded `pow` object. Since ADR-0054 S4 only `/signup/start`
+/// carries one; every other auth, discovery, DS and push-gw body lost
+/// it. All three
 /// fields are base64-encoded 16-byte values.
-public struct PowProofPayload: Codable, Equatable {
+public struct PowProofPayload: Codable, Equatable, Sendable {
     public let seed: String
     public let nonce: String
     public let solution: String
@@ -135,25 +137,21 @@ public struct SignupStartResponse: Codable, Equatable {
 
 /// `POST /signup/finish` request body.
 public struct SignupFinishRequest: Codable, Equatable {
-    public let pow: PowProofPayload
     public let accountId: String
     public let passwordUpload: String
     public let recoveryUpload: String?
 
     public init(
-        pow: PowProofPayload,
         accountId: String,
         passwordUpload: String,
         recoveryUpload: String? = nil
     ) {
-        self.pow = pow
         self.accountId = accountId
         self.passwordUpload = passwordUpload
         self.recoveryUpload = recoveryUpload
     }
 
     enum CodingKeys: String, CodingKey {
-        case pow
         case accountId = "account_id"
         case passwordUpload = "password_upload"
         case recoveryUpload = "recovery_upload"
@@ -190,22 +188,19 @@ public struct SignupFinishResponse: Codable, Equatable {
 // ----------------------------------------------------------------------------
 
 /// Shared by `/login/start` and `/recovery/login/start`.
+///
+/// ADR-0054 S5: the account is named by its login handle, never by its
+/// account id - the id comes back only in the finish response.
 public struct LoginStartRequest: Codable, Equatable {
-    public let pow: PowProofPayload
-    public let accountId: String
+    /// The login handle: base64url, no padding, of the 32 bytes
+    /// `loginHandle(username)` derives.
+    public let handle: String
     /// base64(CredentialRequest).
     public let request: String
 
-    public init(pow: PowProofPayload, accountId: String, request: String) {
-        self.pow = pow
-        self.accountId = accountId
+    public init(handle: String, request: String) {
+        self.handle = handle
         self.request = request
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case pow
-        case accountId = "account_id"
-        case request
     }
 }
 
@@ -227,8 +222,7 @@ public struct LoginStartResponse: Codable, Equatable {
     }
 }
 
-/// Shared by `/login/finish` and `/recovery/login/finish`. No `pow`
-/// field — the server only requires PoW on the start endpoints.
+/// Shared by `/login/finish` and `/recovery/login/finish`.
 public struct LoginFinishRequest: Codable, Equatable {
     public let sessionId: String
     /// base64(CredentialFinalization).
@@ -284,8 +278,8 @@ public struct LoginFinishResponse: Codable, Equatable {
 /// both OPAQUE flows (recovery login + new password registration)
 /// start in this single round trip.
 public struct PasswordResetStartRequest: Codable, Equatable {
-    public let pow: PowProofPayload
-    public let accountId: String
+    /// The login handle (ADR-0054 S5): base64url, no padding, 32 bytes.
+    public let handle: String
     /// base64(CredentialRequest) from `OpaqueLogin.startRecovery(seed:)`.
     public let recoveryRequest: String
     /// base64(RegistrationRequest) from
@@ -293,20 +287,17 @@ public struct PasswordResetStartRequest: Codable, Equatable {
     public let newPasswordRequest: String
 
     public init(
-        pow: PowProofPayload,
-        accountId: String,
+        handle: String,
         recoveryRequest: String,
         newPasswordRequest: String
     ) {
-        self.pow = pow
-        self.accountId = accountId
+        self.handle = handle
         self.recoveryRequest = recoveryRequest
         self.newPasswordRequest = newPasswordRequest
     }
 
     enum CodingKeys: String, CodingKey {
-        case pow
-        case accountId = "account_id"
+        case handle
         case recoveryRequest = "recovery_request"
         case newPasswordRequest = "new_password_request"
     }
@@ -338,9 +329,7 @@ public struct PasswordResetStartResponse: Codable, Equatable {
     }
 }
 
-/// `POST /password/reset/finish` request body. No `pow` field — the
-/// server only requires PoW on the start endpoints, by analogy with
-/// `/login/{start,finish}`.
+/// `POST /password/reset/finish` request body.
 public struct PasswordResetFinishRequest: Codable, Equatable {
     public let sessionId: String
     /// base64(CredentialFinalization) — proves recovery ownership.
@@ -370,16 +359,8 @@ public struct PasswordResetFinishRequest: Codable, Equatable {
 // ADR-0018 factor (a), "another-device" recovery)
 // ----------------------------------------------------------------------------
 
-/// `POST /device/authorize/start` request body. Bearer-authenticated
-/// (the EXISTING device's session token rides the `Authorization`
-/// header, not the body).
-public struct DeviceAuthorizeStartRequest: Codable, Equatable {
-    public let pow: PowProofPayload
-
-    public init(pow: PowProofPayload) {
-        self.pow = pow
-    }
-}
+/// `POST /device/authorize/start` reads no body (ADR-0054 S4): the
+/// session token in the `Authorization` header is the whole request.
 
 /// `POST /device/authorize/start` response body.
 public struct DeviceAuthorizeStartResponse: Codable, Equatable {
@@ -399,10 +380,9 @@ public struct DeviceAuthorizeStartResponse: Codable, Equatable {
 }
 
 /// `POST /device/authorize/redeem` request body. Anonymous — the
-/// fresh device has no token yet; the PoW is the only anti-spam
-/// gate.
+/// fresh device has no token yet; the server limits it per account
+/// and per address (ADR-0054 S4).
 public struct DeviceAuthorizeRedeemRequest: Codable, Equatable {
-    public let pow: PowProofPayload
     /// URL-safe base64 (no pad) of the 16-byte account id the fresh
     /// device learned from the pairing QR.
     public let accountIdB64: String
@@ -410,14 +390,12 @@ public struct DeviceAuthorizeRedeemRequest: Codable, Equatable {
     /// received over the rendezvous channel.
     public let grantTokenB64: String
 
-    public init(pow: PowProofPayload, accountIdB64: String, grantTokenB64: String) {
-        self.pow = pow
+    public init(accountIdB64: String, grantTokenB64: String) {
         self.accountIdB64 = accountIdB64
         self.grantTokenB64 = grantTokenB64
     }
 
     enum CodingKeys: String, CodingKey {
-        case pow
         case accountIdB64 = "account_id_b64"
         case grantTokenB64 = "grant_token_b64"
     }
@@ -494,16 +472,8 @@ public struct DeviceAuthorizeRedeemResponse: Codable, Equatable {
 // authenticator-code recovery)
 // ----------------------------------------------------------------------------
 
-/// `POST /totp/enroll/start` request body. Bearer-authenticated (the
-/// already-logged-in account's session token rides the
-/// `Authorization` header, not the body) + PoW.
-public struct TotpEnrollStartRequest: Codable, Equatable {
-    public let pow: PowProofPayload
-
-    public init(pow: PowProofPayload) {
-        self.pow = pow
-    }
-}
+/// `POST /totp/enroll/start` reads no body (ADR-0054 S4): the
+/// session token in the `Authorization` header is the whole request.
 
 /// `POST /totp/enroll/start` response body — the provisioning
 /// material the authenticator app consumes. The raw secret leaves
@@ -539,24 +509,16 @@ public struct TotpEnrollFinishRequest: Codable, Equatable {
 }
 
 /// `POST /totp/recover` request body. Anonymous (the caller lost
-/// their device) + PoW.
+/// their device).
 public struct TotpRecoverRequest: Codable, Equatable {
-    public let pow: PowProofPayload
-    /// URL-safe base64 (no pad) of the 16-byte account id.
-    public let accountIdB64: String
+    /// The login handle (ADR-0054 S5): base64url, no padding, 32 bytes.
+    public let handle: String
     /// The current 6-digit authenticator code.
     public let code: String
 
-    public init(pow: PowProofPayload, accountIdB64: String, code: String) {
-        self.pow = pow
-        self.accountIdB64 = accountIdB64
+    public init(handle: String, code: String) {
+        self.handle = handle
         self.code = code
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case pow
-        case accountIdB64 = "account_id_b64"
-        case code
     }
 }
 
@@ -607,9 +569,8 @@ public enum ContactKind: Int, Codable, Equatable {
 
 /// `POST /recovery-contact/enroll/start` request body. Bearer-
 /// authenticated (the already-logged-in account's session token rides
-/// the `Authorization` header, not the body) + PoW.
+/// the `Authorization` header, not the body).
 public struct RecoveryContactEnrollStartRequest: Codable, Equatable {
-    public let pow: PowProofPayload
     /// `1 = email`, `2 = phone` (see ``ContactKind``).
     public let kind: ContactKind
     /// The raw phone / email plaintext. Used transiently server-side
@@ -617,8 +578,7 @@ public struct RecoveryContactEnrollStartRequest: Codable, Equatable {
     /// (invariant #1).
     public let contact: String
 
-    public init(pow: PowProofPayload, kind: ContactKind, contact: String) {
-        self.pow = pow
+    public init(kind: ContactKind, contact: String) {
         self.kind = kind
         self.contact = contact
     }
@@ -649,65 +609,69 @@ public struct RecoveryContactEnrollFinishRequest: Codable, Equatable {
 }
 
 /// `POST /recovery-contact/recover/start` request body. Anonymous (the
-/// caller lost their device) + PoW. ENUMERATION-SAFE: the server
+/// caller lost their device). ENUMERATION-SAFE: the server
 /// returns the same `{ sent: true }` whether or not the contact matches
 /// a confirmed row.
 public struct RecoveryContactRecoverStartRequest: Codable, Equatable {
-    public let pow: PowProofPayload
-    /// URL-safe base64 (no pad) of the 16-byte account_id.
-    public let accountIdB64: String
+    /// The login handle (ADR-0054 S5): base64url, no padding, 32 bytes.
+    public let handle: String
     public let kind: ContactKind
     /// The raw phone / email plaintext.
     public let contact: String
 
     public init(
-        pow: PowProofPayload,
-        accountIdB64: String,
+        handle: String,
         kind: ContactKind,
         contact: String
     ) {
-        self.pow = pow
-        self.accountIdB64 = accountIdB64
+        self.handle = handle
         self.kind = kind
         self.contact = contact
     }
-
-    enum CodingKeys: String, CodingKey {
-        case pow
-        case accountIdB64 = "account_id_b64"
-        case kind
-        case contact
-    }
 }
 
-/// `POST /recovery-contact/recover/finish` request body. Anonymous +
-/// PoW.
+/// `POST /recovery-contact/recover/finish` request body. Anonymous;
+/// limited server-side per name and per address (ADR-0054 S4).
 public struct RecoveryContactRecoverFinishRequest: Codable, Equatable {
-    public let pow: PowProofPayload
-    /// URL-safe base64 (no pad) of the 16-byte account_id.
-    public let accountIdB64: String
+    /// The login handle (ADR-0054 S5): base64url, no padding, 32 bytes.
+    public let handle: String
     public let kind: ContactKind
     /// The 6-digit code that was delivered to the contact.
     public let code: String
 
     public init(
-        pow: PowProofPayload,
-        accountIdB64: String,
+        handle: String,
         kind: ContactKind,
         code: String
     ) {
-        self.pow = pow
-        self.accountIdB64 = accountIdB64
+        self.handle = handle
         self.kind = kind
         self.code = code
     }
+}
 
-    enum CodingKeys: String, CodingKey {
-        case pow
-        case accountIdB64 = "account_id_b64"
-        case kind
-        case code
+// ----------------------------------------------------------------------------
+// Login handle binding (services/auth/src/login_handle.rs - ADR-0054 S5)
+// ----------------------------------------------------------------------------
+
+/// `PUT /auth/login-handle` request body (bearer).
+public struct LoginHandleBindRequest: Codable, Equatable {
+    /// base64url, no padding, of the 32-byte handle.
+    public let handle: String
+
+    public init(handle: String) {
+        self.handle = handle
     }
+}
+
+/// `PUT /auth/login-handle` response body.
+public struct LoginHandleBindResponse: Codable, Equatable {
+    public let bound: Bool
+}
+
+/// `DELETE /auth/login-handle` response body.
+public struct LoginHandleRemoveResponse: Codable, Equatable {
+    public let removed: Bool
 }
 
 /// `POST /recovery-contact/recover/finish` response body — the same

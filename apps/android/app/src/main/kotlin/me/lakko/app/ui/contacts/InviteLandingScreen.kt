@@ -135,6 +135,7 @@ public fun InviteLandingScreen(
                 onRetry = viewModel::retry,
                 onDone = onDone,
             )
+            InviteLandingState.AllowanceUsed -> AllowanceUsedPanel(onDone = onDone)
             InviteLandingState.RequiresReauth -> InfoPanel(
                 title = "Log in to accept",
                 body = "Your session needs a fresh password. Log out + log " +
@@ -262,6 +263,22 @@ private fun InfoPanel(
     )
     Spacer(Modifier.height(24.dp))
     Button(
+        onClick = onDone,
+        modifier = Modifier.fillMaxWidth(),
+    ) { Text("Done") }
+}
+
+/** ADR-0054 UX section 3 - the day's allowance of invite tokens is used up:
+ *  the spec's sentence and Done, no retry (it would fail the same way until
+ *  tomorrow). */
+@Composable
+private fun AllowanceUsedPanel(onDone: () -> Unit) {
+    Text(
+        text = me.lakko.app.anon.ACTION_ALLOWANCE_USED_COPY,
+        style = MaterialTheme.typography.bodyMedium,
+    )
+    Spacer(Modifier.height(24.dp))
+    OutlinedButton(
         onClick = onDone,
         modifier = Modifier.fillMaxWidth(),
     ) { Text("Done") }

@@ -7,7 +7,7 @@
  * A PERMISSIVE mirror of the server's `normalize_contact` gate
  * (`services/auth/src/recovery_contact.rs`): just enough of a check
  * to catch an obviously-malformed contact (e.g. an email with no
- * `@`, a phone with no leading `+`) before spending a PoW solve and
+ * `@`, a phone with no leading `+`) before spending a limited attempt and
  * a round-trip. The server is authoritative — it does the full
  * E.164 / RFC-ish normalization and rejects with a 400 — so this
  * deliberately stays loose and never blocks a borderline value the
@@ -25,7 +25,7 @@ import { ContactKind } from "./wire";
  *     `+` followed by at least one digit (digits only thereafter).
  *
  * Whitespace is trimmed first. Anything else returns `false` so the
- * form can surface a precise message instead of burning a PoW solve.
+ * form can surface a precise message instead of burning an attempt.
  */
 export function isPlausibleContact(
   kind: ContactKind,

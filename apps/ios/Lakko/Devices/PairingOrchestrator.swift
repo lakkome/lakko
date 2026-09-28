@@ -302,7 +302,7 @@ public enum PairingOrchestrator {
         /// seed; consumed and zeroized by the scan flow.
         fileprivate var accountIdentitySeed: Data
         /// Mints a single-use device grant
-        /// (`AuthClient.deviceAuthorizeStart`, bearer + PoW);
+        /// (`AuthClient.deviceAuthorizeStart`, bearer);
         /// returns the URL-safe-base64 raw grant token.
         fileprivate let deviceAuthorizeStart: () async throws -> String
 

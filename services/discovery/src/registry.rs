@@ -4,14 +4,14 @@
 //! Username registry — the table mapping `OPRF(K, normalize(@username))`
 //! to `account_id`. Plaintext usernames are never stored.
 //!
-//! ## Phase-1 known gap
+//! ## Authorisation
 //!
-//! `/discovery/register` currently TRUSTS the client's claim of
-//! `account_id`. There is no proof-of-ownership beyond a PoW token,
-//! which means anyone with PoW can register `@arbitrary_handle` against
-//! any `account_id` (their own or someone else's). Phase 1.5b will gate
-//! this endpoint on an auth-issued session token (JWT signed by
-//! `services/auth`). Until then:
+//! `/discovery/register` is session-token-gated (Phase 1.5b) and the
+//! body's `account_id` must equal the token's; it is counted per account
+//! by the write limiter and, since ADR-0054 S3, carries no proof of work.
+//! `/discovery/lookup` is anonymous and rate-limited per source address;
+//! the enumeration step it follows (`/discovery/oprf`) spends an
+//! anonymous token.
 //!
 //!   * Usernames are immutable (no UPDATE / DELETE in the schema).
 //!   * First-come-first-served via `INSERT IGNORE` semantics; the API
@@ -61,7 +61,6 @@ fn decode_fixed<const N: usize>(
 
 #[derive(Deserialize)]
 pub(crate) struct RegisterRequest {
-    pub(crate) pow: crate::pow::PowProof,
     /// Base64-encoded UUIDv7 raw bytes (16 bytes).
     pub(crate) account_id: String,
     /// Base64-encoded VOPRF output bytes (64 bytes for Ristretto255-SHA512).
@@ -83,8 +82,6 @@ pub(crate) async fn register(
     axum::Extension(authed): axum::Extension<crate::auth::AuthenticatedAccount>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<RegisterResponse>, (StatusCode, String)> {
-    crate::pow::verify_proof(&state.db, &payload.pow).await?;
-
     let account_id = decode_fixed::<ACCOUNT_ID_LEN>(&payload.account_id, "account_id")?;
     let oprf_hash = decode_fixed::<OPRF_HASH_LEN>(&payload.oprf_hash, "oprf_hash")?;
 
@@ -140,7 +137,6 @@ pub(crate) async fn register(
 
 #[derive(Deserialize)]
 pub(crate) struct LookupRequest {
-    pub(crate) pow: crate::pow::PowProof,
     pub(crate) oprf_hash: String,
 }
 
@@ -162,8 +158,6 @@ pub(crate) async fn lookup(
     State(state): State<AppState>,
     Json(payload): Json<LookupRequest>,
 ) -> Result<Json<LookupResponse>, (StatusCode, String)> {
-    crate::pow::verify_proof(&state.db, &payload.pow).await?;
-
     let oprf_hash = decode_fixed::<OPRF_HASH_LEN>(&payload.oprf_hash, "oprf_hash")?;
 
     let row: Option<(Vec<u8>,)> =

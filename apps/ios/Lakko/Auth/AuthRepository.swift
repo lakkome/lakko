@@ -31,7 +31,7 @@ import LakkoCore
 ///
 /// `@MainActor` because every mutation lands on
 /// SwiftUI's main runloop; the async flows hop out to
-/// `Task.detached` for the PoW solve + the URLSession call internally
+/// `Task.detached` for the signup PoW solve + the URLSession calls internally
 /// (see ``AuthClient`` and ``solvePow(seedB64:effortBits:)``).
 ///
 /// ## Division of labor
@@ -40,8 +40,10 @@ import LakkoCore
 /// publishing on ``ChatRepository``, and MLS state + chat fan-out
 /// on ``ChatRepository``. This repository owns the authenticate
 /// flows (signup / login / passkey / recover) and coordinates the
-/// post-auth bootstrap: it claims the username at signup and
-/// resolves it at login through ``AccountDirectory``, uploads the
+/// post-auth bootstrap: it claims the username at signup (the auth login
+/// handle first, then the discovery name, ADR-0054 S5), names the account
+/// by its login handle at sign-in and recovery (``LoginName``; no discovery
+/// lookup before a session), uploads the
 /// identity bundle via ``DiscoveryClient`` (signup, sign-in,
 /// recover), and drives the
 /// backup restore + ``ChatRepository/bootstrap(secrets:)``
@@ -54,7 +56,22 @@ public final class AuthRepository: ObservableObject {
     /// Discriminated union driving the UI router. Updated
     /// synchronously from the main actor — SwiftUI re-renders are
     /// scheduled atomically with the assignment.
-    @Published public private(set) var state: AuthState = .loading
+    ///
+    /// ADR-0054 S5: every landing on `.session` also re-binds the account's
+    /// login handle, once per `(session, username)` per process
+    /// (``ensureLoginHandleBound(username:sessionToken:context:)``). Every
+    /// site that lands a session installs ``identitySecrets`` first and then
+    /// sets this, so the session token is in hand here - and this one hook
+    /// covers the relaunch restore, passkey, pairing, the another-device
+    /// confirmation and the phrase completion alike, none of which names the
+    /// account by its handle.
+    @Published public private(set) var state: AuthState = .loading {
+        didSet {
+            if case .session(let account) = state, let token = identitySecrets?.sessionToken {
+                ensureLoginHandleBound(username: account.username, sessionToken: token, context: "session")
+            }
+        }
+    }
 
     /// ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)) —
     /// non-nil when this device's canonical AccountIdentity did NOT match
@@ -97,11 +114,18 @@ public final class AuthRepository: ObservableObject {
     /// Operations that need to sign on behalf of the user still
     /// guard on `nil` defensively.
     ///
-    /// Every change is mirrored into ``AmbientSessionToken``, which
-    /// ``DiscoveryClient`` uses to charge its rate-limited reads to this
-    /// account rather than to the shared per-IP bucket.
+    /// Every change is mirrored into ``AmbientSessionToken`` (the bearer
+    /// source a few repositories read) and into ``AnonTokenPool/shared``
+    /// (ADR-0054 S3): the pool draws anonymous tokens with this session and
+    /// is cleared on logout and on an account switch.
     @Published public private(set) var identitySecrets: IdentitySecrets? {
-        didSet { AmbientSessionToken.shared.set(identitySecrets?.sessionToken) }
+        didSet {
+            AmbientSessionToken.shared.set(identitySecrets?.sessionToken)
+            AnonTokenPool.shared.configure(
+                accountKey: identitySecrets.map { base64Encode($0.accountId) },
+                sessionToken: identitySecrets?.sessionToken
+            )
+        }
     }
 
     // MARK: - Wiring
@@ -125,17 +149,21 @@ public final class AuthRepository: ObservableObject {
     /// ``confirmFreshPhraseSaved()``.
     private var pendingFreshPhrase: PendingFreshPhrase?
 
-    /// ADR-0018 factor (d) — the resolved context for an in-flight
-    /// phone / email OTP recovery. ``recoverWithContactStart(username:kind:contact:)``
-    /// stashes the resolved `(accountId, username, kind)` here after
-    /// sending the code so ``recoverWithContactFinish(code:)`` can
-    /// submit the code without re-resolving. Cleared on finish (the
-    /// code is single-use server-side; a retry must re-send).
+    /// ADR-0018 factor (d) — the context for an in-flight phone / email
+    /// OTP recovery. ``recoverWithContactStart(username:kind:contact:)``
+    /// stashes the `(login name, kind)` here after sending the code so
+    /// ``recoverWithContactFinish(code:)`` submits for the same handle.
+    /// Cleared on finish (the code is single-use server-side; a retry must
+    /// re-send).
     private var pendingContactRecover: PendingContactRecover?
 
-    /// The username directory the signup claim and the login resolution go
+    /// The username directory the signup claim and the identity publish go
     /// through. Injectable so both can be driven by a fake in tests.
     private let accountDirectory: AccountDirectory
+
+    /// Which `(session, username)` pairs already had their login handle
+    /// bound in this process. ``LoginHandleBindLedger/shared`` in the app.
+    private let loginHandleBinds: LoginHandleBindLedger
 
     public convenience init(
         sessionStore: SessionStore = SessionStore(),
@@ -157,12 +185,14 @@ public final class AuthRepository: ObservableObject {
         authClientFactory: @escaping () -> AuthClient,
         persistence: SessionPersistence,
         nowMs: () -> Int64,
-        accountDirectory: AccountDirectory
+        accountDirectory: AccountDirectory,
+        loginHandleBinds: LoginHandleBindLedger = .shared
     ) {
         self.sessionStore = sessionStore
         self.authClientFactory = authClientFactory
         self.persistence = persistence
         self.accountDirectory = accountDirectory
+        self.loginHandleBinds = loginHandleBinds
         rehydrate(nowMs: nowMs())
     }
 
@@ -238,9 +268,16 @@ public final class AuthRepository: ObservableObject {
     ///      bundle, land the session.
     ///   4. Return the 24-word recovery phrase for the UI to display
     ///      **once**.
+    ///
+    /// ADR-0054 S4: cancellable (the task that runs it) until
+    /// `onCommitting`, which fires right before `/signup/finish`. From there
+    /// the rest runs to completion regardless of cancellation - an account
+    /// the finish created must not be left without its username claim and
+    /// device material because the user tapped Cancel a moment too late.
     public func signup(
         username: String,
-        password: Data
+        password: Data,
+        onCommitting: (@MainActor () -> Void)? = nil
     ) async throws -> SignupOutcome {
         // ADR-0048 §4 — refuse a name that fails the username rule BEFORE the
         // OPAQUE registration, so a refused name never leaves an unreachable
@@ -250,8 +287,12 @@ public final class AuthRepository: ObservableObject {
             emptyError: AuthClientError.argument("username must be non-empty")
         )
         let client = authClientFactory()
-        let result = try await client.signup(password: password, enrolRecovery: true)
-        return try await completeSignup(result: result, username: canonical)
+        let result = try await client.signup(
+            password: password, enrolRecovery: true, onCommitting: onCommitting)
+        // A fresh unstructured task does not inherit the caller's cancellation.
+        return try await Task { @MainActor in
+            try await self.completeSignup(result: result, username: canonical)
+        }.value
     }
 
     /// Everything signup does once the OPAQUE registration committed.
@@ -265,8 +306,10 @@ public final class AuthRepository: ObservableObject {
     ///   1. Derive the AccountIdentity seed from the recovery phrase. Pure; a
     ///      missing phrase fails here, before any server-visible side effect
     ///      beyond the registration itself.
-    ///   2. Claim the username in discovery (``claimSignupUsername(accountId:username:sessionToken:directory:)``).
-    ///      BEFORE anything touches the device: a taken name (409) or any other
+    ///   2. Claim the username (``claimSignupUsername(accountId:username:sessionToken:directory:binder:derive:)``):
+    ///      the login handle at auth first, then the name in discovery (ADR-0054
+    ///      S5 claim order). BEFORE anything touches the device: a taken name
+    ///      (409 at either) or any other
     ///      claim failure is thrown to the form with the device untouched, so
     ///      the user is never signed in to an account nobody can find by name.
     ///      The server-side account the registration created is left behind,
@@ -306,12 +349,30 @@ public final class AuthRepository: ObservableObject {
             .toSeed()
 
         // Claim the username before any on-device state exists.
-        let boundUsername = try await claimSignupUsername(
-            accountId: result.accountId,
-            username: username,
-            sessionToken: result.sessionToken,
-            directory: accountDirectory
-        )
+        // ADR-0054 S3 — the claim's OPRF step spends a `discovery-lookup`
+        // token, drawn with the session signup just minted: the session has
+        // not landed yet, so the pool is bound to it here, and put back the
+        // way ``identitySecrets`` has it if the claim fails.
+        AnonTokenPool.shared.configure(
+            accountKey: base64Encode(result.accountId), sessionToken: result.sessionToken)
+        let boundUsername: String
+        do {
+            boundUsername = try await claimSignupUsername(
+                accountId: result.accountId,
+                username: username,
+                sessionToken: result.sessionToken,
+                directory: accountDirectory,
+                binder: authClientFactory()
+            )
+        } catch {
+            AnonTokenPool.shared.configure(
+                accountKey: identitySecrets.map { base64Encode($0.accountId) },
+                sessionToken: identitySecrets?.sessionToken)
+            throw error
+        }
+        // The claim just bound the handle with this session: the landing
+        // below must not bind it a second time.
+        _ = loginHandleBinds.claim(sessionToken: result.sessionToken, canonical: boundUsername)
 
         let accountIdB64 = base64Encode(result.accountId)
         sessionStore.save(
@@ -443,7 +504,9 @@ public final class AuthRepository: ObservableObject {
     /// render + land it unchanged. Claiming a username (`registerUsername`) is a
     /// later onboarding step; the account is full from the start, just
     /// username-less. Returns the recovery phrase.
-    public func signupGuest() async throws -> SignupOutcome {
+    public func signupGuest(
+        onCommitting: (@MainActor () -> Void)? = nil
+    ) async throws -> SignupOutcome {
         // A 32-byte random password the user never sees — the guest HAS a real,
         // random password, so the normal signup derivations apply. `SystemRandom-
         // NumberGenerator` is the OS CSPRNG on Apple platforms.
@@ -451,9 +514,11 @@ public final class AuthRepository: ObservableObject {
         let randomBytes = (0..<32).map { _ in UInt8.random(in: UInt8.min...UInt8.max, using: &rng) }
         let randomPassword = Data(Data(randomBytes).base64EncodedString().utf8)
 
-        // The SAME PoW-gated OPAQUE registration `signup` uses — no bypass.
+        // The SAME PoW-gated OPAQUE registration `signup` uses — no bypass
+        // (ADR-0054 S4: the one heavy proof, cancellable until `onCommitting`).
         let client = authClientFactory()
-        let result = try await client.signup(password: randomPassword, enrolRecovery: true)
+        let result = try await client.signup(
+            password: randomPassword, enrolRecovery: true, onCommitting: onCommitting)
         let accountIdB64 = base64Encode(result.accountId)
 
         // NOTE: no username claim — the account stays username-less until a
@@ -539,63 +604,43 @@ public final class AuthRepository: ObservableObject {
     ///
     /// Mirror of `apps/web/src/auth/AuthContext.tsx` `login`. Steps:
     ///
-    ///   1. Resolve the typed username to an `accountId`
-    ///      (``resolveLoginAccount(cached:typedUsername:normalize:lookup:encodeAccountId:)``):
-    ///      the on-device ``SessionStore`` marker answers when it names the
-    ///      same account (no round-trip); otherwise — a fresh device, or a
-    ///      different account than the one cached — a discovery lookup
-    ///      resolves it. An unregistered name fails as `invalid credentials`,
-    ///      like a wrong password, and nothing is contacted beyond the lookup.
-    ///   2. Call ``AuthClient/login(accountId:password:)``.
+    ///   1. Turn the typed username into its login handle (``LoginName``,
+    ///      ADR-0054 S5). No discovery lookup: the account is named by the
+    ///      handle, and a name nobody holds fails as `invalid credentials`,
+    ///      exactly like a wrong password.
+    ///   2. Call ``AuthClient/login(handle:password:)``. The account id comes
+    ///      back in the finish response.
     ///   3. Re-derive the device root key from the OPAQUE export
     ///      key. The derivation is deterministic for the same
     ///      password, so re-running it on every login produces the
     ///      same bytes the original signup wrote — the
     ///      ``DeviceKeyStore`` upsert is harmless.
-    ///   4. Save the ``SessionStore`` marker for the resolved account
-    ///      (idempotent on the cached path; on a lookup it is the first
-    ///      record of this account on the device).
+    ///   4. Save the ``SessionStore`` marker for the account the finish
+    ///      named, with the canonical username.
     ///   5. Land the session from the cached AccountIdentity seed, or — with
     ///      no seed on this device — park in ``AuthState/needsRecoveryPhrase(_:)``
-    ///      (ADR-0017; the lookup changes which account is targeted, never
-    ///      where the identity comes from).
+    ///      (ADR-0017).
+    ///   6. Re-bind the handle (best-effort, idempotent) so a device that
+    ///      bound before a rename stays in step.
     public func login(
         username: String,
         password: Data
     ) async throws {
-        let trimmed = username.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            throw AuthClientError.argument("username must be non-empty")
-        }
         guard !password.isEmpty else {
             throw AuthClientError.argument("password must be non-empty")
         }
-        let directory = accountDirectory
-        let resolved = try await resolveLoginAccount(
-            cached: sessionStore.load().map {
-                CachedAccount(accountIdB64: $0.accountIdB64, username: $0.username)
-            },
-            typedUsername: trimmed,
-            lookup: { try await directory.lookup(username: $0) },
-            encodeAccountId: base64Encode
+        let name = try LoginName.make(
+            username,
+            emptyError: AuthClientError.argument("username must be non-empty")
         )
-        let accountIdB64 = resolved.accountIdB64
-        guard let accountIdBytes = base64Decode(accountIdB64) else {
-            // Only reachable from a corrupted cached marker (a looked-up id
-            // was encoded here) — fail safe by wiping it.
-            if resolved.fromCache {
-                sessionStore.clear()
-            }
-            throw AuthClientError.argument(
-                "stored account id is malformed; please sign up again"
-            )
-        }
 
         let client = authClientFactory()
         let result = try await client.login(
-            accountId: accountIdBytes,
+            handle: name.handle,
             password: password
         )
+        let accountIdBytes = result.accountId
+        let accountIdB64 = base64Encode(accountIdBytes)
 
         let deviceRootKey = deriveDeviceRootKey(
             exportKey: result.exportKey,
@@ -626,10 +671,10 @@ public final class AuthRepository: ObservableObject {
         } catch {
             NSLog("device-identity ensure (login) failed: \(error)")
         }
-        // Idempotent upsert on the cached path; the first record of this
-        // account on the device after a lookup.
+        // Idempotent upsert for a returning device; the first record of
+        // this account on a fresh one.
         sessionStore.save(
-            PersistedSession(accountIdB64: accountIdB64, username: resolved.username)
+            PersistedSession(accountIdB64: accountIdB64, username: name.canonical)
         )
 
         // ADR-0017: the canonical AccountIdentity is seeded from the
@@ -652,10 +697,66 @@ public final class AuthRepository: ObservableObject {
             exportKey: result.exportKey,
             sessionToken: result.sessionToken,
             sessionExpiresAtMs: result.sessionExpiresAtMs,
-            username: resolved.username
+            username: name.canonical
         )
+        ensureLoginHandleBound(name: name, sessionToken: result.sessionToken, context: "login")
         // 1.20c — best-effort push subscribe.
         Task { await Self.subscribePushBestEffort(context: "login") }
+    }
+
+    /// ADR-0054 S5 — re-`PUT` the login handle of `username` with
+    /// `sessionToken`, once per `(session, username)` per process.
+    ///
+    /// Runs on every session landing (``state``) and after a sign-in or
+    /// recovery by name (which can bind before a fresh device has its phrase
+    /// and so before `.session`). Idempotent server-side for the handle the
+    /// account holds; it binds an account whose session predates S5, or was
+    /// established on a path that never names the handle, so a later sign-in
+    /// by name works.
+    ///
+    ///   * A guest (empty username) has no handle: nothing is sent.
+    ///   * A name the handle derivation refuses: nothing is sent, logged.
+    ///   * Fire-and-forget: a failure never touches the session and shows
+    ///     the user nothing. `409` and any other status is logged by status
+    ///     only; `503 login-by-name-disabled` is not logged at all.
+    func ensureLoginHandleBound(username: String, sessionToken: String, context: String) {
+        guard !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !sessionToken.isEmpty else { return }
+        let name: LoginName
+        do {
+            name = try LoginName.make(
+                username, emptyError: AuthClientError.argument("username must be non-empty"))
+        } catch {
+            NSLog("[auth] login handle re-bind (\(context)) skipped: the username derives no handle")
+            return
+        }
+        ensureLoginHandleBound(name: name, sessionToken: sessionToken, context: context)
+    }
+
+    /// ``ensureLoginHandleBound(username:sessionToken:context:)`` for a name
+    /// already turned into its handle.
+    private func ensureLoginHandleBound(name: LoginName, sessionToken: String, context: String) {
+        guard !sessionToken.isEmpty,
+              loginHandleBinds.claim(sessionToken: sessionToken, canonical: name.canonical) else { return }
+        let client = authClientFactory()
+        let handle = name.handle
+        Task {
+            do {
+                try await client.bindLoginHandle(handle: handle, sessionToken: sessionToken)
+            } catch let error as AuthClientError {
+                switch error {
+                case .http(let status, _, _):
+                    if AuthRateLimit.isLoginByNameDisabled(error) { return }
+                    NSLog("[auth] login handle re-bind (\(context)) failed: status \(status)")
+                case .network:
+                    NSLog("[auth] login handle re-bind (\(context)) failed: network")
+                case .argument:
+                    NSLog("[auth] login handle re-bind (\(context)) failed: argument")
+                }
+            } catch {
+                NSLog("[auth] login handle re-bind (\(context)) failed")
+            }
+        }
     }
 
     /// Phase 2a2c2-ios — sign in with a WebAuthn passkey on a
@@ -818,12 +919,11 @@ public final class AuthRepository: ObservableObject {
     /// ADR-0017: the canonical AccountIdentity is derived from the
     /// (unchanged) BIP39 phrase seed, so a routine recover preserves
     /// the identity — the supersession proof emit is SKIPPED because
-    /// the old and new account pubkeys are equal. The `username`
-    /// resolves the account_id like ``login(username:password:)`` does
-    /// (cache hit, else a `DiscoveryClient.lookup`) so recover works
-    /// on a FRESH device given the username + phrase. It is required
-    /// only when no account is cached on this device; a cached account
-    /// wins.
+    /// the old and new account pubkeys are equal. The account is named by
+    /// the login handle of `username` (ADR-0054 S5), or of the name cached on
+    /// this device when the field is empty; the account id comes back in the
+    /// finish response. No discovery lookup runs, so recover works on a
+    /// FRESH device given the username + phrase.
     public func recover(
         mnemonicPhrase: String,
         newPassword: Data,
@@ -837,34 +937,18 @@ public final class AuthRepository: ObservableObject {
             throw AuthClientError.argument("new password must be non-empty")
         }
 
-        // ADR-0017: resolve the account_id the same way `login` does so
-        // recover works on a FRESH device: a local cache hit wins;
-        // otherwise a `DiscoveryClient.lookup` on the supplied username
-        // binds it. Without either we cannot target the recover. The
-        // branch logic lives in the pure ``resolveRecoverAccount`` helper
-        // (G-29) so it can be unit-tested without a network.
-        let cached = sessionStore.load().map {
-            CachedAccount(accountIdB64: $0.accountIdB64, username: $0.username)
-        }
-        let resolved = try await resolveRecoverAccount(
-            cached: cached,
-            username: username,
-            lookup: {
-                let lookup = try await DiscoveryClient().lookup(username: $0)
-                return RecoverAccountLookup(
-                    account: lookup.account,
-                    normalisedUsername: lookup.normalisedUsername
-                )
+        // ADR-0054 S5: the typed name, else the one cached on this device,
+        // names the account by its login handle.
+        let name = try signInName(
+            typed: username,
+            cached: sessionStore.load().map {
+                CachedAccount(accountIdB64: $0.accountIdB64, username: $0.username)
             },
-            encodeAccountId: base64Encode
-        )
-        let accountIdB64 = resolved.accountIdB64
-        let resolvedUsername = resolved.resolvedUsername
-        guard let accountIdBytes = base64Decode(accountIdB64) else {
-            throw AuthClientError.argument(
-                "resolved account id is malformed; please try again"
+            emptyError: AuthClientError.argument(
+                "Enter your username so Lakko can find your account."
             )
-        }
+        )
+        let resolvedUsername = name.canonical
 
         // Parse the mnemonic up front. `fromPhrase` collapses
         // unknown-word and bad-checksum into one error by design
@@ -893,10 +977,12 @@ public final class AuthRepository: ObservableObject {
 
         let client = authClientFactory()
         let result = try await client.recover(
-            accountId: accountIdBytes,
+            handle: name.handle,
             mnemonicSeed: seed,
             newPassword: newPassword
         )
+        let accountIdBytes = result.accountId
+        let accountIdB64 = base64Encode(accountIdBytes)
 
         let deviceRootKey = deriveDeviceRootKey(
             exportKey: result.exportKey,
@@ -968,8 +1054,8 @@ public final class AuthRepository: ObservableObject {
             NSLog("device-identity ensure (recover) failed: \(error)")
         }
         // Persist the session marker — important on the fresh-device
-        // recover path where there was no cached row (resolved via the
-        // discovery lookup above).
+        // recover path where there was no cached row (the account id came
+        // back in the reset finish).
         sessionStore.save(
             PersistedSession(
                 accountIdB64: accountIdB64,
@@ -1084,6 +1170,7 @@ public final class AuthRepository: ObservableObject {
             context: "recover",
             wholeStorageSnapshot: restoredSnapshot
         )
+        ensureLoginHandleBound(name: name, sessionToken: result.sessionToken, context: "recover")
         // 1.20c — best-effort push subscribe.
         Task { await Self.subscribePushBestEffort(context: "recover") }
     }
@@ -1104,6 +1191,9 @@ public final class AuthRepository: ObservableObject {
         if let cached {
             persistence.deleteSessionToken(accountIdB64: cached.accountIdB64)
         }
+        // ADR-0054 S3 — the push unregister spends a token; take it from
+        // the pool BEFORE the session (and with it the pool) is cleared.
+        let unregisterToken = AnonTokenPool.shared.takeIfAvailable(.pushRegister)
         identitySecrets = nil
         pendingRecovery = nil
         pendingFreshPhrase = nil
@@ -1112,7 +1202,7 @@ public final class AuthRepository: ObservableObject {
         // 1.20c — fire-and-forget unsubscribe so the next page
         // reload doesn't silently keep accepting pushes against
         // a logged-out session.
-        Task { await PushSubscriber.shared.unsubscribe() }
+        Task { await PushSubscriber.shared.unsubscribe(prepaidToken: unregisterToken) }
     }
 
     /// Drop the in-memory session **and** the on-device material.
@@ -1180,6 +1270,9 @@ public final class AuthRepository: ObservableObject {
             ChannelLogStore().delete(accountIdB64: cached.accountIdB64)
         }
         sessionStore.clear()
+        // ADR-0054 S3 — the push unregister below spends a token; take it
+        // before the session (and with it the pool) is cleared.
+        let unregisterToken = AnonTokenPool.shared.takeIfAvailable(.pushRegister)
         identitySecrets = nil
         // ADR-0017/0018 — drop any parked recovery context too (mirror of
         // logout + the Android forgetDevice), so an abandoned recover /
@@ -1194,7 +1287,7 @@ public final class AuthRepository: ObservableObject {
         // pseudonym. Best-effort fire-and-forget — the local
         // clear inside `unsubscribe` runs regardless of the
         // server leg outcome.
-        Task { await PushSubscriber.shared.unsubscribe() }
+        Task { await PushSubscriber.shared.unsubscribe(prepaidToken: unregisterToken) }
     }
 
     // MARK: - Push integration helpers
@@ -1785,41 +1878,27 @@ public final class AuthRepository: ObservableObject {
     ///     `completeFromPairing`) verify the supplied seed fail-closed
     ///     and bootstrap the device key from it.
     public func recoverWithTotp(username: String, code: String) async throws {
-        let trimmed = username.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            throw AuthClientError.argument(
+        // ADR-0054 S5: the typed name, else the one cached on this device,
+        // names the account by its login handle. The account id comes back
+        // in the response; no discovery lookup runs before the session.
+        let name = try signInName(
+            typed: username,
+            cached: sessionStore.load().map {
+                CachedAccount(accountIdB64: $0.accountIdB64, username: $0.username)
+            },
+            emptyError: AuthClientError.argument(
                 "enter the username of the account to recover"
             )
-        }
-        // Resolve the username -> account_id exactly like `login` /
-        // `recover`: a local cache hit wins, else a discovery lookup
-        // round-trip binds it.
-        let cached = sessionStore.load()
-        let accountIdB64: String
-        let resolvedUsername: String
-        if let cached, cached.username == trimmed {
-            accountIdB64 = cached.accountIdB64
-            resolvedUsername = cached.username
-        } else {
-            let discovery = DiscoveryClient()
-            let lookup = try await discovery.lookup(username: trimmed)
-            guard let accountBytes = lookup.account else {
-                throw AuthClientError.argument("username not found")
-            }
-            accountIdB64 = base64Encode(accountBytes)
-            resolvedUsername = lookup.normalisedUsername
-        }
-        guard let accountIdBytes = base64Decode(accountIdB64) else {
-            throw AuthClientError.argument(
-                "resolved account id is malformed; please try again"
-            )
-        }
+        )
 
         let client = authClientFactory()
         let result = try await client.totpRecover(
-            accountId: accountIdBytes,
+            handle: name.handle,
             code: code
         )
+        let accountIdBytes = result.accountId
+        let accountIdB64 = base64Encode(accountIdBytes)
+        let resolvedUsername = name.canonical
 
         // Shared ADR-0018 ACCESS-only landing (warm cached-seed finish
         // OR cold fail-safe park) — identical to the cascade's other
@@ -1833,6 +1912,7 @@ public final class AuthRepository: ObservableObject {
             context: "totp recover",
             pushContext: "totp-recover"
         )
+        ensureLoginHandleBound(name: name, sessionToken: result.sessionToken, context: "totp recover")
     }
 
     /// ADR-0018 — the shared post-ACCESS landing for the two ACCESS-
@@ -1867,7 +1947,7 @@ public final class AuthRepository: ObservableObject {
         pushContext: String
     ) {
         // Persist the session marker — important on a fresh device
-        // where no row existed (resolved via the discovery lookup).
+        // where no row existed (the account id came back in the response).
         sessionStore.save(
             PersistedSession(
                 accountIdB64: accountIdB64,
@@ -2116,12 +2196,10 @@ public final class AuthRepository: ObservableObject {
     /// acquisition runs the ADR-0017 state machine afterward. Mirror of
     /// the web `AuthContext.recoverWithContactStart`.
     ///
-    /// Resolves the username → account_id exactly like `login` /
-    /// `recover` / `recoverWithTotp` (a local cache hit wins, else a
-    /// discovery lookup binds it), sends the code, and stashes the
-    /// resolved `(accountId, username, kind)` so
-    /// ``recoverWithContactFinish(code:)`` can submit without
-    /// re-resolving.
+    /// Names the account by its login handle exactly like `login` /
+    /// `recover` / `recoverWithTotp` (ADR-0054 S5, no discovery lookup),
+    /// sends the code, and stashes the `(login name, kind)` so
+    /// ``recoverWithContactFinish(code:)`` submits for the same handle.
     ///
     /// ENUMERATION-SAFE: the server returns the same `{ sent: true }`
     /// whether or not the contact matches a confirmed row, so a
@@ -2132,53 +2210,33 @@ public final class AuthRepository: ObservableObject {
         kind: ContactKind,
         contact: String
     ) async throws {
-        let trimmed = username.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            throw AuthClientError.argument(
+        // ADR-0054 S5: the typed name, else the one cached on this device,
+        // names the account by its login handle; the account id comes back
+        // only in the finish response.
+        let name = try signInName(
+            typed: username,
+            cached: sessionStore.load().map {
+                CachedAccount(accountIdB64: $0.accountIdB64, username: $0.username)
+            },
+            emptyError: AuthClientError.argument(
                 "enter the username of the account to recover"
             )
-        }
-        // Resolve the username -> account_id exactly like `login` /
-        // `recover` / `recoverWithTotp`: a local cache hit wins, else a
-        // discovery lookup round-trip binds it.
-        let cached = sessionStore.load()
-        let accountIdB64: String
-        let resolvedUsername: String
-        if let cached, cached.username == trimmed {
-            accountIdB64 = cached.accountIdB64
-            resolvedUsername = cached.username
-        } else {
-            let discovery = DiscoveryClient()
-            let lookup = try await discovery.lookup(username: trimmed)
-            guard let accountBytes = lookup.account else {
-                throw AuthClientError.argument("username not found")
-            }
-            accountIdB64 = base64Encode(accountBytes)
-            resolvedUsername = lookup.normalisedUsername
-        }
-        guard let accountIdBytes = base64Decode(accountIdB64) else {
-            throw AuthClientError.argument(
-                "resolved account id is malformed; please try again"
-            )
-        }
+        )
 
         // Send the code. ENUMERATION-SAFE server-side: a non-throwing
         // return here only means "advance to the code step".
         let client = authClientFactory()
         try await client.recoveryContactRecoverStart(
-            accountId: accountIdBytes,
+            handle: name.handle,
             kind: kind,
             contact: contact
         )
 
-        // Stash the resolved context so `…Finish` can submit the code
-        // without re-resolving. The kind is carried verbatim so the
-        // finish targets the exact (account, kind) the code was sent
-        // for.
+        // Stash the name so `…Finish` can submit the code for the same
+        // handle. The kind is carried verbatim so the finish targets the
+        // exact (handle, kind) the code was sent for.
         pendingContactRecover = PendingContactRecover(
-            accountIdBytes: accountIdBytes,
-            accountIdB64: accountIdB64,
-            username: resolvedUsername,
+            name: name,
             kind: kind
         )
     }
@@ -2199,7 +2257,7 @@ public final class AuthRepository: ObservableObject {
         }
         let client = authClientFactory()
         let result = try await client.recoveryContactRecoverFinish(
-            accountId: pending.accountIdBytes,
+            handle: pending.name.handle,
             kind: pending.kind,
             code: code
         )
@@ -2209,14 +2267,16 @@ public final class AuthRepository: ObservableObject {
         // Shared ADR-0018 ACCESS-only landing — identical to the
         // cascade's other ACCESS factor (factor (c) TOTP).
         landAfterAccessRecovery(
-            username: pending.username,
-            accountIdBytes: pending.accountIdBytes,
-            accountIdB64: pending.accountIdB64,
+            username: pending.name.canonical,
+            accountIdBytes: result.accountId,
+            accountIdB64: base64Encode(result.accountId),
             sessionToken: result.sessionToken,
             sessionExpiresAtMs: result.sessionExpiresAtMs,
             context: "contact recover",
             pushContext: "contact-recover"
         )
+        ensureLoginHandleBound(
+            name: pending.name, sessionToken: result.sessionToken, context: "contact recover")
     }
 
     /// ADR-0018 factor (c) — bootstrap the device root key from a
@@ -2773,18 +2833,17 @@ struct PendingFreshPhrase {
     let phrase: String
 }
 
-/// ADR-0018 factor (d) — the resolved context for an in-flight phone /
-/// email OTP recovery, stashed between
+/// ADR-0018 factor (d) — the context for an in-flight phone / email OTP
+/// recovery, stashed between
 /// ``AuthRepository/recoverWithContactStart(username:kind:contact:)``
-/// (which resolves the username + sends the code) and
-/// ``AuthRepository/recoverWithContactFinish(code:)`` (which submits
-/// the delivered code). The `kind` is carried verbatim so the finish
-/// targets the exact `(account, kind)` the code was sent for. Mirror of
-/// the web `PendingContactRecover` signal.
+/// (which sends the code) and
+/// ``AuthRepository/recoverWithContactFinish(code:)`` (which submits the
+/// delivered code). ADR-0054 S5: the account is named by its login handle;
+/// its id is learned only from the finish. The `kind` is carried verbatim so
+/// the finish targets the exact `(handle, kind)` the code was sent for.
+/// Mirror of the web `PendingContactRecover` signal.
 struct PendingContactRecover {
-    let accountIdBytes: Data
-    let accountIdB64: String
-    let username: String
+    let name: LoginName
     let kind: ContactKind
 }
 

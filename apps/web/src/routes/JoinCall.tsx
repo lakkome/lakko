@@ -61,6 +61,9 @@ import { useProfiles } from "../profile/ProfileContext";
 import { createDisplayNameCheck } from "../profile/username-field";
 import { maySaveDisplayName, savedDisplayName } from "../profile/rules";
 import SaveFreshPhrasePrompt from "../auth/SaveFreshPhrasePrompt";
+import { isAbortError } from "../auth/pow";
+import { signupErrorMessage } from "../auth/auth-error-copy";
+import { GUEST_WORKING_TITLE, SIGNUP_WORKING_LINE } from "../auth/signup-working";
 import { loadWasm } from "../wasm";
 import { DiscoveryClient, DiscoveryHttpError, isDiscoveryRateLimited } from "../discovery/client";
 import {
@@ -183,6 +186,11 @@ export default function JoinCall() {
   // second tap can't mint a SECOND guest account. A second call is prevented by
   // the host, which refuses a call while one holds the slot.
   let mintingGuest = false;
+  /** ADR-0054 S4: the guest account pays the signup proof of work. `true`
+   *  while it runs; leaving the screen, or `Cancel`, aborts it. */
+  const [guestWorking, setGuestWorking] = createSignal(false);
+  let guestSignup: AbortController | null = null;
+  onCleanup(() => guestSignup?.abort());
 
   /** The host's link slot, when it is THIS link's call. */
   const hostSlot = createMemo(() => {
@@ -262,15 +270,30 @@ export default function JoinCall() {
     setError(null);
     setLocalPhase("starting");
     setPendingJoin(d);
+    const controller = new AbortController();
+    guestSignup = controller;
+    setGuestWorking(true);
     try {
-      await auth.signupGuest();
+      await auth.signupGuest({ signal: controller.signal });
     } catch (err) {
       mintingGuest = false; // allow a retry after a failed mint
       pendingGuestName = undefined;
       setPendingJoin(null);
-      setError(err instanceof Error ? err.message : String(err));
+      if (isAbortError(err)) {
+        // Cancelled: back to the Join button, nothing was created.
+        setLocalPhase("idle");
+        return;
+      }
+      setError(signupErrorMessage(err));
       setLocalPhase("error");
+    } finally {
+      if (guestSignup === controller) guestSignup = null;
+      setGuestWorking(false);
     }
+  }
+
+  function onCancelGuest(): void {
+    guestSignup?.abort();
   }
 
   /** Hand the ADR-0032 host / join to the call host now that a live session
@@ -394,7 +417,22 @@ export default function JoinCall() {
               {/* No login required: a joiner with no session gets a full,
                   username-less guest account (auth.signupGuest) on tap. */}
             </Show>
-            <Show when={phase() === "starting"}>
+            <Show when={phase() === "starting" && guestWorking()}>
+              {/* docs/ux/anti-abuse.md section 1: the guest account pays the
+                  same once-only work as a signup. */}
+              <div role="status" aria-live="polite" class="lk-stack" style={{ gap: "8px" }}>
+                <button class="primary" type="button" disabled aria-busy="true">
+                  <span class="lakko-spinner" aria-hidden="true" /> {GUEST_WORKING_TITLE}
+                </button>
+                <p class="form-info" style={{ margin: 0 }}>
+                  {SIGNUP_WORKING_LINE}
+                </p>
+                <button type="button" onClick={onCancelGuest}>
+                  Cancel
+                </button>
+              </div>
+            </Show>
+            <Show when={phase() === "starting" && !guestWorking()}>
               <p>Connecting…</p>
             </Show>
             <Show when={phase() === "waiting"}>

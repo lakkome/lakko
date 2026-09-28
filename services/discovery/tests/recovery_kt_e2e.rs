@@ -37,7 +37,6 @@ use lakko_auth_token::TokenSecret;
 use lakko_crypto::hash::blake3;
 use lakko_crypto::signing::SigningKey;
 use lakko_mls::Identity;
-use lakko_pow::solve;
 use lakko_transparency::{
     sign_leaf_genesis, verify_inclusion, verify_leaf_genesis, verify_supersession_chain,
     verify_witness_cosig, verify_witness_quorum, InclusionProof, LogEntry, PinnedIdentity,
@@ -124,12 +123,6 @@ fn now_secs() -> i64 {
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
-struct ChallengeResponse {
-    seed: String,
-    effort_bits: u8,
-}
-
-#[derive(Deserialize)]
 struct OperatorKeyRes {
     operator_pubkey_b64: String,
 }
@@ -176,31 +169,6 @@ struct ProofRes {
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
-/// A fresh PoW proof solved against a just-issued discovery challenge, in the
-/// `{ seed, nonce, solution }` base64 wire shape discovery deserializes.
-async fn fresh_pow(client: &reqwest::Client) -> serde_json::Value {
-    let chall: ChallengeResponse = client
-        .post(format!("{}/pow/challenge", discovery_url()))
-        .send()
-        .await
-        .expect("pow/challenge request")
-        .error_for_status()
-        .expect("pow/challenge status")
-        .json()
-        .await
-        .expect("pow/challenge body");
-
-    let seed_vec = B64.decode(chall.seed.as_bytes()).expect("seed b64");
-    let seed: [u8; 16] = seed_vec.as_slice().try_into().expect("seed is 16 bytes");
-    let proof = solve(&seed, chall.effort_bits).expect("solve pow");
-
-    json!({
-        "seed": B64.encode(proof.seed),
-        "nonce": B64.encode(proof.nonce),
-        "solution": B64.encode(proof.solution),
-    })
-}
-
 /// Upload an identity bundle to discovery. Returns the raw HTTP status so the
 /// negative test can assert a refusal. `leaf_auth` / `supersession_proof` are
 /// base64 when present.
@@ -214,7 +182,6 @@ async fn upload_bundle(
     supersession_proof: Option<&[u8]>,
 ) -> reqwest::StatusCode {
     let mut body = json!({
-        "pow": fresh_pow(client).await,
         "account_id": B64.encode(account_id),
         "signature_pubkey": B64.encode(signature_pubkey),
         "x25519_pubkey": B64.encode(x25519_pubkey),

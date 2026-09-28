@@ -238,20 +238,10 @@ describe("contract point 4 — heal on apply", () => {
 describe("contract point 6 — the knock", () => {
   function ports(epoch: number | null): KnockPorts & { readonly log: string[]; knock: KnockPorts["knock"] } {
     const log: string[] = [];
-    let challenges = 0;
     return {
       log,
-      challenge: async () => {
-        challenges += 1;
-        log.push(`challenge#${challenges}`);
-        return { seed: `seed${challenges}`, effortBits: 4 };
-      },
-      solve: async (seed) => {
-        log.push(`solve:${seed}`);
-        return { seed, nonce: "n", solution: "s" };
-      },
-      knock: async (pow, payloads) => {
-        log.push(`knock:${pow.seed}:[${payloads.map((p) => p[0]).join(",")}]`);
+      knock: async (payloads) => {
+        log.push(`knock:[${payloads.map((p) => p[0]).join(",")}]`);
         return { ids: payloads.map((_, i) => i + 1), epoch };
       },
       buildProposal: (e) => {
@@ -262,78 +252,24 @@ describe("contract point 6 — the knock", () => {
     };
   }
 
-  it("probes with an empty knock, builds the proposal for THAT epoch, then knocks with attribution + proposal under a second proof of work", async () => {
+  it("probes with an empty knock, builds the proposal for THAT epoch, then knocks with attribution + proposal", async () => {
     const p = ports(12);
     const out = await knockToJoin(p);
     expect(out.epoch).toBe(12n);
-    expect(p.log).toEqual([
-      "challenge#1",
-      "solve:seed1",
-      "knock:seed1:[]",
-      "proposal@12",
-      "challenge#2",
-      "solve:seed2",
-      "knock:seed2:[10,11]",
-    ]);
+    expect(p.log).toEqual(["knock:[]", "proposal@12", "knock:[10,11]"]);
   });
 
-  it("an unclaimed group returns no epoch: no proposal is built, nothing is knocked", async () => {
+  it("an unclaimed group returns no epoch: no proposal is built, nothing else is knocked", async () => {
     const p = ports(null);
     await expect(knockToJoin(p)).rejects.toBeInstanceOf(GroupNotClaimedError);
-    expect(p.log).toEqual(["challenge#1", "solve:seed1", "knock:seed1:[]"]);
+    expect(p.log).toEqual(["knock:[]"]);
   });
 
-  it("a knock refused with 401 (the proof of work expired mid-solve) is retried ONCE under a fresh challenge", async () => {
+  it("a refused knock surfaces as is (the token retry lives in the DS client)", async () => {
     const p = ports(12);
-    const knock = p.knock;
-    let refused = 0;
-    p.knock = async (pow, payloads) => {
-      // The probe's first proof and the final knock's first proof are stale.
-      if ((pow.seed === "seed1" || pow.seed === "seed3") && refused < 2) {
-        refused += 1;
-        p.log.push(`knock:${pow.seed}:401`);
-        throw Object.assign(new Error("proof required"), { status: 401 });
-      }
-      return knock(pow, payloads);
-    };
-    const out = await knockToJoin(p);
-    expect(out.epoch).toBe(12n);
-    expect(p.log).toEqual([
-      "challenge#1",
-      "solve:seed1",
-      "knock:seed1:401",
-      "challenge#2",
-      "solve:seed2",
-      "knock:seed2:[]",
-      "proposal@12",
-      "challenge#3",
-      "solve:seed3",
-      "knock:seed3:401",
-      "challenge#4",
-      "solve:seed4",
-      "knock:seed4:[10,11]",
-    ]);
-  });
-
-  it("a second 401 surfaces, and a non-401 failure is not retried", async () => {
-    const always = ports(12);
-    always.knock = async () => {
-      throw Object.assign(new Error("proof required"), { status: 401 });
-    };
-    await expect(knockToJoin(always)).rejects.toMatchObject({ status: 401 });
-    expect(always.log.filter((l) => l.startsWith("challenge"))).toHaveLength(2);
-
-    const server = ports(12);
-    server.knock = async () => {
+    p.knock = async () => {
       throw Object.assign(new Error("boom"), { status: 500 });
     };
-    await expect(knockToJoin(server)).rejects.toMatchObject({ status: 500 });
-    expect(server.log.filter((l) => l.startsWith("challenge"))).toHaveLength(1);
-  });
-
-  it("an attribution that cannot be built does not block the request", async () => {
-    const p = { ...ports(3), buildAttribution: () => null };
-    await knockToJoin(p);
-    expect(p.log[p.log.length - 1]).toBe("knock:seed2:[11]");
+    await expect(knockToJoin(p)).rejects.toMatchObject({ status: 500 });
   });
 });

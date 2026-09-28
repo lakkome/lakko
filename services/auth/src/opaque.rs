@@ -28,7 +28,15 @@
 //!
 //! ## State machine
 //!
-//! Registration is stateless on the server between `/start` and `/finish`.
+//! Registration keeps one row between `/start` and `/finish`
+//! (`signup_states`, keyed on `account_id`, TTL [`SIGNUP_STATE_TTL_SECS`]):
+//! `/signup/start` is the one auth route that still demands a proof of work
+//! (ADR-0054 S4), and the row is what binds `/signup/finish` to a start whose
+//! proof was spent — finish deletes it in the account-creating transaction,
+//! so one proof creates at most one account and a finish without a live start
+//! is refused (`410`). The OPAQUE state itself is not stored: the math binds
+//! each upload to its response.
+//!
 //! Login is **stateful**: `ServerLogin<CS>` is serialized and stored in
 //! `opaque_login_states` keyed by `session_id` (UUIDv7), with TTL 2
 //! minutes and a periodic pruner. The row also stores `kind`, and the
@@ -57,6 +65,54 @@ use serde::{Deserialize, Serialize};
 use sqlx::MySqlPool;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+
+/// Error type of the OPAQUE handlers: the plain `(status, text)` shape they
+/// always had, or a limiter refusal (`429` + body code + `Retry-After`, or
+/// `503` when the counter store fails).
+pub(crate) enum OpaqueError {
+    /// A plain status + text body.
+    Plain(StatusCode, String),
+    /// A limiter refusal.
+    Limit(crate::limits::LimitError),
+    /// A shared-module refusal (ADR-0054 S5: login by name disabled, a
+    /// malformed handle, a handle-lookup store error).
+    Api(crate::webauthn::ApiError),
+}
+
+impl From<crate::webauthn::ApiError> for OpaqueError {
+    fn from(e: crate::webauthn::ApiError) -> Self {
+        Self::Api(e)
+    }
+}
+
+impl From<(StatusCode, String)> for OpaqueError {
+    fn from((code, msg): (StatusCode, String)) -> Self {
+        Self::Plain(code, msg)
+    }
+}
+
+impl From<crate::limits::LimitError> for OpaqueError {
+    fn from(e: crate::limits::LimitError) -> Self {
+        Self::Limit(e)
+    }
+}
+
+impl From<crate::pow::PowError> for OpaqueError {
+    fn from(e: crate::pow::PowError) -> Self {
+        let (code, msg): (StatusCode, String) = e.into();
+        Self::Plain(code, msg)
+    }
+}
+
+impl axum::response::IntoResponse for OpaqueError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            Self::Plain(code, msg) => (code, msg).into_response(),
+            Self::Limit(e) => e.into_response(),
+            Self::Api(e) => e.into_response(),
+        }
+    }
+}
 
 /// Issue a fresh session token for `account_id`. Returns the
 /// dot-formatted token + the absolute unix-ms expiry (mirror of
@@ -260,8 +316,10 @@ fn opaque_registration_start(
 /// second `RegistrationRequest` derived from the BIP39 seed.
 #[derive(Deserialize)]
 pub(crate) struct SignupStartRequest {
-    /// PoW proof obtained via `POST /pow/challenge`. Verified and
-    /// consumed before any expensive work.
+    /// PoW proof obtained via `POST /pow/challenge` — the one proof of work
+    /// left in the auth service (ADR-0054 S4), at the
+    /// `LAKKO_SIGNUP_POW_EFFORT_BITS` effort. Verified and consumed before
+    /// any other work.
     pub(crate) pow: crate::pow::PowProof,
     /// Base64-encoded raw bytes of `account_id` (16 bytes, UUIDv7).
     pub(crate) account_id: String,
@@ -294,12 +352,14 @@ pub(crate) struct SignupStartResponse {
 /// run with the same server-static setup but distinct `credential_id`
 /// values (`account_id || 0x01` vs `account_id || 0x02`).
 ///
-/// **The server stays stateless** between start and finish — OPAQUE math
-/// binds each upload (which arrives in `/signup/finish`) to its response.
+/// Behind the per-address `Signup` bucket (a `429` `signup-rate-limited`).
+/// After the proof verifies and both OPAQUE starts succeed, records a
+/// `signup_states` row for `account_id` (replacing an earlier pending one) —
+/// the only thing that lets `/signup/finish` create the account.
 pub(crate) async fn signup_start(
     State(state): State<crate::AppState>,
     Json(payload): Json<SignupStartRequest>,
-) -> Result<Json<SignupStartResponse>, (StatusCode, String)> {
+) -> Result<Json<SignupStartResponse>, OpaqueError> {
     crate::pow::verify_proof(&state.db, &payload.pow).await?;
 
     let account_id = decode_account_id(&payload.account_id)?;
@@ -325,6 +385,23 @@ pub(crate) async fn signup_start(
         None => None,
     };
 
+    sqlx::query(
+        "INSERT INTO signup_states (account_id, with_recovery, created_at) \
+         VALUES (?, ?, NOW(3)) \
+         ON DUPLICATE KEY UPDATE with_recovery = VALUES(with_recovery), created_at = NOW(3)",
+    )
+    .bind(&account_id[..])
+    .bind(recovery_response.is_some())
+    .execute(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "insert signup_states");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal db error".to_string(),
+        )
+    })?;
+
     Ok(Json(SignupStartResponse {
         password_response,
         recovery_response,
@@ -335,13 +412,60 @@ pub(crate) async fn signup_start(
 // /signup/finish
 // ============================================================================
 
+/// Take the live `signup_states` row for `account_id` inside the
+/// account-creating transaction: `410` when there is none (no start with a
+/// spent proof, expired, or already used), `400` when the recovery upload
+/// does not match what the start carried.
+async fn take_signup_state(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    account_id: &[u8; ACCOUNT_ID_LEN],
+    with_recovery: bool,
+) -> Result<(), OpaqueError> {
+    let db_err = |what: &'static str| {
+        move |e: sqlx::Error| {
+            tracing::error!(error = %e, what, "signup_states");
+            OpaqueError::Plain(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal db error".to_string(),
+            )
+        }
+    };
+    let pending: Option<(bool,)> = sqlx::query_as(
+        "SELECT with_recovery FROM signup_states \
+         WHERE account_id = ? AND created_at >= NOW(3) - INTERVAL ? SECOND \
+         FOR UPDATE",
+    )
+    .bind(&account_id[..])
+    .bind(SIGNUP_STATE_TTL_SECS)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db_err("select"))?;
+    let Some((started_with_recovery,)) = pending else {
+        return Err(OpaqueError::Plain(
+            StatusCode::GONE,
+            "signup not started or expired".to_string(),
+        ));
+    };
+    if started_with_recovery != with_recovery {
+        return Err(OpaqueError::Plain(
+            StatusCode::BAD_REQUEST,
+            "recovery_upload must be present iff signup/start carried recovery_request".to_string(),
+        ));
+    }
+    sqlx::query("DELETE FROM signup_states WHERE account_id = ?")
+        .bind(&account_id[..])
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err("delete"))?;
+    Ok(())
+}
+
 /// Registration-finish request. Includes both uploads if the caller
 /// started both flows in `/signup/start`.
 #[derive(Deserialize)]
 pub(crate) struct SignupFinishRequest {
-    /// PoW proof — separate from the one consumed by `/signup/start`.
-    /// Both endpoints write to MariaDB; both need anti-spam.
-    pub(crate) pow: crate::pow::PowProof,
+    /// Must name an `account_id` whose `/signup/start` (and its proof of
+    /// work) completed within [`SIGNUP_STATE_TTL_SECS`]. No proof here.
     pub(crate) account_id: String,
     /// Base64-encoded `RegistrationUpload` for the password flow.
     pub(crate) password_upload: String,
@@ -369,6 +493,10 @@ pub(crate) struct SignupFinishResponse {
 ///
 /// In a single DB transaction:
 ///
+///   0. DELETE the live `signup_states` row for `account_id` — none means
+///      no start with a spent proof (or it expired, or it was already
+///      used): `410 Gone`. The recovery upload must match what the start
+///      carried, else `400`.
 ///   1. INSERT `accounts(id = account_id)` — uniqueness here is the
 ///      anti-replay check.
 ///   2. INSERT the password envelope into `opaque_registrations` with
@@ -383,9 +511,7 @@ pub(crate) struct SignupFinishResponse {
 pub(crate) async fn signup_finish(
     State(state): State<crate::AppState>,
     Json(payload): Json<SignupFinishRequest>,
-) -> Result<Json<SignupFinishResponse>, (StatusCode, String)> {
-    crate::pow::verify_proof(&state.db, &payload.pow).await?;
-
+) -> Result<Json<SignupFinishResponse>, OpaqueError> {
     let account_id = decode_account_id(&payload.account_id)?;
 
     let password_upload = decode_registration_upload(&payload.password_upload)?;
@@ -409,6 +535,9 @@ pub(crate) async fn signup_finish(
         )
     })?;
 
+    // Bind to the start: take the live pending row (one shot).
+    take_signup_state(&mut tx, &account_id, recovery_bytes.is_some()).await?;
+
     // Insert account row. PK collision means account_id is already taken.
     let account_insert = sqlx::query("INSERT INTO accounts (id) VALUES (?)")
         .bind(&account_id[..])
@@ -418,14 +547,14 @@ pub(crate) async fn signup_finish(
     match account_insert {
         Ok(_) => {},
         Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
-            return Err((
+            return Err(OpaqueError::Plain(
                 StatusCode::CONFLICT,
                 "account_id already registered".to_string(),
             ));
         },
         Err(e) => {
             tracing::error!(error = %e, "insert account");
-            return Err((
+            return Err(OpaqueError::Plain(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal db error".to_string(),
             ));
@@ -499,6 +628,11 @@ pub(crate) async fn signup_finish(
 /// Typed as `i64` so it can be passed directly to SQL `INTERVAL ? SECOND`
 /// without a cast.
 const LOGIN_STATE_TTL_SECS: i64 = 120;
+
+/// TTL of a pending signup (`signup_states`): how long after a
+/// `/signup/start` its `/signup/finish` is accepted. Covers the client-side
+/// Argon2id stretch between the two on a slow phone.
+pub(crate) const SIGNUP_STATE_TTL_SECS: i64 = 600;
 
 /// Period between pruner runs that delete expired rows.
 const LOGIN_STATE_PRUNE_INTERVAL: Duration = Duration::from_secs(30);
@@ -581,7 +715,7 @@ async fn take_login_state(
 }
 
 /// Spawn a background task that runs every `LOGIN_STATE_PRUNE_INTERVAL` and
-/// deletes expired login states from the DB.
+/// deletes expired login states and pending signups from the DB.
 pub(crate) fn spawn_login_state_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(LOGIN_STATE_PRUNE_INTERVAL);
@@ -607,6 +741,15 @@ pub(crate) fn spawn_login_state_pruner(pool: MySqlPool) -> tokio::task::JoinHand
                 Ok(_) => {},
                 Err(e) => tracing::warn!(error = %e, "opaque_login_states prune failed"),
             }
+            if let Err(e) = sqlx::query(
+                "DELETE FROM signup_states WHERE created_at < NOW(3) - INTERVAL ? SECOND",
+            )
+            .bind(SIGNUP_STATE_TTL_SECS)
+            .execute(&pool)
+            .await
+            {
+                tracing::warn!(error = %e, "signup_states prune failed");
+            }
         }
     })
 }
@@ -617,12 +760,10 @@ pub(crate) fn spawn_login_state_pruner(pool: MySqlPool) -> tokio::task::JoinHand
 
 #[derive(Deserialize)]
 pub(crate) struct LoginStartRequest {
-    /// PoW proof obtained via `POST /pow/challenge`. Required on both
-    /// `/login/start` and `/recovery/login/start`. The `*/finish`
-    /// endpoints don't need it — they consume an existing session_id
-    /// that the server only issues after a verified PoW.
-    pub(crate) pow: crate::pow::PowProof,
-    pub(crate) account_id: String,
+    /// The login handle of the account to log into (ADR-0054 S5): 32 bytes,
+    /// base64url without padding. No proof of work (ADR-0054 S4): the start
+    /// is limited per named handle and per source address instead.
+    pub(crate) handle: String,
     /// Base64-encoded `CredentialRequest` from `ClientLogin::start`.
     pub(crate) request: String,
 }
@@ -661,20 +802,36 @@ pub(crate) struct LoginFinishResponse {
 
 /// Shared `/login/start` handler parameterised by `kind`.
 ///
-/// Looks up `opaque_registrations(account_id, kind)`. If no row is found
-/// (unknown account or no recovery enrolled), passes `None` to
-/// `ServerLogin::start` — opaque-ke 3.0 takes the fake-credentials path
-/// and produces a plausible response that cannot be distinguished from a
-/// real login with the wrong secret. This blocks both account enumeration
-/// AND recovery-enrolment enumeration.
+/// Resolves the login handle to its account (ADR-0054 S5); a handle nobody
+/// holds resolves to a stand-in account id derived from it, stable per
+/// handle. Then looks up `opaque_registrations(account_id, kind)`. If no row
+/// is found (unknown handle, or no recovery enrolled), passes `None` to
+/// `ServerLogin::start` — opaque-ke 3.0 takes the fake-credentials path and
+/// produces a plausible response that cannot be distinguished from a real
+/// login with the wrong secret. The credential identifier on that path is
+/// `stand_in || kind`, so the same unknown name meets the same OPRF key on
+/// every attempt, as a real account's name does. This blocks both account
+/// enumeration AND recovery-enrolment enumeration.
+///
+/// Every start is charged to the named handle's counter (per kind) before
+/// anything is looked up, so the limit trips for an unknown name exactly as
+/// for a known one.
 async fn login_start_inner(
     state: &crate::AppState,
     payload: LoginStartRequest,
     kind: u8,
-) -> Result<Json<LoginStartResponse>, (StatusCode, String)> {
-    crate::pow::verify_proof(&state.db, &payload.pow).await?;
-
-    let account_id = decode_account_id(&payload.account_id)?;
+) -> Result<Json<LoginStartResponse>, OpaqueError> {
+    let pepper = crate::login_handle::pepper(state)?;
+    let handle = crate::login_handle::decode_handle(&payload.handle)?;
+    let scope = if kind == KIND_RECOVERY {
+        crate::limits::Scope::LoginRecovery
+    } else {
+        crate::limits::Scope::LoginPassword
+    };
+    crate::limits::charge_name(&state.db, &state.limits, scope, &handle).await?;
+    let account_id = crate::login_handle::resolve(&state.db, &pepper, &handle)
+        .await?
+        .account_id;
     let credential_id = build_credential_id(&account_id, kind);
 
     let request_bytes = B64.decode(&payload.request).map_err(|e| {
@@ -839,7 +996,7 @@ async fn login_finish_inner(
 pub(crate) async fn login_start(
     State(state): State<crate::AppState>,
     Json(payload): Json<LoginStartRequest>,
-) -> Result<Json<LoginStartResponse>, (StatusCode, String)> {
+) -> Result<Json<LoginStartResponse>, OpaqueError> {
     login_start_inner(&state, payload, KIND_PASSWORD).await
 }
 
@@ -865,7 +1022,7 @@ pub(crate) async fn login_finish(
 pub(crate) async fn recovery_login_start(
     State(state): State<crate::AppState>,
     Json(payload): Json<LoginStartRequest>,
-) -> Result<Json<LoginStartResponse>, (StatusCode, String)> {
+) -> Result<Json<LoginStartResponse>, OpaqueError> {
     login_start_inner(&state, payload, KIND_RECOVERY).await
 }
 
@@ -890,7 +1047,8 @@ pub(crate) async fn recovery_login_finish(
 //      Sends both to /password/reset/start.
 //
 //   2. Server:
-//        - verifies PoW,
+//        - charges the named handle's reset counter (ADR-0054 S4) and
+//          resolves the handle to its account (ADR-0054 S5),
 //        - looks up the stored KIND_RECOVERY envelope (or None),
 //        - runs ServerLogin::start with KIND_RECOVERY credential_id (proves the
 //          user knows the recovery secret, no real password yet),
@@ -914,14 +1072,14 @@ pub(crate) async fn recovery_login_finish(
 //          the existing recovery envelope stays untouched, so the same
 //          mnemonic continues to work after this operation.
 //
-// PoW lives only on /password/reset/start (matches the rest of the
-// expensive endpoints: PoW gates the start, the start consumes the
-// challenge, finish runs against an already-issued session_id).
+// The limit lives only on /password/reset/start (finish runs against an
+// already-issued, one-shot session_id).
 
 #[derive(Deserialize)]
 pub(crate) struct PasswordResetStartRequest {
-    pub(crate) pow: crate::pow::PowProof,
-    pub(crate) account_id: String,
+    /// The login handle of the account (ADR-0054 S5): 32 bytes, base64url
+    /// without padding.
+    pub(crate) handle: String,
     /// Base64-encoded `CredentialRequest` from
     /// `ClientLogin::start(recovery_seed)`. The server feeds this to
     /// `ServerLogin::start` against the KIND_RECOVERY envelope.
@@ -978,10 +1136,22 @@ pub(crate) struct PasswordResetFinishResponse {
 pub(crate) async fn password_reset_start(
     State(state): State<crate::AppState>,
     Json(payload): Json<PasswordResetStartRequest>,
-) -> Result<Json<PasswordResetStartResponse>, (StatusCode, String)> {
-    crate::pow::verify_proof(&state.db, &payload.pow).await?;
-
-    let account_id = decode_account_id(&payload.account_id)?;
+) -> Result<Json<PasswordResetStartResponse>, OpaqueError> {
+    let pepper = crate::login_handle::pepper(&state)?;
+    let handle = crate::login_handle::decode_handle(&payload.handle)?;
+    crate::limits::charge_name(
+        &state.db,
+        &state.limits,
+        crate::limits::Scope::PasswordReset,
+        &handle,
+    )
+    .await?;
+    // An unknown handle resolves to its stand-in id: every lookup below
+    // misses and OPAQUE takes its fake-credentials path, as for an account
+    // without a recovery envelope.
+    let account_id = crate::login_handle::resolve(&state.db, &pepper, &handle)
+        .await?
+        .account_id;
 
     // Decode both client messages up-front; surfaces wire errors as
     // 400 before we touch the DB.
@@ -1656,5 +1826,933 @@ mod tests {
             wrong_seed,
             Some(stored)
         ));
+    }
+}
+
+/// ADR-0054 S4 over HTTP + a live MariaDB: signup keeps exactly one proof of
+/// work (on start) and finish is bound to that start; login / reset starts
+/// carry no proof and are limited per named account, enumeration-safely.
+///
+/// Gated on `LAKKO_AUTH_TEST_DATABASE_URL` (skips when unset).
+#[cfg(test)]
+mod signup_login_limits_e2e_tests {
+    use super::*;
+    use axum::body::{Body, Bytes};
+    use axum::http::{header, HeaderMap, Method, Request};
+    use http_body_util::BodyExt as _;
+    use opaque_ke::{ClientLogin, ClientRegistration, ClientRegistrationFinishParameters};
+    use sqlx::mysql::MySqlPoolOptions;
+    use std::sync::Arc;
+    use tower::ServiceExt as _;
+
+    use crate::limits::{Category, Limits, Scope, Window};
+
+    fn build_state(pool: MySqlPool, limits: Limits) -> crate::AppState {
+        let token_secret = lakko_auth_token::TokenSecret::new(vec![7u8; 64]).expect("token secret");
+        crate::AppState {
+            db: pool,
+            opaque_setup: Arc::new(ServerSetup::<LakkoCipherSuite>::new(&mut OsRng)),
+            session_token_secret: Arc::new(token_secret),
+            session_token_ttl_ms: 86_400_000,
+            webauthn: None,
+            webauthn_action_core: None,
+            call_jwt_signing: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&[0xAB; 32])),
+            attest_key: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&[0xCD; 32])),
+            turn: None,
+            totp_enc_key: None,
+            recovery_contact_pepper: None,
+            vault_enc_key: None,
+            otp_sender: Arc::new(crate::otp_sender::LogOnlyOtpSender),
+            throttle: crate::throttle::ThrottleConfig::disabled(),
+            backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
+            anon_tokens: None,
+            handle_pepper: Some(Arc::new(crate::login_handle::TEST_PEPPER)),
+            limits: Arc::new(limits),
+        }
+    }
+
+    async fn post(
+        state: &crate::AppState,
+        uri: &str,
+        ip: &str,
+        body: &serde_json::Value,
+    ) -> (StatusCode, HeaderMap, Bytes) {
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("x-real-ip", ip)
+            .body(Body::from(serde_json::to_vec(body).unwrap()))
+            .unwrap();
+        let resp = crate::build_app(state.clone())
+            .oneshot(req)
+            .await
+            .expect("router oneshot");
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        (status, headers, bytes)
+    }
+
+    /// Fetch a challenge and solve it (the tests run at effort 0).
+    async fn fresh_pow(state: &crate::AppState, ip: &str) -> serde_json::Value {
+        let (st, _, body) = post(state, "/pow/challenge", ip, &serde_json::json!({})).await;
+        assert_eq!(st, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let seed_b64 = v["seed"].as_str().unwrap().to_string();
+        let seed = B64.decode(&seed_b64).unwrap();
+        let mut nonce = [0u8; 16];
+        loop {
+            let mut challenge = Vec::with_capacity(32);
+            challenge.extend_from_slice(&seed);
+            challenge.extend_from_slice(&nonce);
+            if let Ok(eq) = equix::EquiX::new(&challenge) {
+                if let Some(sol) = eq.solve().first() {
+                    return serde_json::json!({
+                        "seed": seed_b64,
+                        "nonce": B64.encode(nonce),
+                        "solution": B64.encode(sol.to_bytes()),
+                    });
+                }
+            }
+            nonce[0] = nonce[0].wrapping_add(1);
+            if nonce[0] == 0 {
+                nonce[1] = nonce[1].wrapping_add(1);
+            }
+        }
+    }
+
+    async fn pool() -> Option<MySqlPool> {
+        let url = std::env::var("LAKKO_AUTH_TEST_DATABASE_URL").ok()?;
+        std::env::set_var("LAKKO_SIGNUP_POW_EFFORT_BITS", "0");
+        let pool = MySqlPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .expect("connect test DB");
+        crate::MIGRATIONS.run(&pool).await.expect("migrations");
+        Some(pool)
+    }
+
+    /// A fresh 16-byte account id, base64 as the wire carries it.
+    fn new_account() -> ([u8; 16], String) {
+        let id = *Uuid::now_v7().as_bytes();
+        (id, B64.encode(id))
+    }
+
+    /// Client-side registration start + the finish closure's inputs.
+    fn reg_start(secret: &[u8]) -> (opaque_ke::ClientRegistration<LakkoCipherSuite>, String) {
+        let cs = ClientRegistration::<LakkoCipherSuite>::start(&mut OsRng, secret).unwrap();
+        let msg = B64.encode(cs.message.serialize());
+        (cs.state, msg)
+    }
+
+    fn reg_finish(
+        state: opaque_ke::ClientRegistration<LakkoCipherSuite>,
+        secret: &[u8],
+        response_b64: &str,
+    ) -> String {
+        let resp = opaque_ke::RegistrationResponse::<LakkoCipherSuite>::deserialize(
+            &B64.decode(response_b64).unwrap(),
+        )
+        .unwrap();
+        let fin = state
+            .finish(
+                &mut OsRng,
+                secret,
+                resp,
+                ClientRegistrationFinishParameters::default(),
+            )
+            .unwrap();
+        B64.encode(fin.message.serialize())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn signup_keeps_one_proof_and_binds_finish_to_start() {
+        let Some(pool) = pool().await else {
+            eprintln!("skipping signup e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
+            return;
+        };
+        let state = build_state(pool.clone(), Limits::defaults());
+        let ip = "198.51.100.10";
+        let pw = b"correct horse battery staple";
+        let seed = [0x42u8; 64];
+
+        // (1) start without a proof is refused (the field is required).
+        let (id, id_b64) = new_account();
+        let (_, req) = reg_start(pw);
+        let (st, _, _) = post(
+            &state,
+            "/signup/start",
+            ip,
+            &serde_json::json!({ "account_id": id_b64, "password_request": req }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "no pow field");
+        // A proof that does not verify is refused too.
+        let (st, _, _) = post(
+            &state,
+            "/signup/start",
+            ip,
+            &serde_json::json!({
+                "pow": { "seed": B64.encode([0u8; 16]), "nonce": B64.encode([0u8; 16]),
+                         "solution": B64.encode([0u8; 16]) },
+                "account_id": id_b64, "password_request": req,
+            }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "unknown challenge");
+
+        // (2) finish without a start is refused, and creates nothing.
+        let (cs, req) = reg_start(pw);
+        let throwaway = ServerSetup::<LakkoCipherSuite>::new(&mut OsRng);
+        let response = ServerRegistration::<LakkoCipherSuite>::start(
+            &throwaway,
+            RegistrationRequest::deserialize(&B64.decode(&req).unwrap()).unwrap(),
+            &build_credential_id(&id, KIND_PASSWORD),
+        )
+        .unwrap();
+        let upload = reg_finish(cs, pw, &B64.encode(response.message.serialize()));
+        let (st, _, _) = post(
+            &state,
+            "/signup/finish",
+            ip,
+            &serde_json::json!({ "account_id": id_b64, "password_upload": upload }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::GONE, "finish without a start");
+        let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM accounts WHERE id = ?")
+            .bind(id.as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(exists, 0);
+
+        // (3) the real flow: one proof on start, none on finish.
+        let (cs_pw, req_pw) = reg_start(pw);
+        let (cs_rc, req_rc) = reg_start(&seed);
+        let pow = fresh_pow(&state, ip).await;
+        let (st, _, body) = post(
+            &state,
+            "/signup/start",
+            ip,
+            &serde_json::json!({
+                "pow": pow, "account_id": id_b64,
+                "password_request": req_pw, "recovery_request": req_rc,
+            }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let up_pw = reg_finish(cs_pw, pw, v["password_response"].as_str().unwrap());
+        let up_rc = reg_finish(cs_rc, &seed, v["recovery_response"].as_str().unwrap());
+
+        // A finish that drops the recovery upload the start announced: 400,
+        // and the pending start survives (the transaction rolled back).
+        let (st, _, _) = post(
+            &state,
+            "/signup/finish",
+            ip,
+            &serde_json::json!({ "account_id": id_b64, "password_upload": up_pw }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "recovery mismatch");
+
+        // A finish that still carries a legacy `pow` field: ignored.
+        let (st, _, body) = post(
+            &state,
+            "/signup/finish",
+            ip,
+            &serde_json::json!({
+                "pow": { "seed": "x", "nonce": "x", "solution": "x" },
+                "account_id": id_b64, "password_upload": up_pw, "recovery_upload": up_rc,
+            }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["session_token"].as_str().is_some());
+
+        // (4) the start is spent: a replayed finish is refused.
+        let (st, _, _) = post(
+            &state,
+            "/signup/finish",
+            ip,
+            &serde_json::json!({
+                "account_id": id_b64, "password_upload": up_pw, "recovery_upload": up_rc,
+            }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::GONE, "one start, one account");
+
+        // (5) the per-address signup limit: 429 + Retry-After, never 401.
+        let limited = build_state(
+            pool.clone(),
+            Limits::defaults().with_ip_window(Category::Signup, Window::new(2, 3600)),
+        );
+        let ip2 = "198.51.100.11";
+        for _ in 0..2 {
+            let (st, _, _) = post(&limited, "/signup/start", ip2, &serde_json::json!({})).await;
+            assert_eq!(
+                st,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "admitted by the bucket"
+            );
+        }
+        let (st, headers, body) =
+            post(&limited, "/signup/start", ip2, &serde_json::json!({})).await;
+        assert_eq!(st, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(headers[header::RETRY_AFTER], "1800");
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"], crate::limits::CODE_SIGNUP_RATE_LIMITED);
+        assert_eq!(v["retry_after_secs"], 1800);
+        // Another address is unaffected.
+        let (st, _, _) = post(
+            &limited,
+            "/signup/start",
+            "198.51.100.12",
+            &serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+
+        sqlx::query("DELETE FROM accounts WHERE id = ?")
+            .bind(id.as_slice())
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn login_and_reset_are_limited_per_named_account_enumeration_safely() {
+        let Some(pool) = pool().await else {
+            eprintln!("skipping login e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
+            return;
+        };
+        let state = build_state(
+            pool.clone(),
+            Limits::defaults()
+                .with_name_window(Scope::LoginPassword, Window::new(3, 900))
+                .with_name_window(Scope::PasswordReset, Window::new(1, 900)),
+        );
+        let ip = "198.51.100.20";
+        let pw = b"hunter2hunter2";
+
+        // A registered account.
+        let (known, known_id_b64) = new_account();
+        let (cs, req) = reg_start(pw);
+        let pow = fresh_pow(&state, ip).await;
+        let (st, _, body) = post(
+            &state,
+            "/signup/start",
+            ip,
+            &serde_json::json!({ "pow": pow, "account_id": known_id_b64, "password_request": req }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let upload = reg_finish(cs, pw, v["password_response"].as_str().unwrap());
+        let (st, _, _) = post(
+            &state,
+            "/signup/finish",
+            ip,
+            &serde_json::json!({ "account_id": known_id_b64, "password_upload": upload }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        // ADR-0054 S5: the routes name the account by its login handle.
+        let (known_handle, known_b64) = crate::login_handle::random_handle();
+        crate::login_handle::bind_for_test(&pool, &known, &known_handle).await;
+        let (_, unknown_b64) = crate::login_handle::random_handle();
+
+        let login_start = |id: String, with_legacy_pow: bool| {
+            let state = state.clone();
+            async move {
+                let cl = ClientLogin::<LakkoCipherSuite>::start(&mut OsRng, pw).unwrap();
+                let mut body = serde_json::json!({
+                    "handle": id,
+                    "request": B64.encode(cl.message.serialize()),
+                });
+                if with_legacy_pow {
+                    body["pow"] = serde_json::json!({ "seed": "x", "nonce": "x", "solution": "x" });
+                }
+                post(&state, "/login/start", ip, &body).await
+            }
+        };
+
+        // Under the limit both answer 200 (the unknown one via OPAQUE's fake
+        // credentials); a body with a legacy `pow` field is accepted.
+        for id in [&known_b64, &unknown_b64] {
+            for i in 0..3 {
+                let (st, _, body) = login_start(id.clone(), i == 0).await;
+                assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+            }
+        }
+        // The next start is refused identically for both.
+        let mut refusals = Vec::new();
+        for id in [&known_b64, &unknown_b64] {
+            let (st, headers, body) = login_start(id.clone(), false).await;
+            assert_eq!(st, StatusCode::TOO_MANY_REQUESTS);
+            let retry: u64 = headers[header::RETRY_AFTER]
+                .to_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!((1..=900).contains(&retry));
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(v["error"], crate::limits::CODE_TOO_MANY_ATTEMPTS);
+            refusals.push(v["error"].clone());
+        }
+        assert_eq!(refusals[0], refusals[1]);
+
+        // The recovery login keeps its own counter.
+        let cl = ClientLogin::<LakkoCipherSuite>::start(&mut OsRng, &[0x42u8; 64]).unwrap();
+        let (st, _, _) = post(
+            &state,
+            "/recovery/login/start",
+            ip,
+            &serde_json::json!({
+                "handle": known_b64,
+                "request": B64.encode(cl.message.serialize()),
+            }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "separate scope");
+
+        // Password reset: one per window here, for an unknown account too.
+        for (i, expected) in [StatusCode::OK, StatusCode::TOO_MANY_REQUESTS]
+            .into_iter()
+            .enumerate()
+        {
+            let cl = ClientLogin::<LakkoCipherSuite>::start(&mut OsRng, &[0x42u8; 64]).unwrap();
+            let (_, req) = reg_start(b"new password");
+            let (st, _, body) = post(
+                &state,
+                "/password/reset/start",
+                ip,
+                &serde_json::json!({
+                    "handle": unknown_b64,
+                    "recovery_request": B64.encode(cl.message.serialize()),
+                    "new_password_request": req,
+                }),
+            )
+            .await;
+            assert_eq!(
+                st,
+                expected,
+                "reset {i}: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+
+        sqlx::query("DELETE FROM accounts WHERE id = ?")
+            .bind(known.as_slice())
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    // ------------------------------------------------------------------
+    // ADR-0054 S5 — login by name
+    // ------------------------------------------------------------------
+
+    /// A request with an optional bearer token.
+    async fn send_json(
+        state: &crate::AppState,
+        method: Method,
+        uri: &str,
+        bearer: Option<&str>,
+        body: Option<&serde_json::Value>,
+    ) -> (StatusCode, Bytes) {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("x-real-ip", "198.51.100.40");
+        if let Some(t) = bearer {
+            req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
+        }
+        let req = match body {
+            Some(b) => req
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(b).unwrap()))
+                .unwrap(),
+            None => req.body(Body::empty()).unwrap(),
+        };
+        let resp = crate::build_app(state.clone())
+            .oneshot(req)
+            .await
+            .expect("router oneshot");
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        (status, bytes)
+    }
+
+    /// Create an account with a password and a recovery seed; returns its id
+    /// and the session token signup issued.
+    async fn signup_account(state: &crate::AppState, pw: &[u8], seed: &[u8]) -> ([u8; 16], String) {
+        let ip = "198.51.100.41";
+        let (id, id_b64) = new_account();
+        let (cs_pw, req_pw) = reg_start(pw);
+        let (cs_rc, req_rc) = reg_start(seed);
+        let pow = fresh_pow(state, ip).await;
+        let (st, _, body) = post(
+            state,
+            "/signup/start",
+            ip,
+            &serde_json::json!({
+                "pow": pow, "account_id": id_b64,
+                "password_request": req_pw, "recovery_request": req_rc,
+            }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let up_pw = reg_finish(cs_pw, pw, v["password_response"].as_str().unwrap());
+        let up_rc = reg_finish(cs_rc, seed, v["recovery_response"].as_str().unwrap());
+        let (st, _, body) = post(
+            state,
+            "/signup/finish",
+            ip,
+            &serde_json::json!({
+                "account_id": id_b64, "password_upload": up_pw, "recovery_upload": up_rc,
+            }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        (id, v["session_token"].as_str().unwrap().to_string())
+    }
+
+    /// Run a full login by handle with the real OPAQUE client. `Ok(account
+    /// id)` on success; `Err(())` when the client cannot finish (wrong
+    /// secret or an unbound handle — the two are the same to the client).
+    async fn login_by_handle(
+        state: &crate::AppState,
+        start_uri: &str,
+        finish_uri: &str,
+        handle_b64: &str,
+        secret: &[u8],
+    ) -> Result<String, ()> {
+        let cl = ClientLogin::<LakkoCipherSuite>::start(&mut OsRng, secret).unwrap();
+        let (st, _, body) = post(
+            state,
+            start_uri,
+            "198.51.100.42",
+            &serde_json::json!({
+                "handle": handle_b64,
+                "request": B64.encode(cl.message.serialize()),
+            }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let response = opaque_ke::CredentialResponse::<LakkoCipherSuite>::deserialize(
+            &B64.decode(v["response"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let fin = cl
+            .state
+            .finish(
+                secret,
+                response,
+                opaque_ke::ClientLoginFinishParameters::default(),
+            )
+            .map_err(|_| ())?;
+        let (st, _, body) = post(
+            state,
+            finish_uri,
+            "198.51.100.42",
+            &serde_json::json!({
+                "session_id": v["session_id"],
+                "finalize": B64.encode(fin.message.serialize()),
+            }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["session_token"].as_str().is_some());
+        Ok(v["account_id"].as_str().unwrap().to_string())
+    }
+
+    fn err_code(body: &[u8]) -> serde_json::Value {
+        serde_json::from_slice::<serde_json::Value>(body).unwrap()["error"].clone()
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn login_handle_bind_replace_taken_delete_and_login_by_name() {
+        let Some(pool) = pool().await else {
+            eprintln!("skipping login-handle e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
+            return;
+        };
+        let state = build_state(pool.clone(), Limits::defaults());
+        let pw = b"a password for login by name";
+        let seed = [0x31u8; 64];
+        let (a, a_token) = signup_account(&state, pw, &seed).await;
+        let (b, b_token) = signup_account(&state, b"b's password", &[0x32u8; 64]).await;
+        let (_, h1) = crate::login_handle::random_handle();
+        let (_, h2) = crate::login_handle::random_handle();
+        let (_, hb) = crate::login_handle::random_handle();
+        let put = |token: String, handle: String| {
+            let state = state.clone();
+            async move {
+                send_json(
+                    &state,
+                    Method::PUT,
+                    "/auth/login-handle",
+                    Some(&token),
+                    Some(&serde_json::json!({ "handle": handle })),
+                )
+                .await
+            }
+        };
+
+        // Bind, then sign in by name (password and recovery), learning the
+        // account id only from the finish response.
+        let (st, body) = put(a_token.clone(), h1.clone()).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let a_b64 = B64.encode(a);
+        assert_eq!(
+            login_by_handle(&state, "/login/start", "/login/finish", &h1, pw).await,
+            Ok(a_b64.clone())
+        );
+        assert_eq!(
+            login_by_handle(
+                &state,
+                "/recovery/login/start",
+                "/recovery/login/finish",
+                &h1,
+                &seed
+            )
+            .await,
+            Ok(a_b64.clone())
+        );
+        assert_eq!(
+            login_by_handle(&state, "/login/start", "/login/finish", &h1, b"wrong").await,
+            Err(()),
+            "a wrong password cannot finish"
+        );
+
+        // Replace: the old handle stops naming the account.
+        let (st, _) = put(a_token.clone(), h2.clone()).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(
+            login_by_handle(&state, "/login/start", "/login/finish", &h1, pw).await,
+            Err(())
+        );
+        assert_eq!(
+            login_by_handle(&state, "/login/start", "/login/finish", &h2, pw).await,
+            Ok(a_b64.clone())
+        );
+
+        // Taken: B cannot take A's handle, and a refused bind keeps B's own.
+        let (st, _) = put(b_token.clone(), hb.clone()).await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, body) = put(b_token.clone(), h2.clone()).await;
+        assert_eq!(st, StatusCode::CONFLICT);
+        assert_eq!(err_code(&body), "handle-taken");
+        assert_eq!(
+            login_by_handle(
+                &state,
+                "/login/start",
+                "/login/finish",
+                &hb,
+                b"b's password"
+            )
+            .await,
+            Ok(B64.encode(b))
+        );
+        assert_eq!(
+            login_by_handle(&state, "/login/start", "/login/finish", &h2, pw).await,
+            Ok(a_b64.clone()),
+            "the refused bind changed nothing for A"
+        );
+
+        // Without a session, and with a malformed handle.
+        let (st, _) = send_json(
+            &state,
+            Method::PUT,
+            "/auth/login-handle",
+            None,
+            Some(&serde_json::json!({ "handle": h1 })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        let (st, _) = put(a_token.clone(), "AAAA".to_string()).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+
+        // Delete: the name stops resolving; a second delete removes nothing.
+        let (st, body) = send_json(
+            &state,
+            Method::DELETE,
+            "/auth/login-handle",
+            Some(&a_token),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["removed"],
+            true
+        );
+        let h2_bytes = crate::login_handle::decode_handle(&h2).ok().unwrap();
+        assert!(
+            !crate::login_handle::resolve(&pool, &crate::login_handle::TEST_PEPPER, &h2_bytes)
+                .await
+                .ok()
+                .unwrap()
+                .bound
+        );
+        let (_, body) = send_json(
+            &state,
+            Method::DELETE,
+            "/auth/login-handle",
+            Some(&a_token),
+            None,
+        )
+        .await;
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["removed"],
+            false
+        );
+
+        // Account deletion removes the handle (FK cascade), freeing the name.
+        let (st, _) = put(a_token.clone(), h1.clone()).await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = send_json(&state, Method::DELETE, "/account", Some(&a_token), None).await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        let left: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM login_handles WHERE account_id = ?")
+                .bind(a.as_slice())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(left, 0);
+        let (st, _) = put(b_token.clone(), h1.clone()).await;
+        assert_eq!(st, StatusCode::OK, "a freed name can be bound again");
+
+        sqlx::query("DELETE FROM accounts WHERE id = ?")
+            .bind(b.as_slice())
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    /// The OPRF evaluation that opens a credential response: its first 32
+    /// bytes (RFC 9807 `evaluated_message`).
+    async fn evaluation_for(
+        state: &crate::AppState,
+        uri: &str,
+        handle_b64: &str,
+        blind_seed: u64,
+    ) -> (Vec<u8>, usize, Vec<String>) {
+        use rand::SeedableRng as _;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(blind_seed);
+        let cl = ClientLogin::<LakkoCipherSuite>::start(&mut rng, b"same guess").unwrap();
+        let (st, _, body) = post(
+            state,
+            uri,
+            "198.51.100.43",
+            &serde_json::json!({
+                "handle": handle_b64,
+                "request": B64.encode(cl.message.serialize()),
+            }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let mut keys: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        let resp = B64.decode(v["response"].as_str().unwrap()).unwrap();
+        (resp[..32].to_vec(), resp.len(), keys)
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn an_unknown_handle_is_indistinguishable_from_a_known_one() {
+        let Some(pool) = pool().await else {
+            eprintln!("skipping login-handle e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
+            return;
+        };
+        let state = build_state(pool.clone(), Limits::defaults());
+        let (k, _) = signup_account(&state, b"known pw", &[0x33u8; 64]).await;
+        let (k_handle, known) = crate::login_handle::random_handle();
+        crate::login_handle::bind_for_test(&pool, &k, &k_handle).await;
+        let (u1_handle, unknown1) = crate::login_handle::random_handle();
+        let (_, unknown2) = crate::login_handle::random_handle();
+
+        // The code path is the same one: both resolve to an account id and
+        // run the same lookups; only the internal flag differs.
+        let p = crate::login_handle::TEST_PEPPER;
+        assert!(
+            crate::login_handle::resolve(&pool, &p, &k_handle)
+                .await
+                .ok()
+                .unwrap()
+                .bound
+        );
+        let u = crate::login_handle::resolve(&pool, &p, &u1_handle)
+            .await
+            .ok()
+            .unwrap();
+        assert!(!u.bound);
+        assert_eq!(
+            u.account_id,
+            crate::login_handle::resolve(&pool, &p, &u1_handle)
+                .await
+                .ok()
+                .unwrap()
+                .account_id,
+            "the stand-in is stable per handle"
+        );
+
+        for uri in ["/login/start", "/recovery/login/start"] {
+            // Same status, same body shape, same response length.
+            let (ek, lk, kk) = evaluation_for(&state, uri, &known, 7).await;
+            let (e1, l1, k1) = evaluation_for(&state, uri, &unknown1, 7).await;
+            assert_eq!((lk, &kk), (l1, &k1), "{uri}: shape");
+            // A repeated name meets the same OPRF key: with the same blind the
+            // evaluation repeats, for a known and an unknown name alike.
+            assert_eq!(ek, evaluation_for(&state, uri, &known, 7).await.0, "{uri}");
+            assert_eq!(
+                e1,
+                evaluation_for(&state, uri, &unknown1, 7).await.0,
+                "{uri}"
+            );
+            // Different names meet different keys.
+            let (e2, _, _) = evaluation_for(&state, uri, &unknown2, 7).await;
+            assert_ne!(e1, e2, "{uri}");
+            assert_ne!(e1, ek, "{uri}");
+        }
+
+        // A finalization that does not verify answers the same for both.
+        let mut finishes = Vec::new();
+        for h in [&known, &unknown1] {
+            let cl = ClientLogin::<LakkoCipherSuite>::start(&mut OsRng, b"guess").unwrap();
+            let (_, _, body) = post(
+                &state,
+                "/login/start",
+                "198.51.100.44",
+                &serde_json::json!({ "handle": h, "request": B64.encode(cl.message.serialize()) }),
+            )
+            .await;
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let (st, _, body) = post(
+                &state,
+                "/login/finish",
+                "198.51.100.44",
+                &serde_json::json!({
+                    "session_id": v["session_id"],
+                    "finalize": B64.encode([0x42u8; 64]),
+                }),
+            )
+            .await;
+            finishes.push((st, body));
+        }
+        assert_eq!(finishes[0].0, StatusCode::UNAUTHORIZED);
+        assert_eq!(finishes[0], finishes[1]);
+
+        // A reset start answers the same shape for both.
+        let mut shapes = Vec::new();
+        for h in [&known, &unknown1] {
+            let cl = ClientLogin::<LakkoCipherSuite>::start(&mut OsRng, &[0x33u8; 64]).unwrap();
+            let (_, req) = reg_start(b"new password");
+            let (st, _, body) = post(
+                &state,
+                "/password/reset/start",
+                "198.51.100.45",
+                &serde_json::json!({
+                    "handle": h,
+                    "recovery_request": B64.encode(cl.message.serialize()),
+                    "new_password_request": req,
+                }),
+            )
+            .await;
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let mut keys: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            keys.sort();
+            let lens: Vec<usize> = ["recovery_response", "new_password_response"]
+                .iter()
+                .map(|f| B64.decode(v[*f].as_str().unwrap()).unwrap().len())
+                .collect();
+            shapes.push((st, keys, lens));
+        }
+        assert_eq!(shapes[0].0, StatusCode::OK);
+        assert_eq!(shapes[0], shapes[1]);
+
+        sqlx::query("DELETE FROM accounts WHERE id = ?")
+            .bind(k.as_slice())
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    #[tokio::test]
+    async fn every_name_route_answers_503_without_the_pepper() {
+        let Some(pool) = pool().await else {
+            eprintln!("skipping login-handle e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
+            return;
+        };
+        let mut state = build_state(pool.clone(), Limits::defaults());
+        state.handle_pepper = None;
+        // The factor keys are set so the pepper is what refuses.
+        state.totp_enc_key = Some(Arc::new([1u8; 32]));
+        state.vault_enc_key = Some(Arc::new([2u8; 32]));
+        state.recovery_contact_pepper = Some(Arc::new([3u8; 32]));
+        let (_, h) = crate::login_handle::random_handle();
+        let routes = [
+            (
+                "/login/start",
+                serde_json::json!({ "handle": h, "request": "x" }),
+            ),
+            (
+                "/recovery/login/start",
+                serde_json::json!({ "handle": h, "request": "x" }),
+            ),
+            (
+                "/password/reset/start",
+                serde_json::json!({ "handle": h, "recovery_request": "x", "new_password_request": "x" }),
+            ),
+            (
+                "/totp/recover",
+                serde_json::json!({ "handle": h, "code": "000000" }),
+            ),
+            ("/vault/recover/start", serde_json::json!({ "handle": h })),
+            (
+                "/vault/recover/finish",
+                serde_json::json!({ "handle": h, "verifier_b64": B64.encode([0u8; 32]) }),
+            ),
+            (
+                "/recovery-contact/recover/start",
+                serde_json::json!({ "handle": h, "kind": 1, "contact": "a@example.com" }),
+            ),
+            (
+                "/recovery-contact/recover/finish",
+                serde_json::json!({ "handle": h, "kind": 1, "code": "000000" }),
+            ),
+        ];
+        for (uri, body) in routes {
+            let (st, _, bytes) = post(&state, uri, "198.51.100.46", &body).await;
+            assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{uri}");
+            assert_eq!(err_code(&bytes), "login-by-name-disabled", "{uri}");
+        }
+        let token = state
+            .session_token_secret
+            .issue(&[9u8; 16], i64::MAX / 2)
+            .unwrap();
+        for method in [Method::PUT, Method::DELETE] {
+            let (st, bytes) = send_json(
+                &state,
+                method,
+                "/auth/login-handle",
+                Some(&token),
+                Some(&serde_json::json!({ "handle": h })),
+            )
+            .await;
+            assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(err_code(&bytes), "login-by-name-disabled");
+        }
     }
 }

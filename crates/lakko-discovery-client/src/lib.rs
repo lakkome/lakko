@@ -87,7 +87,7 @@ mod normalize;
 pub use blinder::{OprfBlinder, OPRF_HASH_LEN};
 pub use error::DiscoveryClientError;
 pub use lakko_contacts::username::{UsernameError, USERNAME_MAX_LEN, USERNAME_MIN_LEN};
-pub use normalize::{normalize_username, validate_username};
+pub use normalize::{login_handle, normalize_username, validate_username};
 
 /// Lakko VOPRF cipher suite — Ristretto255-SHA512.
 ///

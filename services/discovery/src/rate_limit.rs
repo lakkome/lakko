@@ -5,20 +5,24 @@
 
 //! Token-bucket rate limiter for discovery's
 //! anonymous endpoints — OPRF evaluation, username
-//! lookup, channel-name lookup. Requests with a valid
-//! session token are charged per account plus a
-//! per-IP ceiling; requests without one per IP (see
-//! [`DiscoveryLimits`]).
+//! lookup, channel-name lookup, the invite ledgers'
+//! fetch + consume — and for its session-gated writes.
+//! Anonymous requests with a valid session token are
+//! charged per account plus a per-IP ceiling; requests
+//! without one per IP (see [`DiscoveryLimits`]). A
+//! session-gated write is charged to its account
+//! ([`write_middleware`]).
 //!
 //! ## Threat model
 //!
-//! Defense in depth on top of the existing PoW gate.
-//! PoW makes brute-force expensive per request, but a
-//! botnet can distribute the PoW work across thousands
-//! of hosts. The rate limiter caps **server CPU spent
-//! per source IP** on the OPRF compute (Ristretto255
-//! scalar multiplication) regardless of how many PoW
-//! tokens the attacker mints.
+//! Since ADR-0054 S3 the per-action ration is an
+//! anonymous token (the OPRF evaluation, channel-name
+//! registration and the invite consumes spend one), and
+//! the session-gated writes carry no proof of work: this
+//! limiter caps **server CPU spent per source IP** on
+//! the OPRF compute (Ristretto255 scalar multiplication)
+//! regardless of how many tokens an attacker holds, and
+//! caps each account's write rate.
 //!
 //! ## Bucket math
 //!
@@ -261,6 +265,10 @@ pub struct Limit {
 pub struct DiscoveryLimits {
     anonymous_ip: RateLimiter<IpAddr>,
     account: RateLimiter<[u8; ACCOUNT_ID_LEN]>,
+    /// Session-gated writes (register, identity / KeyPackage / invite
+    /// uploads, revocations): the same per-account rate as `account`, in a
+    /// bucket of its own so lookups and writes never starve each other.
+    account_writes: RateLimiter<[u8; ACCOUNT_ID_LEN]>,
     authenticated_ip: RateLimiter<IpAddr>,
     token_secret: Arc<TokenSecret>,
 }
@@ -288,6 +296,7 @@ impl DiscoveryLimits {
         Self {
             anonymous_ip: RateLimiter::new(anonymous_ip.per_minute, anonymous_ip.burst),
             account: RateLimiter::new(account.per_minute, account.burst),
+            account_writes: RateLimiter::new(account.per_minute, account.burst),
             authenticated_ip: RateLimiter::new(authenticated_ip.per_minute, authenticated_ip.burst),
             token_secret,
         }
@@ -323,6 +332,15 @@ impl DiscoveryLimits {
         }
     }
 
+    /// Charge one session-gated write to `account`.
+    pub fn admit_write_at(&self, account: [u8; ACCOUNT_ID_LEN], now: Instant) -> Verdict {
+        if self.account_writes.try_consume_at(account, now) {
+            Verdict::Admit
+        } else {
+            Verdict::AccountExhausted
+        }
+    }
+
     /// The account a request's `Authorization: Bearer` token verifies to.
     ///
     /// A missing, malformed or expired token is not an error on these
@@ -343,6 +361,7 @@ impl DiscoveryLimits {
     pub fn prune_idle(&self, cutoff: Instant) -> usize {
         self.anonymous_ip.prune_idle(cutoff)
             + self.account.prune_idle(cutoff)
+            + self.account_writes.prune_idle(cutoff)
             + self.authenticated_ip.prune_idle(cutoff)
     }
 
@@ -351,6 +370,7 @@ impl DiscoveryLimits {
     pub fn bucket_count(&self) -> usize {
         self.anonymous_ip.bucket_count()
             + self.account.bucket_count()
+            + self.account_writes.bucket_count()
             + self.authenticated_ip.bucket_count()
     }
 }
@@ -448,6 +468,35 @@ pub async fn middleware(
         Verdict::NetworkExhausted => rate_limited_response(
             "rate-limited",
             "too many discovery requests from your network — back off and retry",
+        ),
+    }
+}
+
+/// Middleware for the session-gated writes: charge the request to the account
+/// `auth::require_session` verified (read from the request extensions, so this
+/// layer must sit INSIDE the session layer) and answer 429 when its bucket is
+/// empty. A request that reaches here without the extension is a wiring bug
+/// and fails closed with 429 as well.
+///
+/// Wire as the inner `route_layer`, with `require_session` added after it.
+pub async fn write_middleware(
+    State(limits): State<Arc<DiscoveryLimits>>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    let Some(account) = req
+        .extensions()
+        .get::<crate::auth::AuthenticatedAccount>()
+        .map(|a| a.0)
+    else {
+        tracing::error!("write limiter reached without an authenticated account");
+        return rate_limited_response("rate-limited", "unable to identify account");
+    };
+    match limits.admit_write_at(account, Instant::now()) {
+        Verdict::Admit => next.run(req).await,
+        Verdict::AccountExhausted | Verdict::NetworkExhausted => rate_limited_response(
+            "rate-limited",
+            "too many discovery writes from your account — back off and retry",
         ),
     }
 }
@@ -680,6 +729,19 @@ mod tests {
             l.admit_at(src, Some([99; 16]), now),
             Verdict::NetworkExhausted
         );
+    }
+
+    #[test]
+    fn writes_are_charged_per_account_in_their_own_bucket() {
+        let l = limits(3.0, 5.0, 100.0);
+        let now = Instant::now();
+        for _ in 0..5 {
+            assert_eq!(l.admit_write_at([3; 16], now), Verdict::Admit);
+        }
+        assert_eq!(l.admit_write_at([3; 16], now), Verdict::AccountExhausted);
+        // Another account is untouched, and so are the account's lookups.
+        assert_eq!(l.admit_write_at([4; 16], now), Verdict::Admit);
+        assert_eq!(drain(&l, ip(192, 0, 2, 9), Some([3; 16]), now), 5);
     }
 
     #[test]

@@ -18,7 +18,9 @@
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use lakko_pow::{solve, PowError, PowProof as InnerProof, NONCE_LEN, SEED_LEN, SOLUTION_LEN};
+use lakko_pow::{
+    solve, solve_chunk, PowError, PowProof as InnerProof, NONCE_LEN, SEED_LEN, SOLUTION_LEN,
+};
 use wasm_bindgen::prelude::*;
 
 /// Map a `lakko_pow::PowError` into a `JsError`. Single variant
@@ -96,6 +98,33 @@ impl PowSolver {
 
         let proof: InnerProof = solve(&seed, effort_bits).map_err(pow_err)?;
         Ok(PowProof::from_inner(proof))
+    }
+
+    /// One cancellable slice of a solve: at most `maxAttempts` nonces, then
+    /// `undefined` if none of them produced a proof.
+    ///
+    /// A Worker loops over chunks and checks for a cancel message between
+    /// them. Each call samples fresh nonces, so the loop is the same search
+    /// as one [`PowSolver::solve`].
+    ///
+    /// # Errors
+    ///
+    /// Throws for a seed that is not base64 or not 16 bytes. Running out of
+    /// attempts is not an error: it is `undefined`.
+    #[wasm_bindgen(js_name = solveChunk)]
+    pub fn solve_chunk(
+        seed_b64: &str,
+        effort_bits: u8,
+        max_attempts: u32,
+    ) -> Result<Option<PowProof>, JsError> {
+        let seed_bytes = B64
+            .decode(seed_b64)
+            .map_err(|e| JsError::new(&format!("invalid seed base64: {e}")))?;
+        let seed: [u8; SEED_LEN] = seed_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| JsError::new("seed must be 16 bytes"))?;
+        Ok(solve_chunk(&seed, effort_bits, max_attempts).map(PowProof::from_inner))
     }
 }
 
@@ -176,5 +205,20 @@ mod tests {
         assert_eq!(nonce.len(), NONCE_LEN);
         let solution = B64.decode(proof.solution_b64()).expect("decode solution");
         assert_eq!(solution.len(), SOLUTION_LEN);
+    }
+
+    #[test]
+    fn solve_chunk_loop_finds_a_proof_and_an_empty_chunk_is_none() {
+        let seed_b64 = B64.encode([0x46u8; SEED_LEN]);
+        assert!(PowSolver::solve_chunk(&seed_b64, 0, 0).unwrap().is_none());
+        let mut found = None;
+        for _ in 0..10_000 {
+            found = PowSolver::solve_chunk(&seed_b64, 4, 2).unwrap();
+            if found.is_some() {
+                break;
+            }
+        }
+        let proof = found.expect("proof");
+        assert_eq!(proof.seed_b64(), seed_b64);
     }
 }

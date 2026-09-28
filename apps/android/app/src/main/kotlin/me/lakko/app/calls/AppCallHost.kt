@@ -216,8 +216,8 @@ public object AppCallHost {
      * One kind of call: a group video call, founded here and now, with the
      * person who asked for it landing in it. Nothing is asked first and nothing
      * is uploaded: a call needs only a fresh `call_id` and an owner, both of
-     * which this device already has, so the proof-of-work the invite link costs
-     * is paid later by whoever actually wants a link (section 3).
+     * which this device already has, so the upload the invite link costs is
+     * paid later by whoever actually wants a link (section 3).
      *
      * The call runs through the same [link] host a `/c/` link's landing uses —
      * the ADR-0032 owner-founds path, unchanged — so it holds the one call slot
@@ -618,8 +618,8 @@ internal class MultiJoinerLinkCallPort(
      *
      * The capability is signed under the account's own Ed25519 key and carries
      * the LIVE `call_id`, so whoever follows it arrives in this call rather than
-     * founding a new one. The discovery upload solves a proof-of-work challenge,
-     * which is why this runs on the first `Invite` and not at the call's start.
+     * founding a new one. The discovery upload is a network round trip, which
+     * is why this runs on the first `Invite` and not at the call's start.
      */
     override suspend fun mintInviteLink(callId: ByteArray, identity: CallInviteIdentity): String =
         Identity.fromSeed(identity.accountIdentitySeed).use { own ->

@@ -99,7 +99,15 @@ services:
       # LAKKO_SMS_ACCOUNT_SID: AC...
       # LAKKO_SMS_AUTH_TOKEN: change-me
       # LAKKO_SMS_FROM: "+15551234567"
-      LAKKO_POW_EFFORT_BITS: ${LAKKO_POW_EFFORT_BITS:-8}
+      LAKKO_SIGNUP_POW_EFFORT_BITS: ${LAKKO_SIGNUP_POW_EFFORT_BITS:-8}
+      # ADR-0054 - the anonymous-token master secret (64 hex chars) auth issues
+      # under; discovery, the DS and push-gw MUST hold the same value. Unset:
+      # /auth/tokens and every token route answer 503.
+      LAKKO_ANON_TOKEN_MASTER_SECRET: ${LAKKO_ANON_TOKEN_MASTER_SECRET:-}
+      # ADR-0054 S5 - pepper keying the stored login handles (64 hex chars).
+      # Dev fixture only; never a production value. Unset: every route that
+      # names an account by login handle answers 503.
+      LAKKO_AUTH_HANDLE_PEPPER: ${LAKKO_AUTH_HANDLE_PEPPER:-6c616b6b6f2d6c6f63616c2d6465762d6c6f67696e2d68616e646c652d706570}
     ports:
       - "127.0.0.1:8081:8081"
     healthcheck:
@@ -127,6 +135,9 @@ services:
       # to turn wakes off; setting only one refuses to start.
       LAKKO_DS_PUSH_GW_URL: ${LAKKO_DS_PUSH_GW_URL:-http://push-gw:8092}
       LAKKO_DS_PUSH_GW_SECRET: ${LAKKO_PUSH_GW_INTERNAL_SECRET:-ZGV2LXB1c2gtZ3ctaW50ZXJuYWwtd2FrZS1zZWNyZXQ=}
+      # ADR-0054 - the anonymous-token master secret; MUST match auth's.
+      # Unset: the knock answers 503 anon-tokens-disabled.
+      LAKKO_ANON_TOKEN_MASTER_SECRET: ${LAKKO_ANON_TOKEN_MASTER_SECRET:-}
     ports:
       - "127.0.0.1:8082:8082"
     healthcheck:
@@ -174,7 +185,10 @@ services:
       # MUST match auth's secret - discovery verifies the bearer session
       # tokens auth mints (identity-bundle upload is gated).
       LAKKO_SESSION_TOKEN_SECRET: ${LAKKO_SESSION_TOKEN_SECRET:-ZGV2LXNlc3Npb24tdG9rZW4tc2VjcmV0LWZvci1sb2NhbC10ZXN0aW5nLW9ubHkhIQ==}
-      LAKKO_DISCOVERY_POW_EFFORT_BITS: ${LAKKO_DISCOVERY_POW_EFFORT_BITS:-8}
+      # ADR-0054 - the anonymous-token master secret; MUST match auth's.
+      # Unset: the token routes (OPRF, channel register, invite consumes)
+      # answer 503 anon-tokens-disabled.
+      LAKKO_ANON_TOKEN_MASTER_SECRET: ${LAKKO_ANON_TOKEN_MASTER_SECRET:-}
       # ADR-0017 (ii) — per-account cool-down (seconds) on UNPROVEN
       # AccountIdentity changes to a NEW key (the lost-everything publish),
       # blunting attacker churn. Default 1 h; 0 disables. A heal-back to the
@@ -215,7 +229,9 @@ services:
       LAKKO_PUSH_GW_DATABASE_URL: mysql://lakko:devpass@db:3306/lakko_push_gw
       DATABASE_URL: mysql://lakko:devpass@db:3306/lakko_push_gw
       LAKKO_SESSION_TOKEN_SECRET: ${LAKKO_SESSION_TOKEN_SECRET:-ZGV2LXNlc3Npb24tdG9rZW4tc2VjcmV0LWZvci1sb2NhbC10ZXN0aW5nLW9ubHkhIQ==}
-      LAKKO_PUSH_GW_POW_EFFORT_BITS: ${LAKKO_PUSH_GW_POW_EFFORT_BITS:-8}
+      # ADR-0054 - the anonymous-token master secret; MUST match auth's.
+      # Unset: the registration routes answer 503 anon-tokens-disabled.
+      LAKKO_ANON_TOKEN_MASTER_SECRET: ${LAKKO_ANON_TOKEN_MASTER_SECRET:-}
       # ADR-0054 - the internal listener the DS forwards wakes to. Reachable
       # on the compose network only (not published below). The secret MUST
       # match the DS's LAKKO_DS_PUSH_GW_SECRET.

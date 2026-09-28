@@ -333,8 +333,8 @@ public class RecoverViewModel(
             }
         }
 
-        // ADR-0048 §4 — a typed username must pass the rule before the
-        // fresh-device path resolves it through discovery.
+        // ADR-0048 §4 — a typed username must pass the rule before its login
+        // handle is sent (ADR-0054 S5).
         val typedUsername = snapshot.username.trim()
         val recoverUsername = if (typedUsername.isEmpty()) {
             null
@@ -488,7 +488,7 @@ public class RecoverViewModel(
             return
         }
         val user = usernameOrRefuse(typedUser) ?: return
-        // Light client-side shape check — saves a PoW solve on an
+        // Light client-side shape check — saves a round trip on an
         // obviously-malformed contact. The server is authoritative.
         if (!isPlausibleContact(snapshot.contactKind, snapshot.contact)) {
             mutableState.update {
@@ -601,7 +601,9 @@ public class RecoverViewModel(
      *  account / no-live-challenge / wrong-code / replayed-code
      *  uniformly (mirror of the web `contactRecoverErrorMessage`). */
     private fun contactUserFacingHttpError(err: AuthHttpError): String =
-        when (err.status) {
+        me.lakko.app.auth.authLimitCopy(err) ?: if (me.lakko.app.auth.isLoginByNameDisabled(err)) {
+            GENERIC_SERVER_FAILURE_COPY
+        } else when (err.status) {
             401 -> "That code is wrong or has expired. Request a new one."
             429 -> "Too many attempts. Wait a while, then request a new code."
             503 -> "Email and phone recovery are not available right now. Try another method."
@@ -615,7 +617,9 @@ public class RecoverViewModel(
      *  unconfirmed-enrollment / wrong-code / replayed-code uniformly
      *  (mirror of the web `totpRecoverErrorMessage`). */
     private fun totpUserFacingHttpError(err: AuthHttpError): String =
-        when (err.status) {
+        me.lakko.app.auth.authLimitCopy(err) ?: if (me.lakko.app.auth.isLoginByNameDisabled(err)) {
+            GENERIC_SERVER_FAILURE_COPY
+        } else when (err.status) {
             401 -> "That code is wrong or has expired. Try the next one."
             429 -> "Too many attempts. Wait 15 minutes, then try again."
             503 -> "Authenticator recovery is not available right now. Try another method."
@@ -624,7 +628,7 @@ public class RecoverViewModel(
         }
 
     private fun userFacingHttpError(err: AuthHttpError): String =
-        when (err.status) {
+        me.lakko.app.auth.authLimitCopy(err) ?: when (err.status) {
             // The server's `/password/reset/{start,finish}` pair
             // returns 401 on a wrong mnemonic (the OPAQUE recovery
             // login fails at AKE finalisation). Surface generic
@@ -641,6 +645,10 @@ public class RecoverViewModel(
          *  recovery flow sets a **new** password so the same
          *  floor applies. */
         public const val MIN_PASSWORD_LEN: Int = 8
+
+        /** The generic failure a `503 login-by-name-disabled` shows. */
+        private const val GENERIC_SERVER_FAILURE_COPY: String =
+            "Something went wrong on our side. Try again in a moment."
     }
 }
 

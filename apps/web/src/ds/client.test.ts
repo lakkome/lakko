@@ -12,6 +12,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { DsAccessRegistry, dsClockSkewNotice, CLOCK_SKEW_NOTICE } from "./access";
 import { fakeSigner } from "./access-test-doubles";
+import { fakeTokenPool } from "../tokens/anon-token-test-doubles";
 import { DsClient, DsClientArgError, DsHttpError, journalQuery } from "./client";
 
 const GID = new Uint8Array(32).fill(0xab);
@@ -22,6 +23,9 @@ interface Sent {
   readonly method: string;
   readonly proof: string | undefined;
   readonly wake: string | undefined;
+  readonly token: string | undefined;
+  readonly authorization: string | undefined;
+  readonly credentials: RequestCredentials | undefined;
   readonly body: Uint8Array | undefined;
 }
 
@@ -43,6 +47,9 @@ function fakeFetch(
       method: init?.method ?? "GET",
       proof: headers["x-lakko-ds-proof"],
       wake: headers["x-lakko-wake"],
+      token: headers["x-lakko-anon-token"],
+      authorization: headers["authorization"] ?? headers["Authorization"],
+      credentials: init?.credentials,
       body: bodyOf(init),
     });
     const next = script.shift() ?? { status: 200, json: { messages: [], has_more: false } };
@@ -252,28 +259,35 @@ describe("mailboxes", () => {
 });
 
 describe("the knock", () => {
-  it("posts the proof of work and the payloads as standard base64, unsigned", async () => {
-    const { fetchImpl, sent } = fakeFetch([
-      { status: 200, json: { seed: "c2VlZA==", effort_bits: 8, expires_in: 60 } },
-      { status: 201, json: { ids: [4, 5], epoch: 12 } },
-    ]);
-    const ds = new DsClient("/api/ds", { access: new DsAccessRegistry(), fetchImpl });
+  it("spends one ds-knock token, posts the payloads as standard base64, unsigned and without credentials", async () => {
+    const { fetchImpl, sent } = fakeFetch([{ status: 201, json: { ids: [4, 5], epoch: 12 } }]);
+    const { pool } = fakeTokenPool();
+    const ds = new DsClient("/api/ds", { access: new DsAccessRegistry(), fetchImpl, tokens: pool });
 
-    const ch = await ds.powChallenge();
-    expect(ch).toEqual({ seed: "c2VlZA==", effortBits: 8 });
-    const res = await ds.knock(GID, { seed: "c2VlZA==", nonce: "bg==", solution: "cw==" }, [
-      new Uint8Array([0xfa]),
-      new Uint8Array([0xfb, 0xfc]),
-    ]);
+    const res = await ds.knock(GID, [new Uint8Array([0xfa]), new Uint8Array([0xfb, 0xfc])]);
 
     expect(res).toEqual({ ids: [4, 5], epoch: 12 });
-    expect(sent[0]?.url).toBe("/api/ds/pow/challenge");
-    expect(sent[1]?.url).toBe(`/api/ds/ds/group/${GID_HEX}/knock`);
-    expect(sent[1]?.proof).toBeUndefined();
-    expect(JSON.parse(new TextDecoder().decode(sent[1]?.body))).toEqual({
-      pow: { seed: "c2VlZA==", nonce: "bg==", solution: "cw==" },
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.url).toBe(`/api/ds/ds/group/${GID_HEX}/knock`);
+    expect(sent[0]?.proof).toBeUndefined();
+    expect(sent[0]?.token).toBe("tok-1");
+    expect(sent[0]?.authorization).toBeUndefined();
+    expect(sent[0]?.credentials).toBe("omit");
+    expect(JSON.parse(new TextDecoder().decode(sent[0]?.body))).toEqual({
       payloads_b64: ["+g==", "+/w="],
     });
+    expect(pool.size("ds-knock")).toBeGreaterThan(0);
+  });
+
+  it("a spent token is dropped and the knock retried ONCE with another", async () => {
+    const { fetchImpl, sent } = fakeFetch([
+      { status: 401, json: { error: "anon-token-spent" } },
+      { status: 201, json: { ids: [], epoch: 3 } },
+    ]);
+    const { pool } = fakeTokenPool();
+    const ds = new DsClient("/api/ds", { access: new DsAccessRegistry(), fetchImpl, tokens: pool });
+    await expect(ds.knock(GID, [])).resolves.toEqual({ ids: [], epoch: 3 });
+    expect(sent.map((s) => s.token)).toEqual(["tok-1", "tok-2"]);
   });
 });
 

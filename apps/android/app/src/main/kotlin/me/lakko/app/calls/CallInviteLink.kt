@@ -28,7 +28,7 @@ import java.security.SecureRandom
  * ## When it is minted
  *
  * At the FIRST `Invite` of a call, never at `New call`. Minting costs a network
- * round trip and a proof-of-work solve, so paying it at the start would make
+ * round trip, so paying it at the start would make
  * every call slower for the sake of the links most calls never need. That is
  * also why the busy state here says what it is doing instead of only spinning:
  * the wait is seconds, not milliseconds.
@@ -98,7 +98,7 @@ public sealed interface CallInviteLinkState {
     /** Nothing asked for yet. */
     public data object Idle : CallInviteLinkState
 
-    /** Signing and uploading the capability; includes the proof-of-work solve. */
+    /** Signing and uploading the capability. */
     public data object Preparing : CallInviteLinkState
 
     /** Minted. A second `Invite` re-offers this rather than minting again. */

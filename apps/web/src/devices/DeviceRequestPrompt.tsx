@@ -17,6 +17,7 @@
  * account's chat groups; see ADR-0049 section 5 for why that is blocked on
  * per-device conversation leaves.
  */
+import { authLimitMessage } from "../auth/auth-error-copy";
 import { createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { useAuth } from "../auth/AuthContext";
 import { AuthClient } from "../auth/client";
@@ -142,7 +143,9 @@ export function DeviceRequestPrompt(): JSX.Element {
             ? err.message
             : err.name
           : String(err);
-      setResult(`Could not add the device: ${detail}`);
+      // ADR-0054 S4: a server limit says when to try again, never "failed".
+      const limit = authLimitMessage(err);
+      setResult(limit ?? `Could not add the device: ${detail}`);
       handled.add(p.requestId);
       setPending(null);
     } finally {

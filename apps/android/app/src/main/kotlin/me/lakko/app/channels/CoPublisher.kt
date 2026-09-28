@@ -330,9 +330,7 @@ public object CoPublisher {
         // [GroupNotAcceptingRequests]; nothing was stored.
         runLinkJoinKnock(
             knock = { payloads ->
-                ds.knockWithPow(groupId, payloads) { seed, bits ->
-                    me.lakko.app.auth.solvePow(seed, bits)
-                }.epoch
+                ds.knock(groupId, payloads).epoch
             },
             buildProposal = { epoch -> identity.createExternalJoinProposal(groupId, epoch) },
             buildAttribution = { composeGroupJoinAttribution(identity.ed25519Seed(), wire) },

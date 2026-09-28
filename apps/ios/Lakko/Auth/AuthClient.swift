@@ -19,11 +19,12 @@ import LakkoCore
 ///      SwiftUI screens that 1.14d3–5 build on top.
 ///
 ///   2. **High-level ``signup(password:enrolRecovery:)`` /
-///      ``login(accountId:password:)`` /
-///      ``recover(accountId:mnemonicSeed:newPassword:)``** orchestrate
+///      ``login(handle:password:)`` /
+///      ``recover(handle:mnemonicSeed:newPassword:)``** orchestrate
 ///      the full multi-round-trip flow:
-///      `/pow/challenge` → `/signup/start` → `/pow/challenge` →
-///      `/signup/finish` (and the equivalent for login and recover).
+///      `/pow/challenge` → `/signup/start` → `/signup/finish` (and the
+///      equivalent for login and recover, which carry no proof of work
+///      since ADR-0054 S4).
 ///      They drive the UniFFI OPAQUE handles (``OpaqueRegister`` /
 ///      ``OpaqueLogin``), the BIP39 ``RecoveryMnemonic``, and the
 ///      ``solvePow(seedB64:effortBits:)`` helper.
@@ -88,12 +89,19 @@ public final class AuthClient {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
+    /// The proof-of-work solver signup runs. Injectable so a test can hold
+    /// the solve open and cancel it.
+    public typealias PowSolver = @Sendable (_ seedB64: String, _ effortBits: Int) async throws -> PowProofPayload
+    private let solve: PowSolver
+
     public init(
         baseURL: String = AuthClient.defaultBaseURL,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        solve: @escaping PowSolver = { try await solvePow(seedB64: $0, effortBits: $1) }
     ) {
         self.baseURL = baseURL
         self.session = session
+        self.solve = solve
         self.encoder = JSONEncoder()
         self.decoder = JSONDecoder()
     }
@@ -171,7 +179,7 @@ public final class AuthClient {
     /// `AuthClient.deviceAuthorizeStart`.
     ///
     /// Bearer-authenticated (the EXISTING device proves it already
-    /// holds a session) + PoW-gated. Returns the URL-safe base64
+    /// holds a session). Returns the URL-safe base64
     /// (no pad) of the RAW grant token — the server stores only its
     /// SHA-256. The caller seals it (together with the phrase seed)
     /// to the fresh device over the E2EE pairing channel; it never
@@ -180,14 +188,8 @@ public final class AuthClient {
         guard !sessionToken.isEmpty else {
             throw AuthClientError.argument("sessionToken must be non-empty")
         }
-        let challenge = try await powChallenge()
-        let pow = try await solvePow(
-            seedB64: challenge.seed,
-            effortBits: challenge.effortBits
-        )
-        let resp: DeviceAuthorizeStartResponse = try await post(
+        let resp: DeviceAuthorizeStartResponse = try await postNoBody(
             endpoint: "/device/authorize/start",
-            body: DeviceAuthorizeStartRequest(pow: pow),
             bearer: sessionToken
         )
         return resp.grantTokenB64
@@ -198,7 +200,7 @@ public final class AuthClient {
     /// factor (a), fresh-device side). Mirror of the web / Android
     /// `AuthClient.deviceAuthorizeRedeem`.
     ///
-    /// Anonymous (the fresh device has no token yet) + PoW-gated. A
+    /// Anonymous (the fresh device has no token yet). Limited per account and per address server-side (ADR-0054 S4); a
     /// missing / expired / already-consumed grant fails as an
     /// enumeration-safe 401 (``AuthClientError/http(status:endpoint:body:)``),
     /// indistinguishable from a wrong credential by design.
@@ -220,15 +222,9 @@ public final class AuthClient {
         guard !grantTokenB64.isEmpty else {
             throw AuthClientError.argument("grantTokenB64 must be non-empty")
         }
-        let challenge = try await powChallenge()
-        let pow = try await solvePow(
-            seedB64: challenge.seed,
-            effortBits: challenge.effortBits
-        )
         let resp: DeviceAuthorizeRedeemResponse = try await post(
             endpoint: "/device/authorize/redeem",
             body: DeviceAuthorizeRedeemRequest(
-                pow: pow,
                 accountIdB64: base64UrlEncodeNoPad(accountId),
                 grantTokenB64: grantTokenB64
             )
@@ -294,7 +290,7 @@ public final class AuthClient {
     /// secret for this account (ADR-0018 factor (c), enrollment step
     /// 1). Mirror of the web `AuthClient.totpEnrollStart`.
     ///
-    /// Bearer-authenticated (the already-logged-in account) + PoW.
+    /// Bearer-authenticated (the already-logged-in account).
     /// Returns the `otpauth://` provisioning URI (QR) + the base32
     /// secret (manual entry). The enrollment only becomes usable for
     /// recovery after ``totpEnrollFinish(sessionToken:code:)``
@@ -310,14 +306,8 @@ public final class AuthClient {
         guard !sessionToken.isEmpty else {
             throw AuthClientError.argument("sessionToken must be non-empty")
         }
-        let challenge = try await powChallenge()
-        let pow = try await solvePow(
-            seedB64: challenge.seed,
-            effortBits: challenge.effortBits
-        )
-        let resp: TotpEnrollStartResponse = try await post(
+        let resp: TotpEnrollStartResponse = try await postNoBody(
             endpoint: "/totp/enroll/start",
-            body: TotpEnrollStartRequest(pow: pow),
             bearer: sessionToken
         )
         return TotpEnrollStartResult(
@@ -360,38 +350,28 @@ public final class AuthClient {
     /// code (ADR-0018 factor (c), recovery side). Mirror of the web
     /// `AuthClient.totpRecover`.
     ///
-    /// Anonymous (the caller lost their device) + PoW. The server is
+    /// Anonymous (the caller lost their device). The server is
     /// enumeration-safe by design: unknown account, unconfirmed
     /// enrollment, wrong code, and replayed code all surface the SAME
     /// generic 401 ``AuthClientError/http(status:endpoint:body:)``;
-    /// 429 signals the 5-failures-in-15-minutes lockout; 503 means
+    /// 429 signals the per-name / per-address limit (``AuthRateLimit``); 503 means
     /// TOTP is disabled server-side.
     ///
     /// TOTP grants ACCESS only — the result carries no key material.
     /// Identity acquisition is the caller's job (ADR-0017 state
     /// machine).
     public func totpRecover(
-        accountId: Data,
+        handle: Data,
         code: String
     ) async throws -> TotpRecoverResult {
-        guard accountId.count == accountIdLength else {
-            throw AuthClientError.argument(
-                "accountId must be \(accountIdLength) bytes"
-            )
-        }
+        try requireHandle(handle)
         guard let normalized = normalizeTotpCode(code) else {
             throw AuthClientError.argument("code must be 6 digits")
         }
-        let challenge = try await powChallenge()
-        let pow = try await solvePow(
-            seedB64: challenge.seed,
-            effortBits: challenge.effortBits
-        )
         let resp: TotpRecoverResponse = try await post(
             endpoint: "/totp/recover",
             body: TotpRecoverRequest(
-                pow: pow,
-                accountIdB64: base64UrlEncodeNoPad(accountId),
+                handle: base64UrlEncodeNoPad(handle),
                 code: normalized
             )
         )
@@ -418,7 +398,7 @@ public final class AuthClient {
     /// `AuthClient.recoveryContactEnrollStart`.
     ///
     /// Bearer-authenticated (the already-logged-in account's session
-    /// token rides the `Authorization` header) + PoW. The enrollment
+    /// token rides the `Authorization` header). The enrollment
     /// only becomes usable for recovery after
     /// ``recoveryContactEnrollFinish(sessionToken:kind:code:)`` confirms
     /// the code.
@@ -439,15 +419,9 @@ public final class AuthClient {
         guard !trimmed.isEmpty else {
             throw AuthClientError.argument("contact must be non-empty")
         }
-        let challenge = try await powChallenge()
-        let pow = try await solvePow(
-            seedB64: challenge.seed,
-            effortBits: challenge.effortBits
-        )
         let _: RecoveryContactSentResponse = try await post(
             endpoint: "/recovery-contact/enroll/start",
             body: RecoveryContactEnrollStartRequest(
-                pow: pow,
                 kind: kind,
                 contact: trimmed
             ),
@@ -490,7 +464,7 @@ public final class AuthClient {
     /// (ADR-0018 factor (d), recovery step 1). Mirror of the web
     /// `AuthClient.recoveryContactRecoverStart`.
     ///
-    /// Anonymous (the caller lost their device) + PoW. The server is
+    /// Anonymous (the caller lost their device). The server is
     /// ENUMERATION-SAFE by design: it returns the same `{ sent: true }`
     /// whether or not the supplied contact matches a confirmed row, so
     /// a non-throwing return here reveals nothing about account /
@@ -498,29 +472,19 @@ public final class AuthClient {
     /// 503 means the factor is disabled server-side; a 400 means a
     /// malformed contact.
     public func recoveryContactRecoverStart(
-        accountId: Data,
+        handle: Data,
         kind: ContactKind,
         contact: String
     ) async throws {
-        guard accountId.count == accountIdLength else {
-            throw AuthClientError.argument(
-                "accountId must be \(accountIdLength) bytes"
-            )
-        }
+        try requireHandle(handle)
         let trimmed = contact.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             throw AuthClientError.argument("contact must be non-empty")
         }
-        let challenge = try await powChallenge()
-        let pow = try await solvePow(
-            seedB64: challenge.seed,
-            effortBits: challenge.effortBits
-        )
         let _: RecoveryContactSentResponse = try await post(
             endpoint: "/recovery-contact/recover/start",
             body: RecoveryContactRecoverStartRequest(
-                pow: pow,
-                accountIdB64: base64UrlEncodeNoPad(accountId),
+                handle: base64UrlEncodeNoPad(handle),
                 kind: kind,
                 contact: trimmed
             )
@@ -532,7 +496,7 @@ public final class AuthClient {
     /// step 2). Mirror of the web
     /// `AuthClient.recoveryContactRecoverFinish`.
     ///
-    /// Anonymous + PoW. Enumeration-safe: unknown account, no live
+    /// Anonymous. Enumeration-safe: unknown account, no live
     /// challenge, wrong code and replayed code all surface the SAME
     /// generic 401 ``AuthClientError/http(status:endpoint:body:)``; 429
     /// signals the attempt-cap lockout; 503 means the factor is
@@ -542,28 +506,18 @@ public final class AuthClient {
     /// Identity acquisition is the caller's job (ADR-0017 state
     /// machine).
     public func recoveryContactRecoverFinish(
-        accountId: Data,
+        handle: Data,
         kind: ContactKind,
         code: String
     ) async throws -> RecoveryContactRecoverResult {
-        guard accountId.count == accountIdLength else {
-            throw AuthClientError.argument(
-                "accountId must be \(accountIdLength) bytes"
-            )
-        }
+        try requireHandle(handle)
         guard let normalized = normalizeTotpCode(code) else {
             throw AuthClientError.argument("code must be 6 digits")
         }
-        let challenge = try await powChallenge()
-        let pow = try await solvePow(
-            seedB64: challenge.seed,
-            effortBits: challenge.effortBits
-        )
         let resp: RecoveryContactRecoverFinishResponse = try await post(
             endpoint: "/recovery-contact/recover/finish",
             body: RecoveryContactRecoverFinishRequest(
-                pow: pow,
-                accountIdB64: base64UrlEncodeNoPad(accountId),
+                handle: base64UrlEncodeNoPad(handle),
                 kind: kind,
                 code: normalized
             )
@@ -587,12 +541,10 @@ public final class AuthClient {
     /// Drive the full signup flow:
     ///
     /// ```text
-    ///   POST /pow/challenge   →  seed₁
-    ///   client: solve PoW + OPAQUE password start [+ recovery start]
+    ///   POST /pow/challenge   →  seed (the only proof of work left, ADR-0054)
+    ///   client: solve PoW (cancellable) + OPAQUE password start [+ recovery start]
     ///   POST /signup/start    →  password_response [+ recovery_response]
     ///   client: OPAQUE finish (both flows)
-    ///   POST /pow/challenge   →  seed₂
-    ///   client: solve PoW
     ///   POST /signup/finish   →  ok
     /// ```
     ///
@@ -602,23 +554,48 @@ public final class AuthClient {
     /// and returns the phrase in ``SignupResult/recoveryPhrase`` for
     /// the UI to display **once**. Both envelopes commit atomically
     /// inside `/signup/finish` (server transaction).
+    ///
+    /// ADR-0054 S4: the proof of work before `/signup/start` is the only one
+    /// left in the app and deliberately heavy. The flow is cancellable up to
+    /// the finish: a cancelled task stops before `/signup/start` or before
+    /// `/signup/finish` (``CancellationError``), so no account is created.
+    /// `onCommitting` runs right before `/signup/finish` - past it the account
+    /// is being created and the caller should no longer offer Cancel.
+    /// A `410` from the finish (no live start for this account, e.g. more
+    /// than 600 s between the two) restarts the whole signup once from the
+    /// start.
     public func signup(
         password: Data,
-        enrolRecovery: Bool = true
+        enrolRecovery: Bool = true,
+        onCommitting: (@MainActor () -> Void)? = nil
     ) async throws -> SignupResult {
         guard !password.isEmpty else {
             throw AuthClientError.argument("password must be non-empty")
         }
+        do {
+            return try await signupOnce(
+                password: password, enrolRecovery: enrolRecovery, onCommitting: onCommitting)
+        } catch AuthClientError.http(let status, let endpoint, _)
+            where status == 410 && endpoint == "/signup/finish" {
+            NSLog("[auth] signup finish found no live start (410), restarting from the start")
+            return try await signupOnce(
+                password: password, enrolRecovery: enrolRecovery, onCommitting: onCommitting)
+        }
+    }
 
+    private func signupOnce(
+        password: Data,
+        enrolRecovery: Bool,
+        onCommitting: (@MainActor () -> Void)?
+    ) async throws -> SignupResult {
         let accountId = generateAccountId()
         let accountIdB64 = base64Encode(accountId)
 
         // ------------- start
+        try Task.checkCancellation()
         let challenge1 = try await powChallenge()
-        let pow1 = try await solvePow(
-            seedB64: challenge1.seed,
-            effortBits: challenge1.effortBits
-        )
+        let pow1 = try await solve(challenge1.seed, challenge1.effortBits)
+        try Task.checkCancellation()
 
         let passwordReg = try OpaqueRegister.startPassword(password: password)
 
@@ -674,15 +651,10 @@ public final class AuthClient {
             recoveryUploadB64 = out.uploadB64()
         }
 
-        let challenge2 = try await powChallenge()
-        let pow2 = try await solvePow(
-            seedB64: challenge2.seed,
-            effortBits: challenge2.effortBits
-        )
-
+        try Task.checkCancellation()
+        if let onCommitting { await onCommitting() }
         let finishResp = try await signupFinish(
             SignupFinishRequest(
-                pow: pow2,
                 accountId: accountIdB64,
                 passwordUpload: passwordOut.uploadB64(),
                 recoveryUpload: recoveryUploadB64
@@ -708,45 +680,33 @@ public final class AuthClient {
     /// Drive the full password-login flow:
     ///
     /// ```text
-    ///   POST /pow/challenge  →  seed
-    ///   client: solve PoW + OPAQUE start
+    ///   client: OPAQUE start
     ///   POST /login/start    →  session_id, response
     ///   client: OPAQUE finish
     ///   POST /login/finish   →  ok, account_id
     /// ```
     ///
-    /// `accountId` MUST be the raw 16-byte id the server gave back
-    /// at signup time. The SwiftUI side will pin it in the Keychain
-    /// keyed by username (1.14d2).
+    /// ADR-0054 S5: the account is named by its 32-byte login `handle`
+    /// (``LoginName``); the account id is learned from the finish response,
+    /// never sent.
     ///
     /// Wrong passwords surface as an
     /// ``AuthClientError/http(status:endpoint:body:)`` with status
-    /// 401 — by design, indistinguishable from "unknown account".
+    /// 401 — by design, indistinguishable from "unknown account" (a handle
+    /// nobody holds runs the same path on a stand-in account).
     public func login(
-        accountId: Data,
+        handle: Data,
         password: Data
     ) async throws -> LoginResult {
         guard !password.isEmpty else {
             throw AuthClientError.argument("password must be non-empty")
         }
-        guard accountId.count == accountIdLength else {
-            throw AuthClientError.argument(
-                "accountId must be \(accountIdLength) bytes"
-            )
-        }
-
-        let accountIdB64 = base64Encode(accountId)
-        let challenge = try await powChallenge()
-        let pow = try await solvePow(
-            seedB64: challenge.seed,
-            effortBits: challenge.effortBits
-        )
+        try requireHandle(handle)
 
         let login = try OpaqueLogin.startPassword(password: password)
         let startResp = try await loginStart(
             LoginStartRequest(
-                pow: pow,
-                accountId: accountIdB64,
+                handle: base64UrlEncodeNoPad(handle),
                 request: login.requestB64()
             )
         )
@@ -768,6 +728,7 @@ public final class AuthClient {
                 body: "server reported ok=false"
             )
         }
+        let accountId = try Self.decodeAccountId(finishResp.accountId, endpoint: "/login/finish")
         return LoginResult(
             accountId: accountId,
             sessionKey: out.sessionKey(),
@@ -780,8 +741,6 @@ public final class AuthClient {
     /// Drive the full recover-from-mnemonic flow:
     ///
     /// ```text
-    ///   POST /pow/challenge          →  seed
-    ///   client: solve PoW
     ///   client: OPAQUE recovery start (seed)
     ///   client: OPAQUE password start (newPassword)
     ///   POST /password/reset/start   →  session_id, recovery_response,
@@ -796,35 +755,20 @@ public final class AuthClient {
     /// new one — the `KIND_RECOVERY` envelope stays intact, so the
     /// same 24 words work for future resets.
     ///
-    /// Note: the recovery flow only requires **one** PoW solve
-    /// (gating `/start`), unlike signup which needs two.
     /// Wrong-mnemonic attempts fail at the AKE finalization with
     /// the same indistinguishable response as `/recovery/login/finish`.
     public func recover(
-        accountId: Data,
+        handle: Data,
         mnemonicSeed: Data,
         newPassword: Data
     ) async throws -> RecoverResult {
-        guard accountId.count == accountIdLength else {
-            throw AuthClientError.argument(
-                "accountId must be \(accountIdLength) bytes"
-            )
-        }
+        try requireHandle(handle)
         guard !mnemonicSeed.isEmpty else {
             throw AuthClientError.argument("mnemonicSeed must be non-empty")
         }
         guard !newPassword.isEmpty else {
             throw AuthClientError.argument("newPassword must be non-empty")
         }
-
-        let accountIdB64 = base64Encode(accountId)
-
-        // Single PoW solve — the server only gates /start.
-        let challenge = try await powChallenge()
-        let pow = try await solvePow(
-            seedB64: challenge.seed,
-            effortBits: challenge.effortBits
-        )
 
         // Two parallel OPAQUE flows: recovery login proves the user
         // knows the mnemonic; password registration enrols the new
@@ -835,8 +779,7 @@ public final class AuthClient {
 
         let startResp = try await passwordResetStart(
             PasswordResetStartRequest(
-                pow: pow,
-                accountId: accountIdB64,
+                handle: base64UrlEncodeNoPad(handle),
                 recoveryRequest: recoveryLogin.requestB64(),
                 newPasswordRequest: newPasswordReg.requestB64()
             )
@@ -870,6 +813,8 @@ public final class AuthClient {
                 body: "server reported ok=false"
             )
         }
+        let accountId = try Self.decodeAccountId(
+            finishResp.accountId, endpoint: "/password/reset/finish")
 
         return RecoverResult(
             accountId: accountId,
@@ -879,16 +824,80 @@ public final class AuthClient {
         )
     }
 
+    // MARK: - Login handle binding (ADR-0054 S5)
+
+    /// `PUT /auth/login-handle` - bind the signed-in account to `handle`,
+    /// replacing its previous one. Idempotent for the handle it already holds.
+    ///
+    /// Throws ``AuthClientError/http(status:endpoint:body:)``: `409`
+    /// (`handle-taken`, another account holds it; nothing changed), `503`
+    /// (`login-by-name-disabled`), `400`, `401`.
+    public func bindLoginHandle(handle: Data, sessionToken: String) async throws {
+        try requireHandle(handle)
+        guard !sessionToken.isEmpty else {
+            throw AuthClientError.argument("sessionToken must be non-empty")
+        }
+        let _: LoginHandleBindResponse = try await send(
+            method: "PUT",
+            endpoint: "/auth/login-handle",
+            body: LoginHandleBindRequest(handle: base64UrlEncodeNoPad(handle)),
+            bearer: sessionToken
+        )
+    }
+
+    /// `DELETE /auth/login-handle` - remove the signed-in account's handle.
+    /// Returns whether one was removed.
+    @discardableResult
+    public func removeLoginHandle(sessionToken: String) async throws -> Bool {
+        guard !sessionToken.isEmpty else {
+            throw AuthClientError.argument("sessionToken must be non-empty")
+        }
+        let url = try buildURL(endpoint: "/auth/login-handle")
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.setValue("Bearer \(sessionToken)", forHTTPHeaderField: "Authorization")
+        let resp: LoginHandleRemoveResponse = try await execute(
+            endpoint: "/auth/login-handle", request: request)
+        return resp.removed
+    }
+
     // MARK: - Internal HTTP helpers
+
+    private func requireHandle(_ handle: Data) throws {
+        guard handle.count == loginHandleLength else {
+            throw AuthClientError.argument("handle must be \(loginHandleLength) bytes")
+        }
+    }
+
+    /// The account id of a login / reset finish (standard base64, 16 bytes).
+    private static func decodeAccountId(_ b64: String, endpoint: String) throws -> Data {
+        guard let bytes = base64Decode(b64), bytes.count == accountIdLength else {
+            throw AuthClientError.http(
+                status: 200,
+                endpoint: endpoint,
+                body: "malformed account_id in response"
+            )
+        }
+        return bytes
+    }
 
     private func post<Req: Encodable, Res: Decodable>(
         endpoint: String,
         body: Req,
         bearer: String? = nil
     ) async throws -> Res {
+        try await send(method: "POST", endpoint: endpoint, body: body, bearer: bearer)
+    }
+
+    private func send<Req: Encodable, Res: Decodable>(
+        method: String,
+        endpoint: String,
+        body: Req,
+        bearer: String? = nil
+    ) async throws -> Res {
         let url = try buildURL(endpoint: endpoint)
         var request = URLRequest(url: url)
-        request.httpMethod = "POST"
+        request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let bearer {
             request.setValue(
@@ -907,11 +916,18 @@ public final class AuthClient {
     }
 
     private func postNoBody<Res: Decodable>(
-        endpoint: String
+        endpoint: String,
+        bearer: String? = nil
     ) async throws -> Res {
         let url = try buildURL(endpoint: endpoint)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        if let bearer {
+            request.setValue(
+                "Bearer \(bearer)",
+                forHTTPHeaderField: "Authorization"
+            )
+        }
         return try await execute(endpoint: endpoint, request: request)
     }
 
@@ -1013,7 +1029,7 @@ public struct SignupResult: Equatable {
     }
 }
 
-/// Result of ``AuthClient/login(accountId:password:)``.
+/// Result of ``AuthClient/login(handle:password:)``.
 public struct LoginResult: Equatable {
     public let accountId: Data
     /// Symmetric session key shared with the server. Use to bind a
@@ -1042,7 +1058,7 @@ public struct LoginResult: Equatable {
     }
 }
 
-/// Result of ``AuthClient/recover(accountId:mnemonicSeed:newPassword:)``.
+/// Result of ``AuthClient/recover(handle:mnemonicSeed:newPassword:)``.
 public struct RecoverResult: Equatable {
     public let accountId: Data
     /// OPAQUE export key for the **new** password. Derive a fresh
@@ -1108,7 +1124,7 @@ public struct TotpEnrollStartResult: Equatable {
     }
 }
 
-/// Result of ``AuthClient/totpRecover(accountId:code:)`` (ADR-0018
+/// Result of ``AuthClient/totpRecover(handle:code:)`` (ADR-0018
 /// factor (c)) — the same `(account_id, session_token, expiry)`
 /// triple every other login flow returns. ACCESS only, no identity
 /// material.
@@ -1134,7 +1150,7 @@ public struct TotpRecoverResult: Equatable {
 /// `JSONDecoder` ignores unknown keys for an empty shape.
 private struct TotpEnrollFinishAck: Decodable {}
 
-/// Result of ``AuthClient/recoveryContactRecoverFinish(accountId:kind:code:)``
+/// Result of ``AuthClient/recoveryContactRecoverFinish(handle:kind:code:)``
 /// (ADR-0018 factor (d)) — the same `(account_id, session_token,
 /// expiry)` triple every other login flow returns. ACCESS only, no
 /// identity material.

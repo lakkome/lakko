@@ -43,7 +43,7 @@ public enum PushTokenRegistration {
     /// `true` when this token should be uploaded.
     ///
     /// iOS re-delivers the same token on every launch, and a registration costs
-    /// a proof-of-work solve plus a round trip, so an unchanged token is
+    /// an anonymous token plus a round trip, so an unchanged token is
     /// skipped. An empty token is never sent: the gateway rejects it, and a
     /// device that reports one has no working push either way — the failure
     /// belongs in a log, not in a request.

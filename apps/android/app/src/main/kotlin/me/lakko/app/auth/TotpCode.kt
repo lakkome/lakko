@@ -10,7 +10,7 @@ package me.lakko.app.auth
  * (`services/auth/src/totp.rs`) and of the web
  * `apps/web/src/auth/totp-code.ts`: a code is exactly 6 ASCII
  * digits after trimming surrounding whitespace. Validating before
- * the network call saves a PoW solve on `/totp/recover` and lets
+ * the network call saves one of `/totp/recover`'s counted attempts and lets
  * the forms surface a precise message instead of the server's
  * generic 400/401.
  */

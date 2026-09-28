@@ -13,10 +13,16 @@
  *
  *   2. **High-level `signup` / `login`** orchestrate the full
  *      multi-round-trip flow:
- *      `/pow/challenge` → `/signup/start` → `/pow/challenge` →
- *      `/signup/finish` (and the equivalent for login). They
- *      drive the OPAQUE WASM classes (`OpaqueRegister` /
- *      `OpaqueLogin`) and the PoW solver.
+ *      `/pow/challenge` → `/signup/start` → `/signup/finish` (and
+ *      the equivalent for login). They drive the OPAQUE WASM classes
+ *      (`OpaqueRegister` / `OpaqueLogin`) and, for signup only, the
+ *      proof-of-work solver (ADR-0054 S4: account creation is the one
+ *      request that still pays one).
+ *
+ * Limits (ADR-0054 S4) answer `429 {"error": code, "retry_after_secs": N}`
+ * with `Retry-After`; `AuthHttpError.errorCode` / `.retryAfter` expose them
+ * and `auth-error-copy.ts` turns them into screen copy. A 429 is never a
+ * sign-out.
  *
  * Errors propagate as plain `Error` instances. Status-code-derived
  * messages preserve the server's body when small, since the
@@ -37,12 +43,14 @@ import type {
   ContactKind,
   DeviceAuthorizeRedeemRequest,
   DeviceAuthorizeRedeemResponse,
-  DeviceAuthorizeStartRequest,
   DeviceAuthorizeStartResponse,
   GenesisAttestRequest,
   GenesisAttestResponse,
   LoginFinishRequest,
   LoginFinishResponse,
+  LoginHandleDeleteResponse,
+  LoginHandlePutRequest,
+  LoginHandlePutResponse,
   LoginStartRequest,
   LoginStartResponse,
   PasswordResetFinishRequest,
@@ -61,7 +69,6 @@ import type {
   SignupStartRequest,
   SignupStartResponse,
   TotpEnrollFinishRequest,
-  TotpEnrollStartRequest,
   TotpEnrollStartResponse,
   TotpRecoverRequest,
   TotpRecoverResponse,
@@ -117,6 +124,8 @@ export interface SignupOptions {
    *  recovery envelope alongside the password. Defaults to `true`
    *  — every new account SHOULD have a recovery passphrase. */
   enrolRecovery?: boolean;
+  /** Cancels the signup's proof of work and everything after it. */
+  signal?: AbortSignal;
 }
 
 /** Result of `AuthClient.login`. */
@@ -208,9 +217,47 @@ export class AuthHttpError extends Error {
     /** Truncated server body (max 512 chars to keep stack traces
      *  tractable). */
     public readonly body: string,
+    /** Seconds from a `Retry-After` header, when the server sent one
+     *  (ADR-0054 S4: every auth limit answers 429 with it). */
+    public readonly retryAfterSecs: number | null = null,
   ) {
     super(`auth ${endpoint} → ${status}: ${body}`);
   }
+
+  /** The machine-readable code of a `{"error": "<code>", ...}` body (the
+   *  ADR-0054 limit shape), or `null` when the body has none. */
+  get errorCode(): string | null {
+    return parseLimitBody(this.body).error;
+  }
+
+  /** `retry_after_secs` from the body, else the `Retry-After` header. */
+  get retryAfter(): number | null {
+    return parseLimitBody(this.body).retryAfterSecs ?? this.retryAfterSecs;
+  }
+}
+
+/** Read `{"error": code, "retry_after_secs": N}` leniently. */
+function parseLimitBody(body: string): { error: string | null; retryAfterSecs: number | null } {
+  try {
+    const parsed = JSON.parse(body) as { error?: unknown; retry_after_secs?: unknown };
+    return {
+      error: typeof parsed.error === "string" ? parsed.error : null,
+      retryAfterSecs:
+        typeof parsed.retry_after_secs === "number" && Number.isFinite(parsed.retry_after_secs)
+          ? Math.max(0, Math.ceil(parsed.retry_after_secs))
+          : null,
+    };
+  } catch {
+    return { error: null, retryAfterSecs: null };
+  }
+}
+
+/** Seconds from a `Retry-After` header, `null` when absent or unparseable. */
+function retryAfterHeader(response: Response): number | null {
+  const header = response.headers.get("retry-after");
+  if (header === null) return null;
+  const secs = Number(header.trim());
+  return Number.isFinite(secs) && secs >= 0 ? Math.ceil(secs) : null;
 }
 
 /** Network failure (DNS / connectivity / TLS). Distinct from
@@ -234,7 +281,7 @@ export class AuthClient {
   // Low-level: 1:1 HTTP endpoints
   // -----------------------------------------------------------------
 
-  /** `POST /pow/challenge`. */
+  /** `POST /pow/challenge` — used by signup only. */
   async powChallenge(): Promise<PowChallengeResponse> {
     return this.post<undefined, PowChallengeResponse>("/pow/challenge", undefined);
   }
@@ -296,7 +343,7 @@ export class AuthClient {
    * (a), scanner side).
    *
    * Bearer-authenticated (the EXISTING device proves it already
-   * holds a session) + PoW-gated. Returns the URL-safe base64
+   * holds a session) (no proof of work since ADR-0054 S4; limited server-side). Returns the URL-safe base64
    * (no pad) of the RAW grant token — the server stores only its
    * SHA-256. The caller seals it (together with the phrase seed)
    * to the fresh device over the E2EE pairing channel; it never
@@ -306,12 +353,10 @@ export class AuthClient {
     if (sessionToken.length === 0) {
       throw new AuthClientArgError("sessionToken must be non-empty");
     }
-    const challenge = await this.powChallenge();
-    const pow = await solvePow(challenge.seed, challenge.effort_bits);
     const resp = await this.post<
-      DeviceAuthorizeStartRequest,
+      undefined,
       DeviceAuthorizeStartResponse
-    >("/device/authorize/start", { pow }, sessionToken);
+    >("/device/authorize/start", undefined, sessionToken);
     return resp.grant_token_b64;
   }
 
@@ -320,7 +365,7 @@ export class AuthClient {
    * single-use device grant for a session-token triple (ADR-0018
    * factor (a), fresh-device side).
    *
-   * Anonymous (the fresh device has no token yet) + PoW-gated. A
+   * Anonymous (the fresh device has no token yet) (no proof of work since ADR-0054 S4; limited server-side). A
    * missing / expired / already-consumed grant fails as an
    * enumeration-safe 401 (`AuthHttpError`), indistinguishable from
    * a wrong credential by design.
@@ -340,13 +385,10 @@ export class AuthClient {
     if (grantTokenB64.length === 0) {
       throw new AuthClientArgError("grantTokenB64 must be non-empty");
     }
-    const challenge = await this.powChallenge();
-    const pow = await solvePow(challenge.seed, challenge.effort_bits);
     const resp = await this.post<
       DeviceAuthorizeRedeemRequest,
       DeviceAuthorizeRedeemResponse
     >("/device/authorize/redeem", {
-      pow,
       account_id_b64: base64UrlEncodeNoPad(accountId),
       grant_token_b64: grantTokenB64,
     });
@@ -366,7 +408,7 @@ export class AuthClient {
    * attestation for this account's client-generated identity pubkey
    * (ADR-0036, closes the G-30 finding-2 squatting residual).
    *
-   * Bearer-authenticated (NO PoW): holding a valid session token *is*
+   * Bearer-authenticated (no proof of work): holding a valid session token *is*
    * proof the caller OPAQUE-authenticated as `account_id`, which is the
    * entire security basis — only the account holder can mint a genesis
    * attestation for their own key, so a squatter cannot fabricate one
@@ -409,7 +451,7 @@ export class AuthClient {
    * `POST /totp/enroll/start` — mint + store an (unconfirmed) TOTP
    * secret for this account (ADR-0018 factor (c), enrollment step 1).
    *
-   * Bearer-authenticated (the already-logged-in account) + PoW.
+   * Bearer-authenticated (the already-logged-in account (no proof of work since ADR-0054 S4; limited server-side).
    * Returns the `otpauth://` provisioning URI (QR) + the base32
    * secret (manual entry). The enrollment only becomes usable for
    * recovery after `totpEnrollFinish` confirms it with a live code.
@@ -422,11 +464,9 @@ export class AuthClient {
     if (sessionToken.length === 0) {
       throw new AuthClientArgError("sessionToken must be non-empty");
     }
-    const challenge = await this.powChallenge();
-    const pow = await solvePow(challenge.seed, challenge.effort_bits);
-    const resp = await this.post<TotpEnrollStartRequest, TotpEnrollStartResponse>(
+    const resp = await this.post<undefined, TotpEnrollStartResponse>(
       "/totp/enroll/start",
-      { pow },
+      undefined,
       sessionToken,
     );
     return { otpauthUri: resp.otpauth_uri, secretB32: resp.secret_b32 };
@@ -437,7 +477,7 @@ export class AuthClient {
    * first code the authenticator produced (ADR-0018 factor (c),
    * enrollment step 2).
    *
-   * Bearer-authenticated, NO PoW — the server does not gate finish.
+   * Bearer-authenticated, no proof of work.
    * A 401 `AuthHttpError` means the code did not verify (wrong app
    * entry / clock skew beyond ±30 s); the pending enrollment stays
    * pending, so the user can simply retry with the next code.
@@ -461,7 +501,7 @@ export class AuthClient {
    * `POST /totp/recover` — recover ACCESS with an authenticator
    * code (ADR-0018 factor (c), recovery side).
    *
-   * Anonymous (the caller lost their device) + PoW. The server is
+   * Anonymous (the caller lost their device (no proof of work since ADR-0054 S4; limited server-side). The server is
    * enumeration-safe by design: unknown account, unconfirmed
    * enrollment, wrong code, and replayed code all surface the SAME
    * generic 401 `AuthHttpError`; 429 signals the
@@ -473,25 +513,17 @@ export class AuthClient {
    * machine).
    */
   async totpRecover(
-    accountId: Uint8Array,
+    handle: string,
     code: string,
   ): Promise<TotpRecoverResult> {
-    if (accountId.length !== 16) {
-      throw new AuthClientArgError("accountId must be 16 bytes");
-    }
+    requireHandle(handle);
     const normalized = normalizeTotpCode(code);
     if (normalized === null) {
       throw new AuthClientArgError("code must be 6 digits");
     }
-    const challenge = await this.powChallenge();
-    const pow = await solvePow(challenge.seed, challenge.effort_bits);
     const resp = await this.post<TotpRecoverRequest, TotpRecoverResponse>(
       "/totp/recover",
-      {
-        pow,
-        account_id_b64: base64UrlEncodeNoPad(accountId),
-        code: normalized,
-      },
+      { handle, code: normalized },
     );
     return {
       accountId: base64UrlDecodeNoPad(resp.account_id_b64),
@@ -511,7 +543,7 @@ export class AuthClient {
    * enrollment step 1).
    *
    * Bearer-authenticated (the already-logged-in account's session
-   * token rides the `Authorization` header) + PoW. The enrollment
+   * token rides the `Authorization` header (no proof of work since ADR-0054 S4; limited server-side). The enrollment
    * only becomes usable for recovery after
    * `recoveryContactEnrollFinish` confirms the code.
    *
@@ -530,14 +562,12 @@ export class AuthClient {
     if (contact.trim().length === 0) {
       throw new AuthClientArgError("contact must be non-empty");
     }
-    const challenge = await this.powChallenge();
-    const pow = await solvePow(challenge.seed, challenge.effort_bits);
     await this.post<
       RecoveryContactEnrollStartRequest,
       RecoveryContactSentResponse
     >(
       "/recovery-contact/enroll/start",
-      { pow, kind, contact: contact.trim() },
+      { kind, contact: contact.trim() },
       sessionToken,
     );
   }
@@ -547,7 +577,7 @@ export class AuthClient {
    * with the code that was delivered (ADR-0018 factor (d),
    * enrollment step 2).
    *
-   * Bearer-authenticated, NO PoW — the server does not gate finish.
+   * Bearer-authenticated, no proof of work.
    * A 401 `AuthHttpError` means the code did not verify (wrong /
    * expired / replayed); the user can retry by re-sending a code.
    */
@@ -575,7 +605,7 @@ export class AuthClient {
    * recovery code be sent to a previously-confirmed contact
    * (ADR-0018 factor (d), recovery step 1).
    *
-   * Anonymous (the caller lost their device) + PoW. The server is
+   * Anonymous (the caller lost their device (no proof of work since ADR-0054 S4; limited server-side). The server is
    * ENUMERATION-SAFE by design: it returns the same `{ sent: true }`
    * whether or not the supplied contact matches a confirmed row, so
    * a 2xx here reveals nothing about account / contact existence — it
@@ -583,24 +613,19 @@ export class AuthClient {
    * disabled server-side; a 400 means a malformed contact.
    */
   async recoveryContactRecoverStart(
-    accountId: Uint8Array,
+    handle: string,
     kind: ContactKind,
     contact: string,
   ): Promise<void> {
-    if (accountId.length !== 16) {
-      throw new AuthClientArgError("accountId must be 16 bytes");
-    }
+    requireHandle(handle);
     if (contact.trim().length === 0) {
       throw new AuthClientArgError("contact must be non-empty");
     }
-    const challenge = await this.powChallenge();
-    const pow = await solvePow(challenge.seed, challenge.effort_bits);
     await this.post<
       RecoveryContactRecoverStartRequest,
       RecoveryContactSentResponse
     >("/recovery-contact/recover/start", {
-      pow,
-      account_id_b64: base64UrlEncodeNoPad(accountId),
+      handle,
       kind,
       contact: contact.trim(),
     });
@@ -611,7 +636,7 @@ export class AuthClient {
    * the code that was delivered (ADR-0018 factor (d), recovery
    * step 2).
    *
-   * Anonymous + PoW. Enumeration-safe: unknown account, no live
+   * Anonymous, limited server-side (ADR-0054 S4). Enumeration-safe: unknown account, no live
    * challenge, wrong code and replayed code all surface the SAME
    * generic 401 `AuthHttpError`; 429 signals the attempt-cap
    * lockout; 503 means the factor is disabled server-side.
@@ -621,25 +646,20 @@ export class AuthClient {
    * machine).
    */
   async recoveryContactRecoverFinish(
-    accountId: Uint8Array,
+    handle: string,
     kind: ContactKind,
     code: string,
   ): Promise<RecoveryContactRecoverResult> {
-    if (accountId.length !== 16) {
-      throw new AuthClientArgError("accountId must be 16 bytes");
-    }
+    requireHandle(handle);
     const normalized = normalizeTotpCode(code);
     if (normalized === null) {
       throw new AuthClientArgError("code must be 6 digits");
     }
-    const challenge = await this.powChallenge();
-    const pow = await solvePow(challenge.seed, challenge.effort_bits);
     const resp = await this.post<
       RecoveryContactRecoverFinishRequest,
       RecoveryContactRecoverFinishResponse
     >("/recovery-contact/recover/finish", {
-      pow,
-      account_id_b64: base64UrlEncodeNoPad(accountId),
+      handle,
       kind,
       code: normalized,
     });
@@ -658,14 +678,19 @@ export class AuthClient {
    * Drive the full signup flow:
    *
    * ```text
-   *   POST /pow/challenge   →  seed₁
-   *   client: solve PoW + OPAQUE password start [+ recovery start]
+   *   POST /pow/challenge   →  seed          (auth's, the only one left)
+   *   client: solve the proof of work (off the main thread, cancellable)
+   *   client: OPAQUE password start [+ recovery start]
    *   POST /signup/start    →  password_response [+ recovery_response]
    *   client: OPAQUE finish (both flows)
-   *   POST /pow/challenge   →  seed₂
-   *   client: solve PoW
-   *   POST /signup/finish   →  ok
+   *   POST /signup/finish   →  ok            (no proof: bound to the start)
    * ```
+   *
+   * ADR-0054 S4: account creation is the one request that still pays a
+   * proof of work, once, heavily. `/signup/finish` carries none; it must
+   * follow a start for the same account within the server's window, and
+   * answers `410` when it does not (a start that expired while the device was
+   * busy). That restarts the flow from the start, once.
    *
    * When `options.enrolRecovery !== false` (default), this method
    * also generates a fresh BIP39 24-word mnemonic, enrols it as
@@ -673,6 +698,11 @@ export class AuthClient {
    * and returns the phrase in `result.recoveryPhrase` for the UI
    * to display **once**. Both envelopes commit atomically inside
    * `/signup/finish` (server transaction).
+   *
+   * `options.signal` cancels the proof of work (the worker is terminated)
+   * and stops before any further request; the abort surfaces as a
+   * `DOMException` named `AbortError`. The server holds nothing until the
+   * proof is spent, so a cancelled signup leaves no half-created account.
    *
    * Throws `AuthClientArgError` on programmer error (empty
    * password). `AuthHttpError` on a non-2xx response and
@@ -686,137 +716,122 @@ export class AuthClient {
       throw new AuthClientArgError("password must be non-empty");
     }
     const enrolRecovery = options.enrolRecovery !== false;
+    const signal = options.signal;
 
     const wasm = await loadWasm();
     const accountId = generateAccountId();
     const accountIdB64 = base64Encode(accountId);
 
-    // ------------- start
-    const challenge1 = await this.powChallenge();
-    const pow1 = await solvePow(challenge1.seed, challenge1.effort_bits);
-
-    // Password OPAQUE start.
-    const passwordReg = wasm.OpaqueRegister.startPassword(password);
-
-    // Recovery side: generate a fresh mnemonic + derive the
-    // BIP39 64-byte seed; that seed is the OPAQUE secret for the
-    // KIND_RECOVERY envelope. We hold the seed + the
-    // OPAQUE state in a typed bundle so the conditional flow
-    // doesn't need awkward null re-checks later.
-    interface RecoveryBundle {
-      readonly mnemonicPhrase: string;
-      readonly seed: Uint8Array;
-      readonly opaque: ReturnType<typeof wasm.OpaqueRegister.startRecovery>;
-    }
-    let recovery: RecoveryBundle | null = null;
+    // The recovery phrase is chosen once: a restarted start enrols the
+    // same one, so the phrase the user is shown is the one on the server.
+    let recoveryPhrase: { readonly phrase: string; readonly seed: Uint8Array } | null = null;
     if (enrolRecovery) {
       const mnemonic = wasm.RecoveryMnemonic.generate();
-      const seed = mnemonic.toSeed();
-      recovery = {
-        mnemonicPhrase: mnemonic.phrase,
-        seed,
-        opaque: wasm.OpaqueRegister.startRecovery(seed),
+      recoveryPhrase = { phrase: mnemonic.phrase, seed: mnemonic.toSeed() };
+    }
+
+    for (let attempt = 0; ; attempt += 1) {
+      throwIfAborted(signal);
+      // ------------- start
+      const challenge = await this.powChallenge();
+      throwIfAborted(signal);
+      const pow = await solvePow(challenge.seed, challenge.effort_bits, signal);
+      throwIfAborted(signal);
+
+      const passwordReg = wasm.OpaqueRegister.startPassword(password);
+      const recoveryReg =
+        recoveryPhrase !== null ? wasm.OpaqueRegister.startRecovery(recoveryPhrase.seed) : null;
+
+      const startResp = await this.signupStart({
+        pow,
+        account_id: accountIdB64,
+        password_request: passwordReg.requestB64,
+        ...(recoveryReg !== null ? { recovery_request: recoveryReg.requestB64 } : {}),
+      });
+
+      if (recoveryReg !== null && startResp.recovery_response === undefined) {
+        // The server should always echo back a recovery_response
+        // when we set recovery_request. Treat the missing field as
+        // a server-side wiring bug rather than crashing later in
+        // OPAQUE finish.
+        throw new AuthHttpError(
+          200,
+          "/signup/start",
+          "missing recovery_response despite recovery_request being set",
+        );
+      }
+
+      // ------------- finish (OPAQUE math)
+      const passwordOut = passwordReg.finish(password, startResp.password_response);
+
+      // The recovery export key has a different domain (KIND_RECOVERY)
+      // and is only useful when the user re-authenticates via the
+      // mnemonic. The PASSWORD export key is what the device root
+      // key gets derived from for day-to-day use, so we throw the
+      // recovery-side export key away here.
+      const recoveryUploadB64: string | undefined =
+        recoveryReg !== null && recoveryPhrase !== null && startResp.recovery_response !== undefined
+          ? recoveryReg.finish(recoveryPhrase.seed, startResp.recovery_response).uploadB64
+          : undefined;
+
+      let finishResp: SignupFinishResponse;
+      try {
+        finishResp = await this.signupFinish({
+          account_id: accountIdB64,
+          password_upload: passwordOut.uploadB64,
+          ...(recoveryUploadB64 !== undefined ? { recovery_upload: recoveryUploadB64 } : {}),
+        });
+      } catch (err) {
+        // The start expired (or was never recorded): restart from the start.
+        if (attempt === 0 && err instanceof AuthHttpError && err.status === 410) continue;
+        throw err;
+      }
+      if (!finishResp.ok) {
+        throw new AuthHttpError(
+          200,
+          "/signup/finish",
+          "server reported ok=false",
+        );
+      }
+
+      return {
+        accountId,
+        exportKey: passwordOut.exportKey,
+        ...(recoveryPhrase !== null ? { recoveryPhrase: recoveryPhrase.phrase } : {}),
+        sessionToken: finishResp.session_token,
+        sessionExpiresAtMs: finishResp.session_expires_at_ms,
       };
     }
-
-    const startResp = await this.signupStart({
-      pow: pow1,
-      account_id: accountIdB64,
-      password_request: passwordReg.requestB64,
-      ...(recovery !== null
-        ? { recovery_request: recovery.opaque.requestB64 }
-        : {}),
-    });
-
-    if (recovery !== null && startResp.recovery_response === undefined) {
-      // The server should always echo back a recovery_response
-      // when we set recovery_request. Treat the missing field as
-      // a server-side wiring bug rather than crashing later in
-      // OPAQUE finish.
-      throw new AuthHttpError(
-        200,
-        "/signup/start",
-        "missing recovery_response despite recovery_request being set",
-      );
-    }
-
-    // ------------- finish (OPAQUE math)
-    const passwordOut = passwordReg.finish(password, startResp.password_response);
-
-    // The recovery export key has a different domain (KIND_RECOVERY)
-    // and is only useful when the user re-authenticates via the
-    // mnemonic. The PASSWORD export key is what the device root
-    // key gets derived from for day-to-day use, so we throw the
-    // recovery-side export key away here.
-    const recoveryUploadB64: string | undefined =
-      recovery !== null && startResp.recovery_response !== undefined
-        ? recovery.opaque.finish(recovery.seed, startResp.recovery_response).uploadB64
-        : undefined;
-
-    const challenge2 = await this.powChallenge();
-    const pow2 = await solvePow(challenge2.seed, challenge2.effort_bits);
-
-    const finishResp = await this.signupFinish({
-      pow: pow2,
-      account_id: accountIdB64,
-      password_upload: passwordOut.uploadB64,
-      ...(recoveryUploadB64 !== undefined
-        ? { recovery_upload: recoveryUploadB64 }
-        : {}),
-    });
-    if (!finishResp.ok) {
-      throw new AuthHttpError(
-        200,
-        "/signup/finish",
-        "server reported ok=false",
-      );
-    }
-
-    return {
-      accountId,
-      exportKey: passwordOut.exportKey,
-      ...(recovery !== null ? { recoveryPhrase: recovery.mnemonicPhrase } : {}),
-      sessionToken: finishResp.session_token,
-      sessionExpiresAtMs: finishResp.session_expires_at_ms,
-    };
   }
 
   /**
    * Drive the full password-login flow:
    *
    * ```text
-   *   POST /pow/challenge  →  seed
-   *   client: solve PoW + OPAQUE start
+   *   client: OPAQUE start
    *   POST /login/start    →  session_id, response
    *   client: OPAQUE finish
    *   POST /login/finish   →  ok, account_id
    * ```
    *
-   * `accountId` MUST be the raw 16-byte id the server gave back
-   * at signup time. The web client persists it in `localStorage`
-   * keyed by username (1.16c3b minimal scope).
+   * ADR-0054 S5: the start names the account by its login handle
+   * (`login-handle.ts`); the account id is learned from the finish, after
+   * the password proved itself.
    *
    * Wrong passwords surface as an `AuthHttpError` with status
    * 401 — by design, indistinguishable from "unknown account".
    */
-  async login(accountId: Uint8Array, password: Uint8Array): Promise<LoginResult> {
+  async login(handle: string, password: Uint8Array): Promise<LoginResult> {
     if (password.length === 0) {
       throw new AuthClientArgError("password must be non-empty");
     }
-    if (accountId.length !== 16) {
-      throw new AuthClientArgError("accountId must be 16 bytes");
-    }
+    requireHandle(handle);
 
     const wasm = await loadWasm();
-    const accountIdB64 = base64Encode(accountId);
-
-    const challenge = await this.powChallenge();
-    const pow = await solvePow(challenge.seed, challenge.effort_bits);
 
     const login = wasm.OpaqueLogin.startPassword(password);
     const startResp = await this.loginStart({
-      pow,
-      account_id: accountIdB64,
+      handle,
       request: login.requestB64,
     });
 
@@ -831,7 +846,7 @@ export class AuthClient {
     }
 
     return {
-      accountId,
+      accountId: accountIdOfFinish(finishResp.account_id, "/login/finish"),
       sessionKey: out.sessionKey,
       exportKey: out.exportKey,
       sessionToken: finishResp.session_token,
@@ -843,8 +858,6 @@ export class AuthClient {
    * Drive the full recover-from-mnemonic flow:
    *
    * ```text
-   *   POST /pow/challenge          →  seed
-   *   client: solve PoW
    *   client: OPAQUE recovery start (seed)
    *   client: OPAQUE password start (newPassword)
    *   POST /password/reset/start   →  session_id, recovery_response,
@@ -860,17 +873,15 @@ export class AuthClient {
    * `KIND_RECOVERY` envelope stays intact, so the same 24 words
    * work for future resets.
    *
-   * Note that the recovery flow only requires **one** PoW solve
-   * (gating `/start`), unlike signup which needs two (one per
-   * server-side write). Wrong-mnemonic attempts fail at the AKE
+   * The recovery flow pays no proof of work (ADR-0054 S4: the start is
+   * limited per named account and per address instead). Wrong-mnemonic
+   * attempts fail at the AKE
    * finalization with the same indistinguishable response as
    * `/recovery/login/finish`.
    *
-   * @param accountId    Raw 16-byte UUIDv7. The recovery flow can
-   *                     only target an account whose id is known
-   *                     locally; until 1.16d's discovery service
-   *                     lands, that means the account that
-   *                     signed up on this device.
+   * @param handle       The login handle (ADR-0054 S5), base64url of the
+   *                     32 bytes `loginHandle(username)` returns. The
+   *                     account id comes back in the finish.
    * @param mnemonicSeed The 64-byte BIP39 seed derived from the
    *                     user's typed phrase via
    *                     `RecoveryMnemonic.fromPhrase(phrase).toSeed()`.
@@ -881,13 +892,11 @@ export class AuthClient {
    *                     bytes.
    */
   async recover(
-    accountId: Uint8Array,
+    handle: string,
     mnemonicSeed: Uint8Array,
     newPassword: Uint8Array,
   ): Promise<RecoverResult> {
-    if (accountId.length !== 16) {
-      throw new AuthClientArgError("accountId must be 16 bytes");
-    }
+    requireHandle(handle);
     if (mnemonicSeed.length === 0) {
       throw new AuthClientArgError("mnemonicSeed must be non-empty");
     }
@@ -896,11 +905,6 @@ export class AuthClient {
     }
 
     const wasm = await loadWasm();
-    const accountIdB64 = base64Encode(accountId);
-
-    // Single PoW solve — the server only gates /start.
-    const challenge = await this.powChallenge();
-    const pow = await solvePow(challenge.seed, challenge.effort_bits);
 
     // Two parallel OPAQUE flows: recovery login proves the user
     // knows the mnemonic; password registration enrols the new
@@ -910,8 +914,7 @@ export class AuthClient {
     const newPasswordReg = wasm.OpaqueRegister.startPassword(newPassword);
 
     const startResp = await this.passwordResetStart({
-      pow,
-      account_id: accountIdB64,
+      handle,
       recovery_request: recoveryLogin.requestB64,
       new_password_request: newPasswordReg.requestB64,
     });
@@ -944,7 +947,7 @@ export class AuthClient {
     }
 
     return {
-      accountId,
+      accountId: accountIdOfFinish(finishResp.account_id, "/password/reset/finish"),
       exportKey: passwordOut.exportKey,
       sessionToken: finishResp.session_token,
       sessionExpiresAtMs: finishResp.session_expires_at_ms,
@@ -970,7 +973,7 @@ export class AuthClient {
   }
 
   /** `POST /vault/enroll` — store (or replace) the account's word vault.
-   *  Bearer-authenticated, no PoW. */
+   *  Bearer-authenticated, no proof of work. */
   async wordVaultEnroll(sessionToken: string, req: WordVaultEnrollRequest): Promise<void> {
     if (sessionToken.length === 0) {
       throw new AuthClientArgError("sessionToken must be non-empty");
@@ -979,39 +982,30 @@ export class AuthClient {
   }
 
   /** `POST /vault/recover/start` — the positions, salt and Argon2 cost to
-   *  answer with. Anonymous + PoW; an unknown account gets stable decoys, so
+   *  answer with. Anonymous, limited server-side (ADR-0054 S4); an unknown account gets stable decoys, so
    *  a 200 says nothing about whether the account exists. */
-  async wordVaultRecoverStart(accountId: Uint8Array): Promise<WordVaultRecoverStartResponse> {
-    if (accountId.length !== 16) {
-      throw new AuthClientArgError("accountId must be 16 bytes");
-    }
-    const challenge = await this.powChallenge();
-    const pow = await solvePow(challenge.seed, challenge.effort_bits);
+  async wordVaultRecoverStart(handle: string): Promise<WordVaultRecoverStartResponse> {
+    requireHandle(handle);
     return this.post<WordVaultRecoverStartRequest, WordVaultRecoverStartResponse>(
       "/vault/recover/start",
-      { pow, account_id_b64: base64UrlEncodeNoPad(accountId) },
+      { handle },
     );
   }
 
-  /** `POST /vault/recover/finish` — submit the guess. Anonymous + PoW. A
+  /** `POST /vault/recover/finish` — submit the guess. Anonymous, limited server-side (ADR-0054 S4). A
    *  generic 401 `AuthHttpError` means a wrong answer, an unknown account or
    *  a destroyed vault (indistinguishable by design); 429 is the
    *  5-in-15-minutes lockout; 503 means the vault is disabled server-side.
    *  Returns the sealed entropy the wasm `WordVaultAnswer.open` unseals. */
-  async wordVaultRecoverFinish(accountId: Uint8Array, verifier: Uint8Array): Promise<Uint8Array> {
-    if (accountId.length !== 16) {
-      throw new AuthClientArgError("accountId must be 16 bytes");
-    }
+  async wordVaultRecoverFinish(handle: string, verifier: Uint8Array): Promise<Uint8Array> {
+    requireHandle(handle);
     if (verifier.length !== 32) {
       throw new AuthClientArgError("verifier must be 32 bytes");
     }
-    const challenge = await this.powChallenge();
-    const pow = await solvePow(challenge.seed, challenge.effort_bits);
     const resp = await this.post<WordVaultRecoverFinishRequest, WordVaultRecoverFinishResponse>(
       "/vault/recover/finish",
       {
-        pow,
-        account_id_b64: base64UrlEncodeNoPad(accountId),
+        handle,
         verifier_b64: base64Encode(verifier),
       },
     );
@@ -1059,7 +1053,7 @@ export class AuthClient {
   // -----------------------------------------------------------------
 
   /** `POST /device/request` — the fresh device posts its pairing payload.
-   *  Anonymous + PoW. A 200 says nothing about whether the account exists. */
+   *  Anonymous, limited server-side (ADR-0054 S4). A 200 says nothing about whether the account exists. */
   async deviceRequestCreate(
     accountId: Uint8Array,
     pairingPayload: Uint8Array,
@@ -1067,12 +1061,9 @@ export class AuthClient {
     if (accountId.length !== 16) {
       throw new AuthClientArgError("accountId must be 16 bytes");
     }
-    const challenge = await this.powChallenge();
-    const pow = await solvePow(challenge.seed, challenge.effort_bits);
     const resp = await this.post<DeviceRequestCreateRequest, DeviceRequestCreateResponse>(
       "/device/request",
       {
-        pow,
         account_id_b64: base64UrlEncodeNoPad(accountId),
         pairing_payload_b64: base64Encode(pairingPayload),
       },
@@ -1120,6 +1111,42 @@ export class AuthClient {
     );
   }
 
+  // -----------------------------------------------------------------
+  // Login handle — ADR-0054 S5, sign in by name
+  // -----------------------------------------------------------------
+
+  /** `PUT /auth/login-handle` — bind this account to `handle` (base64url,
+   *  32 bytes), replacing its previous one. Idempotent for the same handle.
+   *  `409 handle-taken` (another account holds it) surfaces as an
+   *  `AuthHttpError` with status 409; `503 login-by-name-disabled` as 503. */
+  async bindLoginHandle(sessionToken: string, handle: string): Promise<void> {
+    if (sessionToken.length === 0) {
+      throw new AuthClientArgError("sessionToken must be non-empty");
+    }
+    requireHandle(handle);
+    await this.request<LoginHandlePutRequest, LoginHandlePutResponse>(
+      "PUT",
+      "/auth/login-handle",
+      { handle },
+      sessionToken,
+    );
+  }
+
+  /** `DELETE /auth/login-handle` — remove this account's handle. Returns
+   *  whether one was bound. */
+  async releaseLoginHandle(sessionToken: string): Promise<boolean> {
+    if (sessionToken.length === 0) {
+      throw new AuthClientArgError("sessionToken must be non-empty");
+    }
+    const resp = await this.request<undefined, LoginHandleDeleteResponse>(
+      "DELETE",
+      "/auth/login-handle",
+      undefined,
+      sessionToken,
+    );
+    return resp.removed;
+  }
+
   private async request<Req, Res>(
     method: "PUT" | "DELETE",
     endpoint: string,
@@ -1143,7 +1170,7 @@ export class AuthClient {
     }
     if (!response.ok) {
       const text = await safeReadBody(response);
-      throw new AuthHttpError(response.status, endpoint, text);
+      throw new AuthHttpError(response.status, endpoint, text, retryAfterHeader(response));
     }
     return (await response.json()) as Res;
   }
@@ -1161,7 +1188,7 @@ export class AuthClient {
     }
     if (!response.ok) {
       const text = await safeReadBody(response);
-      throw new AuthHttpError(response.status, endpoint, text);
+      throw new AuthHttpError(response.status, endpoint, text, retryAfterHeader(response));
     }
     return (await response.json()) as Res;
   }
@@ -1192,12 +1219,42 @@ export class AuthClient {
 
     if (!response.ok) {
       const text = await safeReadBody(response);
-      throw new AuthHttpError(response.status, endpoint, text);
+      throw new AuthHttpError(response.status, endpoint, text, retryAfterHeader(response));
     }
 
     // Some endpoints return small JSON, others return `{ ok: true }`.
     // Both are JSON; force the parse so a non-JSON 200 is loud.
     return (await response.json()) as Res;
+  }
+}
+
+/** A login handle on the wire: base64url without padding of 32 bytes. */
+const HANDLE_WIRE = /^[A-Za-z0-9_-]{43}$/;
+
+function requireHandle(handle: string): void {
+  if (!HANDLE_WIRE.test(handle)) {
+    throw new AuthClientArgError("handle must be base64url (no pad) of 32 bytes");
+  }
+}
+
+/** The 16-byte account id a finish response carries (standard base64). */
+function accountIdOfFinish(b64: string, endpoint: string): Uint8Array {
+  let bytes: Uint8Array;
+  try {
+    bytes = base64Decode(b64);
+  } catch {
+    throw new AuthHttpError(200, endpoint, "account_id is not base64");
+  }
+  if (bytes.length !== 16) {
+    throw new AuthHttpError(200, endpoint, "account_id is not 16 bytes");
+  }
+  return bytes;
+}
+
+/** Throw the standard `AbortError` when `signal` has fired. */
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) {
+    throw new DOMException("signup cancelled", "AbortError");
   }
 }
 

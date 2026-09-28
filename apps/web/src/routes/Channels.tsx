@@ -27,6 +27,7 @@
  * dark); this file carries no colour literal and no local palette.
  */
 
+import { anonTokenMessage } from "../tokens/token-copy";
 import {
   createEffect,
   createMemo,
@@ -407,8 +408,15 @@ const NewChannel: Component = () => {
         try {
           await registerChannelHandle(wantedHandle, id, secrets.sessionToken);
         } catch (err) {
+          const token = anonTokenMessage(
+            err,
+            "Could not claim the handle. Check your connection and try again.",
+          );
           if (err instanceof DiscoveryHttpError && err.status === 409) {
             setError(`@${wantedHandle} is already taken. Pick another, or leave it blank.`);
+          } else if (token !== null) {
+            // ADR-0054 S3: the lookup and the register each spend a token.
+            setError(token);
           } else {
             setError(`Could not claim the handle. Try again. (${String(err)})`);
           }

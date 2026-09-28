@@ -19,7 +19,7 @@ import Foundation
 /// This is a thin channel-facing wrapper over
 /// ``DiscoveryClient/registerChannelName(channelId:handle:)`` /
 /// ``DiscoveryClient/lookupChannel(handle:)`` (which own the
-/// multi-round-trip PoW → blind → evaluate → finalize → PoW →
+/// multi-round-trip blind → evaluate (one anonymous token) → finalize →
 /// register/lookup dance and reuse the UniFFI `OprfBlinder` blind/finalize
 /// primitives — no OPRF is reimplemented here). It only bridges the hex
 /// `channel_id` the channels UI speaks to the raw-16-byte form the
@@ -40,29 +40,27 @@ public enum ChannelDiscovery {
     }
 
     /// Register the `@handle → channel_id` mapping at channel-create time.
-    /// Session-token-gated write (a DoS rate-limit role — the token's
-    /// account is NOT compared against the channel; ownership lives at the
-    /// PublisherGroup layer).
+    /// Since ADR-0054 S3 an anonymous write spending a `discovery-lookup`
+    /// token (the OPRF step) and a `discovery-register` token, drawn with the
+    /// signed-in session by ``AnonTokenPool``; the request itself never
+    /// carries the session (ownership lives at the PublisherGroup layer).
     ///
     /// - Parameters:
     ///   - handle:       User-typed handle, with or without a leading `@`
     ///                   — normalised inside `OprfBlinder.blind`.
     ///   - channelIdHex: The freshly-minted 32-char hex channel id.
-    ///   - sessionToken: Bearer token for the gated write (from
-    ///                   `IdentitySecrets.sessionToken`).
     /// - Returns: The server `ok` flag.
     /// - Throws: ``DiscoveryClientError/http(status:endpoint:body:)`` with
     ///   `status == 409` when the handle is already taken
-    ///   (first-come-first-served).
+    ///   (first-come-first-served); ``AnonTokenUnavailable`` when no token
+    ///   could be spent.
     @discardableResult
     public static func registerChannelHandle(
         handle: String,
-        channelIdHex: String,
-        sessionToken: String
+        channelIdHex: String
     ) async throws -> Bool {
         let channelId = try ChannelsComposer.channelIdFromHex(channelIdHex)
         let client = DiscoveryClient()
-        client.setSessionToken(sessionToken)
         return try await client.registerChannelName(
             channelId: channelId,
             handle: handle

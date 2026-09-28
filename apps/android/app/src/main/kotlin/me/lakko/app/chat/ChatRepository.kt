@@ -106,8 +106,7 @@ private const val MILLIS_PER_SECOND: Long = 1_000L
 
 /** ADR-0050 section 2.8 — how long [ChatRepository.admitDevice] waits for the
  *  new device's KeyPackage to appear in the directory, and how often it looks.
- *  The fresh device publishes it after it has landed a session, which includes
- *  a proof-of-work solve. */
+ *  The fresh device publishes it after it has landed a session. */
 private const val ADMIT_DEVICE_WAIT_MS: Long = 180_000L
 private const val ADMIT_DEVICE_POLL_MS: Long = 3_000L
 
@@ -2903,13 +2902,11 @@ public class ChatRepository(
         // answers only its members, so the joiner never reads it: an empty
         // knock learns the epoch, and a second knock carries the attribution
         // (advisory, ADR-0028 OQ2) and the proposal built for that epoch. Each
-        // knock pays its own proof of work.
+        // knock spends its own `ds-knock` token (ADR-0054).
         try {
             runLinkJoinKnock(
                 knock = { payloads ->
-                    dsClient.knockWithPow(groupId, payloads) { seed, bits ->
-                        me.lakko.app.auth.solvePow(seed, bits)
-                    }.epoch
+                    dsClient.knock(groupId, payloads).epoch
                 },
                 buildProposal = { epoch ->
                     providerLock.withLock {

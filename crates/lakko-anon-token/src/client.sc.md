@@ -14,7 +14,8 @@ The issuer must evaluate a token without seeing it, or it could link the account
 ## Public contract
 
 - `TokenRequest::new(context, epoch, count)` — `count` in `1..=MAX_BATCH` else `BadBatchSize`. For each token: a fresh 32-byte nonce from the OS CSPRNG, the input `token_input(context, epoch, nonce)`, and a VOPRF-mode blind. The request holds the blinding factors and is as sensitive as the tokens it becomes; its `Debug` prints context, epoch and count only.
-- `blinded_elements()` — what to send to `POST /auth/tokens`, in order.
+- `blinded_elements()` — what to send to `POST /auth/tokens`, in order; `blinded_elements_b64url()` the same as base64url without padding, the text the issuance body's `blinded_elements` field carries.
+- `finalize_b64url(self, evaluations, proof, public_key)` — `finalize` over the base64url text the issuer and the key route send. Each field is length-checked on the text and decoded into its fixed width before `finalize` runs; a field that does not decode maps to the error its binary form would raise (an evaluation to `BadElement`, the proof to `ProofVerification`, the key to `BadPublicKey`). Added in ADR-0054 S3 so both FFI surfaces share one decoder.
 - `finalize(self, evaluations, proof, public_key)` — consumes the request. Refuses: a count mismatch (`CountMismatch`); an invalid or identity public key (`BadPublicKey`); an invalid or identity evaluation (`BadElement`); a malformed proof, or one that does not verify for these blinded elements, evaluations and `public_key` (`ProofVerification`). All or nothing: no token is returned unless the whole batch verifies.
 
 ## Invariants upheld
@@ -30,4 +31,4 @@ The issuer must evaluate a token without seeing it, or it could link the account
 ## References
 
 - ADR-0054 decision 2; RFC 9497 (VOPRF mode, batched proofs).
-- Tests (`tests/round_trip.rs`): `an_evaluation_under_another_key_is_refused_by_the_client`, `a_tampered_proof_or_evaluation_is_refused_by_the_client`, `the_client_refuses_bad_shapes`, `a_batch_round_trips_and_every_token_verifies_once_per_spend_id`.
+- Tests (`tests/round_trip.rs`): `an_evaluation_under_another_key_is_refused_by_the_client`, `a_tampered_proof_or_evaluation_is_refused_by_the_client`, `the_client_refuses_bad_shapes`, `a_batch_round_trips_and_every_token_verifies_once_per_spend_id`, `the_base64url_exchange_round_trips_and_the_header_value_verifies`, `the_base64url_finalize_refuses_bad_text`.

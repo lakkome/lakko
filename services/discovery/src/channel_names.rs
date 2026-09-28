@@ -77,7 +77,6 @@ fn decode_fixed<const N: usize>(
 /// Body for [`register`].
 #[derive(Deserialize)]
 pub(crate) struct RegisterChannelRequest {
-    pub(crate) pow: crate::pow::PowProof,
     /// Base64-encoded VOPRF output (64 bytes for
     /// Ristretto255-SHA512). Client computes locally after
     /// a `/discovery/oprf` round-trip.
@@ -97,17 +96,17 @@ pub(crate) struct RegisterChannelResponse {
 /// registration of the same hash with a different
 /// channel id is **409 Conflict**.
 ///
-/// Session-token-gated (same DoS-rate-limit role as
-/// `/discovery/register` — see registry.rs §"Phase-1
-/// known gap"). The token's account id is NOT compared
-/// against the channel id; see module-level docs for
-/// the rationale.
+/// Anonymous: no session names the publisher. Since
+/// ADR-0054 S3 the request spends one `discovery-register`
+/// anonymous token (`x-lakko-anon-token`, checked by the
+/// router's gate before this handler runs), which is what
+/// rations squatting per account without linking the
+/// channel to one. See module-level docs for why no
+/// account binds the channel id.
 pub(crate) async fn register(
     State(state): State<AppState>,
     Json(payload): Json<RegisterChannelRequest>,
 ) -> Result<Json<RegisterChannelResponse>, (StatusCode, String)> {
-    crate::pow::verify_proof(&state.db, &payload.pow).await?;
-
     let oprf_hash = decode_fixed::<OPRF_HASH_LEN>(&payload.oprf_hash, "oprf_hash")?;
     let channel_id = decode_fixed::<CHANNEL_ID_LEN>(&payload.channel_id, "channel_id")?;
 
@@ -146,7 +145,6 @@ pub(crate) async fn register(
 /// Body for [`lookup`].
 #[derive(Deserialize)]
 pub(crate) struct LookupChannelRequest {
-    pub(crate) pow: crate::pow::PowProof,
     pub(crate) oprf_hash: String,
 }
 
@@ -168,8 +166,6 @@ pub(crate) async fn lookup(
     State(state): State<AppState>,
     Json(payload): Json<LookupChannelRequest>,
 ) -> Result<Json<LookupChannelResponse>, (StatusCode, String)> {
-    crate::pow::verify_proof(&state.db, &payload.pow).await?;
-
     let oprf_hash = decode_fixed::<OPRF_HASH_LEN>(&payload.oprf_hash, "oprf_hash")?;
 
     let row: Option<(Vec<u8>,)> =

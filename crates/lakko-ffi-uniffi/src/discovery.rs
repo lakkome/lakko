@@ -34,8 +34,8 @@
 use std::sync::Mutex;
 
 use lakko_discovery_client::{
-    normalize_username as inner_normalize, validate_username as inner_validate,
-    DiscoveryClientError, OprfBlinder as InnerBlinder,
+    login_handle as inner_login_handle, normalize_username as inner_normalize,
+    validate_username as inner_validate, DiscoveryClientError, OprfBlinder as InnerBlinder,
 };
 
 use crate::FfiError;
@@ -67,6 +67,24 @@ impl From<DiscoveryClientError> for FfiError {
 #[uniffi::export]
 pub fn validate_username(input: String) -> Result<String, FfiError> {
     inner_validate(&input).map_err(Into::into)
+}
+
+/// The login handle for a typed username (ADR-0054 S5): normalise, apply
+/// the username rule, then `BLAKE3-derive-key("lakko/auth/login-handle/v1",
+/// canonical)`. 32 bytes; sent base64url (no padding) as `handle` to the
+/// pre-session sign-in and recovery routes of `services/auth`, and bound to
+/// the signed-in account with `PUT /auth/login-handle`.
+///
+/// # Errors
+///
+/// * [`FfiError::UsernameEmpty`] / [`FfiError::UsernameTooShort`] /
+///   [`FfiError::UsernameTooLong`] / [`FfiError::UsernameInvalidCharacters`]
+///   — the same reasons as [`validate_username`].
+#[uniffi::export]
+pub fn login_handle(username: String) -> Result<Vec<u8>, FfiError> {
+    inner_login_handle(&username)
+        .map(|h| h.to_vec())
+        .map_err(Into::into)
 }
 
 /// Normalise the typed username and return the canonical form.
@@ -231,6 +249,21 @@ mod tests {
             Err(other) => panic!("expected UsernameEmpty, got {other:?}"),
             Ok(_) => panic!("expected empty-username rejection"),
         }
+    }
+
+    #[test]
+    fn login_handle_is_the_pinned_derivation_and_refuses_typed() {
+        let h = login_handle("@Alice".to_string()).unwrap();
+        assert_eq!(
+            h,
+            lakko_contacts::username::login_handle("alice")
+                .unwrap()
+                .to_vec()
+        );
+        assert!(matches!(
+            login_handle("al".to_string()),
+            Err(FfiError::UsernameTooShort(_))
+        ));
     }
 
     #[test]

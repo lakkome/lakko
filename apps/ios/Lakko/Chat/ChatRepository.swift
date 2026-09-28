@@ -917,7 +917,7 @@ public final class ChatRepository: ObservableObject {
     /// keeps handing out a KeyPackage this device can no longer open, and
     /// the next person to add this user fails. A failed join republishes
     /// too: whether the keys were consumed before the failure is not
-    /// observable from here, and a spare upload costs one PoW.
+    /// observable from here, and a spare upload costs one bearer request.
     public func joinGroupFromWelcome(welcomeBytes: Data) async throws -> String {
         defer { republishKeyPackage() }
         guard let identity = canonicalIdentity else {
@@ -1571,18 +1571,13 @@ public final class ChatRepository: ObservableObject {
         // access key is registered at (no journal read: a non-member cannot
         // read a claimed journal, and paging one it is not in was the old
         // shape), the proposal is built for that epoch, and a second knock
-        // carries the attribution and the proposal. Each knock pays its own
-        // proof of work.
+        // carries the attribution and the proposal. Each knock spends one
+        // `ds-knock` anonymous token (ADR-0054 S3).
         let client = dsClient
         do {
             try await DsKnockJoin(
-                solvePow: {
-                    let challenge = try await client.powChallenge()
-                    return try await solvePow(
-                        seedB64: challenge.seed, effortBits: challenge.effortBits)
-                },
-                knock: { pow, payloads in
-                    try await client.knock(groupId: groupId, pow: pow, payloads: payloads).epoch
+                knock: { payloads in
+                    try await client.knock(groupId: groupId, payloads: payloads).epoch
                 },
                 createProposal: { epoch in
                     try identity.createExternalJoinProposal(groupId: groupId, epoch: epoch)
@@ -4367,8 +4362,7 @@ public final class ChatRepository: ObservableObject {
 
     /// How long ``admitDevice(deviceKey:)`` waits for the new device's
     /// KeyPackage to appear in the directory, and how often it looks. The fresh
-    /// device publishes it after it has landed a session, which includes a
-    /// proof-of-work solve.
+    /// device publishes it after it has landed a session.
     static let admitDeviceWaitMs: Int64 = 180_000
     static let admitDevicePollMs: UInt64 = 3_000
 

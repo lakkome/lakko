@@ -2,19 +2,17 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Resolve which account a recover-from-words flow should target.
+ * Which name a recover-from-words flow targets.
  *
- * Extracted from `AuthContext.recover` (G-29) as a pure, dependency-injected
- * function so the cross-device behaviour — a fresh device recovers given the
- * username + phrase — is locked by a unit test instead of living inlined in a
- * large async method where it can silently regress.
+ * Since ADR-0054 S5 the recovery routes are addressed by the login handle of
+ * a NAME, never by an account id, and nothing is looked up before a session:
+ * the account id comes back in the finish. So the only question left is
+ * which name: the typed one, else the account cached on this device (the
+ * form lets a returning user leave the field empty). A cached guest account
+ * has no name, and neither does an empty field on a fresh device: then there
+ * is nothing to address, and the form asks for the username.
  *
- * The rule (identical on web / iOS / Android `recover`): a local
- * `(accountId, username)` cache hit wins when the typed username is empty or
- * matches it; otherwise a discovery lookup on the typed username binds the
- * account. With neither we cannot target the recover. A lookup miss collapses
- * into the same error a bad phrase yields downstream — we never confirm or
- * deny a username's existence (preserves the no-probing property).
+ * Pure, so the rule is pinned by a unit test (G-29).
  */
 
 /** Minimal shape of a locally-cached `(accountId, username)` record. */
@@ -23,64 +21,19 @@ export interface CachedAccount {
   readonly username: string;
 }
 
-/** Minimal shape of a discovery account lookup result. */
-export interface AccountLookup {
-  /** Raw 16-byte account id, or `null` when the username is unregistered. */
-  readonly account: Uint8Array | null;
-  /** Server-normalised form of the looked-up username. */
-  readonly normalisedUsername: string;
-}
-
-/** The resolved account the recover targets. */
-export interface ResolvedAccount {
-  readonly accountIdB64: string;
-  readonly resolvedUsername: string;
-}
-
 /**
- * Resolve the account to recover.
+ * The name to recover.
  *
- * @throws Error `"invalid recovery"` when the typed username is unregistered
- *   (collapsed with the downstream bad-phrase rejection — no username probing).
- * @throws Error a fresh-device prompt when neither a cached account nor a typed
- *   username is available.
+ * @throws Error asking for the username when neither a typed name nor a
+ *   cached, named account is available.
  */
-export async function resolveRecoverAccount(args: {
+export function resolveRecoverUsername(args: {
   readonly cached: CachedAccount | null;
   readonly username: string | undefined;
-  readonly lookup: (username: string) => Promise<AccountLookup>;
-  readonly encodeAccountId: (bytes: Uint8Array) => string;
-}): Promise<ResolvedAccount> {
-  const trimmedUsername = args.username?.trim() ?? "";
-
-  // A local cache hit wins when the typed username is empty or matches it.
-  if (
-    args.cached !== null &&
-    (trimmedUsername.length === 0 || args.cached.username === trimmedUsername)
-  ) {
-    return {
-      accountIdB64: args.cached.accountIdB64,
-      resolvedUsername: args.cached.username,
-    };
-  }
-
-  // Otherwise resolve the typed username via discovery so a FRESH device can
-  // recover given username + phrase.
-  if (trimmedUsername.length > 0) {
-    const result = await args.lookup(trimmedUsername);
-    if (result.account === null) {
-      // Collapsed with "bad phrase" downstream by the OPAQUE rejection — we
-      // don't help probe the username space.
-      throw new Error("invalid recovery");
-    }
-    return {
-      accountIdB64: args.encodeAccountId(result.account),
-      resolvedUsername: result.normalisedUsername,
-    };
-  }
-
-  throw new Error(
-    "no account on this device — enter your username so we can " +
-      "look up the account to recover",
-  );
+}): string {
+  const typed = args.username?.trim() ?? "";
+  if (typed.length > 0) return typed;
+  const cached = args.cached?.username.trim() ?? "";
+  if (cached.length > 0) return cached;
+  throw new Error("Enter the username of the account to recover.");
 }

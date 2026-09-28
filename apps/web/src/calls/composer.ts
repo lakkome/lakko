@@ -143,8 +143,8 @@ export class CallInviteComposerArgError extends Error {
  *     latter.
  *
  * The call MUST be driven from inside a user gesture (the
- * server-side PoW solve inside `uploadCallInvite` takes a
- * few seconds on slow devices and freezing it under a
+ * network round-trip inside `uploadCallInvite` can take a
+ * moment on a slow connection and freezing it under a
  * synchronous click handler degrades UX). That cost is the
  * reason minting happens on the first `Invite` inside a call
  * rather than when the call starts.

@@ -11,7 +11,7 @@
  *
  *   * **ACCESS** — a single-use 32-byte device-authorization
  *     `grant_token` minted by `POST /device/authorize/start`
- *     (bearer + PoW). The fresh device redeems it anonymously at
+ *     (bearer). The fresh device redeems it anonymously at
  *     `POST /device/authorize/redeem` for a session-token triple.
  *   * **IDENTITY** — the 64-byte AccountIdentity (BIP39 phrase)
  *     seed (ADR-0017), so the fresh device never types the phrase.
@@ -88,7 +88,7 @@ const PER_REQUEST_LONG_POLL_SECS = 15;
 
 /** Default soft timeout for the joiner-side recovery poll. The
  *  scanner publishes the row right after the Welcome + history
- *  bundle (one extra PoW + `/device/authorize/start` round-trip),
+ *  bundle (one extra `/device/authorize/start` round-trip),
  *  so a short window suffices; absence (older scanner build, or
  *  the best-effort scanner half failed) is tolerated — the join
  *  completes without a recovery payload. */

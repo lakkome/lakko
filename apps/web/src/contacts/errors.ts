@@ -5,6 +5,7 @@
  * Error copy for the Contacts screens. Moved out of `routes/Contacts.tsx`
  * unchanged so the list, detail and invite panels share one formatter.
  */
+import { anonTokenMessage } from "../tokens/token-copy";
 import { ContactsError, SupersessionRefused } from "./client";
 import { supersessionRefusedMessage } from "./supersession-message";
 
@@ -16,6 +17,12 @@ export function atLabel(raw: string): string | undefined {
 }
 
 export function formatContactsError(err: unknown, peerLabel?: string): string {
+  // ADR-0054 S3 — a lookup or a link that could not spend an anonymous token.
+  const token = anonTokenMessage(
+    err,
+    "Could not reach Lakko. Check your connection and try again.",
+  );
+  if (token !== null) return token;
   // KT-log S4 — a fail-closed supersession refusal (an unproven CHANGED
   // key) is the moment the reset-vs-compromise distinction matters most.
   // Render a reset-aware message driven by the best-effort log marker the

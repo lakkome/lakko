@@ -47,16 +47,17 @@ public object ChannelDiscovery {
 
     /**
      * Register the `@handle → channel_id` mapping at channel-create
-     * time. Session-token-gated write (a DoS rate-limit role — the
-     * token's account is NOT compared against the channel; ownership
-     * lives at the PublisherGroup layer).
+     * time. Anonymous: it spends a `discovery-lookup` token (the OPRF)
+     * and a `discovery-register` token (ADR-0054); nothing binds the
+     * handle to the account, ownership lives at the PublisherGroup
+     * layer.
      *
      * @param handle       User-typed handle, with or without a
      *                     leading `@` — normalised inside
      *                     `OprfBlinder.blind`.
      * @param channelIdHex The freshly-minted 32-char hex channel id.
-     * @param sessionToken Bearer token for the gated write (from
-     *                     `IdentitySecrets.sessionToken`).
+     * @param sessionToken Kept for the caller's shape; the register
+     *                     itself goes out without a session.
      * @return `true` once the handle is bound.
      * @throws me.lakko.app.discovery.DiscoveryHttpError with
      *   `status == 409` when the handle is already taken

@@ -72,8 +72,15 @@ export default function RestoreIdentityPrompt(): JSX.Element {
   onMount(() => {
     const acct = account();
     if (acct === null) return;
+    // ADR-0054 S5: the vault is addressed by the name's login handle. An
+    // account with no name (a guest, or a passkey sign-in with no name on
+    // this device) has nothing to address it by.
+    if (acct.username.trim().length === 0) {
+      setWordsOff(true);
+      return;
+    }
     void auth
-      .wordVaultStart(acct.accountIdB64)
+      .wordVaultStart(acct.username)
       .then((c) => setChallenge(c))
       .catch((err: unknown) => {
         setChallengeError(wordVaultErrorMessage(err, null));
@@ -94,7 +101,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
     setError(null);
     setBusy(true);
     try {
-      const fullPhrase = await auth.wordVaultOpen(acct.accountIdB64, c, words());
+      const fullPhrase = await auth.wordVaultOpen(acct.username, c, words());
       await auth.provideRecoveryPhrase(fullPhrase);
       setWords(["", "", ""]);
     } catch (err) {

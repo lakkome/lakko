@@ -101,7 +101,7 @@ public fun usernameCanonicalHint(check: UsernameCheck, input: String): String? {
  * What a search field does with [input]: a lookup for a name that passes, or
  * nothing and the reason for one that fails. A search field NEVER sends a
  * lookup for a failing name (UX §4) — the blinder would refuse it anyway, but
- * the round-trip (and its proof-of-work) is not spent on it.
+ * the round-trip (and its lookup token) is not spent on it.
  */
 public sealed interface SearchDecision {
     /** Send the lookup for [normalized]. */

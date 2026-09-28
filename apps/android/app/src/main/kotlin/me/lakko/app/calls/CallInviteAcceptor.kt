@@ -110,6 +110,10 @@ public class CallInviteAcceptor(
         /** The discovery service answered `429` on fetch or consume. The
          *  link may be fine; the UI says to try again later. */
         public data object RateLimited : Result()
+
+        /** ADR-0054: today's allowance of invite-consume tokens is used up
+         *  (`ACTION_ALLOWANCE_USED_COPY`). */
+        public data object AllowanceUsed : Result()
         public data class SignatureFailure(val reason: String) : Result()
         public data class Failed(val message: String) : Result()
     }
@@ -201,6 +205,8 @@ public class CallInviteAcceptor(
                 )
             } catch (e: Exception) {
                 if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) return Result.RateLimited
+                // ADR-0054 - the consume spends an `invite-consume` token.
+                if (me.lakko.app.anon.isAnonTokenQuotaExhausted(e)) return Result.AllowanceUsed
                 return Result.Failed(message = e.message ?: e.toString())
             }
             when (consumeResult) {

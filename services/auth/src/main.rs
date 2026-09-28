@@ -10,10 +10,9 @@
 //! Phase 1.1d: BIP39 mnemonic recovery — a parallel OPAQUE registration
 //! kind, bundled into signup and exposed for re-authentication via
 //! `/recovery/login/{start,finish}`.
-//! Phase 1.1e: Equix proof-of-work anti-spam (`/pow/challenge`) gating
-//! the four expensive endpoints. Privacy Pass tokens (RFC 9576) are
-//! deferred until we have App Attest / Play Integrity issuers; IP rate
-//! limit with rotating salts lands in Phase 2 hardening.
+//! Phase 1.1e: Equix proof-of-work anti-spam (`/pow/challenge`). Since
+//! ADR-0054 S4 it gates `/signup/start` only; every other pre-session route
+//! is limited by server-side counters (`src/limits.rs`).
 //!
 //! Configuration via environment variables (loaded by systemd from
 //! `/etc/lakko/lakko.env`):
@@ -21,7 +20,13 @@
 //! - `LAKKO_BIND` — `host:port` to listen on (default `127.0.0.1:8081`)
 //! - `DATABASE_URL` — sqlx-style MariaDB DSN
 //! - `RUST_LOG` — `tracing-subscriber` env-filter spec
-//! - `LAKKO_POW_EFFORT_BITS` — PoW difficulty (default 8; 0 in tests)
+//! - `LAKKO_SIGNUP_POW_EFFORT_BITS` — the one proof of work left, on
+//!   `/signup/start` (ADR-0054 S4; default 8, to be set by measurement on the
+//!   slowest supported phone; 0 in tests)
+//! - `LAKKO_AUTH_LIMIT_<SCOPE>` / `LAKKO_AUTH_IP_LIMIT_<CATEGORY>` — the
+//!   per-name and per-address attempt limits that replaced proof of work on
+//!   every other route, each `N/SECS` (see `src/limits.rs` for the names and
+//!   the defaults, which are chosen, not measured)
 //! - `LAKKO_SESSION_TOKEN_SECRET` — base64-encoded HMAC-SHA256 key
 //!   (≥ 32 bytes after decode) shared with `lakko-svc-discovery` for
 //!   Phase 1.5b session-token issuance + verification. **Required**
@@ -52,6 +57,12 @@
 //! - `LAKKO_ANON_TOKEN_MASTER_SECRET` — 64 hex characters shared with every
 //!   service that verifies anonymous tokens (ADR-0054). Optional; unset =
 //!   `/auth/tokens*` return 503 (logged as a warning at startup).
+//! - `LAKKO_AUTH_HANDLE_PEPPER` — 64 hex characters keying the stored login
+//!   handles (ADR-0054 S5). Optional; unset = every route that names an
+//!   account by login handle (login, recovery login, password reset, TOTP
+//!   recovery, the word vault, recovery-contact recovery, and
+//!   `/auth/login-handle`) answers 503 `login-by-name-disabled`, logged as a
+//!   warning at startup. Losing it unbinds every handle.
 //! - `LAKKO_ANON_TOKEN_WINDOW_SECS` — anonymous-token epoch window (default
 //!   86400; must match every verifier).
 //! - `LAKKO_ANON_TOKEN_QUOTA_<CONTEXT>` — tokens per account per epoch for one
@@ -81,6 +92,8 @@
 //! - `GET  /.well-known/jwks.json`   — publish call-JWT public key (Phase 3b4 forward, anonymous)
 //! - `POST /auth/tokens`             — issue anonymous tokens against a quota (ADR-0054, bearer-auth)
 //! - `GET  /auth/tokens/key/{context}/{epoch}` — anonymous-token public key (ADR-0054, anonymous)
+//! - `PUT  /auth/login-handle`       — bind the caller's login handle (ADR-0054 S5, bearer-auth)
+//! - `DELETE /auth/login-handle`     — remove it (ADR-0054 S5, bearer-auth)
 
 #![forbid(unsafe_code)]
 
@@ -90,6 +103,8 @@ mod call_jwt;
 mod device_authorize;
 mod device_request;
 mod genesis_attest;
+mod limits;
+mod login_handle;
 mod opaque;
 mod otp_sender;
 mod pow;
@@ -226,6 +241,14 @@ pub(crate) struct AppState {
     /// secret + epoch window + per-context quotas). `None` when
     /// `LAKKO_ANON_TOKEN_MASTER_SECRET` is unset: `/auth/tokens*` return 503.
     pub(crate) anon_tokens: Option<Arc<anon_tokens::AnonTokenIssuer>>,
+    /// ADR-0054 S5 — pepper keying the stored login handles
+    /// (`LAKKO_AUTH_HANDLE_PEPPER`, 64 hex). `None` disables every route that
+    /// names an account by login handle (503 `login-by-name-disabled`).
+    pub(crate) handle_pepper: Option<Arc<[u8; 32]>>,
+    /// ADR-0054 S4 — per-name attempt counters (DB-backed, fail closed) and
+    /// per-address token buckets (in memory) that replaced proof of work on
+    /// every route except `/signup/start`.
+    pub(crate) limits: Arc<limits::Limits>,
 }
 
 #[tokio::main]
@@ -410,6 +433,15 @@ async fn main() -> Result<()> {
     let anon_tokens = anon_tokens::load_anon_tokens().context("load anonymous-token config")?;
     anon_tokens::log_startup(anon_tokens.as_ref());
 
+    // ADR-0054 S5 — the login-handle pepper. Loud-fail on a malformed value;
+    // dormant (with a warning) when unset.
+    let handle_pepper =
+        login_handle::load_handle_pepper().context("load LAKKO_AUTH_HANDLE_PEPPER")?;
+    login_handle::log_startup(handle_pepper.as_ref());
+    // ADR-0054 S4 — attempt limits. Loud-fail on a malformed knob.
+    let limits = Arc::new(limits::Limits::from_env().context("load auth attempt limits")?);
+    limits.log_startup();
+
     let state = AppState {
         db: pool.clone(),
         opaque_setup: Arc::new(opaque_setup),
@@ -427,6 +459,8 @@ async fn main() -> Result<()> {
         throttle: throttle_config,
         backup_head_mint_rate,
         anon_tokens: anon_tokens.clone().map(Arc::new),
+        handle_pepper: handle_pepper.map(Arc::new),
+        limits: limits.clone(),
     };
 
     // Background tasks: periodically delete expired rows from the
@@ -434,6 +468,8 @@ async fn main() -> Result<()> {
     // tables. Aborted when the service stops.
     let _login_pruner = opaque::spawn_login_state_pruner(pool.clone());
     let _pow_pruner = pow::spawn_pruner(pool.clone());
+    // ADR-0054 S4 — expired name counters + refilled address buckets.
+    let _limits_pruner = limits::spawn_pruner(pool.clone(), limits);
     let _webauthn_pruner = webauthn::spawn_state_pruner(pool.clone());
     // ADR-0033 — prune expired call-admission events + throttled-call rows.
     let _throttle_pruner = throttle::spawn_pruner(pool.clone(), throttle_config);
@@ -449,10 +485,15 @@ async fn main() -> Result<()> {
         .with_context(|| format!("bind {bind}"))?;
     tracing::info!(addr = %bind, "auth service listening");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("axum serve")?;
+    // Connect info feeds the address limiter when no nginx header is present
+    // (a direct `cargo run`).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("axum serve")?;
 
     pool.close().await;
     tracing::info!("auth service stopped cleanly");
@@ -463,6 +504,12 @@ async fn main() -> Result<()> {
 /// binding a TCP listener.
 #[allow(clippy::too_many_lines)] // flat route-registration table reads best whole
 fn build_app(state: AppState) -> Router {
+    // ADR-0054 S4 — the per-address bucket for one route family, layered on
+    // that route alone (the per-name counters run inside the handlers, where
+    // the named value is known).
+    let ip = |cat: limits::Category| {
+        axum::middleware::from_fn_with_state((state.limits.clone(), cat), limits::ip_gate)
+    };
     // Phase 2a2 — the four `/webauthn/*` routes are gated by the
     // session-token middleware so only an already-authenticated
     // caller can register / list / delete passkeys. The /auth/*
@@ -497,11 +544,11 @@ fn build_app(state: AppState) -> Router {
         )
         // ADR-0018 factor (a) — mint a single-use device grant. Bearer-auth:
         // the caller is the ALREADY-authenticated existing device
-        // authorizing a fresh device. PoW-gated inside the handler. The
+        // authorizing a fresh device. Per-account + per-address limited. The
         // matching `/device/authorize/redeem` is anonymous (public router).
         .route(
             "/device/authorize/start",
-            post(device_authorize::start),
+            post(device_authorize::start).route_layer(ip(limits::Category::Attempt)),
         )
         // ADR-0018 factor (c) — TOTP enrollment. Bearer-auth: the caller
         // is an already-logged-in account adding an authenticator factor.
@@ -524,13 +571,19 @@ fn build_app(state: AppState) -> Router {
             "/device/requests/{request_id_b64}",
             delete(device_request::delete),
         )
+        // ADR-0054 S5 — bind / remove the login handle the name routes
+        // resolve. Bearer-auth: the caller binds its own account.
+        .route(
+            "/auth/login-handle",
+            put(login_handle::put).delete(login_handle::delete),
+        )
         // ADR-0018 factor (d) — phone / email contact enrollment. Bearer-auth:
         // the caller is an already-logged-in account adding an OTP-recovery
         // contact. The matching `/recovery-contact/recover/*` are anonymous
         // (public router).
         .route(
             "/recovery-contact/enroll/start",
-            post(recovery_contact::enroll_start),
+            post(recovery_contact::enroll_start).route_layer(ip(limits::Category::CodeSend)),
         )
         .route(
             "/recovery-contact/enroll/finish",
@@ -607,17 +660,34 @@ fn build_app(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/version", get(version))
-        .route("/pow/challenge", post(pow::issue_challenge))
-        .route("/signup/start", post(opaque::signup_start))
+        // ADR-0054 S4 — the only proof of work left: one challenge per
+        // account creation.
+        .route(
+            "/pow/challenge",
+            post(pow::issue_challenge).route_layer(ip(limits::Category::Challenge)),
+        )
+        .route(
+            "/signup/start",
+            post(opaque::signup_start).route_layer(ip(limits::Category::Signup)),
+        )
         .route("/signup/finish", post(opaque::signup_finish))
-        .route("/login/start", post(opaque::login_start))
+        .route(
+            "/login/start",
+            post(opaque::login_start).route_layer(ip(limits::Category::Attempt)),
+        )
         .route("/login/finish", post(opaque::login_finish))
-        .route("/recovery/login/start", post(opaque::recovery_login_start))
+        .route(
+            "/recovery/login/start",
+            post(opaque::recovery_login_start).route_layer(ip(limits::Category::Attempt)),
+        )
         .route(
             "/recovery/login/finish",
             post(opaque::recovery_login_finish),
         )
-        .route("/password/reset/start", post(opaque::password_reset_start))
+        .route(
+            "/password/reset/start",
+            post(opaque::password_reset_start).route_layer(ip(limits::Category::Attempt)),
+        )
         .route(
             "/password/reset/finish",
             post(opaque::password_reset_finish),
@@ -629,42 +699,52 @@ fn build_app(state: AppState) -> Router {
         .route("/webauthn/auth/finish", post(webauthn::auth_finish))
         // ADR-0018 factor (a) — redeem a device grant for a session token.
         // ANONYMOUS: the fresh device has no token yet (the whole point is
-        // to mint it). PoW-gated inside the handler; the grant token (held
-        // by the fresh device over the rendezvous channel) is the
-        // authorization.
+        // to mint it). Per-address limited; the grant token (held by the
+        // fresh device over the rendezvous channel) is the authorization.
         .route(
             "/device/authorize/redeem",
-            post(device_authorize::redeem),
+            post(device_authorize::redeem).route_layer(ip(limits::Category::Attempt)),
         )
         // ADR-0018 factor (c) — recover ACCESS with an authenticator
-        // code. ANONYMOUS (the caller lost their device); PoW-gated +
-        // lockout + replay-protected inside the handler.
-        .route("/totp/recover", post(totp::recover))
+        // code. ANONYMOUS (the caller lost their device); per-name +
+        // per-address limited + replay-protected inside the handler.
+        .route(
+            "/totp/recover",
+            post(totp::recover).route_layer(ip(limits::Category::Attempt)),
+        )
         // ADR-0049 — three-word recovery. ANONYMOUS (the caller has nothing
-        // yet); PoW-gated + enumeration-safe + lockout + destruction-capped
-        // inside the handlers. `/start` serves positions + salt + cost,
-        // `/finish` compares the guess and releases the sealed entropy.
-        .route("/vault/recover/start", post(word_vault::recover_start))
+        // yet); enumeration-safe + per-name / per-address limited +
+        // destruction-capped inside the handlers. `/start` serves positions
+        // + salt + cost, `/finish` compares the guess and releases the
+        // sealed entropy.
+        .route(
+            "/vault/recover/start",
+            post(word_vault::recover_start).route_layer(ip(limits::Category::Attempt)),
+        )
         // ADR-0049 section 2 — the fresh device posts its pairing payload
-        // (anonymous + PoW) and polls whether the request is still open.
-        .route("/device/request", post(device_request::create))
+        // (anonymous; per-target + per-address limited) and polls whether
+        // the request is still open.
+        .route(
+            "/device/request",
+            post(device_request::create).route_layer(ip(limits::Category::DeviceRequest)),
+        )
         .route("/device/request/status", post(device_request::status))
         .route(
             "/vault/recover/finish",
-            post(word_vault::recover_finish),
+            post(word_vault::recover_finish).route_layer(ip(limits::Category::Attempt)),
         )
         // ADR-0018 factor (d) — recover ACCESS with a phone / email OTP.
-        // ANONYMOUS (the caller lost their device); PoW-gated + enumeration-
-        // safe + attempt-capped inside the handlers. `/recover/start` sends a
-        // code (indistinguishably on no-match); `/recover/finish` verifies +
-        // mints the session triple.
+        // ANONYMOUS (the caller lost their device); enumeration-safe +
+        // per-name / per-address limited inside the handlers.
+        // `/recover/start` sends a code (indistinguishably on no-match);
+        // `/recover/finish` verifies + mints the session triple.
         .route(
             "/recovery-contact/recover/start",
-            post(recovery_contact::recover_start),
+            post(recovery_contact::recover_start).route_layer(ip(limits::Category::CodeSend)),
         )
         .route(
             "/recovery-contact/recover/finish",
-            post(recovery_contact::recover_finish),
+            post(recovery_contact::recover_finish).route_layer(ip(limits::Category::Attempt)),
         )
         // Phase 3b4 forward — anonymous JWKS endpoint. The
         // public key is public; the SFU fetches it at

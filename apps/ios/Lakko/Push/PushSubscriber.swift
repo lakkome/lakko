@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import LakkoCore
 import UIKit
 import UserNotifications
 
@@ -108,7 +109,11 @@ public final class PushSubscriber {
     /// Drop the push registration locally + tell `push-gw` to
     /// forget the token. Called on logout + forgetDevice.
     /// Idempotent + best-effort: failures are logged.
-    public func unsubscribe() async {
+    ///
+    /// `prepaidToken` (ADR-0054 S3): the `push-register` token the
+    /// unregister spends, taken by the caller before it cleared the session;
+    /// without one the unregister draws from the pool.
+    public func unsubscribe(prepaidToken: AnonToken? = nil) async {
         let pseudonym: Data?
         do {
             pseudonym = try DevicePushId.peek()
@@ -119,7 +124,8 @@ public final class PushSubscriber {
             do {
                 _ = try await client.unregister(
                     devicePseudonym: pseudonym,
-                    provider: .apns
+                    provider: .apns,
+                    prepaidToken: prepaidToken
                 )
             } catch {
                 // Server-side unregister failed — log and
@@ -212,7 +218,7 @@ public enum PushSubscribeError: Error {
     /// unreachable.
     case deviceIdUnavailable(Error)
     /// `PushClient.register` rejected the upload (server
-    /// failure / PoW miss / network).
+    /// failure / no anonymous token / network).
     case registerFailed(Error)
     /// Two ``PushSubscriber/subscribe()`` calls overlapped.
     /// Only one register can be in flight at a time — the OS

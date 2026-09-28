@@ -10,8 +10,8 @@ package me.lakko.app.auth
  * (`services/auth/src/recovery_contact.rs`) and of the web
  * `apps/web/src/auth/contact-shape.ts`: just enough of a check to
  * catch an obviously-malformed contact (an email with no `@`, a
- * phone with no leading `+`) BEFORE spending a PoW solve and a
- * round-trip. The server is authoritative — it does the full
+ * phone with no leading `+`) BEFORE spending a round-trip and one
+ * of the server's per-name attempts. The server is authoritative — it does the full
  * E.164 / RFC-ish normalization and rejects with a 400 — so this
  * deliberately stays loose and never blocks a borderline value the
  * server might accept.
@@ -28,7 +28,7 @@ package me.lakko.app.auth
  *     `+` followed by 1..=15 digits (ASCII digits only thereafter).
  *
  * Whitespace is trimmed first. Anything else returns `false` so the
- * form can surface a precise message instead of burning a PoW solve.
+ * form can surface a precise message instead of burning a round trip.
  * An unknown `kind` returns `false` (fail-closed).
  */
 public fun isPlausibleContact(kind: Int, contact: String): Boolean {
