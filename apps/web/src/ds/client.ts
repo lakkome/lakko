@@ -32,6 +32,11 @@
  * refused group request is retried under the previous epoch's key, then once
  * after a claim (contract point 5). Mailbox writes and the knock stay
  * unsigned; the knock is PoW-gated instead.
+ *
+ * ADR-0054 - a group publish that should wake the recipients carries an
+ * `x-lakko-wake` header (built by `./wake`); the DS forwards the wake to
+ * push-gw after the proof gate passed and the row was appended. No header, no
+ * wake. The client never calls push-gw to wake.
  */
 import { base64Decode, base64Encode } from "../auth/account-id";
 import {
@@ -42,6 +47,9 @@ import {
   type DsAccessRegistry,
   type ProofSigner,
 } from "./access";
+import { DS_WAKE_HEADER, dsWakeHeaderValue, type DsWake } from "./wake";
+
+export { DS_WAKE_HEADER, dsWakeHeaderValue, type DsWake, type DsWakeKind } from "./wake";
 
 /** Default base URL — Vite dev proxy `/api/ds/*` →
  *  `127.0.0.1:8082`. Prod nginx routes the same path. */
@@ -153,6 +161,16 @@ export interface DsSigningOptions {
   readonly signer?: ProofSigner | null;
 }
 
+/** Options of {@link DsClient.publishGroup}. */
+export interface DsGroupPublishOptions extends DsSigningOptions {
+  /**
+   * ADR-0054 - ask the DS to wake the group's subscribed devices after the
+   * row is appended. Absent or `null` publishes silently: a control envelope,
+   * or a device that does not hold the group's `push_gid` yet.
+   */
+  readonly wake?: DsWake | null;
+}
+
 /** Response of `POST /ds/group/<hex>/knock`. */
 export interface KnockResult {
   readonly ids: readonly number[];
@@ -201,6 +219,7 @@ export class DsClient {
     readonly query: string;
     readonly body: Uint8Array;
     readonly contentType?: string;
+    readonly extraHeaders?: Readonly<Record<string, string>>;
     readonly signal?: AbortSignal | undefined;
     readonly plan: SigningPlan;
   }): Promise<Response> {
@@ -262,11 +281,12 @@ export class DsClient {
       readonly query: string;
       readonly body: Uint8Array;
       readonly contentType?: string;
+      readonly extraHeaders?: Readonly<Record<string, string>>;
       readonly signal?: AbortSignal | undefined;
     },
     signer: ProofSigner | null,
   ): Promise<Response> {
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = { ...req.extraHeaders };
     if (req.contentType !== undefined) headers["content-type"] = req.contentType;
     if (signer !== null) {
       headers[DS_PROOF_HEADER] = signer.sign(req.method, req.path, req.query, req.body);
@@ -461,11 +481,15 @@ export class DsClient {
    *
    * Used by `ChatClient.sendMessage` to ship MLS Application
    * messages produced by `Group.createApplicationMessage`.
+   *
+   * `options.wake` (ADR-0054) adds the `x-lakko-wake` header to every attempt
+   * of this publish, the contract-point-5 retries included; the value is built
+   * before any request, so a malformed wake fails here rather than as a 400.
    */
   async publishGroup(
     groupId: Uint8Array,
     payload: Uint8Array,
-    options?: DsSigningOptions,
+    options?: DsGroupPublishOptions,
   ): Promise<PublishResult> {
     if (groupId.length === 0) {
       throw new DsClientArgError("groupId must be non-empty");
@@ -473,10 +497,20 @@ export class DsClient {
     if (payload.length === 0) {
       throw new DsClientArgError("payload must be non-empty");
     }
+    const wake = options?.wake;
+    let extraHeaders: Record<string, string> | undefined;
+    if (wake !== undefined && wake !== null) {
+      try {
+        extraHeaders = { [DS_WAKE_HEADER]: dsWakeHeaderValue(wake) };
+      } catch (err) {
+        throw new DsClientArgError(err instanceof Error ? err.message : String(err));
+      }
+    }
     return this.publish(
       `/ds/group/${pseudonymHex(groupId)}/messages`,
       payload,
       this.groupPlan(groupId, options),
+      extraHeaders,
     );
   }
 
@@ -484,6 +518,7 @@ export class DsClient {
     path: string,
     payload: Uint8Array,
     plan: SigningPlan,
+    extraHeaders?: Readonly<Record<string, string>>,
   ): Promise<PublishResult> {
     const response = await this.send({
       method: "POST",
@@ -491,6 +526,7 @@ export class DsClient {
       query: "",
       body: payload,
       contentType: "application/octet-stream",
+      ...(extraHeaders === undefined ? {} : { extraHeaders }),
       plan,
     });
     const json = (await response.json()) as { id: number; created_at: string };

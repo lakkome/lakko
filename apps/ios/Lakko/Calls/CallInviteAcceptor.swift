@@ -63,6 +63,10 @@ public enum CallInviteAcceptor {
         case expired
         case exhausted
         case notFound
+        /// `429` on the ledger fetch or consume: the link may be
+        /// fine, the server asked this network address to slow
+        /// down. "Try again later", never "invalid".
+        case rateLimited
         case malformedSlug(reason: String)
         case signatureFailure(reason: String)
         case failed(message: String)
@@ -134,6 +138,9 @@ public enum CallInviteAcceptor {
                 if case let .http(status, _, _) = error, status == 404 {
                     return .notFound
                 }
+                if case .rateLimited = error {
+                    return .rateLimited
+                }
                 return .failed(message: error.errorDescription ?? String(describing: error))
             } catch {
                 return .failed(message: (error as? LocalizedError)?.errorDescription
@@ -167,6 +174,9 @@ public enum CallInviteAcceptor {
                     joinerAccountId: joinerAccountId
                 )
             } catch {
+                if DiscoveryClientError.isRateLimited(error) {
+                    return .rateLimited
+                }
                 return .failed(message: (error as? LocalizedError)?.errorDescription
                     ?? String(describing: error))
             }

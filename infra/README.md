@@ -44,11 +44,13 @@ infra/
 | ds | 127.0.0.1:8082 | `journalctl -u lakko-svc-ds` |
 | storage | 127.0.0.1:8083 | `journalctl -u lakko-svc-storage` |
 | discovery | 127.0.0.1:8084 | `journalctl -u lakko-svc-discovery` |
-| push-gw | 127.0.0.1:8085 | `journalctl -u lakko-svc-push-gw` |
+| push-gw | 127.0.0.1:8085 (public API) + 127.0.0.1:8092 (internal, DS wake forward) | `journalctl -u lakko-svc-push-gw` |
 | channels | 127.0.0.1:8086 | `journalctl -u lakko-svc-channels` |
 | gif-proxy | 127.0.0.1:8091 | `journalctl -u lakko-svc-gif-proxy` |
 
 system-nginx listens on 80/443 → reverse proxies to 127.0.0.1:808X. Services are not exposed externally.
+
+push-gw's second listener (127.0.0.1:8092, `LAKKO_PUSH_GW_INTERNAL_BIND`) is **never** proxied: it serves only `/push/notify-group`, which the DS calls after a signed group publish that asked for a wake (ADR-0054 decision 1), authenticated by a shared secret (`LAKKO_PUSH_GW_INTERNAL_SECRET` on push-gw = `LAKKO_DS_PUSH_GW_SECRET` on the DS, plus `LAKKO_DS_PUSH_GW_URL=http://127.0.0.1:8092`). With the secret unset on push-gw the listener does not start and no group wake is delivered; with both DS variables unset the DS drops wakes; with only one DS variable set the DS refuses to start.
 
 ## What's already on the VPS (from lakko_me)
 

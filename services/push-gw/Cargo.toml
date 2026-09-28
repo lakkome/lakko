@@ -54,6 +54,11 @@ base64 = "0.22"
 hex = "0.4"
 rand = "0.8"
 
+# ADR-0054 decision 1 - constant-time comparison of the internal listener's
+# shared secret (the transparency append-secret pattern). Already in the
+# workspace graph via lakko-crypto / lakko-auth-token / transparency.
+subtle = "2"
+
 # `#[async_trait]` for the Provider abstraction.
 async-trait = "0.1"
 

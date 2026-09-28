@@ -3,9 +3,11 @@
 
 //! Service-local Equix proof-of-work shim.
 //!
-//! Phase 1.6 gates the expensive push-gw endpoints (`/push/register`,
-//! `/push/unregister`, `/push/notify`) with an Equix PoW — battery-drain
-//! wake-up attacks are real, this is the first line of defence. The
+//! Phase 1.6 gated the push-gw endpoints with an Equix PoW. Since ADR-0054
+//! decision 1 the wake itself is not a public route (the DS forwards it to
+//! the internal listener after a signed publish, see `src/internal.rs`), so
+//! the PoW now covers only `/push/register`, `/push/unregister` and the group
+//! subscribe / unsubscribe pair - until ADR-0054 S3 replaces it there too. The
 //! server-side issue / verify / consume / prune logic + tests now live once in
 //! the shared [`lakko_pow_server`] crate (G-29 dedup — this was duplicated
 //! near-verbatim across `auth` / `discovery` / `push-gw`, a drift risk where a

@@ -27,6 +27,8 @@ members = [
     "crates/lakko-sfu-proto",
     "crates/lakko-pow",
     "crates/lakko-pow-server",
+    "crates/lakko-anon-token",
+    "crates/lakko-anon-token-server",
     "crates/lakko-mnemonic",
     "crates/lakko-shamir",
     "crates/lakko-ui-rules",
@@ -133,6 +135,8 @@ lakko-attest = { path = "crates/lakko-attest", version = "0.0.0" }
 lakko-sfu-proto = { path = "crates/lakko-sfu-proto", version = "0.0.0" }
 lakko-pow = { path = "crates/lakko-pow", version = "0.0.0" }
 lakko-pow-server = { path = "crates/lakko-pow-server", version = "0.0.0" }
+lakko-anon-token = { path = "crates/lakko-anon-token", version = "0.0.0" }
+lakko-anon-token-server = { path = "crates/lakko-anon-token-server", version = "0.0.0" }
 lakko-mnemonic = { path = "crates/lakko-mnemonic", version = "0.0.0" }
 lakko-shamir = { path = "crates/lakko-shamir", version = "0.0.0" }
 lakko-ui-rules = { path = "crates/lakko-ui-rules", version = "0.0.0" }

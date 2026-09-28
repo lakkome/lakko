@@ -149,19 +149,44 @@ pub const REVOKE_DOMAIN_V1: &[u8] = b"lakko-invite-revoke/v1\x00";
 /// than this is also rejected.
 pub const REVOKE_REPLAY_WINDOW_MS: u64 = 10 * 60 * 1_000;
 
-/// Length in bytes of a `blob_id` — SHA-256 of the
-/// capability bytes, mirrors `services/discovery`'s
-/// `BLOB_ID_LEN`. Pinned in the codec layer because the
-/// canonical-bytes layout binds to it.
-pub const BLOB_ID_LEN: usize = 32;
+/// Length in bytes of a discovery-ledger `blob_id`: a random handle the
+/// server assigns at upload (see [`generate_blob_id`]). Shared by all three
+/// ledgers (`/i/`, `/c/`, `/g/`). Pinned in the codec layer because the
+/// revoke canonical-bytes layouts bind to it.
+///
+/// Why 6 random bytes (2026-09-27, the short-link amendment of ADR-0028): the
+/// id is a lookup handle, not a secret and not an integrity anchor, and the
+/// maintainer wants a whole link of about 45 characters. It used to be the
+/// SHA-256 of the capability (32 bytes, 43 URL characters, idempotent by
+/// content); it is now CSPRNG output, so uploading the same capability twice
+/// yields two ids. The id space is 2^48, so resistance to guessing live ids
+/// rests on the per-IP rate limit on the open fetch / consume routes, not on
+/// the id width. The fetched capability is still Ed25519-verified by the
+/// joiner, and a `/g/` link's preview key is bound to the capability's group
+/// and issuer, so a substituted capability does not open that link's preview.
+pub const BLOB_ID_LEN: usize = 6;
+
+/// Length of a `blob_id` in its URL form: base64url without padding of
+/// [`BLOB_ID_LEN`] bytes. `https://<host>/i/<8 chars>` (likewise `/c/`,
+/// `/g/`).
+pub const BLOB_ID_B64URL_LEN: usize = 8;
+
+/// Mint a fresh random ledger id. The discovery service calls this at upload
+/// and retries on a primary-key collision; a client never mints one.
+#[must_use]
+pub fn generate_blob_id() -> [u8; BLOB_ID_LEN] {
+    let mut id = [0u8; BLOB_ID_LEN];
+    lakko_crypto::random::fill(&mut id);
+    id
+}
 
 /// Build the canonical bytes the inviter signs to prove a
 /// revocation request.
 ///
-/// Layout (63 bytes total):
+/// Layout (37 bytes total):
 ///
 /// ```text
-/// REVOKE_DOMAIN_V1 (23 bytes)  ‖ blob_id (32 bytes) ‖ signed_at_ms (8 bytes BE)
+/// REVOKE_DOMAIN_V1 (23 bytes)  ‖ blob_id (6 bytes) ‖ signed_at_ms (8 bytes BE)
 /// ```
 ///
 /// Domain separator binds the signature to the revocation-v1
@@ -983,12 +1008,12 @@ mod tests {
 
     #[test]
     fn revoke_canonical_bytes_layout() {
-        // Domain prefix is 23 bytes; blob_id 32; u64 BE 8 → 63
+        // Domain prefix is 23 bytes; blob_id 6; u64 BE 8 → 37
         // total. Pin so a future refactor that drifts the
         // prefix surfaces here.
         assert_eq!(REVOKE_DOMAIN_V1.len(), 23);
         assert_eq!(REVOKE_DOMAIN_V1, b"lakko-invite-revoke/v1\x00");
-        assert_eq!(BLOB_ID_LEN, 32);
+        assert_eq!(BLOB_ID_LEN, 6);
 
         let blob_id = [0xCDu8; BLOB_ID_LEN];
         let signed_at_ms: u64 = 0x0123_4567_89AB_CDEF;
@@ -1001,6 +1026,22 @@ mod tests {
         assert_eq!(&canonical[blob_off..blob_off + BLOB_ID_LEN], &blob_id[..]);
         let ts_off = blob_off + BLOB_ID_LEN;
         assert_eq!(&canonical[ts_off..ts_off + 8], &signed_at_ms.to_be_bytes());
+    }
+
+    // ----------------------------------------------------------------
+    // Ledger blob ids (ADR-0028 short-link amendment, 2026-09-27)
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn blob_id_is_six_random_bytes_and_eight_url_characters() {
+        // base64url without padding: ceil(6 * 4 / 3) = 8, no partial group.
+        assert_eq!(BLOB_ID_B64URL_LEN, (BLOB_ID_LEN * 4).div_ceil(3));
+        assert_eq!(BLOB_ID_B64URL_LEN, 8);
+        let a = generate_blob_id();
+        let b = generate_blob_id();
+        assert_eq!(a.len(), BLOB_ID_LEN);
+        // 2^-48 chance of a false failure.
+        assert_ne!(a, b, "two fresh ids must differ");
     }
 
     #[test]

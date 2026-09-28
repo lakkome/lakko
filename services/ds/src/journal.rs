@@ -408,8 +408,11 @@ pub(crate) async fn post_group(
     body: Bytes,
 ) -> Result<Response, (StatusCode, String)> {
     let owner = decode_pseudonym(&group_hex)?;
+    // ADR-0054: a malformed wake header refuses the publish before anything
+    // is checked or stored.
+    let wake = crate::wake::parse_wake_header(&headers)?;
     // ADR-0053: a claimed group takes a publish only from a member.
-    crate::access::gate_group(
+    let gated = crate::access::gate_group(
         &state,
         &owner,
         crate::access::Access::Write,
@@ -420,6 +423,20 @@ pub(crate) async fn post_group(
     )
     .await?;
     let resp = publish(&state.db, &state.notifiers, Queue::Group, &owner, &body).await?;
+    // ADR-0054: the wake follows the append, and only a proven writer of a
+    // claimed journal gets one. Fire-and-forget: it cannot delay or fail
+    // this response.
+    if let Some(wake) = wake {
+        if gated == crate::access::Gated::Proven {
+            state.waker.fire(&owner, wake, resp.id);
+        } else {
+            tracing::debug!(
+                kind = wake.kind.as_str(),
+                outcome = "unclaimed",
+                "wake dropped"
+            );
+        }
+    }
     Ok((StatusCode::CREATED, resp).into_response())
 }
 
@@ -466,9 +483,21 @@ pub(crate) async fn get_group(
 pub(crate) async fn post_mailbox(
     State(state): State<AppState>,
     AxumPath(device_hex): AxumPath<String>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, (StatusCode, String)> {
     let owner = decode_pseudonym(&device_hex)?;
+    // ADR-0054: only a group journal wakes; a mailbox publish that asks for
+    // one is refused rather than silently ignored.
+    if headers.contains_key(crate::wake::WAKE_HEADER) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "{} is accepted on a group journal only",
+                crate::wake::WAKE_HEADER
+            ),
+        ));
+    }
     // Deliberately ungated (ADR-0053 section 2): a mailbox is the cold inbox
     // strangers are meant to reach; only reading it is the owner's.
     let resp = publish(&state.db, &state.notifiers, Queue::Mailbox, &owner, &body).await?;

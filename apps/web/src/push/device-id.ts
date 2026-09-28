@@ -9,8 +9,9 @@
  * ## Why a fresh random value, not a derivation from identity
  *
  * The push server sees `(device_pseudonym, provider) → token`.
- * Anyone who knows the pseudonym can post `/push/notify` with it
- * (gated by PoW). To minimise what the server can link:
+ * Anyone who knew the pseudonym could post `/push/notify` with it
+ * (gated by PoW; ADR-0054 deletes that route, no client ever called
+ * it). To minimise what the server can link:
  *
  *   * `device_pseudonym = BLAKE3("lakko/push/device" || identity_pubkey)`
  *     would let the server correlate identity uploads with push

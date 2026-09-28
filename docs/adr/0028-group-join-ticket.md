@@ -9,6 +9,47 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 - **Date:** 2026-06-25
 - **Context:** Phase 3/4 — the live consumer of ADR-0027 (external-join approval, G-3)
 
+> **AMENDED 2026-09-27 — short links (maintainer's decision: a whole link of
+> about 45 characters).** A pointer link read
+> `https://<host>/g/<43-char id>#<43-char key>`; it now reads
+> `https://<host>/g/<8-char id>#<16-char secret>`. Two changes, both flag day
+> (no deployment, no link to keep working, the old lengths are refused):
+>
+> - **Ledger id (all three ledgers, `/i/`, `/c/`, `/g/`).** Was
+>   `SHA-256(capability_bytes)`, 32 bytes / 43 characters, idempotent by
+>   content. Now a **random 6-byte id** the discovery service mints from a
+>   CSPRNG at upload (`lakko_contacts::invite::generate_blob_id`,
+>   `BLOB_ID_LEN = 6`, 8 base64url characters). The insert is a plain `INSERT`
+>   retried under a fresh id on a primary-key collision (at most 4 attempts,
+>   then 500) and is never an upsert, so a collision cannot overwrite another
+>   link's row; the same capability uploaded twice gets two ids. Fetch,
+>   consume and revoke take the 8-character id and refuse any other width with
+>   400; the revoke canonical bytes carry the 6-byte id. Migration
+>   `services/discovery/migrations/0018_short_invite_ids.sql` recreates the six
+>   ledger tables with `blob_id BINARY(6)`. **What this gives up:** the id is no
+>   longer a hash of the bytes, so a joiner cannot re-hash a fetched capability
+>   against it and a malicious discovery server could serve a different
+>   validly-signed capability under a live id (no client ran that re-hash
+>   check, so nothing that was enforced is lost). For `/g/` the link secret
+>   below now covers this: the preview key binds the capability's group id and
+>   issuer, so a substituted capability's preview does not open under the
+>   link's secret. `/i/` and `/c/` links have no such secret. **Guessing live
+>   ids** (2^48) is bounded by the per-IP token bucket: the six open fetch and
+>   consume routes moved into discovery's rate-limited router (60/min, burst
+>   10 per anonymous address by default), where before they were unlimited on
+>   the reasoning that a 32-byte id could not be enumerated.
+> - **Link secret (`/g/` only).** The URL fragment was the 32-byte AEAD key
+>   (43 characters). It is now a **12-byte secret** (`LINK_SECRET_LEN`, 16
+>   characters), and the 32-byte preview key is derived from it:
+>   `HKDF-SHA256(ikm = secret, salt = empty, info = "lakko/group-invite/preview-key/v1\0"
+>   ‖ u16be gid_len ‖ group_id ‖ issuer_pubkey)`. The secret is uniform random,
+>   so HKDF only expands it; binding the group id and issuer is free (both sit
+>   in the signed capability the opener holds) and makes every link's
+>   derivation distinct, so a search over secrets cannot be amortised across
+>   links and a secret moved onto another capability opens nothing. The inline
+>   fallback form (`/g/<whole capability>#<secret>`, used only when the upload
+>   fails) keeps its shape with the shorter fragment.
+
 > **AMENDED 2026-09-02 by [ADR-0045](0045-remote-commit-epoch-fork.md) S7
 > (`576ea14`). The ticket is unchanged; the far end of the flow it feeds is
 > not.** In a group that carries a role table — every ordinary chat group —
@@ -120,8 +161,9 @@ The person opening a link saw only the issuer's fingerprint, which tells them
 nothing about what they are joining (UX spec
 [`group-invite-page.md`](../ux/group-invite-page.md)). The preview - the
 group's name, the inviter's display name and the member count at mint time - is
-sealed under a random 32-byte **link key** carried in the URL **fragment**
-(`https://lakko.me/g/<slug>#<key>`), which a browser never sends and an app
+sealed under a key derived from a random **link secret** carried in the URL
+**fragment** (`https://lakko.me/g/<slug>#<secret>`; 12 bytes since the
+2026-09-27 amendment above, 32 before), which a browser never sends and an app
 never uploads, so the discovery ledger holding pointer-link capabilities and
 every access log stay ciphertext-only (invariants #1, #2, #5). Whoever holds
 the whole link reads the preview, which is the point of a link one shares. The

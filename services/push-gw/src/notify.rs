@@ -1,20 +1,27 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! `POST /push/notify` — wake-up dispatcher.
+//! `POST /push/notify-group` — the group wake fan-out, internal only.
 //!
-//! Looks up every registered token for `device_pseudonym`, picks the
-//! matching `Provider` from `AppState.providers`, and fires off a
-//! delivery in parallel. The response reports per-provider outcomes.
+//! Since ADR-0054 decision 1 this route is not on the public listener. A
+//! group wake is a consequence of a signed publish: the DS, after the
+//! ADR-0053 proof gate passed and the row was appended, forwards
+//! `(push_gid, message_id, kind)` here over the internal network,
+//! authenticated by a shared secret (see [`crate::internal`]). No client
+//! calls push-gw to wake anyone any more, and the per-device
+//! `/push/notify` - which had no caller on any client - is gone.
 //!
-//! Phase 1.6 deliberately does NOT introduce a job queue: failures
-//! are recorded in the response and the caller can decide whether to
-//! retry. Phase 2 adds a durable retry queue with backoff.
+//! The handler looks up every device subscribed to the `push_gid`, picks
+//! the matching `Provider` from `AppState.providers`, and delivers. The
+//! response reports per-provider outcomes; the DS does not read it (the
+//! forward is fire-and-forget), but an operator driving the route by hand
+//! does.
 //!
-//! `TokenInvalid` results trigger an immediate cleanup of the offending
-//! row from `push_tokens` — Apple/Google generate a steady drift of
-//! invalid tokens (app uninstalls, backup restores, etc.) and the
-//! cleanest place to garbage-collect is at the moment we see the
+//! There is deliberately no job queue: a failure is recorded in the
+//! response and dropped. `TokenInvalid` results trigger an immediate
+//! cleanup of the offending row from `push_tokens` — Apple/Google generate
+//! a steady drift of invalid tokens (app uninstalls, backup restores, etc.)
+//! and the cleanest place to garbage-collect is at the moment we see the
 //! provider reject one.
 //!
 //! ## What a wake carries
@@ -52,7 +59,7 @@
 //!      every wake they did before.
 //!
 //! [`delivers_to`] is that rule and the only place it is written as
-//! code; both `/push/notify` and `/push/notify-group` route through it.
+//! code; `/push/notify-group` routes through it.
 //! Note rule 1 makes the decision depend on the device's *whole*
 //! registered set, not on the row in hand — which is why the fan-out
 //! collects each device's kinds before delivering anything.
@@ -90,28 +97,6 @@ fn decode_pseudonym_hex(hex_str: &str) -> Result<[u8; PSEUDONYM_LEN], (StatusCod
     hex::decode_to_slice(hex_str, &mut out)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("hex decode: {e}")))?;
     Ok(out)
-}
-
-#[derive(Deserialize)]
-pub(crate) struct NotifyRequest {
-    pub(crate) pow: crate::pow::PowProof,
-    pub(crate) device_pseudonym: String,
-    /// Optional — if known, lets the recipient client jump to the
-    /// right journal cursor instead of polling all of its groups.
-    #[serde(default)]
-    pub(crate) group_pseudonym: Option<String>,
-    /// Optional — server-assigned cursor in `services/ds`.
-    #[serde(default)]
-    pub(crate) envelope_pointer: Option<u64>,
-}
-
-#[derive(Serialize)]
-pub(crate) struct NotifyResponse {
-    /// Number of provider rows looked up for this device.
-    pub(crate) tokens_found: usize,
-    /// Per-provider outcomes; useful for the caller to see which legs
-    /// of the fan-out actually completed.
-    pub(crate) deliveries: Vec<DeliveryOutcome>,
 }
 
 #[derive(Serialize)]
@@ -171,109 +156,32 @@ async fn drop_invalid_token(state: &AppState, device: &[u8; PSEUDONYM_LEN], prov
     }
 }
 
-/// `POST /push/notify` — wake every registered device endpoint for
-/// this pseudonym.
-pub(crate) async fn notify(
-    State(state): State<AppState>,
-    Json(payload): Json<NotifyRequest>,
-) -> Result<Json<NotifyResponse>, (StatusCode, String)> {
-    crate::pow::verify_proof(&state.db, &payload.pow).await?;
-
-    let device = decode_pseudonym_hex(&payload.device_pseudonym)?;
-    let group = payload
-        .group_pseudonym
-        .as_deref()
-        .map(decode_pseudonym_hex)
-        .transpose()?;
-
-    // Look up every (provider, token) row for this device.
-    let rows: Vec<(u8, Vec<u8>)> =
-        sqlx::query_as("SELECT provider, token FROM push_tokens WHERE device_id = ?")
-            .bind(&device[..])
-            .fetch_all(&state.db)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "lookup push_tokens");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal db error".to_string(),
-                )
-            })?;
-
-    let payload = WakePayload {
-        device_pseudonym: device,
-        group_pseudonym: group,
-        envelope_pointer: payload.envelope_pointer,
-        // The per-device route has no call kind: a call signal rides
-        // the chat group's journal, so it always fans out through
-        // `/push/notify-group`.
-        kind: WakeKind::Message,
-    };
-
-    // Every kind this device is registered under, so the selection rule
-    // can see the whole set rather than one row at a time.
-    let registered: Vec<ProviderKind> = rows
-        .iter()
-        .filter_map(|(provider_db, _)| ProviderKind::from_db(*provider_db))
-        .collect();
-
-    let mut deliveries = Vec::with_capacity(rows.len());
-    for (provider_db, token) in rows {
-        let Some(kind) = ProviderKind::from_db(provider_db) else {
-            tracing::warn!(provider_db, "unknown provider in DB row — skipping");
-            continue;
-        };
-        if !delivers_to(payload.kind, kind, &registered) {
-            // A message wake never reaches a call token.
-            continue;
-        }
-        let outcome = dispatch_one(&state, kind, &token, &payload).await;
-        deliveries.push(outcome);
-
-        // If the provider declared the token invalid, drop the row
-        // synchronously — Apple/Google produce a steady drift and the
-        // notify path is the only place we get a signal.
-        if matches!(deliveries.last().map(|d| d.status), Some("token_invalid")) {
-            drop_invalid_token(&state, &device, provider_db).await;
-        }
-    }
-
-    let tokens_found = deliveries.len();
-    Ok(Json(NotifyResponse {
-        tokens_found,
-        deliveries,
-    }))
-}
-
 // ============================================================================
 // /push/notify-group (Phase 1.20e — fan-out)
 // ============================================================================
 
+/// The body the DS sends. Every field is required and nothing else is
+/// accepted: the only caller is another Lakko service, so a request that
+/// does not match the one shape it sends is a bug to surface, not a
+/// variation to tolerate.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct NotifyGroupRequest {
-    pub(crate) pow: crate::pow::PowProof,
-    /// 32-byte group pseudonym, lowercase hex. The publisher
-    /// just wrote a message into the DS journal at this key;
-    /// we fan a wake out to every device subscribed.
-    pub(crate) group_pseudonym: String,
-    /// Optional — server-assigned cursor in `services/ds` so
-    /// the woken client can jump to the exact row.
-    #[serde(default)]
-    pub(crate) envelope_pointer: Option<u64>,
-    /// Optional — what the woken device is being told about.
-    ///
-    /// Absent (or `"message"`) is the pre-call behaviour, unchanged.
-    /// `"call"` marks the wake as a call signal: the providers raise
-    /// their urgency headers and shorten their expiry, and the
-    /// delivered payload carries the `k` tag the background handler
-    /// needs to ring rather than render a message preview. An
-    /// unrecognised value is rejected by the extractor rather than
-    /// quietly demoted to a message — a call that silently arrives
-    /// as a notification is the failure this field exists to stop.
-    ///
-    /// It changes nothing about *who* may notify: the PoW gate and
-    /// the subscription join are exactly as they were.
-    #[serde(default)]
+    /// The ADR-0042 group routing id, 32 bytes as 64 lowercase hex chars
+    /// (the same spelling as the subscribe route's `group_pseudonym`, so
+    /// both sides of the `push_group_subscriptions` join read one
+    /// encoding). The DS decoded it from the publisher's base64url
+    /// `x-lakko-wake` header; hex is only the internal hop.
+    pub(crate) push_gid: String,
+    /// The DS message id of the row just appended, so the woken client can
+    /// jump to it.
+    pub(crate) envelope_pointer: u64,
+    /// What the woken device is being told about: `"message"` or `"call"`.
+    /// A call raises the providers' urgency headers, shortens their expiry
+    /// and tags the delivered payload so the background handler rings
+    /// rather than previews. An unrecognised value is refused, never
+    /// demoted to a message - a call that silently arrives as a
+    /// notification is the failure this field exists to stop.
     pub(crate) kind: WakeKind,
 }
 
@@ -288,31 +196,22 @@ pub(crate) struct NotifyGroupResponse {
     pub(crate) deliveries: Vec<DeliveryOutcome>,
 }
 
-/// `POST /push/notify-group` — fan a wake out to every device
-/// subscribed to this group. Phase 1.20e: the publisher's client
-/// calls this immediately after a successful
-/// `DsClient::publishGroup` so peers' devices wake and pull the
-/// new message.
+/// `POST /push/notify-group` (internal listener) — fan a wake out to every
+/// device subscribed to this `push_gid`.
 ///
-/// Privacy posture: the push-gw learns `(device_id, group_id)`
-/// via the subscription table; same metadata DS already has via
-/// the cursor-fetch pattern. Documented in
-/// `migrations/0002_push_group_subscriptions.sql`.
+/// Reached only through [`crate::internal::build_internal_app`], behind the
+/// shared-secret gate; there is no proof of work, because the caller is the
+/// DS and the DS has already checked that the publisher is a writer of a
+/// claimed journal (ADR-0053) and charged the wake to its caps (ADR-0054).
 ///
-/// The optional `kind` field marks a wake as a call signal, which
-/// raises the per-provider urgency headers and tags the delivered
-/// payload. It does not change who may call this endpoint: the PoW
-/// gate and the `push_group_subscriptions` join are untouched, so a
-/// caller who could already fan a message wake to a group can now
-/// also fan a call wake to it — no new authority, and the existing
-/// ringing-bound is the client's 45-second window, not this gate.
+/// Privacy posture: the push-gw learns `(device_id, push_gid)` via the
+/// subscription table, as before; the `push_gid` is independent of the DS
+/// `group_id` (ADR-0042), and this request carries no group id.
 pub(crate) async fn notify_group(
     State(state): State<AppState>,
     Json(payload): Json<NotifyGroupRequest>,
 ) -> Result<Json<NotifyGroupResponse>, (StatusCode, String)> {
-    crate::pow::verify_proof(&state.db, &payload.pow).await?;
-
-    let group = decode_pseudonym_hex(&payload.group_pseudonym)?;
+    let group = decode_pseudonym_hex(&payload.push_gid)?;
 
     // Join `push_group_subscriptions` on `push_tokens` so we
     // get every `(device, provider, token)` triple in one
@@ -383,14 +282,13 @@ pub(crate) async fn notify_group(
             );
             continue;
         }
-        // Wake payload — same shape `/push/notify` uses. Note
-        // `device_pseudonym` is the receiver, not the
+        // Note `device_pseudonym` is the receiver, not the
         // publisher; the receiver's client looks at this to
         // confirm the wake is for the right local account.
         let wake_payload = WakePayload {
             device_pseudonym: device_arr,
             group_pseudonym: Some(group),
-            envelope_pointer: payload.envelope_pointer,
+            envelope_pointer: Some(payload.envelope_pointer),
             kind: payload.kind,
         };
 
@@ -533,31 +431,46 @@ mod tests {
 
     fn parse(kind_json: &str) -> Result<NotifyGroupRequest, serde_json::Error> {
         let body = format!(
-            r#"{{"pow":{{"seed":"AA","nonce":"BB","solution":"CC"}},
-                 "group_pseudonym":"{}","envelope_pointer":7{kind_json}}}"#,
+            r#"{{"push_gid":"{}","envelope_pointer":7{kind_json}}}"#,
             "ab".repeat(32),
         );
         serde_json::from_str(&body)
     }
 
     #[test]
-    fn a_request_without_a_kind_is_a_message_wake() {
-        // The pre-call request shape must keep working byte-for-byte:
-        // every client that has not been rebuilt still sends this.
-        let req = parse("").unwrap();
-        assert_eq!(req.kind, WakeKind::Message);
+    fn a_request_without_a_kind_is_refused() {
+        // The DS always sends one; a missing kind is a bug, not a message.
+        assert!(parse("").is_err());
     }
 
     #[test]
-    fn an_explicit_message_kind_is_accepted() {
+    fn a_message_kind_is_accepted() {
         let req = parse(r#","kind":"message""#).unwrap();
         assert_eq!(req.kind, WakeKind::Message);
+        assert_eq!(req.envelope_pointer, 7);
     }
 
     #[test]
     fn a_call_kind_is_accepted() {
         let req = parse(r#","kind":"call""#).unwrap();
         assert_eq!(req.kind, WakeKind::Call);
+    }
+
+    #[test]
+    fn the_old_public_shape_is_refused() {
+        // The pre-ADR-0054 client body: a proof of work and a
+        // `group_pseudonym`. Nothing about it is accepted any more.
+        let old = format!(
+            r#"{{"pow":{{"seed":"AA","nonce":"BB","solution":"CC"}},
+                 "group_pseudonym":"{}","envelope_pointer":7,"kind":"message"}}"#,
+            "ab".repeat(32),
+        );
+        assert!(serde_json::from_str::<NotifyGroupRequest>(&old).is_err());
+        // An extra field on the new shape is refused too.
+        assert!(parse(r#","kind":"message","extra":1"#).is_err());
+        // The pointer is required.
+        let no_pointer = format!(r#"{{"push_gid":"{}","kind":"message"}}"#, "ab".repeat(32));
+        assert!(serde_json::from_str::<NotifyGroupRequest>(&no_pointer).is_err());
     }
 
     #[test]

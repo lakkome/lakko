@@ -63,8 +63,9 @@ use lakko_contacts::group_invite::{
     decode_and_verify as rust_group_invite_decode, generate_link_key as rust_generate_link_key,
     group_sign_revocation as rust_group_sign_revocation,
     GroupInviteCapability as RustGroupInviteCapability,
-    GroupInvitePreview as RustGroupInvitePreview, LINK_KEY_LEN as GROUP_INVITE_LINK_KEY_LEN,
-    MAX_GROUP_ID_LEN,
+    GroupInvitePreview as RustGroupInvitePreview,
+    LINK_SECRET_B64URL_LEN as GROUP_INVITE_LINK_SECRET_B64URL_LEN,
+    LINK_SECRET_LEN as GROUP_INVITE_LINK_SECRET_LEN, MAX_GROUP_ID_LEN,
 };
 use lakko_contacts::group_join_attribution::{
     compose_attribution as rust_group_join_attribution_compose,
@@ -81,7 +82,7 @@ use lakko_contacts::incoming_envelope::{
 use lakko_contacts::invite::{
     compose as rust_invite_compose, compute_joiner_tag as rust_compute_joiner_tag,
     decode_and_verify as rust_invite_decode, sign_owner_list as rust_sign_owner_list,
-    sign_revocation as rust_sign_revocation, BLOB_ID_LEN,
+    sign_revocation as rust_sign_revocation, BLOB_ID_B64URL_LEN, BLOB_ID_LEN,
 };
 use lakko_contacts::media_state::{
     compose_media_state as rust_compose_media_state, decode_media_state as rust_decode_media_state,
@@ -2447,8 +2448,8 @@ pub fn compose_group_invite_capability(
 /// Owner-side: sign a group-invite revocation (ADR-0028 revoke). Returns the
 /// 64-byte Ed25519 signature over the group-invite revoke canonical bytes
 /// (`DELETE /discovery/group-invite/{blob_id}` body). `issuer_signing_seed` is
-/// the 32-byte Ed25519 seed that minted the link; `blob_id` is the 32-byte
-/// content-addressed id.
+/// the 32-byte Ed25519 seed that minted the link; `blob_id` is the
+/// [`BLOB_ID_LEN`]-byte (6) id the discovery upload returned.
 ///
 /// # Errors
 ///
@@ -2477,11 +2478,43 @@ pub fn sign_group_invite_revocation(
     Ok(rust_group_sign_revocation(&signing, &blob_id_arr, signed_at_ms).to_vec())
 }
 
+/// Width in bytes of a discovery-ledger id (`/i/`, `/c/`, `/g/` pointer
+/// links): 6. The server mints it; a client only carries it (ADR-0028
+/// short-link amendment, 2026-09-27).
+#[uniffi::export]
+#[must_use]
+pub fn invite_blob_id_len() -> u32 {
+    u32::try_from(BLOB_ID_LEN).unwrap_or(u32::MAX)
+}
+
+/// Length of a ledger id in a link: base64url without padding, 8 characters.
+/// A pointer path segment of any other length is not a pointer id.
+#[uniffi::export]
+#[must_use]
+pub fn invite_blob_id_url_len() -> u32 {
+    u32::try_from(BLOB_ID_B64URL_LEN).unwrap_or(u32::MAX)
+}
+
+/// Width in bytes of a `/g/` link secret (the URL fragment): 12.
+#[uniffi::export]
+#[must_use]
+pub fn group_invite_link_secret_len() -> u32 {
+    u32::try_from(GROUP_INVITE_LINK_SECRET_LEN).unwrap_or(u32::MAX)
+}
+
+/// Length of a `/g/` link secret in the URL fragment: base64url without
+/// padding, 16 characters. Any other fragment length is refused.
+#[uniffi::export]
+#[must_use]
+pub fn group_invite_link_secret_url_len() -> u32 {
+    u32::try_from(GROUP_INVITE_LINK_SECRET_B64URL_LEN).unwrap_or(u32::MAX)
+}
+
 /// Composed + verified group join-ticket capability (ADR-0028). Mirror of
 /// [`lakko_contacts::GroupInviteCapability`].
 /// The preview a `/g/` link shows before the person asks to join (ADR-0028
-/// v2): the ISSUER's claim at mint time, sealed under the link key that rides
-/// in the URL fragment. Names are optional; the count is a snapshot.
+/// v2): the ISSUER's claim at mint time, sealed under a key derived from the
+/// link secret that rides in the URL fragment. Names are optional; the count is a snapshot.
 #[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
 pub struct GroupInvitePreview {
     pub group_name: Option<String>,
@@ -2490,8 +2523,10 @@ pub struct GroupInvitePreview {
 }
 
 /// What `compose_group_invite_capability_with_preview` mints: the signed
-/// capability bytes (the slug) and the fresh 32-byte link key the caller puts
-/// in the URL fragment and nowhere a server reads.
+/// capability bytes (the slug) and the fresh link secret
+/// ([`group_invite_link_secret_len`] = 12 bytes, 16 base64url characters) the
+/// caller puts in the URL fragment and nowhere a server reads. The field keeps
+/// its `link_key` name; it carries the secret the preview key is derived from.
 #[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
 pub struct GroupInviteMint {
     pub wire: Vec<u8>,
@@ -2596,21 +2631,25 @@ impl GroupInviteCapability {
         !self.inner.sealed_preview.is_empty()
     }
 
-    /// Open the sealed preview with the link key from the URL fragment. `None`
-    /// when the link carries no preview. A wrong or tampered key is an error;
-    /// the caller shows the page without a preview, never a guess.
+    /// Open the sealed preview with the link secret from the URL fragment
+    /// (the 12 bytes the 16-character fragment decodes to). `None` when the
+    /// link carries no preview. A wrong secret, a tampered preview, or a
+    /// capability other than the one the secret was minted with (the derived
+    /// key binds the group id and issuer) is an error; the caller shows the
+    /// page without a preview, never a guess.
     ///
     /// # Errors
     ///
-    /// * [`FfiError::Contacts`] when `link_key` is not 32 bytes or the preview
-    ///   does not open under it.
+    /// * [`FfiError::Contacts`] when `link_key` is not
+    ///   [`group_invite_link_secret_len`] (12) bytes - the pre-amendment
+    ///   32-byte key included - or the preview does not open under it.
     pub fn open_preview(&self, link_key: Vec<u8>) -> Result<Option<GroupInvitePreview>, FfiError> {
-        if link_key.len() != GROUP_INVITE_LINK_KEY_LEN {
+        if link_key.len() != GROUP_INVITE_LINK_SECRET_LEN {
             return Err(FfiError::Contacts(format!(
-                "linkKey must be {GROUP_INVITE_LINK_KEY_LEN} bytes",
+                "linkKey must be {GROUP_INVITE_LINK_SECRET_LEN} bytes",
             )));
         }
-        let mut key = [0u8; GROUP_INVITE_LINK_KEY_LEN];
+        let mut key = [0u8; GROUP_INVITE_LINK_SECRET_LEN];
         key.copy_from_slice(&link_key);
         Ok(self.inner.open_preview(&key)?.map(|p| GroupInvitePreview {
             group_name: p.group_name,
@@ -2923,7 +2962,7 @@ mod tests {
         let alice_signing = SigningKey::from_seed(&[0x77u8; 32]);
         let err = sign_invite_revocation(
             alice_signing.to_seed().to_vec(),
-            vec![0u8; 16], // wrong: BLOB_ID_LEN is 32
+            vec![0u8; 32], // wrong: the pre-amendment width; BLOB_ID_LEN is 6
             0,
         )
         .expect_err("expected wrong-length rejection");
@@ -2988,7 +3027,7 @@ mod tests {
         let alice_signing = SigningKey::from_seed(&[0x55u8; 32]);
         let err = sign_call_invite_revocation(
             alice_signing.to_seed().to_vec(),
-            vec![0u8; 16], // wrong: BLOB_ID_LEN is 32
+            vec![0u8; 32], // wrong: the pre-amendment width; BLOB_ID_LEN is 6
             0,
         )
         .expect_err("expected wrong-length rejection");
@@ -3913,12 +3952,22 @@ mod tests {
         assert_eq!(preview.group_name.as_deref(), Some("Weekend plans"));
         assert_eq!(preview.inviter_name.as_deref(), Some("Anna"));
         assert_eq!(preview.member_count, 4);
-        assert!(cap.open_preview(vec![0u8; 32]).is_err());
+        assert_eq!(mint.link_key.len(), 12);
+        assert!(cap.open_preview(vec![0u8; 12]).is_err(), "wrong secret");
+        assert!(cap.open_preview(vec![0u8; 32]).is_err(), "old key width");
         assert!(cap.open_preview(vec![0u8; 5]).is_err());
         let plain = compose_group_invite_capability(seed, vec![1, 2, 3, 4], 0).expect("plain");
         let cap = GroupInviteCapability::decode_and_verify(plain).expect("decode");
         assert!(!cap.has_preview());
         assert_eq!(cap.open_preview(mint.link_key).expect("open"), None);
+    }
+
+    #[test]
+    fn short_link_lengths_are_exported() {
+        assert_eq!(invite_blob_id_len(), 6);
+        assert_eq!(invite_blob_id_url_len(), 8);
+        assert_eq!(group_invite_link_secret_len(), 12);
+        assert_eq!(group_invite_link_secret_url_len(), 16);
     }
 
     #[test]

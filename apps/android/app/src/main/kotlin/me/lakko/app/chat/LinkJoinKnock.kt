@@ -99,7 +99,9 @@ public const val JOIN_TRY_AGAIN: String = "Try again"
  * The one sentence a failed join request shows, from anywhere in [error]'s
  * cause chain: [GROUP_NOT_ACCEPTING_REQUESTS] when the probe learned no epoch,
  * [me.lakko.app.ds.DS_CLOCK_SKEW_COPY] when a proof refusal is explained by the
- * device clock, [JOIN_FAILED_COPY] for everything else. Never a raw message.
+ * device clock, [me.lakko.app.discovery.INVITE_RATE_LIMITED_COPY] when the
+ * ledger consume answered `429`, [JOIN_FAILED_COPY] for everything else.
+ * Never a raw message.
  */
 public fun joinFailureCopy(error: Throwable): String {
     var cause: Throwable? = error
@@ -111,16 +113,23 @@ public fun joinFailureCopy(error: Throwable): String {
         }
         cause = cause.cause
     }
+    // The ledger consume answered 429: the link is fine, the network's budget
+    // is spent. Never "link invalid".
+    if (me.lakko.app.discovery.isDiscoveryRateLimited(error)) {
+        return me.lakko.app.discovery.INVITE_RATE_LIMITED_COPY
+    }
     return JOIN_FAILED_COPY
 }
 
 /**
- * Whether a join failure showing [copy] offers "Try again": only the general
- * failure ([JOIN_FAILED_COPY]). "Isn't taking requests yet" and the clock
- * sentence ask the person to wait or fix the device first, so they offer no
- * immediate retry (the same rule on web and iOS).
+ * Whether a join failure showing [copy] offers "Try again": the general
+ * failure ([JOIN_FAILED_COPY]) and the rate-limited one (its sentence already
+ * says to try again in a minute). "Isn't taking requests yet" and the clock sentence
+ * ask the person to wait or fix the device first, so they offer no immediate
+ * retry.
  */
-public fun joinFailureOffersRetry(copy: String): Boolean = copy == JOIN_FAILED_COPY
+public fun joinFailureOffersRetry(copy: String): Boolean =
+    copy == JOIN_FAILED_COPY || copy == me.lakko.app.discovery.INVITE_RATE_LIMITED_COPY
 
 /**
  * ADR-0053 — the label of one pending join request in the members sheet.

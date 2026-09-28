@@ -59,7 +59,12 @@ import {
   describeMaxUses,
   parseInviteSlug,
 } from "../contacts/invite";
-import { DiscoveryClient } from "../discovery/client";
+import { DiscoveryClient, isDiscoveryRateLimited } from "../discovery/client";
+import {
+  INVITE_LINK_RATE_LIMITED,
+  INVITE_LINK_TRY_AGAIN,
+  inviteLinkWidths,
+} from "../contacts/invite-link";
 import { useChats } from "../chat/ChatContext";
 import { useProfiles } from "../profile/ProfileContext";
 import { loadWasm } from "../wasm";
@@ -69,7 +74,7 @@ import { PublicLayout } from "../ui/PublicLayout";
 interface DecodedInvite {
   cap: WasmInviteCapability;
   fingerprintShort: string;
-  /** When the slug is a 32-byte content-addressed pointer
+  /** When the slug is an 8-character ledger id
    *  (1.18d1b), the joiner can call `/discovery/invite/{id}/consume`
    *  before sending the ContactRequest (1.18d2a). Inline-bytes
    *  URLs have no associated server row — back-compat
@@ -83,6 +88,9 @@ interface DecodedInvite {
    *  capability_bytes), joiner_account_id). */
   capabilityBytes: Uint8Array;
 }
+
+/** The resource's answer when the ledger rate-limited this address. */
+const RATE_LIMITED = "rate-limited" as const;
 
 export default function Invite(): JSX.Element {
   const params = useParams<{ slug: string }>();
@@ -109,9 +117,12 @@ export default function Invite(): JSX.Element {
   // the page might trigger later.
   const discovery = new DiscoveryClient();
   discovery.setSessionToken(auth.identitySecrets()?.sessionToken ?? null);
-  const [decoded] = createResource(slugSignal, async (slug): Promise<DecodedInvite | null> => {
+  const [decoded, { refetch }] = createResource(
+    slugSignal,
+    async (slug): Promise<DecodedInvite | typeof RATE_LIMITED | null> => {
     try {
-      const parsed = parseInviteSlug(slug);
+      const wasm = await loadWasm();
+      const parsed = parseInviteSlug(slug, inviteLinkWidths(wasm));
       let bytes: Uint8Array;
       let blobId: Uint8Array | null;
       if (parsed.kind === "pointer") {
@@ -131,7 +142,6 @@ export default function Invite(): JSX.Element {
         bytes = parsed.capabilityBytes;
         blobId = null;
       }
-      const wasm = await loadWasm();
       const cap = wasm.InviteCapability.decodeAndVerify(bytes);
       return {
         cap,
@@ -140,11 +150,19 @@ export default function Invite(): JSX.Element {
         capabilityBytes: bytes,
       };
     } catch (err) {
+      // A 429 says nothing about the link: say "try again later", never
+      // "invalid" (ADR-0028 short-link amendment).
+      if (isDiscoveryRateLimited(err)) return RATE_LIMITED;
       // eslint-disable-next-line no-console
       console.warn("invite: decode/verify failed", err);
       return null;
     }
-  });
+    },
+  );
+  const invite = (): DecodedInvite | null => {
+    const d = decoded();
+    return d === undefined || d === null || d === RATE_LIMITED ? null : d;
+  };
 
   // 1.18c-V1 wires only the canonical accessor (no persist hook
   // — `sendContactRequestToBundle` doesn't mutate MLS state, so
@@ -163,13 +181,16 @@ export default function Invite(): JSX.Element {
       <Show when={!decoded.loading && decoded() === null}>
         <InvalidInvitePanel />
       </Show>
-      <Show when={!decoded.loading && decoded() !== null}>
+      <Show when={!decoded.loading && decoded() === RATE_LIMITED}>
+        <RateLimitedInvitePanel onRetry={() => void refetch()} />
+      </Show>
+      <Show when={!decoded.loading && invite() !== null}>
         <Show
           when={auth.state().kind === "session" && auth.identitySecrets() !== null}
           fallback={<NeedsAuthPanel slug={params.slug} />}
         >
           <ConnectPanel
-            invite={decoded() as DecodedInvite}
+            invite={invite() as DecodedInvite}
             client={client}
             discovery={discovery}
             onDone={() => navigate(paths.contacts)}
@@ -183,6 +204,22 @@ export default function Invite(): JSX.Element {
 // ---------------------------------------------------------------
 // Subcomponents
 // ---------------------------------------------------------------
+
+function RateLimitedInvitePanel(props: { onRetry: () => void }): JSX.Element {
+  return (
+    <section class="lk-stack" style={{ gap: "12px" }}>
+      <p>{INVITE_LINK_RATE_LIMITED}</p>
+      <div class="lk-actions">
+        <button class="primary" type="button" onClick={() => props.onRetry()}>
+          {INVITE_LINK_TRY_AGAIN}
+        </button>
+      </div>
+      <p>
+        <A href={paths.home}>Go to Lakko home</A>
+      </p>
+    </section>
+  );
+}
 
 function InvalidInvitePanel(): JSX.Element {
   return (
@@ -357,7 +394,7 @@ function ConnectPanel(props: {
       // to /contacts where the accepted-state UI lives.
       window.setTimeout(props.onDone, 1500);
     } catch (err) {
-      setError(formatError(err));
+      setError(isDiscoveryRateLimited(err) ? INVITE_LINK_RATE_LIMITED : formatError(err));
     } finally {
       setBusy(false);
     }

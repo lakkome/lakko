@@ -97,7 +97,7 @@ class DiscoveryClientTest {
                 headers = headersOf(HttpHeaders.ContentType, "application/json"),
             )
         }
-        return DiscoveryClient(baseUrl = "http://test.invalid", engine = engine)
+        return DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS })
     }
 
     // ===================================================================
@@ -320,7 +320,7 @@ class DiscoveryClientTest {
         val engine = MockEngine { error("must not reach the network") }
         assertThrows(DiscoveryClientArgError::class.java) {
             runTest {
-                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
                     client.identityFetch(ByteArray(8))
                 }
             }
@@ -336,7 +336,7 @@ class DiscoveryClientTest {
         val engine = MockEngine { throw IOException("simulated DNS failure") }
         val err = assertThrows(DiscoveryNetworkError::class.java) {
             runTest {
-                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
                     client.powChallenge()
                 }
             }
@@ -354,7 +354,7 @@ class DiscoveryClientTest {
         val engine = MockEngine { error("must not reach the network") }
         assertThrows(DiscoveryClientArgError::class.java) {
             runTest {
-                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
                     client.uploadIdentityBundle(
                         accountId = ByteArray(8),
                         signaturePubkey = ByteArray(32),
@@ -370,7 +370,7 @@ class DiscoveryClientTest {
         val engine = MockEngine { error("must not reach the network") }
         assertThrows(DiscoveryClientArgError::class.java) {
             runTest {
-                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
                     client.uploadIdentityBundle(
                         accountId = ByteArray(16),
                         signaturePubkey = ByteArray(31),
@@ -386,7 +386,7 @@ class DiscoveryClientTest {
         val engine = MockEngine { error("must not reach the network") }
         assertThrows(DiscoveryClientArgError::class.java) {
             runTest {
-                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
                     client.registerUsername(ByteArray(8), "alice")
                 }
             }
@@ -462,7 +462,7 @@ class DiscoveryClientTest {
         val engine = MockEngine { error("must not reach the network") }
         assertThrows(DiscoveryClientArgError::class.java) {
             runTest {
-                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
                     client.keypackageFetch(ByteArray(8))
                 }
             }
@@ -474,7 +474,7 @@ class DiscoveryClientTest {
         val engine = MockEngine { error("must not reach the network") }
         assertThrows(DiscoveryClientArgError::class.java) {
             runTest {
-                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
                     client.uploadKeyPackage(
                         accountId = ByteArray(8),
                         keyPackageBytes = ByteArray(32),
@@ -490,7 +490,7 @@ class DiscoveryClientTest {
         val engine = MockEngine { error("must not reach the network") }
         assertThrows(DiscoveryClientArgError::class.java) {
             runTest {
-                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
                     client.uploadKeyPackage(
                         accountId = ByteArray(16),
                         keyPackageBytes = ByteArray(0),
@@ -506,7 +506,7 @@ class DiscoveryClientTest {
         val engine = MockEngine { error("must not reach the network") }
         val err = assertThrows(DiscoveryClientArgError::class.java) {
             runTest {
-                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
                     client.uploadKeyPackage(
                         accountId = ByteArray(16),
                         keyPackageBytes = ByteArray(2049), // 1 over the 2048 ceiling
@@ -523,7 +523,7 @@ class DiscoveryClientTest {
         val engine = MockEngine { error("must not reach the network") }
         assertThrows(DiscoveryClientArgError::class.java) {
             runTest {
-                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
                     client.uploadKeyPackage(
                         accountId = ByteArray(16),
                         keyPackageBytes = ByteArray(32),
@@ -581,11 +581,11 @@ class DiscoveryClientTest {
             ),
             captured = captured,
         ).use { client ->
-            val ok = client.inviteFetch(ByteArray(32))
+            val ok = client.inviteFetch(ByteArray(6))
             assertNotNull(ok)
             assertEquals("CAP_B64", ok!!.capability)
 
-            val gone = client.inviteFetch(ByteArray(32))
+            val gone = client.inviteFetch(ByteArray(6))
             assertNull(gone)
         }
         // Both calls used base64url-no-pad slugs.
@@ -603,7 +603,7 @@ class DiscoveryClientTest {
         val engine = MockEngine { error("must not reach the network") }
         assertThrows(DiscoveryClientArgError::class.java) {
             runTest {
-                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
                     client.inviteFetch(ByteArray(16))
                 }
             }
@@ -685,7 +685,7 @@ class DiscoveryClientTest {
         val engine = MockEngine { error("must not reach the network") }
         assertThrows(DiscoveryClientArgError::class.java) {
             runTest {
-                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
                     client.uploadInvite(ByteArray(0))
                 }
             }
@@ -697,7 +697,7 @@ class DiscoveryClientTest {
         val engine = MockEngine { error("must not reach the network") }
         val err = assertThrows(DiscoveryClientArgError::class.java) {
             runTest {
-                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
                     client.uploadInvite(ByteArray(2049))
                 }
             }
@@ -710,7 +710,7 @@ class DiscoveryClientTest {
         val engine = MockEngine { error("must not reach the network") }
         assertThrows(DiscoveryClientArgError::class.java) {
             runTest {
-                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
                     client.fetchInvite(ByteArray(16))
                 }
             }
@@ -722,7 +722,7 @@ class DiscoveryClientTest {
         val engine = MockEngine { error("must not reach the network") }
         assertThrows(DiscoveryClientArgError::class.java) {
             runTest {
-                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
                     client.consumeInvite(
                         blobId = ByteArray(16),
                         capabilityBytes = byteArrayOf(1, 2, 3),
@@ -738,9 +738,9 @@ class DiscoveryClientTest {
         val engine = MockEngine { error("must not reach the network") }
         assertThrows(DiscoveryClientArgError::class.java) {
             runTest {
-                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
                     client.consumeInvite(
-                        blobId = ByteArray(32),
+                        blobId = ByteArray(6),
                         capabilityBytes = byteArrayOf(1),
                         joinerAccountId = ByteArray(8),
                     )
@@ -754,7 +754,7 @@ class DiscoveryClientTest {
         val engine = MockEngine { error("must not reach the network") }
         assertThrows(DiscoveryClientArgError::class.java) {
             runTest {
-                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
                     client.revokeInvite(
                         blobId = ByteArray(16),
                         signingSeed = ByteArray(32),
@@ -769,13 +769,82 @@ class DiscoveryClientTest {
         val engine = MockEngine { error("must not reach the network") }
         assertThrows(DiscoveryClientArgError::class.java) {
             runTest {
-                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
                     client.revokeInvite(
-                        blobId = ByteArray(32),
+                        blobId = ByteArray(6),
                         signingSeed = ByteArray(16),
                     )
                 }
             }
+        }
+    }
+
+    // ===================================================================
+    // Short links (ADR-0028 amendment of 2026-09-27)
+    // ===================================================================
+
+    @Test
+    fun `inviteFetch puts the 8-character id in the path`() = runTest {
+        val captured = mutableListOf<CapturedRequest>()
+        val id = ByteArray(6) { (it + 1).toByte() }
+        client(
+            responses = listOf(HttpStatusCode.OK to """{"capability":"CAP_B64"}"""),
+            captured = captured,
+        ).use { client -> client.inviteFetch(id) }
+        val slug = captured[0].url.substringAfter("/discovery/invite/")
+        assertEquals(me.lakko.app.auth.base64UrlEncodeNoPad(id), slug)
+        assertEquals(8, slug.length)
+    }
+
+    @Test
+    fun `the old 32-byte id is refused before network on every invite route`() {
+        val engine = MockEngine { error("must not reach the network") }
+        val old = ByteArray(32)
+        for (call in listOf<suspend (DiscoveryClient) -> Unit>(
+            { it.fetchInvite(old) },
+            { it.fetchCallInvite(old) },
+            { it.fetchGroupInvite(old) },
+            { it.consumeGroupInvite(old, byteArrayOf(1), ByteArray(16)) },
+            { it.revokeGroupInvite(old, ByteArray(32)) },
+            { it.revokeCallInvite(old, ByteArray(32)) },
+        )) {
+            assertThrows(DiscoveryClientArgError::class.java) {
+                runTest {
+                    DiscoveryClient(
+                        baseUrl = "http://test.invalid",
+                        engine = engine,
+                        inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS },
+                    ).use { call(it) }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `a 429 on group-invite fetch surfaces as rate limited, never as not found`() {
+        val err = assertThrows(DiscoveryHttpError::class.java) {
+            runTest {
+                client(responses = listOf(HttpStatusCode.TooManyRequests to "")).use { client ->
+                    client.fetchGroupInvite(ByteArray(6))
+                }
+            }
+        }
+        assertEquals(429, err.status)
+        assertTrue(isDiscoveryRateLimited(err))
+    }
+
+    @Test
+    fun `a 429 on call-invite and contact-invite fetch is rate limited too`() {
+        for (call in listOf<suspend (DiscoveryClient) -> Unit>(
+            { it.fetchCallInvite(ByteArray(6)) },
+            { it.fetchInvite(ByteArray(6)) },
+        )) {
+            val err = assertThrows(DiscoveryHttpError::class.java) {
+                runTest {
+                    client(responses = listOf(HttpStatusCode.TooManyRequests to "")).use { call(it) }
+                }
+            }
+            assertTrue(isDiscoveryRateLimited(err))
         }
     }
 }

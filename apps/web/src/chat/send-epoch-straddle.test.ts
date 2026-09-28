@@ -77,7 +77,6 @@ import { withGroupMlsLock } from "../mls/group-lock";
 import { base64Encode } from "../auth/account-id";
 import type { DsClient } from "../ds/client";
 import type { DiscoveryClient } from "../discovery/client";
-import type { PushClient } from "../push/client";
 import type {
   Group as WasmGroup,
   Identity as WasmIdentity,
@@ -207,10 +206,6 @@ function replayAsPeer(journal: readonly Uint8Array[], startEpoch: number): strin
   return dropped;
 }
 
-function mockPush(): PushClient {
-  return { notifyGroup: vi.fn(async () => {}) } as unknown as PushClient;
-}
-
 /** A group id no other case in this file reuses — `withGroupMlsLock`'s queue is
  *  MODULE-level (deliberately), so a shared id would let a case that fails
  *  while holding the lock wedge every later one. */
@@ -247,7 +242,7 @@ describe("the send path never straddles an epoch change", () => {
         onPersistWithCommit: async () => {},
       },
     );
-    const chat = new ChatClient(ds, { identityProvider: () => IDENTITY_TOKEN }, mockPush());
+    const chat = new ChatClient(ds, { identityProvider: () => IDENTITY_TOKEN });
 
     const commit = contacts.removeMemberFromGroup(null, g.group, 1);
     await settle();
@@ -273,7 +268,7 @@ describe("the send path never straddles an epoch change", () => {
     const g = stampingGroup(freshGid(), 5);
     const { ds, journal } = journalDs();
     const verdictGate = deferred<void>();
-    const chat = new ChatClient(ds, { identityProvider: () => IDENTITY_TOKEN }, mockPush());
+    const chat = new ChatClient(ds, { identityProvider: () => IDENTITY_TOKEN });
 
     const sweep = withGroupMlsLock(base64Encode(g.group.groupId), async () => {
       journal.push(g.stage());
@@ -314,7 +309,7 @@ describe("the send path never straddles an epoch change", () => {
         onPersistWithCommit: async () => {},
       },
     );
-    const chat = new ChatClient(ds, { identityProvider: () => IDENTITY_TOKEN }, mockPush());
+    const chat = new ChatClient(ds, { identityProvider: () => IDENTITY_TOKEN });
 
     const commit = contacts.removeMemberFromGroup(null, g.group, 1);
     await settle();
@@ -355,7 +350,6 @@ describe("the send path never straddles an epoch change", () => {
           order.push("persist:exit");
         },
       },
-      mockPush(),
     );
 
     const a = chat.sendMessage(null, g.group, new Uint8Array([1]));
@@ -380,7 +374,7 @@ describe("the send path never straddles an epoch change", () => {
     const other = stampingGroup(freshGid(), 5);
     const { ds } = journalDs();
     const gate = deferred<void>();
-    const chat = new ChatClient(ds, { identityProvider: () => IDENTITY_TOKEN }, mockPush());
+    const chat = new ChatClient(ds, { identityProvider: () => IDENTITY_TOKEN });
 
     const held = withGroupMlsLock(base64Encode(busy.group.groupId), async () => {
       await gate.promise;

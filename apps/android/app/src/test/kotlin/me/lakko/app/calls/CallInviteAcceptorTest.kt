@@ -11,6 +11,7 @@ import io.ktor.http.headersOf
 import kotlinx.coroutines.test.runTest
 import me.lakko.app.auth.base64UrlEncodeNoPad
 import me.lakko.app.discovery.DiscoveryClient
+import me.lakko.app.discovery.TEST_INVITE_LINK_LENGTHS
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.lakko_ffi_uniffi.Identity
@@ -56,9 +57,9 @@ class CallInviteAcceptorTest {
             val engine = MockEngine {
                 error("discovery must never be reached for a malformed slug")
             }
-            val result = DiscoveryClient(baseUrl = "http://test.invalid", engine = engine)
+            val result = DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS })
                 .use { discovery ->
-                    CallInviteAcceptor(discovery).acceptFromSlug(
+                    CallInviteAcceptor(discovery, TEST_INVITE_LINK_LENGTHS).acceptFromSlug(
                         slug = "not*valid*base64*url",
                         joinerAccountId = joinerAccountId(),
                         joinerIdentity = Identity(NoHandle),
@@ -72,7 +73,7 @@ class CallInviteAcceptorTest {
 
     @Test
     fun `acceptFromSlug reaches discovery for a well-formed pointer slug`() = runTest {
-        // Positive control for the test above: a 32-byte pointer slug
+        // Positive control for the test above: a 6-byte pointer slug
         // clears the parse gate, so the failure must come from the
         // FETCH (404 -> NotFound) rather than the parser. Without
         // this, a MalformedSlug result could equally mean the
@@ -86,10 +87,10 @@ class CallInviteAcceptorTest {
                 headers = headersOf(HttpHeaders.ContentType, "application/json"),
             )
         }
-        val slug = base64UrlEncodeNoPad(ByteArray(CALL_INVITE_BLOB_ID_LEN) { it.toByte() })
-        val result = DiscoveryClient(baseUrl = "http://test.invalid", engine = engine)
+        val slug = base64UrlEncodeNoPad(ByteArray(TEST_INVITE_LINK_LENGTHS.blobIdLen) { it.toByte() })
+        val result = DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS })
             .use { discovery ->
-                CallInviteAcceptor(discovery).acceptFromSlug(
+                CallInviteAcceptor(discovery, TEST_INVITE_LINK_LENGTHS).acceptFromSlug(
                     slug = slug,
                     joinerAccountId = joinerAccountId(),
                     joinerIdentity = Identity(NoHandle),
@@ -100,5 +101,49 @@ class CallInviteAcceptorTest {
             result is CallInviteAcceptor.Result.NotFound,
         )
         assertTrue("discovery should have been called", requests > 0)
+    }
+
+    @Test
+    fun `acceptFromSlug returns RateLimited when the ledger fetch answers 429`() = runTest {
+        val engine = MockEngine {
+            respond(
+                content = "",
+                status = HttpStatusCode.TooManyRequests,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val slug = base64UrlEncodeNoPad(ByteArray(TEST_INVITE_LINK_LENGTHS.blobIdLen) { 3 })
+        val result = DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS })
+            .use { discovery ->
+                CallInviteAcceptor(discovery, TEST_INVITE_LINK_LENGTHS).acceptFromSlug(
+                    slug = slug,
+                    joinerAccountId = joinerAccountId(),
+                    joinerIdentity = Identity(NoHandle),
+                )
+            }
+        assertTrue(
+            "expected RateLimited (never NotFound / MalformedSlug), got $result",
+            result is CallInviteAcceptor.Result.RateLimited,
+        )
+    }
+
+    @Test
+    fun `acceptFromSlug refuses the pre-amendment 32-byte pointer before any request`() = runTest {
+        val engine = MockEngine {
+            error("discovery must never be reached for an old-width slug")
+        }
+        val slug = base64UrlEncodeNoPad(ByteArray(32) { it.toByte() })
+        val result = DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS })
+            .use { discovery ->
+                CallInviteAcceptor(discovery, TEST_INVITE_LINK_LENGTHS).acceptFromSlug(
+                    slug = slug,
+                    joinerAccountId = joinerAccountId(),
+                    joinerIdentity = Identity(NoHandle),
+                )
+            }
+        assertTrue(
+            "expected MalformedSlug, got $result",
+            result is CallInviteAcceptor.Result.MalformedSlug,
+        )
     }
 }

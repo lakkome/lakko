@@ -7,10 +7,16 @@
  * absence. Pure, so `vitest` can hold the copy to the spec; `JoinGroup.tsx`
  * only places the lines.
  *
- * A missing preview is a state, not an error: a link minted without one, a
- * fragment a chat app stripped, a key that does not open. All three read the
- * same, and nothing here invents a name.
+ * A missing preview is a state, not an error, when the link has no fragment
+ * (a chat app stripped it, a hand-typed URL): the page reads "You are invited
+ * to a group" and nothing here invents a name. A fragment that is present but
+ * does not open the preview is a different state since the short-link
+ * amendment of ADR-0028 (2026-09-27): the preview key binds the capability's
+ * group id and issuer, so a capability a server swapped in under a live
+ * ledger id fails here, and the page refuses the link as damaged rather than
+ * offering a join without a preview.
  */
+import type { GroupInviteFragment } from "../contacts/invite-link";
 
 /** What `GroupInviteCapability.openPreview` yields, as plain data. */
 export interface GroupInvitePreviewData {
@@ -67,4 +73,48 @@ export function inviteHeadline(preview: GroupInvitePreviewData | null): InviteHe
 /** The muted foot line: `Invited by <fingerprint>`. */
 export function invitedByLine(fingerprint: string): string {
   return `${INVITED_BY_PREFIX} ${fingerprint}`;
+}
+
+/** The part of a decoded `GroupInviteCapability` the preview decision reads. */
+export interface PreviewSource {
+  readonly hasPreview: boolean;
+  openPreview(secret: Uint8Array): GroupInvitePreviewData | undefined;
+}
+
+/** What the page does with a link's preview:
+ *
+ *   * `preview` — the fragment's secret opened it; show the names.
+ *   * `none` — the link has no fragment; show the page without a preview.
+ *   * `damaged` — the link has a fragment and the preview does not open (a
+ *     malformed fragment, a wrong or truncated secret, a tampered preview, a
+ *     capability without a preview under a secret, or a capability swapped in
+ *     under a live id). The page refuses the link. */
+export type InvitePreviewOutcome =
+  | { readonly kind: "preview"; readonly preview: GroupInvitePreviewData }
+  | { readonly kind: "none" }
+  | { readonly kind: "damaged" };
+
+/** Decide the preview outcome. Never throws. */
+export function resolveInvitePreview(
+  cap: PreviewSource,
+  fragment: GroupInviteFragment,
+): InvitePreviewOutcome {
+  if (fragment.kind === "none") return { kind: "none" };
+  if (fragment.kind === "damaged") return { kind: "damaged" };
+  if (!cap.hasPreview) return { kind: "damaged" };
+  let opened: GroupInvitePreviewData | undefined;
+  try {
+    opened = cap.openPreview(fragment.secret);
+  } catch {
+    return { kind: "damaged" };
+  }
+  if (opened === undefined) return { kind: "damaged" };
+  return {
+    kind: "preview",
+    preview: {
+      groupName: opened.groupName,
+      inviterName: opened.inviterName,
+      memberCount: opened.memberCount,
+    },
+  };
 }

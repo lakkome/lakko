@@ -2762,8 +2762,9 @@ public final class ChatRepository: ObservableObject {
     /// **ADR-0028 v2 - the link carries a sealed preview.** The group's name
     /// (the shared store's, empty = none), this device's own profile display
     /// name (empty = none) and the roster size at this moment are sealed under
-    /// a fresh 32-byte link key inside the signed capability, and the key rides
-    /// the URL **fragment** - `https://lakko.me/g/<slug>#<key>` - which never
+    /// a key derived from a fresh 12-byte link secret (bound to the group id and
+    /// the issuer) inside the signed capability, and the secret rides the URL
+    /// **fragment** - `https://lakko.me/g/<8-char id>#<16-char secret>` - which never
     /// reaches the discovery ledger (the pointer upload carries the ciphertext
     /// only) and is never logged. Both the pointer form and the inline fallback
     /// carry it; `Copy link` copies the whole string. A name the display-name
@@ -2793,24 +2794,77 @@ public final class ChatRepository: ObservableObject {
         let wire = mint.wire
         // Production default (ADR-0028 OQ1): upload to the discovery ledger —
         // the server-side anti-abuse surface (per-joiner consume dedup + soft
-        // max_uses) — and share the short pointer URL. On an upload failure (a
-        // censored / offline network) fall back to the inline form so the link
-        // still works without the round-trip. `max_uses` is a soft throttle,
-        // not an access control: the admin approval gate stays the boundary.
+        // max_uses) — and share the short pointer URL. `max_uses` is a soft
+        // throttle, not an access control: the admin approval gate stays the
+        // boundary.
+        //
+        // The upload is session-gated (`require_session` on discovery), so it
+        // goes out on a bearer copy of the client; with no session at all the
+        // mint fails here rather than quietly producing the long inline link.
+        // Only a TRANSPORT failure (a censored / offline network) falls back to
+        // the inline form; a refusal from the server (401, 400, 5xx) surfaces.
+        let bearer = try bearerDiscovery()
         let base: String
         do {
-            let blobId = try await discovery.uploadGroupInvite(
+            let blobId = try await bearer.uploadGroupInvite(
                 capabilityBytes: wire, maxUses: UInt32.max)
             base = try GroupInviteUrl.composePointerGroupInviteUrl(blobId: blobId)
-        } catch {
+        } catch let error where Self.groupInviteUploadFallsBackInline(error) {
+            NSLog("group invite upload failed (\(Self.discoveryFailureSummary(error))); "
+                + "sharing the inline link")
             base = (try? GroupInviteUrl.composeInlineGroupInviteUrl(capabilityBytes: wire))
                 ?? ("https://lakko.me/g/" + base64UrlEncodeNoPad(wire))
+        } catch {
+            NSLog("group invite upload failed (\(Self.discoveryFailureSummary(error)))")
+            throw ChatError.wrapped("group invite upload failed", underlying: error)
         }
         return GroupInviteLink.withLinkKey(base, linkKey: mint.linkKey)
     }
 
+    /// The signed-in session's bearer token, read at call time. Defaults to
+    /// ``AmbientSessionToken/shared``, which ``AuthRepository`` keeps in step
+    /// with every sign-in, restore, refresh and logout — unlike the token
+    /// captured at ``bootstrap(secrets:)``, which runs once per account and
+    /// goes stale on a re-login to the same account. Tests replace it.
+    var bearerSessionToken: () -> String? = { AmbientSessionToken.shared.current }
+
+    /// A bearer copy of ``discovery`` for one `require_session` request
+    /// (group-invite upload and revoke). Throws when there is no session
+    /// token, so the caller fails loudly instead of sending a request the
+    /// server can only answer with a 401. The shared ``discovery`` stays
+    /// anonymous: its KeyPackage and invite reads must not name the account.
+    func bearerDiscovery() throws -> DiscoveryClient {
+        guard let token = bearerSessionToken(), !token.isEmpty else {
+            throw ChatError.argument("not signed in: no session token for discovery")
+        }
+        return discovery.withSessionToken(token)
+    }
+
+    /// Whether a group-invite upload failure may fall back to the inline link:
+    /// only when the request never got an answer (DNS, TLS, no route, a
+    /// censored network). Any HTTP status is the server's answer and surfaces.
+    static func groupInviteUploadFallsBackInline(_ error: Error) -> Bool {
+        if let discovery = error as? DiscoveryClientError, case .network = discovery {
+            return true
+        }
+        return false
+    }
+
+    /// A log-safe summary of a discovery failure: the kind and the HTTP
+    /// status, never a body or an argument message (either may echo the
+    /// capability).
+    static func discoveryFailureSummary(_ error: Error) -> String {
+        guard let discovery = error as? DiscoveryClientError else { return "unexpected error" }
+        switch discovery {
+        case .network: return "network"
+        case .http(let status, _, _): return "http \(status)"
+        case .argument: return "invalid argument"
+        case .rateLimited: return "rate limited"
+        }
+    }
+
     /// ADR-0028 revoke — the issuer revokes a previously-created group invite
-    /// link. Only the server-backed pointer form (a 32-byte `blob_id`) is
+    /// link. Only the server-backed pointer form (a 6-byte `blob_id`) is
     /// revocable; an inline link has no ledger row. Returns `true` when a ledger
     /// row was revoked, `false` for an inline / malformed link (nothing to do).
     public func revokeGroupInviteLink(link: String) async throws -> Bool {
@@ -2834,10 +2888,14 @@ public final class ChatRepository: ObservableObject {
         case .inline:
             return false
         case .pointer(let blobId):
+            // Session-gated like the upload (`require_session`); the issuer
+            // signature is the authorisation, the bearer the DoS gate.
+            let bearer = try bearerDiscovery()
             do {
-                _ = try await discovery.revokeGroupInvite(
+                _ = try await bearer.revokeGroupInvite(
                     blobId: blobId, signingSeed: identity.ed25519Seed())
             } catch {
+                NSLog("group invite revoke failed (\(Self.discoveryFailureSummary(error)))")
                 throw ChatError.wrapped("group invite revoke failed", underlying: error)
             }
             return true
@@ -2845,11 +2903,18 @@ public final class ChatRepository: ObservableObject {
     }
 
     /// ADR-0028 (G-3) — resolve a `/g/<slug>` slug to the capability wire bytes,
-    /// fetching from the discovery ledger when the slug is a 32-byte
-    /// content-addressed pointer (the production form) or passing the bytes
-    /// straight through when it is an inline capability (the censored-region
-    /// fallback). Returns the `blobId` (non-nil only for the pointer form) so
-    /// the caller can drive the consume gate before requesting to join.
+    /// fetching from the discovery ledger when the slug is a 6-byte pointer (the
+    /// production form) or passing the bytes straight through when it is an
+    /// inline capability (the transport-failure fallback). Returns the `blobId`
+    /// (non-nil only for the pointer form) so the caller can drive the consume
+    /// gate before requesting to join.
+    ///
+    /// A slug of any other shape (the retired 43-character id included) throws
+    /// ``GroupInviteLinkError/malformed`` without a request, and a ledger 404
+    /// throws ``GroupInviteLinkError/notFound``; both are "invalid or expired"
+    /// to a person. A `429` surfaces as a wrapped
+    /// ``DiscoveryClientError/rateLimited(endpoint:)`` - try again later, never
+    /// "invalid".
     public func resolveGroupInviteSlug(
         slug: String
     ) async throws -> (capabilityWire: Data, blobId: Data?) {
@@ -2857,7 +2922,7 @@ public final class ChatRepository: ObservableObject {
         do {
             parsed = try GroupInviteUrl.parseGroupInviteSlug(slug)
         } catch {
-            throw ChatError.wrapped("group invite link is malformed", underlying: error)
+            throw GroupInviteLinkError.malformed
         }
         switch parsed {
         case .inline(let capabilityBytes):
@@ -2870,7 +2935,7 @@ public final class ChatRepository: ObservableObject {
                 throw ChatError.wrapped("group invite fetch failed", underlying: error)
             }
             guard let capabilityWire = fetched else {
-                throw ChatError.argument("group invite not found or expired")
+                throw GroupInviteLinkError.notFound
             }
             return (capabilityWire, blobId)
         }
@@ -2916,7 +2981,7 @@ public final class ChatRepository: ObservableObject {
         do {
             result = try await withCommitLock(groupIdHex: groupIdHex) { [self] in
                 try await sealAndPublishLocked(
-                    groupIdHex: groupIdHex, plaintextBytes: envelopeBytes)
+                    groupIdHex: groupIdHex, plaintextBytes: envelopeBytes, wake: .message)
             }
         } catch {
             record.markFailed(localId: localId)
@@ -2927,11 +2992,6 @@ public final class ChatRepository: ObservableObject {
             localId: localId, messageId: result.messageId, createdAt: result.createdAt)
         persistMessageLogBestEffort()
         state = state.with(threads: buildThreadList())
-        Task { @MainActor [weak self, groupIdHex, messageId = result.messageId] in
-            await self?.notifyPushGroupBestEffort(
-                groupIdHex: groupIdHex,
-                messageId: messageId)
-        }
     }
 
     /// The chat envelope for a message, a reply or not.
@@ -3044,8 +3104,10 @@ public final class ChatRepository: ObservableObject {
         let result: SendMessageResult
         do {
             result = try await withCommitLock(groupIdHex: groupIdHex) { [self] in
+                // ADR-0054 decision 1 — a chat message asks for a message
+                // wake, carried on the publish itself.
                 try await sealAndPublishLocked(
-                    groupIdHex: groupIdHex, plaintextBytes: envelopeBytes)
+                    groupIdHex: groupIdHex, plaintextBytes: envelopeBytes, wake: .message)
             }
         } catch {
             record.markFailed(localId: localId)
@@ -3068,18 +3130,9 @@ public final class ChatRepository: ObservableObject {
         // best-effort — its loss cannot cause nonce reuse.
         persistMessageLogBestEffort()
         state = state.with(threads: buildThreadList())
-        // 1.20e — fan a wake out to every device subscribed to
-        // this group. Fire-and-forget — the message is already
-        // on the DS and recipients pick it up on next poll
-        // even if push-gw is down. Off the user-visible send
-        // critical path so the PoW solve doesn't double send
-        // latency.
-        Task { @MainActor [weak self, groupIdHex, messageId = result.messageId] in
-            await self?.notifyPushGroupBestEffort(
-                groupIdHex: groupIdHex,
-                messageId: messageId
-            )
-        }
+        // ADR-0054 decision 1 — the wake rode the publish above as the
+        // `x-lakko-wake` header; the DS forwards it to push-gw after the row
+        // is appended. There is no second request from this device.
     }
 
     /// ADR-0023 — edit our own message `target` to `newText`.
@@ -3225,40 +3278,31 @@ public final class ChatRepository: ObservableObject {
     /// composer and the timeline append — call signaling
     /// rides this channel out-of-band.
     ///
-    /// - Parameter wake: Which push wake to fan out after a successful
-    ///   publish. `nil` (the default) fans out none, which is the ADR-0042
-    ///   rule for a control envelope and what every caller of this method
-    ///   wants: a typing signal, a read receipt, a routing-secret handshake
-    ///   and a group-call announcement must not wake anybody's device.
-    ///   ``PushClient/WakeKind/call`` is the single exception, asked for by
-    ///   the 1x1 call publisher for an offer and an end only
-    ///   (``CallSignalingWake``), because those two are the whole of
-    ///   `docs/ux/calls.md` §2.1 — the ring starting and the ring stopping on
-    ///   a device whose app is closed.
+    /// - Parameter wake: Which push wake the publish asks for. `nil` (the
+    ///   default) asks for none, which is the ADR-0042 rule for a control
+    ///   envelope and what every caller of this method wants: a typing
+    ///   signal, a read receipt, a routing-secret handshake and a group-call
+    ///   announcement must not wake anybody's device. ``DsWake/Kind/call`` is
+    ///   the single exception, asked for by the 1x1 call publisher for an
+    ///   offer and an end only (``CallSignalingWake``), because those two are
+    ///   the whole of `docs/ux/calls.md` §2.1 — the ring starting and the ring
+    ///   stopping on a device whose app is closed.
     ///
-    /// The wake is fired from a detached task AFTER the publish returns, so a
-    /// slow or failing push-gw — the PoW solve alone is a visible cost —
-    /// cannot delay or fail the call. That is the same posture ``sendMessage``
-    /// has used for its own wake since 1.20e, for the same reason.
+    /// ADR-0054 decision 1 — the wake rides the signed publish as the
+    /// `x-lakko-wake` header and the DS forwards it after appending the row;
+    /// this device makes no push-gw request.
     public func publishApplicationMessage(
         groupIdHex: String,
         plaintextBytes: Data,
-        wake: PushClient.WakeKind? = nil
+        wake: DsWake.Kind? = nil
     ) async throws {
         // ADR-0045 — the seal and the publish are SERIALIZED against the
         // regions that move this group's epoch. See ``sealAndPublishLocked``.
-        let result = try await withCommitLock(groupIdHex: groupIdHex) { [self] in
-            try await sealAndPublishLocked(groupIdHex: groupIdHex, plaintextBytes: plaintextBytes)
+        _ = try await withCommitLock(groupIdHex: groupIdHex) { [self] in
+            try await sealAndPublishLocked(
+                groupIdHex: groupIdHex, plaintextBytes: plaintextBytes, wake: wake)
         }
         persistSnapshotBestEffort()
-        guard let wake else { return }
-        Task { @MainActor [weak self, groupIdHex, messageId = result.messageId] in
-            await self?.notifyPushGroupBestEffort(
-                groupIdHex: groupIdHex,
-                messageId: messageId,
-                kind: wake
-            )
-        }
     }
 
     /// The serialized body every application send shares: seal at the live
@@ -3308,9 +3352,14 @@ public final class ChatRepository: ObservableObject {
     /// one group now serialize — a latency cost on back-to-back sends, bounded
     /// because no caller of this lock long polls (the poll's 30 s fetch is
     /// outside it, and the sweep's verdict read is `waitSecs: 0`).
+    ///
+    /// `wake` (ADR-0054 decision 1) is resolved to a ``DsWake`` here, from the
+    /// group's `push_gid` (``pushWake(groupIdHex:kind:)``), and rides the
+    /// publish as its `x-lakko-wake` header.
     private func sealAndPublishLocked(
         groupIdHex: String,
-        plaintextBytes: Data
+        plaintextBytes: Data,
+        wake: DsWake.Kind? = nil
     ) async throws -> SendMessageResult {
         guard let identity = canonicalIdentity else {
             throw ChatError.argument("ChatRepository not bootstrapped")
@@ -3321,7 +3370,8 @@ public final class ChatRepository: ObservableObject {
         return try await chatClient.sendMessage(
             identity: identity,
             group: record.group,
-            plaintext: plaintextBytes
+            plaintext: plaintextBytes,
+            wake: wake.flatMap { pushWake(groupIdHex: groupIdHex, kind: $0) }
         )
     }
 
@@ -3371,40 +3421,25 @@ public final class ChatRepository: ObservableObject {
         )
     }
 
-    /// ADR-0042 — push-gw wake fan-out routed under the opaque `push_gid`,
-    /// NOT the DS `group_id`. When this device holds no secret for the
-    /// group yet, the wake is SKIPPED rather than leaking the `group_id` to
-    /// push-gw (invariant #5) — recipients still receive the message on
+    /// ADR-0054 decision 1 over ADR-0042 — the wake a publish to
+    /// `groupIdHex` carries, named by the group's opaque `push_gid`, NOT the
+    /// DS `group_id`. When this device holds no secret for the group yet the
+    /// answer is `nil` and the publish carries no header rather than leaking
+    /// the `group_id` (invariant #5) — recipients still receive the message on
     /// their next foreground poll. A publisher is a member, so it normally
-    /// holds the secret. Best-effort, off the critical path.
+    /// holds the secret.
     ///
-    /// - Parameter kind: Which class of wake to request. `nil` — every
-    ///   caller but the 1x1 call publisher — sends no `kind` field, which
-    ///   the server reads as the message wake it has always sent.
-    ///   ``PushClient/WakeKind/call`` raises the provider urgency so a
-    ///   closed app rings. The wake payload is identical either way: a
-    ///   group pseudonym and a journal pointer, nothing about the call
-    ///   (invariants #2 and #5).
-    private func notifyPushGroupBestEffort(
-        groupIdHex: String,
-        messageId: Int64,
-        kind: PushClient.WakeKind? = nil
-    ) async {
+    /// ``DsWake/Kind/call`` raises the provider urgency so a closed app rings.
+    /// The delivered payload is identical either way: a group pseudonym and a
+    /// journal pointer, nothing about the call (invariants #2 and #5).
+    func pushWake(groupIdHex: String, kind: DsWake.Kind) -> DsWake? {
         guard let accountIdB64 = currentAccountIdB64,
               let pushGid = pushRouting.pushGid(
                 accountIdB64: accountIdB64, groupIdHex: groupIdHex) else {
-            // No secret held yet → do NOT wake under the DS key.
-            return
+            // No secret held yet: do NOT wake under the DS key.
+            return nil
         }
-        do {
-            _ = try await PushClient().notifyGroup(
-                groupPseudonym: pushGid,
-                envelopePointer: messageId,
-                kind: kind
-            )
-        } catch {
-            NSLog("push notify-group failed: \(error)")
-        }
+        return DsWake(pushGid: pushGid, kind: kind)
     }
 
     // MARK: - ADR-0042 opaque push routing

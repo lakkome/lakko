@@ -29,7 +29,6 @@ import { fileURLToPath } from "node:url";
 import initWasm, * as wasmNs from "../../wasm/lakko_ffi_wasm";
 import { ChatClient, type IncomingChatEvent } from "./client";
 import type { DsClient } from "../ds/client";
-import type { PushClient } from "../push/client";
 import type { Group as WasmGroup, Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 import { base64Encode } from "../auth/account-id";
 
@@ -73,8 +72,6 @@ function dsWith(...payloads: Uint8Array[]): DsClient {
   } as unknown as DsClient;
 }
 
-const push = (): PushClient => ({ notifyGroup: vi.fn(async () => {}) }) as unknown as PushClient;
-
 let nextGid = 0;
 function freshGid(): Uint8Array {
   nextGid += 1;
@@ -82,7 +79,7 @@ function freshGid(): Uint8Array {
 }
 
 async function classify(senderLeaf: number, ...payloads: Uint8Array[]): Promise<IncomingChatEvent[]> {
-  const chat = new ChatClient(dsWith(...payloads), { identityProvider: () => IDENTITY_TOKEN }, push());
+  const chat = new ChatClient(dsWith(...payloads), { identityProvider: () => IDENTITY_TOKEN });
   return (await chat.pollMessages(null, group(freshGid(), senderLeaf), 0)).events;
 }
 
@@ -181,7 +178,7 @@ describe("ADR-0048 — an envelope published by another ChatClient on the page i
     const publisherDs = {
       publishGroup: vi.fn(async () => ({ id: 1, createdAt: "2026-09-13T00:00:00Z" })),
     } as unknown as DsClient;
-    const publisher = new ChatClient(publisherDs, { identityProvider: () => IDENTITY_TOKEN }, push());
+    const publisher = new ChatClient(publisherDs, { identityProvider: () => IDENTITY_TOKEN });
     const sealing = {
       get groupId(): Uint8Array {
         return gid;
@@ -192,7 +189,7 @@ describe("ADR-0048 — an envelope published by another ChatClient on the page i
 
     // The chat route's own client polls the same row back.
     const receiving = group(gid);
-    const route = new ChatClient(dsWith(new Uint8Array([1, 2, 3])), { identityProvider: () => IDENTITY_TOKEN }, push());
+    const route = new ChatClient(dsWith(new Uint8Array([1, 2, 3])), { identityProvider: () => IDENTITY_TOKEN });
     const res = await route.pollMessages(null, receiving, 0);
     expect(res.events).toHaveLength(0);
     expect(receiving.processIncomingVerifyingRoles).not.toHaveBeenCalled();

@@ -65,9 +65,20 @@ Invited by <fingerprint>
 
 Nothing invents a name. The page does not say why the preview is missing.
 
-**Preview refused** (the fragment is present but the preview does not open - a
-wrong key, a tampered link): identical to *without a preview*. The signature
-already gates the capability; a preview that fails is simply not shown.
+**Damaged link** (amended 2026-09-28, short links): the fragment is present but
+malformed, or present while the capability carries no preview, or the preview
+does not open under it - a wrong or truncated key, a tampered link, or a
+capability a server swapped in under a live short id (the preview key is bound
+to the group id and the issuer, so a swapped capability never opens). The page
+refuses: `This invite link is damaged. Ask for a new link.` and nothing else.
+There is no preview-less fallback once a fragment is present; before the short
+ids this read "identical to without a preview", which was safe only while the
+id was a hash of the capability. A malformed fragment is refused before any
+request is made.
+
+**Too many requests** (the ledger answered 429 on fetch or consume, any link
+kind): `Too many requests from this network right now. Try again in a minute.`
+and `Try again`. Never shown as an invalid link.
 
 **Invalid or expired link** - unchanged: `This invite link is invalid or has
 expired.` and a link to open Lakko.
@@ -82,9 +93,10 @@ the join lands.
 
 ## 4. What the link looks like
 
-`https://lakko.me/g/<slug>#<link key, base64url, 43 chars>` for both the
-pointer form (`<slug>` = the ledger blob id) and the inline form (`<slug>` =
-the whole capability). `Copy link` copies the fragment with it. A link without
+`https://lakko.me/g/<slug>#<link secret, base64url, 16 chars>` for both the
+pointer form (`<slug>` = the ledger id, 8 chars) and the inline form (`<slug>` =
+the whole capability). A pointer link is therefore about 45 characters
+(ADR-0028 amendment of 2026-09-27). `Copy link` copies the fragment with it. A link without
 a fragment still works; it only loses the preview.
 
 ## 5. Copy rules
@@ -100,4 +112,5 @@ device wrote them, unlinked, with no verification mark (the same rule as the
   name (empty = none), the member count - all already on the device.
 - On open: the capability's `hasPreview`, and `openPreview(linkKey)` giving
   `groupName?`, `inviterName?`, `memberCount`, or nothing when the fragment is
-  absent or the preview does not open.
+  absent; a present fragment whose preview does not open is the damaged state
+  (section 3), not an absent preview.

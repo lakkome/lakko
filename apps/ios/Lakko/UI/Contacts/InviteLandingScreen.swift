@@ -13,7 +13,7 @@ import SwiftUI
 ///   * `apps/web/src/contacts/InviteLandingRoute.tsx` (1.17e11b)
 ///
 /// Drives ``ContactsRepository/acceptInviteLink(slug:)`` on first
-/// appear + renders one of the eight discriminated
+/// appear + renders one of the nine discriminated
 /// ``AcceptInviteResult`` variants. The user dismisses the result
 /// with Done; the host calls
 /// ``InviteIntake/clear()`` to drop the parked slug.
@@ -86,6 +86,12 @@ public struct InviteLandingScreen: View {
                     .font(.body)
                     .foregroundStyle(.secondary)
                 fingerprintBlock(for: result)
+                if result == .rateLimited {
+                    Button("Try again") {
+                        Task { await viewModel.retry() }
+                    }
+                    .buttonStyle(.bordered)
+                }
             }
         }
     }
@@ -133,6 +139,7 @@ public struct InviteLandingScreen: View {
         case .exhausted: return "Invite exhausted"
         case .notFound: return "Invite not found"
         case .malformedSlug: return "Invalid invite link"
+        case .rateLimited: return "Try again in a minute"
         case .requiresReauth: return "Please log in first"
         case .failed: return "Couldn't accept invite"
         }
@@ -163,6 +170,8 @@ public struct InviteLandingScreen: View {
         case .malformedSlug:
             return
                 "This link is incomplete. Ask for it to be sent again."
+        case .rateLimited:
+            return inviteRateLimitedMessage
         case .requiresReauth:
             return
                 "You need an active session to accept an invite. Log in " +
@@ -214,6 +223,16 @@ public final class InviteLandingViewModel: ObservableObject {
     public func run() async {
         guard !didRun else { return }
         didRun = true
+        let result = await repository.acceptInviteLink(slug: slug)
+        state = .done(result)
+    }
+
+    /// Run the accept flow again after a rate-limit refusal
+    /// (`429`): nothing was consumed, so a second pass is the
+    /// same request made later. Any other outcome is final.
+    public func retry() async {
+        guard case .done(.rateLimited) = state else { return }
+        state = .running
         let result = await repository.acceptInviteLink(slug: slug)
         state = .done(result)
     }

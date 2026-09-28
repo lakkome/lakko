@@ -109,6 +109,7 @@ mod group_invite;
 mod identity_bundle;
 mod invite;
 mod keypackage;
+mod ledger_id;
 mod oprf;
 mod pow;
 mod rate_limit;
@@ -437,7 +438,7 @@ pub(crate) fn build_app(state: AppState) -> Router {
         ));
 
     // G-discovery-ratelimit — per-IP token bucket on the
-    // three enumeration-vector endpoints. PoW remains the
+    // enumeration-vector endpoints. PoW remains the
     // primary work proof; rate limiting is defense in
     // depth that caps per-IP server CPU regardless of
     // how many PoW tokens an attacker mints.
@@ -445,38 +446,12 @@ pub(crate) fn build_app(state: AppState) -> Router {
         .route("/discovery/oprf", post(oprf::evaluate))
         .route("/discovery/lookup", post(registry::lookup))
         .route("/discovery/channel/lookup", post(channel_names::lookup))
-        .route_layer(axum::middleware::from_fn_with_state(
-            Arc::clone(&state.rate_limits),
-            rate_limit::middleware,
-        ));
-
-    // Open routes — no auth required, no rate limit.
-    // Endpoints excluded from the limiter above:
-    //   * /health, /ready, /version — no compute.
-    //   * /pow/challenge — itself the primary anti-spam
-    //     layer; rate-limiting it would interfere with
-    //     legitimate retries on poor networks.
-    //   * /discovery/identity/{id} + keypackage/{id} —
-    //     by-id reads, no enumeration vector (the id is
-    //     a 32-byte pseudonym).
-    //   * /discovery/invite, /discovery/call-invite,
-    //     /discovery/group-invite — by-blob-id reads, same shape.
-    //   * /discovery/channel/register — write that's
-    //     UNIQUE-key-gated server-side.
-    let open = Router::new()
-        .route("/health", get(health))
-        .route("/ready", get(ready))
-        .route("/version", get(version))
-        .route("/pow/challenge", post(pow::issue_challenge))
-        .route(
-            "/discovery/identity/{account_id}",
-            get(identity_bundle::fetch),
-        )
-        .route("/discovery/keypackage/{account_id}", get(keypackage::fetch))
-        // Phase 1.18d1 — capability-based invite-link blob fetch +
-        // consume. Both are unauthenticated by design: a joiner
-        // tapping a Universal Link on a fresh install may not be
-        // signed up yet.
+        // The three invite ledgers' open fetch + consume routes. Since the
+        // short-link amendment of ADR-0028 (2026-09-27) a ledger id is a
+        // random 6-byte handle (2^48), so guessing live ids is an
+        // enumeration vector and the per-IP bucket is what bounds it. All
+        // stay unauthenticated by design: a joiner tapping a link on a
+        // fresh install may not be signed up yet.
         .route("/discovery/invite/{blob_id}", get(invite::fetch))
         .route(
             "/discovery/invite/{blob_id}/consume",
@@ -507,6 +482,32 @@ pub(crate) fn build_app(state: AppState) -> Router {
             "/discovery/group-invite/{blob_id}/consume",
             post(group_invite::consume),
         )
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state.rate_limits),
+            rate_limit::middleware,
+        ));
+
+    // Open routes — no auth required, no rate limit.
+    // Endpoints excluded from the limiter above:
+    //   * /health, /ready, /version — no compute.
+    //   * /pow/challenge — itself the primary anti-spam
+    //     layer; rate-limiting it would interfere with
+    //     legitimate retries on poor networks.
+    //   * /discovery/identity/{id} + keypackage/{id} —
+    //     by-id reads, no enumeration vector (the id is
+    //     a 32-byte pseudonym).
+    //   * /discovery/channel/register — write that's
+    //     UNIQUE-key-gated server-side.
+    let open = Router::new()
+        .route("/health", get(health))
+        .route("/ready", get(ready))
+        .route("/version", get(version))
+        .route("/pow/challenge", post(pow::issue_challenge))
+        .route(
+            "/discovery/identity/{account_id}",
+            get(identity_bundle::fetch),
+        )
+        .route("/discovery/keypackage/{account_id}", get(keypackage::fetch))
         // G4-5 — channel @name discovery via OPRF.
         // Register stays on the open path (no
         // enumeration vector — UNIQUE(oprf_hash) gates
@@ -701,6 +702,72 @@ mod tests {
         Router::new()
             .route("/health", get(health))
             .route("/version", get(version))
+    }
+
+    /// The three ledgers' open fetch + consume routes sit behind the per-IP
+    /// bucket (the short-link amendment of ADR-0028: a 6-byte id is
+    /// guessable, so the rate limit is what bounds enumeration). Builds the
+    /// real router over a lazy pool that is never reached: a malformed id is
+    /// refused with 400 before any DB work, so the first `burst` requests
+    /// from one address answer 400 and the next one 429.
+    #[tokio::test]
+    async fn invite_fetch_and_consume_routes_are_rate_limited() {
+        let secret = Arc::new(TokenSecret::new(vec![7u8; 32]).unwrap());
+        let limit = rate_limit::Limit {
+            per_minute: 60.0,
+            burst: 3.0,
+        };
+        let state = AppState {
+            db: MySqlPoolOptions::new()
+                .connect_lazy("mysql://nobody:nothing@127.0.0.1:1/none")
+                .unwrap(),
+            oprf: Arc::new(
+                oprf::LakkoOprfServer::new_from_seed(&[1u8; 32], b"lakko/oprf/v1").unwrap(),
+            ),
+            session_token_secret: Arc::clone(&secret),
+            rate_limits: Arc::new(rate_limit::DiscoveryLimits::new(
+                limit,
+                limit,
+                limit,
+                Arc::clone(&secret),
+            )),
+            fresh_identity_cooldown_secs: 0,
+            transparency: None,
+        };
+        let app = build_app(state);
+        for (method, uri) in [
+            ("GET", "/discovery/invite/too-long-for-an-id"),
+            ("POST", "/discovery/invite/too-long-for-an-id/consume"),
+            ("GET", "/discovery/call-invite/too-long-for-an-id"),
+            ("POST", "/discovery/call-invite/too-long-for-an-id/consume"),
+            ("GET", "/discovery/group-invite/too-long-for-an-id"),
+            ("POST", "/discovery/group-invite/too-long-for-an-id/consume"),
+        ] {
+            let request = |ip: &str| {
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("x-real-ip", ip)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"pow":{"challenge":"","solution":""},"joiner_tag":""}"#,
+                    ))
+                    .unwrap()
+            };
+            // A fresh address per route so the buckets do not interfere.
+            let ip = format!("192.0.2.{}", uri.len());
+            let mut statuses = Vec::new();
+            for _ in 0..4 {
+                let r = app.clone().oneshot(request(&ip)).await.unwrap();
+                statuses.push(r.status());
+            }
+            assert_ne!(statuses[0], StatusCode::TOO_MANY_REQUESTS, "{method} {uri}");
+            assert_eq!(
+                statuses[3],
+                StatusCode::TOO_MANY_REQUESTS,
+                "{method} {uri} must be behind the per-IP bucket: {statuses:?}"
+            );
+        }
     }
 
     #[tokio::test]

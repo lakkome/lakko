@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import LakkoCore
 
 /// iOS-side helpers for the group join-ticket URL shape (ADR-0028, G-3).
 ///
@@ -9,16 +10,19 @@ import Foundation
 /// `/g/<slug>` slug comes in two forms, discriminated purely by the decoded
 /// byte length:
 ///
-///   - **pointer** — the 32-byte content-addressed `blob_id` from
-///     `DiscoveryClient.uploadGroupInvite(...)`. The production default: short
-///     URL, the joiner fetches the capability from
-///     `/discovery/group-invite/<blob_id>`. This is the OQ1 indirection that
-///     adds the server-side anti-abuse ledger (consume dedup + soft max_uses).
+///   - **pointer** — the 6-byte ledger id the discovery service mints at
+///     `DiscoveryClient.uploadGroupInvite(...)` (8 base64url characters,
+///     ADR-0028 amendment of 2026-09-27). The production default: the joiner
+///     fetches the capability from `/discovery/group-invite/<blob_id>`. This is
+///     the OQ1 indirection that adds the server-side anti-abuse ledger (consume
+///     dedup + soft max_uses).
 ///   - **inline** — the full `GroupInviteCapability` wire bytes (>= 108 bytes).
-///     The censored-region fallback: no `/discovery/group-invite` round-trip.
+///     The fallback when the upload fails on a transport error: no
+///     `/discovery/group-invite` round-trip.
 ///
-/// The smallest legal inline capability is 108 bytes (a 1-byte group_id), well
-/// above the 32-byte pointer, so a byte-length test cleanly discriminates.
+/// Anything else is refused, fail-closed - in particular the retired 32-byte
+/// (43-character) content-addressed id of the old link shape, which falls in
+/// the gap between the two forms.
 public enum GroupInviteUrl {
     // MARK: - Constants
 
@@ -30,14 +34,16 @@ public enum GroupInviteUrl {
     /// the stack this build talks to (`ApiEndpoints.webOrigin`).
     public static var defaultOrigin: String { ApiEndpoints.webOrigin }
 
-    /// Length of a content-addressed `blob_id` from
-    /// `services/discovery/src/group_invite.rs` — SHA-256, 32 bytes.
-    public static let blobIdLen: Int = 32
+    /// Length of a ledger `blob_id` (6 bytes), read from the core.
+    public static var blobIdLen: Int { Int(inviteBlobIdLen()) }
 
-    /// Floor on the inline-bytes form. The real minimum is 108 bytes; we pin
-    /// the discriminator floor at 100 — comfortably above the 32-byte pointer
-    /// and below any real capability, so the byte-length test never
-    /// misclassifies. Anything > 32 and < 100 is invalid input.
+    /// Length of a ledger `blob_id` in the URL (8 base64url characters).
+    public static var blobIdUrlLen: Int { Int(inviteBlobIdUrlLen()) }
+
+    /// Floor on the inline-bytes form. The real minimum is 108 bytes; the
+    /// discriminator floor is 100 — above the 6-byte pointer and below any real
+    /// capability, so the byte-length test never misclassifies. Anything
+    /// between the two is invalid input.
     public static let inlineMinLen: Int = 100
 
     // MARK: - URL builders
@@ -46,8 +52,8 @@ public enum GroupInviteUrl {
     /// `<origin>/g/<blob_id_b64url>` shape backed by
     /// `/discovery/group-invite/<blob_id>` lookup.
     ///
-    /// - Throws: ``GroupInviteUrlError/wrongBlobIdLength`` when
-    ///   `blobId.count != 32`.
+    /// - Throws: ``GroupInviteUrlError/wrongBlobIdLength`` when `blobId` is not
+    ///   ``blobIdLen`` bytes.
     public static func composePointerGroupInviteUrl(
         blobId: Data,
         origin: String = defaultOrigin
@@ -60,8 +66,8 @@ public enum GroupInviteUrl {
 
     /// Builder for the **inline-bytes** URL form — the long shape that carries
     /// the capability inside the URL itself, no server round-trip on open.
-    /// Reserved for the censored-region fallback; the pointer form is the
-    /// production default.
+    /// Used only when the upload fails on a transport error; the pointer form
+    /// is the production default.
     ///
     /// - Throws: ``GroupInviteUrlError/inlineTooSmall`` when
     ///   `capabilityBytes.count < 100`.
@@ -79,8 +85,8 @@ public enum GroupInviteUrl {
 
     /// Discriminated parse result for a `/g/<slug>` segment.
     public enum ParsedGroupInvite: Equatable {
-        /// Short form — `blobId` is the 32-byte content-addressed id. Joiner
-        /// fetches via `DiscoveryClient.fetchGroupInvite(blobId:)` ->
+        /// Short form — `blobId` is the 6-byte ledger id. Joiner fetches via
+        /// `DiscoveryClient.fetchGroupInvite(blobId:)` ->
         /// `GroupInviteCapability.decodeAndVerify(...)`.
         case pointer(blobId: Data)
         /// Long form — the bytes are the wire-format `GroupInviteCapability`.
@@ -89,13 +95,13 @@ public enum GroupInviteUrl {
     }
 
     /// Discriminated parse of a URL slug. The dispatch rule is a byte-length
-    /// test: 32 => pointer (SHA-256), >= 100 => inline. Anything else is
-    /// invalid input.
+    /// test: 6 bytes (exactly 8 characters) => pointer, >= 100 => inline.
+    /// Anything else is invalid input.
     public static func parseGroupInviteSlug(_ slug: String) throws -> ParsedGroupInvite {
-        guard let bytes = base64UrlDecodeNoPad(slug) else {
+        guard isBase64Url(slug), let bytes = base64UrlDecodeNoPad(slug) else {
             throw GroupInviteUrlError.invalidBase64Url
         }
-        if bytes.count == blobIdLen {
+        if bytes.count == blobIdLen, slug.count == blobIdUrlLen {
             return .pointer(blobId: bytes)
         }
         if bytes.count >= inlineMinLen {
@@ -106,6 +112,20 @@ public enum GroupInviteUrl {
             inlineMinLen: inlineMinLen,
             got: bytes.count
         )
+    }
+}
+
+/// `true` when `value` is non-empty and uses only the base64url alphabet with
+/// no padding (RFC 4648 section 5) - the only shape a Lakko link segment ever
+/// has. The shared decoder is lenient (it also takes `+`, `/` and `=`), so the
+/// link parsers check the alphabet first and a mangled link is refused rather
+/// than read.
+func isBase64Url(_ value: String) -> Bool {
+    !value.isEmpty && value.unicodeScalars.allSatisfy { scalar in
+        switch scalar {
+        case "A"..."Z", "a"..."z", "0"..."9", "-", "_": return true
+        default: return false
+        }
     }
 }
 

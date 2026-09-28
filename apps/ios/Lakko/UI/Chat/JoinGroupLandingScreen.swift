@@ -17,11 +17,15 @@ import SwiftUI
 /// `group_id` and a claim about who is inviting to what; the admin approval
 /// gate is the security boundary.
 ///
-/// **The preview is shown or it is not - never guessed.** No fragment, a
-/// fragment of the wrong length, a key the preview does not open under: all
-/// three render the same card without a preview, and the page does not say
-/// why. The issuer fingerprint stays at the foot of every card as the one
-/// thing the inviter cannot fake.
+/// **The preview is shown, absent, or the link is refused - never guessed.**
+/// No fragment renders the card without a preview, and the page does not say
+/// why. A fragment that is not a 16-character link secret, or a secret the
+/// preview does not open under, refuses the link as damaged (ADR-0028
+/// amendment of 2026-09-27): the ledger id is no longer a hash of the
+/// capability, and the preview key - bound to the capability's group id and
+/// issuer - is the one check that the capability the server returned is the
+/// one the link was made for. The issuer fingerprint stays at the foot of
+/// every card as the one thing the inviter cannot fake.
 ///
 /// **The wait is TWO-stage since ADR-0045 S7, and the copy says so.** An
 /// admin's approve no longer admits anyone by itself: it publishes an `Add`
@@ -51,7 +55,8 @@ public final class JoinGroupLandingViewModel: ObservableObject {
     /// Local FSM. `loading` (resolve + verify the capability) → `ready` (the
     /// card, waiting for `Request to join`) → `requesting` → `waiting` (poll
     /// loop) → `joined`; `invalid` for a link that does not verify or has
-    /// expired, `failed` for everything else.
+    /// expired, `damaged` for a link whose fragment is present but does not
+    /// open the preview, `failed` for everything else.
     public enum State: Equatable {
         case loading
         case ready
@@ -59,6 +64,9 @@ public final class JoinGroupLandingViewModel: ObservableObject {
         case waiting
         case joined(groupIdHex: String)
         case invalid
+        /// The fragment is not a link secret, or the preview does not open
+        /// under it. Fail-closed: no preview-less fallback.
+        case damaged
         /// ADR-0053 — one of the shared failure states; the raw error is
         /// logged, never shown.
         case failed(JoinRequestFailure)
@@ -117,9 +125,20 @@ public final class JoinGroupLandingViewModel: ObservableObject {
     /// inline link passes the bytes through), verify the signature + expiry,
     /// and open the preview under the fragment's key. Nothing is posted here.
     private func load() async {
+        // A malformed fragment (the retired 43-character key included) refuses
+        // the link before anything is fetched for it.
+        let fragment = GroupInviteLink.readFragment(linkKeyFragment)
+        if fragment == .malformed {
+            state = .damaged
+            return
+        }
         do {
             let resolved = try await repository.resolveGroupInviteSlug(slug: slug)
             self.resolved = resolved
+        } catch let error as GroupInviteLinkError {
+            NSLog("group join: the invite link resolved to nothing: %@", String(describing: error))
+            state = .invalid
+            return
         } catch {
             NSLog("group join: resolving the invite link failed: %@", String(describing: error))
             state = .failed(JoinRequestFailure.classify(error))
@@ -138,24 +157,49 @@ public final class JoinGroupLandingViewModel: ObservableObject {
             state = .invalid
             return
         }
+        switch Self.previewOutcome(of: cap, fragment: linkKeyFragment) {
+        case .none:
+            preview = nil
+        case .opened(let facts):
+            preview = facts
+        case .damaged:
+            state = .damaged
+            return
+        }
         fingerprint = cap.issuerFingerprint()
-        preview = Self.openPreview(of: cap, fragment: linkKeyFragment)
         state = .ready
     }
 
-    /// The preview, or `nil` for every way it can be missing: no fragment, a
-    /// fragment that is not a 32-byte key, a link minted without a preview, or
-    /// a key the preview does not open under (a wrong or tampered link). The
-    /// signature already gates the capability; a preview that fails is simply
-    /// not shown.
-    static func openPreview(of cap: GroupInviteCapability, fragment: String?) -> GroupInviteFacts? {
-        guard cap.hasPreview(),
-              let key = GroupInviteLink.linkKey(fromFragment: fragment),
-              let opened = try? cap.openPreview(linkKey: key) else { return nil }
-        return GroupInviteFacts(
-            groupName: opened.groupName,
-            inviterName: opened.inviterName,
-            memberCount: opened.memberCount)
+    /// What the link's fragment does to the card.
+    enum PreviewOutcome: Equatable {
+        /// No fragment: the card without a preview.
+        case none
+        /// The preview opened under the link secret.
+        case opened(GroupInviteFacts)
+        /// A fragment is present and the preview does not open under it: a
+        /// malformed fragment, a capability minted without a preview, a wrong
+        /// secret, or a capability a server swapped in under a live id.
+        case damaged
+    }
+
+    /// Decide the preview for a verified capability. Fail-closed: once the link
+    /// carries a fragment, anything short of an opened preview is `.damaged`.
+    static func previewOutcome(
+        of cap: GroupInviteCapability, fragment: String?
+    ) -> PreviewOutcome {
+        switch GroupInviteLink.readFragment(fragment) {
+        case .absent:
+            return .none
+        case .malformed:
+            return .damaged
+        case .secret(let secret):
+            guard cap.hasPreview(),
+                  let opened = try? cap.openPreview(linkKey: secret) else { return .damaged }
+            return .opened(GroupInviteFacts(
+                groupName: opened.groupName,
+                inviterName: opened.inviterName,
+                memberCount: opened.memberCount))
+        }
     }
 
     /// ADR-0045 S7 residual 1 — send the request. Reached from the card's
@@ -264,6 +308,15 @@ public struct JoinGroupLandingScreen: View {
             case .loading:
                 ProgressView()
                     .frame(maxWidth: .infinity)
+            case .damaged:
+                Text(groupInviteDamagedMessage)
+                    .foregroundStyle(Color.lakkoText)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Close") {
+                    viewModel.dismiss()
+                    onDone()
+                }
+                .tint(.lakkoAccent)
             case .invalid:
                 Text(groupInviteInvalidMessage)
                     .foregroundStyle(Color.lakkoText)

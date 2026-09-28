@@ -108,7 +108,8 @@ enum CallSignalingWake {
     }
 
     /// Should publishing this signaling frame also fan a push wake out to the
-    /// group's subscribed devices?
+    /// group's subscribed devices? A `true` becomes ``DsWake/Kind/call`` on the
+    /// publish's `x-lakko-wake` header (ADR-0054 decision 1).
     ///
     /// `true` for an offer and an end, `false` for everything else —
     /// including anything that is not call signaling, so a caller that hands

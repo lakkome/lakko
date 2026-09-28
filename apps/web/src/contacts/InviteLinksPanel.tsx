@@ -23,6 +23,7 @@ import { DiscoveryClient, type ActiveInvite } from "../discovery/client";
 import { Icon } from "../ui/icons";
 import { loadWasm } from "../wasm";
 import { formatContactsError } from "./errors";
+import { inviteLinkWidths, type InviteLinkWidths } from "./invite-link";
 import {
   composeInlineInviteUrl,
   composePointerInviteUrl,
@@ -49,7 +50,16 @@ interface LinkRow {
   readonly blobIdSlug: string | null;
 }
 
-function rowOf(invite: ActiveInvite, nowMs: number): LinkRow {
+/** `null` when the listed id is not a ledger id of the current width (a row
+ *  the server should not have sent); the row is then left out rather than
+ *  breaking the list. */
+function rowOf(invite: ActiveInvite, nowMs: number, widths: InviteLinkWidths): LinkRow | null {
+  let url: string;
+  try {
+    url = composePointerInviteUrl(base64UrlDecodeNoPad(invite.blobIdSlug), widths);
+  } catch {
+    return null;
+  }
   const parts = [
     describeInviteCreated(invite.createdAt),
     describeInviteExpiry(invite.expiryMs, nowMs),
@@ -58,7 +68,7 @@ function rowOf(invite: ActiveInvite, nowMs: number): LinkRow {
   if (invite.bootstrapReferral) parts.push("For someone new to Lakko");
   return {
     key: invite.blobIdSlug,
-    url: composePointerInviteUrl(base64UrlDecodeNoPad(invite.blobIdSlug)),
+    url,
     title: invite.label.length > 0 ? invite.label : "Invite link",
     meta: parts.join(" · "),
     revocable: true,
@@ -73,6 +83,7 @@ export function InviteLinksPanel(): JSX.Element {
   discovery.setSessionToken(auth.identitySecrets()?.sessionToken ?? null);
 
   const [invites, setInvites] = createSignal<ActiveInvite[]>([]);
+  const [widths, setWidths] = createSignal<InviteLinkWidths | null>(null);
   const [loaded, setLoaded] = createSignal(false);
   const [inlineLink, setInlineLink] = createSignal<LinkRow | null>(null);
   const [error, setError] = createSignal<string | null>(null);
@@ -89,7 +100,13 @@ export function InviteLinksPanel(): JSX.Element {
 
   const rows = (): LinkRow[] => {
     const now = Date.now();
-    const listed = invites().map((i) => rowOf(i, now));
+    const w = widths();
+    const listed =
+      w === null
+        ? []
+        : invites()
+            .map((i) => rowOf(i, now, w))
+            .filter((r): r is LinkRow => r !== null);
     const inline = inlineLink();
     return inline === null ? listed : [inline, ...listed];
   };
@@ -105,6 +122,7 @@ export function InviteLinksPanel(): JSX.Element {
       if (secrets === null || id === null) {
         throw new Error("Sign in again to see your invite links.");
       }
+      setWidths(inviteLinkWidths(await loadWasm()));
       const result = await discovery.listInvitesByOwner(secrets.accountId, id.ed25519Seed);
       // "not found or not owner" means no row matches this account: no links.
       setInvites(result.kind === "list" ? result.invites : []);

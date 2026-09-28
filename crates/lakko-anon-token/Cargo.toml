@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-anon-token"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Anonymous rate-limit tokens (ADR-0054 decision 2): a privately verifiable Privacy-Pass-shaped VOPRF token, its wire codec, issuance-key derivation, client blind / finalize and the verifier"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+# VOPRF (RFC 9497), VOPRF mode, Ristretto255-SHA512. The SAME crate, version
+# and ciphersuite `lakko-discovery-client` and `services/discovery` already
+# pin, so this crate adds no third-party dependency to the tree. VOPRF mode
+# (not plain OPRF) because the batched DLEQ proof lets a client check that the
+# issuer evaluated under the key published for (context, epoch), which is what
+# stops an issuer tagging one account with its own key.
+voprf = { version = "0.5", default-features = false, features = ["ristretto255-ciphersuite"] }
+
+# BLAKE3 derive-key (issuance-key seed, spend identifier) + the CSPRNG fill
+# for the token nonce. Already in every graph this crate reaches.
+lakko-crypto.workspace = true
+
+# Constant-time comparison of the recomputed VOPRF output against the token's.
+# Already in the tree through `lakko-crypto`.
+subtle = "2"
+
+# Wipe the master secret on drop. Already in the tree through `lakko-crypto`.
+zeroize = "1"
+
+# `OsRng` for the blinding factor and the DLEQ proof nonce - the rand_core
+# 0.6 traits `voprf` 0.5 is written against. Already in the tree through
+# `lakko-crypto`.
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `rand_core`'s `getrandom` needs its WebCrypto backend on wasm32 (the same
+# pin `lakko-discovery-client` carries).
+getrandom = { version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+# Property tests over random contexts / epochs / tamper positions. Already a
+# dev-dependency elsewhere in the workspace (lakko-crypto).
+proptest = "1"

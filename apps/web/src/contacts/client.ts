@@ -43,15 +43,16 @@
  */
 import { loadWasm } from "../wasm";
 import type { Wasm } from "../wasm";
-import { DiscoveryClient } from "../discovery/client";
-import { base64Decode, base64Encode, base64UrlDecodeNoPad } from "../auth/account-id";
+import { DiscoveryClient, DiscoveryNetworkError } from "../discovery/client";
+import { base64Decode, base64Encode } from "../auth/account-id";
 import {
-  appendGroupInviteLinkKey,
+  appendGroupInviteLinkSecret,
   composeInlineGroupInviteUrl,
   composePointerGroupInviteUrl,
   parseGroupInviteSlug,
   splitGroupInviteLink,
 } from "./group-invite";
+import { inviteLinkWidths } from "./invite-link";
 import { DsClient } from "../ds/client";
 import { withGroupMlsLock } from "../mls/group-lock";
 import type { IdentitySecrets } from "../auth/AuthContext";
@@ -3420,22 +3421,40 @@ export class ContactsClient {
     }
     // Production default (ADR-0028 OQ1): upload to the discovery ledger — the
     // server-side anti-abuse surface (per-joiner consume dedup + soft max_uses)
-    // — and return the short pointer URL. On an upload failure (a censored /
-    // offline network) fall back to the inline form so the link still works
-    // without the round-trip. `max_uses` is a soft throttle, not an access
-    // control: the admin approval gate stays the security boundary.
+    // — and return the short pointer URL. `max_uses` is a soft throttle, not
+    // an access control: the admin approval gate stays the security boundary.
+    //
+    // The inline form is the fallback for a TRANSPORT failure only (a
+    // censored / offline network), where the link must still work without the
+    // round-trip. A server answer (a 401 from a client with no session token,
+    // a 429, a 5xx) surfaces instead: falling back there silently hands the
+    // user the huge inline URL for a defect that should be fixed. The log
+    // names the status and never the capability.
+    const widths = inviteLinkWidths(wasm);
     let url: string;
     try {
       const blobId = await this.discovery.uploadGroupInvite(wire, maxUses);
-      url = composePointerGroupInviteUrl(blobId, origin);
-    } catch {
+      url = composePointerGroupInviteUrl(blobId, widths, origin);
+    } catch (err) {
+      if (!(err instanceof DiscoveryNetworkError)) {
+        const status = (err as { status?: unknown }).status;
+        // eslint-disable-next-line no-console
+        console.warn(
+          `group-invite: ledger upload failed (${
+            typeof status === "number" ? `HTTP ${status}` : "local error"
+          })`,
+        );
+        throw ContactsError.wrap(err);
+      }
+      // eslint-disable-next-line no-console
+      console.warn("group-invite: ledger unreachable, using the inline link");
       url = composeInlineGroupInviteUrl(wire, origin);
     }
-    return appendGroupInviteLinkKey(url, linkKey);
+    return appendGroupInviteLinkSecret(url, linkKey, widths);
   }
 
   /** ADR-0028 revoke — the issuer revokes a previously-created group invite
-   *  link. Only the server-backed pointer form (a 32-byte `blob_id`) is
+   *  link. Only the server-backed pointer form (a 6-byte ledger id) is
    *  revocable; an inline link has no ledger row. Parses the `blob_id` out of
    *  the `/g/<slug>` link, signs the revocation with the issuer's identity key,
    *  and DELETEs the ledger row. Returns `false` (nothing to do) for an inline /
@@ -3444,16 +3463,18 @@ export class ContactsClient {
     identity: IdentitySecrets | null,
     link: string,
   ): Promise<boolean> {
-    // The slug ends where the fragment (the ADR-0028 v2 link key) begins.
-    const split = splitGroupInviteLink(link);
+    // The slug ends where the fragment (the ADR-0028 link secret) begins.
+    const widths = inviteLinkWidths(await loadWasm());
+    const split = splitGroupInviteLink(link, widths);
     if (split === null) return false;
-    let blobId: Uint8Array;
+    let parsed;
     try {
-      blobId = base64UrlDecodeNoPad(split.slug);
+      parsed = parseGroupInviteSlug(split.slug, widths);
     } catch {
-      return false;
+      return false; // malformed, or a pre-amendment link
     }
-    if (blobId.length !== 32) return false; // inline link — no ledger row
+    if (parsed.kind !== "pointer") return false; // inline link — no ledger row
+    const blobId = parsed.blobId;
     const myIdentity = await this.resolveAccountIdentity(identity);
     try {
       await this.discovery.revokeGroupInvite(blobId, myIdentity.ed25519Seed);
@@ -3464,17 +3485,19 @@ export class ContactsClient {
   }
 
   /** ADR-0028 (G-3) — resolve a `/g/<slug>` slug to the capability wire bytes,
-   *  fetching from the discovery ledger when the slug is a 32-byte content-
-   *  addressed pointer (the production form) or passing the bytes straight
-   *  through when it is an inline capability (the censored-region fallback).
-   *  Returns the `blobId` (non-null only for the pointer form) so the caller
-   *  can drive `consumeGroupInvite` before requesting to join. */
+   *  fetching from the discovery ledger when the slug is an 8-character
+   *  ledger id (the production form) or passing the bytes straight through
+   *  when it is an inline capability (the upload-failed fallback). Returns the
+   *  `blobId` (non-null only for the pointer form) so the caller can drive
+   *  `consumeGroupInvite` before requesting to join. A 429 from the ledger
+   *  surfaces as a wrapped `DiscoveryRateLimitedError` (see
+   *  `isDiscoveryRateLimited`), never as "not found". */
   async resolveGroupInviteSlug(
     slug: string,
   ): Promise<{ capabilityWire: Uint8Array; blobId: Uint8Array | null }> {
     let parsed;
     try {
-      parsed = parseGroupInviteSlug(slug);
+      parsed = parseGroupInviteSlug(slug, inviteLinkWidths(await loadWasm()));
     } catch (err) {
       throw ContactsError.wrap(err);
     }

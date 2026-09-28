@@ -408,6 +408,9 @@ public enum JoinRequestFailure: Equatable {
     case notTakingRequests
     /// A signed request was refused and the device clock is off.
     case clockSkew
+    /// The discovery ledger answered `429` on the invite fetch or consume:
+    /// the link may be fine, the server asked this network to slow down.
+    case tryLater
     /// Anything else.
     case generic
 
@@ -417,20 +420,24 @@ public enum JoinRequestFailure: Equatable {
             return "This group isn't taking requests yet. Try again later."
         case .clockSkew:
             return DsClockSkew.copy
+        case .tryLater:
+            return inviteRateLimitedMessage
         case .generic:
             return "Your request didn't go through. Check your connection and try again."
         }
     }
 
-    /// Only the generic failure offers "Try again": the other two are not
-    /// fixed by pressing a button now.
-    public var offersRetry: Bool { self == .generic }
+    /// The generic failure and a rate-limit refusal offer "Try again" (the
+    /// latter once the minute has passed); the other two are not fixed by
+    /// pressing a button.
+    public var offersRetry: Bool { self == .generic || self == .tryLater }
 
     public static func classify(_ error: Error) -> JoinRequestFailure {
         if let knock = error as? DsKnockJoinError, knock == .groupNotClaimed {
             return .notTakingRequests
         }
         if DsClientError.clockSkewCopy(in: error) != nil { return .clockSkew }
+        if DiscoveryClientError.isRateLimited(error) { return .tryLater }
         return .generic
     }
 }

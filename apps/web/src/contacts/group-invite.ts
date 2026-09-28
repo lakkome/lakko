@@ -5,27 +5,33 @@
  * Web-side URL helpers for the group join-ticket flow (ADR-0028, G-3).
  *
  * Sibling of `apps/web/src/calls/invite.ts` for the `GroupInviteCapability`
- * ecosystem. The `/g/<slug>` slug comes in two forms, discriminated purely by
- * the decoded byte length:
+ * ecosystem. The `/g/<slug>` slug comes in two forms, discriminated by the
+ * shared rules of `invite-link.ts` (ADR-0028 short-link amendment,
+ * 2026-09-27):
  *
- *   * **pointer** — the 32-byte content-addressed `blob_id` returned by
- *     `DiscoveryClient.uploadGroupInvite(...)`. The production default: short
- *     URL, the joiner fetches the capability from
- *     `/discovery/group-invite/<blob_id>`. This is the OQ1 indirection that
- *     adds the server-side anti-abuse ledger (consume dedup + soft max_uses).
+ *   * **pointer** — the 6-byte ledger id (8 base64url characters) the
+ *     discovery service assigned at `DiscoveryClient.uploadGroupInvite(...)`.
+ *     The production default; the joiner fetches the capability from
+ *     `/discovery/group-invite/<id>`. This is the OQ1 indirection that adds the
+ *     server-side anti-abuse ledger (consume dedup + soft max_uses).
  *   * **inline** — the full `GroupInviteCapability` wire bytes (>= 110 bytes).
- *     The censored-region fallback: no `/discovery/group-invite` round-trip on
- *     open, the capability rides inside the URL itself.
+ *     The fallback for a transport failure at upload: the capability rides
+ *     inside the URL itself.
  *
- * The smallest legal inline capability is 1 (version) + 2 (gid_len) + 1 (min
- * gid) + 32 (issuer_pubkey) + 8 (expiry) + 2 (preview_len, ADR-0028 v2) + 64
- * (signature) = 110 bytes, well above the 32-byte pointer, so a byte-length
- * test cleanly discriminates.
- *
- * Either form may carry the ADR-0028 v2 **link key** as the URL fragment
- * (`#<key>`) — see `appendGroupInviteLinkKey` / `splitGroupInviteLink` below.
+ * Either form may carry the 12-byte **link secret** as the URL fragment
+ * (`#<16 characters>`); the preview key is derived from it bound to the
+ * capability's group id and issuer. See `appendGroupInviteLinkSecret` /
+ * `splitGroupInviteLink` below.
  */
-import { base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
+import { base64UrlEncodeNoPad } from "../auth/account-id";
+import {
+  classifyInviteSlug,
+  parseGroupInviteFragment,
+  requireBlobId,
+  type ClassifiedInviteSlug,
+  type GroupInviteFragment,
+  type InviteLinkWidths,
+} from "./invite-link";
 
 /** Path prefix every group-invite URL starts with — kept in lock-step with
  *  `routes/paths.ts::groupJoinRoutePattern` (`/g/:slug`). The `/g/` shape
@@ -33,42 +39,31 @@ import { base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
  *  landing dispatcher branches on the path segment without parsing the slug. */
 export const GROUP_INVITE_URL_PREFIX = "/g/";
 
-/** Length of a content-addressed `blob_id` from
- *  `services/discovery/src/group_invite.rs` — SHA-256, 32 bytes. */
-export const GROUP_INVITE_BLOB_ID_LEN = 32;
-
-/** Floor on the inline-bytes form. The real minimum is 108 bytes (a 1-byte
- *  group_id); we pin the discriminator floor at 100 — comfortably above the
- *  32-byte pointer and below any real capability, so the byte-length test never
- *  misclassifies. */
+/** Floor on the inline-bytes form. The real minimum is 110 bytes (a 1-byte
+ *  group_id); the discriminator floor is the shared 100. */
 export const GROUP_INVITE_INLINE_MIN_LEN = 100;
 
-/** Build the **pointer** URL form — the short
- *  `https://<host>/g/<blob_id_b64url>` shape backed by
- *  `/discovery/group-invite/<blob_id>` lookup. */
+function defaultOrigin(): string {
+  return typeof location !== "undefined" ? location.origin : "https://lakko.me";
+}
+
+/** Build the **pointer** URL form — `https://<host>/g/<8-char id>`, backed by
+ *  the `/discovery/group-invite/<id>` lookup. */
 export function composePointerGroupInviteUrl(
   blobId: Uint8Array,
-  origin: string = typeof location !== "undefined"
-    ? location.origin
-    : "https://lakko.me",
+  widths: InviteLinkWidths,
+  origin: string = defaultOrigin(),
 ): string {
-  if (blobId.length !== GROUP_INVITE_BLOB_ID_LEN) {
-    throw new Error(
-      `blobId must be ${GROUP_INVITE_BLOB_ID_LEN} bytes, got ${blobId.length}`,
-    );
-  }
+  requireBlobId(blobId, widths);
   return `${origin}${GROUP_INVITE_URL_PREFIX}${base64UrlEncodeNoPad(blobId)}`;
 }
 
 /** Build the **inline-bytes** URL form — the long shape that carries the
- *  capability inside the URL itself, no server round-trip on open. Reserved for
- *  the censored-region fallback where `/discovery/group-invite` is unreachable;
- *  the pointer form is the production default. */
+ *  capability inside the URL itself, no server round-trip on open. Used only
+ *  when the upload failed on a transport error. */
 export function composeInlineGroupInviteUrl(
   capabilityBytes: Uint8Array,
-  origin: string = typeof location !== "undefined"
-    ? location.origin
-    : "https://lakko.me",
+  origin: string = defaultOrigin(),
 ): string {
   if (capabilityBytes.length < GROUP_INVITE_INLINE_MIN_LEN) {
     throw new Error(
@@ -87,82 +82,59 @@ export function composeInlineGroupInviteUrl(
  *    * `kind: "inline"` — run `decodeAndVerify` directly on the bytes, no
  *      server round-trip.
  *
- *  The dispatch rule is a byte-length test: 32 => pointer (SHA-256), >= 100 =>
- *  inline. Anything else is invalid input. */
-export type ParsedGroupInvite =
-  | { readonly kind: "pointer"; readonly blobId: Uint8Array }
-  | { readonly kind: "inline"; readonly capabilityBytes: Uint8Array };
+ *  Throws on anything else, the pre-amendment 43-character id included. */
+export type ParsedGroupInvite = ClassifiedInviteSlug;
 
-export function parseGroupInviteSlug(slug: string): ParsedGroupInvite {
-  const bytes = base64UrlDecodeNoPad(slug);
-  if (bytes.length === GROUP_INVITE_BLOB_ID_LEN) {
-    return { kind: "pointer", blobId: bytes };
-  }
-  if (bytes.length >= GROUP_INVITE_INLINE_MIN_LEN) {
-    return { kind: "inline", capabilityBytes: bytes };
-  }
-  throw new Error(
-    `group-invite slug decoded to ${bytes.length} bytes — neither a ` +
-      `${GROUP_INVITE_BLOB_ID_LEN}-byte pointer nor a ` +
-      `>= ${GROUP_INVITE_INLINE_MIN_LEN}-byte inline capability`,
-  );
+export function parseGroupInviteSlug(slug: string, widths: InviteLinkWidths): ParsedGroupInvite {
+  return classifyInviteSlug(slug, widths, GROUP_INVITE_INLINE_MIN_LEN, "group-invite");
 }
 
 // ----------------------------------------------------------------------------
-// The link key (ADR-0028 v2, docs/ux/group-invite-page.md section 4)
+// The link secret (ADR-0028 v2 + short-link amendment, docs/ux/group-invite-page.md section 4)
 // ----------------------------------------------------------------------------
 
-/** Length of the link key that opens a capability's sealed preview — the
- *  `LINK_KEY_LEN` of `lakko-contacts::group_invite`, 32 bytes. */
-export const GROUP_INVITE_LINK_KEY_LEN = 32;
-
-/** Append the link key to a `/g/` URL as its **fragment**:
- *  `<origin>/g/<slug>#<key, base64url no-pad>`. The fragment is the one part
- *  of a URL a browser never sends, so the discovery ledger and every access
- *  log see only the sealed preview. Both the pointer and the inline form take
- *  the same fragment. */
-export function appendGroupInviteLinkKey(url: string, linkKey: Uint8Array): string {
-  if (linkKey.length !== GROUP_INVITE_LINK_KEY_LEN) {
-    throw new Error(
-      `linkKey must be ${GROUP_INVITE_LINK_KEY_LEN} bytes, got ${linkKey.length}`,
-    );
+/** Append the link secret to a `/g/` URL as its **fragment**:
+ *  `<origin>/g/<slug>#<secret, 16 base64url characters>`. The fragment is the
+ *  one part of a URL a browser never sends, so the discovery ledger and every
+ *  access log see only the sealed preview. Both the pointer and the inline
+ *  form take the same fragment. */
+export function appendGroupInviteLinkSecret(
+  url: string,
+  secret: Uint8Array,
+  widths: InviteLinkWidths,
+): string {
+  if (secret.length !== widths.linkSecretLen) {
+    throw new Error(`link secret must be ${widths.linkSecretLen} bytes, got ${secret.length}`);
   }
   if (url.includes("#")) {
     throw new Error("url already carries a fragment");
   }
-  return `${url}#${base64UrlEncodeNoPad(linkKey)}`;
+  return `${url}#${base64UrlEncodeNoPad(secret)}`;
 }
 
-/** Read the link key back out of a URL fragment (`location.hash`, with or
- *  without the leading `#`). Never throws: an absent, undecodable or
- *  wrong-length fragment is `null`, and the page then shows no preview — the
- *  spec's "never a guess, never an error for that". */
-export function decodeGroupInviteLinkKey(fragment: string | null | undefined): Uint8Array | null {
-  if (fragment === null || fragment === undefined) return null;
-  const raw = fragment.startsWith("#") ? fragment.slice(1) : fragment;
-  if (raw.length === 0) return null;
-  let bytes: Uint8Array;
-  try {
-    bytes = base64UrlDecodeNoPad(raw);
-  } catch {
-    return null;
-  }
-  return bytes.length === GROUP_INVITE_LINK_KEY_LEN ? bytes : null;
+/** Read a `/g/` fragment. See `parseGroupInviteFragment` in `invite-link.ts`:
+ *  `none`, `secret`, or `damaged` (which the page refuses). */
+export function decodeGroupInviteFragment(
+  fragment: string | null | undefined,
+  widths: InviteLinkWidths,
+): GroupInviteFragment {
+  return parseGroupInviteFragment(fragment, widths);
 }
 
-/** Split a full `/g/` link into its slug and its link key. `null` when the
- *  string is not a group-invite link at all; `linkKey` is `null` when the
- *  fragment is absent or not a key. The revoke path reads the slug from here,
- *  so the fragment can never be mistaken for part of the blob id. */
+/** Split a full `/g/` link into its slug and its fragment. `null` when the
+ *  string is not a group-invite link at all. The revoke path reads the slug
+ *  from here, so the fragment can never be mistaken for part of the id. */
 export function splitGroupInviteLink(
   link: string,
-): { readonly slug: string; readonly linkKey: Uint8Array | null } | null {
+  widths: InviteLinkWidths,
+): { readonly slug: string; readonly fragment: GroupInviteFragment } | null {
   const idx = link.lastIndexOf(GROUP_INVITE_URL_PREFIX);
   if (idx < 0) return null;
   const rest = link.slice(idx + GROUP_INVITE_URL_PREFIX.length);
   const hashAt = rest.indexOf("#");
   const slug = hashAt < 0 ? rest : rest.slice(0, hashAt);
   if (slug.length === 0) return null;
-  const linkKey = hashAt < 0 ? null : decodeGroupInviteLinkKey(rest.slice(hashAt));
-  return { slug, linkKey };
+  const fragment =
+    hashAt < 0 ? ({ kind: "none" } as const) : parseGroupInviteFragment(rest.slice(hashAt), widths);
+  return { slug, fragment };
 }

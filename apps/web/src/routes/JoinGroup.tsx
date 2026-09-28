@@ -80,11 +80,19 @@ import { recordConversationKind } from "../chat/conversation-kind-store";
 // ADR-0028 v2 — the sealed preview and the link key in the URL fragment
 // (docs/ux/group-invite-page.md). The copy lives in a plain module for the
 // same `vitest` reason as the wait copy above.
-import { decodeGroupInviteLinkKey } from "../contacts/group-invite";
-import type { GroupInviteCapability as WasmGroupInviteCapability } from "../../wasm/lakko_ffi_wasm";
+import { parseGroupInviteSlug } from "../contacts/group-invite";
+import {
+  INVITE_LINK_DAMAGED,
+  INVITE_LINK_RATE_LIMITED,
+  INVITE_LINK_TRY_AGAIN,
+  inviteLinkWidths,
+  parseGroupInviteFragment,
+} from "../contacts/invite-link";
+import { isDiscoveryRateLimited } from "../discovery/client";
 import {
   inviteHeadline,
   invitedByLine,
+  resolveInvitePreview,
   type GroupInvitePreviewData,
 } from "./join-group-preview";
 
@@ -99,33 +107,14 @@ interface DecodedTicket {
   blobId: Uint8Array | null;
   fingerprint: string;
   valid: boolean;
-  /** The sealed preview, opened with the link key from the URL fragment —
-   *  `null` when the link carries none, the fragment is absent or not a key,
-   *  or the key does not open it. All three show the same page. */
+  /** The sealed preview, opened with the link secret from the URL fragment,
+   *  or `null` when the link has no fragment. A fragment that does not open
+   *  the preview never reaches here: the link is refused as damaged. */
   preview: GroupInvitePreviewData | null;
 }
 
-/** Open the link's sealed preview with the key in the URL fragment. A link
- *  without a preview, a fragment that is absent or not a 32-byte key, and a
- *  key the preview refuses all yield `null` — the page then shows no preview,
- *  never a guess and never an error for that (the signature already gated the
- *  capability). */
-function openPreview(cap: WasmGroupInviteCapability, hash: string): GroupInvitePreviewData | null {
-  if (!cap.hasPreview) return null;
-  const key = decodeGroupInviteLinkKey(hash);
-  if (key === null) return null;
-  try {
-    const opened = cap.openPreview(key);
-    if (opened === undefined) return null;
-    return {
-      groupName: opened.groupName,
-      inviterName: opened.inviterName,
-      memberCount: opened.memberCount,
-    };
-  } catch {
-    return null;
-  }
-}
+/** Why the page refuses to offer a join without the link being invalid. */
+type LinkRefusal = "rate-limited" | "damaged";
 
 export default function JoinGroup() {
   const params = useParams<{ slug: string }>();
@@ -152,24 +141,49 @@ export default function JoinGroup() {
   // renders the right state without imperative juggling. Re-runs on navigation
   // — of the slug or of the fragment, since the fragment holds the link key.
   const source = createMemo(() => ({ slug: params.slug, hash: location.hash }));
-  const [decoded] = createResource(source, async ({ slug, hash }): Promise<DecodedTicket | null> => {
-    try {
-      const { capabilityWire, blobId } = await client.resolveGroupInviteSlug(slug);
-      const wasm = await loadWasm();
-      const cap = wasm.GroupInviteCapability.decodeAndVerify(capabilityWire);
-      return {
-        wire: capabilityWire,
-        blobId,
-        fingerprint: cap.issuerFingerprint(),
-        valid: cap.isValidNow(BigInt(Date.now())),
-        preview: openPreview(cap, hash),
-      };
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("group-join: decode/verify failed", err);
-      return null;
-    }
-  });
+  const [decoded, { refetch }] = createResource(
+    source,
+    async ({ slug, hash }): Promise<DecodedTicket | LinkRefusal | null> => {
+      try {
+        const wasm = await loadWasm();
+        const widths = inviteLinkWidths(wasm);
+        // An old-width or malformed slug is invalid (it throws into the
+        // invalid-or-expired state below) and never reaches the network.
+        parseGroupInviteSlug(slug, widths);
+        // A fragment that is present but is not a 16-character link secret
+        // (the pre-amendment 43-character key included) is damaged: refuse it
+        // before any network round-trip.
+        const fragment = parseGroupInviteFragment(hash, widths);
+        if (fragment.kind === "damaged") return "damaged";
+        const { capabilityWire, blobId } = await client.resolveGroupInviteSlug(slug);
+        const cap = wasm.GroupInviteCapability.decodeAndVerify(capabilityWire);
+        // The preview key binds the capability's group id and issuer, so a
+        // capability a server swapped in under a live id does not open under
+        // the link's secret. Fail closed: no preview-less join is offered.
+        const outcome = resolveInvitePreview(cap, fragment);
+        if (outcome.kind === "damaged") return "damaged";
+        return {
+          wire: capabilityWire,
+          blobId,
+          fingerprint: cap.issuerFingerprint(),
+          valid: cap.isValidNow(BigInt(Date.now())),
+          preview: outcome.kind === "preview" ? outcome.preview : null,
+        };
+      } catch (err) {
+        // A 429 says nothing about the link: "try again later", never
+        // "invalid" (ADR-0028 short-link amendment).
+        if (isDiscoveryRateLimited(err)) return "rate-limited";
+        // eslint-disable-next-line no-console
+        console.warn("group-join: decode/verify failed", err);
+        return null;
+      }
+    },
+  );
+  /** The decoded ticket, or `null` for every refusal. */
+  const ticket = (): DecodedTicket | null => {
+    const d = decoded();
+    return d === undefined || d === null || typeof d === "string" ? null : d;
+  };
 
   const [phase, setPhase] = createSignal<JoinPhase>("idle");
   /** The failure sentence and whether `Try again` is offered — never the raw
@@ -247,7 +261,7 @@ export default function JoinGroup() {
   // The card's headline (spec section 3): the inviter as the subject, the
   // group's name or `a group`, the count at mint time; without a preview,
   // `You are invited to a group` and nothing more.
-  const headline = createMemo(() => inviteHeadline(decoded()?.preview ?? null));
+  const headline = createMemo(() => inviteHeadline(ticket()?.preview ?? null));
   const authLinks = () => joinGroupAuthLinks(params.slug, location.hash);
 
   return (
@@ -256,12 +270,25 @@ export default function JoinGroup() {
         <h1>Join a group</h1>
         <p>Loading invite…</p>
       </Show>
-      <Show when={!decoded.loading && (decoded() === null || decoded()?.valid === false)}>
+      <Show when={!decoded.loading && (decoded() === null || ticket()?.valid === false)}>
         <h1>Join a group</h1>
         <p>This invite link is invalid or has expired.</p>
         <A href={paths.home}>Open Lakko</A>
       </Show>
-      <Show when={!decoded.loading && decoded() !== null && decoded()?.valid === true}>
+      <Show when={!decoded.loading && decoded() === "damaged"}>
+        <h1>Join a group</h1>
+        <p>{INVITE_LINK_DAMAGED}</p>
+        <A href={paths.home}>Open Lakko</A>
+      </Show>
+      <Show when={!decoded.loading && decoded() === "rate-limited"}>
+        <h1>Join a group</h1>
+        <p>{INVITE_LINK_RATE_LIMITED}</p>
+        <button type="button" class="primary" onClick={() => void refetch()}>
+          {INVITE_LINK_TRY_AGAIN}
+        </button>
+        <A href={paths.home}>Open Lakko</A>
+      </Show>
+      <Show when={!decoded.loading && ticket()?.valid === true}>
         <Show when={headline().title} fallback={<h1>{headline().lead}</h1>}>
           {(title) => (
             <>
@@ -286,12 +313,12 @@ export default function JoinGroup() {
                   <button type="button">Log in</button>
                 </A>
               </div>
-              <p class="lk-meta">{invitedByLine(decoded()?.fingerprint ?? "")}</p>
+              <p class="lk-meta">{invitedByLine(ticket()?.fingerprint ?? "")}</p>
             </>
           }
         >
           <Show when={phase() === "idle"}>
-            <button type="button" class="primary" onClick={() => void onRequest(decoded()!)}>
+            <button type="button" class="primary" onClick={() => void onRequest(ticket()!)}>
               Request to join
             </button>
           </Show>
@@ -306,7 +333,7 @@ export default function JoinGroup() {
             <button
               type="button"
               disabled={requesting()}
-              onClick={() => void onRequest(decoded()!)}
+              onClick={() => void onRequest(ticket()!)}
             >
               {JOIN_REQUEST_AGAIN}
             </button>
@@ -321,7 +348,7 @@ export default function JoinGroup() {
                 type="button"
                 class="primary"
                 disabled={requesting()}
-                onClick={() => void onRequest(decoded()!)}
+                onClick={() => void onRequest(ticket()!)}
               >
                 {JOIN_TRY_AGAIN}
               </button>
@@ -330,7 +357,7 @@ export default function JoinGroup() {
           {/* The one thing on the page the inviter cannot fake stays, at the
               foot and in the muted style, for a person who was told the
               digits out of band. */}
-          <p class="lk-meta">{invitedByLine(decoded()?.fingerprint ?? "")}</p>
+          <p class="lk-meta">{invitedByLine(ticket()?.fingerprint ?? "")}</p>
         </Show>
       </Show>
     </PublicLayout>

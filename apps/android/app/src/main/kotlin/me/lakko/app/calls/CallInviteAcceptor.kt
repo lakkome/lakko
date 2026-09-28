@@ -40,6 +40,10 @@ import uniffi.lakko_ffi_uniffi.acceptCallInvite
  */
 public class CallInviteAcceptor(
     private val discoveryClient: DiscoveryClient,
+    /** The short-link widths; the core's by default, passed in by a host
+     *  JVM test that has no native library. */
+    private val lengths: me.lakko.app.discovery.InviteLinkLengths =
+        me.lakko.app.discovery.InviteLinkLengths.core,
 ) {
 
     /**
@@ -102,6 +106,10 @@ public class CallInviteAcceptor(
         public data object Exhausted : Result()
         public data object NotFound : Result()
         public data class MalformedSlug(val reason: String) : Result()
+
+        /** The discovery service answered `429` on fetch or consume. The
+         *  link may be fine; the UI says to try again later. */
+        public data object RateLimited : Result()
         public data class SignatureFailure(val reason: String) : Result()
         public data class Failed(val message: String) : Result()
     }
@@ -142,7 +150,7 @@ public class CallInviteAcceptor(
     ): Result {
         // ---- 1. Parse slug -----------------------------------
         val parsed = try {
-            parseCallInviteSlug(slug)
+            parseCallInviteSlug(slug, lengths)
         } catch (e: CallInviteUrlException) {
             return Result.MalformedSlug(reason = e.message ?: e::class.simpleName ?: "parse error")
         }
@@ -159,6 +167,7 @@ public class CallInviteAcceptor(
                     capabilityBytes = fetched
                 } catch (e: DiscoveryHttpError) {
                     if (e.status == 404) return Result.NotFound
+                    if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) return Result.RateLimited
                     return Result.Failed(message = e.message ?: e.toString())
                 } catch (e: Exception) {
                     return Result.Failed(message = e.message ?: e.toString())
@@ -191,6 +200,7 @@ public class CallInviteAcceptor(
                     joinerAccountId = joinerAccountId,
                 )
             } catch (e: Exception) {
+                if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) return Result.RateLimited
                 return Result.Failed(message = e.message ?: e.toString())
             }
             when (consumeResult) {

@@ -73,7 +73,6 @@ import { ChatClient } from "./client";
 import { ContactsClient } from "../contacts/client";
 import type { DsClient } from "../ds/client";
 import type { DiscoveryClient } from "../discovery/client";
-import type { PushClient } from "../push/client";
 import type {
   Group as WasmGroup,
   Identity as WasmIdentity,
@@ -164,10 +163,6 @@ function rows(n: number): { messages: unknown[]; hasMore: boolean } {
   };
 }
 
-function mockPush(): PushClient {
-  return { notifyGroup: vi.fn(async () => {}) } as unknown as PushClient;
-}
-
 afterEach(() => {
   vi.clearAllMocks();
 });
@@ -216,7 +211,6 @@ describe("G-38 — the poll's apply half is serialized against commits", () => {
     const chat = new ChatClient(
       { fetchGroup } as unknown as DsClient,
       { identityProvider: () => IDENTITY_TOKEN },
-      mockPush(),
     );
 
     const commit = contacts.removeMemberFromGroup(null, g.group, 1);
@@ -282,7 +276,6 @@ describe("G-38 — the poll's apply half is serialized against commits", () => {
     const chat = new ChatClient(
       { fetchGroup: vi.fn(async () => rows(1)) } as unknown as DsClient,
       { identityProvider: () => IDENTITY_TOKEN },
-      mockPush(),
     );
 
     const commit = contacts.removeMemberFromGroup(null, a.group, 1);
@@ -315,7 +308,6 @@ describe("G-38 — the poll's apply half is serialized against commits", () => {
     const chat = new ChatClient(
       { fetchGroup: vi.fn(async () => rows(3)) } as unknown as DsClient,
       { identityProvider: () => IDENTITY_TOKEN },
-      mockPush(),
     );
 
     // Two concurrent refreshes. Both read cursor 0 and both fetch rows 1..3 —
@@ -369,7 +361,6 @@ describe("G-38 — the poll's apply half is serialized against commits", () => {
     const chat = new ChatClient(
       { fetchGroup: vi.fn(async () => rows(3)) } as unknown as DsClient,
       { identityProvider: () => IDENTITY_TOKEN },
-      mockPush(),
     );
 
     // Exactly what `routes/Chat.tsx` used to do: no cursor handed in, the
@@ -402,7 +393,6 @@ describe("G-38 — the poll's apply half is serialized against commits", () => {
     const chat = new ChatClient(
       { fetchGroup: vi.fn(async () => rows(3)) } as unknown as DsClient,
       { identityProvider: () => IDENTITY_TOKEN },
-      mockPush(),
     );
 
     // The re-read gate IS wired, but the write is deferred to the caller — the
@@ -439,7 +429,6 @@ describe("G-38 — the poll's apply half is serialized against commits", () => {
     const chat = new ChatClient(
       { fetchGroup: vi.fn(async () => rows(2)) } as unknown as DsClient,
       { identityProvider: () => IDENTITY_TOKEN },
-      mockPush(),
     );
 
     // Guard, not a discriminator: `pollMessages` still applies and still
@@ -471,7 +460,6 @@ describe("G-38 — the poll's apply half is serialized against commits", () => {
     const chat = new ChatClient(
       { fetchGroup: vi.fn(async () => rows(1)) } as unknown as DsClient,
       { identityProvider: () => IDENTITY_TOKEN },
-      mockPush(),
     );
 
     // Exactly `routes/Chat.tsx`'s shape: the commit is awaited (so its region

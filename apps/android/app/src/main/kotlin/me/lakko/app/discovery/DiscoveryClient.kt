@@ -93,7 +93,25 @@ public class DiscoveryClient(
      *  per-IP bucket; it is never attached to any other request. Defaults to
      *  [AmbientSessionToken]. */
     private val rateLimitToken: () -> String? = { AmbientSessionToken.current },
+    /** The short-link widths (ADR-0028 amendment of 2026-09-27): the 6-byte
+     *  ledger id every invite route takes. Defaults to the core's values;
+     *  a host JVM test (no native library) passes them in. */
+    private val inviteLinkLengths: () -> InviteLinkLengths = { InviteLinkLengths.core },
 ) : AutoCloseable {
+
+    /** Width in bytes of a ledger id (6), read from the core. */
+    private val blobIdLen: Int get() = inviteLinkLengths().blobIdLen
+
+    /** Decode the `blob_id` an upload answered with; a width other than the
+     *  8-character / 6-byte id is the server misbehaving, never a link. */
+    private fun uploadedBlobId(blobIdText: String, endpoint: String): ByteArray =
+        decodeInviteBlobId(blobIdText, inviteLinkLengths())
+            ?: throw DiscoveryHttpError(
+                status = 200,
+                endpoint = endpoint,
+                body = "server returned a blob_id of ${blobIdText.length} characters, expected " +
+                    "${inviteLinkLengths().blobIdUrlLen}",
+            )
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -248,7 +266,7 @@ public class DiscoveryClient(
     }
 
     /** `POST /discovery/invite` — upload a verified
-     *  `InviteCapability` blob, get the content-addressed
+     *  `InviteCapability` blob, get the server-assigned
      *  `blob_id` back (Phase 1.18d1). */
     public suspend fun inviteUpload(req: InviteUploadRequest): InviteUploadResponse =
         doPost("/discovery/invite") {
@@ -263,8 +281,8 @@ public class DiscoveryClient(
      * non-2xx.
      */
     public suspend fun inviteFetch(blobId: ByteArray): InviteFetchResponse? {
-        if (blobId.size != BLOB_ID_LEN) {
-            throw DiscoveryClientArgError("blobId must be $BLOB_ID_LEN bytes")
+        if (blobId.size != blobIdLen) {
+            throw DiscoveryClientArgError("blobId must be $blobIdLen bytes")
         }
         val slug = base64UrlEncodeNoPad(blobId)
         val endpoint = "/discovery/invite/$slug"
@@ -292,7 +310,7 @@ public class DiscoveryClient(
         }
 
     /** `POST /discovery/call-invite` — upload a verified
-     *  `CallInviteCapability` blob, get the content-addressed
+     *  `CallInviteCapability` blob, get the server-assigned
      *  `blob_id` back (Phase 3c3-server). Sibling of
      *  [inviteUpload]; wire shape is shared. The high-level
      *  [uploadCallInvite] wrapper drives the PoW solve. */
@@ -309,8 +327,8 @@ public class DiscoveryClient(
      * any other non-2xx.
      */
     public suspend fun callInviteFetch(blobId: ByteArray): InviteFetchResponse? {
-        if (blobId.size != BLOB_ID_LEN) {
-            throw DiscoveryClientArgError("blobId must be $BLOB_ID_LEN bytes")
+        if (blobId.size != blobIdLen) {
+            throw DiscoveryClientArgError("blobId must be $blobIdLen bytes")
         }
         val slug = base64UrlEncodeNoPad(blobId)
         val endpoint = "/discovery/call-invite/$slug"
@@ -340,7 +358,7 @@ public class DiscoveryClient(
     // ------------------------------------------------------------------------
 
     /** `POST /discovery/group-invite` — upload a verified
-     *  `GroupInviteCapability` blob, get the content-addressed `blob_id` back
+     *  `GroupInviteCapability` blob, get the server-assigned `blob_id` back
      *  (ADR-0028, G-3). Distinct from [callInviteUpload] because the
      *  group-invite request carries a `max_uses` the capability does NOT embed.
      *  The high-level [uploadGroupInvite] wrapper drives the PoW solve. */
@@ -356,8 +374,8 @@ public class DiscoveryClient(
      * same status), throws on any other non-2xx.
      */
     public suspend fun groupInviteFetch(blobId: ByteArray): InviteFetchResponse? {
-        if (blobId.size != BLOB_ID_LEN) {
-            throw DiscoveryClientArgError("blobId must be $BLOB_ID_LEN bytes")
+        if (blobId.size != blobIdLen) {
+            throw DiscoveryClientArgError("blobId must be $blobIdLen bytes")
         }
         val slug = base64UrlEncodeNoPad(blobId)
         val endpoint = "/discovery/group-invite/$slug"
@@ -793,10 +811,10 @@ public class DiscoveryClient(
 
     /**
      * Upload a freshly-composed [InviteCapability] blob and
-     * receive the server-assigned content-addressed `blobId`
-     * (raw 32-byte SHA-256). Drives one PoW solve + `POST
-     * /discovery/invite`. Idempotent — same bytes yield the
-     * same id, server upserts.
+     * receive the server-assigned `blobId` (a random 6-byte
+     * ledger id, ADR-0028 amendment of 2026-09-27). Drives one
+     * PoW solve + `POST /discovery/invite`. NOT idempotent: the
+     * same bytes uploaded twice get two ids.
      *
      * Feed `capabilityBytes` straight from
      * [uniffi.lakko_ffi_uniffi.composeInviteCapability]. The
@@ -804,7 +822,7 @@ public class DiscoveryClient(
      * upload surfaces as
      * `DiscoveryHttpError(400, "/discovery/invite", …)`.
      *
-     * Returns the 32-byte `blobId`, ready to substitute into a
+     * Returns the 6-byte `blobId`, ready to substitute into a
      * `https://<host>/i/<slug>` pointer URL via
      * [base64UrlEncodeNoPad].
      */
@@ -827,23 +845,14 @@ public class DiscoveryClient(
         val resp = inviteUpload(
             InviteUploadRequest(pow = pow, capability = base64Encode(capabilityBytes)),
         )
-        // Server returns base64url-no-pad; decode back to raw
-        // 32 bytes via the same helper used for accountId
-        // slugs.
-        val blobId = base64UrlDecodeNoPad(resp.blob_id)
-        if (blobId.size != BLOB_ID_LEN) {
-            throw DiscoveryHttpError(
-                status = 200,
-                endpoint = "/discovery/invite",
-                body = "server returned blob_id of ${blobId.size} bytes, expected $BLOB_ID_LEN",
-            )
-        }
-        return blobId
+        // Server returns the 8-character base64url id; decode it
+        // back to the raw 6 bytes.
+        return uploadedBlobId(resp.blob_id, "/discovery/invite")
     }
 
     /**
      * Fetch a previously-uploaded `InviteCapability` by its
-     * content-addressed [blobId]. Returns `null` on 404 (server
+     * ledger id [blobId]. Returns `null` on 404 (server
      * folds expired blobs into the same status), the raw
      * capability bytes on 200 (the caller drives
      * [uniffi.lakko_ffi_uniffi.InviteCapability.decodeAndVerify]
@@ -851,8 +860,8 @@ public class DiscoveryClient(
      * substituted bytes).
      */
     public suspend fun fetchInvite(blobId: ByteArray): ByteArray? {
-        if (blobId.size != BLOB_ID_LEN) {
-            throw DiscoveryClientArgError("blobId must be $BLOB_ID_LEN bytes")
+        if (blobId.size != blobIdLen) {
+            throw DiscoveryClientArgError("blobId must be $blobIdLen bytes")
         }
         val raw = inviteFetch(blobId) ?: return null
         return base64Decode(raw.capability)
@@ -882,8 +891,8 @@ public class DiscoveryClient(
         capabilityBytes: ByteArray,
         joinerAccountId: ByteArray,
     ): ConsumeInviteResult {
-        if (blobId.size != BLOB_ID_LEN) {
-            throw DiscoveryClientArgError("blobId must be $BLOB_ID_LEN bytes")
+        if (blobId.size != blobIdLen) {
+            throw DiscoveryClientArgError("blobId must be $blobIdLen bytes")
         }
         if (joinerAccountId.size != ACCOUNT_ID_LEN) {
             throw DiscoveryClientArgError("joinerAccountId must be $ACCOUNT_ID_LEN bytes")
@@ -969,8 +978,8 @@ public class DiscoveryClient(
         blobId: ByteArray,
         signingSeed: ByteArray,
     ): RevokeInviteResult {
-        if (blobId.size != BLOB_ID_LEN) {
-            throw DiscoveryClientArgError("blobId must be $BLOB_ID_LEN bytes")
+        if (blobId.size != blobIdLen) {
+            throw DiscoveryClientArgError("blobId must be $blobIdLen bytes")
         }
         if (signingSeed.size != SIGNING_SEED_LEN) {
             throw DiscoveryClientArgError("signingSeed must be $SIGNING_SEED_LEN bytes")
@@ -1000,16 +1009,16 @@ public class DiscoveryClient(
 
     /**
      * Upload a freshly-composed `CallInviteCapability` blob and
-     * receive the server-assigned content-addressed `blobId`
-     * (raw 32-byte SHA-256). Drives one PoW solve + `POST
-     * /discovery/call-invite`. Idempotent.
+     * receive the server-assigned 6-byte `blobId` (a fresh
+     * random ledger id per upload). Drives one PoW solve +
+     * `POST /discovery/call-invite`.
      *
      * Sibling of [uploadInvite]; the client-side ceiling is
      * [MAX_CALL_CAPABILITY_BYTES] (8 KiB, 4× contact-invite)
      * because the call-invite capability embeds a one-time
      * MLS KeyPackage.
      *
-     * Returns the 32-byte `blobId`, ready to substitute into a
+     * Returns the 6-byte `blobId`, ready to substitute into a
      * `https://<host>/c/<slug>` pointer URL via
      * [base64UrlEncodeNoPad].
      */
@@ -1030,20 +1039,12 @@ public class DiscoveryClient(
         val resp = callInviteUpload(
             InviteUploadRequest(pow = pow, capability = base64Encode(capabilityBytes)),
         )
-        val blobId = base64UrlDecodeNoPad(resp.blob_id)
-        if (blobId.size != BLOB_ID_LEN) {
-            throw DiscoveryHttpError(
-                status = 200,
-                endpoint = "/discovery/call-invite",
-                body = "server returned blob_id of ${blobId.size} bytes, expected $BLOB_ID_LEN",
-            )
-        }
-        return blobId
+        return uploadedBlobId(resp.blob_id, "/discovery/call-invite")
     }
 
     /**
      * Fetch a previously-uploaded `CallInviteCapability` by its
-     * content-addressed [blobId]. Returns `null` on 404 (server
+     * ledger id [blobId]. Returns `null` on 404 (server
      * folds expired blobs into the same status), raw capability
      * bytes on 200 (the caller drives
      * [uniffi.lakko_ffi_uniffi.CallInviteCapability.decodeAndVerify]
@@ -1051,8 +1052,8 @@ public class DiscoveryClient(
      * substituted bytes).
      */
     public suspend fun fetchCallInvite(blobId: ByteArray): ByteArray? {
-        if (blobId.size != BLOB_ID_LEN) {
-            throw DiscoveryClientArgError("blobId must be $BLOB_ID_LEN bytes")
+        if (blobId.size != blobIdLen) {
+            throw DiscoveryClientArgError("blobId must be $blobIdLen bytes")
         }
         val raw = callInviteFetch(blobId) ?: return null
         return base64Decode(raw.capability)
@@ -1074,8 +1075,8 @@ public class DiscoveryClient(
         capabilityBytes: ByteArray,
         joinerAccountId: ByteArray,
     ): ConsumeInviteResult {
-        if (blobId.size != BLOB_ID_LEN) {
-            throw DiscoveryClientArgError("blobId must be $BLOB_ID_LEN bytes")
+        if (blobId.size != blobIdLen) {
+            throw DiscoveryClientArgError("blobId must be $blobIdLen bytes")
         }
         if (joinerAccountId.size != ACCOUNT_ID_LEN) {
             throw DiscoveryClientArgError("joinerAccountId must be $ACCOUNT_ID_LEN bytes")
@@ -1135,14 +1136,14 @@ public class DiscoveryClient(
 
     /**
      * Upload a freshly-composed `GroupInviteCapability` blob and receive the
-     * server-assigned content-addressed `blobId` (raw 32-byte SHA-256). Drives
-     * one PoW solve + `POST /discovery/group-invite`. Idempotent.
+     * server-assigned 6-byte `blobId` (a fresh random ledger id per upload).
+     * Drives one PoW solve + `POST /discovery/group-invite`.
      *
      * `maxUses` is a SOFT anti-spam throttle (NOT part of the signed capability,
      * NOT an access control — the admin approval gate is the security
      * boundary): `0` = single-use, `0xFFFFFFFF` = unlimited.
      *
-     * Returns the 32-byte `blobId`, ready to substitute into a
+     * Returns the 6-byte `blobId`, ready to substitute into a
      * `https://<host>/g/<slug>` pointer URL via [base64UrlEncodeNoPad].
      */
     public suspend fun uploadGroupInvite(
@@ -1169,28 +1170,20 @@ public class DiscoveryClient(
                 max_uses = maxUses,
             ),
         )
-        val blobId = base64UrlDecodeNoPad(resp.blob_id)
-        if (blobId.size != BLOB_ID_LEN) {
-            throw DiscoveryHttpError(
-                status = 200,
-                endpoint = "/discovery/group-invite",
-                body = "server returned blob_id of ${blobId.size} bytes, expected $BLOB_ID_LEN",
-            )
-        }
-        return blobId
+        return uploadedBlobId(resp.blob_id, "/discovery/group-invite")
     }
 
     /**
      * Fetch a previously-uploaded `GroupInviteCapability` by its
-     * content-addressed [blobId]. Returns `null` on 404 (the server folds
+     * ledger id [blobId]. Returns `null` on 404 (the server folds
      * expired blobs into the same status), raw capability bytes on 200 (the
      * caller drives
      * [uniffi.lakko_ffi_uniffi.GroupInviteCapability.decodeAndVerify] to
      * re-verify locally so a malicious server cannot serve substituted bytes).
      */
     public suspend fun fetchGroupInvite(blobId: ByteArray): ByteArray? {
-        if (blobId.size != BLOB_ID_LEN) {
-            throw DiscoveryClientArgError("blobId must be $BLOB_ID_LEN bytes")
+        if (blobId.size != blobIdLen) {
+            throw DiscoveryClientArgError("blobId must be $blobIdLen bytes")
         }
         val raw = groupInviteFetch(blobId) ?: return null
         return base64Decode(raw.capability)
@@ -1211,8 +1204,8 @@ public class DiscoveryClient(
         capabilityBytes: ByteArray,
         joinerAccountId: ByteArray,
     ): ConsumeInviteResult {
-        if (blobId.size != BLOB_ID_LEN) {
-            throw DiscoveryClientArgError("blobId must be $BLOB_ID_LEN bytes")
+        if (blobId.size != blobIdLen) {
+            throw DiscoveryClientArgError("blobId must be $blobIdLen bytes")
         }
         if (joinerAccountId.size != ACCOUNT_ID_LEN) {
             throw DiscoveryClientArgError("joinerAccountId must be $ACCOUNT_ID_LEN bytes")
@@ -1307,8 +1300,8 @@ public class DiscoveryClient(
         blobId: ByteArray,
         signingSeed: ByteArray,
     ): RevokeInviteResult {
-        if (blobId.size != BLOB_ID_LEN) {
-            throw DiscoveryClientArgError("blobId must be $BLOB_ID_LEN bytes")
+        if (blobId.size != blobIdLen) {
+            throw DiscoveryClientArgError("blobId must be $blobIdLen bytes")
         }
         if (signingSeed.size != SIGNING_SEED_LEN) {
             throw DiscoveryClientArgError("signingSeed must be $SIGNING_SEED_LEN bytes")
@@ -1354,8 +1347,8 @@ public class DiscoveryClient(
         blobId: ByteArray,
         signingSeed: ByteArray,
     ): RevokeInviteResult {
-        if (blobId.size != BLOB_ID_LEN) {
-            throw DiscoveryClientArgError("blobId must be $BLOB_ID_LEN bytes")
+        if (blobId.size != blobIdLen) {
+            throw DiscoveryClientArgError("blobId must be $blobIdLen bytes")
         }
         if (signingSeed.size != SIGNING_SEED_LEN) {
             throw DiscoveryClientArgError("signingSeed must be $SIGNING_SEED_LEN bytes")
@@ -1682,9 +1675,6 @@ public class DiscoveryClient(
          *  server's `VARBINARY(512)` column. */
         private const val MAX_GROUP_CAPABILITY_BYTES: Int = 512
 
-        /** SHA-256 → 32-byte content-addressed invite id. */
-        private const val BLOB_ID_LEN: Int = 32
-
         /** Ed25519 signing seed length, mirrors
          *  `me.lakko.app.auth` constants. */
         private const val SIGNING_SEED_LEN: Int = 32
@@ -1798,7 +1788,7 @@ public sealed interface RevokeInviteResult {
  *  owner uses to reconstruct the share URL or feed back into
  *  [DiscoveryClient.revokeInvite]. */
 public data class ActiveInvite(
-    /** URL-safe base64 (no padding) of the 32-byte blob_id —
+    /** URL-safe base64 (no padding) of the 6-byte blob_id —
      *  same `/i/<slug>` segment that appears in the share URL. */
     val blobIdSlug: String,
     /** UNIX millis the capability expires at. `0` means never

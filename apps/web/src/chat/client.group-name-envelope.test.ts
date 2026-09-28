@@ -17,7 +17,6 @@ import { fileURLToPath } from "node:url";
 import initWasm, * as wasmNs from "../../wasm/lakko_ffi_wasm";
 import { ChatClient, type IncomingChatEvent } from "./client";
 import type { DsClient } from "../ds/client";
-import type { PushClient } from "../push/client";
 import type { Group as WasmGroup, Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 import { base64Encode } from "../auth/account-id";
 
@@ -59,8 +58,6 @@ function dsWith(...payloads: Uint8Array[]): DsClient {
   } as unknown as DsClient;
 }
 
-const push = (): PushClient => ({ notifyGroup: vi.fn(async () => {}) }) as unknown as PushClient;
-
 let nextGid = 0;
 function freshGid(): Uint8Array {
   nextGid += 1;
@@ -68,7 +65,7 @@ function freshGid(): Uint8Array {
 }
 
 async function classify(senderLeaf: number, ...payloads: Uint8Array[]): Promise<IncomingChatEvent[]> {
-  const chat = new ChatClient(dsWith(...payloads), { identityProvider: () => IDENTITY_TOKEN }, push());
+  const chat = new ChatClient(dsWith(...payloads), { identityProvider: () => IDENTITY_TOKEN });
   return (await chat.pollMessages(null, group(freshGid(), senderLeaf), 0)).events;
 }
 

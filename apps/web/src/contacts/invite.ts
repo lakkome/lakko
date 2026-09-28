@@ -19,7 +19,13 @@
  *     focused on rendering and gives unit-test coverage for the
  *     defaulting logic without spinning up Solid.
  */
-import { base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
+import { base64UrlEncodeNoPad } from "../auth/account-id";
+import {
+  classifyInviteSlug,
+  requireBlobId,
+  type ClassifiedInviteSlug,
+  type InviteLinkWidths,
+} from "./invite-link";
 
 /** Path prefix every invite URL starts with — kept in lock-step
  *  with `routes/paths.ts::inviteRoutePattern`. */
@@ -33,19 +39,16 @@ export const INVITE_URL_PREFIX = "/i/";
  *  must also bump this one. */
 export const INVITE_LABEL_MAX_LEN = 64;
 
-/** Length of a content-addressed `blob_id` from
- *  `services/discovery/src/invite.rs` — SHA-256, 32 bytes. */
-export const INVITE_BLOB_ID_LEN = 32;
-
 /** Lower bound on the inline-bytes form. The 1.18a wire format
  *  is `1 + 32 + 16 + 32 + 8 + 4 + 1 + 2 + label(0..64) + 64 =
  *  160..224 bytes`; an empty label (the smallest legal payload)
- *  is 160 bytes. Far above 32, so a slug-byte-length test
- *  cleanly discriminates inline vs pointer URLs. */
+ *  is 160 bytes. Far above the 6-byte ledger id (ADR-0028
+ *  short-link amendment), so a slug-byte-length test cleanly
+ *  discriminates inline vs pointer URLs. */
 export const INVITE_INLINE_MIN_LEN = 160;
 
 /** Auto-pick the URL form by argument shape — pointer
- *  (`blob_id`, 32 bytes) when the caller has uploaded the
+ *  (`blob_id`, 6 bytes) when the caller has uploaded the
  *  capability and wants the short form, inline-bytes (≥160
  *  bytes) when the caller is staying server-free.
  *
@@ -74,13 +77,10 @@ export function composeInviteUrl(
  *  better at the call site. */
 export function composePointerInviteUrl(
   blobId: Uint8Array,
+  widths: InviteLinkWidths,
   origin?: string,
 ): string {
-  if (blobId.length !== INVITE_BLOB_ID_LEN) {
-    throw new Error(
-      `blobId must be ${INVITE_BLOB_ID_LEN} bytes, got ${blobId.length}`,
-    );
-  }
+  requireBlobId(blobId, widths);
   return composeInviteUrl(blobId, origin);
 }
 
@@ -108,25 +108,14 @@ export function composeInlineInviteUrl(
  *    * `kind: "inline"` — run `decodeAndVerify` directly on the
  *      bytes, no server round-trip.
  *
- *  The dispatch rule is a clean byte-length test: 32 ⇒ pointer
- *  (SHA-256), ≥ 160 ⇒ inline (1.18a wire-format minimum).
- *  Anything else is invalid input. */
-export type ParsedInvite =
-  | { readonly kind: "pointer"; readonly blobId: Uint8Array }
-  | { readonly kind: "inline"; readonly capabilityBytes: Uint8Array };
+ *  The dispatch rule (`invite-link.ts`): 8 characters decoding
+ *  to 6 bytes ⇒ pointer, ≥ 160 bytes ⇒ inline (1.18a wire-format
+ *  minimum). Anything else, the pre-amendment 43-character id
+ *  included, is refused. */
+export type ParsedInvite = ClassifiedInviteSlug;
 
-export function parseInviteSlug(slug: string): ParsedInvite {
-  const bytes = base64UrlDecodeNoPad(slug);
-  if (bytes.length === INVITE_BLOB_ID_LEN) {
-    return { kind: "pointer", blobId: bytes };
-  }
-  if (bytes.length >= INVITE_INLINE_MIN_LEN) {
-    return { kind: "inline", capabilityBytes: bytes };
-  }
-  throw new Error(
-    `invite slug decoded to ${bytes.length} bytes — neither a ${INVITE_BLOB_ID_LEN}-byte pointer ` +
-      `nor a ≥ ${INVITE_INLINE_MIN_LEN}-byte inline capability`,
-  );
+export function parseInviteSlug(slug: string, widths: InviteLinkWidths): ParsedInvite {
+  return classifyInviteSlug(slug, widths, INVITE_INLINE_MIN_LEN, "invite");
 }
 
 /** Discrete UI choices the "Generate invite link" form exposes

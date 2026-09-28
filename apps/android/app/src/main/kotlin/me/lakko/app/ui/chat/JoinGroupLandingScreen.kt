@@ -52,13 +52,16 @@ import me.lakko.app.chat.invitedByLine
  * posts an external-join proposal (ADR-0027), then polls until the rendezvous
  * Welcome lands.
  *
- * **The preview is shown before anyone taps, and a missing one is not an
- * error.** The link key rides in the URL fragment; a chat app that strips
- * fragments, a hand-typed URL, a link minted without a preview or a key the
- * preview does not open under all land on the same page without a preview
- * (`You are invited to a group`) — nothing invents a name and the page does
- * not say why. Only a capability that fails to decode, verify or is past its
- * expiry is the invalid state.
+ * **The preview is shown before anyone taps.** The link secret rides in the
+ * URL fragment; a chat app that strips fragments or a hand-typed URL without
+ * one lands on the page without a preview (`You are invited to a group`) —
+ * nothing invents a name and the page does not say why. A fragment that IS
+ * present but malformed, or whose preview does not open, refuses the link as
+ * damaged (ADR-0028 amendment of 2026-09-27): the ledger id is no longer a hash
+ * of the capability, and a secret that opens nothing is how a capability
+ * swapped in under a live id is noticed. A capability that fails to decode,
+ * verify or is past its expiry is the invalid state; a `429` from the ledger
+ * is "try again later", never "invalid".
  *
  * **The wait is TWO-stage since ADR-0045 S7, and the copy says so.** An admin's
  * approve no longer admits anyone by itself: it publishes an `Add` proposal, and
@@ -87,10 +90,9 @@ import me.lakko.app.chat.invitedByLine
 public class JoinGroupLandingViewModel(
     private val repository: ChatRepository,
     private val slug: String,
-    /** The 32-byte link key from the URL fragment, or `null` when the tapped
-     *  URL had none (or one of the wrong shape) — the page then shows no
-     *  preview. */
-    private val linkKey: ByteArray?,
+    /** The URL fragment: absent (no preview), the 12-byte link secret, or
+     *  malformed (the link is refused as damaged). */
+    private val fragment: me.lakko.app.chat.GroupInviteFragment,
 ) : ViewModel() {
 
     /** Local FSM: Loading -> Invalid | Ready -> Requesting -> Waiting (poll
@@ -100,6 +102,10 @@ public class JoinGroupLandingViewModel(
         public data object Loading : State
         /** The capability does not decode, verify, or has expired. */
         public data object Invalid : State
+        /** The link carries a fragment its preview does not open under. */
+        public data object Damaged : State
+        /** The ledger answered `429`; the link may be fine. */
+        public data object RateLimited : State
         /** The card is on screen; nothing has been sent yet. */
         public data object Ready : State
         public data object Requesting : State
@@ -139,6 +145,12 @@ public class JoinGroupLandingViewModel(
     public fun start() {
         if (started) return
         started = true
+        if (fragment == me.lakko.app.chat.GroupInviteFragment.Malformed) {
+            // Refused before any network: the old 43-character key, a
+            // truncated secret, anything that is not the 16-character secret.
+            mutableState.value = State.Damaged
+            return
+        }
         viewModelScope.launch {
             // A tapped link starts (or recreates) the activity, whose shell
             // bootstraps a fresh repository on its own dispatcher while the
@@ -150,11 +162,11 @@ public class JoinGroupLandingViewModel(
             repository.state.first { it.bootstrapped }
             val nowMs = System.currentTimeMillis().toULong()
             try {
-                // ADR-0028 OQ1 — resolve the slug (a 32-byte content-addressed
+                // ADR-0028 OQ1 — resolve the slug (a 6-byte ledger-id
                 // pointer => fetch the capability from the ledger; an inline
                 // capability => pass through).
                 val wireAndBlob = repository.resolveGroupInviteSlug(slug)
-                val card = repository.inspectGroupInvite(wireAndBlob.first, linkKey, nowMs)
+                val card = repository.inspectGroupInvite(wireAndBlob.first, fragment, nowMs)
                 if (!card.valid) {
                     mutableState.value = State.Invalid
                     return@launch
@@ -162,14 +174,29 @@ public class JoinGroupLandingViewModel(
                 resolved = wireAndBlob
                 mutableCard.value = card
                 mutableState.value = State.Ready
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Throwable) {
                 // A slug that does not resolve, a ledger row that is gone, a
                 // capability that does not verify: all one state for the
-                // person (spec section 3, `Invalid or expired link`).
+                // person (spec section 3, `Invalid or expired link`). A
+                // damaged fragment and a 429 are their own states.
                 android.util.Log.w("JoinGroupLanding", "invite link did not open", e)
-                mutableState.value = State.Invalid
+                mutableState.value = when (me.lakko.app.chat.groupInviteOpenFailure(e)) {
+                    me.lakko.app.chat.GroupInviteOpenFailure.Invalid -> State.Invalid
+                    me.lakko.app.chat.GroupInviteOpenFailure.Damaged -> State.Damaged
+                    me.lakko.app.chat.GroupInviteOpenFailure.RateLimited -> State.RateLimited
+                }
             }
         }
+    }
+
+    /** `Try again` after a rate-limited open: resolve the link once more. */
+    public fun retryOpen() {
+        if (mutableState.value != State.RateLimited) return
+        mutableState.value = State.Loading
+        started = false
+        start()
     }
 
     /**
@@ -293,6 +320,16 @@ public fun JoinGroupLandingScreen(
                 Text(GROUP_INVITE_INVALID_COPY, textAlign = TextAlign.Center)
                 Spacer(Modifier.height(12.dp))
                 Button(onClick = onDone) { Text("Open Lakko") }
+            }
+            is JoinGroupLandingViewModel.State.Damaged -> {
+                Text(me.lakko.app.chat.GROUP_INVITE_DAMAGED_COPY, textAlign = TextAlign.Center)
+                Spacer(Modifier.height(12.dp))
+                Button(onClick = onDone) { Text("Open Lakko") }
+            }
+            is JoinGroupLandingViewModel.State.RateLimited -> {
+                Text(me.lakko.app.discovery.INVITE_RATE_LIMITED_COPY, textAlign = TextAlign.Center)
+                Spacer(Modifier.height(12.dp))
+                Button(onClick = { viewModel.retryOpen() }) { Text(me.lakko.app.chat.JOIN_TRY_AGAIN) }
             }
             is JoinGroupLandingViewModel.State.Ready -> {
                 InviteHeadline(card)

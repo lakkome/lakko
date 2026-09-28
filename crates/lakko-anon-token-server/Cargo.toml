@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-anon-token-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Server-side bookkeeping for anonymous tokens (ADR-0054 decision 2): the shared configuration, the issuer's per-account quota counter, and each verifier's spent-set, with their pruners and migration SQL"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+# The pure primitive: contexts, epochs, the master secret, spend identifiers.
+lakko-anon-token.workspace = true
+
+# MariaDB bookkeeping. Features mirror `lakko-pow-server` (the same shape:
+# one crate carrying the queries each service's own table runs), minus the
+# bits this crate does not use.
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring",
+    "mysql",
+] }
+
+[dev-dependencies]
+# Random account ids / spend ids so the DB-gated tests are re-runnable against
+# a persistent dev database.
+lakko-crypto.workspace = true

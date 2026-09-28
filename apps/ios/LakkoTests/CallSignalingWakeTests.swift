@@ -146,7 +146,7 @@ final class CallSignalingWakeTests: XCTestCase {
     /// says wake, and for nothing otherwise. Restated here against the two
     /// bodies that matter so a change to either side has to change this test.
     func testThePublisherAsksForACallWakeOnlyForOfferAndEnd() throws {
-        func requested(_ bytes: Data) -> PushClient.WakeKind? {
+        func requested(_ bytes: Data) -> DsWake.Kind? {
             CallSignalingWake.shouldWake(bytes) ? .call : nil
         }
         XCTAssertEqual(requested(try offer()), .call)
@@ -157,10 +157,10 @@ final class CallSignalingWakeTests: XCTestCase {
             callId: callId, leafIndex: 2, joinedAtMs: 1))))
     }
 
-    /// The wire value the server matches on. An unrecognised `kind` is
-    /// refused rather than demoted to a message, so a drifted spelling here
-    /// would silently stop every call wake.
+    /// The wire value the DS matches on in `x-lakko-wake`. A malformed header
+    /// is refused with a 400, so a drifted spelling here would fail every
+    /// call offer's publish, not only its wake.
     func testTheCallWakeKindSerialisesAsTheServerSpellsIt() {
-        XCTAssertEqual(PushClient.WakeKind.call.rawValue, "call")
+        XCTAssertEqual(DsWake.Kind.call.rawValue, "call")
     }
 }

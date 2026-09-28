@@ -4,8 +4,9 @@
 /**
  * `PushClient` — fetch-based client for `lakko-svc-push-gw`.
  *
- * Two endpoints from the user-device side (the third, `/push/notify`,
- * is driven by the DS fan-out — clients themselves never notify):
+ * Device-side endpoints only. A client never asks push-gw to wake anybody:
+ * since ADR-0054 a group wake is the `x-lakko-wake` header of the signed DS
+ * publish (`ds/wake.ts`), and the DS forwards it to push-gw internally.
  *
  *   * `POST /push/register` — bind a `(device_pseudonym, provider)`
  *     pair to a platform-specific token blob. Idempotent: re-register
@@ -13,6 +14,8 @@
  *     rebuild / FCM token refresh / Web Push subscription change).
  *   * `POST /push/unregister` — drop a token. Called on logout +
  *     forget-device.
+ *   * `POST /push/group/{subscribe,unsubscribe}` — (un)bind this device to
+ *     a group's `push_gid`.
  *
  * Plus `/pow/challenge` for the per-call PoW seed (same shape as the
  * auth + discovery PoW path).
@@ -43,21 +46,6 @@ export const DEVICE_PSEUDONYM_LEN = 32;
 /** Provider names — must match the snake_case `serde` rename on
  *  `ProviderKind` in `services/push-gw/src/provider.rs`. */
 export type ProviderKind = "apns" | "fcm" | "web_push" | "unified_push";
-
-/**
- * Optional wake class on `/push/notify-group`.
- *
- * Absent means an ordinary message wake — the only shape that existed before
- * calls needed to ring a closed tab, and still the default. `"call"` is the
- * one named class: push-gw raises Web Push to `Urgency: high` with a `TTL` of
- * 60 s, which is both halves of what a ring needs — deliver it now, and do not
- * deliver it at all once the call it announces is over.
- *
- * The delivered payload is unchanged either way: the wake still carries only a
- * group pseudonym and a journal pointer, so the provider learns nothing more
- * from a call than from a message (invariant #5).
- */
-export type PushWakeKind = "call";
 
 /** Programmer error — wrong-length pseudonym, empty token, etc. */
 export class PushClientArgError extends Error {
@@ -179,10 +167,10 @@ export class PushClient {
   }
 
   /**
-   * Subscribe this device to wakes for `groupPseudonym`. Phase
-   * 1.20e: publishers call [`notifyGroup`] after each successful
-   * `chat.sendMessage`, and the push-gw fans out to every device
-   * with a row here.
+   * Subscribe this device to wakes for `groupPseudonym` (the group's
+   * ADR-0042 `push_gid`). A publisher's DS publish carries an
+   * `x-lakko-wake` header (ADR-0054); the DS forwards it and push-gw fans
+   * out to every device with a row here.
    *
    * Idempotent — re-subscribing the same `(device, group)` pair
    * returns `inserted: false` and is a no-op.
@@ -242,63 +230,6 @@ export class PushClient {
       );
     }
     return { removed: resp.removed };
-  }
-
-  /**
-   * Fan a wake out to every device subscribed to
-   * `groupPseudonym`. Phase 1.20e: the publisher's client calls
-   * this right after `chat.sendMessage` succeeds. The push-gw
-   * looks up the subscription table + dispatches per device via
-   * the same provider machinery as `/push/notify`.
-   *
-   * @param groupPseudonym 32-byte group id (same value DS uses
-   *                       as the journal key).
-   * @param envelopePointer Optional DS message id; lets the
-   *                        woken client jump to the exact row
-   *                        instead of polling.
-   * @param kind           Optional wake class. Omitted (the default)
-   *                       sends byte-for-byte the pre-existing
-   *                       request, an ordinary message wake.
-   *                       `"call"` asks push-gw to deliver at the
-   *                       highest priority the transport offers
-   *                       (Web Push `Urgency: high`, `TTL: 60`),
-   *                       because a ring is worth the battery and is
-   *                       worthless once the call is over
-   *                       (`docs/ux/calls.md` §7).
-   */
-  async notifyGroup(
-    groupPseudonym: Uint8Array,
-    envelopePointer?: number,
-    kind?: PushWakeKind,
-  ): Promise<{ devicesWoken: number }> {
-    const groupHex = pseudonymHex(groupPseudonym, "groupPseudonym");
-
-    const challenge = await this.fetchChallenge();
-    const pow = await solvePow(challenge.seed, challenge.effort_bits);
-
-    interface NotifyGroupReq {
-      pow: PowProofPayload;
-      group_pseudonym: string;
-      envelope_pointer?: number;
-      kind?: PushWakeKind;
-    }
-    const req: NotifyGroupReq = {
-      pow,
-      group_pseudonym: groupHex,
-    };
-    if (envelopePointer !== undefined) {
-      req.envelope_pointer = envelopePointer;
-    }
-    // Set ONLY when a caller asked for it, so a message wake keeps producing
-    // the exact request body it produced before this field existed.
-    if (kind !== undefined) {
-      req.kind = kind;
-    }
-    const resp = await this.post<
-      NotifyGroupReq,
-      { devices_woken: number; deliveries: unknown[] }
-    >("/push/notify-group", req);
-    return { devicesWoken: resp.devices_woken };
   }
 
   /**

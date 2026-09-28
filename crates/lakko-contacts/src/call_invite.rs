@@ -121,7 +121,7 @@ pub const CALL_INVITE_REVOKE_DOMAIN_V1: &[u8] = b"lakko-call-invite-revoke/v1\x0
 /// Layout:
 ///
 /// ```text
-/// CALL_INVITE_REVOKE_DOMAIN_V1 (28 bytes) ‖ blob_id (32 bytes) ‖ signed_at_ms (8 bytes BE)
+/// CALL_INVITE_REVOKE_DOMAIN_V1 (28 bytes) ‖ blob_id (6 bytes) ‖ signed_at_ms (8 bytes BE)
 /// ```
 ///
 /// Pure deterministic helper. Both the discovery service
@@ -1018,7 +1018,7 @@ mod tests {
     fn call_revoke_canonical_bytes_layout_is_stable() {
         let blob_id = [0xAB_u8; BLOB_ID_LEN];
         let bytes = call_revoke_canonical_bytes(&blob_id, 0x0102_0304_0506_0708);
-        // Domain (28) + blob_id (32) + signed_at_ms (8) = 68 bytes.
+        // Domain (28) + blob_id (6) + signed_at_ms (8) = 42 bytes.
         assert_eq!(
             bytes.len(),
             CALL_INVITE_REVOKE_DOMAIN_V1.len() + BLOB_ID_LEN + 8

@@ -131,6 +131,10 @@ public fun InviteLandingScreen(
                     "share it again.",
                 onDone = onDone,
             )
+            InviteLandingState.RateLimited -> RateLimitedPanel(
+                onRetry = viewModel::retry,
+                onDone = onDone,
+            )
             InviteLandingState.RequiresReauth -> InfoPanel(
                 title = "Log in to accept",
                 body = "Your session needs a fresh password. Log out + log " +
@@ -261,6 +265,33 @@ private fun InfoPanel(
         onClick = onDone,
         modifier = Modifier.fillMaxWidth(),
     ) { Text("Done") }
+}
+
+/** The discovery service answered `429`: honest copy and a retry, never
+ *  "invalid link". */
+@Composable
+private fun RateLimitedPanel(
+    onRetry: () -> Unit,
+    onDone: () -> Unit,
+) {
+    Text(
+        text = me.lakko.app.discovery.INVITE_RATE_LIMITED_COPY,
+        style = MaterialTheme.typography.bodyMedium,
+    )
+    Spacer(Modifier.height(24.dp))
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Button(
+            onClick = onRetry,
+            modifier = Modifier.weight(1f),
+        ) { Text("Try again") }
+        OutlinedButton(
+            onClick = onDone,
+            modifier = Modifier.weight(1f),
+        ) { Text("Done") }
+    }
 }
 
 @Composable

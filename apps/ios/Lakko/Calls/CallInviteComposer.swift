@@ -56,7 +56,7 @@ public enum CallInviteComposer {
     /// revoke flow, and keeps ``callId`` around for the in-
     /// call signaling layer.
     public struct Composed: Sendable, Equatable {
-        /// Raw 32-byte content-addressed `blob_id`. Pass to
+        /// Raw 6-byte ledger `blob_id` the server minted. Pass to
         /// ``DiscoveryClient/revokeCallInvite(blobId:signingSeed:)``
         /// when the owner cancels the link.
         public let blobId: Data

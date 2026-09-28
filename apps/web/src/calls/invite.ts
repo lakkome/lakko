@@ -31,7 +31,13 @@
  * server-side route table and the joiner-side landing-page
  * dispatcher can branch on a one-character lookahead.
  */
-import { base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
+import { base64UrlEncodeNoPad } from "../auth/account-id";
+import {
+  classifyInviteSlug,
+  requireBlobId,
+  type ClassifiedInviteSlug,
+  type InviteLinkWidths,
+} from "../contacts/invite-link";
 
 /** Path prefix every call-invite URL starts with — kept in
  *  lock-step with `routes/paths.ts::callInviteRoutePattern`
@@ -53,23 +59,17 @@ export const CALL_ID_LEN = 16;
  *  can validate the form before crossing the WASM boundary. */
 export const CALL_INVITE_LABEL_MAX_LEN = 64;
 
-/** Length of a content-addressed `blob_id` from
- *  `services/discovery/src/call_invite.rs` — SHA-256, 32
- *  bytes. Same shape as the contact-invite ledger; the dedup
- *  tables on the server are partitioned by table, not by
- *  id-namespace, so the layout is allowed to collide. */
-export const CALL_INVITE_BLOB_ID_LEN = 32;
-
 /** Lower bound on the inline-bytes form. The 3c3 wire format
  *  with a 256-byte one-time KP tops out around 500 bytes; with
  *  a 4 KiB KP around 4308 bytes. The smallest legal payload
- *  (256-byte KP + empty label) is well above 32, so a slug-
+ *  (256-byte KP + empty label) is well above the 6-byte ledger
+ *  id, so a slug-
  *  byte-length test cleanly discriminates inline vs pointer
  *  URLs. We pin the floor at 400 to leave headroom for KP
  *  formats that might shrink slightly. */
 export const CALL_INVITE_INLINE_MIN_LEN = 400;
 
-/** Auto-pick the URL form by argument shape — pointer (32
+/** Auto-pick the URL form by argument shape — pointer (6
  *  bytes) when the caller has uploaded the capability and
  *  wants the short form, inline-bytes (≥ 400 bytes) when the
  *  caller is staying server-free.
@@ -94,13 +94,10 @@ export function composeCallInviteUrl(
  *  round-trip. */
 export function composePointerCallInviteUrl(
   blobId: Uint8Array,
+  widths: InviteLinkWidths,
   origin?: string,
 ): string {
-  if (blobId.length !== CALL_INVITE_BLOB_ID_LEN) {
-    throw new Error(
-      `blobId must be ${CALL_INVITE_BLOB_ID_LEN} bytes, got ${blobId.length}`,
-    );
-  }
+  requireBlobId(blobId, widths);
   return composeCallInviteUrl(blobId, origin);
 }
 
@@ -132,25 +129,14 @@ export function composeInlineCallInviteUrl(
  *      `decodeAndVerifyCallInviteCapability` directly on the
  *      bytes, no server round-trip.
  *
- *  The dispatch rule is a clean byte-length test: 32 ⇒
- *  pointer (SHA-256), ≥ 400 ⇒ inline (3c3 wire-format minimum
- *  with a 256-byte KP). Anything else is invalid input. */
-export type ParsedCallInvite =
-  | { readonly kind: "pointer"; readonly blobId: Uint8Array }
-  | { readonly kind: "inline"; readonly capabilityBytes: Uint8Array };
+ *  The dispatch rule (`contacts/invite-link.ts`): 8 characters
+ *  decoding to 6 bytes ⇒ pointer, ≥ 400 bytes ⇒ inline (3c3
+ *  wire-format minimum with a 256-byte KP). Anything else, the
+ *  pre-amendment 43-character id included, is refused. */
+export type ParsedCallInvite = ClassifiedInviteSlug;
 
-export function parseCallInviteSlug(slug: string): ParsedCallInvite {
-  const bytes = base64UrlDecodeNoPad(slug);
-  if (bytes.length === CALL_INVITE_BLOB_ID_LEN) {
-    return { kind: "pointer", blobId: bytes };
-  }
-  if (bytes.length >= CALL_INVITE_INLINE_MIN_LEN) {
-    return { kind: "inline", capabilityBytes: bytes };
-  }
-  throw new Error(
-    `call-invite slug decoded to ${bytes.length} bytes — neither a ${CALL_INVITE_BLOB_ID_LEN}-byte pointer ` +
-      `nor a ≥ ${CALL_INVITE_INLINE_MIN_LEN}-byte inline capability`,
-  );
+export function parseCallInviteSlug(slug: string, widths: InviteLinkWidths): ParsedCallInvite {
+  return classifyInviteSlug(slug, widths, CALL_INVITE_INLINE_MIN_LEN, "call-invite");
 }
 
 /** Convert a wire `max_uses` u32 back into a human-visible

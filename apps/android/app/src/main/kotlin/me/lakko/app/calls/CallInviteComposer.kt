@@ -48,7 +48,7 @@ public class CallInviteComposer(
      * [url] to the share sheet, and [blobId] is what a future revoke would name.
      */
     public data class Composed(
-        /** Raw 32-byte content-addressed `blob_id`. */
+        /** Raw 6-byte server-assigned `blob_id`. */
         val blobId: ByteArray,
         /** The full `<origin>/c/<slug>` URL the owner shares. */
         val url: String,

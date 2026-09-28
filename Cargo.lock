@@ -2461,6 +2461,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-anon-token"
+version = "0.0.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "lakko-crypto",
+ "proptest",
+ "rand_core 0.6.4",
+ "subtle",
+ "thiserror 1.0.69",
+ "voprf",
+ "zeroize",
+]
+
+[[package]]
+name = "lakko-anon-token-server"
+version = "0.0.0"
+dependencies = [
+ "lakko-anon-token",
+ "lakko-crypto",
+ "sqlx",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lakko-attachments"
 version = "0.0.0"
 dependencies = [
@@ -2843,6 +2869,8 @@ dependencies = [
  "equix",
  "hmac 0.12.1",
  "http-body-util",
+ "lakko-anon-token",
+ "lakko-anon-token-server",
  "lakko-attest",
  "lakko-auth-token",
  "lakko-call-jwt",
@@ -2917,7 +2945,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "sqlx",
  "tokio",
  "tower",
@@ -2941,6 +2968,7 @@ dependencies = [
  "lakko-ds-proof",
  "lakko-pow",
  "lakko-pow-server",
+ "reqwest",
  "serde",
  "serde_json",
  "sqlx",
@@ -3027,6 +3055,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
+ "subtle",
  "thiserror 1.0.69",
  "tokio",
  "tower",

@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import LakkoCore
 
 /// iOS-side helpers for the link-based call-invite URL shape
 /// (Phase 3c3-url-helpers).
@@ -37,22 +38,27 @@ public enum CallInviteUrl {
     /// test stack opens on the test stack.
     public static var defaultOrigin: String { ApiEndpoints.webOrigin }
 
-    /// Length of a content-addressed `blob_id` from
-    /// `services/discovery/src/call_invite.rs` — SHA-256,
-    /// 32 bytes.
-    public static let blobIdLen: Int = 32
+    /// Length of a ledger `blob_id`: 6 random bytes the
+    /// discovery service mints at upload (ADR-0028 amendment
+    /// of 2026-09-27), read from the core.
+    public static var blobIdLen: Int { Int(inviteBlobIdLen()) }
+
+    /// Length of a ledger `blob_id` in the URL (8 base64url
+    /// characters).
+    public static var blobIdUrlLen: Int { Int(inviteBlobIdUrlLen()) }
 
     /// Lower bound on the inline-bytes form. The 3c3 wire
     /// format with a 256-byte one-time KP tops out around 500
     /// bytes; we pin the floor at 400 to leave headroom for
     /// KP formats that might shrink slightly. Anything < 400
-    /// and ≠ 32 is invalid input.
+    /// that is not a 6-byte pointer is invalid input - the
+    /// retired 32-byte content-addressed id included.
     public static let inlineMinLen: Int = 400
 
     // MARK: - URL builders
 
     /// Auto-pick the URL form by argument shape — pointer
-    /// (32 bytes) when the caller has uploaded the capability
+    /// (6 bytes) when the caller has uploaded the capability
     /// and wants the short form, inline-bytes (≥ 400 bytes)
     /// when the caller is staying server-free.
     ///
@@ -71,7 +77,7 @@ public enum CallInviteUrl {
     /// `/discovery/call-invite/<blob_id>` lookup.
     ///
     /// - Throws: ``CallInviteUrlError/wrongBlobIdLength`` when
-    ///   `blobId.count != 32`.
+    ///   `blobId` is not ``blobIdLen`` bytes.
     public static func composePointerCallInviteUrl(
         blobId: Data,
         origin: String = defaultOrigin
@@ -110,8 +116,7 @@ public enum CallInviteUrl {
 
     /// Discriminated parse result for a `/c/<slug>` segment.
     public enum ParsedCallInvite: Equatable {
-        /// Short form — `blobId` is the 32-byte content-
-        /// addressed id. Joiner fetches via
+        /// Short form — `blobId` is the 6-byte ledger id. Joiner fetches via
         /// `DiscoveryClient.fetchCallInvite(blobId:)` →
         /// `CallInviteCapability.decodeAndVerify(...)`.
         case pointer(blobId: Data)
@@ -122,14 +127,14 @@ public enum CallInviteUrl {
     }
 
     /// Discriminated parse of a URL slug. The dispatch rule
-    /// is a clean byte-length test: 32 ⇒ pointer (SHA-256),
-    /// ≥ 400 ⇒ inline (3c3 wire-format minimum). Anything
-    /// else is invalid input.
+    /// is a clean byte-length test: 6 bytes (exactly 8
+    /// characters) ⇒ pointer, ≥ 400 ⇒ inline (3c3 wire-format
+    /// minimum). Anything else is invalid input.
     public static func parseCallInviteSlug(_ slug: String) throws -> ParsedCallInvite {
-        guard let bytes = base64UrlDecodeNoPad(slug) else {
+        guard isBase64Url(slug), let bytes = base64UrlDecodeNoPad(slug) else {
             throw CallInviteUrlError.invalidBase64Url
         }
-        if bytes.count == blobIdLen {
+        if bytes.count == blobIdLen, slug.count == blobIdUrlLen {
             return .pointer(blobId: bytes)
         }
         if bytes.count >= inlineMinLen {

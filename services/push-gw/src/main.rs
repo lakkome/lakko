@@ -35,20 +35,39 @@
 //!   service per the per-service DB isolation rule.
 //! - `LAKKO_PUSH_GW_POW_EFFORT_BITS` — PoW difficulty (default 8;
 //!   0 in tests).
+//! - `LAKKO_PUSH_GW_INTERNAL_BIND` — the internal listener (default
+//!   `127.0.0.1:8092`). Not proxied by nginx; bind it to loopback or a
+//!   private interface only.
+//! - `LAKKO_PUSH_GW_INTERNAL_SECRET` — base64, >= 16 bytes; the shared
+//!   secret the DS presents (its `LAKKO_DS_PUSH_GW_SECRET`). Unset: the
+//!   internal listener is not started and no group wake is delivered.
 //! - `RUST_LOG` — `tracing-subscriber` env-filter spec.
 //!
 //! ## Endpoints
 //!
-//! - `GET    /health`         — liveness, 200 OK
-//! - `GET    /ready`          — readiness (DB ping), 200 / 503
+//! Public listener (`LAKKO_BIND`, proxied by nginx):
+//!
+//! - `GET    /health`                — liveness, 200 OK
+//! - `GET    /ready`                 — readiness (DB ping), 200 / 503
 //! - `GET    /version`
-//! - `POST   /pow/challenge`  — Equix PoW challenge (1.1e-style)
-//! - `POST   /push/register`  — bind `(device_pseudonym, provider) → token`
-//! - `POST   /push/unregister`— drop a token
-//! - `POST   /push/notify`    — wake every registered endpoint for a device
+//! - `POST   /pow/challenge`         — Equix PoW challenge (1.1e-style)
+//! - `POST   /push/register`         — bind `(device_pseudonym, provider) → token`
+//! - `POST   /push/unregister`       — drop a token
+//! - `POST   /push/group/subscribe`  — subscribe a device to a `push_gid`
+//! - `POST   /push/group/unsubscribe`
+//!
+//! Internal listener (`LAKKO_PUSH_GW_INTERNAL_BIND`, shared-secret gated,
+//! ADR-0054 decision 1 — see `src/internal.rs`):
+//!
+//! - `POST   /push/notify-group`     — the DS forwards a wake after a signed
+//!   publish
+//!
+//! The per-device `/push/notify` is gone (ADR-0054: no caller on any
+//! client), and no route on the public listener can wake a device.
 
 #![forbid(unsafe_code)]
 
+mod internal;
 mod notify;
 mod pow;
 mod provider;
@@ -100,6 +119,9 @@ pub(crate) struct AppState {
     /// `ApnsProvider` / `FcmProvider` / `WebPushProvider` instances
     /// based on env config.
     pub(crate) providers: Arc<HashMap<ProviderKind, Box<dyn Provider>>>,
+    /// ADR-0054 - the secret the internal listener checks. `None` when
+    /// `LAKKO_PUSH_GW_INTERNAL_SECRET` is unset (the listener is then off).
+    pub(crate) internal_secret: Option<Arc<Vec<u8>>>,
 }
 
 #[tokio::main]
@@ -118,6 +140,16 @@ async fn main() -> Result<()> {
         .parse()
         .context("parse LAKKO_BIND as host:port")?;
 
+    let internal_bind: SocketAddr = std::env::var("LAKKO_PUSH_GW_INTERNAL_BIND")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| internal::DEFAULT_INTERNAL_BIND.to_string())
+        .parse()
+        .context("parse LAKKO_PUSH_GW_INTERNAL_BIND as host:port")?;
+    let internal_secret = internal::load_internal_secret()
+        .map_err(anyhow::Error::msg)
+        .context("internal secret")?;
+
     let db_url = std::env::var("LAKKO_PUSH_GW_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
         .context("LAKKO_PUSH_GW_DATABASE_URL or DATABASE_URL env var must be set")?;
@@ -135,9 +167,46 @@ async fn main() -> Result<()> {
     let state = AppState {
         db: pool.clone(),
         providers: Arc::new(providers),
+        internal_secret,
     };
 
     let _pow_pruner = pow::spawn_pruner(pool.clone());
+
+    // One shutdown signal, observed by both listeners.
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = stop_tx.send(true);
+    });
+    let stopped = |mut rx: tokio::sync::watch::Receiver<bool>| async move {
+        let _ = rx.wait_for(|stop| *stop).await;
+    };
+
+    let internal = if state.internal_secret.is_some() {
+        if !internal_bind.ip().is_loopback() {
+            tracing::warn!(
+                addr = %internal_bind,
+                "internal listener is not on loopback; keep it off any public interface"
+            );
+        }
+        let listener = tokio::net::TcpListener::bind(internal_bind)
+            .await
+            .with_context(|| format!("bind internal {internal_bind}"))?;
+        tracing::info!(addr = %internal_bind, "push-gw internal listener up");
+        let app = internal::build_internal_app(state.clone());
+        let stop = stopped(stop_rx.clone());
+        Some(tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(stop)
+                .await
+        }))
+    } else {
+        tracing::warn!(
+            "LAKKO_PUSH_GW_INTERNAL_SECRET unset - the internal listener is OFF: the DS \
+             cannot forward wakes and no group wake is delivered"
+        );
+        None
+    };
 
     let app = build_app(state);
 
@@ -147,9 +216,15 @@ async fn main() -> Result<()> {
     tracing::info!(addr = %bind, "push-gw service listening");
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(stopped(stop_rx))
         .await
         .context("axum serve")?;
+    if let Some(internal) = internal {
+        internal
+            .await
+            .context("internal listener task")?
+            .context("axum serve internal")?;
+    }
 
     pool.close().await;
     tracing::info!("push-gw service stopped cleanly");
@@ -275,14 +350,12 @@ pub(crate) fn build_app(state: AppState) -> Router {
         .route("/pow/challenge", post(pow::issue_challenge))
         .route("/push/register", post(registry::register))
         .route("/push/unregister", post(registry::unregister))
-        .route("/push/notify", post(notify::notify))
-        // 1.20e — group fan-out. Devices subscribe to groups
-        // they care about; publishers call `/push/notify-group`
-        // once per send + the gateway fans out to every
-        // subscribed device's tokens.
+        // 1.20e — group fan-out. Devices subscribe to the groups
+        // they care about. The wake itself is NOT here: since
+        // ADR-0054 it is the DS's forward to the internal
+        // listener (`src/internal.rs`), never a public route.
         .route("/push/group/subscribe", post(registry::group_subscribe))
         .route("/push/group/unsubscribe", post(registry::group_unsubscribe))
-        .route("/push/notify-group", post(notify::notify_group))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -346,12 +419,51 @@ async fn shutdown_signal() {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt as _;
     use tower::ServiceExt as _;
+
+    /// An `AppState` whose pool never connects - for routes and gates that
+    /// must answer before any query runs.
+    pub(crate) fn state_without_db(internal_secret: Option<Arc<Vec<u8>>>) -> AppState {
+        let db = MySqlPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(50))
+            .connect_lazy("mysql://nobody:nothing@127.0.0.1:1/none")
+            .expect("lazy pool");
+        AppState {
+            db,
+            providers: Arc::new(HashMap::new()),
+            internal_secret,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_public_router_wakes_nobody() {
+        // ADR-0054: `/push/notify` is deleted and `/push/notify-group` lives
+        // on the internal listener only. The public router must not match
+        // either, whatever is presented.
+        for path in ["/push/notify", "/push/notify-group"] {
+            let response = build_app(state_without_db(None))
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("content-type", "application/json")
+                        .header(
+                            internal::SECRET_HEADER,
+                            "c2hhcmVkLXdha2Utc2VjcmV0LWZvci10ZXN0cy0zMmI=",
+                        )
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+    }
 
     fn test_app_no_db() -> Router {
         Router::new()

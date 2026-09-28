@@ -53,8 +53,7 @@ import { ChatClient } from "./client";
 import { makeCallSignalingPublisher } from "./call-signaling-publish";
 import { withGroupMlsLock } from "../mls/group-lock";
 import { base64Encode } from "../auth/account-id";
-import type { DsClient } from "../ds/client";
-import type { PushClient } from "../push/client";
+import type { DsClient, DsGroupPublishOptions } from "../ds/client";
 import type {
   Group as WasmGroup,
   Identity as WasmIdentity,
@@ -140,15 +139,24 @@ function stampingGroup(
 
 /** A DS double that keeps the journal in ARRIVAL order, which is the order the
  *  real DS assigns ids in and therefore the order every peer replays. */
-function journalDs(): { ds: DsClient; journal: Uint8Array[] } {
+function journalDs(): {
+  ds: DsClient;
+  journal: Uint8Array[];
+  /** The `wake` option of each publish, in the same order as `journal`. */
+  wakes: DsGroupPublishOptions["wake"][];
+} {
   const journal: Uint8Array[] = [];
+  const wakes: DsGroupPublishOptions["wake"][] = [];
   const ds = {
-    publishGroup: vi.fn(async (_gid: Uint8Array, bytes: Uint8Array) => {
-      journal.push(bytes);
-      return { id: journal.length, createdAt: "t" };
-    }),
+    publishGroup: vi.fn(
+      async (_gid: Uint8Array, bytes: Uint8Array, options?: DsGroupPublishOptions) => {
+        journal.push(bytes);
+        wakes.push(options?.wake);
+        return { id: journal.length, createdAt: "t" };
+      },
+    ),
   } as unknown as DsClient;
-  return { ds, journal };
+  return { ds, journal, wakes };
 }
 
 /**
@@ -173,10 +181,6 @@ function replayAsPeer(
     }
   }
   return dropped;
-}
-
-function mockPush(): PushClient {
-  return { notifyGroup: vi.fn(async () => {}) } as unknown as PushClient;
 }
 
 /** A group id no other case reuses — `withGroupMlsLock`'s queue is MODULE-level
@@ -205,7 +209,6 @@ describe("call signaling publishes through the locked, persisting seam", () => {
     const chat = new ChatClient(
       ds,
       { identityProvider: () => IDENTITY_TOKEN },
-      mockPush(),
     );
     const publish = makeCallSignalingPublisher({
       chat,
@@ -251,7 +254,6 @@ describe("call signaling publishes through the locked, persisting seam", () => {
           order.push("persist");
         },
       },
-      mockPush(),
     );
     const publish = makeCallSignalingPublisher({
       chat,
@@ -280,7 +282,6 @@ describe("call signaling publishes through the locked, persisting seam", () => {
           throw new Error("IDB is gone");
         },
       },
-      mockPush(),
     );
     const publish = makeCallSignalingPublisher({
       chat,
@@ -309,7 +310,6 @@ describe("call signaling publishes through the locked, persisting seam", () => {
     const chat = new ChatClient(
       ds,
       { identityProvider: () => IDENTITY_TOKEN },
-      mockPush(),
     );
     const publish = makeCallSignalingPublisher({
       chat,
@@ -332,14 +332,17 @@ describe("call signaling publishes through the locked, persisting seam", () => {
 /**
  * The push wake, which is what makes a call ring a closed or backgrounded tab
  * at all (`docs/ux/calls.md` §2.1). `broadcastControl` wakes nobody by
- * default; this publisher opts in per frame.
+ * default; this publisher opts in per frame. Since ADR-0054 the wake is the
+ * `x-lakko-wake` header of the DS publish itself, so what is pinned here is
+ * the `wake` option the publish receives.
  *
  * The frames here are raw leading tag bytes rather than composed ones on
  * purpose: `calls/call-signaling-wake.test.ts` already pins the tag table
  * against frames the REAL core composed, so repeating that here would test the
  * same thing twice and pay a wasm init for it. What is pinned here is the
- * wiring — that the decision reaches `notifyGroup`, with the right `kind`, off
- * the critical path, and that its failure cannot reach the caller.
+ * wiring — that the decision reaches the publish, with the right `kind` and
+ * the group's `push_gid`, and that a failure to resolve the id cannot reach
+ * the caller.
  */
 describe("a call offer and a call end wake the group; nothing else does", () => {
   /** Leading `CallSignalingPayload.body` oneof tags. */
@@ -348,85 +351,74 @@ describe("a call offer and a call end wake the group; nothing else does", () => 
   const CANDIDATE = new Uint8Array([0x62, 0x00]);
   const END = new Uint8Array([0x6a, 0x00]);
   const GROUP_START = new Uint8Array([0x72, 0x00]);
+  const PUSH_GID = new Uint8Array(32).fill(0x5c);
 
-  async function publishAndDrain(
+  async function publishOne(
     frame: Uint8Array,
-    push: PushClient,
-  ): Promise<void> {
+    pushGidResolver: (groupId: Uint8Array) => Promise<Uint8Array | null> = async () => PUSH_GID,
+    errors: unknown[] = [],
+  ): Promise<ReturnType<typeof journalDs>> {
     const g = stampingGroup(freshGid(), 5);
-    const { ds } = journalDs();
-    const chat = new ChatClient(ds, { identityProvider: () => IDENTITY_TOKEN }, push);
-    const publish = makeCallSignalingPublisher({
-      chat,
-      identity: () => null,
-      group: () => g.group,
-      onError: () => {},
+    const recorded = journalDs();
+    const chat = new ChatClient(recorded.ds, {
+      identityProvider: () => IDENTITY_TOKEN,
+      pushGidResolver,
     });
-    await within(1000, publish(frame), "signaling publish");
-    // The wake is deliberately unawaited, so give it a turn to land.
-    await settle();
-  }
-
-  it("wakes for an offer, at call priority", async () => {
-    const push = mockPush();
-    await publishAndDrain(OFFER, push);
-    expect(push.notifyGroup).toHaveBeenCalledTimes(1);
-    // (groupPseudonym, envelopePointer, kind)
-    expect(vi.mocked(push.notifyGroup).mock.calls[0]?.[2]).toBe("call");
-  });
-
-  it("wakes for an end, so a cancelled call stops ringing a closed tab", async () => {
-    const push = mockPush();
-    await publishAndDrain(END, push);
-    expect(push.notifyGroup).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(push.notifyGroup).mock.calls[0]?.[2]).toBe("call");
-  });
-
-  it("stays silent for answer, candidate and group control", async () => {
-    for (const frame of [ANSWER, CANDIDATE, GROUP_START]) {
-      const push = mockPush();
-      await publishAndDrain(frame, push);
-      expect(push.notifyGroup).not.toHaveBeenCalled();
-    }
-  });
-
-  it("does not wait on the wake — the DS publish returns first", async () => {
-    // A ring must not sit behind a proof of work. The wake is dispatched
-    // without an await, so a wake that never settles still lets the publish
-    // resolve; if it were awaited this case would hang and `within` would
-    // report a deadlock rather than a failure.
-    const push = {
-      notifyGroup: vi.fn(() => new Promise<{ devicesWoken: number }>(() => {})),
-    } as unknown as PushClient;
-    await publishAndDrain(OFFER, push);
-    expect(push.notifyGroup).toHaveBeenCalledTimes(1);
-  });
-
-  it("a failed wake never fails the call", async () => {
-    // The offer is already on the DS by the time the wake runs, so a push-gw
-    // outage costs the ring's promptness and nothing else: the callee still
-    // sees the call on its next foreground poll, exactly as before the wake
-    // existed.
-    const push = {
-      notifyGroup: vi.fn(async () => {
-        throw new Error("push-gw is down");
-      }),
-    } as unknown as PushClient;
-    const errors: unknown[] = [];
-    const g = stampingGroup(freshGid(), 5);
-    const { ds, journal } = journalDs();
-    const chat = new ChatClient(ds, { identityProvider: () => IDENTITY_TOKEN }, push);
     const publish = makeCallSignalingPublisher({
       chat,
       identity: () => null,
       group: () => g.group,
       onError: (err) => errors.push(err),
     });
+    await within(1000, publish(frame), "signaling publish");
+    return recorded;
+  }
 
-    await within(1000, publish(OFFER), "signaling publish");
-    await settle();
+  it("wakes for an offer, at call priority, under the push_gid", async () => {
+    const { wakes } = await publishOne(OFFER);
+    expect(wakes.length).toBe(1);
+    expect(wakes[0]?.kind).toBe("call");
+    expect(Array.from(wakes[0]?.pushGid ?? [])).toEqual(Array.from(PUSH_GID));
+  });
 
+  it("wakes for an end, so a cancelled call stops ringing a closed tab", async () => {
+    const { wakes } = await publishOne(END);
+    expect(wakes.length).toBe(1);
+    expect(wakes[0]?.kind).toBe("call");
+  });
+
+  it("stays silent for answer, candidate and group control", async () => {
+    for (const frame of [ANSWER, CANDIDATE, GROUP_START]) {
+      const resolver = vi.fn(async () => PUSH_GID);
+      const { wakes } = await publishOne(frame, resolver);
+      expect(wakes).toEqual([null]);
+      expect(resolver).not.toHaveBeenCalled();
+    }
+  });
+
+  it("a device without the push_gid still publishes the offer, silently", async () => {
+    // ADR-0042 defer: the DS group_id never stands in for the push_gid. The
+    // callee still sees the call on its next foreground poll.
+    const errors: unknown[] = [];
+    const { journal, wakes } = await publishOne(OFFER, async () => null, errors);
     expect(journal.length).toBe(1);
+    expect(wakes).toEqual([null]);
     expect(errors).toEqual([]);
+  });
+
+  it("a failed push_gid lookup never fails the call", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const errors: unknown[] = [];
+    const { journal, wakes } = await publishOne(
+      OFFER,
+      async () => {
+        throw new Error("routing store unavailable");
+      },
+      errors,
+    );
+    expect(journal.length).toBe(1);
+    expect(wakes).toEqual([null]);
+    expect(errors).toEqual([]);
+    warn.mockRestore();
   });
 });

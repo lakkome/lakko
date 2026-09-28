@@ -108,6 +108,24 @@ public final class DiscoveryClient {
         self.sessionToken = token
     }
 
+    /// A copy of this client carrying `token` as its bearer, over the same
+    /// base URL, session, transport and rate-limit source.
+    ///
+    /// For a caller that holds a long-lived ANONYMOUS client (its reads -
+    /// KeyPackage fetches, invite fetch / consume - must stay unlinked from
+    /// the account, invariant #5) and needs one bearer-gated write: the copy
+    /// is used for that request only, so the shared client never starts
+    /// attaching the token to every later read.
+    public func withSessionToken(_ token: String) -> DiscoveryClient {
+        DiscoveryClient(
+            baseURL: baseURL,
+            session: session,
+            sessionToken: token,
+            antiCensorship: antiCensorship,
+            rateLimitToken: rateLimitToken
+        )
+    }
+
     // MARK: - Low-level: 1:1 HTTP endpoints
 
     /// `POST /pow/challenge`.
@@ -615,9 +633,9 @@ public final class DiscoveryClient {
     // MARK: - Invite endpoints (1.14e6, parallel to Android 1.15e9)
 
     /// `POST /discovery/invite` — upload a verified
-    /// `InviteCapability` blob, get the content-addressed
-    /// `blob_id` back. Idempotent — same bytes yield the same id,
-    /// server upserts.
+    /// `InviteCapability` blob, get the server-minted 6-byte
+    /// `blob_id` back (8 base64url characters). Not idempotent:
+    /// every upload gets a fresh random id.
     public func inviteUpload(
         _ request: InviteUploadRequest
     ) async throws -> InviteUploadResponse {
@@ -658,9 +676,10 @@ public final class DiscoveryClient {
     // MARK: - High-level invite flows
 
     /// Upload a freshly-composed `InviteCapability` blob and
-    /// receive the server-assigned content-addressed `blobId`
-    /// (raw 32-byte SHA-256). Drives one PoW solve + `POST
-    /// /discovery/invite`. Idempotent.
+    /// receive the server-minted `blobId` (6 random bytes,
+    /// ADR-0028 amendment of 2026-09-27). Drives one PoW solve +
+    /// `POST /discovery/invite`. A second upload of the same
+    /// bytes gets a second id.
     public func uploadInvite(capabilityBytes: Data) async throws -> Data {
         guard !capabilityBytes.isEmpty else {
             throw DiscoveryClientError.argument(
@@ -698,7 +717,7 @@ public final class DiscoveryClient {
     }
 
     /// Fetch a previously-uploaded `InviteCapability` by its
-    /// content-addressed `blobId`. Returns `nil` on 404, raw
+    /// ledger `blobId`. Returns `nil` on 404, raw
     /// capability bytes on 200 (the caller drives
     /// `InviteCapability.decodeAndVerify` to re-verify locally so
     /// a malicious server cannot serve substituted bytes).
@@ -783,6 +802,8 @@ public final class DiscoveryClient {
             return .notFound
         case 410:
             return .exhausted
+        case 429:
+            throw DiscoveryClientError.rateLimited(endpoint: endpoint)
         case 200..<300:
             let parsed: InviteConsumeResponse
             do {
@@ -992,10 +1013,9 @@ public final class DiscoveryClient {
     }
 
     /// Upload a freshly-composed `CallInviteCapability` blob and
-    /// receive the server-assigned content-addressed `blobId`
-    /// (raw 32-byte SHA-256). Drives one PoW solve + `POST
-    /// /discovery/call-invite`. Idempotent — same bytes yield
-    /// the same id, server upserts.
+    /// receive the server-minted `blobId` (6 random bytes).
+    /// Drives one PoW solve + `POST /discovery/call-invite`.
+    /// Every upload gets a fresh id.
     ///
     /// Sibling of ``uploadInvite(capabilityBytes:)``; the
     /// client-side ceiling is `maxCallCapabilityBytes` (8 KiB,
@@ -1038,7 +1058,7 @@ public final class DiscoveryClient {
     }
 
     /// Fetch a previously-uploaded `CallInviteCapability` by
-    /// its content-addressed `blobId`. Returns `nil` on 404,
+    /// its ledger `blobId`. Returns `nil` on 404,
     /// raw capability bytes on 200 (the caller drives
     /// `CallInviteCapability.decodeAndVerify` to re-verify
     /// locally so a malicious server cannot serve substituted
@@ -1127,6 +1147,8 @@ public final class DiscoveryClient {
             return .notFound
         case 410:
             return .exhausted
+        case 429:
+            throw DiscoveryClientError.rateLimited(endpoint: endpoint)
         case 200..<300:
             let parsed: InviteConsumeResponse
             do {
@@ -1193,8 +1215,8 @@ public final class DiscoveryClient {
     }
 
     /// Upload a freshly-composed `GroupInviteCapability` blob and receive the
-    /// server-assigned content-addressed `blobId` (raw 32-byte SHA-256). Drives
-    /// one PoW solve + `POST /discovery/group-invite`. Idempotent.
+    /// server-minted `blobId` (6 random bytes). Drives one PoW solve + `POST
+    /// /discovery/group-invite`. Every upload gets a fresh id.
     ///
     /// `maxUses` is a SOFT anti-spam throttle (NOT part of the signed
     /// capability, NOT an access control — the admin approval gate is the
@@ -1238,7 +1260,7 @@ public final class DiscoveryClient {
     }
 
     /// Fetch a previously-uploaded `GroupInviteCapability` by its
-    /// content-addressed `blobId`. Returns `nil` on 404, raw capability bytes
+    /// ledger `blobId`. Returns `nil` on 404, raw capability bytes
     /// on 200 (the caller drives `GroupInviteCapability.decodeAndVerify` to
     /// re-verify locally so a malicious server cannot serve substituted bytes).
     public func fetchGroupInvite(blobId: Data) async throws -> Data? {
@@ -1324,6 +1346,8 @@ public final class DiscoveryClient {
             return .notFound
         case 410:
             return .exhausted
+        case 429:
+            throw DiscoveryClientError.rateLimited(endpoint: endpoint)
         case 200..<300:
             let parsed: InviteConsumeResponse
             do {
@@ -1668,6 +1692,9 @@ public final class DiscoveryClient {
         if httpResponse.statusCode == 404 {
             return nil
         }
+        if httpResponse.statusCode == 429 {
+            throw DiscoveryClientError.rateLimited(endpoint: "\(endpoint) (GET)")
+        }
         if !(200..<300).contains(httpResponse.statusCode) {
             let bodyText = Self.truncate(
                 String(data: raw.0, encoding: .utf8) ?? "<binary>"
@@ -1929,8 +1956,10 @@ public final class DiscoveryClient {
     /// column + this client-side ceiling are 512.
     fileprivate static let maxGroupCapabilityBytes: Int = 512
 
-    /// SHA-256 → 32-byte content-addressed invite id.
-    fileprivate static let blobIdLength: Int = 32
+    /// The ledger id of an invite (`/i/`, `/c/`, `/g/`): a random 6-byte id
+    /// the discovery service mints at upload (ADR-0028 amendment of
+    /// 2026-09-27). Read from the core so it cannot drift from the server.
+    static var blobIdLength: Int { Int(inviteBlobIdLen()) }
 
     /// Ed25519 signing seed length.
     fileprivate static let signingSeedLength: Int = 32
@@ -2001,7 +2030,7 @@ public enum RevokeInviteResult: Equatable {
 /// the owner uses to reconstruct the share URL or feed back
 /// into ``DiscoveryClient/revokeInvite(blobId:signingSeed:)``.
 public struct ActiveInvite: Equatable {
-    /// URL-safe base64 (no padding) of the 32-byte blob_id —
+    /// URL-safe base64 (no padding) of the 6-byte blob_id —
     /// same `/i/<slug>` segment that appears in the share URL.
     public let blobIdSlug: String
     /// UNIX millis the capability expires at. `0` means never
@@ -2065,6 +2094,27 @@ public enum DiscoveryClientError: Error {
     /// Network-level failure (DNS, TLS, no route, …). Distinct from
     /// `http` so the UI can suggest "check connection".
     case network(endpoint: String, underlying: Error)
+    /// `429` from one of the rate-limited invite reads (fetch / consume).
+    /// The link may be perfectly good: the server is asking this network
+    /// address to slow down. Never to be shown as "link invalid".
+    case rateLimited(endpoint: String)
+
+    /// Whether `error` is, or wraps, a ``rateLimited(endpoint:)`` refusal.
+    /// Looks through the repository wrappers (`ChatError.wrapped`,
+    /// `ContactsError.wrapped`) so a screen can pick the "try again later"
+    /// copy without knowing which layer threw.
+    public static func isRateLimited(_ error: Error) -> Bool {
+        if let discovery = error as? DiscoveryClientError, case .rateLimited = discovery {
+            return true
+        }
+        if let chat = error as? ChatError, case .wrapped(_, let underlying) = chat {
+            return isRateLimited(underlying)
+        }
+        if let contacts = error as? ContactsError, case .wrapped(let underlying) = contacts {
+            return isRateLimited(underlying)
+        }
+        return false
+    }
 }
 
 extension DiscoveryClientError: LocalizedError {
@@ -2076,6 +2126,8 @@ extension DiscoveryClientError: LocalizedError {
             return "discovery \(endpoint) → \(status): \(body)"
         case .network(let endpoint, let underlying):
             return "discovery \(endpoint) network error: \(underlying)"
+        case .rateLimited(let endpoint):
+            return "discovery \(endpoint) → 429: rate limited"
         }
     }
 }

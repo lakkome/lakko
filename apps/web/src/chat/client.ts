@@ -79,7 +79,7 @@ import { base64Encode } from "../auth/account-id";
 import { withGroupMlsLock } from "../mls/group-lock";
 import { healAfterApply, takeSigner } from "../ds/access";
 import { readKnockCursor, takeKnockReadSlot, writeKnockCursor } from "./knock-cursor";
-import { PushClient } from "../push/client";
+import { PUSH_GID_LEN, type DsWake } from "../ds/wake";
 import { loadWasm } from "../wasm";
 import type {
   Group as WasmGroup,
@@ -533,24 +533,24 @@ export interface ChatClientOptions {
    *  provider snapshot to disk. Best-effort — exceptions are
    *  logged and swallowed; the in-memory state stays good. */
   onPersist?: () => Promise<void>;
-  /** ADR-0042 — resolve the opaque `push_gid` for a group's DS
-   *  `group_id`, so the notify wake routes under the routing id instead
-   *  of the leaky DS journal key. Returns `null` when this device does
-   *  not (yet) hold the group's `push_routing_secret` — in which case the
-   *  wake is SKIPPED (never notified under `group_id`, invariant #5). When
-   *  UNSET (tests / standalone callers with no push-routing store) the
-   *  notify falls back to the raw `group_id`, mirroring the
-   *  `identityProvider` fallback convention — production paths
-   *  (`<ChatProvider>`) MUST wire this. */
+  /** ADR-0042 / ADR-0054 — resolve the opaque `push_gid` for a group's DS
+   *  `group_id`, so the `x-lakko-wake` header of a publish names the routing
+   *  id instead of the leaky DS journal key. Returns `null` when this device
+   *  does not (yet) hold the group's `push_routing_secret` — the publish then
+   *  carries NO wake header (never the `group_id`, invariant #5). When UNSET
+   *  the client wakes nobody at all: there is no fallback to the `group_id`.
+   *  Every production client that sends a waking frame (a chat message, a
+   *  call offer or end) MUST wire this. */
   pushGidResolver?: (groupId: Uint8Array) => Promise<Uint8Array | null>;
 }
 
 /**
  * Whether a published application message fans a push wake out, and of what
- * class.
+ * class. Since ADR-0054 the wake is the `x-lakko-wake` header of the signed
+ * publish itself (see `ds/wake.ts`); the DS forwards it to push-gw.
  *
  *   * `"message"` — the ordinary message wake `sendMessage` has always fired.
- *   * `"call"` — a ring. Same transport and same best-effort discipline, but
+ *   * `"call"` — a ring. Same header and same best-effort discipline, but
  *     push-gw is asked for its highest priority and a short TTL, because a
  *     late ring is worse than no ring (`docs/ux/calls.md` §7).
  *   * `null` — no wake at all: the ADR-0042 rule for control envelopes, and
@@ -583,11 +583,6 @@ export class ChatClient {
   constructor(
     private readonly ds: DsClient = new DsClient(),
     options: ChatClientOptions = {},
-    /** 1.20e — push-gw client for the fan-out wake. Side-channel:
-     *  sendMessage fires `notifyGroup` after the DS publish to
-     *  wake every subscribed device. Default to a fresh client
-     *  so the chat surface needs no extra wiring. */
-    private readonly pushClient: PushClient = new PushClient(),
   ) {
     this.identityProvider = options.identityProvider;
     this.onPersist = options.onPersist;
@@ -756,6 +751,11 @@ export class ChatClient {
     plaintext: Uint8Array,
     wake: OutboundWake,
   ): Promise<SendMessageResult> {
+    // ADR-0054 — the wake rides the signed publish as a header, so the
+    // `push_gid` is resolved BEFORE anything is sealed: nothing awaits between
+    // the ratchet advance and the persist below except the persist itself.
+    const dsWake = wake === null ? null : await this.resolveDsWake(groupId, wake);
+
     // `createApplicationMessage` ADVANCES the MLS sender ratchet:
     // it consumes the current generation N (deriving the AEAD
     // key+nonce from N) and leaves the in-memory OpenMLS provider
@@ -799,7 +799,7 @@ export class ChatClient {
 
     let publish;
     try {
-      publish = await this.ds.publishGroup(groupId, wireBytes);
+      publish = await this.ds.publishGroup(groupId, wireBytes, { wake: dsWake });
     } catch (err) {
       throw new ChatError("DS publish failed", err);
     }
@@ -808,76 +808,50 @@ export class ChatClient {
     // after a Welcome) is still recognised as an echo there.
     markOwnPublished(base64Encode(groupId), publish.id);
 
-    // 1.20e — fan a wake out to every device subscribed to
-    // this group. Fire-and-forget — failures here would not
-    // help the sender (the message is already on the DS,
-    // recipients will see it on their next poll regardless).
-    // No await; the function returns the DS receipt
-    // immediately while the wake fans out in the background.
-    //
-    // ADR-0042 — most CONTROL envelopes skip it: a routing-secret handshake or
-    // a liveness beacon should not wake devices. A call offer and a call end
-    // are the exception, opted into per frame by the caller (`"call"`), so the
-    // rule stays "control is silent unless it is a ring".
-    if (wake !== null) this.notifyPushGroupBestEffort(groupId, publish.id, wake);
-
     return { messageId: publish.id, createdAt: publish.createdAt };
   }
 
   /**
-   * 1.20e — fire `pushClient.notifyGroup(pushGid, messageId)`
-   * on the side. Best-effort: if push-gw is down, the message
-   * has still been published to DS + recipients will pick it
-   * up on their next poll. We don't gate `sendMessage` on this.
+   * ADR-0054 decision 1 — the wake a publish carries. The DS forwards it to
+   * push-gw once the ADR-0053 proof gate passed and the row was appended; this
+   * client never calls push-gw to wake anybody.
    *
-   * ADR-0042 — the notify routes under the opaque `push_gid`, NOT the DS
-   * `group_id`. When a `pushGidResolver` is wired (production) and it
-   * yields `null` (this device holds no secret for the group yet), the
-   * wake is SKIPPED rather than leaking the `group_id` to push-gw
-   * (invariant #5). A publisher is a member, so it normally holds the
-   * secret. When no resolver is wired (tests) the raw `group_id` is used,
-   * matching the `identityProvider`/`resolveIdentity` fallback convention.
+   * The wake names the opaque ADR-0042 `push_gid`, NOT the DS `group_id`. No
+   * resolver wired, a resolver that yields `null` (this device holds no routing
+   * secret for the group yet) and a resolver that fails all mean the same
+   * thing: the publish goes out with NO wake header. Never the `group_id` in
+   * its place (invariant #5). Recipients still receive the row on their next
+   * foreground poll; the wake resumes once the secret propagates.
    *
-   * `wake` names the class. A CALL wake travels the identical path — same
-   * PoW, same opaque `push_gid`, same off-the-critical-path dispatch, same
-   * swallow-every-failure discipline — and differs only in the `kind` field
-   * push-gw reads to raise the transport's priority. That sameness is
-   * load-bearing: a failed or skipped wake must never fail the call. The
-   * offer is already on the DS when this runs, so the worst case for a ring
-   * is the pre-existing one, where the callee learns about the call on its
-   * next foreground poll.
+   * A failure here never fails the send — it was best-effort when the wake was
+   * a separate push-gw request, and it stays so now that it is a header.
+   *
+   * `wake` names the class: `"message"` for an ordinary message, `"call"` for
+   * the two signaling frames that must ring a closed tab (push-gw raises the
+   * transport priority and shortens the TTL for it, `docs/ux/calls.md` §7).
    */
-  private notifyPushGroupBestEffort(
+  private async resolveDsWake(
     groupId: Uint8Array,
-    messageId: number,
     wake: Exclude<OutboundWake, null>,
-  ): void {
-    // The notifyGroup call drives a PoW solve, which takes
-    // 100-500 ms; running it inline in sendMessage would
-    // double the user-visible send latency. Off the critical
-    // path — and for a call offer that matters more, not less: the
-    // ringing UI must not wait on a proof of work.
-    void (async (): Promise<void> => {
-      let target = groupId;
-      if (this.pushGidResolver !== undefined) {
-        const pushGid = await this.pushGidResolver(groupId);
-        if (pushGid === null) {
-          // ADR-0042 — no secret held yet: do NOT wake under the DS key.
-          // Recipients still receive the message on their next foreground
-          // poll; the wake resumes once the secret propagates.
-          return;
-        }
-        target = pushGid;
-      }
-      await this.pushClient.notifyGroup(
-        target,
-        messageId,
-        wake === "call" ? "call" : undefined,
-      );
-    })().catch((err) => {
+  ): Promise<DsWake | null> {
+    if (this.pushGidResolver === undefined) return null;
+    let pushGid: Uint8Array | null;
+    try {
+      pushGid = await this.pushGidResolver(groupId);
+    } catch (err) {
       // eslint-disable-next-line no-console
-      console.warn("push notify-group failed", err);
-    });
+      console.warn("push_gid resolution failed; publishing without a wake", err);
+      return null;
+    }
+    if (pushGid === null) return null;
+    if (pushGid.length !== PUSH_GID_LEN) {
+      // A header the DS would answer with 400 would fail the publish itself,
+      // after the ratchet has already advanced; drop the wake instead.
+      // eslint-disable-next-line no-console
+      console.warn(`push_gid has ${pushGid.length} bytes; publishing without a wake`);
+      return null;
+    }
+    return { pushGid, kind: wake };
   }
 
   /**

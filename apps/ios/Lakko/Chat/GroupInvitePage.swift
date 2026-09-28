@@ -2,27 +2,46 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import LakkoCore
 
 /// The group invite page's pure rules (ADR-0028 v2, `docs/ux/group-invite-page.md`).
 ///
-/// Two things live here, both FFI-free so a unit test can drive them without
-/// the core framework:
+/// Two things live here, both kept out of SwiftUI so a unit test can drive
+/// them:
 ///
-///   1. **The link shape.** `https://lakko.me/g/<slug>#<link key>` - the
-///      sealed preview's key rides the URL fragment, which a browser never
-///      sends and this app never uploads (the discovery ledger and every access
-///      log stay ciphertext-only). ``GroupInviteLink`` appends the fragment on
-///      mint and splits it back out on open.
+///   1. **The link shape.** `https://lakko.me/g/<slug>#<link secret>` - the
+///      12-byte secret the sealed preview's key is derived from rides the URL
+///      fragment (16 base64url characters, ADR-0028 amendment of 2026-09-27),
+///      which a browser never sends and this app never uploads (the discovery
+///      ledger and every access log stay ciphertext-only). ``GroupInviteLink``
+///      appends the fragment on mint and reads it back on open.
 ///   2. **The headline.** What the card says for a given preview - or for
 ///      none. ``GroupInviteHeadline`` is a value the view renders line by line,
 ///      so the copy rules of the spec (section 3) are asserted once, in a test,
 ///      rather than re-derived inside SwiftUI where nothing can reach them.
 public enum GroupInviteLink {
-    /// The link key is 32 bytes - `LINK_KEY_LEN` in `lakko-contacts`.
-    public static let linkKeyLen: Int = 32
+    /// The link secret is 12 bytes - `LINK_SECRET_LEN` in `lakko-contacts`,
+    /// read from the core.
+    public static var linkSecretLen: Int { Int(groupInviteLinkSecretLen()) }
 
-    /// Append the link key to a `/g/` URL as its fragment (base64url, no
-    /// padding, 43 characters for 32 bytes). Any fragment the URL already
+    /// The link secret is exactly 16 characters in the URL.
+    public static var linkSecretUrlLen: Int { Int(groupInviteLinkSecretUrlLen()) }
+
+    /// What a link's fragment amounts to.
+    public enum Fragment: Equatable {
+        /// No fragment: the link carries no preview secret (a chat app that
+        /// strips fragments, a hand-typed URL). The page shows no preview.
+        case absent
+        /// A well-formed 12-byte link secret.
+        case secret(Data)
+        /// A fragment that is not exactly 16 base64url characters decoding to
+        /// 12 bytes - the retired 43-character key included. The link is
+        /// refused as damaged, fail-closed: nothing is fetched for it.
+        case malformed
+    }
+
+    /// Append the link secret to a `/g/` URL as its fragment (base64url, no
+    /// padding, 16 characters for 12 bytes). Any fragment the URL already
     /// carried is replaced, never doubled.
     public static func withLinkKey(_ url: String, linkKey: Data) -> String {
         let base = split(url).base
@@ -37,16 +56,25 @@ public enum GroupInviteLink {
         return (String(link[..<hash]), fragment.isEmpty ? nil : fragment)
     }
 
-    /// Decode a fragment into a link key: base64url (padded or not), exactly
-    /// 32 bytes. Anything else is `nil` - the page then shows no preview,
-    /// which is the spec's answer to a lost or mangled fragment, never an
-    /// error.
-    public static func linkKey(fromFragment fragment: String?) -> Data? {
-        guard let fragment, !fragment.isEmpty,
+    /// Read a fragment: absent, a 12-byte secret, or malformed. Only exactly
+    /// 16 base64url characters (no padding) decoding to 12 bytes is a secret.
+    public static func readFragment(_ fragment: String?) -> Fragment {
+        guard let fragment, !fragment.isEmpty else { return .absent }
+        guard fragment.count == linkSecretUrlLen,
+              isBase64Url(fragment),
               let bytes = base64UrlDecodeNoPad(fragment),
-              bytes.count == linkKeyLen else { return nil }
-        return bytes
+              bytes.count == linkSecretLen else { return .malformed }
+        return .secret(bytes)
     }
+}
+
+/// Why a `/g/` link resolved to nothing: both read as "invalid or expired".
+public enum GroupInviteLinkError: Error, Equatable {
+    /// The slug is neither a 6-byte pointer nor an inline capability (the
+    /// retired 43-character id included). Refused before any request.
+    case malformed
+    /// The ledger has no row for the id (never issued, revoked or expired).
+    case notFound
 }
 
 /// The three facts a preview carries, decoupled from the FFI record so the
@@ -75,9 +103,10 @@ public struct GroupInviteHeadline: Equatable {
     public let groupName: String?
     public let members: String?
 
-    /// What the page says without a preview: the fragment was absent, the
-    /// preview did not open, or the link was minted without one. Nothing is
-    /// invented and the page does not say why.
+    /// What the page says without a preview: the link had no fragment.
+    /// Nothing is invented and the page does not say why. (A fragment under
+    /// which the preview does not open is not this state: that link is refused
+    /// as damaged, see ``groupInviteDamagedMessage``.)
     public static let noPreview = GroupInviteHeadline(
         lead: "You are invited to a group", groupName: nil, members: nil)
 
@@ -107,3 +136,17 @@ public struct GroupInviteHeadline: Equatable {
 
 /// The copy of the invalid / expired state, verbatim from the spec.
 public let groupInviteInvalidMessage = "This invite link is invalid or has expired."
+
+/// The copy of a `/g/` link whose fragment is present but whose preview does
+/// not open under it (or whose fragment is not a link secret at all). Since the
+/// ledger id stopped being a hash of the capability, the preview key - bound to
+/// the capability's group id and issuer - is what tells the joiner that the
+/// capability it was served is the one the link was made for, so a preview
+/// that does not open refuses the link rather than showing a card without one.
+public let groupInviteDamagedMessage = "This invite link is damaged. Ask for a new link."
+
+/// The copy of a `429` from the discovery ledger on an invite fetch or consume:
+/// the link may be fine, the server is asking this network to slow down. Never
+/// shown as "link invalid". Shared by the `/i/`, `/c/` and `/g/` landings.
+public let inviteRateLimitedMessage =
+    "Too many requests from this network right now. Try again in a minute."

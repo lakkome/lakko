@@ -5,11 +5,13 @@
  * The `/g/` join screen's result copy (ADR-0053 live walk, 2026-09-27). The
  * same sentences ship on iOS and Android, so they are defined once here and
  * the screen never shows a raw error: the error is logged and the person gets
- * one of four sentences.
+ * one of a handful of fixed sentences.
  *
  * In a plain module because `vitest` cannot load a `.tsx` route.
  */
 import { CLOCK_SKEW_NOTICE, GROUP_NOT_TAKING_REQUESTS, dsClockSkewNotice } from "../ds/access";
+import { INVITE_LINK_RATE_LIMITED } from "../contacts/invite-link";
+import { isDiscoveryRateLimited } from "../discovery/client";
 
 /** The join landed. */
 export const JOIN_SUCCEEDED = "You joined the group.";
@@ -43,5 +45,8 @@ function isGroupNotClaimed(err: unknown): boolean {
 export function joinFailureNotice(err: unknown): JoinFailureNotice {
   if (isGroupNotClaimed(err)) return { message: GROUP_NOT_TAKING_REQUESTS, offerRetry: false };
   if (dsClockSkewNotice(err) !== null) return { message: CLOCK_SKEW_NOTICE, offerRetry: false };
+  // The ledger's consume answered 429: the link is fine, the request can be
+  // sent again after a pause (ADR-0028 short-link amendment).
+  if (isDiscoveryRateLimited(err)) return { message: INVITE_LINK_RATE_LIMITED, offerRetry: true };
   return { message: JOIN_REQUEST_FAILED, offerRetry: true };
 }

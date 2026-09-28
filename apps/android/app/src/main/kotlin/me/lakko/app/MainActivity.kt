@@ -363,9 +363,11 @@ class MainActivity : ComponentActivity() {
         if (!path.startsWith("/g/")) return
         val slug = path.removePrefix("/g/").trim().removeSuffix("/")
         if (slug.isEmpty()) return
-        // ADR-0028 v2 — the `#<link key>` fragment unlocks the page's preview.
-        // It is read here and nowhere else: `Uri.fragment` is decoded, never
-        // sent, and a URL that lost it still joins, only without the preview.
+        // ADR-0028 v2 — the `#<link secret>` fragment unlocks the page's
+        // preview. It is read here and nowhere else: `Uri.fragment` is decoded,
+        // never sent, and a URL that lost it still joins, only without the
+        // preview. Its width is checked on the landing (a wrong one refuses
+        // the link), not here.
         inviteIntake.publishGroupJoin(slug, uri.fragment?.takeIf { it.isNotBlank() })
     }
 
@@ -1714,7 +1716,7 @@ private fun SessionRoot(
                             me.lakko.app.ui.chat.JoinGroupLandingViewModel(
                                 chatRepository,
                                 groupJoinLink.slug,
-                                me.lakko.app.chat.parseGroupInviteLinkKey(groupJoinLink.fragment),
+                                me.lakko.app.chat.parseGroupInviteFragment(groupJoinLink.fragment),
                             )
                         },
                     )

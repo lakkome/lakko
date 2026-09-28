@@ -65,6 +65,17 @@ lakko-ds-proof.workspace = true
 # server-side Equix verifier the other services already use.
 lakko-pow-server.workspace = true
 
+# ADR-0054 decision 1 - the DS forwards a wake to push-gw's internal listener
+# after a signed publish (the DS's first outbound HTTP). Same version and
+# feature set the other services use (auth, push-gw, discovery, transparency):
+# rustls, no default features, so no OpenSSL and no second TLS stack; `json`
+# for the request body. Already in the workspace graph, so no new crate enters
+# the supply chain.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+] }
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 # The client-side Equix solver, so the knock tests can pay a real (effort-0)

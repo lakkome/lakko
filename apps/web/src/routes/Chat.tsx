@@ -132,6 +132,7 @@ import {
   sleepCancellable,
 } from "../ds/long-poll-loop";
 import { ContactsClient } from "../contacts/client";
+import { DiscoveryClient } from "../discovery/client";
 import { loadAccepted, subscribeAcceptedChanged } from "../contacts/local-store";
 import {
   findPersonRecord,
@@ -562,41 +563,50 @@ function ChatView(props: {
   // addMember + ships Welcome). Same canonical-Identity +
   // persist plumbing as ChatClient — both end up calling
   // `chats.persistSnapshot` after every mutation.
-  const contacts = new ContactsClient(undefined, undefined, {
-    identityProvider: () => chats.identity(),
-    onPersist: async () => {
-      const s = auth.state();
-      if (s.kind !== "session") return;
-      await chats.persistSnapshot(s.account.accountId);
+  // The discovery client reads the session token at request time: the group
+  // invite upload and revoke sit behind discovery's `require_session`, and a
+  // tokenless client made every upload a 401 that fell back to the inline link.
+  const contacts = new ContactsClient(
+    new DiscoveryClient(undefined, {
+      sessionToken: () => auth.identitySecrets()?.sessionToken ?? null,
+    }),
+    undefined,
+    {
+      identityProvider: () => chats.identity(),
+      onPersist: async () => {
+        const s = auth.state();
+        if (s.kind !== "session") return;
+        await chats.persistSnapshot(s.account.accountId);
+      },
+      // ADR-0048 §3 — an add-by-username lookup proves the binding a username
+      // verification would check.
+      onUsernameResolved: (key, username) => profiles.learnUsername(key, username),
+      // ADR-0040 (G-35) — the FAIL-CLOSED persist the four commit paths run BEFORE
+      // publishing: the outbox entry + the N+1 snapshot in one atomic write. A
+      // throw here (no session, no device key, IDB failure) aborts the commit so
+      // the group is never advanced on the wire without a re-publishable record.
+      onPersistWithCommit: async (entry) => {
+        const s = auth.state();
+        if (s.kind !== "session") {
+          throw new Error("no active session — commit aborted (ADR-0040)");
+        }
+        await chats.persistSnapshotWithCommit(s.account.accountId, entry);
+      },
+      // ADR-0040 F1 (lakko-security) — on a FAIL-CLOSED commit persist-abort, reset
+      // the in-memory group back to the last durable snapshot (epoch N), dropping
+      // the un-published eager merge. Reloads the group from IDB + replaces the
+      // cached registry reference so the next `props.entry.group` read (reactive
+      // via `chats.get`) sees the epoch-N group — a subsequent commit builds on N,
+      // not the poisoned N+1 that would strand the whole group.
+      onCommitPersistAbort: async (groupIdB64) => {
+        const s = auth.state();
+        if (s.kind !== "session") {
+          throw new Error("no active session — cannot reset group (ADR-0040 F1)");
+        }
+        await chats.resetGroupToDurableSnapshot(s.account.accountId, groupIdB64);
+      },
     },
-    // ADR-0048 §3 — an add-by-username lookup proves the binding a username
-    // verification would check.
-    onUsernameResolved: (key, username) => profiles.learnUsername(key, username),
-    // ADR-0040 (G-35) — the FAIL-CLOSED persist the four commit paths run BEFORE
-    // publishing: the outbox entry + the N+1 snapshot in one atomic write. A
-    // throw here (no session, no device key, IDB failure) aborts the commit so
-    // the group is never advanced on the wire without a re-publishable record.
-    onPersistWithCommit: async (entry) => {
-      const s = auth.state();
-      if (s.kind !== "session") {
-        throw new Error("no active session — commit aborted (ADR-0040)");
-      }
-      await chats.persistSnapshotWithCommit(s.account.accountId, entry);
-    },
-    // ADR-0040 F1 (lakko-security) — on a FAIL-CLOSED commit persist-abort, reset
-    // the in-memory group back to the last durable snapshot (epoch N), dropping
-    // the un-published eager merge. Reloads the group from IDB + replaces the
-    // cached registry reference so the next `props.entry.group` read (reactive
-    // via `chats.get`) sees the epoch-N group — a subsequent commit builds on N,
-    // not the poisoned N+1 that would strand the whole group.
-    onCommitPersistAbort: async (groupIdB64) => {
-      const s = auth.state();
-      if (s.kind !== "session") {
-        throw new Error("no active session — cannot reset group (ADR-0040 F1)");
-      }
-      await chats.resetGroupToDurableSnapshot(s.account.accountId, groupIdB64);
-    },
-  });
+  );
 
   const [rows, setRows] = createSignal<TimelineRow[]>([]);
   /** docs/ux/calls.md section 6 — the calls this device was in, in this

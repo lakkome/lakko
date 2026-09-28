@@ -18,9 +18,11 @@ use libfuzzer_sys::fuzz_target;
 fuzz_target!(|data: &[u8]| {
     // A capability that verifies (the fuzzer cannot forge the Ed25519 signature,
     // so this arm is reached only from a corpus entry a test minted) also drives
-    // the preview open: the sealed bytes are attacker-controlled and the key is
-    // fixed, so the AEAD refuses and the plaintext decoder is what remains.
+    // the preview open: the sealed bytes are attacker-controlled and the link
+    // secret is fixed (HKDF-expanded to the AEAD key, bound to the capability's
+    // group id and issuer), so the AEAD refuses and the plaintext decoder is
+    // what remains.
     if let Ok(cap) = lakko_contacts::group_invite::decode_and_verify(data) {
-        let _ = cap.open_preview(&[0x42u8; lakko_contacts::group_invite::LINK_KEY_LEN]);
+        let _ = cap.open_preview(&[0x42u8; lakko_contacts::group_invite::LINK_SECRET_LEN]);
     }
 });

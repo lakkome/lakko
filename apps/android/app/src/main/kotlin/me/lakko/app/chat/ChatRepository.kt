@@ -38,6 +38,8 @@ import me.lakko.app.ds.DsClient
 import me.lakko.app.ds.DsJournalSigner
 import me.lakko.app.ds.DsSignerRegistry
 import me.lakko.app.ds.DsSignerSource
+import me.lakko.app.ds.DsWake
+import me.lakko.app.ds.DsWakeKind
 import me.lakko.app.ds.FfiDsJournalSigner
 import me.lakko.app.ds.dsGroupKeyHex
 import me.lakko.app.ds.dsMailboxKey
@@ -183,10 +185,11 @@ public class ChatRepository(
      *  persist; the sensitive secret lives encrypted in
      *  [PushRoutingSecretStore]. */
     private val pushRouteStore: PushRouteStore = PushRouteStore(applicationContext),
-    /** Builds the short-lived, bearer-authenticated discovery client
-     *  [republishKeyPackage] uploads through. Separate from [discovery] so
-     *  the session token is never attached to that shared client's other
-     *  requests. */
+    /** Builds the short-lived, bearer-authenticated discovery client every
+     *  `require_session` route goes through: the KeyPackage upload and
+     *  delete, and the group-invite upload and revoke. Separate from
+     *  [discovery] so the session token is never attached to that shared
+     *  client's anonymous requests. */
     private val keyPackageDiscoveryFactory: () -> DiscoveryClient = { DiscoveryClient() },
     /** ADR-0024 — durable per-group read watermarks, so the author-side
      *  "Read" state survives a relaunch (the poll resumes past receipts it
@@ -226,10 +229,11 @@ public class ChatRepository(
      * lock the whole repository — the [Identity] handle is
      * thread-safe at the UniFFI level (Rust-side `Arc`).
      */
-    /** 1.20e — process-lifetime scope for fire-and-forget push
-     *  fan-out / subscribe coroutines. `SupervisorJob` so one
-     *  failed leg doesn't tear down siblings; `Dispatchers.IO`
-     *  because both legs are network-heavy. */
+    /** Process-lifetime scope for fire-and-forget push-routing work
+     *  (ADR-0042 subscribe / unsubscribe, rotation). `SupervisorJob` so
+     *  one failed leg doesn't tear down siblings; `Dispatchers.IO`
+     *  because the legs are network-heavy. The group WAKE no longer runs
+     *  here: since ADR-0054 it rides the signed DS publish. */
     private val pushScope: CoroutineScope =
         CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -2623,8 +2627,8 @@ public class ChatRepository(
         // ADR-0028 v2 (docs/ux/group-invite-page.md) — the link carries a
         // sealed preview: the group's shared name, this device's own profile
         // name and the roster size at mint time, all already on the device.
-        // Sealed under a fresh link key that goes into the URL fragment and
-        // nowhere a server reads. The core trims the names and reads a blank
+        // Sealed under a key derived from a fresh 12-byte link secret that
+        // goes into the URL fragment and nowhere a server reads. The core trims the names and reads a blank
         // one as absent.
         val groupName = groupName(groupIdHex)?.name
         val inviterName = ownDisplayName()
@@ -2661,16 +2665,23 @@ public class ChatRepository(
         val wire = mint.wire
         // Production default (ADR-0028 OQ1): upload to the discovery ledger --
         // the server-side anti-abuse surface (per-joiner consume dedup + soft
-        // max_uses) -- and share the short pointer URL. On an upload failure (a
-        // censored / offline network) fall back to the inline form so the link
-        // still works without the round-trip. `max_uses` is a soft throttle,
-        // not an access control: the admin approval gate stays the boundary.
-        // Either form takes the link key as its fragment; the copy action
+        // max_uses) -- and share the short pointer URL. The upload is
+        // bearer-gated, so it runs on a client carrying the session token read
+        // NOW; no session is a loud failure. Only a transport failure (a
+        // censored / offline network) falls back to the inline form; a server
+        // refusal is thrown. `max_uses` is a soft throttle, not an access
+        // control: the admin approval gate stays the boundary. Either form
+        // takes the 12-byte link secret as its fragment; the copy action
         // copies the whole string.
-        val url = try {
-            val blobId = discovery.uploadGroupInvite(wire, 0xFFFFFFFFL)
+        val blobId = uploadGroupInviteOrNull(
+            sessionToken = keyPackageAccount.get()?.sessionToken,
+            clientFactory = keyPackageDiscoveryFactory,
+            upload = { client -> client.uploadGroupInvite(wire, 0xFFFFFFFFL) },
+            log = { message -> android.util.Log.w("ChatRepository", message) },
+        )
+        val url = if (blobId != null) {
             composePointerGroupInviteUrl(blobId)
-        } catch (e: Throwable) {
+        } else {
             try {
                 composeInlineGroupInviteUrl(wire)
             } catch (fallbackError: Throwable) {
@@ -2683,7 +2694,7 @@ public class ChatRepository(
 
     /**
      * ADR-0028 revoke — the issuer revokes a previously-created group invite
-     * link. Only the server-backed pointer form (a 32-byte blob_id) is
+     * link. Only the server-backed pointer form (a 6-byte ledger id) is
      * revocable; an inline link has no ledger row. Returns `true` when a ledger
      * row was revoked, `false` for an inline / malformed link (nothing to do).
      */
@@ -2705,10 +2716,18 @@ public class ChatRepository(
         return when (parsed) {
             is ParsedGroupInvite.Inline -> false
             is ParsedGroupInvite.Pointer -> {
-                try {
-                    discovery.revokeGroupInvite(parsed.blobId, identity.ed25519Seed())
-                } catch (e: Throwable) {
-                    throw ChatError("group invite revoke failed", e)
+                // Bearer-gated route: a client carrying the session token
+                // read now (a missing session throws a ChatError as is).
+                withSessionDiscovery(
+                    sessionToken = keyPackageAccount.get()?.sessionToken,
+                    what = "group invite revoke",
+                    clientFactory = keyPackageDiscoveryFactory,
+                ) { client ->
+                    try {
+                        client.revokeGroupInvite(parsed.blobId, identity.ed25519Seed())
+                    } catch (e: Throwable) {
+                        throw ChatError("group invite revoke failed", e)
+                    }
                 }
                 true
             }
@@ -2717,8 +2736,8 @@ public class ChatRepository(
 
     /**
      * ADR-0028 (G-3) — resolve a `/g/<slug>` slug to the capability wire bytes,
-     * fetching from the discovery ledger when the slug is a 32-byte
-     * content-addressed pointer (the production form) or passing the bytes
+     * fetching from the discovery ledger when the slug is a 6-byte ledger-id
+     * pointer (the production form) or passing the bytes
      * straight through when it is an inline capability (the censored-region
      * fallback). Returns the wire bytes + the `blobId` (non-null only for the
      * pointer form) so the caller can drive the consume gate before requesting
@@ -2753,20 +2772,23 @@ public class ChatRepository(
      * What the group invite page shows before anyone taps (ADR-0028 v2,
      * `docs/ux/group-invite-page.md` section 3). Decodes + verifies the
      * capability, checks expiry at [nowMs], and opens the sealed preview under
-     * [linkKey] when the link has one.
+     * the link secret in [fragment].
      *
-     * The preview is best-effort by design: an absent key, a wrong-length key,
-     * a link minted without a preview, or a key the preview does not open
-     * under all read as `preview = null` — the page then shows no preview,
-     * never a guess and never an error for that. The signature already gates
-     * the capability.
+     * A link without a fragment shows the page with no preview. A link WITH a
+     * fragment must open its preview (ADR-0028 amendment of 2026-09-27): the
+     * preview key is bound to the capability's group id and issuer, so a
+     * capability a malicious server swapped in under a live ledger id does not
+     * open under the link's secret. A malformed fragment, a capability without
+     * a preview, or a preview that does not open all throw
+     * [GroupInviteLinkDamaged] — fail closed, never a preview-less fallback.
      *
      * @throws ChatError when the capability does not decode or verify — the
      *   page's "invalid or expired" state.
+     * @throws GroupInviteLinkDamaged when the fragment does not open the preview.
      */
     public suspend fun inspectGroupInvite(
         capabilityWire: ByteArray,
-        linkKey: ByteArray?,
+        fragment: GroupInviteFragment,
         nowMs: ULong,
     ): GroupInviteCard = withContext(mlsDispatcher) {
         val cap = try {
@@ -2775,27 +2797,26 @@ public class ChatRepository(
             throw ChatError("group invite capability did not verify", e)
         }
         try {
-            val preview = if (linkKey != null && linkKey.size == GROUP_INVITE_LINK_KEY_LEN && cap.hasPreview()) {
-                try {
-                    cap.openPreview(linkKey)?.let {
-                        GroupInvitePreviewUi(
-                            groupName = it.groupName,
-                            inviterName = it.inviterName,
-                            memberCount = it.memberCount.toInt(),
-                        )
-                    }
-                } catch (e: FfiException) {
-                    android.util.Log.w("ChatRepository", "invite preview did not open; showing the page without one", e)
-                    null
+            val outcome = resolveGroupInvitePreview(fragment) { secret ->
+                cap.openPreview(secret)?.let {
+                    GroupInvitePreviewUi(
+                        groupName = it.groupName,
+                        inviterName = it.inviterName,
+                        memberCount = it.memberCount.toInt(),
+                    )
                 }
-            } else {
-                null
             }
-            GroupInviteCard(
-                fingerprint = cap.issuerFingerprint(),
-                valid = cap.isValidNow(nowMs),
-                preview = preview,
-            )
+            when (outcome) {
+                GroupInvitePreviewOutcome.Damaged -> {
+                    android.util.Log.w("ChatRepository", "invite link fragment does not open its preview; refusing the link")
+                    throw GroupInviteLinkDamaged()
+                }
+                is GroupInvitePreviewOutcome.Shown -> GroupInviteCard(
+                    fingerprint = cap.issuerFingerprint(),
+                    valid = cap.isValidNow(nowMs),
+                    preview = outcome.preview,
+                )
+            }
         } finally {
             cap.destroy()
         }
@@ -3006,26 +3027,19 @@ public class ChatRepository(
                     persistRatchet = { persistSnapshotDurableOrThrow() },
                 )
             }
+            // docs/ux/calls.md §2.1 — a call must arrive when the app is closed.
+            // ADR-0054 — the wake rides this signed publish as a header and the
+            // DS fans it out after appending the row; only an offer and an end
+            // ask for one, every other frame published here stays silent.
+            val wake = DsWake.forPublish(
+                pushGid = pushGidForGroupOrNull(groupIdHex),
+                kind = if (me.lakko.app.calls.shouldWakeForCallSignaling(plaintextBytes)) DsWakeKind.CALL else null,
+            )
             // ADR-0045 — the publish is INSIDE the per-group lock (see
             // [runGroupSend]): a message sealed at one epoch and published on the
             // far side of a commit is permanently undecryptable for every
             // recipient, because `lakko-mls` retains no past-epoch secrets.
-            val result = chatClient.publishPreparedSend(prepared)
-            // docs/ux/calls.md §2.1 — a call must arrive when the app is closed.
-            // Off the critical path exactly as `sendMessage`'s wake is: LAUNCHED
-            // onto `pushScope`, never awaited, so neither the PoW solve nor a
-            // dead push-gw can delay or fail the call. A dropped wake costs the
-            // ring, not the call: a foregrounded peer still receives the offer
-            // on its poll.
-            if (me.lakko.app.calls.shouldWakeForCallSignaling(plaintextBytes)) {
-                pushScope.launch {
-                    notifyPushGroupBestEffort(
-                        groupIdHex = groupIdHex,
-                        messageId = result.messageId,
-                        kind = PushClient.WakeKind.CALL,
-                    )
-                }
-            }
+            chatClient.publishPreparedSend(prepared, wake = wake)
         }
     }
 
@@ -3238,7 +3252,17 @@ public class ChatRepository(
                 val ownKey = ownIdentity(record.group)
                 prepared to ownKey
             }
-            val result = chatClient.publishPreparedSend(prepared)
+            // ADR-0054 — the wake to every device subscribed to this group
+            // rides the signed publish as the `x-lakko-wake` header; the DS
+            // forwards it to push-gw after appending the row. ADR-0042 — it
+            // names the opaque `push_gid`, never the DS `group_id`; with no
+            // routing secret held yet the header is omitted and recipients
+            // pick the message up on their next foreground poll.
+            val wake = DsWake.forPublish(
+                pushGid = pushGidForGroupOrNull(groupIdHex),
+                kind = DsWakeKind.MESSAGE,
+            )
+            val result = chatClient.publishPreparedSend(prepared, wake = wake)
             record.markSent(
                 localId = localId,
                 messageId = result.messageId,
@@ -3247,20 +3271,6 @@ public class ChatRepository(
             )
             persistMessageLogBestEffort()
             publishThreadList()
-            // 1.20e — fan a wake out to every device subscribed
-            // to this group. Off the user-visible critical path
-            // so the PoW solve doesn't double send latency.
-            // Best-effort — recipients still get the message via
-            // foreground polling if push-gw is down.
-            // ADR-0042 — the wake routes under the opaque `push_gid`, not
-            // the leaky DS `group_id`; no secret held -> the wake is
-            // SKIPPED (never under group_id).
-            pushScope.launch {
-                notifyPushGroupBestEffort(
-                    groupIdHex = groupIdHex,
-                    messageId = result.messageId,
-                )
-            }
         }
     }
 
@@ -3538,40 +3548,6 @@ public class ChatRepository(
             }
         } catch (cause: Throwable) {
             android.util.Log.w("ChatRepository", "sendReadReceipt failed", cause)
-        }
-    }
-
-    /** 1.20e / ADR-0042 — fire `PushClient.notifyGroup` on the side scope,
-     *  UNDER the opaque `push_gid` (not the DS `group_id`). When this device
-     *  holds no secret for the group yet the wake is SKIPPED rather than
-     *  leaking `group_id` to push-gw (invariant #5); recipients still receive
-     *  the message on their next foreground poll. Logged-and-swallowed.
-     *
-     *  [kind] is `null` for a message wake — the shape that shipped — and
-     *  [PushClient.WakeKind.CALL] for the two call-signaling frames that have
-     *  to ring a closed app (`docs/ux/calls.md` §7). It changes only the
-     *  delivery priority the provider is asked for; the pseudonym and the
-     *  cursor are identical either way. */
-    private suspend fun notifyPushGroupBestEffort(
-        groupIdHex: String,
-        messageId: Long,
-        kind: PushClient.WakeKind? = null,
-    ) {
-        try {
-            val pushGid = pushGidForGroupOrNull(groupIdHex) ?: return
-            PushClient().use { client ->
-                client.notifyGroup(
-                    groupPseudonym = pushGid,
-                    envelopePointer = messageId,
-                    kind = kind,
-                )
-            }
-        } catch (cause: Throwable) {
-            android.util.Log.w(
-                "lakko-chat",
-                "push notify-group failed",
-                cause,
-            )
         }
     }
 

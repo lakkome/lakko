@@ -69,7 +69,6 @@ import {
   type RotateBatchEntry,
 } from "./api";
 import {
-  base64UrlToBytes,
   bytesToHex,
   freshPublisherKeys,
   type ChannelPublisherKeys,
@@ -79,6 +78,8 @@ import {
   isLegacyV1PublisherGroupId,
   rethrowAsLegacyChannel,
 } from "./legacy-v1";
+import { inviteLinkWidths } from "../contacts/invite-link";
+import { parseGroupInviteSlug, splitGroupInviteLink } from "../contacts/group-invite";
 
 type Identity = InstanceType<Wasm["Identity"]>;
 type PublisherGroup = InstanceType<Wasm["PublisherGroup"]>;
@@ -319,10 +320,16 @@ export async function requestToCoPublish(
   link: string,
 ): Promise<{ groupId: Uint8Array; channelIdHex: string; joinerKey: Uint8Array }> {
   const wasm = await loadWasm();
-  const idx = link.lastIndexOf(GROUP_INVITE_URL_PREFIX);
-  if (idx < 0) throw new Error("not a /g/ co-publisher link");
-  const slug = link.slice(idx + GROUP_INVITE_URL_PREFIX.length);
-  const wire = base64UrlToBytes(slug);
+  // The shared `/g/` shape rules (ADR-0028 short-link amendment): the slug
+  // ends at the fragment, and a co-publisher link is always the inline form
+  // (the owner never uploads it to the ledger).
+  const widths = inviteLinkWidths(wasm);
+  const split = splitGroupInviteLink(link, widths);
+  if (split === null) throw new Error("not a /g/ co-publisher link");
+  if (split.fragment.kind === "damaged") throw new Error("co-publisher link is damaged");
+  const parsed = parseGroupInviteSlug(split.slug, widths);
+  if (parsed.kind !== "inline") throw new Error("co-publisher link is not an inline capability");
+  const wire = parsed.capabilityBytes;
   const cap = wasm.GroupInviteCapability.decodeAndVerify(wire);
   let groupId: Uint8Array;
   try {

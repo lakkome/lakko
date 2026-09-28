@@ -125,6 +125,7 @@ import {
   type QuietCallOffer,
 } from "./quiet-call-offer";
 import { ChatClient } from "../chat/client";
+import { pushGidForGroup } from "../push/group-routing";
 import { makeCallSignalingPublisher } from "../chat/call-signaling-publish";
 import { readIsActive } from "../chat/membership-ended";
 import { memberKeysOf, peerName } from "../chat/peer-name";
@@ -451,6 +452,15 @@ export function CallHostProvider(props: { children: JSX.Element }): JSX.Element 
       const s = auth.state();
       if (s.kind !== "session") return;
       await chats.persistSnapshot(s.account.accountId);
+    },
+    // ADR-0054 — a call offer and a call end ring a closed tab through the
+    // `x-lakko-wake` header of their DS publish, which names the group's
+    // opaque `push_gid` (ADR-0042). Without a resolver there is no wake at
+    // all: the DS `group_id` is never put in the header in its place.
+    pushGidResolver: async (groupId) => {
+      const s = auth.state();
+      if (s.kind !== "session") return null;
+      return pushGidForGroup(s.account.accountId, base64Encode(groupId));
     },
   });
 

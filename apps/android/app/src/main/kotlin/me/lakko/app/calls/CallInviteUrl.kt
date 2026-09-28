@@ -5,6 +5,7 @@ package me.lakko.app.calls
 
 import me.lakko.app.auth.base64UrlDecodeNoPad
 import me.lakko.app.auth.base64UrlEncodeNoPad
+import me.lakko.app.discovery.InviteLinkLengths
 
 /**
  * Android-side helpers for the link-based call-invite URL shape
@@ -40,10 +41,6 @@ public const val CALL_INVITE_URL_PREFIX: String = "/c/"
 public val CALL_INVITE_DEFAULT_ORIGIN: String
     get() = me.lakko.app.config.ApiEndpoints.webOrigin
 
-/** Length of a content-addressed `blob_id` from
- *  `services/discovery/src/call_invite.rs` — SHA-256, 32 bytes. */
-public const val CALL_INVITE_BLOB_ID_LEN: Int = 32
-
 /** Lower bound on the inline-bytes form. The 3c3 wire format
  *  with a 256-byte one-time KP tops out around 500 bytes; we
  *  pin the floor at 400 to leave headroom for KP formats that
@@ -55,8 +52,8 @@ public const val CALL_INVITE_INLINE_MIN_LEN: Int = 400
 // =============================================================
 
 /**
- * Auto-pick the URL form by argument shape — pointer (32
- * bytes) when the caller has uploaded the capability and
+ * Auto-pick the URL form by argument shape — pointer (the
+ * 6-byte ledger id) when the caller has uploaded the capability and
  * wants the short form, inline-bytes (≥ 400 bytes) when the
  * caller is staying server-free.
  *
@@ -77,15 +74,16 @@ public fun composeCallInviteUrl(
  * `/discovery/call-invite/<blob_id>` lookup.
  *
  * @throws CallInviteUrlException.WrongBlobIdLength when
- *         `blobId.size != 32`.
+ *         `blobId` is not the core's ledger-id width (6 bytes).
  */
 public fun composePointerCallInviteUrl(
     blobId: ByteArray,
     origin: String = CALL_INVITE_DEFAULT_ORIGIN,
+    lengths: InviteLinkLengths = InviteLinkLengths.core,
 ): String {
-    if (blobId.size != CALL_INVITE_BLOB_ID_LEN) {
+    if (blobId.size != lengths.blobIdLen) {
         throw CallInviteUrlException.WrongBlobIdLength(
-            expected = CALL_INVITE_BLOB_ID_LEN,
+            expected = lengths.blobIdLen,
             got = blobId.size,
         )
     }
@@ -120,8 +118,8 @@ public fun composeInlineCallInviteUrl(
 
 /** Discriminated parse result for a `/c/<slug>` segment. */
 public sealed class ParsedCallInvite {
-    /** Short form — [blobId] is the 32-byte content-
-     *  addressed id. Joiner fetches via
+    /** Short form — [blobId] is the 6-byte server-
+     *  assigned ledger id. Joiner fetches via
      *  `DiscoveryClient.fetchCallInvite(blobId)` →
      *  `CallInviteCapability.decodeAndVerify(...)`. */
     public data class Pointer(val blobId: ByteArray) : ParsedCallInvite() {
@@ -150,15 +148,19 @@ public sealed class ParsedCallInvite {
 
 /**
  * Discriminated parse of a URL slug. The dispatch rule is a
- * clean byte-length test: 32 ⇒ pointer (SHA-256), ≥ 400 ⇒
- * inline (3c3 wire-format minimum). Anything else is invalid.
+ * clean byte-length test: the ledger-id width (6) ⇒ pointer,
+ * ≥ 400 ⇒ inline (3c3 wire-format minimum). Anything else is
+ * invalid, the pre-amendment 32-byte pointer included.
  *
  * @throws CallInviteUrlException.InvalidBase64Url when the
  *         slug doesn't decode.
  * @throws CallInviteUrlException.SlugWrongLength when the
  *         decoded byte count falls outside both branches.
  */
-public fun parseCallInviteSlug(slug: String): ParsedCallInvite {
+public fun parseCallInviteSlug(
+    slug: String,
+    lengths: InviteLinkLengths = InviteLinkLengths.core,
+): ParsedCallInvite {
     // `base64UrlDecodeNoPad` returns a NON-null ByteArray and THROWS
     // `IllegalArgumentException` on a character outside the base64url
     // alphabet — it never returns null, so an elvis here would be dead
@@ -172,10 +174,10 @@ public fun parseCallInviteSlug(slug: String): ParsedCallInvite {
         throw CallInviteUrlException.InvalidBase64Url
     }
     return when {
-        bytes.size == CALL_INVITE_BLOB_ID_LEN -> ParsedCallInvite.Pointer(bytes)
+        bytes.size == lengths.blobIdLen -> ParsedCallInvite.Pointer(bytes)
         bytes.size >= CALL_INVITE_INLINE_MIN_LEN -> ParsedCallInvite.Inline(bytes)
         else -> throw CallInviteUrlException.SlugWrongLength(
-            blobIdLen = CALL_INVITE_BLOB_ID_LEN,
+            blobIdLen = lengths.blobIdLen,
             inlineMinLen = CALL_INVITE_INLINE_MIN_LEN,
             got = bytes.size,
         )

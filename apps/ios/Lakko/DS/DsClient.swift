@@ -98,10 +98,18 @@ public final class DsClient {
     ///
     /// ADR-0053 — `auth` signs the request for a claimed journal. `nil` sends
     /// it unsigned, which only an unclaimed journal accepts.
+    ///
+    /// ADR-0054 decision 1 — `wake` adds the `x-lakko-wake` header, asking the
+    /// DS to wake the group's subscribed devices once the row is appended.
+    /// `nil` (every control envelope, and any group whose `push_gid` this
+    /// device does not hold yet) sends no header and wakes nobody. The header
+    /// is not part of the signed proof inputs; the DS forwards it only after
+    /// the proof gate passed.
     public func publishGroup(
         groupId: Data,
         payload: Data,
-        auth: DsAuth? = nil
+        auth: DsAuth? = nil,
+        wake: DsWake? = nil
     ) async throws -> PublishResult {
         guard !groupId.isEmpty else {
             throw DsClientError.argument("groupId must be non-empty")
@@ -112,20 +120,27 @@ public final class DsClient {
         return try await doPublish(
             endpoint: "/ds/group/\(Self.pseudonymHex(groupId))/messages",
             payload: payload,
-            auth: auth
+            auth: auth,
+            wake: wake
         )
     }
 
     private func doPublish(
         endpoint: String,
         payload: Data,
-        auth: DsAuth?
+        auth: DsAuth?,
+        wake: DsWake? = nil
     ) async throws -> PublishResult {
+        var headers: [String: String] = [:]
+        if let wake {
+            headers[DsWake.headerName] = wake.headerValue
+        }
         let parsed: PublishWireResponse = try await sendDecoding(
             method: "POST",
             endpoint: endpoint,
             body: payload,
             contentType: "application/octet-stream",
+            extraHeaders: headers,
             auth: auth
         )
         return PublishResult(id: parsed.id, createdAt: parsed.createdAt)
@@ -368,6 +383,7 @@ public final class DsClient {
         queryItems: [URLQueryItem] = [],
         body: Data = Data(),
         contentType: String? = nil,
+        extraHeaders: [String: String] = [:],
         timeout: TimeInterval? = nil,
         auth: DsAuth?
     ) async throws -> (Data, HTTPURLResponse) {
@@ -379,6 +395,9 @@ public final class DsClient {
             request.httpMethod = method
             if let contentType {
                 request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+            }
+            for (name, value) in extraHeaders {
+                request.setValue(value, forHTTPHeaderField: name)
             }
             if method != "GET" {
                 request.httpBody = body
@@ -454,6 +473,7 @@ public final class DsClient {
         queryItems: [URLQueryItem] = [],
         body: Data = Data(),
         contentType: String? = nil,
+        extraHeaders: [String: String] = [:],
         timeout: TimeInterval? = nil,
         auth: DsAuth?
     ) async throws -> Res {
@@ -463,6 +483,7 @@ public final class DsClient {
             queryItems: queryItems,
             body: body,
             contentType: contentType,
+            extraHeaders: extraHeaders,
             timeout: timeout,
             auth: auth
         )

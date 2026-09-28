@@ -44,6 +44,7 @@
 import { loadWasm } from "../wasm";
 import { DiscoveryClient } from "../discovery/client";
 import { composePointerCallInviteUrl, CALL_ID_LEN, CALL_INVITE_LABEL_MAX_LEN } from "./invite";
+import { inviteLinkWidths } from "../contacts/invite-link";
 
 /** Options bag the UI hands to [`composeAndUploadCallInvite`]. */
 export interface ComposeCallInviteOptions {
@@ -206,7 +207,7 @@ export async function composeAndUploadCallInvite(
   const blobId = await opts.discoveryClient.uploadCallInvite(capabilityBytes);
 
   // ---- 6. URL build ----------------------------------------
-  const url = composePointerCallInviteUrl(blobId, opts.origin);
+  const url = composePointerCallInviteUrl(blobId, inviteLinkWidths(wasm), opts.origin);
 
   return {
     blobId,

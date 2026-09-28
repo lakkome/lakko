@@ -59,6 +59,14 @@ uuid = { version = "1", features = ["v7", "serde"] }
 # is a thin re-export + axum handler shim.
 lakko-pow-server.workspace = true
 
+# ADR-0054 decision 2 — anonymous-token issuance. The pure VOPRF primitive
+# (key derivation from the shared master, batched evaluation + DLEQ proof)
+# and the shared bookkeeping (config, the per-account quota counter + its
+# pruner + migration SQL). `voprf` 0.5 is already a workspace dependency
+# (`lakko-discovery-client`, `services/discovery`); no new third-party crate.
+lakko-anon-token.workspace = true
+lakko-anon-token-server.workspace = true
+
 # Equix (LGPL-3.0-only — AGPL-compatible). Memory-hard PoW from the Tor
 # Project. The server-side verify now lives in `lakko-pow-server`; auth still
 # pulls `equix` directly because its `#[cfg(test)]` helpers solve a real puzzle

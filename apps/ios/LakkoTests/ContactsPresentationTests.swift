@@ -99,7 +99,7 @@ final class ContactsPresentationTests: XCTestCase {
 
     private func generated(slug: String, expiryMs: Int64, createdAtMs: Int64) -> GeneratedInvite {
         GeneratedInvite(
-            blobId: Data(repeating: 1, count: 32), blobIdSlug: slug,
+            blobId: Data(repeating: 1, count: 6), blobIdSlug: slug,
             url: "https://lakko.me/i/\(slug)", label: "", expiryMs: expiryMs,
             maxUses: 0, createdAtMs: createdAtMs)
     }
@@ -140,7 +140,7 @@ final class ContactsPresentationTests: XCTestCase {
         XCTAssertEqual(rows[0].title, "Invite link")
         XCTAssertEqual(rows[0].usesLeft, "1 use left")
         if case .session(let blobId) = rows[0].origin {
-            XCTAssertEqual(blobId.count, 32)
+            XCTAssertEqual(blobId.count, 6)
         } else {
             XCTFail("a session-only link revokes through its blob id")
         }

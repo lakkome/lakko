@@ -39,13 +39,25 @@
 //! - `LAKKO_BIND` — `host:port` to listen on (default `127.0.0.1:8082`)
 //! - `DATABASE_URL` — sqlx-style MariaDB DSN
 //! - `RUST_LOG` — `tracing-subscriber` env-filter spec
+//! - `LAKKO_DS_PUSH_GW_URL` + `LAKKO_DS_PUSH_GW_SECRET` — push-gw's internal
+//!   listener (e.g. `http://127.0.0.1:8092`) and the shared secret it checks
+//!   (base64, >= 16 bytes; the same value as push-gw's
+//!   `LAKKO_PUSH_GW_INTERNAL_SECRET`). ADR-0054: a signed group publish that
+//!   carries `x-lakko-wake` is forwarded there. Both unset: the header is
+//!   still validated but every wake is dropped (one startup warning). Only
+//!   one set: the service refuses to start.
+//! - `LAKKO_DS_WAKE_BURST` / `LAKKO_DS_WAKE_PER_MINUTE` — the wake cap, per
+//!   journal and per woken `push_gid` (defaults 30 and 60; see
+//!   `src/wake.rs` for why). Over the cap the message is still appended, the
+//!   wake is dropped.
 //!
 //! Endpoints:
 //!
 //! - `GET    /health`                              — liveness, 200 OK
 //! - `GET    /ready`                               — readiness (DB ping), 200 / 503
 //! - `GET    /version`
-//! - `POST   /ds/group/{group_id_hex}/messages`    — publish to group (1 MB cap)
+//! - `POST   /ds/group/{group_id_hex}/messages`    — publish to group (1 MB cap;
+//!   optional `x-lakko-wake: <push_gid b64url>;<message|call>`, ADR-0054)
 //! - `GET    /ds/group/{group_id_hex}/messages`    — `?after=<id>&limit=<n>&wait=<secs>`
 //! - `POST   /ds/mailbox/{device_id_hex}/messages` — publish to device mailbox
 //! - `GET    /ds/mailbox/{device_id_hex}/messages` — `?after=<id>&limit=<n>&wait=<secs>`
@@ -61,8 +73,10 @@
 
 mod access;
 mod journal;
+mod wake;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -95,6 +109,8 @@ pub(crate) struct AppState {
     /// In-process only — multi-instance fanout (NATS / Redis pub/sub)
     /// is Phase 2 horizontal-scaling work.
     pub(crate) notifiers: journal::Notifiers,
+    /// ADR-0054 - the wake caps and the forwarder to push-gw.
+    pub(crate) waker: Arc<wake::Waker>,
 }
 
 #[tokio::main]
@@ -119,6 +135,27 @@ async fn main() -> Result<()> {
         .or_else(|_| std::env::var("DATABASE_URL"))
         .context("LAKKO_DS_DATABASE_URL or DATABASE_URL env var must be set")?;
 
+    // Read the wake configuration before touching the database, so a
+    // half-configured forward fails the start loudly and at once.
+    let wake_config = wake::WakeConfig::from_env()
+        .map_err(anyhow::Error::msg)
+        .context("wake configuration")?;
+    let waker = wake::Waker::new(&wake_config)
+        .map_err(anyhow::Error::msg)
+        .context("wake forwarder")?;
+    if waker.is_active() {
+        tracing::info!(
+            burst = wake_config.cap.burst,
+            per_minute = wake_config.cap.per_minute,
+            "wakes are forwarded to push-gw"
+        );
+    } else {
+        tracing::warn!(
+            "LAKKO_DS_PUSH_GW_URL / LAKKO_DS_PUSH_GW_SECRET unset - x-lakko-wake is \
+             validated but no wake is forwarded; devices are not woken by a publish"
+        );
+    }
+
     let pool = MySqlPoolOptions::new()
         .max_connections(32)
         .acquire_timeout(Duration::from_secs(5))
@@ -131,6 +168,7 @@ async fn main() -> Result<()> {
     let state = AppState {
         db: pool.clone(),
         notifiers: journal::Notifiers::default(),
+        waker: Arc::new(waker),
     };
 
     let _pruner = journal::spawn_pruner(pool.clone());

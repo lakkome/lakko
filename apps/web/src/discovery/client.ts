@@ -33,6 +33,7 @@ import {
   base64UrlEncodeNoPad,
 } from "../auth/account-id";
 import { solvePow } from "../auth/pow";
+import { inviteLinkWidths } from "../contacts/invite-link";
 import type {
   ChannelLookupRequest,
   ChannelLookupResponse,
@@ -162,7 +163,7 @@ export type RevokeInviteResult =
  *  reconstruct the share URL or feed into
  *  [`DiscoveryClient.revokeInvite`]. */
 export interface ActiveInvite {
-  /** URL-safe base64 (no padding) of the 32-byte blob_id —
+  /** URL-safe base64 (no padding) of the 6-byte ledger id —
    *  same `/i/<slug>` segment that appears in the share URL.
    *  Pass through `base64UrlDecodeNoPad` to recover the raw
    *  bytes when calling `revokeInvite`. */
@@ -227,6 +228,72 @@ export class DiscoveryNetworkError extends Error {
   }
 }
 
+/** The discovery service answered 429 to an invite fetch or consume (the
+ *  open invite routes are behind a per-address token bucket since the
+ *  short-link amendment of ADR-0028). The link may be perfectly valid; the UI
+ *  says "try again later" and never "this link is invalid". */
+export class DiscoveryRateLimitedError extends Error {
+  override name = "DiscoveryRateLimitedError";
+  constructor(
+    public readonly endpoint: string,
+    /** Seconds from a `Retry-After` header, when the server sent one. */
+    public readonly retryAfterSecs: number | null,
+  ) {
+    super(`discovery ${endpoint} -> 429 rate limited`);
+  }
+
+  static from(response: Response, endpoint: string): DiscoveryRateLimitedError {
+    const header = response.headers.get("retry-after");
+    const secs = header === null ? Number.NaN : Number(header.trim());
+    return new DiscoveryRateLimitedError(
+      endpoint,
+      Number.isFinite(secs) && secs >= 0 ? Math.ceil(secs) : null,
+    );
+  }
+}
+
+/** `true` when `err`, or anything it wraps (`cause`, a `ContactsError`
+ *  variant's `cause`), is a {@link DiscoveryRateLimitedError}. */
+export function isDiscoveryRateLimited(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 8 && current !== undefined && current !== null; depth += 1) {
+    if (current instanceof DiscoveryRateLimitedError) return true;
+    if (typeof current !== "object") return false;
+    const r = current as { name?: unknown; cause?: unknown; variant?: { cause?: unknown } };
+    if (r.name === "DiscoveryRateLimitedError") return true;
+    current = r.cause ?? r.variant?.cause;
+  }
+  return false;
+}
+
+/** Refuse a ledger id of the wrong width before any request (ADR-0028
+ *  short-link amendment: 6 bytes, read from the wasm core). */
+async function requireLedgerId(blobId: Uint8Array): Promise<void> {
+  const widths = inviteLinkWidths(await loadWasm());
+  if (blobId.length !== widths.blobIdLen) {
+    throw new DiscoveryClientArgError(`blobId must be ${widths.blobIdLen} bytes`);
+  }
+}
+
+/** Decode the `blob_id` an upload returned: exactly 8 base64url characters
+ *  decoding to 6 bytes. A server answering any other shape (the
+ *  pre-amendment 43-character id included) is refused. */
+async function decodeServerLedgerId(slug: string, endpoint: string): Promise<Uint8Array> {
+  const widths = inviteLinkWidths(await loadWasm());
+  let blobId: Uint8Array | null = null;
+  if (typeof slug === "string" && slug.length === widths.blobIdUrlLen && /^[A-Za-z0-9_-]+$/.test(slug)) {
+    blobId = base64UrlDecodeNoPad(slug);
+  }
+  if (blobId === null || blobId.length !== widths.blobIdLen) {
+    throw new DiscoveryHttpError(
+      200,
+      endpoint,
+      `server returned a blob_id that is not a ${widths.blobIdUrlLen}-character ledger id`,
+    );
+  }
+  return blobId;
+}
+
 /** One device of an account, as the directory serves it (ADR-0050). */
 export interface DeviceKeyPackage {
   /** The device leaf's 32-byte Ed25519 signature key. */
@@ -247,7 +314,18 @@ export class DiscoveryClient {
    */
   private sessionToken: string | null = null;
 
-  constructor(public readonly baseUrl: string = DEFAULT_BASE_URL) {}
+  /** Read at REQUEST time when set, so a client built once (a route's
+   *  `ContactsClient`) always sends the current session's token and keeps
+   *  working across a re-login. Takes precedence over
+   *  {@link setSessionToken}. */
+  private readonly sessionTokenProvider: (() => string | null) | undefined;
+
+  constructor(
+    public readonly baseUrl: string = DEFAULT_BASE_URL,
+    options: { readonly sessionToken?: () => string | null } = {},
+  ) {
+    this.sessionTokenProvider = options.sessionToken;
+  }
 
   /** Update the bearer token in-place. Mirror of the iOS +
    *  Android `setSessionToken` shape. */
@@ -259,9 +337,9 @@ export class DiscoveryClient {
    *  is set. `null` collapses to "no header" — caller spreads
    *  via `{ ...this.authHeaders() }`. */
   private authHeaders(): Record<string, string> {
-    return this.sessionToken !== null
-      ? { Authorization: `Bearer ${this.sessionToken}` }
-      : {};
+    const token =
+      this.sessionTokenProvider !== undefined ? this.sessionTokenProvider() : this.sessionToken;
+    return token !== null ? { Authorization: `Bearer ${token}` } : {};
   }
 
   // -----------------------------------------------------------------
@@ -292,7 +370,7 @@ export class DiscoveryClient {
   }
 
   /** `POST /discovery/invite` — upload a verified
-   *  `InviteCapability` blob, get the content-addressed
+   *  `InviteCapability` blob, get the server-assigned
    *  `blob_id` back (Phase 1.18d1). The high-level
    *  [`uploadInvite`] wrapper drives the PoW solve. */
   async inviteUpload(req: InviteUploadRequest): Promise<InviteUploadResponse> {
@@ -312,7 +390,7 @@ export class DiscoveryClient {
   }
 
   /** `POST /discovery/call-invite` — upload a verified
-   *  `CallInviteCapability` blob, get the content-addressed
+   *  `CallInviteCapability` blob, get the server-assigned
    *  `blob_id` back (Phase 3c3-server). Sibling of
    *  [`inviteUpload`]; wire shape (`InviteUploadRequest`) is
    *  shared with the contact-invite endpoint — only the URL
@@ -871,10 +949,10 @@ export class DiscoveryClient {
 
   /**
    * Upload a freshly-composed `InviteCapability` blob and
-   * receive the server-assigned content-addressed `blob_id`
-   * (raw 32-byte SHA-256). Phase 1.18d1: drives one PoW solve
-   * + `POST /discovery/invite`. Idempotent — same bytes yield
-   * the same id, and the server upserts.
+   * receive the server-assigned `blob_id` (6 random bytes,
+   * ADR-0028 short-link amendment). Phase 1.18d1: drives one PoW
+   * solve + `POST /discovery/invite`. Not idempotent — every
+   * upload mints a fresh id.
    *
    * Caller responsibility: feed `capabilityBytes` straight from
    * `wasm.InviteCapability.compose(...)`. The server runs
@@ -882,7 +960,7 @@ export class DiscoveryClient {
    * as `DiscoveryHttpError(400, "/discovery/invite", …)`.
    *
    * @param capabilityBytes  The 1.18a wire-format bytes.
-   * @returns The 32-byte `blob_id`, ready to substitute into a
+   * @returns The 6-byte `blob_id`, ready to substitute into a
    *          pointer URL via `composePointerInviteUrl`.
    *
    * @throws `DiscoveryClientArgError` on local input validation,
@@ -917,33 +995,23 @@ export class DiscoveryClient {
 
     // Server returns base64url-no-pad; decode back to raw 32
     // bytes via the same helper we use for `accountId` slugs.
-    const blobId = base64UrlDecodeNoPad(resp.blob_id);
-    if (blobId.length !== 32) {
-      throw new DiscoveryHttpError(
-        200,
-        "/discovery/invite",
-        `server returned blob_id of ${blobId.length} bytes, expected 32`,
-      );
-    }
-    return blobId;
+    return decodeServerLedgerId(resp.blob_id, "/discovery/invite");
   }
 
   /**
    * Fetch a previously-uploaded `InviteCapability` by its
-   * content-addressed `blob_id`. Returns `null` on 404 (the
+   * server-assigned `blob_id`. Returns `null` on 404 (the
    * server folds expired blobs into the same status — see
    * `services/discovery/src/invite.rs::fetch` for why we don't
    * use 410). Returns the raw capability bytes on 200; the
    * caller drives `wasm.InviteCapability.decodeAndVerify(...)`
    * to validate the signature locally (the server already
    * verified at upload time, but we re-verify so a malicious
-   * server cannot serve substituted bytes — and the joiner can
-   * cross-check `SHA-256(bytes) === blobId` if they want).
+   * server cannot serve forged bytes). Throws
+   * `DiscoveryRateLimitedError` on 429 (per-address rate limit).
    */
   async fetchInvite(blobId: Uint8Array): Promise<Uint8Array | null> {
-    if (blobId.length !== 32) {
-      throw new DiscoveryClientArgError("blobId must be 32 bytes");
-    }
+    await requireLedgerId(blobId);
     const slug = base64UrlEncodeNoPad(blobId);
     const url = `${this.baseUrl}/discovery/invite/${slug}`;
     let response: Response;
@@ -952,6 +1020,7 @@ export class DiscoveryClient {
     } catch (err) {
       throw new DiscoveryNetworkError("/discovery/invite (GET)", err);
     }
+    if (response.status === 429) throw DiscoveryRateLimitedError.from(response, "/discovery/invite (GET)");
     if (response.status === 404) return null;
     if (!response.ok) {
       const text = await safeReadBody(response);
@@ -998,7 +1067,7 @@ export class DiscoveryClient {
    * upload), plus one WASM call to compute the per-joiner
    * dedup tag locally before posting.
    *
-   * @param blobId            32-byte content-addressed invite id
+   * @param blobId            6-byte ledger id
    *                          (the same value `uploadInvite`
    *                          returned).
    * @param capabilityBytes   The same wire-format bytes the
@@ -1018,9 +1087,7 @@ export class DiscoveryClient {
     capabilityBytes: Uint8Array,
     joinerAccountId: Uint8Array,
   ): Promise<ConsumeInviteResult> {
-    if (blobId.length !== 32) {
-      throw new DiscoveryClientArgError("blobId must be 32 bytes");
-    }
+    await requireLedgerId(blobId);
     if (joinerAccountId.length !== 16) {
       throw new DiscoveryClientArgError("joinerAccountId must be 16 bytes");
     }
@@ -1058,6 +1125,7 @@ export class DiscoveryClient {
     } catch (err) {
       throw new DiscoveryNetworkError(endpoint, err);
     }
+    if (response.status === 429) throw DiscoveryRateLimitedError.from(response, endpoint);
     if (response.status === 404) return { kind: "not-found" };
     if (response.status === 410) return { kind: "exhausted" };
     if (!response.ok) {
@@ -1074,11 +1142,11 @@ export class DiscoveryClient {
 
   /**
    * Upload a verified [`CallInviteCapability`] blob and get its
-   * content-addressed `blob_id` back (Phase 3c3-client).
+   * server-assigned `blob_id` back (Phase 3c3-client).
    *
    * Sibling of [`uploadInvite`] for the call-invite ecosystem.
    * Drives one PoW solve + `POST /discovery/call-invite`.
-   * Idempotent — same bytes yield the same id, server upserts.
+   * Every upload mints a fresh 6-byte id (ADR-0028 short-link amendment).
    *
    * Caller responsibility: feed `capabilityBytes` straight from
    * `wasm.composeCallInviteCapability(...)`. The server runs
@@ -1092,7 +1160,7 @@ export class DiscoveryClient {
    *
    * @param capabilityBytes  The 3a wire-format `CallInviteCapability`
    *                         bytes (composed via the wasm FFI).
-   * @returns The 32-byte `blob_id`, ready to substitute into a
+   * @returns The 6-byte `blob_id`, ready to substitute into a
    *          `/c/<slug>` pointer URL via the call-invite link
    *          composer.
    *
@@ -1122,20 +1190,12 @@ export class DiscoveryClient {
       capability: base64Encode(capabilityBytes),
     });
 
-    const blobId = base64UrlDecodeNoPad(resp.blob_id);
-    if (blobId.length !== 32) {
-      throw new DiscoveryHttpError(
-        200,
-        "/discovery/call-invite",
-        `server returned blob_id of ${blobId.length} bytes, expected 32`,
-      );
-    }
-    return blobId;
+    return decodeServerLedgerId(resp.blob_id, "/discovery/call-invite");
   }
 
   /**
    * Fetch a previously-uploaded `CallInviteCapability` by its
-   * content-addressed `blob_id` (Phase 3c3-client).
+   * server-assigned `blob_id` (Phase 3c3-client).
    *
    * Sibling of [`fetchInvite`]. Returns `null` on 404 (server
    * folds expired blobs into the same status to deny attacker
@@ -1143,13 +1203,11 @@ export class DiscoveryClient {
    * 200; the caller drives
    * `wasm.decodeAndVerifyCallInviteCapability(...)` locally —
    * the server already verified at upload time, but we re-verify
-   * so a malicious server cannot serve substituted bytes (+
-   * the joiner can cross-check `SHA-256(bytes) === blobId`).
+   * so a malicious server cannot serve forged bytes. Throws
+   * `DiscoveryRateLimitedError` on 429 (per-address rate limit).
    */
   async fetchCallInvite(blobId: Uint8Array): Promise<Uint8Array | null> {
-    if (blobId.length !== 32) {
-      throw new DiscoveryClientArgError("blobId must be 32 bytes");
-    }
+    await requireLedgerId(blobId);
     const slug = base64UrlEncodeNoPad(blobId);
     const url = `${this.baseUrl}/discovery/call-invite/${slug}`;
     let response: Response;
@@ -1158,6 +1216,7 @@ export class DiscoveryClient {
     } catch (err) {
       throw new DiscoveryNetworkError("/discovery/call-invite (GET)", err);
     }
+    if (response.status === 429) throw DiscoveryRateLimitedError.from(response, "/discovery/call-invite (GET)");
     if (response.status === 404) return null;
     if (!response.ok) {
       const text = await safeReadBody(response);
@@ -1197,7 +1256,7 @@ export class DiscoveryClient {
    * `joiner_tag_works_on_call_invite_bytes` in
    * `lakko_contacts::invite`).
    *
-   * @param blobId            32-byte content-addressed call-invite id.
+   * @param blobId            6-byte ledger id.
    * @param capabilityBytes   The same wire-format bytes the
    *                          server holds — mandatory for the
    *                          per-blob salt of `computeJoinerInviteTag`.
@@ -1210,9 +1269,7 @@ export class DiscoveryClient {
     capabilityBytes: Uint8Array,
     joinerAccountId: Uint8Array,
   ): Promise<ConsumeInviteResult> {
-    if (blobId.length !== 32) {
-      throw new DiscoveryClientArgError("blobId must be 32 bytes");
-    }
+    await requireLedgerId(blobId);
     if (joinerAccountId.length !== 16) {
       throw new DiscoveryClientArgError("joinerAccountId must be 16 bytes");
     }
@@ -1245,6 +1302,7 @@ export class DiscoveryClient {
     } catch (err) {
       throw new DiscoveryNetworkError(endpoint, err);
     }
+    if (response.status === 429) throw DiscoveryRateLimitedError.from(response, endpoint);
     if (response.status === 404) return { kind: "not-found" };
     if (response.status === 410) return { kind: "exhausted" };
     if (!response.ok) {
@@ -1260,7 +1318,7 @@ export class DiscoveryClient {
   }
 
   /** `POST /discovery/group-invite` — upload a verified
-   *  `GroupInviteCapability` blob, get the content-addressed
+   *  `GroupInviteCapability` blob, get the server-assigned
    *  `blob_id` back (ADR-0028, G-3). The high-level
    *  [`uploadGroupInvite`] wrapper drives the PoW solve. */
   async groupInviteUpload(
@@ -1271,11 +1329,11 @@ export class DiscoveryClient {
 
   /**
    * Upload a verified [`GroupInviteCapability`] blob and get its
-   * content-addressed `blob_id` back (ADR-0028, G-3).
+   * server-assigned `blob_id` back (ADR-0028, G-3).
    *
    * Sibling of [`uploadCallInvite`] for the group join-ticket ledger.
-   * Drives one PoW solve + `POST /discovery/group-invite`. Idempotent —
-   * same bytes yield the same id, the server upserts.
+   * Drives one PoW solve + `POST /discovery/group-invite`. Every upload
+   * mints a fresh 6-byte id (ADR-0028 short-link amendment).
    *
    * `maxUses` is a SOFT anti-spam throttle (NOT part of the signed
    * capability, NOT an access control — the admin approval gate is the
@@ -1286,7 +1344,7 @@ export class DiscoveryClient {
    * `MAX_CAPABILITY_BYTES` for the group-invite ledger (the wire format
    * tops out near 363 bytes).
    *
-   * @returns The 32-byte `blob_id`, ready to substitute into a
+   * @returns The 6-byte `blob_id`, ready to substitute into a
    *          `/g/<slug>` pointer URL.
    */
   async uploadGroupInvite(
@@ -1313,31 +1371,23 @@ export class DiscoveryClient {
       max_uses: maxUses,
     });
 
-    const blobId = base64UrlDecodeNoPad(resp.blob_id);
-    if (blobId.length !== 32) {
-      throw new DiscoveryHttpError(
-        200,
-        "/discovery/group-invite",
-        `server returned blob_id of ${blobId.length} bytes, expected 32`,
-      );
-    }
-    return blobId;
+    return decodeServerLedgerId(resp.blob_id, "/discovery/group-invite");
   }
 
   /**
    * Fetch a previously-uploaded `GroupInviteCapability` by its
-   * content-addressed `blob_id` (ADR-0028, G-3).
+   * server-assigned `blob_id` (ADR-0028, G-3).
    *
    * Sibling of [`fetchCallInvite`]. Returns `null` on 404 (server folds
    * expired blobs into the same status to deny attacker status-code
    * probing). The caller re-runs `wasm.GroupInviteCapability.decodeAndVerify`
-   * locally so a malicious server cannot serve substituted bytes (+ the
-   * joiner can cross-check `SHA-256(bytes) === blobId`).
+   * locally so a malicious server cannot serve forged bytes; a capability
+   * swapped in under a live id does not open the link's preview (the preview
+   * key binds the group id and issuer). Throws `DiscoveryRateLimitedError` on
+   * 429 (per-address rate limit).
    */
   async fetchGroupInvite(blobId: Uint8Array): Promise<Uint8Array | null> {
-    if (blobId.length !== 32) {
-      throw new DiscoveryClientArgError("blobId must be 32 bytes");
-    }
+    await requireLedgerId(blobId);
     const slug = base64UrlEncodeNoPad(blobId);
     const url = `${this.baseUrl}/discovery/group-invite/${slug}`;
     let response: Response;
@@ -1346,6 +1396,7 @@ export class DiscoveryClient {
     } catch (err) {
       throw new DiscoveryNetworkError("/discovery/group-invite (GET)", err);
     }
+    if (response.status === 429) throw DiscoveryRateLimitedError.from(response, "/discovery/group-invite (GET)");
     if (response.status === 404) return null;
     if (!response.ok) {
       const text = await safeReadBody(response);
@@ -1381,9 +1432,7 @@ export class DiscoveryClient {
     capabilityBytes: Uint8Array,
     joinerAccountId: Uint8Array,
   ): Promise<ConsumeInviteResult> {
-    if (blobId.length !== 32) {
-      throw new DiscoveryClientArgError("blobId must be 32 bytes");
-    }
+    await requireLedgerId(blobId);
     if (joinerAccountId.length !== 16) {
       throw new DiscoveryClientArgError("joinerAccountId must be 16 bytes");
     }
@@ -1416,6 +1465,7 @@ export class DiscoveryClient {
     } catch (err) {
       throw new DiscoveryNetworkError(endpoint, err);
     }
+    if (response.status === 429) throw DiscoveryRateLimitedError.from(response, endpoint);
     if (response.status === 404) return { kind: "not-found" };
     if (response.status === 410) return { kind: "exhausted" };
     if (!response.ok) {
@@ -1455,7 +1505,7 @@ export class DiscoveryClient {
    *
    * Other non-2xx still throw `DiscoveryHttpError`.
    *
-   * @param blobId      Raw 32-byte content-addressed id (the
+   * @param blobId      Raw 6-byte ledger id (the
    *                    same value `uploadInvite` returned).
    * @param signingSeed The owner's 32-byte Ed25519 seed —
    *                    typically `chats.identity().ed25519Seed`.
@@ -1464,9 +1514,7 @@ export class DiscoveryClient {
     blobId: Uint8Array,
     signingSeed: Uint8Array,
   ): Promise<RevokeInviteResult> {
-    if (blobId.length !== 32) {
-      throw new DiscoveryClientArgError("blobId must be 32 bytes");
-    }
+    await requireLedgerId(blobId);
     if (signingSeed.length !== 32) {
       throw new DiscoveryClientArgError("signingSeed must be 32 bytes");
     }
@@ -1520,7 +1568,7 @@ export class DiscoveryClient {
    *     row" / "bad signature" / "stored bytes failed
    *     re-decode" into one status)
    *
-   * @param blobId      Raw 32-byte content-addressed id (the
+   * @param blobId      Raw 6-byte ledger id (the
    *                    same value `uploadCallInvite` returned).
    * @param signingSeed The owner's 32-byte Ed25519 seed —
    *                    typically `chats.identity().ed25519Seed`.
@@ -1529,9 +1577,7 @@ export class DiscoveryClient {
     blobId: Uint8Array,
     signingSeed: Uint8Array,
   ): Promise<RevokeInviteResult> {
-    if (blobId.length !== 32) {
-      throw new DiscoveryClientArgError("blobId must be 32 bytes");
-    }
+    await requireLedgerId(blobId);
     if (signingSeed.length !== 32) {
       throw new DiscoveryClientArgError("signingSeed must be 32 bytes");
     }
@@ -1591,9 +1637,7 @@ export class DiscoveryClient {
     blobId: Uint8Array,
     signingSeed: Uint8Array,
   ): Promise<RevokeInviteResult> {
-    if (blobId.length !== 32) {
-      throw new DiscoveryClientArgError("blobId must be 32 bytes");
-    }
+    await requireLedgerId(blobId);
     if (signingSeed.length !== 32) {
       throw new DiscoveryClientArgError("signingSeed must be 32 bytes");
     }

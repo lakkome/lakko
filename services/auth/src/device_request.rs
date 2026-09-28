@@ -381,6 +381,7 @@ mod device_request_e2e_tests {
             otp_sender: Arc::new(crate::otp_sender::LogOnlyOtpSender),
             throttle: crate::throttle::ThrottleConfig::disabled(),
             backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
+            anon_tokens: None,
         };
         let now_ms = i64::try_from(
             SystemTime::now()

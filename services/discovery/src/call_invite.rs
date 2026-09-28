@@ -4,7 +4,8 @@
 //! Capability-based call-invite blob storage (Phase 3c3-server).
 //!
 //! Sibling of `invite.rs` for `lakko_contacts::CallInviteCapability`.
-//! Owners POST verified bytes; joiners GET by content-addressed id.
+//! Owners POST verified bytes; joiners GET by a random server-minted id
+//! (the ADR-0028 short-link amendment, see `crate::ledger_id`).
 //! Closes G-21 / G-22 from `docs/security/known-gaps.md` by giving
 //! the multi-joiner + max_uses surface a real server-side row.
 //!
@@ -53,10 +54,9 @@ use base64::Engine as _;
 use lakko_contacts::call_invite::{
     call_revoke_canonical_bytes, decode_and_verify, CALL_ID_LEN, CALL_REVOKE_REPLAY_WINDOW_MS,
 };
-use lakko_contacts::invite::{BLOB_ID_LEN, JOINER_TAG_LEN};
+use lakko_contacts::invite::JOINER_TAG_LEN;
 use lakko_contacts::ACCOUNT_ID_LEN;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::AppState;
 
@@ -74,7 +74,7 @@ const MAX_CAPABILITY_BYTES: usize = 8192;
 const MAX_USES_UNLIMITED: u32 = u32::MAX;
 
 // ============================================================================
-// POST /discovery/call-invite — upload + verify + content-address
+// POST /discovery/call-invite — upload + verify + mint a random id
 // ============================================================================
 
 #[derive(Deserialize)]
@@ -88,15 +88,15 @@ pub(crate) struct UploadRequest {
 
 #[derive(Serialize)]
 pub(crate) struct UploadResponse {
-    /// base64url-no-pad of the SHA-256 of `capability_bytes`.
-    /// Same bytes ⇒ same id; a retried upload is idempotent.
-    /// The web client substitutes this directly into the
-    /// `/c/<blob_id>` URL.
+    /// base64url-no-pad of the random [`lakko_contacts::invite::BLOB_ID_LEN`]-byte
+    /// ledger id (8 characters), minted fresh for this upload: the same
+    /// capability uploaded twice gets two ids. The client substitutes this
+    /// directly into the `/c/<blob_id>` URL.
     pub(crate) blob_id: String,
 }
 
-/// `POST /discovery/call-invite` — upsert a verified call-invite
-/// capability.
+/// `POST /discovery/call-invite` — store a verified call-invite
+/// capability under a fresh id.
 pub(crate) async fn upload(
     State(state): State<AppState>,
     axum::Extension(authed): axum::Extension<crate::auth::AuthenticatedAccount>,
@@ -138,7 +138,6 @@ pub(crate) async fn upload(
         )
     })?;
 
-    let blob_id = blob_id_for(&bytes);
     let owner_account_id = cap.owner_account_id;
 
     // Anti-impersonation — the capability's embedded
@@ -161,29 +160,30 @@ pub(crate) async fn upload(
     let max_uses: u32 = cap.max_uses;
     let call_id: [u8; CALL_ID_LEN] = cap.call_id;
 
-    sqlx::query(
-        "INSERT INTO call_invites \
-            (blob_id, capability_bytes, owner_account_id, call_id, expiry_ms, max_uses) \
-         VALUES (?, ?, ?, ?, ?, ?) \
-         ON DUPLICATE KEY UPDATE \
-            capability_bytes = VALUES(capability_bytes), \
-            max_uses = VALUES(max_uses)",
-    )
-    .bind(&blob_id[..])
-    .bind(&bytes)
-    .bind(&owner_account_id[..])
-    .bind(&call_id[..])
-    .bind(expiry_ms)
-    .bind(max_uses)
-    .execute(&state.db)
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "upsert call_invites");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal db error".to_string(),
-        )
-    })?;
+    // A random id, never an upsert: a collision is retried under a fresh id
+    // and can never overwrite another link's row (the short-link amendment
+    // of ADR-0028, see `crate::ledger_id`).
+    let db = state.db.clone();
+    let blob_id = crate::ledger_id::insert_with_fresh_id("call_invites", |id| {
+        let db = db.clone();
+        let bytes = bytes.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO call_invites \
+                    (blob_id, capability_bytes, owner_account_id, call_id, expiry_ms, max_uses) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(id.to_vec())
+            .bind(bytes)
+            .bind(owner_account_id.to_vec())
+            .bind(call_id.to_vec())
+            .bind(expiry_ms)
+            .bind(max_uses)
+            .execute(&db)
+            .await
+        }
+    })
+    .await?;
 
     let blob_id_b64url = B64URL.encode(blob_id);
     tracing::info!(
@@ -192,7 +192,7 @@ pub(crate) async fn upload(
         call_id = %B64.encode(call_id),
         expiry_ms = expiry_ms,
         bytes = bytes.len(),
-        "call-invite upserted",
+        "call-invite stored",
     );
     Ok(Json(UploadResponse {
         blob_id: blob_id_b64url,
@@ -200,13 +200,13 @@ pub(crate) async fn upload(
 }
 
 // ============================================================================
-// GET /discovery/call-invite/{blob_id} — fetch by content-addressed id
+// GET /discovery/call-invite/{blob_id} — fetch by id
 // ============================================================================
 
 #[derive(Serialize)]
 pub(crate) struct FetchResponse {
     /// Standard-alphabet base64 of the stored capability bytes.
-    /// Client re-hashes + re-verifies locally before consuming.
+    /// Client re-verifies the signature locally before consuming.
     pub(crate) capability: String,
 }
 
@@ -218,18 +218,7 @@ pub(crate) async fn fetch(
     State(state): State<AppState>,
     Path(blob_id_b64url): Path<String>,
 ) -> Result<Json<FetchResponse>, (StatusCode, String)> {
-    let blob_id = B64URL.decode(&blob_id_b64url).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("invalid blob_id base64url: {e}"),
-        )
-    })?;
-    if blob_id.len() != BLOB_ID_LEN {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("blob_id must be {BLOB_ID_LEN} bytes after decode"),
-        ));
-    }
+    let blob_id = crate::ledger_id::parse_blob_id(&blob_id_b64url)?;
 
     let row: Option<(Vec<u8>, u64)> =
         sqlx::query_as("SELECT capability_bytes, expiry_ms FROM call_invites WHERE blob_id = ?")
@@ -323,18 +312,7 @@ pub(crate) async fn consume(
 ) -> Result<Json<ConsumeResponse>, (StatusCode, String)> {
     crate::pow::verify_proof(&state.db, &payload.pow).await?;
 
-    let blob_id = B64URL.decode(&blob_id_b64url).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("invalid blob_id base64url: {e}"),
-        )
-    })?;
-    if blob_id.len() != BLOB_ID_LEN {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("blob_id must be {BLOB_ID_LEN} bytes after decode"),
-        ));
-    }
+    let blob_id = crate::ledger_id::parse_blob_id(&blob_id_b64url)?;
 
     let joiner_tag = B64.decode(&payload.joiner_tag).map_err(|e| {
         (
@@ -563,18 +541,7 @@ pub(crate) async fn revoke(
     axum::Extension(_authed): axum::Extension<crate::auth::AuthenticatedAccount>,
     Json(payload): Json<RevokeRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let blob_id = B64URL.decode(&blob_id_b64url).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("invalid blob_id base64url: {e}"),
-        )
-    })?;
-    if blob_id.len() != BLOB_ID_LEN {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("blob_id must be {BLOB_ID_LEN} bytes after decode"),
-        ));
-    }
+    let blob_id = crate::ledger_id::parse_blob_id(&blob_id_b64url)?;
 
     // Replay window check before any DB work — cheap DoS
     // gate.
@@ -637,9 +604,7 @@ pub(crate) async fn revoke(
         },
     };
 
-    let mut blob_id_arr = [0_u8; BLOB_ID_LEN];
-    blob_id_arr.copy_from_slice(&blob_id);
-    let canonical = call_revoke_canonical_bytes(&blob_id_arr, payload.signed_at_ms);
+    let canonical = call_revoke_canonical_bytes(&blob_id, payload.signed_at_ms);
     if cap
         .owner_signature_pubkey
         .verify(&canonical, &signature)
@@ -688,16 +653,6 @@ fn current_unix_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
-
-fn blob_id_for(capability_bytes: &[u8]) -> [u8; BLOB_ID_LEN] {
-    let mut hasher = Sha256::new();
-    hasher.update(capability_bytes);
-    let digest = hasher.finalize();
-    let mut out = [0_u8; BLOB_ID_LEN];
-    out.copy_from_slice(&digest);
-    out
-}
-
 // Statically prove the constants align with the imports we
 // don't otherwise read at runtime.
 const _: () = {
@@ -718,61 +673,7 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // -------------------------------------------------------------------------
-    // blob_id_for — SHA-256 of the capability bytes, surface
-    // contract: deterministic 32 bytes, distinct inputs ⇒
-    // distinct outputs.
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn blob_id_is_sha256_of_capability_bytes() {
-        let bytes = b"a-test-call-capability-stand-in";
-        let id = blob_id_for(bytes);
-        assert_eq!(id.len(), BLOB_ID_LEN);
-
-        // Independent SHA-256 with the same input must match.
-        let mut h = Sha256::new();
-        h.update(bytes);
-        let expected: [u8; BLOB_ID_LEN] = h.finalize().into();
-        assert_eq!(id, expected);
-    }
-
-    #[test]
-    fn same_bytes_yield_same_blob_id() {
-        let bytes = vec![0xAAu8; 200];
-        assert_eq!(blob_id_for(&bytes), blob_id_for(&bytes));
-    }
-
-    #[test]
-    fn different_bytes_yield_different_blob_id() {
-        // SHA-256 collision space is 2^256 — practically zero
-        // chance of an accidental tie on single-byte differences.
-        let a = [0xAAu8; 200];
-        let mut b = a;
-        b[0] = 0xBB;
-        assert_ne!(blob_id_for(&a), blob_id_for(&b));
-    }
-
-    /// The `blob_id_for` output must NOT collide with the
-    /// contact-invite ledger's `blob_id_for` over the same
-    /// bytes — both compute SHA-256, so they collide by design,
-    /// but the cross-table FK CASCADE on `call_invite_consumers`
-    /// only fires when `call_invites.blob_id` is deleted. We
-    /// pin the layout contract: the call-invite `blob_id_for`
-    /// is byte-for-byte SHA-256 of the capability bytes (no
-    /// domain separator), so a future change to a domain-
-    /// separated layout would surface here. The dedup tables
-    /// are partitioned by table, not by id-namespace.
-    #[test]
-    fn blob_id_layout_is_plain_sha256_no_domain_separator() {
-        let bytes = b"call-invite-canary";
-        let id = blob_id_for(bytes);
-        let mut h = Sha256::new();
-        h.update(bytes);
-        let expected: [u8; BLOB_ID_LEN] = h.finalize().into();
-        assert_eq!(id, expected, "blob_id_for must be plain SHA-256");
-    }
+    use lakko_contacts::invite::BLOB_ID_LEN;
 
     // -------------------------------------------------------------------------
     // Constants vs. migration shape — drift sentinels.
@@ -780,29 +681,29 @@ mod tests {
 
     /// The `MAX_CAPABILITY_BYTES` constant pins the
     /// `VARBINARY(...)` width declared in
-    /// `0007_call_invites.sql`. Drift surfaces as a test
+    /// `0018_short_invite_ids.sql`. Drift surfaces as a test
     /// failure rather than a silent "everything past N bytes
     /// 500s in production".
     #[test]
     fn max_capability_bytes_matches_column_width() {
-        let migration = include_str!("../migrations/0007_call_invites.sql");
+        let migration = include_str!("../migrations/0018_short_invite_ids.sql");
         assert!(
             migration.contains(&format!("VARBINARY({MAX_CAPABILITY_BYTES})")),
             "MAX_CAPABILITY_BYTES ({MAX_CAPABILITY_BYTES}) must match the \
-             VARBINARY width declared in 0007_call_invites.sql",
+             VARBINARY width declared in 0018_short_invite_ids.sql",
         );
     }
 
     #[test]
     fn blob_id_len_matches_column_width() {
-        let migration = include_str!("../migrations/0007_call_invites.sql");
+        let migration = include_str!("../migrations/0018_short_invite_ids.sql");
         // Whitespace-tolerant — same hand-alignment as
         // `call_invites_migration_indexes`.
         let normalised = migration.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             normalised.contains(&format!("blob_id BINARY({BLOB_ID_LEN})")),
             "BLOB_ID_LEN ({BLOB_ID_LEN}) must match the BINARY width \
-             declared in 0007_call_invites.sql",
+             declared in 0018_short_invite_ids.sql",
         );
     }
 
@@ -824,31 +725,31 @@ mod tests {
     /// silently break dedup or leak orphan rows; surface here.
     #[test]
     fn call_invite_consumers_migration_shape() {
-        let migration = include_str!("../migrations/0008_call_invite_consumers.sql");
+        let migration = include_str!("../migrations/0018_short_invite_ids.sql");
         let normalised = migration.split_whitespace().collect::<Vec<_>>().join(" ");
         // Side-table exists.
         assert!(
             migration.contains("CREATE TABLE IF NOT EXISTS call_invite_consumers"),
-            "0008 migration must create `call_invite_consumers`",
+            "0018 migration must create `call_invite_consumers`",
         );
         // Tag column matches `JOINER_TAG_LEN` (the helper
         // shared with the contact-invite ecosystem — see
         // `lakko_contacts::invite::JOINER_TAG_LEN`).
         assert!(
             normalised.contains(&format!("joiner_tag BINARY({JOINER_TAG_LEN})")),
-            "0008 migration must declare joiner_tag as BINARY({JOINER_TAG_LEN})",
+            "0018 migration must declare joiner_tag as BINARY({JOINER_TAG_LEN})",
         );
         // PK is the dedup key the consume handler reads.
         assert!(
             migration.contains("PRIMARY KEY (blob_id, joiner_tag)"),
-            "0008 migration must PK on (blob_id, joiner_tag)",
+            "0018 migration must PK on (blob_id, joiner_tag)",
         );
         // FK CASCADE is what gives us free cleanup on revoke.
         assert!(
             migration.contains(
                 "FOREIGN KEY (blob_id) REFERENCES call_invites(blob_id) ON DELETE CASCADE",
             ),
-            "0008 migration must FK CASCADE on call_invites.blob_id",
+            "0018 migration must FK CASCADE on call_invites.blob_id",
         );
     }
 
@@ -859,10 +760,10 @@ mod tests {
     /// hot queries into table scans.
     #[test]
     fn call_invites_migration_indexes() {
-        let migration = include_str!("../migrations/0007_call_invites.sql");
+        let migration = include_str!("../migrations/0018_short_invite_ids.sql");
         assert!(
             migration.contains("CREATE TABLE IF NOT EXISTS call_invites"),
-            "0007 migration must create `call_invites`",
+            "0018 migration must create `call_invites`",
         );
         // Whitespace-tolerant — the migration is hand-aligned
         // for readability (varies between 1–11 spaces between
@@ -872,7 +773,7 @@ mod tests {
         let normalised = migration.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             normalised.contains(&format!("call_id BINARY({CALL_ID_LEN})")),
-            "0007 migration must declare call_id as BINARY({CALL_ID_LEN})",
+            "0018 migration must declare call_id as BINARY({CALL_ID_LEN})",
         );
         // The host-side bind layout requires `expiry_ms`,
         // `max_uses`, `owner_account_id`, `call_id` all
@@ -880,15 +781,15 @@ mod tests {
         // drops one of them.
         assert!(
             migration.contains("expiry_ms"),
-            "0007 migration must declare expiry_ms column",
+            "0018 migration must declare expiry_ms column",
         );
         assert!(
             migration.contains("max_uses"),
-            "0007 migration must declare max_uses column",
+            "0018 migration must declare max_uses column",
         );
         assert!(
             migration.contains("owner_account_id"),
-            "0007 migration must declare owner_account_id column",
+            "0018 migration must declare owner_account_id column",
         );
     }
 

@@ -112,10 +112,15 @@ public final class ChatClient {
     /// the send (fail-closed) so the gen-N ciphertext never reaches the DS
     /// without its N+1 ratchet state on disk — see the persist-before-
     /// publish comment below for the nonce-reuse-on-crash rationale.
+    ///
+    /// ADR-0054 decision 1 — `wake`, when present, rides the publish as the
+    /// `x-lakko-wake` header and the DS wakes the group's subscribed devices
+    /// after appending the row. There is no separate push-gw request.
     public func sendMessage(
         identity: Identity,
         group: Group,
-        plaintext: Data
+        plaintext: Data,
+        wake: DsWake? = nil
     ) async throws -> SendMessageResult {
         guard !plaintext.isEmpty else {
             throw ChatError.argument("plaintext must be non-empty")
@@ -181,7 +186,8 @@ public final class ChatClient {
             publish = try await ds.publishGroup(
                 groupId: groupId,
                 payload: wireBytes,
-                auth: await dsAuth(identity: identity, group: group, groupId: groupId)
+                auth: await dsAuth(identity: identity, group: group, groupId: groupId),
+                wake: wake
             )
         } catch {
             throw ChatError.wrapped("DS publish failed", underlying: error)
@@ -241,6 +247,9 @@ public final class ChatClient {
     /// Records the DS id in the own-published registry so the broadcaster's
     /// own next poll drops the echo (the owner already holds the secret it
     /// minted). Returns the DS message id.
+    ///
+    /// Never carries an ADR-0054 `x-lakko-wake` header: a control envelope
+    /// is silent.
     @discardableResult
     public func broadcastControl(
         identity: Identity,

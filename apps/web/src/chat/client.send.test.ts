@@ -22,7 +22,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { ChatClient, ChatError } from "./client";
 import type { DsClient } from "../ds/client";
-import type { PushClient } from "../push/client";
 import type {
   Group as WasmGroup,
   Identity as WasmIdentity,
@@ -41,15 +40,6 @@ function mockGroup(order: string[]): WasmGroup {
       return new Uint8Array([9, 9, 9, 9]);
     },
   } as unknown as WasmGroup;
-}
-
-/** Push client stub — `sendMessage` fires `notifyGroup`
- *  fire-and-forget after publish; a resolved stub keeps it off
- *  the network. */
-function mockPush(): PushClient {
-  return {
-    notifyGroup: vi.fn(async () => {}),
-  } as unknown as PushClient;
 }
 
 /** Canonical identity is only ever handed to the (mocked) group,
@@ -71,7 +61,6 @@ describe("ChatClient.sendMessage — persist-before-send", () => {
     const client = new ChatClient(
       ds,
       { identityProvider: () => IDENTITY_TOKEN, onPersist },
-      mockPush(),
     );
 
     const res = await client.sendMessage(
@@ -104,7 +93,6 @@ describe("ChatClient.sendMessage — persist-before-send", () => {
     const client = new ChatClient(
       ds,
       { identityProvider: () => IDENTITY_TOKEN, onPersist },
-      mockPush(),
     );
 
     await expect(
@@ -134,7 +122,6 @@ describe("ChatClient.sendMessage — persist-before-send", () => {
     const client = new ChatClient(
       ds,
       { identityProvider: () => IDENTITY_TOKEN, onPersist },
-      mockPush(),
     );
 
     let caught: unknown;
@@ -164,7 +151,6 @@ describe("ChatClient.sendMessage — persist-before-send", () => {
     const client = new ChatClient(
       ds,
       { identityProvider: () => IDENTITY_TOKEN },
-      mockPush(),
     );
 
     const res = await client.sendMessage(

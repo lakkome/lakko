@@ -866,6 +866,7 @@ mod recovery_contact_e2e_tests {
             otp_sender: sender,
             throttle: crate::throttle::ThrottleConfig::disabled(),
             backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
+            anon_tokens: None,
         };
         (state, token_secret)
     }

@@ -59,7 +59,6 @@ vi.mock("./commit-outbox", () => ({
 import { base64Encode } from "../auth/account-id";
 import { ChatClient } from "./client";
 import type { DsClient } from "../ds/client";
-import type { PushClient } from "../push/client";
 import type {
   Group as WasmGroup,
   Identity as WasmIdentity,
@@ -173,7 +172,6 @@ function world(): World {
         if (persistFails) throw new Error("IndexedDB quota exceeded");
       },
     },
-    { notifyGroup: async () => {} } as unknown as PushClient,
   );
 
   return {

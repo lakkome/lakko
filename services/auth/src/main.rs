@@ -49,6 +49,13 @@
 //!   value, e.g. 60, to arm it — fails OPEN on a store error).
 //! - `LAKKO_BACKUP_HEAD_MINT_RATE_WINDOW_SECS` — the mint rate-limit's fixed
 //!   window (default 60; only consulted once a positive limit is set).
+//! - `LAKKO_ANON_TOKEN_MASTER_SECRET` — 64 hex characters shared with every
+//!   service that verifies anonymous tokens (ADR-0054). Optional; unset =
+//!   `/auth/tokens*` return 503 (logged as a warning at startup).
+//! - `LAKKO_ANON_TOKEN_WINDOW_SECS` — anonymous-token epoch window (default
+//!   86400; must match every verifier).
+//! - `LAKKO_ANON_TOKEN_QUOTA_<CONTEXT>` — tokens per account per epoch for one
+//!   context (see `src/anon_tokens.rs` for the names and defaults).
 //!
 //! Endpoints:
 //!
@@ -72,9 +79,12 @@
 //! - `POST /webauthn/auth/finish`    — passkey login, step 2 (Phase 2a2b, anonymous)
 //! - `POST /call/jwt`                — issue SFU-bound JWT (Phase 3b4 forward, bearer-auth)
 //! - `GET  /.well-known/jwks.json`   — publish call-JWT public key (Phase 3b4 forward, anonymous)
+//! - `POST /auth/tokens`             — issue anonymous tokens against a quota (ADR-0054, bearer-auth)
+//! - `GET  /auth/tokens/key/{context}/{epoch}` — anonymous-token public key (ADR-0054, anonymous)
 
 #![forbid(unsafe_code)]
 
+mod anon_tokens;
 mod backup_head;
 mod call_jwt;
 mod device_authorize;
@@ -212,6 +222,10 @@ pub(crate) struct AppState {
     /// only per-account mint bookkeeping and fails OPEN on a store error — no
     /// E2EE / invariant impact.
     pub(crate) backup_head_mint_rate: backup_head::MintRateConfig,
+    /// ADR-0054 decision 2 — anonymous-token issuance (the shared master
+    /// secret + epoch window + per-context quotas). `None` when
+    /// `LAKKO_ANON_TOKEN_MASTER_SECRET` is unset: `/auth/tokens*` return 503.
+    pub(crate) anon_tokens: Option<Arc<anon_tokens::AnonTokenIssuer>>,
 }
 
 #[tokio::main]
@@ -391,6 +405,11 @@ async fn main() -> Result<()> {
         );
     }
 
+    // ADR-0054 decision 2 — anonymous-token issuance. Loud-fail on a malformed
+    // master secret / window / quota; dormant (with a warning) when unset.
+    let anon_tokens = anon_tokens::load_anon_tokens().context("load anonymous-token config")?;
+    anon_tokens::log_startup(anon_tokens.as_ref());
+
     let state = AppState {
         db: pool.clone(),
         opaque_setup: Arc::new(opaque_setup),
@@ -407,6 +426,7 @@ async fn main() -> Result<()> {
         otp_sender,
         throttle: throttle_config,
         backup_head_mint_rate,
+        anon_tokens: anon_tokens.clone().map(Arc::new),
     };
 
     // Background tasks: periodically delete expired rows from the
@@ -417,6 +437,10 @@ async fn main() -> Result<()> {
     let _webauthn_pruner = webauthn::spawn_state_pruner(pool.clone());
     // ADR-0033 — prune expired call-admission events + throttled-call rows.
     let _throttle_pruner = throttle::spawn_pruner(pool.clone(), throttle_config);
+    // ADR-0054 — drop issuance-quota rows older than the previous epoch.
+    let _anon_token_pruner = anon_tokens.as_ref().map(|i| {
+        lakko_anon_token_server::spawn_issuance_pruner(pool.clone(), i.server.window_secs)
+    });
 
     let app = build_app(state);
 
@@ -568,6 +592,17 @@ fn build_app(state: AppState) -> Router {
             webauthn::require_session,
         ));
 
+    // ADR-0054 decision 2 — `POST /auth/tokens` evaluates a blinded batch of
+    // anonymous tokens against the account's per-(context, epoch) quota.
+    // Bearer-auth: the session is what the quota is counted against. The
+    // matching public-key route is anonymous (public router below).
+    let anon_token_routes = Router::new()
+        .route("/auth/tokens", post(anon_tokens::issue_tokens))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            webauthn::require_session,
+        ));
+
     Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
@@ -644,6 +679,14 @@ fn build_app(state: AppState) -> Router {
         .merge(turn_routes)
         .merge(genesis_routes)
         .merge(backup_head_routes)
+        // ADR-0054 — the anonymous-token public key for (context, epoch).
+        // ANONYMOUS: a client checks the issuance proof against this key,
+        // fetched independently of the issuance response.
+        .route(
+            "/auth/tokens/key/{context}/{epoch}",
+            get(anon_tokens::public_key),
+        )
+        .merge(anon_token_routes)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

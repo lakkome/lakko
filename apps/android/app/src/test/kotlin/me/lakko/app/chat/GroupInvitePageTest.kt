@@ -4,90 +4,226 @@
 package me.lakko.app.chat
 
 import me.lakko.app.auth.base64UrlEncodeNoPad
+import me.lakko.app.discovery.DiscoveryHttpError
+import me.lakko.app.discovery.TEST_INVITE_LINK_LENGTHS
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ADR-0028 v2 (`docs/ux/group-invite-page.md`) — the pure half of the group
- * invite page.
+ * ADR-0028 v2 (`docs/ux/group-invite-page.md`) and the short-link amendment of
+ * 2026-09-27 — the pure half of the group invite page.
  *
- *  1. The link key rides the URL fragment on both link forms and parses back
- *     out; anything that is not a 32-byte base64url key reads as "no preview".
- *  2. The revoke path parses the slug BEFORE the `#`.
- *  3. The one route argument carries slug + fragment and splits back.
- *  4. The card copy: both names, one missing, both missing, count 1 vs N, and
- *     no preview at all.
+ *  1. The 12-byte link secret rides the URL fragment (16 characters) on both
+ *     link forms and parses back out; an absent fragment is "no preview", a
+ *     present one of any other shape (the old 43-character key included) is
+ *     malformed and refuses the link.
+ *  2. A fragment whose preview does not open refuses the link as damaged — no
+ *     preview-less fallback.
+ *  3. The pointer slug is the 8-character id; the old 43-character id and the
+ *     dead zone are refused.
+ *  4. The revoke path parses the slug BEFORE the `#`.
+ *  5. The one route argument carries slug + fragment and splits back.
+ *  6. The card copy.
+ *
+ * The widths are passed in ([TEST_INVITE_LINK_LENGTHS]): the host JVM has no
+ * native library to read the core's.
  */
 class GroupInvitePageTest {
 
-    private val key = ByteArray(GROUP_INVITE_LINK_KEY_LEN) { (it * 7 + 3).toByte() }
+    private val L = TEST_INVITE_LINK_LENGTHS
+    private val key = ByteArray(L.linkSecretLen) { (it * 7 + 3).toByte() }
     private val keyText = base64UrlEncodeNoPad(key)
-    private val blobId = ByteArray(GROUP_INVITE_BLOB_ID_LEN) { it.toByte() }
+    private val blobId = ByteArray(L.blobIdLen) { it.toByte() }
     private val origin = "https://lakko.me"
+
+    private fun pointerUrl(): String = composePointerGroupInviteUrl(blobId, origin, L)
 
     // ---- 1. the fragment -------------------------------------------------
 
     @Test
-    fun `the pointer link carries the key as its fragment`() {
-        val url = appendGroupInviteLinkKey(composePointerGroupInviteUrl(blobId, origin), key)
+    fun `the pointer link is id plus secret, about 45 characters`() {
+        val url = appendGroupInviteLinkKey(pointerUrl(), key, L)
         assertEquals("$origin/g/${base64UrlEncodeNoPad(blobId)}#$keyText", url)
-        assertEquals(43, keyText.length)
+        assertEquals(8, base64UrlEncodeNoPad(blobId).length)
+        assertEquals(16, keyText.length)
+        assertEquals("https://lakko.me/g/".length + 8 + 1 + 16, url.length)
     }
 
     @Test
-    fun `the inline link carries the key as its fragment too`() {
+    fun `the inline link carries the secret as its fragment too`() {
         val wire = ByteArray(160) { (it + 1).toByte() }
-        val url = appendGroupInviteLinkKey(composeInlineGroupInviteUrl(wire, origin), key)
+        val url = appendGroupInviteLinkKey(composeInlineGroupInviteUrl(wire, origin), key, L)
         assertEquals("$origin/g/${base64UrlEncodeNoPad(wire)}#$keyText", url)
         // The slug still discriminates as inline once the fragment is stripped.
         val slug = groupInviteSlugOf(url)
-        assertEquals(ParsedGroupInvite.Inline(wire), parseGroupInviteSlug(slug!!))
+        assertEquals(ParsedGroupInvite.Inline(wire), parseGroupInviteSlug(slug!!, L))
     }
 
     @Test
-    fun `a key of the wrong length never produces a link`() {
+    fun `a secret of the wrong length never produces a link`() {
         assertThrows(IllegalArgumentException::class.java) {
-            appendGroupInviteLinkKey("$origin/g/x", ByteArray(31))
+            appendGroupInviteLinkKey("$origin/g/x", ByteArray(32), L)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            appendGroupInviteLinkKey("$origin/g/x", ByteArray(11), L)
         }
     }
 
     @Test
-    fun `the key parses back out of the fragment`() {
-        val url = appendGroupInviteLinkKey(composePointerGroupInviteUrl(blobId, origin), key)
+    fun `the secret parses back out of the fragment`() {
+        val url = appendGroupInviteLinkKey(pointerUrl(), key, L)
         val fragment = groupInviteFragmentOf(url)
         assertEquals(keyText, fragment)
-        assertArrayEquals(key, parseGroupInviteLinkKey(fragment))
+        val parsed = parseGroupInviteFragment(fragment, L)
+        assertTrue(parsed is GroupInviteFragment.Secret)
+        assertArrayEquals(key, (parsed as GroupInviteFragment.Secret).bytes)
     }
 
     @Test
-    fun `an absent, blank, wrong-length or undecodable fragment is no preview, not an error`() {
-        assertNull(parseGroupInviteLinkKey(null))
-        assertNull(parseGroupInviteLinkKey(""))
-        assertNull(parseGroupInviteLinkKey("   "))
-        assertNull(parseGroupInviteLinkKey(base64UrlEncodeNoPad(ByteArray(31))))
-        assertNull(parseGroupInviteLinkKey(base64UrlEncodeNoPad(ByteArray(33))))
-        assertNull(parseGroupInviteLinkKey("not*base64url!"))
-        assertNull(groupInviteFragmentOf(composePointerGroupInviteUrl(blobId, origin)))
+    fun `an absent or blank fragment is no preview, not an error`() {
+        assertSame(GroupInviteFragment.Absent, parseGroupInviteFragment(null, L))
+        assertSame(GroupInviteFragment.Absent, parseGroupInviteFragment("", L))
+        assertSame(GroupInviteFragment.Absent, parseGroupInviteFragment("   ", L))
+        assertNull(groupInviteFragmentOf(pointerUrl()))
     }
 
-    // ---- 2. the revoke slug ---------------------------------------------
+    @Test
+    fun `a fragment that is not exactly the 16-character secret is malformed`() {
+        val old = base64UrlEncodeNoPad(ByteArray(32) { 1 })
+        assertEquals(43, old.length)
+        assertSame(GroupInviteFragment.Malformed, parseGroupInviteFragment(old, L))
+        assertSame(GroupInviteFragment.Malformed, parseGroupInviteFragment(keyText.dropLast(1), L))
+        assertSame(GroupInviteFragment.Malformed, parseGroupInviteFragment(keyText + "A", L))
+        assertSame(GroupInviteFragment.Malformed, parseGroupInviteFragment("not*base64url!!!", L))
+    }
+
+    // ---- 2. the damaged-preview refusal ----------------------------------
+
+    private val preview = GroupInvitePreviewUi("Hiking club", "Anna", 12)
+
+    @Test
+    fun `a secret that opens the preview shows it`() {
+        var opened: ByteArray? = null
+        val outcome = resolveGroupInvitePreview(GroupInviteFragment.Secret(key)) { opened = it; preview }
+        assertEquals(GroupInvitePreviewOutcome.Shown(preview), outcome)
+        assertArrayEquals(key, opened)
+    }
+
+    @Test
+    fun `no fragment shows the page without a preview and never opens`() {
+        val outcome = resolveGroupInvitePreview(GroupInviteFragment.Absent) {
+            error("no secret, nothing to open")
+        }
+        assertEquals(GroupInvitePreviewOutcome.Shown(null), outcome)
+    }
+
+    @Test
+    fun `a secret the preview does not open under refuses the link`() {
+        // The core throws when the sealed preview does not open (a capability
+        // swapped in under a live id, or a wrong secret).
+        val outcome = resolveGroupInvitePreview(GroupInviteFragment.Secret(key)) {
+            throw IllegalStateException("does not open")
+        }
+        assertSame(GroupInvitePreviewOutcome.Damaged, outcome)
+    }
+
+    @Test
+    fun `a secret on a capability with no preview refuses the link`() {
+        // `openPreview` answers null when the capability carries none: a
+        // substituted preview-less capability must not pass as a plain link.
+        val outcome = resolveGroupInvitePreview(GroupInviteFragment.Secret(key)) { null }
+        assertSame(GroupInvitePreviewOutcome.Damaged, outcome)
+    }
+
+    @Test
+    fun `a malformed fragment refuses the link without opening`() {
+        val outcome = resolveGroupInvitePreview(GroupInviteFragment.Malformed) {
+            error("must not open")
+        }
+        assertSame(GroupInvitePreviewOutcome.Damaged, outcome)
+    }
+
+    @Test
+    fun `open failures classify as damaged, rate limited or invalid`() {
+        assertEquals(
+            GroupInviteOpenFailure.Damaged,
+            groupInviteOpenFailure(GroupInviteLinkDamaged()),
+        )
+        assertEquals(
+            GroupInviteOpenFailure.RateLimited,
+            groupInviteOpenFailure(
+                ChatError("group invite fetch failed", DiscoveryHttpError(429, "/discovery/group-invite/x (GET)", "")),
+            ),
+        )
+        assertEquals(
+            GroupInviteOpenFailure.Invalid,
+            groupInviteOpenFailure(ChatError("group invite not found or expired", IllegalStateException("404"))),
+        )
+        assertEquals(
+            GroupInviteOpenFailure.Invalid,
+            groupInviteOpenFailure(
+                ChatError("group invite fetch failed", DiscoveryHttpError(500, "/x", "")),
+            ),
+        )
+    }
+
+    @Test
+    fun `a 429 on consume reads as try again later with a retry, never invalid`() {
+        val copy = joinFailureCopy(
+            ChatError("group invite consume failed", DiscoveryHttpError(429, "/discovery/group-invite/x/consume", "")),
+        )
+        assertEquals(me.lakko.app.discovery.INVITE_RATE_LIMITED_COPY, copy)
+        assertTrue(joinFailureOffersRetry(copy))
+    }
+
+    // ---- 3. the slug -----------------------------------------------------
+
+    @Test
+    fun `the old 43-character pointer and the dead zone are refused`() {
+        val old = base64UrlEncodeNoPad(ByteArray(32) { 2 })
+        assertEquals(43, old.length)
+        val ex = assertThrows(GroupInviteUrlException.SlugWrongLength::class.java) {
+            parseGroupInviteSlug(old, L)
+        }
+        assertEquals(32, ex.got)
+        assertEquals(6, ex.blobIdLen)
+        assertThrows(GroupInviteUrlException.SlugWrongLength::class.java) {
+            parseGroupInviteSlug(base64UrlEncodeNoPad(ByteArray(99)), L)
+        }
+        assertThrows(GroupInviteUrlException.SlugWrongLength::class.java) {
+            parseGroupInviteSlug(base64UrlEncodeNoPad(ByteArray(7)), L)
+        }
+        assertThrows(GroupInviteUrlException.WrongBlobIdLength::class.java) {
+            composePointerGroupInviteUrl(ByteArray(32), origin, L)
+        }
+    }
+
+    @Test
+    fun `a 100-byte slug is inline`() {
+        val wire = ByteArray(GROUP_INVITE_INLINE_MIN_LEN) { 4 }
+        assertEquals(ParsedGroupInvite.Inline(wire), parseGroupInviteSlug(base64UrlEncodeNoPad(wire), L))
+    }
+
+    // ---- 4. the revoke slug ---------------------------------------------
 
     @Test
     fun `the revoke path reads the slug before the fragment`() {
-        val url = appendGroupInviteLinkKey(composePointerGroupInviteUrl(blobId, origin), key)
+        val url = appendGroupInviteLinkKey(pointerUrl(), key, L)
         val slug = groupInviteSlugOf(url)
         assertEquals(base64UrlEncodeNoPad(blobId), slug)
-        assertEquals(ParsedGroupInvite.Pointer(blobId), parseGroupInviteSlug(slug!!))
+        assertEquals(ParsedGroupInvite.Pointer(blobId), parseGroupInviteSlug(slug!!, L))
         // A link without a fragment parses the same.
-        assertEquals(slug, groupInviteSlugOf(composePointerGroupInviteUrl(blobId, origin)))
+        assertEquals(slug, groupInviteSlugOf(pointerUrl()))
         assertNull(groupInviteSlugOf("https://lakko.me/i/abc"))
         assertNull(groupInviteSlugOf("https://lakko.me/g/#$keyText"))
     }
 
-    // ---- 3. the route argument -------------------------------------------
+    // ---- 5. the route argument -------------------------------------------
 
     @Test
     fun `the route argument carries the slug and the fragment and splits back`() {
@@ -106,7 +242,7 @@ class GroupInvitePageTest {
         assertEquals(link, parseGroupJoinArgument("abc#"))
     }
 
-    // ---- 4. the card copy ------------------------------------------------
+    // ---- 6. the card copy ------------------------------------------------
 
     @Test
     fun `both names, several members`() {

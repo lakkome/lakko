@@ -278,6 +278,8 @@ extension DiscoveryClientError {
             }
         case .network:
             return "Network error. Check your connection and try again."
+        case .rateLimited:
+            return "Too many requests. Please wait a moment and retry."
         }
     }
 }

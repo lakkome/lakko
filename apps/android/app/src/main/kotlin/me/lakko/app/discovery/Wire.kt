@@ -257,10 +257,11 @@ data class InviteUploadRequest(
 /** Response body of `POST /discovery/invite`. */
 @Serializable
 data class InviteUploadResponse(
-    /** base64url-no-pad of `SHA-256(capability_bytes)` — same
-     *  bytes ⇒ same id; a retried upload is a no-op (server-
-     *  side upsert). The client substitutes this directly into
-     *  the `https://<host>/i/<blob_id>` pointer URL. */
+    /** base64url-no-pad of a random 6-byte ledger id, 8
+     *  characters (ADR-0028 amendment of 2026-09-27). Fresh on
+     *  every upload: the same bytes uploaded twice get two ids.
+     *  The client substitutes it into the
+     *  `https://<host>/i/<blob_id>` pointer URL. */
     val blob_id: String,
 )
 

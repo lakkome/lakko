@@ -12,7 +12,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { DsAccessRegistry, dsClockSkewNotice, CLOCK_SKEW_NOTICE } from "./access";
 import { fakeSigner } from "./access-test-doubles";
-import { DsClient, DsHttpError, journalQuery } from "./client";
+import { DsClient, DsClientArgError, DsHttpError, journalQuery } from "./client";
 
 const GID = new Uint8Array(32).fill(0xab);
 const GID_HEX = "ab".repeat(32);
@@ -21,6 +21,7 @@ interface Sent {
   readonly url: string;
   readonly method: string;
   readonly proof: string | undefined;
+  readonly wake: string | undefined;
   readonly body: Uint8Array | undefined;
 }
 
@@ -41,6 +42,7 @@ function fakeFetch(
       url: String(input),
       method: init?.method ?? "GET",
       proof: headers["x-lakko-ds-proof"],
+      wake: headers["x-lakko-wake"],
       body: bodyOf(init),
     });
     const next = script.shift() ?? { status: 200, json: { messages: [], has_more: false } };
@@ -272,5 +274,82 @@ describe("the knock", () => {
       pow: { seed: "c2VlZA==", nonce: "bg==", solution: "cw==" },
       payloads_b64: ["+g==", "+/w="],
     });
+  });
+});
+
+describe("ADR-0054 — the wake rides the signed group publish", () => {
+  const PUSH_GID = new Uint8Array(32).fill(0xff);
+  const PUSH_GID_B64URL = "_".repeat(42) + "8";
+
+  it("adds `x-lakko-wake: <push_gid>;<kind>` beside the proof", async () => {
+    const reg = registryWith(() => fakeSigner(4n));
+    reg.markClaimAttempt(GID);
+    const { fetchImpl, sent } = fakeFetch([{ status: 201, json: { id: 9, created_at: "t" } }]);
+    const ds = new DsClient("/api/ds", { access: reg, fetchImpl });
+
+    await ds.publishGroup(GID, new Uint8Array([1, 2]), {
+      wake: { pushGid: PUSH_GID, kind: "message" },
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.wake).toBe(`${PUSH_GID_B64URL};message`);
+    // The proof is unchanged by the wake: it covers method, path, query, body.
+    expect(sent[0]?.proof).toBe(`proof:g@4:POST:/ds/group/${GID_HEX}/messages::2`);
+  });
+
+  it("carries the header on every contract-point-5 retry", async () => {
+    let epoch = 4n;
+    const reg = registryWith(() => fakeSigner(epoch));
+    reg.markClaimAttempt(GID);
+    reg.groupSigners(GID);
+    epoch = 5n;
+    const { fetchImpl, sent } = fakeFetch([
+      { status: 401 },
+      { status: 201, json: { id: 9, created_at: "t" } },
+    ]);
+    const ds = new DsClient("/api/ds", { access: reg, fetchImpl });
+
+    await ds.publishGroup(GID, new Uint8Array([1]), { wake: { pushGid: PUSH_GID, kind: "call" } });
+
+    expect(sent.map((r) => r.wake)).toEqual([
+      `${PUSH_GID_B64URL};call`,
+      `${PUSH_GID_B64URL};call`,
+    ]);
+  });
+
+  it("sends no header without a wake, or with `wake: null`", async () => {
+    const reg = registryWith(() => fakeSigner(4n));
+    reg.markClaimAttempt(GID);
+    const { fetchImpl, sent } = fakeFetch([
+      { status: 201, json: { id: 1, created_at: "t" } },
+      { status: 201, json: { id: 2, created_at: "t" } },
+    ]);
+    const ds = new DsClient("/api/ds", { access: reg, fetchImpl });
+
+    await ds.publishGroup(GID, new Uint8Array([1]));
+    await ds.publishGroup(GID, new Uint8Array([1]), { wake: null });
+
+    expect(sent.map((r) => r.wake)).toEqual([undefined, undefined]);
+  });
+
+  it("refuses a wrong-length push_gid before any request is made", async () => {
+    const reg = registryWith(() => fakeSigner(4n));
+    reg.markClaimAttempt(GID);
+    const { fetchImpl, sent } = fakeFetch([]);
+    const ds = new DsClient("/api/ds", { access: reg, fetchImpl });
+
+    await expect(
+      ds.publishGroup(GID, new Uint8Array([1]), {
+        wake: { pushGid: new Uint8Array(31), kind: "message" },
+      }),
+    ).rejects.toBeInstanceOf(DsClientArgError);
+    expect(sent).toHaveLength(0);
+  });
+
+  it("never puts a wake on a mailbox publish", async () => {
+    const { fetchImpl, sent } = fakeFetch([{ status: 201, json: { id: 1, created_at: "t" } }]);
+    const ds = new DsClient("/api/ds", { access: new DsAccessRegistry(), fetchImpl });
+    await ds.publishMailbox(GID, new Uint8Array([1]));
+    expect(sent[0]?.wake).toBeUndefined();
   });
 });

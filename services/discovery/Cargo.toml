@@ -57,10 +57,6 @@ generic-array = "0.14"
 # it comes in transitively through `lakko-pow-server`.
 lakko-pow-server.workspace = true
 
-# SHA-256 (used by call-invite / invite hashing). The server-side PoW verify
-# (Equix puzzle + SHA-256 effort filter) moved to `lakko-pow-server` above.
-sha2 = "0.10"
-
 base64 = "0.22"
 hex = "0.4"
 rand = "0.8"

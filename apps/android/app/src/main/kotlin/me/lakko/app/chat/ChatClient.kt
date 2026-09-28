@@ -235,10 +235,17 @@ public class ChatClient(
      * Touches no MLS state at all — [PreparedSend] carries plain bytes, so this
      * runs OUTSIDE the repository's global provider lock and a 15 s DS publish no
      * longer blocks every other group's MLS work.
+     *
+     * ADR-0054 — [wake] rides the signed publish as the `x-lakko-wake` header
+     * and the DS wakes the recipients after appending the row; `null` wakes
+     * nobody. The client never calls push-gw to wake anyone.
      */
-    public suspend fun publishPreparedSend(prepared: PreparedSend): SendMessageResult {
+    public suspend fun publishPreparedSend(
+        prepared: PreparedSend,
+        wake: me.lakko.app.ds.DsWake? = null,
+    ): SendMessageResult {
         val publish = try {
-            ds.publishGroup(prepared.groupId, prepared.wireBytes)
+            ds.publishGroup(prepared.groupId, prepared.wireBytes, wake = wake)
         } catch (e: DsClientArgError) {
             throw ChatError("DS publish failed", e)
         } catch (e: DsHttpError) {

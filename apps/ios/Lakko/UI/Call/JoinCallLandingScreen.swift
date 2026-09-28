@@ -70,6 +70,9 @@ public final class JoinCallLandingViewModel: ObservableObject {
     @Published private var localPhase: Phase = .idle
     @Published public private(set) var decoded: Decoded?
     @Published public private(set) var loading = true
+    /// The ledger answered `429` on the link fetch: the link may be fine, so
+    /// the screen says "try again later" rather than "invalid".
+    @Published public private(set) var rateLimited = false
     /// ADR-0048 / UX spec §4 — a guest (no session) is asked for a name here,
     /// prefilled `Guest`. It becomes the new account's own profile.
     @Published public var guestName: String = "Guest"
@@ -242,6 +245,14 @@ public final class JoinCallLandingViewModel: ObservableObject {
 
     // MARK: - Decode
 
+    /// Decode again after a rate-limit refusal.
+    public func retryDecode() async {
+        guard rateLimited else { return }
+        rateLimited = false
+        loading = true
+        await decode()
+    }
+
     private func decode() async {
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
         do {
@@ -277,6 +288,7 @@ public final class JoinCallLandingViewModel: ObservableObject {
         } catch {
             NSLog("join-call: decode/verify failed: %@", String(describing: error))
             decoded = nil
+            rateLimited = DiscoveryClientError.isRateLimited(error)
             loading = false
         }
     }
@@ -344,6 +356,15 @@ public struct JoinCallLandingScreen: View {
 
             if viewModel.loading {
                 ProgressView("Loading call link…")
+            } else if viewModel.rateLimited {
+                Text(inviteRateLimitedMessage)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                Button("Try again") {
+                    Task { await viewModel.retryDecode() }
+                }
+                .buttonStyle(.bordered)
+                closeButton
             } else if viewModel.decoded == nil || viewModel.decoded?.valid == false {
                 Text("This call link is invalid or has expired.")
                     .multilineTextAlignment(.center)

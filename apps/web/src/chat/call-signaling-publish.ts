@@ -76,9 +76,11 @@ export function makeCallSignalingPublisher(
 ): (bytes: Uint8Array) => Promise<void> {
   return async (bytes: Uint8Array): Promise<void> => {
     try {
-      // The wake is fanned out by `broadcastControl` after the DS publish,
-      // unawaited and with every failure swallowed, so asking for one here
-      // cannot slow the publish down and cannot fail the call.
+      // The wake rides the DS publish itself as an `x-lakko-wake` header
+      // (ADR-0054); the DS forwards it to push-gw after the row is appended.
+      // Resolving it never fails the publish: a device without the group's
+      // `push_gid` publishes silently, so asking for one here cannot fail the
+      // call.
       await deps.chat.broadcastControl(
         deps.identity(),
         deps.group(),

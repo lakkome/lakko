@@ -15,7 +15,6 @@ import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.IdentitySecrets
 import me.lakko.app.auth.base64Encode
 import me.lakko.app.profile.toFfi
-import me.lakko.app.auth.base64UrlDecodeNoPad
 import me.lakko.app.auth.base64UrlEncodeNoPad
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.chat.ConversationKind
@@ -750,8 +749,8 @@ public class ContactsRepository(
      * outcome copy.
      *
      * Steps:
-     *   1. base64url-decode the slug to recover the 32-byte
-     *      `blob_id`.
+     *   1. base64url-decode the 8-character slug to recover the
+     *      6-byte `blob_id`.
      *   2. `DiscoveryClient.fetchInvite(blobId)` → capability
      *      wire bytes (404 → `NotFound`).
      *   3. `InviteCapability.decodeAndVerify(wire)` — local
@@ -783,18 +782,17 @@ public class ContactsRepository(
     public suspend fun acceptInviteLink(slug: String): AcceptInviteResult {
         val secrets = authRepo.identitySecrets.value
             ?: return AcceptInviteResult.RequiresReauth
-        val blobId = try {
-            base64UrlDecodeNoPad(slug)
-        } catch (_: Throwable) {
-            return AcceptInviteResult.MalformedSlug
-        }
-        if (blobId.size != 32) return AcceptInviteResult.MalformedSlug
+        // ADR-0028 amendment of 2026-09-27: an `/i/` slug is the 8-character
+        // ledger id (6 bytes); the pre-amendment 43-character id is refused.
+        val blobId = me.lakko.app.discovery.decodeInviteBlobId(slug.trim())
+            ?: return AcceptInviteResult.MalformedSlug
 
         val capabilityBytes = try {
             authenticatedDiscoveryClient().use { discovery ->
                 discovery.fetchInvite(blobId)
             }
         } catch (e: Throwable) {
+            if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) return AcceptInviteResult.RateLimited
             return AcceptInviteResult.Failed(message = e.message ?: "fetch failed")
         } ?: return AcceptInviteResult.NotFound
 
@@ -824,6 +822,9 @@ public class ContactsRepository(
                     discovery.consumeInvite(blobId, capabilityBytes, secrets.accountId)
                 }
             } catch (e: Throwable) {
+                if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) {
+                    return@use AcceptInviteResult.RateLimited
+                }
                 return@use AcceptInviteResult.Failed(
                     message = e.message ?: "consume failed",
                 )
@@ -925,7 +926,7 @@ public class ContactsRepository(
      * Builds the canonical [`InviteCapability`](uniffi.lakko_ffi_uniffi.InviteCapability)
      * wire bytes from the current session's [IdentitySecrets] +
      * uploads them to the discovery directory; receives a
-     * server-assigned 32-byte `blob_id` back. Returns the
+     * server-assigned 6-byte `blob_id` back. Returns the
      * `https://lakko.me/i/<blob_id_b64url>` pointer URL the
      * owner shares via copy-to-clipboard or the Android share
      * sheet.
@@ -1230,8 +1231,10 @@ public data class ContactsState(
  *   * [NotFound] — server returned 404 (revoked / expired /
  *     never-issued; the server folds these into one status to
  *     deny status-code probing).
- *   * [MalformedSlug] — the URL slug is not valid base64url
- *     or doesn't decode to a 32-byte blob_id.
+ *   * [MalformedSlug] — the URL slug is not the 8-character
+ *     base64url form of a 6-byte blob_id.
+ *   * [RateLimited] — the discovery service answered `429` on
+ *     fetch or consume. The link may be fine; try again later.
  *   * [RequiresReauth] — [AuthRepository.identitySecrets] is
  *     `null`. The UI surfaces a "please re-enter your
  *     password" panel + a Login deep-link.
@@ -1273,6 +1276,7 @@ public sealed interface AcceptInviteResult {
     public data object Exhausted : AcceptInviteResult
     public data object NotFound : AcceptInviteResult
     public data object MalformedSlug : AcceptInviteResult
+    public data object RateLimited : AcceptInviteResult
     public data object RequiresReauth : AcceptInviteResult
 
     public data class Failed(val message: String) : AcceptInviteResult
@@ -1280,7 +1284,7 @@ public sealed interface AcceptInviteResult {
 
 /** An invite link the owner has just generated this session. */
 public data class GeneratedInvite(
-    /** Raw 32-byte content-addressed id (the same value
+    /** Raw 6-byte server-assigned ledger id (the same value
      *  `revokeInviteLink` takes). */
     val blobId: ByteArray,
     /** base64url-no-pad of [blobId] — the slug portion of [url]. */

@@ -5,15 +5,15 @@
 //!
 //! Server-side anti-abuse ledger for `GroupInviteCapability` links — the group
 //! analogue of [`crate::call_invite`]. An owner/admin POSTs the verified link
-//! bytes; a prospective joiner GETs them by content-addressed id (the
+//! bytes; a prospective joiner GETs them by a random server-minted id (the
 //! `/g/<blob_id>` pointer form, the indirection over the inline
 //! `/g/<base64url>` link of ADR-0028 Phase 1-3) and registers one consume
 //! against the link's soft `max_uses` ceiling.
 //!
 //! Routes:
 //!
-//! - `POST /discovery/group-invite`                       — upload + verify + content-address (session-gated).
-//! - `GET  /discovery/group-invite/{blob_id}`             — fetch by content-addressed id (open).
+//! - `POST /discovery/group-invite`                       — upload + verify + mint a random id (session-gated).
+//! - `GET  /discovery/group-invite/{blob_id}`             — fetch by id (open, per-IP rate-limited).
 //! - `POST /discovery/group-invite/{blob_id}/consume`     — atomic per-joiner consume (open).
 //!
 //! ## The ledger is NOT the security boundary
@@ -44,9 +44,8 @@ use base64::Engine as _;
 use lakko_contacts::group_invite::{
     decode_and_verify, group_revoke_canonical_bytes, GROUP_INVITE_REVOKE_REPLAY_WINDOW_MS,
 };
-use lakko_contacts::invite::{BLOB_ID_LEN, JOINER_TAG_LEN};
+use lakko_contacts::invite::JOINER_TAG_LEN;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::AppState;
 
@@ -62,7 +61,7 @@ const MAX_CAPABILITY_BYTES: usize = 512;
 const MAX_USES_UNLIMITED: u32 = u32::MAX;
 
 // ============================================================================
-// POST /discovery/group-invite — upload + verify + content-address
+// POST /discovery/group-invite — upload + verify + mint a random id
 // ============================================================================
 
 #[derive(Deserialize)]
@@ -80,13 +79,14 @@ pub(crate) struct UploadRequest {
 
 #[derive(Serialize)]
 pub(crate) struct UploadResponse {
-    /// base64url-no-pad of the SHA-256 of `capability_bytes`. Same bytes => same
-    /// id; a retried upload is idempotent. The client substitutes this directly
-    /// into the `/g/<blob_id>` pointer URL.
+    /// base64url-no-pad of the random [`lakko_contacts::invite::BLOB_ID_LEN`]-byte
+    /// ledger id (8 characters), minted fresh for this upload: the same
+    /// capability uploaded twice gets two ids. The client substitutes this
+    /// directly into the `/g/<blob_id>` URL.
     pub(crate) blob_id: String,
 }
 
-/// `POST /discovery/group-invite` — upsert a verified group-invite capability.
+/// `POST /discovery/group-invite` — store a verified group-invite capability under a fresh id.
 pub(crate) async fn upload(
     State(state): State<AppState>,
     // Session-token-gated via the route_layer in `main.rs`. There is no
@@ -130,35 +130,36 @@ pub(crate) async fn upload(
         )
     })?;
 
-    let blob_id = blob_id_for(&bytes);
     let issuer_pubkey = cap.issuer_signature_pubkey.to_bytes();
     let group_id = cap.group_id;
     let expiry_ms: u64 = cap.expiry_ms;
     let max_uses: u32 = payload.max_uses;
 
-    sqlx::query(
-        "INSERT INTO group_invites \
-            (blob_id, capability_bytes, issuer_pubkey, group_id, expiry_ms, max_uses) \
-         VALUES (?, ?, ?, ?, ?, ?) \
-         ON DUPLICATE KEY UPDATE \
-            capability_bytes = VALUES(capability_bytes), \
-            max_uses = VALUES(max_uses)",
-    )
-    .bind(&blob_id[..])
-    .bind(&bytes)
-    .bind(&issuer_pubkey[..])
-    .bind(&group_id[..])
-    .bind(expiry_ms)
-    .bind(max_uses)
-    .execute(&state.db)
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "upsert group_invites");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal db error".to_string(),
-        )
-    })?;
+    // A random id, never an upsert: a collision is retried under a fresh id
+    // and can never overwrite another link's row (the short-link amendment
+    // of ADR-0028, see `crate::ledger_id`).
+    let db = state.db.clone();
+    let blob_id = crate::ledger_id::insert_with_fresh_id("group_invites", |id| {
+        let db = db.clone();
+        let bytes = bytes.clone();
+        let group_id = group_id.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO group_invites \
+                    (blob_id, capability_bytes, issuer_pubkey, group_id, expiry_ms, max_uses) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(id.to_vec())
+            .bind(bytes)
+            .bind(issuer_pubkey.to_vec())
+            .bind(group_id)
+            .bind(expiry_ms)
+            .bind(max_uses)
+            .execute(&db)
+            .await
+        }
+    })
+    .await?;
 
     let blob_id_b64url = B64URL.encode(blob_id);
     tracing::info!(
@@ -168,7 +169,7 @@ pub(crate) async fn upload(
         expiry_ms = expiry_ms,
         max_uses = max_uses,
         bytes = bytes.len(),
-        "group-invite upserted",
+        "group-invite stored",
     );
     Ok(Json(UploadResponse {
         blob_id: blob_id_b64url,
@@ -176,13 +177,15 @@ pub(crate) async fn upload(
 }
 
 // ============================================================================
-// GET /discovery/group-invite/{blob_id} — fetch by content-addressed id
+// GET /discovery/group-invite/{blob_id} — fetch by id
 // ============================================================================
 
 #[derive(Serialize)]
 pub(crate) struct FetchResponse {
     /// Standard-alphabet base64 of the stored capability bytes. The client
-    /// re-hashes + re-verifies locally before requesting to join.
+    /// re-verifies the signature locally before requesting to join, and a link
+    /// carrying a preview secret opens the preview only on the capability it
+    /// was minted for (the preview key binds the group id and issuer).
     pub(crate) capability: String,
 }
 
@@ -194,18 +197,7 @@ pub(crate) async fn fetch(
     State(state): State<AppState>,
     Path(blob_id_b64url): Path<String>,
 ) -> Result<Json<FetchResponse>, (StatusCode, String)> {
-    let blob_id = B64URL.decode(&blob_id_b64url).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("invalid blob_id base64url: {e}"),
-        )
-    })?;
-    if blob_id.len() != BLOB_ID_LEN {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("blob_id must be {BLOB_ID_LEN} bytes after decode"),
-        ));
-    }
+    let blob_id = crate::ledger_id::parse_blob_id(&blob_id_b64url)?;
 
     let row: Option<(Vec<u8>, u64)> =
         sqlx::query_as("SELECT capability_bytes, expiry_ms FROM group_invites WHERE blob_id = ?")
@@ -291,18 +283,7 @@ pub(crate) async fn consume(
 ) -> Result<Json<ConsumeResponse>, (StatusCode, String)> {
     crate::pow::verify_proof(&state.db, &payload.pow).await?;
 
-    let blob_id = B64URL.decode(&blob_id_b64url).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("invalid blob_id base64url: {e}"),
-        )
-    })?;
-    if blob_id.len() != BLOB_ID_LEN {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("blob_id must be {BLOB_ID_LEN} bytes after decode"),
-        ));
-    }
+    let blob_id = crate::ledger_id::parse_blob_id(&blob_id_b64url)?;
 
     let joiner_tag = B64.decode(&payload.joiner_tag).map_err(|e| {
         (
@@ -514,18 +495,7 @@ pub(crate) async fn revoke(
     axum::Extension(_authed): axum::Extension<crate::auth::AuthenticatedAccount>,
     Json(payload): Json<RevokeRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let blob_id = B64URL.decode(&blob_id_b64url).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("invalid blob_id base64url: {e}"),
-        )
-    })?;
-    if blob_id.len() != BLOB_ID_LEN {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("blob_id must be {BLOB_ID_LEN} bytes after decode"),
-        ));
-    }
+    let blob_id = crate::ledger_id::parse_blob_id(&blob_id_b64url)?;
 
     // Replay window check before any DB work — cheap DoS gate.
     let now_ms = current_unix_ms();
@@ -587,9 +557,7 @@ pub(crate) async fn revoke(
         },
     };
 
-    let mut blob_id_arr = [0_u8; BLOB_ID_LEN];
-    blob_id_arr.copy_from_slice(&blob_id);
-    let canonical = group_revoke_canonical_bytes(&blob_id_arr, payload.signed_at_ms);
+    let canonical = group_revoke_canonical_bytes(&blob_id, payload.signed_at_ms);
     if cap
         .issuer_signature_pubkey
         .verify(&canonical, &signature)
@@ -633,16 +601,6 @@ fn current_unix_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
-
-fn blob_id_for(capability_bytes: &[u8]) -> [u8; BLOB_ID_LEN] {
-    let mut hasher = Sha256::new();
-    hasher.update(capability_bytes);
-    let digest = hasher.finalize();
-    let mut out = [0_u8; BLOB_ID_LEN];
-    out.copy_from_slice(&digest);
-    out
-}
-
 // ============================================================================
 // Background expiry pruner (ADR-0028, G-3)
 // ============================================================================
@@ -713,24 +671,7 @@ pub(crate) fn spawn_pruner(pool: sqlx::MySqlPool) -> tokio::task::JoinHandle<()>
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn blob_id_is_sha256_of_capability_bytes() {
-        let bytes = b"a-test-group-capability-stand-in";
-        let id = blob_id_for(bytes);
-        assert_eq!(id.len(), BLOB_ID_LEN);
-
-        let mut h = Sha256::new();
-        h.update(bytes);
-        let expected: [u8; BLOB_ID_LEN] = h.finalize().into();
-        assert_eq!(id, expected);
-    }
-
-    #[test]
-    fn same_bytes_yield_same_blob_id() {
-        let bytes = vec![0xAAu8; 200];
-        assert_eq!(blob_id_for(&bytes), blob_id_for(&bytes));
-    }
+    use lakko_contacts::invite::BLOB_ID_LEN;
 
     /// Pruner cadence pin — mirrors `invite::prune_interval_is_one_hour`. The
     /// constant is also named in the `spawn_pruner` doc; pin it in code so a
@@ -741,35 +682,27 @@ mod tests {
         assert_eq!(PRUNE_INTERVAL, std::time::Duration::from_secs(3600));
     }
 
-    #[test]
-    fn different_bytes_yield_different_blob_id() {
-        let a = [0xAAu8; 200];
-        let mut b = a;
-        b[0] = 0xBB;
-        assert_ne!(blob_id_for(&a), blob_id_for(&b));
-    }
-
     /// `MAX_CAPABILITY_BYTES` pins the `VARBINARY(...)` width declared in
-    /// `0014_group_invites.sql`. Drift surfaces as a test failure rather than a
+    /// `0018_short_invite_ids.sql`. Drift surfaces as a test failure rather than a
     /// silent "everything past N bytes 500s in production".
     #[test]
     fn max_capability_bytes_matches_column_width() {
-        let migration = include_str!("../migrations/0014_group_invites.sql");
+        let migration = include_str!("../migrations/0018_short_invite_ids.sql");
         assert!(
             migration.contains(&format!("VARBINARY({MAX_CAPABILITY_BYTES})")),
             "MAX_CAPABILITY_BYTES ({MAX_CAPABILITY_BYTES}) must match the \
-             VARBINARY width declared in 0014_group_invites.sql",
+             VARBINARY width declared in 0018_short_invite_ids.sql",
         );
     }
 
     #[test]
     fn blob_id_len_matches_column_width() {
-        let migration = include_str!("../migrations/0014_group_invites.sql");
+        let migration = include_str!("../migrations/0018_short_invite_ids.sql");
         let normalised = migration.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             normalised.contains(&format!("blob_id BINARY({BLOB_ID_LEN})")),
             "BLOB_ID_LEN ({BLOB_ID_LEN}) must match the BINARY width \
-             declared in 0014_group_invites.sql",
+             declared in 0018_short_invite_ids.sql",
         );
     }
 
@@ -786,10 +719,10 @@ mod tests {
     /// silently break the INSERT.
     #[test]
     fn group_invites_migration_columns() {
-        let migration = include_str!("../migrations/0014_group_invites.sql");
+        let migration = include_str!("../migrations/0018_short_invite_ids.sql");
         assert!(
             migration.contains("CREATE TABLE IF NOT EXISTS group_invites"),
-            "0014 migration must create `group_invites`",
+            "0018 migration must create `group_invites`",
         );
         for col in [
             "issuer_pubkey",
@@ -800,7 +733,7 @@ mod tests {
         ] {
             assert!(
                 migration.contains(col),
-                "0014 migration must declare the `{col}` column",
+                "0018 migration must declare the `{col}` column",
             );
         }
     }
@@ -811,25 +744,25 @@ mod tests {
     /// dedup or leak orphan rows; surface here.
     #[test]
     fn group_invite_consumers_migration_shape() {
-        let migration = include_str!("../migrations/0015_group_invite_consumers.sql");
+        let migration = include_str!("../migrations/0018_short_invite_ids.sql");
         let normalised = migration.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             migration.contains("CREATE TABLE IF NOT EXISTS group_invite_consumers"),
-            "0015 migration must create `group_invite_consumers`",
+            "0018 migration must create `group_invite_consumers`",
         );
         assert!(
             normalised.contains(&format!("joiner_tag BINARY({JOINER_TAG_LEN})")),
-            "0015 migration must declare joiner_tag as BINARY({JOINER_TAG_LEN})",
+            "0018 migration must declare joiner_tag as BINARY({JOINER_TAG_LEN})",
         );
         assert!(
             migration.contains("PRIMARY KEY (blob_id, joiner_tag)"),
-            "0015 migration must PK on (blob_id, joiner_tag)",
+            "0018 migration must PK on (blob_id, joiner_tag)",
         );
         assert!(
             migration.contains(
                 "FOREIGN KEY (blob_id) REFERENCES group_invites(blob_id) ON DELETE CASCADE",
             ),
-            "0015 migration must FK CASCADE on group_invites.blob_id",
+            "0018 migration must FK CASCADE on group_invites.blob_id",
         );
     }
 }

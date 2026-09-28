@@ -36,7 +36,12 @@
  */
 
 import { loadWasm } from "../wasm";
-import { DiscoveryClient, DiscoveryHttpError } from "../discovery/client";
+import {
+  DiscoveryClient,
+  DiscoveryHttpError,
+  isDiscoveryRateLimited,
+} from "../discovery/client";
+import { inviteLinkWidths } from "../contacts/invite-link";
 import { parseCallInviteSlug } from "./invite";
 
 // Re-exported by `loadWasm()` — the wasm module surfaces
@@ -57,7 +62,7 @@ export interface JoinerIdentityHandle {
  *  [`acceptCallInviteFromSlug`]. */
 export interface AcceptCallInviteOptions {
   /** The `<slug>` segment from a `/c/<slug>` URL — base64url-
-   *  no-pad of either a 32-byte `blob_id` (pointer form) or
+   *  no-pad of either a 6-byte ledger id (pointer form) or
    *  ≥ 400 bytes of inline capability (censored-region
    *  fallback). */
   readonly slug: string;
@@ -131,6 +136,9 @@ export type AcceptCallInviteResult =
   | { readonly kind: "expired" }
   | { readonly kind: "exhausted" }
   | { readonly kind: "notFound" }
+  /** 429 from the ledger on fetch or consume: the link may be fine, try
+   *  again later. Never folded into `notFound`. */
+  | { readonly kind: "rateLimited" }
   | { readonly kind: "malformedSlug"; readonly reason: string }
   | { readonly kind: "signatureFailure"; readonly reason: string }
   | { readonly kind: "failed"; readonly message: string };
@@ -158,9 +166,10 @@ export async function acceptCallInviteFromSlug(
   opts: AcceptCallInviteOptions,
 ): Promise<AcceptCallInviteResult> {
   // ---- 1. Parse the slug -----------------------------------
+  const wasm = await loadWasm();
   let parsed: ReturnType<typeof parseCallInviteSlug>;
   try {
-    parsed = parseCallInviteSlug(opts.slug);
+    parsed = parseCallInviteSlug(opts.slug, inviteLinkWidths(wasm));
   } catch (err) {
     return {
       kind: "malformedSlug",
@@ -183,6 +192,7 @@ export async function acceptCallInviteFromSlug(
       if (err instanceof DiscoveryHttpError && err.status === 404) {
         return { kind: "notFound" };
       }
+      if (isDiscoveryRateLimited(err)) return { kind: "rateLimited" };
       throw err; // bubble up network / non-404 HTTP errors
     }
   } else {
@@ -191,7 +201,6 @@ export async function acceptCallInviteFromSlug(
 
   // ---- 3. decodeAndVerify --- catches malicious-server
   //          substitution + signature tamper ----------------
-  const wasm = await loadWasm();
   let capability: {
     readonly callId: Uint8Array;
     readonly ownerAccountId: Uint8Array;
@@ -229,6 +238,7 @@ export async function acceptCallInviteFromSlug(
         opts.joinerAccountId,
       );
     } catch (err) {
+      if (isDiscoveryRateLimited(err)) return { kind: "rateLimited" };
       return {
         kind: "failed",
         message: err instanceof Error ? err.message : String(err),

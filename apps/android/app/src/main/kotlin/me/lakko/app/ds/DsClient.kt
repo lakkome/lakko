@@ -153,11 +153,18 @@ public class DsClient(
      * ADR-0053: signed with [signer] when given, else with the registry's
      * signer for this journal (unsigned when neither knows it — an unclaimed
      * journal accepts that). A refusal retries per the client contract.
+     *
+     * ADR-0054: [wake] adds the [DS_WAKE_HEADER] asking the DS to wake the
+     * group's subscribed devices once the row is appended. `null` (the
+     * default) sends no header and wakes nobody — every control envelope.
+     * The header rides every retry of the same request, and the DS wakes only
+     * for the attempt that was appended.
      */
     public suspend fun publishGroup(
         groupId: ByteArray,
         payload: ByteArray,
         signer: DsJournalSigner? = null,
+        wake: DsWake? = null,
     ): PublishResult {
         if (groupId.isEmpty()) {
             throw DsClientArgError("groupId must be non-empty")
@@ -169,12 +176,18 @@ public class DsClient(
             endpoint = "/ds/group/${pseudonymHex(groupId)}/messages",
             payload = payload,
             journal = Journal.group(groupId, signer),
+            wake = wake,
         )
     }
 
     /** Shared POST plumbing for the two publish flavours.
      *  Octet-stream body + JSON response. */
-    private suspend fun doPublish(endpoint: String, payload: ByteArray, journal: Journal?): PublishResult {
+    private suspend fun doPublish(
+        endpoint: String,
+        payload: ByteArray,
+        journal: Journal?,
+        wake: DsWake? = null,
+    ): PublishResult {
         val response = exchange(
             method = HttpMethod.Post,
             endpoint = endpoint,
@@ -183,6 +196,7 @@ public class DsClient(
             contentType = ContentType.Application.OctetStream,
             waitSecs = null,
             journal = journal,
+            wake = wake,
         )
         if (!response.status.isSuccess()) {
             throw DsHttpError(
@@ -514,15 +528,19 @@ public class DsClient(
         contentType: ContentType?,
         waitSecs: Int?,
         journal: Journal?,
+        wake: DsWake? = null,
     ): HttpResponse {
+        val wakeHeader = wake?.headerValue()
+        suspend fun attempt(signer: DsJournalSigner?): HttpResponse =
+            send(method, endpoint, query, body, contentType, waitSecs, signer, wakeHeader)
         val first = journal?.let { it.explicit ?: signers.current(it.key) }
-        var response = send(method, endpoint, query, body, contentType, waitSecs, first)
+        var response = attempt(first)
         if (journal == null || response.status.value != HTTP_UNAUTHORIZED) return response
         if (first == null) throw refusedError(response, endpoint)
 
         val previous = if (journal.explicit == null) signers.previous(journal.key) else null
         if (previous != null && previous.epoch != first.epoch) {
-            response = send(method, endpoint, query, body, contentType, waitSecs, previous)
+            response = attempt(previous)
             if (response.status.value != HTTP_UNAUTHORIZED) return response
         }
         if (journal.reclaim) {
@@ -539,7 +557,7 @@ public class DsClient(
             }
             if (reclaimed) {
                 val again = journal.explicit ?: signers.current(journal.key) ?: first
-                response = send(method, endpoint, query, body, contentType, waitSecs, again)
+                response = attempt(again)
                 if (response.status.value != HTTP_UNAUTHORIZED) return response
             }
         }
@@ -574,6 +592,7 @@ public class DsClient(
         contentType: ContentType?,
         waitSecs: Int?,
         signer: DsJournalSigner?,
+        wakeHeader: String? = null,
     ): HttpResponse {
         val url = if (query.isEmpty()) "$baseUrl$endpoint" else "$baseUrl$endpoint?$query"
         val proof = signer?.let {
@@ -591,6 +610,7 @@ public class DsClient(
             client.request(url) {
                 this.method = method
                 if (proof != null) header(DS_PROOF_HEADER, proof)
+                if (wakeHeader != null) header(DS_WAKE_HEADER, wakeHeader)
                 if (method != HttpMethod.Get) {
                     if (contentType != null) contentType(contentType)
                     setBody(body)

@@ -17,7 +17,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChatClient } from "./client";
 import type { DsClient } from "../ds/client";
 import type { ProofSigner } from "../ds/access";
-import type { PushClient } from "../push/client";
 import { fakeAccessSigner } from "../ds/access-test-doubles";
 import type { Group as WasmGroup, Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 
@@ -101,7 +100,6 @@ function chat(ds: DsClient): ChatClient {
   return new ChatClient(
     ds,
     { identityProvider: () => IDENTITY_TOKEN },
-    { notifyGroup: vi.fn(async () => {}) } as unknown as PushClient,
   );
 }
 

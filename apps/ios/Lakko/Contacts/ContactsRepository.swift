@@ -843,6 +843,18 @@ public final class ContactsRepository: ObservableObject {
     /// side opens on the other.
     public nonisolated static var inviteUrlPrefix: String { ApiEndpoints.webOrigin + "/i/" }
 
+    /// The 6-byte ledger id an `/i/<slug>` names, or `nil` for any other slug:
+    /// exactly 8 base64url characters decoding to ``DiscoveryClient`` 's id
+    /// width. A contact invite has no inline form, so the retired 43-character
+    /// id and everything else are refused before any request.
+    public nonisolated static func parseInviteSlug(_ slug: String) -> Data? {
+        guard slug.count == Int(inviteBlobIdUrlLen()),
+              isBase64Url(slug),
+              let bytes = base64UrlDecodeNoPad(slug),
+              bytes.count == Int(inviteBlobIdLen()) else { return nil }
+        return bytes
+    }
+
     // MARK: - Joiner-side invite consume (1.14e8)
 
     /// Open + verify an invite-link slug, fetch the capability
@@ -854,8 +866,9 @@ public final class ContactsRepository: ObservableObject {
     /// outcome copy.
     ///
     /// Steps:
-    ///   1. base64url-decode the slug to recover the 32-byte
-    ///      `blob_id`.
+    ///   1. base64url-decode the slug to recover the 6-byte
+    ///      `blob_id` (exactly 8 characters; the retired
+    ///      43-character id is refused as malformed).
     ///   2. `DiscoveryClient.fetchInvite(blobId)` → capability wire
     ///      bytes (404 → `notFound`).
     ///   3. `InviteCapability.decodeAndVerify(wire)` — local
@@ -875,7 +888,7 @@ public final class ContactsRepository: ObservableObject {
         guard let secrets = authRepository.identitySecrets else {
             return .requiresReauth
         }
-        guard let blobId = base64UrlDecodeNoPad(slug), blobId.count == 32 else {
+        guard let blobId = Self.parseInviteSlug(slug) else {
             return .malformedSlug
         }
 
@@ -884,6 +897,7 @@ public final class ContactsRepository: ObservableObject {
         do {
             capabilityBytes = try await discovery.fetchInvite(blobId: blobId)
         } catch {
+            if DiscoveryClientError.isRateLimited(error) { return .rateLimited }
             return .failed(message: (error as? LocalizedError)?.errorDescription
                 ?? "fetch failed")
         }
@@ -920,6 +934,7 @@ public final class ContactsRepository: ObservableObject {
                 joinerAccountId: secrets.accountId
             )
         } catch {
+            if DiscoveryClientError.isRateLimited(error) { return .rateLimited }
             return .failed(message: (error as? LocalizedError)?.errorDescription
                 ?? "consume failed")
         }
@@ -1042,6 +1057,10 @@ public enum AcceptInviteResult: Equatable {
     case exhausted
     case notFound
     case malformedSlug
+    /// `429` from the discovery ledger on the fetch or the consume: the link
+    /// may be fine, the server asked this network address to slow down. The
+    /// screen says "try again later", never "invalid".
+    case rateLimited
     case requiresReauth
     case failed(message: String)
 }

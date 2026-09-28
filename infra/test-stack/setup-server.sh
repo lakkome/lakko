@@ -36,6 +36,7 @@ install -d -m 755 -o root -g root /var/www/lakko-test-web
 if [[ ! -f $ENV_FILE ]]; then
   umask 027
   DB_PASS=$(openssl rand -hex 32)
+  WAKE_SECRET=$(openssl rand -base64 32)
   TURN_LINES="# TURN not configured"
   if [[ -f $TURN_CONF && -n $TURN_URIS ]]; then
     TURN_SECRET_B64=$(grep -E '^\s*static-auth-secret' "$TURN_CONF" | head -1 | cut -d= -f2- | tr -d ' \n' | base64 -w0)
@@ -56,6 +57,7 @@ LAKKO_SESSION_TOKEN_SECRET=$(openssl rand -base64 32)
 LAKKO_TOTP_ENC_KEY=$(openssl rand -base64 32)
 LAKKO_VAULT_ENC_KEY=$(openssl rand -base64 32)
 LAKKO_RECOVERY_CONTACT_PEPPER=$(openssl rand -base64 32)
+LAKKO_ANON_TOKEN_MASTER_SECRET=$(openssl rand -hex 32)
 
 LAKKO_WEBAUTHN_RP_ID=${DOMAIN}
 LAKKO_WEBAUTHN_RP_NAME=Lakko (test)
@@ -80,6 +82,12 @@ LAKKO_SFU_MEDIA_ADVERTISE_IP=${PUBLIC_IP}
 
 LAKKO_GIF_PROXY_BIND=127.0.0.1:8091
 # LAKKO_GIF_GIPHY_API_KEY=
+
+# ADR-0054: the DS forwards group wakes to push-gw's internal listener
+# (127.0.0.1:8092, never proxied by nginx). Both secrets hold one value.
+LAKKO_PUSH_GW_INTERNAL_SECRET=${WAKE_SECRET}
+LAKKO_DS_PUSH_GW_SECRET=${WAKE_SECRET}
+LAKKO_DS_PUSH_GW_URL=http://127.0.0.1:8092
 EOF
   chown root:lakkotest $ENV_FILE
   chmod 640 $ENV_FILE
@@ -126,6 +134,31 @@ fi
 if ! grep -q '^LAKKO_VAULT_ENC_KEY=' $ENV_FILE; then
   echo "LAKKO_VAULT_ENC_KEY=$(openssl rand -base64 32)" >> $ENV_FILE
   echo "word-vault key added to the env file"
+fi
+
+# Anonymous tokens (ADR-0054 decision 2) arrived later: an older env file gains
+# the master secret here, generated once and then kept (regenerating it
+# invalidates every token issued on this stack).
+if ! grep -q '^LAKKO_ANON_TOKEN_MASTER_SECRET=' $ENV_FILE; then
+  echo "LAKKO_ANON_TOKEN_MASTER_SECRET=$(openssl rand -hex 32)" >> $ENV_FILE
+  echo "anonymous-token master secret added to the env file"
+fi
+
+# The DS -> push-gw wake forward (ADR-0054) arrived later: an older env file
+# gains one shared secret here, written to both services' variables at once
+# (a half-configured pair would stop the DS from starting).
+if ! grep -q '^LAKKO_PUSH_GW_INTERNAL_SECRET=' $ENV_FILE; then
+  WAKE_SECRET=$(openssl rand -base64 32)
+  sed -i -e '/^LAKKO_DS_PUSH_GW_SECRET=/d' -e '/^LAKKO_DS_PUSH_GW_URL=/d' $ENV_FILE
+  {
+    echo
+    echo "# ADR-0054: the DS forwards group wakes to push-gw's internal listener."
+    echo "LAKKO_PUSH_GW_INTERNAL_SECRET=${WAKE_SECRET}"
+    echo "LAKKO_DS_PUSH_GW_SECRET=${WAKE_SECRET}"
+    echo "LAKKO_DS_PUSH_GW_URL=http://127.0.0.1:8092"
+  } >> $ENV_FILE
+  unset WAKE_SECRET
+  echo "wake forward secret added to the env file"
 fi
 
 {

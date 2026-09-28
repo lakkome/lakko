@@ -62,7 +62,6 @@ import { fileURLToPath } from "node:url";
 import initWasm, * as wasmNs from "../../wasm/lakko_ffi_wasm";
 import { ChatClient, type IncomingChatEvent } from "./client";
 import type { DsClient } from "../ds/client";
-import type { PushClient } from "../push/client";
 import type {
   Group as WasmGroup,
   Identity as WasmIdentity,
@@ -115,10 +114,6 @@ function dsWith(...payloads: Uint8Array[]): DsClient {
   } as unknown as DsClient;
 }
 
-function mockPush(): PushClient {
-  return { notifyGroup: vi.fn(async () => {}) } as unknown as PushClient;
-}
-
 /** A group id no other case in this file reuses — `withGroupMlsLock`'s queue
  *  is module-level, so a shared id would let one failure wedge the next case. */
 let nextGid = 0;
@@ -132,7 +127,6 @@ async function classify(...payloads: Uint8Array[]): Promise<IncomingChatEvent[]>
   const chat = new ChatClient(
     dsWith(...payloads),
     { identityProvider: () => IDENTITY_TOKEN },
-    mockPush(),
   );
   const res = await chat.pollMessages(null, passthroughGroup(freshGid()), 0);
   return res.events;
@@ -176,7 +170,6 @@ describe("ADR-0045 — the committer beacon is filtered in the foreground loop",
     const chat = new ChatClient(
       dsWith(wasm.composeCommitterBeacon()),
       { identityProvider: () => IDENTITY_TOKEN },
-      mockPush(),
     );
     const res = await chat.pollMessages(null, passthroughGroup(freshGid(), 7), 0);
     const ev = res.events[0];
@@ -252,7 +245,6 @@ describe("ADR-0048 — the profile request is filtered in the foreground loop", 
     const chat = new ChatClient(
       dsWith(wasm.composeProfileRequest()),
       { identityProvider: () => IDENTITY_TOKEN },
-      mockPush(),
     );
     const res = await chat.pollMessages(null, passthroughGroup(freshGid(), 7), 0);
     const ev = res.events[0];

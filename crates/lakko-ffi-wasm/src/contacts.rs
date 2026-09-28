@@ -37,8 +37,9 @@ use lakko_contacts::group_invite::{
     decode_and_verify as rust_group_invite_decode, generate_link_key as rust_generate_link_key,
     group_sign_revocation as rust_group_sign_revocation,
     GroupInviteCapability as RustGroupInviteCapability,
-    GroupInvitePreview as RustGroupInvitePreview, LINK_KEY_LEN as GROUP_INVITE_LINK_KEY_LEN,
-    MAX_GROUP_ID_LEN,
+    GroupInvitePreview as RustGroupInvitePreview,
+    LINK_SECRET_B64URL_LEN as GROUP_INVITE_LINK_SECRET_B64URL_LEN,
+    LINK_SECRET_LEN as GROUP_INVITE_LINK_SECRET_LEN, MAX_GROUP_ID_LEN,
 };
 use lakko_contacts::group_join_attribution::{
     compose_attribution as rust_group_join_attribution_compose,
@@ -56,7 +57,7 @@ use lakko_contacts::incoming_envelope::{
 use lakko_contacts::invite::{
     compose as rust_invite_compose, compute_joiner_tag as rust_compute_joiner_tag,
     decode_and_verify as rust_invite_decode, sign_owner_list as rust_sign_owner_list,
-    sign_revocation as rust_sign_revocation, BLOB_ID_LEN,
+    sign_revocation as rust_sign_revocation, BLOB_ID_B64URL_LEN, BLOB_ID_LEN,
 };
 use lakko_contacts::media_state::{
     compose_media_state as rust_compose_media_state, decode_media_state as rust_decode_media_state,
@@ -1157,7 +1158,7 @@ impl InviteCapability {
 /// # Errors
 ///
 /// `JsError` on any input-shape failure (32-byte signing seed,
-/// 32-byte blob_id required).
+/// 6-byte blob_id required).
 #[wasm_bindgen(js_name = signInviteRevocation)]
 pub fn sign_invite_revocation(
     signing_seed: &[u8],
@@ -1203,7 +1204,7 @@ pub fn sign_invite_revocation(
 /// # Errors
 ///
 /// `JsError` on any input-shape failure (32-byte signing seed,
-/// 32-byte blob_id required).
+/// 6-byte blob_id required).
 #[wasm_bindgen(js_name = signCallInviteRevocation)]
 pub fn sign_call_invite_revocation(
     signing_seed: &[u8],
@@ -2511,8 +2512,8 @@ pub fn compose_group_invite_capability(
 /// Owner-side: sign a group-invite revocation (ADR-0028 revoke). Returns the
 /// 64-byte Ed25519 signature over the group-invite revoke canonical bytes (the
 /// `DELETE /discovery/group-invite/{blob_id}` body). `issuerSigningSeed` is the
-/// 32-byte Ed25519 seed that minted the link; `blobId` is the 32-byte
-/// content-addressed id.
+/// 32-byte Ed25519 seed that minted the link; `blobId` is the 6-byte id the
+/// discovery upload returned.
 #[wasm_bindgen(js_name = signGroupInviteRevocation)]
 pub fn sign_group_invite_revocation(
     issuer_signing_seed: &[u8],
@@ -2533,11 +2534,43 @@ pub fn sign_group_invite_revocation(
     Ok(rust_group_sign_revocation(&signing, &blob_id_arr, signed_at_ms).to_vec())
 }
 
+/// Width in bytes of a discovery-ledger id (`/i/`, `/c/`, `/g/` pointer
+/// links): 6. The server mints it; a client only carries it (ADR-0028
+/// short-link amendment, 2026-09-27).
+#[wasm_bindgen(js_name = inviteBlobIdLen)]
+#[must_use]
+pub fn invite_blob_id_len() -> u32 {
+    u32::try_from(BLOB_ID_LEN).unwrap_or(u32::MAX)
+}
+
+/// Length of a ledger id in a link: base64url without padding, 8 characters.
+/// A pointer path segment of any other length is not a pointer id.
+#[wasm_bindgen(js_name = inviteBlobIdUrlLen)]
+#[must_use]
+pub fn invite_blob_id_url_len() -> u32 {
+    u32::try_from(BLOB_ID_B64URL_LEN).unwrap_or(u32::MAX)
+}
+
+/// Width in bytes of a `/g/` link secret (the URL fragment): 12.
+#[wasm_bindgen(js_name = groupInviteLinkSecretLen)]
+#[must_use]
+pub fn group_invite_link_secret_len() -> u32 {
+    u32::try_from(GROUP_INVITE_LINK_SECRET_LEN).unwrap_or(u32::MAX)
+}
+
+/// Length of a `/g/` link secret in the URL fragment: base64url without
+/// padding, 16 characters. Any other fragment length is refused.
+#[wasm_bindgen(js_name = groupInviteLinkSecretUrlLen)]
+#[must_use]
+pub fn group_invite_link_secret_url_len() -> u32 {
+    u32::try_from(GROUP_INVITE_LINK_SECRET_B64URL_LEN).unwrap_or(u32::MAX)
+}
+
 /// Composed + verified group join-ticket capability (ADR-0028). Mirror of
 /// [`lakko_contacts::GroupInviteCapability`].
 /// The preview a `/g/` link shows before the person asks to join (ADR-0028
-/// v2): the ISSUER's claim at mint time, sealed under the link key that rides
-/// in the URL fragment.
+/// v2): the ISSUER's claim at mint time, sealed under a key derived from the
+/// link secret that rides in the URL fragment.
 #[wasm_bindgen(js_name = GroupInvitePreview)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WasmGroupInvitePreview {
@@ -2568,8 +2601,10 @@ impl WasmGroupInvitePreview {
 }
 
 /// What `composeGroupInviteCapabilityWithPreview` mints: the signed capability
-/// bytes (the slug) and the fresh 32-byte link key that goes in the URL
-/// fragment and nowhere a server reads.
+/// bytes (the slug) and the fresh 12-byte link secret (16 base64url
+/// characters) that goes in the URL fragment and nowhere a server reads. The
+/// getter keeps its `linkKey` name; it carries the secret the preview key is
+/// derived from.
 #[wasm_bindgen(js_name = GroupInviteMint)]
 pub struct WasmGroupInviteMint {
     wire: Vec<u8>,
@@ -2584,7 +2619,7 @@ impl WasmGroupInviteMint {
         self.wire.clone()
     }
 
-    /// The link key (32 bytes) for the URL fragment.
+    /// The link secret (12 bytes) for the URL fragment.
     #[wasm_bindgen(getter, js_name = linkKey)]
     pub fn link_key(&self) -> Vec<u8> {
         self.link_key.clone()
@@ -2690,21 +2725,25 @@ impl GroupInviteCapability {
         !self.inner.sealed_preview.is_empty()
     }
 
-    /// Open the sealed preview with the link key from the URL fragment.
-    /// `undefined` when the link carries no preview. A wrong or tampered key
-    /// throws; the caller shows the page without a preview, never a guess.
+    /// Open the sealed preview with the link secret from the URL fragment
+    /// (the 12 bytes the 16-character fragment decodes to). `undefined` when
+    /// the link carries no preview. A wrong secret, a tampered preview, or a
+    /// capability other than the one the secret was minted with (the derived
+    /// key binds the group id and issuer) throws; the caller shows the page
+    /// without a preview, never a guess.
     ///
     /// # Errors
     ///
-    /// Throws when `linkKey` is not 32 bytes or the preview does not open.
+    /// Throws when `linkKey` is not 12 bytes (the pre-amendment 32-byte key
+    /// included) or the preview does not open.
     #[wasm_bindgen(js_name = openPreview)]
     pub fn open_preview(&self, link_key: &[u8]) -> Result<Option<WasmGroupInvitePreview>, JsError> {
-        if link_key.len() != GROUP_INVITE_LINK_KEY_LEN {
+        if link_key.len() != GROUP_INVITE_LINK_SECRET_LEN {
             return Err(JsError::new(&format!(
-                "linkKey must be {GROUP_INVITE_LINK_KEY_LEN} bytes"
+                "linkKey must be {GROUP_INVITE_LINK_SECRET_LEN} bytes"
             )));
         }
-        let mut key = [0u8; GROUP_INVITE_LINK_KEY_LEN];
+        let mut key = [0u8; GROUP_INVITE_LINK_SECRET_LEN];
         key.copy_from_slice(link_key);
         let opened = self
             .inner
@@ -2970,12 +3009,20 @@ mod tests {
     }
 
     #[test]
+    fn short_link_lengths_are_exported() {
+        assert_eq!(invite_blob_id_len(), 6);
+        assert_eq!(invite_blob_id_url_len(), 8);
+        assert_eq!(group_invite_link_secret_len(), 12);
+        assert_eq!(group_invite_link_secret_url_len(), 16);
+    }
+
+    #[test]
     fn sign_invite_revocation_round_trip() {
         use lakko_contacts::invite::revoke_canonical_bytes;
         use lakko_crypto::signing::{Signature, VerifyingKey};
 
         let seed = [0xAAu8; 32];
-        let blob_id = [0xBBu8; 32];
+        let blob_id = [0xBBu8; BLOB_ID_LEN];
         let signed_at_ms = 1_700_000_000_000u64;
 
         let sig_bytes = sign_invite_revocation(&seed, &blob_id, signed_at_ms).unwrap();
@@ -2997,7 +3044,7 @@ mod tests {
         use lakko_crypto::signing::{Signature, VerifyingKey};
 
         let seed = [0xCCu8; 32];
-        let blob_id = [0xDDu8; 32];
+        let blob_id = [0xDDu8; BLOB_ID_LEN];
         let signed_at_ms = 1_700_000_000_000u64;
 
         let sig_bytes = sign_call_invite_revocation(&seed, &blob_id, signed_at_ms).unwrap();
@@ -3023,7 +3070,7 @@ mod tests {
         use lakko_crypto::signing::{Signature, VerifyingKey};
 
         let seed = [0xEEu8; 32];
-        let blob_id = [0xFFu8; 32];
+        let blob_id = [0xFFu8; BLOB_ID_LEN];
         let signed_at_ms = 1_700_000_000_000u64;
 
         let sig_bytes = sign_call_invite_revocation(&seed, &blob_id, signed_at_ms).unwrap();

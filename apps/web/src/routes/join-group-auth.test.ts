@@ -14,7 +14,7 @@ import { describe, expect, it } from "vitest";
 import { joinGroupAuthLinks } from "./join-group-auth";
 
 describe("joinGroupAuthLinks", () => {
-  const slug = "AQAgTcBaot-tzbAeAL9CbxJR-tSZ_VStkq";
+  const slug = "AQAgTcBa";
 
   it("offers sign-up that returns to the invite", () => {
     const { signup } = joinGroupAuthLinks(slug);
@@ -24,7 +24,7 @@ describe("joinGroupAuthLinks", () => {
   });
 
   it("keeps the link key fragment in the return path, so the preview survives the round trip", () => {
-    const hash = "#XFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFw";
+    const hash = "#XFxcXFxcXFxcXFxc";
     const { signup, login } = joinGroupAuthLinks(slug, hash);
     for (const href of [signup, login]) {
       const url = new URL(href, "http://lakko.test");

@@ -10,6 +10,12 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
   the envelope formats, the revocation design and the URL parity are unchanged
   and still in force.
 - **Date:** 2026-05-21
+
+> **Update 2026-09-27 ([ADR-0028](0028-group-join-ticket.md) short-link
+> amendment):** the `/c/` ledger id below is no longer `SHA-256(capability_bytes)`.
+> All three invite ledgers now use a random 6-byte id the server mints at
+> upload (8 base64url characters, `BINARY(6)`), so a `/c/` pointer link is
+> `https://<host>/c/<8 chars>` and uploads are no longer idempotent by content.
 - **Context:** Phase 3c3 (link calls — sub-sprint cluster of Phase 3 Calls)
 
 > **AMENDED by [ADR-0032](0032-multi-joiner-call-links.md); recorded here

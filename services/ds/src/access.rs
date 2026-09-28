@@ -197,6 +197,16 @@ fn parts<'a>(method: &'a Method, uri: &'a Uri, body: &'a [u8]) -> RequestParts<'
     }
 }
 
+/// Which way a group-journal request passed [`gate_group`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Gated {
+    /// The group is unclaimed; nothing was checked.
+    Unclaimed,
+    /// The group is claimed and the request carried a valid proof - the
+    /// caller holds an epoch key of the tier it asked for.
+    Proven,
+}
+
 /// Gate a group-journal request: open when the group is unclaimed, else a
 /// valid proof under a registered epoch of the tier `access` allows - any
 /// retained epoch for a read, one of the two newest for a write.
@@ -208,10 +218,10 @@ pub(crate) async fn gate_group(
     uri: &Uri,
     headers: &HeaderMap,
     body: &[u8],
-) -> Result<(), HandlerError> {
+) -> Result<Gated, HandlerError> {
     let keys = group_keys(&state.db, group_id).await?;
     if keys.is_empty() {
-        return Ok(());
+        return Ok(Gated::Unclaimed);
     }
     let tier = match access {
         Access::Read => keys.len(),
@@ -222,7 +232,8 @@ pub(crate) async fn gate_group(
     check_proof(&state.db, group_id, headers, &req, |epoch| {
         usable.iter().find(|(e, _)| *e == epoch).map(|(_, k)| *k)
     })
-    .await
+    .await?;
+    Ok(Gated::Proven)
 }
 
 /// Gate a mailbox read: open when the mailbox is unclaimed, else a valid
@@ -583,6 +594,7 @@ mod tests {
         let state = AppState {
             db: pool.clone(),
             notifiers: journal::Notifiers::default(),
+            waker: std::sync::Arc::new(crate::wake::Waker::dormant()),
         };
         Some((crate::build_app(state), pool))
     }
@@ -636,7 +648,18 @@ mod tests {
     }
 
     async fn send(app: &Router, req: Req<'_>) -> (StatusCode, Vec<u8>) {
+        send_with(app, req, &[]).await
+    }
+
+    async fn send_with(
+        app: &Router,
+        req: Req<'_>,
+        extra: &[(&str, &str)],
+    ) -> (StatusCode, Vec<u8>) {
         let mut builder = Request::builder().method(req.method).uri(req.uri);
+        for (name, value) in extra {
+            builder = builder.header(*name, *value);
+        }
         if !req.body.is_empty() {
             builder = builder.header(header::CONTENT_TYPE, "application/json");
         }
@@ -718,6 +741,109 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+    }
+
+    /// ADR-0054: the wake header is parsed before the append, so a malformed
+    /// one stores nothing; a valid one on a claimed publish is accepted (the
+    /// test waker is dormant, so nothing leaves the process); a mailbox never
+    /// takes one; an unclaimed group validates it and drops the wake.
+    #[tokio::test]
+    async fn a_wake_header_is_checked_before_the_append() {
+        let Some((app, _pool)) = app().await else {
+            return;
+        };
+        let gid = fresh_name(7);
+        let k = key(7);
+        assert_eq!(
+            claim_group(&app, &gid, 1, &k, None).await,
+            StatusCode::NO_CONTENT
+        );
+        let uri = messages_uri("group", &gid);
+        let good = format!(
+            "{};message",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([5u8; 32])
+        );
+        let wake = crate::wake::WAKE_HEADER;
+
+        for bad in [
+            "",
+            "x;message",
+            &format!("{good}x"),
+            &good.replace("message", "ring"),
+        ] {
+            let (status, _) = send_with(
+                &app,
+                Req {
+                    method: "POST",
+                    uri: &uri,
+                    body: b"never stored".to_vec(),
+                    proof: Some((&k, 1)),
+                },
+                &[(wake, bad)],
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "accepted {bad:?}");
+        }
+        let fetch = |app: Router| {
+            let uri = format!("{uri}?after=0");
+            let k = k.clone();
+            async move {
+                let (status, body) = send(
+                    &app,
+                    Req {
+                        method: "GET",
+                        uri: &uri,
+                        body: vec![],
+                        proof: Some((&k, 1)),
+                    },
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK);
+                let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                v["messages"].as_array().unwrap().len()
+            }
+        };
+        assert_eq!(fetch(app.clone()).await, 0, "a refused publish left a row");
+
+        let (status, _) = send_with(
+            &app,
+            Req {
+                method: "POST",
+                uri: &uri,
+                body: b"hello".to_vec(),
+                proof: Some((&k, 1)),
+            },
+            &[(wake, &good)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(fetch(app.clone()).await, 1);
+
+        let (status, _) = send_with(
+            &app,
+            Req {
+                method: "POST",
+                uri: &messages_uri("mailbox", &fresh_name(8)),
+                body: b"hi".to_vec(),
+                proof: None,
+            },
+            &[(wake, &good)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, _) = send_with(
+            &app,
+            Req {
+                method: "POST",
+                uri: &messages_uri("group", &fresh_name(9)),
+                body: b"hi".to_vec(),
+                proof: None,
+            },
+            &[(wake, &good)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
     }
 
     #[tokio::test]

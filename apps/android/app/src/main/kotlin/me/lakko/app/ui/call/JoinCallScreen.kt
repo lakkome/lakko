@@ -130,8 +130,11 @@ data class DecodedCall(
 /** Landing UI snapshot. */
 data class JoinCallUiState(
     val loading: Boolean = true,
-    /** `null` = invalid / expired / not-found link. */
+    /** `null` = invalid / expired / not-found link (or [rateLimited]). */
     val decoded: DecodedCall? = null,
+    /** The discovery service answered `429` while resolving the link: not an
+     *  invalid link, the screen says to try again later. */
+    val rateLimited: Boolean = false,
     val phase: JoinCallPhase = JoinCallPhase.Idle,
     val error: String? = null,
     /** ADR-0048 UX §4 — a guest's "Your name", prefilled `Guest`. */
@@ -171,11 +174,26 @@ class JoinCallViewModel(
     // prevented by the host, which refuses a call while one holds the slot.
     private var mintingGuest = false
 
+    /** Set by [decode] when the ledger answered `429`. */
+    private var lastDecodeRateLimited = false
+
     init {
+        runDecode()
+    }
+
+    private fun runDecode() {
         viewModelScope.launch {
+            lastDecodeRateLimited = false
             val d = decode(slug)
-            local.update { it.copy(loading = false, decoded = d) }
+            local.update { it.copy(loading = false, decoded = d, rateLimited = d == null && lastDecodeRateLimited) }
         }
+    }
+
+    /** `Try again` after a rate-limited resolve. */
+    fun retryDecode() {
+        if (!local.value.rateLimited) return
+        local.update { it.copy(loading = true, rateLimited = false) }
+        runDecode()
     }
 
     private fun JoinCallUiState.withHostSlot(slot: LinkCallSlot?): JoinCallUiState {
@@ -223,7 +241,10 @@ class JoinCallViewModel(
                 )
             }
         } catch (e: DiscoveryHttpError) {
-            if (e.status == 404) null else {
+            if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) {
+                lastDecodeRateLimited = true
+                null
+            } else if (e.status == 404) null else {
                 Log.w("JoinCall", "decode/verify failed", e)
                 null
             }
@@ -474,6 +495,11 @@ fun JoinCallScreen(
 
         when {
             ui.loading -> Text("Loading call link…")
+            ui.rateLimited -> {
+                Text(me.lakko.app.discovery.INVITE_RATE_LIMITED_COPY)
+                TextButton(onClick = { viewModel.retryDecode() }) { Text("Try again") }
+                TextButton(onClick = onExit) { Text("Go back") }
+            }
             ui.decoded == null || ui.decoded?.valid == false -> {
                 Text("This call link is invalid or has expired.")
                 TextButton(onClick = onExit) { Text("Go back") }

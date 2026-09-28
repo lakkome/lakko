@@ -39,8 +39,9 @@
 //! nothing else, which tells them nothing about what they are joining. The
 //! capability now carries an optional **sealed preview** - the group name, the
 //! inviter's display name and the member count at mint time - encrypted under
-//! a random 32-byte **link key** that travels in the URL **fragment**
-//! (`https://lakko.me/g/<slug>#<key>`). A fragment never leaves the browser or
+//! a key derived from a random 12-byte **link secret** that travels in the URL
+//! **fragment** (`https://lakko.me/g/<slug>#<secret>`, 16 base64url characters;
+//! see [`preview_key`] for the derivation). A fragment never leaves the browser or
 //! the app, so neither the discovery ledger (which stores pointer-link
 //! capabilities) nor an access log ever sees the names; the server side stays
 //! ciphertext-only (invariants #1, #2, #5). Whoever holds the whole link can
@@ -59,7 +60,8 @@
 //! [32 bytes]   issuer_signature_pubkey             — Ed25519 verifying key
 //! u64be        expiry_ms                           — UNIX millis; 0 = no expiry
 //! u16be        preview_len                         — 0 = no preview; else <= MAX_SEALED_PREVIEW_LEN
-//! [preview]    sealed preview                      — nonce(12) ‖ ChaCha20-Poly1305 over the plaintext below
+//! [preview]    sealed preview                      — nonce(12) ‖ ChaCha20-Poly1305 over the plaintext below,
+//!                                                    under preview_key(link secret, group_id, issuer)
 //! [64 bytes]   signature                           — Ed25519 over the above
 //! ```
 //!
@@ -79,7 +81,9 @@
 use lakko_crypto::aead::{
     open_with_key, seal_with_key, KEY_LEN as AEAD_KEY_LEN, NONCE_LEN, TAG_LEN,
 };
+use lakko_crypto::kdf::hkdf_sha256;
 use lakko_crypto::random;
+use lakko_crypto::secret::SecretBytes;
 use lakko_crypto::signing::{
     Signature, SigningKey, VerifyingKey, PUBLIC_KEY_LEN as ED25519_PUB_LEN, SIGNATURE_LEN,
 };
@@ -91,9 +95,20 @@ use crate::profile::check_display_name;
 /// Current schema version on the wire.
 const SCHEMA_VERSION: u8 = 2;
 
-/// Length of the link key that opens the sealed preview. It rides in the URL
-/// fragment and never reaches a server.
-pub const LINK_KEY_LEN: usize = AEAD_KEY_LEN;
+/// Length of the link secret that opens the sealed preview. It rides in the
+/// URL fragment and never reaches a server. 96 bits of CSPRNG output, the
+/// maintainer's length choice for a link of about 45 characters (the
+/// short-link amendment of ADR-0028, 2026-09-27): the preview is a name and a
+/// count behind a link its holder shares, and a 2^96 offline search per link
+/// (per-link, see [`preview_key`]) is out of reach.
+pub const LINK_SECRET_LEN: usize = 12;
+
+/// Length of the link secret in its URL-fragment form: base64url without
+/// padding of [`LINK_SECRET_LEN`] bytes.
+pub const LINK_SECRET_B64URL_LEN: usize = 16;
+
+/// HKDF-SHA256 `info` domain for the preview key (see [`preview_key`]).
+pub const PREVIEW_KEY_DOMAIN_V1: &[u8] = b"lakko/group-invite/preview-key/v1\x00";
 
 /// Preview plaintext version byte.
 const PREVIEW_VERSION: u8 = 1;
@@ -232,17 +247,50 @@ impl GroupInvitePreview {
     }
 }
 
-/// Mint a fresh link key. One per link: it is what makes the preview safe to
-/// seal under a random nonce, and it is never reused.
+/// Mint a fresh link secret (the URL-fragment value). One per link: it is what
+/// makes the preview safe to seal under a random nonce, and it is never reused.
 #[must_use]
-pub fn generate_link_key() -> [u8; LINK_KEY_LEN] {
-    let mut key = [0u8; LINK_KEY_LEN];
-    random::fill(&mut key);
-    key
+pub fn generate_link_key() -> [u8; LINK_SECRET_LEN] {
+    let mut secret = [0u8; LINK_SECRET_LEN];
+    random::fill(&mut secret);
+    secret
+}
+
+/// Derive the 32-byte preview AEAD key from the URL-carried link secret:
+///
+/// ```text
+/// HKDF-SHA256(ikm  = link_secret,
+///             salt = empty,
+///             info = PREVIEW_KEY_DOMAIN_V1 ‖ u16be gid_len ‖ group_id ‖ issuer_pubkey(32))
+/// ```
+///
+/// The secret is uniform random, so HKDF only has to expand it to the AEAD key
+/// width; the key's strength is the secret's 96 bits. Binding the capability's
+/// own `group_id` and issuer key into `info` is free (both are in the signed
+/// capability the opener already holds) and makes every link's key derivation
+/// distinct, so a search over secrets cannot be shared across many links: a
+/// guessed secret has to be run through HKDF once per target link rather than
+/// tested against all of them with one derivation. It also means a secret moved
+/// onto a different capability opens nothing.
+fn preview_key(
+    link_secret: &[u8; LINK_SECRET_LEN],
+    group_id: &[u8],
+    issuer_pubkey: &VerifyingKey,
+) -> Result<SecretBytes<AEAD_KEY_LEN>> {
+    // Callers bound `group_id` to MAX_GROUP_ID_LEN; a wrong caller saturates.
+    let gid_len = u16::try_from(group_id.len()).unwrap_or(u16::MAX);
+    let mut info = Vec::with_capacity(PREVIEW_KEY_DOMAIN_V1.len() + 2 + group_id.len() + 32);
+    info.extend_from_slice(PREVIEW_KEY_DOMAIN_V1);
+    info.extend_from_slice(&gid_len.to_be_bytes());
+    info.extend_from_slice(group_id);
+    info.extend_from_slice(&issuer_pubkey.to_bytes());
+    hkdf_sha256::<AEAD_KEY_LEN>(link_secret, &[], &info).map_err(|e| {
+        ContactError::InvalidArgument(format!("group-invite preview key derivation: {e}"))
+    })
 }
 
 impl GroupInviteCapability {
-    /// Open the sealed preview with the link key from the URL fragment.
+    /// Open the sealed preview with the link secret from the URL fragment.
     ///
     /// `Ok(None)` when the link carries no preview. A caller that has no key,
     /// or gets an `Err` (wrong key, tampered or malformed preview), shows the
@@ -251,15 +299,16 @@ impl GroupInviteCapability {
     /// # Errors
     ///
     /// - [`ContactError::InvalidEncoding`] when the preview does not open under
-    ///   `link_key` or its plaintext is malformed.
+    ///   `link_secret` or its plaintext is malformed.
     pub fn open_preview(
         &self,
-        link_key: &[u8; LINK_KEY_LEN],
+        link_secret: &[u8; LINK_SECRET_LEN],
     ) -> Result<Option<GroupInvitePreview>> {
         if self.sealed_preview.is_empty() {
             return Ok(None);
         }
-        let plain = open_with_key(link_key, &self.sealed_preview).map_err(|_| {
+        let key = preview_key(link_secret, &self.group_id, &self.issuer_signature_pubkey)?;
+        let plain = open_with_key(key.as_bytes(), &self.sealed_preview).map_err(|_| {
             ContactError::InvalidEncoding(
                 "group-invite preview does not open under this key".into(),
             )
@@ -307,8 +356,9 @@ pub fn compose(issuer_signing: &SigningKey, group_id: &[u8], expiry_ms: u64) -> 
 }
 
 /// Compose + sign a group join-ticket capability that carries a preview,
-/// sealed under `link_key` (see [`generate_link_key`]). The caller puts the key
-/// in the link's URL fragment and never anywhere a server reads.
+/// sealed under the key [`preview_key`] derives from `link_secret` (see
+/// [`generate_link_key`]). The caller puts the secret in the link's URL
+/// fragment and never anywhere a server reads.
 ///
 /// # Errors
 ///
@@ -319,10 +369,11 @@ pub fn compose_with_preview(
     group_id: &[u8],
     expiry_ms: u64,
     preview: &GroupInvitePreview,
-    link_key: &[u8; LINK_KEY_LEN],
+    link_secret: &[u8; LINK_SECRET_LEN],
 ) -> Result<Vec<u8>> {
     preview.validate()?;
-    let sealed = seal_with_key(link_key, &preview.encode()).map_err(|e| {
+    let key = preview_key(link_secret, group_id, &issuer_signing.verifying_key())?;
+    let sealed = seal_with_key(key.as_bytes(), &preview.encode()).map_err(|e| {
         ContactError::InvalidArgument(format!("group-invite preview could not be sealed: {e}"))
     })?;
     compose_sealed(issuer_signing, group_id, expiry_ms, &sealed)
@@ -505,7 +556,7 @@ pub const GROUP_INVITE_REVOKE_DOMAIN_V1: &[u8] = b"lakko-group-invite-revoke/v1\
 
 /// Build the canonical bytes the issuer signs to revoke a group-invite blob.
 ///
-/// Layout: `GROUP_INVITE_REVOKE_DOMAIN_V1 (29 bytes) ‖ blob_id (32 bytes) ‖
+/// Layout: `GROUP_INVITE_REVOKE_DOMAIN_V1 (29 bytes) ‖ blob_id (6 bytes) ‖
 /// signed_at_ms (8 bytes BE)`. The discovery service recovers the issuer's
 /// verifying key from the stored capability's `issuer_signature_pubkey` and
 /// verifies this; `signed_at_ms` gives replay protection bounded by
@@ -791,6 +842,72 @@ mod tests {
         assert!(
             cap.open_preview(&other).is_err(),
             "a wrong key must not open the preview"
+        );
+    }
+
+    #[test]
+    fn link_secret_is_twelve_bytes_and_sixteen_url_characters() {
+        assert_eq!(LINK_SECRET_LEN, 12);
+        assert_eq!(generate_link_key().len(), LINK_SECRET_LEN);
+        assert_eq!(LINK_SECRET_B64URL_LEN, (LINK_SECRET_LEN * 4).div_ceil(3));
+        assert_eq!(LINK_SECRET_B64URL_LEN, 16);
+        assert_ne!(generate_link_key(), generate_link_key());
+    }
+
+    #[test]
+    fn preview_key_is_hkdf_over_the_secret_bound_to_group_and_issuer() {
+        let secret = [0x07u8; LINK_SECRET_LEN];
+        let gid = fixture_group_id();
+        let issuer = fixture_signing().verifying_key();
+        let key = preview_key(&secret, &gid, &issuer).unwrap();
+        let mut info = PREVIEW_KEY_DOMAIN_V1.to_vec();
+        info.extend_from_slice(&u16::try_from(gid.len()).unwrap().to_be_bytes());
+        info.extend_from_slice(&gid);
+        info.extend_from_slice(&issuer.to_bytes());
+        let expected = hkdf_sha256::<AEAD_KEY_LEN>(&secret, &[], &info).unwrap();
+        assert_eq!(key.as_bytes(), expected.as_bytes());
+        // A different group or issuer gives a different key for the same secret.
+        let mut other_gid = gid.clone();
+        other_gid[1] ^= 0x01;
+        assert_ne!(
+            preview_key(&secret, &other_gid, &issuer)
+                .unwrap()
+                .as_bytes(),
+            key.as_bytes()
+        );
+        let other_issuer = SigningKey::from_seed(&[0x6B; 32]).verifying_key();
+        assert_ne!(
+            preview_key(&secret, &gid, &other_issuer)
+                .unwrap()
+                .as_bytes(),
+            key.as_bytes()
+        );
+    }
+
+    #[test]
+    fn a_link_secret_moved_onto_another_capability_opens_nothing() {
+        // The key is bound to the capability's group id and issuer, so a
+        // sealed preview transplanted onto a capability naming a different
+        // group or issuer does not open under the same secret.
+        let secret = generate_link_key();
+        let wire_a = compose_with_preview(
+            &fixture_signing(),
+            &fixture_group_id(),
+            NEVER_EXPIRES,
+            &fixture_preview(),
+            &secret,
+        )
+        .unwrap();
+        let cap_a = decode_and_verify(&wire_a).unwrap();
+        let mut transplanted = cap_a.clone();
+        transplanted.group_id[0] ^= 0x01;
+        assert!(transplanted.open_preview(&secret).is_err());
+        let mut other_issuer = cap_a.clone();
+        other_issuer.issuer_signature_pubkey = SigningKey::from_seed(&[0x6B; 32]).verifying_key();
+        assert!(other_issuer.open_preview(&secret).is_err());
+        assert_eq!(
+            cap_a.open_preview(&secret).unwrap(),
+            Some(fixture_preview())
         );
     }
 

@@ -62,7 +62,12 @@ import { createDisplayNameCheck } from "../profile/username-field";
 import { maySaveDisplayName, savedDisplayName } from "../profile/rules";
 import SaveFreshPhrasePrompt from "../auth/SaveFreshPhrasePrompt";
 import { loadWasm } from "../wasm";
-import { DiscoveryClient, DiscoveryHttpError } from "../discovery/client";
+import { DiscoveryClient, DiscoveryHttpError, isDiscoveryRateLimited } from "../discovery/client";
+import {
+  INVITE_LINK_RATE_LIMITED,
+  INVITE_LINK_TRY_AGAIN,
+  inviteLinkWidths,
+} from "../contacts/invite-link";
 import { parseCallInviteSlug } from "../calls/invite";
 import { useCallHost, type CallHostApi } from "../calls/CallHostContext";
 import { callIdHex } from "../calls/call-signaling-dispatch";
@@ -120,11 +125,16 @@ export default function JoinCall() {
   // Decode + verify the capability in a resource so the panel renders the
   // right state declaratively. Re-runs on navigation.
   const slugSignal = createMemo(() => params.slug);
-  const [decoded] = createResource(
+  /** The ledger answered 429: the link may be fine, so the page says "try
+   *  again later" instead of "invalid" (ADR-0028 short-link amendment). */
+  const [rateLimited, setRateLimited] = createSignal(false);
+  const [decoded, { refetch }] = createResource(
     slugSignal,
     async (slug): Promise<DecodedCall | null> => {
       try {
-        const parsed = parseCallInviteSlug(slug);
+        setRateLimited(false);
+        const wasm = await loadWasm();
+        const parsed = parseCallInviteSlug(slug, inviteLinkWidths(wasm));
         let capabilityBytes: Uint8Array;
         if (parsed.kind === "pointer") {
           const fetched = await discovery.fetchCallInvite(parsed.blobId);
@@ -133,7 +143,6 @@ export default function JoinCall() {
         } else {
           capabilityBytes = parsed.capabilityBytes;
         }
-        const wasm = await loadWasm();
         const cap = wasm.CallInviteCapability.decodeAndVerify(capabilityBytes);
         const identity = chats.identity();
         const isOwner =
@@ -151,6 +160,10 @@ export default function JoinCall() {
         };
       } catch (err) {
         if (err instanceof DiscoveryHttpError && err.status === 404) return null;
+        if (isDiscoveryRateLimited(err)) {
+          setRateLimited(true);
+          return null;
+        }
         // eslint-disable-next-line no-console
         console.warn("join-call: decode/verify failed", err);
         return null;
@@ -309,10 +322,17 @@ export default function JoinCall() {
           <Show when={decoded.loading}>
             <p>Loading call link…</p>
           </Show>
+          <Show when={!decoded.loading && decoded() === null && rateLimited()}>
+            <p>{INVITE_LINK_RATE_LIMITED}</p>
+            <button type="button" class="primary" onClick={() => void refetch()}>
+              {INVITE_LINK_TRY_AGAIN}
+            </button>
+            <A href={paths.home}>Open Lakko</A>
+          </Show>
           <Show
             when={
               !decoded.loading &&
-              (decoded() === null || decoded()?.valid === false)
+              ((decoded() === null && !rateLimited()) || decoded()?.valid === false)
             }
           >
             <p>This call link is invalid or has expired.</p>
