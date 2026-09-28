@@ -420,6 +420,108 @@ stand-in must be indistinguishable from a UUIDv7, including its timestamp,
 which is hard), or a pairing change so the confirming device supplies the id
 (an `lakko-mls` change, invariant #3).
 
+## What the security pass found (2026-09-28)
+
+A `lakko-security` review of `services/auth` after S4 and S5. Fixed in
+`services/auth` (`src/limits.rs`, `src/login_handle.rs`, `src/opaque.rs`,
+`src/word_vault.rs`, `src/recovery_contact.rs`, migration `0023`),
+host-tested against a local MariaDB; not deployed.
+
+- **`PUT /auth/login-handle` was an unlimited existence oracle** (MEDIUM).
+  `409 handle-taken` against `200` told a signed-in account whether any
+  handle was held, and each `200` released the previous probe, so one
+  account could sweep a username dictionary. The `409` stays (the claim
+  order stops on it) and is rationed three ways, each refusing with
+  `429 {"error": "handle-bind-limited", "retry_after_secs": N}`: a
+  per-account counter charged on every bind (`LAKKO_AUTH_LIMIT_HANDLE_BIND`,
+  default 5 per 24 h), a per-address bucket on the route
+  (`LAKKO_AUTH_IP_LIMIT_HANDLE_BIND`, default 20 per hour), and a minimum
+  interval between two binds of one account that change its handle
+  (`LAKKO_AUTH_HANDLE_CHANGE_MIN_INTERVAL_SECS`, default 60 s), kept in
+  `login_handle_changes` so a `DELETE` does not reopen it. Restoring the
+  handle held just before is exempt, so a client can roll back a rename
+  whose discovery registration failed. Defaults are chosen, not measured.
+  *Residual:* the `409` is still an oracle, at up to 5 names per account per
+  day and 20 per address per hour; each extra account costs the signup
+  proof, so a sweep scales with the accounts and addresses an attacker is
+  willing to pay for. *Honest cost:* a signup whose first name was free at
+  auth but taken at discovery (a modified client registered it, or a race)
+  releases the handle and waits out the interval before binding another.
+- **Address buckets keyed on the full address, with no cap** (MEDIUM). An
+  IPv6 /64 was 2^64 buckets and the in-memory map grew for up to an hour.
+  Every auth bucket now keys on `bucket_address`: an IPv4 address (and an
+  IPv4-mapped IPv6 one) as is, an IPv6 address as its /64. The map holds at
+  most 65 536 buckets; a new source past the cap evicts the refilled
+  buckets first, then the least recently charged eighth of the cap.
+  *Residual:* a source owning many /64s (a /48 is 65 536 of them) still
+  gets one bucket per /64, and past the cap an evicted bucket is forgotten,
+  i.e. refilled; the per-name counters are what still bounds guessing then.
+  Many users behind one IPv4 address (carrier NAT) share one bucket, as
+  before.
+- **The per-name counter was charged before the body was decoded**
+  (MEDIUM, partial fix). A junk `/login/start`, `/recovery/login/start` or
+  `/password/reset/start` locked the named handle. The body is now decoded
+  and validated first (still before any lookup, so a `400` says nothing
+  about the name) and only then charged; `/recovery-contact/recover/finish`
+  refuses a code that is not six ASCII digits with `400` before charging
+  (TOTP, the word vault and `/device/request` already decoded first).
+  *Residual, inherent to per-name limits:* anyone who knows a username can
+  still spend its counters with well-formed requests, one window at a time,
+  bounded per address. While a name's login, recovery, reset, TOTP, vault,
+  recovery-code and device-request counters are spent, the routes that stay
+  open to its owner are the passkey login (the discoverable ceremony names
+  no account) and QR pairing from a signed-in device.
+- **The name-counter key was unkeyed** (LOW). `BLAKE3(scope || handle)`
+  let a database dump plus a username list show whose name was the target
+  of which attempts. The stored key is now `keyed-BLAKE3(subkey, scope ||
+  name)` with the subkey derived from `LAKKO_AUTH_HANDLE_PEPPER` under its
+  own context (`lakko/auth/name-limit-key/v1`). Without the pepper the
+  limiter uses a per-process random key and says so at startup (the name
+  routes answer `503` in that posture anyway; a restart starts every window
+  afresh). Migration `0023` drops the rows written under the old key.
+- **Recovery-code send was a timing oracle** (LOW). `recover/start`
+  awaited the challenge write and the SMTP or SMS round trip before
+  answering on a match and answered at once on a miss. Both paths now run
+  the same queries and answer; on a match the challenge write and the
+  delivery run in a spawned task afterwards. A failure there is logged and
+  never reaches the caller (as before).
+- **The vault's destruction was visible** (LOW). After the tenth miss the
+  row was deleted and `/vault/recover/start` switched from the real
+  positions, salt and cost to decoys, which told a caller a vault had
+  existed. Destruction now leaves a tombstone: the row keeps positions,
+  salt and cost and loses `body_enc` (now nullable), so start answers
+  identically before and after and every later guess misses (the same
+  dummy compare and `401` as an account without a vault). `GET /vault`
+  reports a tombstone as not enrolled; enrolling again replaces it. The
+  decoy cost is a frozen server constant (`DECOY_PARAMS`, equal to the
+  client default today) rather than the client default read at run time,
+  and a test fails when the client default moves: rows keep the cost they
+  were enrolled with, so a decoy that followed a new default would single
+  out every row enrolled under the old one. *Residual:* that decision (how
+  decoys cover two costs, for example drawing each handle's decoy cost from
+  the costs in use) is not built; and start's answer changes when an
+  account enrolls or re-enrolls, so someone polling a name can see those
+  events.
+- **Concurrent binds of one account could answer a spurious `409`**
+  (LOW/INFO). Two binds of one account raced on the account's unique key,
+  and that violation was reported as `handle-taken`. A bind (and a delete)
+  now locks the account's `accounts` row for its transaction, so the
+  account's binds run one after another; a unique violation on the account
+  key, should one still occur, is retried rather than reported, and only
+  the handle's primary key yields `409`. Verified by a test that binds
+  eight handles concurrently; with the lock removed the same test fails.
+- **`expect()` on corrupted rows** (INFO). A stored OPAQUE registration or
+  login state that does not deserialize now logs and answers `500` instead
+  of panicking the handler.
+
+**Client-visible changes.** `PUT /auth/login-handle` can answer
+`429 {"error": "handle-bind-limited", "retry_after_secs": N}` with
+`Retry-After` (a new code for `docs/ux/anti-abuse.md`).
+`/recovery-contact/recover/finish` answers `400` for a code that is not six
+ASCII digits (was `401`). A `400` on the login, recovery-login and reset
+starts no longer spends the name's budget. `recover/start`'s code arrives
+after its `200` rather than before; nothing else about the answer changes.
+
 ## References
 
 - [ADR-0042](0042-push-opaque-group-routing-id.md), [ADR-0053](0053-ds-journal-authorisation.md),

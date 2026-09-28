@@ -22,6 +22,10 @@
 //! - **`PUT /auth/login-handle`** — bearer. Binds the caller's account to a
 //!   handle, replacing its previous one (one per account). A handle another
 //!   account holds is `409 {"error":"handle-taken"}` and changes nothing.
+//!   That answer is an existence oracle clients need (the claim order), so
+//!   it is rationed rather than removed: a per-account counter charged on
+//!   every bind, a per-address bucket, and a minimum interval between two
+//!   binds that change the handle (`429 {"error":"handle-bind-limited"}`).
 //! - **`DELETE /auth/login-handle`** — bearer. Removes the caller's handle.
 //!   Account deletion removes it too (FK cascade).
 //!
@@ -186,16 +190,117 @@ pub(crate) async fn resolve(
     })
 }
 
-/// Bind `account_id` to `handle`, replacing its previous handle. `Ok(false)`
-/// when another account holds the handle (nothing changes).
+/// How a bind ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BindOutcome {
+    /// The account now holds the handle (it held another, or none).
+    Bound,
+    /// The account already held this handle; nothing changed.
+    Unchanged,
+    /// Another account holds the handle; nothing changed (`409`).
+    Taken,
+    /// The account changed its handle less than the minimum interval ago
+    /// and this bind would change it again; nothing changed (`429`).
+    TooSoon {
+        /// Seconds until a change is admitted (>= 1).
+        retry_after_secs: u64,
+    },
+}
+
+/// Attempts at a bind that lost to a concurrent bind of the same account.
+/// The account-row lock below serialises them, so a retry is not expected;
+/// it only keeps a lost race from surfacing as a spurious `409`.
+const BIND_ATTEMPTS: usize = 3;
+
+/// Why one bind attempt did not finish.
+enum AttemptError {
+    /// A unique violation on the account key, not the handle: a concurrent
+    /// bind of the same account got in between. Retried.
+    AccountRace,
+    Db(sqlx::Error),
+}
+
+impl From<sqlx::Error> for AttemptError {
+    fn from(e: sqlx::Error) -> Self {
+        Self::Db(e)
+    }
+}
+
+/// Bind `account_id` to `handle`, replacing its previous handle.
+///
+/// The account's binds are serialised on its `accounts` row, so two
+/// concurrent binds of one account run one after the other and only a real
+/// handle conflict (the primary key, held by another account) answers
+/// [`BindOutcome::Taken`]. A change within `min_interval_secs` of the
+/// account's last change is refused ([`BindOutcome::TooSoon`]) unless it
+/// restores the handle the account held just before; re-binding the handle
+/// it holds is [`BindOutcome::Unchanged`] and not a change.
 pub(crate) async fn bind(
     pool: &MySqlPool,
     pepper: &[u8; 32],
     account_id: &[u8; ACCOUNT_ID_LEN],
     handle: &[u8; HANDLE_LEN],
-) -> Result<bool, sqlx::Error> {
+    min_interval_secs: u32,
+) -> Result<BindOutcome, sqlx::Error> {
     let key = handle_key(pepper, handle);
+    for _ in 0..BIND_ATTEMPTS {
+        match bind_once(pool, account_id, &key, min_interval_secs).await {
+            Ok(outcome) => return Ok(outcome),
+            Err(AttemptError::AccountRace) => {
+                tracing::debug!("login handle bind raced a bind of the same account; retrying");
+            },
+            Err(AttemptError::Db(e)) => return Err(e),
+        }
+    }
+    Err(sqlx::Error::Protocol(
+        "login handle bind kept racing a bind of the same account".to_string(),
+    ))
+}
+
+async fn bind_once(
+    pool: &MySqlPool,
+    account_id: &[u8; ACCOUNT_ID_LEN],
+    key: &[u8; 32],
+    min_interval_secs: u32,
+) -> Result<BindOutcome, AttemptError> {
     let mut tx = pool.begin().await?;
+    // Serialise this account's binds: the second waits here until the first
+    // commits or rolls back.
+    let locked: Option<(Vec<u8>,)> =
+        sqlx::query_as("SELECT id FROM accounts WHERE id = ? FOR UPDATE")
+            .bind(account_id.as_slice())
+            .fetch_optional(&mut *tx)
+            .await?;
+    if locked.is_none() {
+        return Err(AttemptError::Db(sqlx::Error::RowNotFound));
+    }
+    let current: Option<(Vec<u8>,)> =
+        sqlx::query_as("SELECT handle_key FROM login_handles WHERE account_id = ?")
+            .bind(account_id.as_slice())
+            .fetch_optional(&mut *tx)
+            .await?;
+    let current = current.map(|(k,)| k);
+    if current.as_deref() == Some(key.as_slice()) {
+        tx.commit().await?;
+        return Ok(BindOutcome::Unchanged);
+    }
+    let change: Option<(Option<i64>, Option<Vec<u8>>)> = sqlx::query_as(
+        "SELECT CAST(? - TIMESTAMPDIFF(SECOND, last_changed_at, NOW(3)) AS SIGNED), \
+                previous_handle_key \
+         FROM login_handle_changes WHERE account_id = ?",
+    )
+    .bind(i64::from(min_interval_secs))
+    .bind(account_id.as_slice())
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some((Some(remaining), previous)) = change {
+        let restoring = previous.as_deref() == Some(key.as_slice());
+        if remaining > 0 && !restoring {
+            return Ok(BindOutcome::TooSoon {
+                retry_after_secs: u64::try_from(remaining).unwrap_or(1).max(1),
+            });
+        }
+    }
     sqlx::query("DELETE FROM login_handles WHERE account_id = ?")
         .bind(account_id.as_slice())
         .execute(&mut *tx)
@@ -206,16 +311,29 @@ pub(crate) async fn bind(
         .execute(&mut *tx)
         .await;
     match inserted {
-        Ok(_) => {
-            tx.commit().await?;
-            Ok(true)
-        },
+        Ok(_) => {},
         Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
-            // The rollback on drop keeps the caller's previous handle.
-            Ok(false)
+            // Rolled back on drop: the caller keeps its previous handle.
+            return if e.message().contains("uq_login_handles_account") {
+                Err(AttemptError::AccountRace)
+            } else {
+                Ok(BindOutcome::Taken)
+            };
         },
-        Err(e) => Err(e),
+        Err(e) => return Err(e.into()),
     }
+    sqlx::query(
+        "INSERT INTO login_handle_changes (account_id, last_changed_at, previous_handle_key) \
+         VALUES (?, NOW(3), ?) \
+         ON DUPLICATE KEY UPDATE last_changed_at = NOW(3), \
+           previous_handle_key = VALUES(previous_handle_key)",
+    )
+    .bind(account_id.as_slice())
+    .bind(current.as_deref())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(BindOutcome::Bound)
 }
 
 /// `PUT /auth/login-handle` body.
@@ -226,6 +344,14 @@ pub(crate) struct PutReq {
 }
 
 /// `PUT /auth/login-handle` — bind the caller's account to a handle.
+///
+/// The `409` a taken handle answers is an existence oracle a client needs
+/// (the claim order of ADR-0054 S5 stops on it), so it is kept and made
+/// expensive instead: every bind is charged to the account's
+/// [`crate::limits::Scope::HandleBind`] counter (default 5 per 24 h) and to
+/// the per-address `HandleBind` bucket, and a bind that would change the
+/// handle within the minimum interval of the last change is refused. Each
+/// refusal is `429 {"error":"handle-bind-limited","retry_after_secs":N}`.
 #[axum::debug_handler]
 pub(crate) async fn put(
     State(state): State<AppState>,
@@ -234,35 +360,90 @@ pub(crate) async fn put(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let pepper = pepper(&state)?;
     let handle = decode_handle(&req.handle)?;
-    if !bind(&state.db, &pepper, &auth.0, &handle)
-        .await
-        .map_err(ApiError::Db)?
-    {
-        return Err(ApiError::HandleTaken);
+    crate::limits::charge_name(
+        &state.db,
+        &state.limits,
+        crate::limits::Scope::HandleBind,
+        &auth.0,
+    )
+    .await?;
+    let outcome = bind(
+        &state.db,
+        &pepper,
+        &auth.0,
+        &handle,
+        state.limits.handle_change_min_interval_secs(),
+    )
+    .await
+    .map_err(ApiError::Db)?;
+    match outcome {
+        BindOutcome::Bound | BindOutcome::Unchanged => {},
+        BindOutcome::Taken => return Err(ApiError::HandleTaken),
+        BindOutcome::TooSoon { retry_after_secs } => {
+            return Err(ApiError::Limit(crate::limits::LimitError::Limited {
+                code: crate::limits::CODE_HANDLE_BIND_LIMITED,
+                retry_after_secs,
+            }));
+        },
     }
     tracing::info!(account_id = %URL_SAFE_NO_PAD.encode(auth.0), "login handle bound");
     Ok(Json(serde_json::json!({ "bound": true })))
 }
 
 /// `DELETE /auth/login-handle` — remove the caller's handle.
+///
+/// The removed handle becomes the one a later bind may restore within the
+/// minimum interval; the time of the last change is left as it was, so
+/// releasing a handle does not reopen the interval.
 #[axum::debug_handler]
 pub(crate) async fn delete(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthenticatedAccount>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     pepper(&state)?;
-    let removed = sqlx::query("DELETE FROM login_handles WHERE account_id = ?")
-        .bind(auth.0.as_slice())
-        .execute(&state.db)
-        .await
-        .map_err(ApiError::Db)?
-        .rows_affected();
+    let removed = remove(&state.db, &auth.0).await.map_err(ApiError::Db)?;
     tracing::info!(
         account_id = %URL_SAFE_NO_PAD.encode(auth.0),
         removed,
         "login handle removed"
     );
-    Ok(Json(serde_json::json!({ "removed": removed == 1 })))
+    Ok(Json(serde_json::json!({ "removed": removed })))
+}
+
+async fn remove(pool: &MySqlPool, account_id: &[u8; ACCOUNT_ID_LEN]) -> Result<bool, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let locked: Option<(Vec<u8>,)> =
+        sqlx::query_as("SELECT id FROM accounts WHERE id = ? FOR UPDATE")
+            .bind(account_id.as_slice())
+            .fetch_optional(&mut *tx)
+            .await?;
+    if locked.is_none() {
+        return Ok(false);
+    }
+    let current: Option<(Vec<u8>,)> =
+        sqlx::query_as("SELECT handle_key FROM login_handles WHERE account_id = ?")
+            .bind(account_id.as_slice())
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some((current,)) = current else {
+        tx.commit().await?;
+        return Ok(false);
+    };
+    sqlx::query("DELETE FROM login_handles WHERE account_id = ?")
+        .bind(account_id.as_slice())
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO login_handle_changes (account_id, last_changed_at, previous_handle_key) \
+         VALUES (?, NULL, ?) \
+         ON DUPLICATE KEY UPDATE previous_handle_key = VALUES(previous_handle_key)",
+    )
+    .bind(account_id.as_slice())
+    .bind(current.as_slice())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(true)
 }
 
 /// A fresh random handle and its wire form (tests).
@@ -281,9 +462,12 @@ pub(crate) async fn bind_for_test(
     account_id: &[u8; ACCOUNT_ID_LEN],
     handle: &[u8; HANDLE_LEN],
 ) {
-    assert!(bind(pool, &TEST_PEPPER, account_id, handle)
-        .await
-        .expect("bind handle"));
+    assert_eq!(
+        bind(pool, &TEST_PEPPER, account_id, handle, 0)
+            .await
+            .expect("bind handle"),
+        BindOutcome::Bound
+    );
 }
 
 #[cfg(test)]

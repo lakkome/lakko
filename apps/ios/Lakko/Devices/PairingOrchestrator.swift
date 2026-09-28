@@ -29,10 +29,17 @@ public enum PairingOrchestrator {
     /// value is non-nil); the session token pair is ACCESS and is
     /// `nil` when the grant redeem failed (seed-only degradation).
     /// The consumer (`AuthRepository.completeFromPairing` /
-    /// `completeFromDeviceRestore`) owns zeroizing `phraseSeed`
-    /// (best-effort under Swift `Data` value semantics).
-    public struct JoinRecoveryOutcome {
-        public let phraseSeed: Data
+    /// `completeFromDeviceRestore`, or the view model refusing it) owns
+    /// zeroizing `phraseSeed` through ``wipeSeed()``.
+    ///
+    /// A class, not a struct, so the seed lives in ONE mutable place: under
+    /// `Data` copy-on-write, `var seed = outcome.phraseSeed;
+    /// seed.resetBytes(...)` zeroes a fresh copy and leaves the bytes that
+    /// were received untouched. ``wipeSeed()`` zeroes the outcome's own
+    /// storage in place, which is the received buffer as long as nobody
+    /// kept a copy of `phraseSeed` (the refusal paths keep none).
+    public final class JoinRecoveryOutcome {
+        public private(set) var phraseSeed: Data
         public let sessionToken: String?
         public let sessionExpiresAtMs: Int64?
         /// ADR-0056 — the raw 16-byte account id the redeemed grant belongs
@@ -40,17 +47,35 @@ public enum PairingOrchestrator {
         /// fresh device that named its account by username first learns the
         /// id here.
         public let accountId: Data?
+        /// ADR-0056 security pass — a join by name holds everything it
+        /// received (the device-identity seed, the DeviceGroup snapshot,
+        /// the history rows, the state bundle) in memory; this writes it.
+        /// The restore calls it only after the phrase seed verified against
+        /// the published identity AND the typed name resolved, at
+        /// discovery, to the redeemed account. `nil` for a device that
+        /// knew its account (it persisted at join, as before).
+        public let persistJoin: (() async -> Void)?
 
         public init(
             phraseSeed: Data,
             sessionToken: String?,
             sessionExpiresAtMs: Int64?,
-            accountId: Data? = nil
+            accountId: Data? = nil,
+            persistJoin: (() async -> Void)? = nil
         ) {
             self.phraseSeed = phraseSeed
             self.sessionToken = sessionToken
             self.sessionExpiresAtMs = sessionExpiresAtMs
             self.accountId = accountId
+            self.persistJoin = persistJoin
+        }
+
+        /// Zero the seed in place. Idempotent.
+        public func wipeSeed() {
+            phraseSeed.withUnsafeMutableBytes { raw in
+                guard let base = raw.baseAddress else { return }
+                memset(base, 0, raw.count)
+            }
         }
     }
 
@@ -247,6 +272,15 @@ public enum PairingOrchestrator {
         /// joined group checked to be that account's DeviceGroup. A redeem
         /// that fails or a group of another account ends the join: without
         /// the account the device has nothing to land.
+        ///
+        /// ADR-0056 security pass: NOTHING is written here. The device
+        /// seed, the snapshot, the history rows and the state bundle are
+        /// held in a ``PendingJoinByName`` whose ``PendingJoinByName/persist()``
+        /// rides the outcome as ``JoinRecoveryOutcome/persistJoin``; the
+        /// restore runs it only after the phrase seed verified against the
+        /// published identity and the typed name resolved, at discovery, to
+        /// the redeemed account. A refusal before that leaves this device
+        /// exactly as it was.
         private func acceptByName(
             welcomeBytes: Data,
             welcomeCursor: Int64
@@ -266,8 +300,7 @@ public enum PairingOrchestrator {
                 throw JoinByNameError.noAccess
             }
             guard let accountIdBytes = outcome.accountId, outcome.sessionToken != nil else {
-                var seed = outcome.phraseSeed
-                seed.resetBytes(in: 0..<seed.count)
+                outcome.wipeSeed()
                 throw JoinByNameError.noAccess
             }
             let joined: DeviceGroup
@@ -277,31 +310,49 @@ public enum PairingOrchestrator {
                     accountIdBytes: accountIdBytes
                 )
             } catch {
-                var seed = outcome.phraseSeed
-                seed.resetBytes(in: 0..<seed.count)
+                outcome.wipeSeed()
                 throw error
             }
-            let accountIdB64 = base64Encode(accountIdBytes)
-            // The device-identity seed is keyed by account; it is persisted
-            // only now, once the redeem named the account.
-            if !pendingDeviceSeed.isEmpty {
-                do {
-                    try DeviceIdentityStore.putDeviceIdentitySeed(
-                        accountIdB64: accountIdB64,
-                        seed: pendingDeviceSeed
-                    )
-                } catch {
-                    NSLog("device identity seed persist (join by name) failed: %@", error.localizedDescription)
-                }
-                pendingDeviceSeed.resetBytes(in: 0..<pendingDeviceSeed.count)
-                pendingDeviceSeed = Data()
-            }
-            DeviceGroupLifecycle.persistSnapshot(
+            // The device-identity seed moves into the pending join, which
+            // becomes its only owner (zeroed there on persist or on release).
+            let pending = PendingJoinByName(
                 identity: identity,
-                accountIdB64: accountIdB64
+                joined: joined,
+                accountIdBytes: accountIdBytes,
+                deviceSeed: pendingDeviceSeed
             )
-            await receiveBundles(joined: joined, accountIdB64: accountIdB64, welcomeCursor: welcomeCursor)
-            return outcome
+            pendingDeviceSeed = Data()
+            await fetchBundles(into: pending, welcomeCursor: welcomeCursor)
+            return JoinRecoveryOutcome(
+                phraseSeed: outcome.phraseSeed,
+                sessionToken: outcome.sessionToken,
+                sessionExpiresAtMs: outcome.sessionExpiresAtMs,
+                accountId: accountIdBytes,
+                persistJoin: { pending.persist() }
+            )
+        }
+
+        /// Fetch (not apply) the history and state bundles of a join by
+        /// name: both best-effort, both held by `pending` until the restore
+        /// passed its checks.
+        private func fetchBundles(into pending: PendingJoinByName, welcomeCursor cursor: Int64) async {
+            do {
+                let sealed = try await WelcomeCourier.pollForHistoryBundle(
+                    rendezvousPseudonym: rendezvous,
+                    welcomeCursor: cursor
+                )
+                if case .received(let sealedBytes) = sealed {
+                    pending.historySealed = sealedBytes
+                }
+            } catch {
+                NSLog("history bundle fetch failed: %@", error.localizedDescription)
+            }
+            pending.stateBundle = await StateBundle.receive(
+                group: pending.joined,
+                identity: identity,
+                rendezvousPseudonym: rendezvous,
+                afterCursor: cursor
+            )
         }
 
         /// Phase 2a3d8-ui history catch-up bundle + ADR-0050 section 2.9
@@ -412,6 +463,92 @@ public enum PairingOrchestrator {
                 )
                 return nil
             }
+        }
+    }
+
+    /// ADR-0056 security pass — what a join by name received, held in
+    /// memory until the restore has verified the phrase seed and checked
+    /// the typed name at discovery. ``persist()`` is the one place any of it
+    /// reaches the disk; releasing the object without calling it leaves the
+    /// device as it was (the device seed is zeroed on release).
+    final class PendingJoinByName {
+        let identity: Identity
+        let joined: DeviceGroup
+        let accountIdBytes: Data
+        let accountIdB64: String
+        /// The sealed history bundle, opened and applied at ``persist()``.
+        var historySealed: Data?
+        /// The state bundle (contacts, pins, known groups), applied at
+        /// ``persist()``.
+        var stateBundle: StateBundle.V1?
+        /// The only owner of the device-identity seed once the join moved
+        /// it here; zeroed in place after the write and on release.
+        private var deviceSeed: Data
+        private(set) var persisted = false
+
+        init(identity: Identity, joined: DeviceGroup, accountIdBytes: Data, deviceSeed: Data) {
+            self.identity = identity
+            self.joined = joined
+            self.accountIdBytes = accountIdBytes
+            self.accountIdB64 = base64Encode(accountIdBytes)
+            self.deviceSeed = deviceSeed
+        }
+
+        deinit {
+            wipeDeviceSeed()
+        }
+
+        /// Write the device-identity seed, the DeviceGroup snapshot, the
+        /// history rows and the state bundle under the redeemed account.
+        /// Each write is best-effort, as it was at join time before the
+        /// security pass. Runs once.
+        func persist() {
+            guard !persisted else { return }
+            persisted = true
+            if !deviceSeed.isEmpty {
+                do {
+                    try DeviceIdentityStore.putDeviceIdentitySeed(
+                        accountIdB64: accountIdB64,
+                        seed: deviceSeed
+                    )
+                } catch {
+                    NSLog("device identity seed persist (join by name) failed: %@", error.localizedDescription)
+                }
+                wipeDeviceSeed()
+            }
+            DeviceGroupLifecycle.persistSnapshot(
+                identity: identity,
+                accountIdB64: accountIdB64
+            )
+            if var sealed = historySealed {
+                historySealed = nil
+                do {
+                    var secret = try joined.historyBundleSecret(identity: identity)
+                    defer { secret.resetBytes(in: 0..<secret.count) }
+                    let applied = try HistoryBundleCodec.applyToMessageLog(
+                        accountIdB64: accountIdB64,
+                        secret: secret,
+                        sealedBytes: sealed
+                    )
+                    NSLog("history catch-up: applied %d rows", applied)
+                } catch {
+                    NSLog("history bundle apply failed: %@", error.localizedDescription)
+                }
+                sealed.resetBytes(in: 0..<sealed.count)
+            }
+            if let bundle = stateBundle {
+                stateBundle = nil
+                let applied = StateBundle.apply(bundle)
+                NSLog("state bundle: %d contacts, %d pins", applied.contacts, applied.pins)
+            }
+        }
+
+        private func wipeDeviceSeed() {
+            deviceSeed.withUnsafeMutableBytes { raw in
+                guard let base = raw.baseAddress else { return }
+                memset(base, 0, raw.count)
+            }
+            deviceSeed = Data()
         }
     }
 

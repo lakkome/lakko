@@ -15,21 +15,29 @@
 //!   counter is charged BEFORE the handler looks anything up, and it exists
 //!   for a name with no account exactly as for one with an account, so a
 //!   refusal says nothing about existence (same status, same body, same
-//!   queries on both paths). Stored in `auth_name_limits` as a BLAKE3 of the
-//!   name; a store error refuses the request (fail closed, `503`).
+//!   queries on both paths). Stored in `auth_name_limits` as a keyed BLAKE3
+//!   of the name under a subkey of the login-handle pepper, so a database
+//!   dump plus a username list does not show who was the target of which
+//!   attempts; a store error refuses the request (fail closed, `503`).
 //! - **Per source address** ([`ip_gate`]): an in-memory token bucket per
 //!   (route category, address). Addresses never reach the database. The
 //!   address is what the fronting nginx wrote (`X-Real-IP`, else the
 //!   rightmost `X-Forwarded-For` entry), else the socket peer; a request with
 //!   none of them is charged to one shared bucket rather than admitted
-//!   unmetered.
+//!   unmetered. An IPv6 address is charged to its /64 (one subscriber
+//!   usually holds a whole /64, so per address it would be 2^64 buckets);
+//!   an IPv4 address, and an IPv4-mapped IPv6 one, to the address itself.
+//!   The map holds at most [`MAX_ADDRESS_BUCKETS`] entries: a new source
+//!   past the cap first evicts buckets that have refilled completely, then
+//!   the least recently used ones (a batch at a time).
 //!
 //! A limit reached answers `429` with `{"error": <code>, "retry_after_secs":
 //! N}` and a `Retry-After: N` header — never `401`, so no client reads it as
 //! a bad credential or a lost session. The codes are one per route family so
 //! the clients can map each to its copy (`docs/ux/anti-abuse.md` §2):
 //! [`CODE_TOO_MANY_ATTEMPTS`], [`CODE_RECOVERY_CODE_SEND_LIMITED`],
-//! [`CODE_DEVICE_REQUEST_LIMITED`], [`CODE_SIGNUP_RATE_LIMITED`].
+//! [`CODE_DEVICE_REQUEST_LIMITED`], [`CODE_SIGNUP_RATE_LIMITED`],
+//! [`CODE_HANDLE_BIND_LIMITED`].
 //!
 //! Every default below is **chosen, not measured**; each has an env knob of
 //! the form `N/SECS` (at most `N` per `SECS` seconds).
@@ -49,7 +57,7 @@ use axum::extract::{ConnectInfo, State};
 use axum::http::{header, HeaderValue, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Json, Response};
-use lakko_crypto::hash::blake3_derive_key_from_material;
+use lakko_crypto::hash::{blake3_derive_key_from_material, blake3_keyed};
 use serde_json::json;
 use sqlx::MySqlPool;
 
@@ -67,11 +75,30 @@ pub(crate) const CODE_DEVICE_REQUEST_LIMITED: &str = "device-request-limited";
 /// Body code for a refused `/signup/start` or `/pow/challenge`.
 pub(crate) const CODE_SIGNUP_RATE_LIMITED: &str = "signup-rate-limited";
 
+/// Body code for a refused `PUT /auth/login-handle` (the per-account bind
+/// counter, the minimum interval between handle changes, or the address
+/// bucket).
+pub(crate) const CODE_HANDLE_BIND_LIMITED: &str = "handle-bind-limited";
+
 /// Body code when the name-counter store cannot be read (`503`).
 pub(crate) const CODE_LIMITER_UNAVAILABLE: &str = "rate-limiter-unavailable";
 
-/// Domain separator for the stored name-counter key.
-const NAME_KEY_DOMAIN: &str = "lakko/auth/name-limit/v1";
+/// Derive-key context of the limiter's subkey of the login-handle pepper.
+/// The stored counter key is `keyed-BLAKE3(subkey, scope || name)`.
+const NAME_KEY_DOMAIN: &str = "lakko/auth/name-limit-key/v1";
+
+/// Most address buckets held in memory at once (every category together).
+/// A bucket is a key of at most 17 bytes plus 16 bytes of state and the
+/// map's overhead, so the cap bounds the map to a few MiB.
+pub(crate) const MAX_ADDRESS_BUCKETS: usize = 65_536;
+
+/// Default minimum interval between two binds of one account that change its
+/// login handle (`LAKKO_AUTH_HANDLE_CHANGE_MIN_INTERVAL_SECS`). Chosen, not
+/// measured.
+const DEFAULT_HANDLE_CHANGE_MIN_INTERVAL_SECS: u32 = 60;
+
+/// Env knob for the minimum interval between handle changes.
+const HANDLE_CHANGE_INTERVAL_VAR: &str = "LAKKO_AUTH_HANDLE_CHANGE_MIN_INTERVAL_SECS";
 
 /// Saturation ceiling for the stored hit count (the column is `INT UNSIGNED`).
 const MAX_HITS: u32 = 1_000_000_000;
@@ -131,10 +158,13 @@ pub(crate) enum Scope {
     DeviceRequestTarget = 9,
     /// `/device/authorize/start`, keyed on the signed-in account.
     DeviceGrantMint = 10,
+    /// `PUT /auth/login-handle`, keyed on the signed-in account (charged on
+    /// every bind, whatever it answers).
+    HandleBind = 11,
 }
 
 impl Scope {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::LoginPassword,
         Self::LoginRecovery,
         Self::PasswordReset,
@@ -145,6 +175,7 @@ impl Scope {
         Self::CodeSendAccount,
         Self::DeviceRequestTarget,
         Self::DeviceGrantMint,
+        Self::HandleBind,
     ];
 
     const fn index(self) -> usize {
@@ -163,6 +194,7 @@ impl Scope {
             Self::CodeSendAccount => "LAKKO_AUTH_LIMIT_CODE_SEND_ACCOUNT",
             Self::DeviceRequestTarget => "LAKKO_AUTH_LIMIT_DEVICE_REQUEST",
             Self::DeviceGrantMint => "LAKKO_AUTH_LIMIT_DEVICE_GRANT",
+            Self::HandleBind => "LAKKO_AUTH_LIMIT_HANDLE_BIND",
         }
     }
 
@@ -178,6 +210,7 @@ impl Scope {
             Self::CodeSendContact => Window::new(3, 900),
             Self::CodeSendAccount => Window::new(5, 3600),
             Self::DeviceRequestTarget => Window::new(5, 600),
+            Self::HandleBind => Window::new(5, 86_400),
         }
     }
 
@@ -192,6 +225,7 @@ impl Scope {
             | Self::DeviceGrantMint => CODE_TOO_MANY_ATTEMPTS,
             Self::CodeSendContact | Self::CodeSendAccount => CODE_RECOVERY_CODE_SEND_LIMITED,
             Self::DeviceRequestTarget => CODE_DEVICE_REQUEST_LIMITED,
+            Self::HandleBind => CODE_HANDLE_BIND_LIMITED,
         }
     }
 }
@@ -210,15 +244,18 @@ pub(crate) enum Category {
     Signup,
     /// `/pow/challenge` (used only by signup).
     Challenge,
+    /// `PUT /auth/login-handle`.
+    HandleBind,
 }
 
 impl Category {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Attempt,
         Self::CodeSend,
         Self::DeviceRequest,
         Self::Signup,
         Self::Challenge,
+        Self::HandleBind,
     ];
 
     const fn index(self) -> usize {
@@ -232,6 +269,7 @@ impl Category {
             Self::DeviceRequest => "LAKKO_AUTH_IP_LIMIT_DEVICE_REQUEST",
             Self::Signup => "LAKKO_AUTH_IP_LIMIT_SIGNUP",
             Self::Challenge => "LAKKO_AUTH_IP_LIMIT_POW_CHALLENGE",
+            Self::HandleBind => "LAKKO_AUTH_IP_LIMIT_HANDLE_BIND",
         }
     }
 
@@ -243,6 +281,7 @@ impl Category {
             Self::Attempt => Window::new(30, 60),
             Self::CodeSend | Self::DeviceRequest | Self::Signup => Window::new(10, 3600),
             Self::Challenge => Window::new(30, 3600),
+            Self::HandleBind => Window::new(20, 3600),
         }
     }
 
@@ -252,6 +291,7 @@ impl Category {
             Self::CodeSend => CODE_RECOVERY_CODE_SEND_LIMITED,
             Self::DeviceRequest => CODE_DEVICE_REQUEST_LIMITED,
             Self::Signup | Self::Challenge => CODE_SIGNUP_RATE_LIMITED,
+            Self::HandleBind => CODE_HANDLE_BIND_LIMITED,
         }
     }
 }
@@ -261,35 +301,58 @@ impl Category {
 pub(crate) struct Limits {
     names: [Window; Scope::ALL.len()],
     ips: [Window; Category::ALL.len()],
+    /// Key of the stored name-counter hashes (a subkey of the login-handle
+    /// pepper, or a per-process random key when the pepper is unset).
+    name_key: [u8; 32],
+    /// Minimum seconds between two handle-changing binds of one account
+    /// (0 = no minimum).
+    handle_change_min_interval_secs: u32,
+    /// Cap on the address-bucket map ([`MAX_ADDRESS_BUCKETS`]).
+    max_buckets: usize,
     buckets: Mutex<HashMap<(Category, IpAddr), Bucket>>,
 }
 
 impl Limits {
-    /// The documented defaults (tests use this directly).
+    /// The documented defaults, keyed as under the test pepper (tests use
+    /// this directly).
     #[cfg(test)]
     pub(crate) fn defaults() -> Self {
         Self::with_windows(
             Scope::ALL.map(Scope::default_window),
             Category::ALL.map(Category::default_window),
+            name_subkey(&crate::login_handle::TEST_PEPPER),
+            DEFAULT_HANDLE_CHANGE_MIN_INTERVAL_SECS,
         )
     }
 
-    fn with_windows(names: [Window; Scope::ALL.len()], ips: [Window; Category::ALL.len()]) -> Self {
+    fn with_windows(
+        names: [Window; Scope::ALL.len()],
+        ips: [Window; Category::ALL.len()],
+        name_key: [u8; 32],
+        handle_change_min_interval_secs: u32,
+    ) -> Self {
         Self {
             names,
             ips,
+            name_key,
+            handle_change_min_interval_secs,
+            max_buckets: MAX_ADDRESS_BUCKETS,
             buckets: Mutex::new(HashMap::new()),
         }
     }
 
     /// Read every knob; an unset knob takes its default, a malformed one
-    /// fails startup.
+    /// fails startup. `handle_pepper` keys the stored name counters; without
+    /// it they are keyed by a per-process random key (logged), so a restart
+    /// starts every name window afresh. That posture is dormant anyway: the
+    /// name routes answer `503` without the pepper.
     ///
     /// # Errors
     ///
     /// Returns an error naming the first knob that is set but is not `N/SECS`
-    /// with both numbers positive.
-    pub(crate) fn from_env() -> anyhow::Result<Self> {
+    /// with both numbers positive, or a minimum interval that is not an
+    /// unsigned integer.
+    pub(crate) fn from_env(handle_pepper: Option<&[u8; 32]>) -> anyhow::Result<Self> {
         fn read(var: &str, default: Window) -> anyhow::Result<Window> {
             match std::env::var(var) {
                 Ok(v) if !v.trim().is_empty() => Window::parse(&v)
@@ -305,7 +368,25 @@ impl Limits {
         for cat in Category::ALL {
             ips[cat.index()] = read(cat.env_var(), cat.default_window())?;
         }
-        Ok(Self::with_windows(names, ips))
+        let interval = match std::env::var(HANDLE_CHANGE_INTERVAL_VAR) {
+            Ok(v) if !v.trim().is_empty() => v.trim().parse::<u32>().map_err(|_| {
+                anyhow::anyhow!("{HANDLE_CHANGE_INTERVAL_VAR} must be an unsigned integer")
+            })?,
+            _ => DEFAULT_HANDLE_CHANGE_MIN_INTERVAL_SECS,
+        };
+        let name_key = if let Some(p) = handle_pepper {
+            name_subkey(p)
+        } else {
+            use rand::RngCore as _;
+            tracing::warn!(
+                "auth name counters keyed by a per-process random key: \
+                 LAKKO_AUTH_HANDLE_PEPPER is unset, so a restart resets every name window"
+            );
+            let mut k = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut k);
+            k
+        };
+        Ok(Self::with_windows(names, ips, name_key, interval))
     }
 
     /// Override one name window (tests).
@@ -322,9 +403,36 @@ impl Limits {
         self
     }
 
+    /// Override the minimum interval between handle changes (tests).
+    #[cfg(test)]
+    pub(crate) const fn with_handle_change_interval(mut self, secs: u32) -> Self {
+        self.handle_change_min_interval_secs = secs;
+        self
+    }
+
+    /// Override the address-bucket cap (tests).
+    #[cfg(test)]
+    const fn with_max_buckets(mut self, max: usize) -> Self {
+        self.max_buckets = max;
+        self
+    }
+
     /// The window for a name scope.
     pub(crate) const fn name_window(&self, scope: Scope) -> Window {
         self.names[scope.index()]
+    }
+
+    /// Minimum seconds between two handle-changing binds of one account.
+    pub(crate) const fn handle_change_min_interval_secs(&self) -> u32 {
+        self.handle_change_min_interval_secs
+    }
+
+    /// The stored counter key for `name` in `scope`.
+    fn name_key(&self, scope: Scope, name: &[u8]) -> [u8; 32] {
+        let mut material = Vec::with_capacity(1 + name.len());
+        material.push(scope as u8);
+        material.extend_from_slice(name);
+        blake3_keyed(&self.name_key, &material)
     }
 
     /// Log the effective limits once at startup.
@@ -347,18 +455,28 @@ impl Limits {
                 "auth address limit"
             );
         }
+        tracing::info!(
+            knob = HANDLE_CHANGE_INTERVAL_VAR,
+            secs = self.handle_change_min_interval_secs,
+            "auth handle change minimum interval"
+        );
     }
 
-    /// Charge one request from `ip` to `cat`'s bucket.
+    /// Charge one request from `ip` (grouped by [`bucket_address`]) to
+    /// `cat`'s bucket.
     fn charge_ip_at(&self, cat: Category, ip: IpAddr, now: Instant) -> Result<(), u64> {
         let w = self.ips[cat.index()];
         let capacity = f64::from(w.limit);
         let rate = capacity / f64::from(w.window_secs);
+        let key = (cat, bucket_address(ip));
         let mut buckets = match self.buckets.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        let bucket = buckets.entry((cat, ip)).or_insert(Bucket {
+        if !buckets.contains_key(&key) && buckets.len() >= self.max_buckets {
+            self.make_room(&mut buckets, now);
+        }
+        let bucket = buckets.entry(key).or_insert(Bucket {
             tokens: capacity,
             last: now,
         });
@@ -384,6 +502,14 @@ impl Limits {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
+        self.retain_busy(&mut buckets, now)
+    }
+
+    fn retain_busy(
+        &self,
+        buckets: &mut HashMap<(Category, IpAddr), Bucket>,
+        now: Instant,
+    ) -> usize {
         let before = buckets.len();
         let ips = self.ips;
         buckets.retain(|(cat, _), b| {
@@ -391,6 +517,30 @@ impl Limits {
             now.saturating_duration_since(b.last) < full_after
         });
         before - buckets.len()
+    }
+
+    /// Bring the map below its cap: drop refilled buckets first; if that is
+    /// not enough, drop the least recently charged eighth of the cap (at
+    /// least one), so a flood of new sources pays one scan per batch rather
+    /// than one per request. An evicted bucket that was not full is
+    /// forgotten, i.e. refilled: past the cap, the per-name counters are what
+    /// still bounds guessing.
+    fn make_room(&self, buckets: &mut HashMap<(Category, IpAddr), Bucket>, now: Instant) {
+        self.retain_busy(buckets, now);
+        if buckets.len() < self.max_buckets {
+            return;
+        }
+        let batch = (self.max_buckets / 8).max(1).min(buckets.len());
+        let mut by_age: Vec<(Instant, (Category, IpAddr))> =
+            buckets.iter().map(|(k, b)| (b.last, *k)).collect();
+        by_age.select_nth_unstable_by_key(batch - 1, |(last, _)| *last);
+        for (_, k) in &by_age[..batch] {
+            buckets.remove(k);
+        }
+        tracing::debug!(
+            evicted = batch,
+            "auth address buckets at cap; evicted least recent"
+        );
     }
 
     /// The longest name window, for the pruner.
@@ -453,11 +603,10 @@ impl IntoResponse for LimitError {
 // Name counters
 // ---------------------------------------------------------------------------
 
-fn name_key(scope: Scope, name: &[u8]) -> [u8; 32] {
-    let mut material = Vec::with_capacity(1 + name.len());
-    material.push(scope as u8);
-    material.extend_from_slice(name);
-    blake3_derive_key_from_material(NAME_KEY_DOMAIN, &material)
+/// The limiter's subkey of the login-handle pepper (domain-separated from
+/// the handle keys the pepper itself produces).
+fn name_subkey(handle_pepper: &[u8; 32]) -> [u8; 32] {
+    blake3_derive_key_from_material(NAME_KEY_DOMAIN, handle_pepper)
 }
 
 /// Charge one attempt against `scope` for `name` and refuse once the window's
@@ -478,7 +627,7 @@ pub(crate) async fn charge_name(
     name: &[u8],
 ) -> Result<(), LimitError> {
     let w = limits.name_window(scope);
-    match bump(pool, scope, &name_key(scope, name), w.window_secs).await {
+    match bump(pool, scope, &limits.name_key(scope, name), w.window_secs).await {
         Ok((hits, _)) if hits <= w.limit => Ok(()),
         Ok((_, retry_after_secs)) => {
             tracing::debug!(scope = ?scope, "auth name limit reached");
@@ -496,10 +645,10 @@ pub(crate) async fn charge_name(
 
 /// Forget the counter for `name` (tests stand in for a window elapsing).
 #[cfg(test)]
-pub(crate) async fn reset_name(pool: &MySqlPool, scope: Scope, name: &[u8]) {
+pub(crate) async fn reset_name(pool: &MySqlPool, limits: &Limits, scope: Scope, name: &[u8]) {
     sqlx::query("DELETE FROM auth_name_limits WHERE scope = ? AND key_hash = ?")
         .bind(scope as u8)
-        .bind(name_key(scope, name).as_slice())
+        .bind(limits.name_key(scope, name).as_slice())
         .execute(pool)
         .await
         .expect("reset name limit");
@@ -550,6 +699,23 @@ async fn bump(
 
 /// The key requests without any identifiable source share.
 const UNIDENTIFIED: IpAddr = IpAddr::V6(Ipv6Addr::UNSPECIFIED);
+
+/// The address a bucket is keyed on: an IPv4 address as is (an IPv4-mapped
+/// IPv6 address as its IPv4 form), an IPv6 address as its /64 prefix.
+/// Every address bucket goes through this, so rotating through one /64
+/// buys nothing.
+pub(crate) fn bucket_address(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or_else(
+            || {
+                let prefix = u128::from(v6) & !u128::from(u64::MAX);
+                IpAddr::V6(Ipv6Addr::from(prefix))
+            },
+            IpAddr::V4,
+        ),
+    }
+}
 
 /// The source address, trusting only what nginx wrote.
 ///
@@ -650,7 +816,7 @@ mod tests {
     fn scope_discriminants_are_pinned() {
         // Stored in the database; a renumbering would merge two counters.
         let pinned: Vec<u8> = Scope::ALL.iter().map(|s| *s as u8).collect();
-        assert_eq!(pinned, (1..=10).collect::<Vec<u8>>());
+        assert_eq!(pinned, (1..=11).collect::<Vec<u8>>());
         for (i, s) in Scope::ALL.iter().enumerate() {
             assert_eq!(s.index(), i);
         }
@@ -661,10 +827,105 @@ mod tests {
 
     #[test]
     fn name_key_separates_scopes_and_names() {
-        let a = name_key(Scope::LoginPassword, b"acct");
-        assert_eq!(a, name_key(Scope::LoginPassword, b"acct"));
-        assert_ne!(a, name_key(Scope::LoginRecovery, b"acct"));
-        assert_ne!(a, name_key(Scope::LoginPassword, b"acct2"));
+        let limits = Limits::defaults();
+        let a = limits.name_key(Scope::LoginPassword, b"acct");
+        assert_eq!(a, limits.name_key(Scope::LoginPassword, b"acct"));
+        assert_ne!(a, limits.name_key(Scope::LoginRecovery, b"acct"));
+        assert_ne!(a, limits.name_key(Scope::LoginPassword, b"acct2"));
+    }
+
+    #[test]
+    fn name_key_is_keyed_by_the_pepper() {
+        // Without the pepper, a dump of `auth_name_limits` plus a list of
+        // candidate names must not show which name a counter belongs to: the
+        // stored key is not computable from (scope, name) alone.
+        let limits = Limits::defaults();
+        let mut material = vec![Scope::LoginPassword as u8];
+        material.extend_from_slice(b"acct");
+        let unkeyed = blake3_derive_key_from_material("lakko/auth/name-limit/v1", &material);
+        assert_ne!(limits.name_key(Scope::LoginPassword, b"acct"), unkeyed);
+        // Another pepper gives another key for the same name.
+        let other = Limits::with_windows(
+            Scope::ALL.map(Scope::default_window),
+            Category::ALL.map(Category::default_window),
+            name_subkey(&[0x11; 32]),
+            0,
+        );
+        assert_ne!(
+            limits.name_key(Scope::LoginPassword, b"acct"),
+            other.name_key(Scope::LoginPassword, b"acct")
+        );
+        // The subkey is not the pepper itself (domain separation from the
+        // login-handle keys the pepper produces).
+        assert_ne!(
+            name_subkey(&crate::login_handle::TEST_PEPPER),
+            crate::login_handle::TEST_PEPPER
+        );
+    }
+
+    #[test]
+    fn ipv6_is_bucketed_per_64_and_ipv4_per_address() {
+        let a: IpAddr = "2001:db8:1:2:aaaa:bbbb:cccc:dddd".parse().unwrap();
+        let b: IpAddr = "2001:db8:1:2:1:2:3:4".parse().unwrap();
+        let c: IpAddr = "2001:db8:1:3::1".parse().unwrap();
+        assert_eq!(bucket_address(a), bucket_address(b));
+        assert_eq!(
+            bucket_address(a),
+            "2001:db8:1:2::".parse::<IpAddr>().unwrap()
+        );
+        assert_ne!(bucket_address(a), bucket_address(c));
+        assert_eq!(bucket_address(ip(7)), ip(7));
+        assert_ne!(bucket_address(ip(7)), bucket_address(ip(8)));
+        let mapped: IpAddr = "::ffff:192.0.2.7".parse().unwrap();
+        assert_eq!(bucket_address(mapped), ip(7));
+
+        // Rotating through one /64 draws on one bucket.
+        let limits = Limits::defaults().with_ip_window(Category::Signup, Window::new(2, 3600));
+        let t0 = Instant::now();
+        assert!(limits.charge_ip_at(Category::Signup, a, t0).is_ok());
+        assert!(limits.charge_ip_at(Category::Signup, b, t0).is_ok());
+        assert!(limits
+            .charge_ip_at(Category::Signup, "2001:db8:1:2::99".parse().unwrap(), t0)
+            .is_err());
+        assert!(limits.charge_ip_at(Category::Signup, c, t0).is_ok());
+    }
+
+    #[test]
+    fn bucket_map_is_capped_idle_first_then_least_recent() {
+        let limits = Limits::defaults()
+            .with_ip_window(Category::Attempt, Window::new(2, 60))
+            .with_max_buckets(8);
+        let t0 = Instant::now();
+        // Eight sources fill the map; the first four were charged earliest.
+        for i in 0..8u8 {
+            let t = t0 + Duration::from_secs(u64::from(i));
+            assert!(limits.charge_ip_at(Category::Attempt, ip(i), t).is_ok());
+        }
+        let len = || limits.buckets.lock().unwrap().len();
+        assert_eq!(len(), 8);
+        // A ninth source, with nothing idle: the least recently charged
+        // eighth of the cap (one bucket, source 0) goes.
+        let t9 = t0 + Duration::from_secs(10);
+        assert!(limits.charge_ip_at(Category::Attempt, ip(100), t9).is_ok());
+        assert_eq!(len(), 8);
+        {
+            let b = limits.buckets.lock().unwrap();
+            assert!(!b.contains_key(&(Category::Attempt, ip(0))));
+            assert!(b.contains_key(&(Category::Attempt, ip(1))));
+            assert!(b.contains_key(&(Category::Attempt, ip(100))));
+        }
+        // Once every bucket has refilled, a new source clears the idle ones
+        // first rather than evicting by age.
+        let later = t0 + Duration::from_secs(200);
+        assert!(limits
+            .charge_ip_at(Category::Attempt, ip(200), later)
+            .is_ok());
+        assert_eq!(len(), 1);
+        // A known source never evicts.
+        for _ in 0..3 {
+            let _ = limits.charge_ip_at(Category::Attempt, ip(200), later);
+        }
+        assert_eq!(len(), 1);
     }
 
     #[test]

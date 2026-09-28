@@ -157,8 +157,11 @@ public enum RecoveryPayload {
                 "(got \(payload.count))"
             )
         }
-        // Normalise to zero-based indices — `payload` may be a slice.
-        let bytes = Data(payload)
+        // Normalise to zero-based indices — `payload` may be a slice. The
+        // copy holds the grant and the phrase seed: zeroed in place once the
+        // two fields are cut out of it (it is this function's only owner).
+        var bytes = Data(payload)
+        defer { bytes.resetBytes(in: 0..<bytes.count) }
         return ParsedRecoveryPayload(
             grantToken: bytes.subdata(in: 0..<recoveryGrantTokenLength),
             phraseSeed: bytes.subdata(

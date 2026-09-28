@@ -9,6 +9,61 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 - **Date:** 2026-06-25
 - **Context:** Phase 3/4 — the live consumer of ADR-0027 (external-join approval, G-3)
 
+> **SECURITY PASS 2026-09-28 (`lakko-security` on the short-link amendment
+> below).** Fixed in the same pass:
+>
+> - **Per-IP limiter keyed on the full address (MEDIUM).** Discovery's
+>   token buckets were keyed on the exact `IpAddr`, so one IPv6 subscriber's
+>   /64 was 2^64 fresh buckets and the ceiling that now bounds id guessing did
+>   not bind it; each new bucket also grew memory until the 5-minute sweep.
+>   Buckets are now keyed by network (`rate_limit::network_key`: IPv4 per
+>   address, IPv4-mapped IPv6 as its IPv4, other IPv6 per /64), and each
+>   limiter holds at most `DEFAULT_MAX_BUCKETS` = 100 000 buckets: at the cap
+>   it drops every idle bucket (one refilled to its burst, so nothing is lost)
+>   and, if none is idle, the least-recently-touched eighth. Tests in
+>   `services/discovery/src/rate_limit.rs`.
+> - **The ledger refused long previews (INFO, functional).**
+>   `group_invites.capability_bytes` was `VARBINARY(512)`, sized for v1, while
+>   a v2 capability with a maximal sealed preview is 908 bytes
+>   (1 + 2 + 256 + 32 + 8 + 2 + 543 + 64), so a link naming a long group or
+>   inviter failed to upload and fell back to the long inline link.
+>   `MAX_CAPABILITY_BYTES` is now derived from the codec's bounds
+>   (`MAX_GROUP_ID_LEN`, `MAX_SEALED_PREVIEW_LEN`, the Ed25519 widths) and
+>   migration `0021_group_invite_capability_width.sql` widens the column to
+>   match; a test composes a maximal capability and checks it fits exactly and
+>   survives upload and fetch against the database.
+> - **Stale documentation (INFO).** `lakko_contacts::invite` still described
+>   the ledger id as `SHA-256(capability)` and cited proof of work for the
+>   joiner-tag probe (it is an anonymous `invite-consume` token plus the per-IP
+>   limit since ADR-0054 S3); `services/discovery/src/group_invite.rs` said "no
+>   revoke (v1)" while issuer-signed revocation exists. Corrected.
+> - **The preview decoder was unfuzzed (INFO).** `group_invite_decode` never
+>   reaches `GroupInvitePreview::decode` (random input neither verifies nor
+>   opens the AEAD). New fuzz target `group_invite_preview_decode` feeds the
+>   plaintext decoder directly through `lakko_contacts::fuzz_api` and asserts
+>   decode / validate / re-encode agreement.
+>
+> **Still OPEN — design items this pass did not change**, recorded so the
+> short-link trade is read with them:
+>
+> - **A `/c/` pointer link is a 48-bit bearer into a call that may
+>   auto-admit.** The id is the only secret in the link; whoever fetches it
+>   holds a valid capability, and under ADR-0032's auto admission that is a
+>   seat in the call. Guessing is bounded only by the per-IP limit.
+> - **A malicious discovery can substitute `/i/` and `/c/` capabilities
+>   undetectably.** The id no longer hashes the bytes, and neither link carries
+>   a secret that would bind the fetched capability, so any validly-signed
+>   capability can be served under a live id.
+> - **A `/g/` pointer link that lost its fragment accepts a substituted
+>   capability.** The link secret is what binds the capability's group and
+>   issuer; a link shared without the `#` part carries nothing to check the
+>   fetched bytes against.
+> - **Anyone holding an id can burn an invite's uses.** The joiner tag is
+>   opaque to the server, so random tags each count as a distinct joiner
+>   against `max_uses`; the cost is one anonymous token and the rate limit per
+>   attempt. For `/g/` this is the soft anti-spam counter, not the admission
+>   gate.
+
 > **AMENDED 2026-09-27 — short links (maintainer's decision: a whole link of
 > about 45 characters).** A pointer link read
 > `https://<host>/g/<43-char id>#<43-char key>`; it now reads

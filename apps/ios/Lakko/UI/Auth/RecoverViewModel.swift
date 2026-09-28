@@ -281,7 +281,7 @@ public final class RecoverViewModel: ObservableObject {
     /// Complete the no-password restore with the identity + redeemed
     /// session token received from the other device. The account id is the
     /// one the grant redeem returned (ADR-0056). Async passthrough to
-    /// ``AuthRepository/completeFromDeviceRestore(accountIdBytes:accountIdB64:username:phraseSeed:sessionToken:sessionExpiresAtMs:)``;
+    /// ``AuthRepository/completeFromDeviceRestore(accountIdBytes:accountIdB64:username:phraseSeed:sessionToken:sessionExpiresAtMs:persistJoin:)``;
     /// verification failures propagate to the calling panel. Requires
     /// the redeemed token and account id (without them this device has no
     /// ACCESS) — refused otherwise with a clear message.
@@ -289,6 +289,7 @@ public final class RecoverViewModel: ObservableObject {
         outcome: PairingOrchestrator.JoinRecoveryOutcome
     ) async throws {
         guard let target = deviceRestoreTarget else {
+            outcome.wipeSeed()
             throw AuthClientError.argument(
                 "no username — enter your username first"
             )
@@ -299,23 +300,33 @@ public final class RecoverViewModel: ObservableObject {
             // Seed-only outcome: the grant redeem failed, so this
             // device has IDENTITY but no ACCESS. Refuse rather than
             // leave a half-restored profile; the user retries (a
-            // fresh pairing mints a fresh grant). Best-effort wipe of
-            // the local seed copy.
-            var seed = outcome.phraseSeed
-            seed.resetBytes(in: 0..<seed.count)
+            // fresh pairing mints a fresh grant). The seed is zeroed
+            // where it lives, in the outcome.
+            outcome.wipeSeed()
             throw AuthClientError.argument(
                 "The other device transferred your identity but the " +
                 "sign-in grant could not be redeemed. Try again."
             )
         }
-        try await repository.completeFromDeviceRestore(
-            accountIdBytes: accountIdBytes,
-            accountIdB64: base64Encode(accountIdBytes),
-            username: target.username,
-            phraseSeed: outcome.phraseSeed,
-            sessionToken: token,
-            sessionExpiresAtMs: expiry
-        )
+        // ADR-0056 security pass: the repository verifies the seed, checks
+        // the typed name at discovery, and only then runs the pairing's
+        // held writes (`persistJoin`) and its own. On any refusal nothing
+        // was written; the seed is zeroed here, in the outcome, once the
+        // repository's own references are gone.
+        do {
+            try await repository.completeFromDeviceRestore(
+                accountIdBytes: accountIdBytes,
+                accountIdB64: base64Encode(accountIdBytes),
+                username: target.username,
+                phraseSeed: outcome.phraseSeed,
+                sessionToken: token,
+                sessionExpiresAtMs: expiry,
+                persistJoin: outcome.persistJoin ?? {}
+            )
+        } catch {
+            outcome.wipeSeed()
+            throw error
+        }
     }
 
     /// ADR-0018 factor (c) — submit the Authenticator mode: username

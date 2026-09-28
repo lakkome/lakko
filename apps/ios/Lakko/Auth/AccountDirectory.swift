@@ -243,3 +243,101 @@ extension DiscoveryClientError {
         }
     }
 }
+
+// MARK: - Device restore: the discovery reads (ADR-0056 security pass)
+
+/// The two discovery reads a no-password device restore makes before it
+/// persists anything: the published identity the transferred seed must
+/// reproduce, and the account the typed username resolves to. Injectable so
+/// the restore's ordering is testable without a network.
+protocol DeviceRestoreDirectory {
+    /// `GET /discovery/identity/{account}`; `nil` on 404.
+    func fetchIdentityBundle(accountId: Data, sessionToken: String?) async throws -> IdentityFetchResponse?
+
+    /// The ordinary username lookup (OPRF, one `discovery-lookup` token drawn
+    /// with `sessionToken`, then the anonymous `POST /discovery/lookup`):
+    /// the 16-byte account id `username` resolves to, `nil` when discovery
+    /// does not know the name. `accountId` is the account `sessionToken`
+    /// belongs to (whose allowance the token is drawn from); it never
+    /// travels on the lookup itself.
+    func lookupAccount(username: String, accountId: Data, sessionToken: String) async throws -> Data?
+}
+
+/// The production reads, over short-lived clients.
+struct DiscoveryDeviceRestoreDirectory: DeviceRestoreDirectory {
+    func fetchIdentityBundle(accountId: Data, sessionToken: String?) async throws -> IdentityFetchResponse? {
+        try await DiscoveryClient(sessionToken: sessionToken).identityFetch(accountId: accountId)
+    }
+
+    func lookupAccount(username: String, accountId: Data, sessionToken: String) async throws -> Data? {
+        // The session has not landed: the token is drawn with it directly,
+        // never through the shared pool (which would store tokens for an
+        // account the restore may still refuse). The lookup itself stays
+        // anonymous (invariant #5): the client carries no session on it.
+        let tokens = DetachedAnonTokenSource(issuer: AuthAnonTokenIssuer(), sessionToken: sessionToken)
+        return try await DiscoveryClient(tokens: tokens).lookup(username: username).account
+    }
+}
+
+/// Why a no-password device restore refused the name check.
+public enum TypedNameCheckRefusal: Error, LocalizedError, Equatable {
+    /// Discovery resolves the typed name to another account, or to none.
+    case otherAccount
+    /// The lookup could not run (network, token quota, tokens switched off).
+    case unavailable
+
+    public var errorDescription: String? {
+        switch self {
+        case .otherAccount: return TypedNameCheck.otherAccountCopy
+        case .unavailable: return TypedNameCheck.unavailableCopy
+        }
+    }
+}
+
+/// ADR-0056 security pass — the typed name must resolve, at discovery, to the
+/// account the grant redeem answered for.
+///
+/// The fresh device's request is routed by the auth login handle of the typed
+/// name, and a squatted handle can route it to another account whose device
+/// confirms; the fresh device would then land in that account under the typed
+/// name. Discovery is a registry auth does not control (its own service,
+/// database and OPRF key), so it is asked too. Fail closed: a mismatch, an
+/// unknown name and a lookup that could not run all refuse. Mirror of
+/// `apps/web/src/auth/device-restore-name-check.ts`.
+enum TypedNameCheck {
+    /// The name resolves to another account, or to none.
+    static let otherAccountCopy =
+        "The name you typed belongs to a different account. Nothing was changed on this device."
+    /// The lookup could not run; the generic network failure copy.
+    static let unavailableCopy = "Could not reach Lakko. Check your connection and try again."
+
+    /// - Throws: ``TypedNameCheckRefusal``.
+    static func check(
+        username: String,
+        accountIdBytes: Data,
+        lookup: (String) async throws -> Data?
+    ) async throws {
+        let resolved: Data?
+        do {
+            resolved = try await lookup(username)
+        } catch {
+            NSLog("device restore: typed-name lookup failed; refusing (%@)", String(describing: type(of: error)))
+            throw TypedNameCheckRefusal.unavailable
+        }
+        guard let resolved, constantTimeEquals(resolved, accountIdBytes) else {
+            NSLog(
+                resolved == nil
+                    ? "device restore: typed name unknown to discovery; refusing"
+                    : "device restore: typed name resolves to another account; refusing"
+            )
+            throw TypedNameCheckRefusal.otherAccount
+        }
+    }
+
+    private static func constantTimeEquals(_ a: Data, _ b: Data) -> Bool {
+        guard a.count == b.count else { return false }
+        var diff: UInt8 = 0
+        for (x, y) in zip(a, b) { diff |= x ^ y }
+        return diff == 0
+    }
+}

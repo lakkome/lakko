@@ -263,3 +263,283 @@ final class RestoreViaDeviceByNameTests: XCTestCase {
         XCTAssertTrue(NameRouteStub.requests(host).isEmpty)
     }
 }
+
+// MARK: - Security pass: nothing lands before both checks
+
+/// Discovery for the restore gates, scripted. Records the order of the reads.
+private final class ScriptedRestoreDirectory: DeviceRestoreDirectory {
+    var publishedKey: Data?
+    var lookup: Result<Data?, Error> = .success(nil)
+    private(set) var calls: [String] = []
+    private(set) var lookupSessionToken: String?
+
+    func fetchIdentityBundle(accountId: Data, sessionToken: String?) async throws -> IdentityFetchResponse? {
+        calls.append("identity")
+        guard let publishedKey else { return nil }
+        return IdentityFetchResponse(signaturePubkey: base64Encode(publishedKey), x25519Pubkey: "")
+    }
+
+    func lookupAccount(username: String, accountId: Data, sessionToken: String) async throws -> Data? {
+        calls.append("lookup:\(username)")
+        lookupSessionToken = sessionToken
+        return try lookup.get()
+    }
+}
+
+private final class NoAccountDirectory: AccountDirectory {
+    func registerUsername(accountId: Data, username: String, sessionToken: String) async throws -> RegisterResult {
+        throw AuthClientError.argument("not reached")
+    }
+    func publishIdentityBundle(
+        accountId: Data, signaturePubkey: Data, x25519Pubkey: Data,
+        leafAuth: Data?, genesisAttest: Data?, sessionToken: String
+    ) async throws {}
+}
+
+private final class MemorySessionPersistence: SessionPersistence {
+    private(set) var tokens: [String: PersistedSessionToken] = [:]
+    func hasDeviceKey(accountIdB64: String) -> Bool { false }
+    func accountIdentitySeed(accountIdB64: String) -> Data? { nil }
+    func exportKey(accountIdB64: String) -> Data? { nil }
+    func sessionToken(accountIdB64: String) -> PersistedSessionToken? { tokens[accountIdB64] }
+    func putSessionToken(_ token: PersistedSessionToken, accountIdB64: String) throws { tokens[accountIdB64] = token }
+    func deleteSessionToken(accountIdB64: String) { tokens[accountIdB64] = nil }
+}
+
+/// ADR-0056 security pass: a join-by-name restore verifies the transferred
+/// seed against the published identity, then checks at discovery that the
+/// typed name resolves to the redeemed account, and only then writes
+/// anything - the pairing's held state (`persistJoin`) and its own.
+@MainActor
+final class DeviceRestoreSecurityPassTests: XCTestCase {
+
+    private var accountIdsToClean: [String] = []
+
+    override func tearDown() async throws {
+        for b64 in accountIdsToClean {
+            DeviceKeyStore.deleteDeviceKey(accountIdB64: b64)
+            AccountIdentitySeedStore.deleteAccountIdentitySeed(accountIdB64: b64)
+            DeviceIdentityStore.deleteDeviceIdentitySeed(accountIdB64: b64)
+            DeviceGroupSnapshotStore().deleteSnapshot(accountIdB64: b64)
+        }
+        accountIdsToClean = []
+        try await super.tearDown()
+    }
+
+    private struct Harness {
+        let model: RecoverViewModel
+        let repository: AuthRepository
+        let store: SessionStore
+        let persistence: MemorySessionPersistence
+        let directory: ScriptedRestoreDirectory
+    }
+
+    private func harness() -> Harness {
+        let host = NameRouteStub.scope { _, _, _ in (503, "") }
+        let store = SessionStore(defaults: UserDefaults(suiteName: "restore-pass-\(UUID().uuidString)")!)
+        let persistence = MemorySessionPersistence()
+        let directory = ScriptedRestoreDirectory()
+        let repository = AuthRepository(
+            sessionStore: store,
+            authClientFactory: { NameRouteStub.client(host) },
+            persistence: persistence,
+            nowMs: { 1_000_000 },
+            accountDirectory: NoAccountDirectory(),
+            loginHandleBinds: LoginHandleBindLedger(),
+            restoreDirectory: directory
+        )
+        let model = RecoverViewModel(repository: repository, cachedUsername: nil)
+        model.mode = .anotherDevice
+        model.username = "alice"
+        model.prepareDeviceRestore()
+        return Harness(model: model, repository: repository, store: store, persistence: persistence, directory: directory)
+    }
+
+    /// A redeemed outcome whose `persistJoin` records that it ran.
+    private func outcome(seed: Data, accountId: Data, ran: @escaping () -> Void) -> PairingOrchestrator.JoinRecoveryOutcome {
+        accountIdsToClean.append(base64Encode(accountId))
+        return PairingOrchestrator.JoinRecoveryOutcome(
+            phraseSeed: seed,
+            sessionToken: "redeemed-token",
+            sessionExpiresAtMs: 9_000_000,
+            accountId: accountId,
+            persistJoin: ran
+        )
+    }
+
+    private func publishedKey(of seed: Data) throws -> Data {
+        try Identity.fromSeed(seed: seed).signaturePublicKey()
+    }
+
+    private func assertNothingLanded(_ h: Harness, accountId: Data, file: StaticString = #filePath, line: UInt = #line) {
+        let b64 = base64Encode(accountId)
+        XCTAssertNil(h.store.load(), "no account marker", file: file, line: line)
+        XCTAssertNil(h.repository.identitySecrets, "no session installed", file: file, line: line)
+        XCTAssertTrue(h.persistence.tokens.isEmpty, "no session token persisted", file: file, line: line)
+        XCTAssertNil(try? DeviceKeyStore.getDeviceKey(accountIdB64: b64), file: file, line: line)
+        XCTAssertNil(try? AccountIdentitySeedStore.getAccountIdentitySeed(accountIdB64: b64), file: file, line: line)
+        if case .session = h.repository.state { XCTFail("landed a session", file: file, line: line) }
+    }
+
+    func testASeedThatFailsVerificationPersistsNothingAndAsksDiscoveryNothingMore() async throws {
+        let h = harness()
+        let seed = randomBytes(64)
+        let accountId = randomBytes(16)
+        h.directory.publishedKey = try publishedKey(of: randomBytes(64))
+        var ran = false
+        let o = outcome(seed: seed, accountId: accountId) { ran = true }
+        do {
+            try await h.model.completeFromDeviceRestore(outcome: o)
+            XCTFail("a seed that does not reproduce the published key must be refused")
+        } catch {
+            XCTAssertTrue(error is PhraseMismatch, "\(error)")
+        }
+        XCTAssertFalse(ran, "the pairing's held state was not written")
+        XCTAssertEqual(h.directory.calls, ["identity"], "the name check never ran")
+        XCTAssertTrue(o.phraseSeed.allSatisfy { $0 == 0 }, "the received seed is zeroed")
+        assertNothingLanded(h, accountId: accountId)
+    }
+
+    func testATypedNameThatResolvesToAnotherAccountIsRefusedWithTheCopyAndNothingLands() async throws {
+        let h = harness()
+        let seed = randomBytes(64)
+        let accountId = randomBytes(16)
+        h.directory.publishedKey = try publishedKey(of: seed)
+        h.directory.lookup = .success(randomBytes(16))
+        var ran = false
+        let o = outcome(seed: seed, accountId: accountId) { ran = true }
+        do {
+            try await h.model.completeFromDeviceRestore(outcome: o)
+            XCTFail("the typed name belongs to another account")
+        } catch {
+            XCTAssertEqual(error as? TypedNameCheckRefusal, .otherAccount)
+            XCTAssertEqual(
+                (error as? LocalizedError)?.errorDescription,
+                "The name you typed belongs to a different account. Nothing was changed on this device.")
+        }
+        XCTAssertEqual(h.directory.calls, ["identity", "lookup:alice"])
+        XCTAssertEqual(h.directory.lookupSessionToken, "redeemed-token", "the lookup draws with the new session")
+        XCTAssertFalse(ran)
+        XCTAssertTrue(o.phraseSeed.allSatisfy { $0 == 0 })
+        assertNothingLanded(h, accountId: accountId)
+    }
+
+    func testANameDiscoveryDoesNotKnowIsRefusedTheSameWay() async throws {
+        let h = harness()
+        let seed = randomBytes(64)
+        let accountId = randomBytes(16)
+        h.directory.publishedKey = try publishedKey(of: seed)
+        h.directory.lookup = .success(nil)
+        var ran = false
+        let o = outcome(seed: seed, accountId: accountId) { ran = true }
+        do {
+            try await h.model.completeFromDeviceRestore(outcome: o)
+            XCTFail("an unknown name confirms nothing")
+        } catch {
+            XCTAssertEqual(error as? TypedNameCheckRefusal, .otherAccount)
+        }
+        XCTAssertFalse(ran)
+        assertNothingLanded(h, accountId: accountId)
+    }
+
+    func testALookupThatCannotRunFailsClosed() async throws {
+        for failure: Error in [
+            AnonTokenUnavailable.disabled,
+            AnonTokenUnavailable.quotaExhausted(retryAfterSecs: 60),
+            URLError(.notConnectedToInternet),
+        ] {
+            let h = harness()
+            let seed = randomBytes(64)
+            let accountId = randomBytes(16)
+            h.directory.publishedKey = try publishedKey(of: seed)
+            h.directory.lookup = .failure(failure)
+            var ran = false
+            let o = outcome(seed: seed, accountId: accountId) { ran = true }
+            do {
+                try await h.model.completeFromDeviceRestore(outcome: o)
+                XCTFail("a lookup that could not run must refuse: \(failure)")
+            } catch {
+                XCTAssertEqual(error as? TypedNameCheckRefusal, .unavailable, "\(failure)")
+                XCTAssertEqual((error as? LocalizedError)?.errorDescription, TypedNameCheck.unavailableCopy)
+            }
+            XCTAssertFalse(ran)
+            XCTAssertTrue(o.phraseSeed.allSatisfy { $0 == 0 })
+            assertNothingLanded(h, accountId: accountId)
+        }
+    }
+
+    func testTheHappyPathPersistsOnlyAfterBothChecksThenLands() async throws {
+        let h = harness()
+        let seed = randomBytes(64)
+        let accountId = randomBytes(16)
+        h.directory.publishedKey = try publishedKey(of: seed)
+        h.directory.lookup = .success(accountId)
+        var callsWhenPersisted: [String] = []
+        var landedWhenPersisted = true
+        let o = outcome(seed: seed, accountId: accountId) { [directory = h.directory, store = h.store] in
+            callsWhenPersisted = directory.calls
+            landedWhenPersisted = store.load() != nil
+        }
+        try await h.model.completeFromDeviceRestore(outcome: o)
+
+        XCTAssertEqual(callsWhenPersisted, ["identity", "lookup:alice"], "the held state lands after both checks")
+        XCTAssertFalse(landedWhenPersisted, "and before the session lands")
+        let b64 = base64Encode(accountId)
+        XCTAssertEqual(h.store.load()?.accountIdB64, b64)
+        XCTAssertEqual(h.store.load()?.username, "alice")
+        XCTAssertEqual(h.repository.identitySecrets?.accountId, accountId)
+        XCTAssertEqual(h.persistence.tokens[b64]?.sessionToken, "redeemed-token")
+        XCTAssertEqual(try AccountIdentitySeedStore.getAccountIdentitySeed(accountIdB64: b64), seed)
+    }
+}
+
+/// ADR-0056 security pass: the join by name holds what it received and
+/// writes it only when told to.
+final class PendingJoinByNameTests: XCTestCase {
+
+    func testNothingIsWrittenUntilPersistAndPersistWritesTheSeedAndTheSnapshot() throws {
+        let accountId = randomBytes(16)
+        let b64 = base64Encode(accountId)
+        defer {
+            DeviceIdentityStore.deleteDeviceIdentitySeed(accountIdB64: b64)
+            DeviceGroupSnapshotStore().deleteSnapshot(accountIdB64: b64)
+        }
+        let founderIdentity = try Identity.fromSeed(seed: randomBytes(32))
+        let founder = try DeviceGroup.createFounder(identity: founderIdentity, accountId: accountId)
+        let deviceSeed = randomBytes(32)
+        let joiner = try Identity.fromSeed(seed: deviceSeed)
+        let addition = try founder.addDeviceFromWire(
+            identity: founderIdentity, keyPackage: try joiner.createKeyPackage())
+        _ = try PairingOrchestrator.joinWelcomeByName(welcomeBytes: addition.welcome, identity: joiner)
+        let joined = try PairingOrchestrator.adoptJoinedDeviceGroup(identity: joiner, accountIdBytes: accountId)
+
+        let pending = PairingOrchestrator.PendingJoinByName(
+            identity: joiner, joined: joined, accountIdBytes: accountId, deviceSeed: deviceSeed)
+        XCTAssertNil(try DeviceIdentityStore.getDeviceIdentitySeed(accountIdB64: b64), "held, not written")
+        XCTAssertNil(DeviceGroupSnapshotStore().getSnapshot(accountIdB64: b64), "held, not written")
+
+        pending.persist()
+        XCTAssertEqual(try DeviceIdentityStore.getDeviceIdentitySeed(accountIdB64: b64), deviceSeed)
+        XCTAssertNotNil(DeviceGroupSnapshotStore().getSnapshot(accountIdB64: b64))
+        XCTAssertTrue(pending.persisted)
+    }
+}
+
+/// ADR-0056 security pass: zeroing reaches the bytes that were received,
+/// not a copy-on-write copy of them.
+final class JoinRecoveryOutcomeWipeTests: XCTestCase {
+
+    func testWipeZeroesTheSeedInPlace() {
+        let o = PairingOrchestrator.JoinRecoveryOutcome(
+            phraseSeed: Data(repeating: 0xAB, count: 64),
+            sessionToken: nil,
+            sessionExpiresAtMs: nil
+        )
+        let before = o.phraseSeed.withUnsafeBytes { UInt(bitPattern: $0.baseAddress) }
+        o.wipeSeed()
+        let after = o.phraseSeed.withUnsafeBytes { UInt(bitPattern: $0.baseAddress) }
+        XCTAssertEqual(o.phraseSeed.count, 64)
+        XCTAssertTrue(o.phraseSeed.allSatisfy { $0 == 0 })
+        XCTAssertEqual(before, after, "the same buffer, not a fresh copy")
+    }
+}

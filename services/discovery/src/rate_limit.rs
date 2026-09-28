@@ -48,18 +48,46 @@
 //! use. The leftmost `X-Forwarded-For` entry is the
 //! client's own claim and is never used.
 //!
-//! ## Cleanup
+//! ## Address grouping
 //!
-//! Idle buckets (full token count + last touch >
-//! `prune_after`) are dropped periodically by a
-//! background task spun up at boot, so a global memory
-//! ceiling stays bounded under a Slowloris-style
-//! enumerator that touches one IP every refresh
-//! interval.
+//! A bucket is keyed by the **network** a request came
+//! from, not by its exact address ([`network_key`]): an
+//! IPv4 address is its own key, an IPv6 address is keyed
+//! by its /64 prefix, and an IPv4-mapped IPv6 address is
+//! keyed as the IPv4 address it carries. A single IPv6
+//! subscriber is routinely handed a whole /64 (2^64
+//! addresses), so keying on the full address would give
+//! one attacker an unbounded supply of fresh buckets and
+//! make the per-IP ceiling meaningless. The cost is that
+//! hosts sharing one /64 share a bucket, which is the
+//! same trade an IPv4 NAT already makes.
+//!
+//! ## Cleanup and the size cap
+//!
+//! Buckets untouched for `DEFAULT_PRUNE_AFTER` are
+//! dropped periodically by a background task spun up at
+//! boot. That alone does not bound memory: a flood of
+//! requests from fresh sources adds one bucket per
+//! request until the next sweep. Each limiter therefore
+//! also holds at most [`DEFAULT_MAX_BUCKETS`] buckets.
+//! When a new key arrives at the cap, the limiter first
+//! drops every **idle** bucket (one that has refilled to
+//! its full burst, so forgetting it loses nothing: a
+//! fresh bucket is identical), and if that frees nothing
+//! it drops the least-recently-touched eighth of the map
+//! ([`EVICTION_FRACTION`]), so the O(n) sweep runs at
+//! most once per `cap / 8` new keys.
+//!
+//! Evicting a bucket that is *not* full forgives that
+//! source its debt. An attacker can reach that only by
+//! pushing its own bucket out of the least-recently-used
+//! eighth, which takes a stream of fresh keys, i.e. fresh
+//! /64s or IPv4 addresses (or accounts), each of which
+//! the same limiter throttles on its own.
 
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -107,12 +135,46 @@ pub const DEFAULT_AUTHENTICATED_IP_BURST: f64 = 100.0;
 /// are dropped on the next sweep.
 pub const DEFAULT_PRUNE_AFTER: Duration = Duration::from_secs(300);
 
-/// Background sweep cadence. Hourly is fine — the
-/// bucket map is keyed by `IpAddr` (16 bytes) +
-/// 32 bytes of bucket state ≈ 48 bytes per entry;
-/// even a million long-lived IPs only burn ~48 MB
-/// between sweeps.
+/// Background sweep cadence. Memory between sweeps is
+/// bounded by [`DEFAULT_MAX_BUCKETS`], not by this
+/// interval.
 pub const DEFAULT_PRUNE_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Upper bound on the buckets one limiter holds (the
+/// discovery service runs four limiters). A bucket is a
+/// key (an address or a 16-byte account id) plus a
+/// fractional token count and an `Instant`. Chosen, not
+/// derived from a traffic model or a memory measurement:
+/// large enough that honest traffic between two sweeps
+/// should not reach it, small enough that a flood of
+/// fresh sources cannot grow the process without bound.
+pub const DEFAULT_MAX_BUCKETS: usize = 100_000;
+
+/// Divisor for the least-recently-used eviction at the
+/// cap: when no idle bucket can be dropped, the oldest
+/// `len / EVICTION_FRACTION` (at least one) go.
+pub const EVICTION_FRACTION: usize = 8;
+
+/// IPv6 prefix length a bucket is keyed on.
+pub const IPV6_BUCKET_PREFIX_BITS: u32 = 64;
+
+/// The network a request is charged to: an IPv4 address
+/// as itself, an IPv4-mapped IPv6 address as the IPv4
+/// address it carries, any other IPv6 address as its
+/// /64 prefix (the low 64 bits zeroed).
+#[must_use]
+pub fn network_key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or_else(
+            || {
+                let mask = u128::MAX << (128 - IPV6_BUCKET_PREFIX_BITS);
+                IpAddr::V6(Ipv6Addr::from(u128::from(v6) & mask))
+            },
+            IpAddr::V4,
+        ),
+    }
+}
 
 /// Per-IP token-bucket state.
 #[derive(Debug, Clone)]
@@ -130,6 +192,15 @@ impl TokenBucket {
             tokens: burst,
             last_refill: now,
         }
+    }
+
+    /// Whether the bucket would be full at `now`, i.e.
+    /// forgetting it is indistinguishable from keeping it.
+    fn is_idle(&self, rate_per_sec: f64, burst: f64, now: Instant) -> bool {
+        let elapsed = now
+            .saturating_duration_since(self.last_refill)
+            .as_secs_f64();
+        self.tokens + rate_per_sec * elapsed >= burst
     }
 
     /// Refill and try to consume one token. Returns
@@ -162,8 +233,37 @@ struct RateLimiterInner<K> {
     rate_per_sec: f64,
     /// Maximum tokens per bucket.
     burst: f64,
+    /// Most buckets the map may hold.
+    max_buckets: usize,
     /// One bucket per key.
     buckets: HashMap<K, TokenBucket>,
+}
+
+impl<K: Eq + Hash + Copy> RateLimiterInner<K> {
+    /// Make room for one new key: drop every idle bucket
+    /// and, if none was idle, the least-recently-touched
+    /// `len / EVICTION_FRACTION` (at least one).
+    fn make_room(&mut self, now: Instant) {
+        let (rate, burst) = (self.rate_per_sec, self.burst);
+        self.buckets.retain(|_, b| !b.is_idle(rate, burst, now));
+        if self.buckets.len() < self.max_buckets {
+            return;
+        }
+        let evict = (self.buckets.len() / EVICTION_FRACTION).max(1);
+        let mut touched: Vec<Instant> = self.buckets.values().map(|b| b.last_refill).collect();
+        // `1 <= evict <= len`, so the index is in bounds.
+        let (_, cutoff, _) = touched.select_nth_unstable(evict - 1);
+        let cutoff = *cutoff;
+        let mut removed = 0usize;
+        self.buckets.retain(|_, b| {
+            if removed < evict && b.last_refill <= cutoff {
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        });
+    }
 }
 
 impl<K: Eq + Hash + Copy> RateLimiter<K> {
@@ -177,12 +277,24 @@ impl<K: Eq + Hash + Copy> RateLimiter<K> {
     /// runtime state we want to silently propagate.
     #[must_use]
     pub fn new(rate_per_minute: f64, burst: f64) -> Self {
+        Self::with_max_buckets(rate_per_minute, burst, DEFAULT_MAX_BUCKETS)
+    }
+
+    /// As [`Self::new`] with an explicit bucket cap.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::new`], and if `max_buckets == 0`.
+    #[must_use]
+    pub fn with_max_buckets(rate_per_minute: f64, burst: f64, max_buckets: usize) -> Self {
         assert!(rate_per_minute > 0.0, "rate_per_minute must be positive");
         assert!(burst > 0.0, "burst must be positive");
+        assert!(max_buckets > 0, "max_buckets must be positive");
         Self {
             inner: Arc::new(Mutex::new(RateLimiterInner {
                 rate_per_sec: rate_per_minute / 60.0,
                 burst,
+                max_buckets,
                 buckets: HashMap::new(),
             })),
         }
@@ -204,6 +316,9 @@ impl<K: Eq + Hash + Copy> RateLimiter<K> {
         };
         let burst = inner.burst;
         let rate = inner.rate_per_sec;
+        if inner.buckets.len() >= inner.max_buckets && !inner.buckets.contains_key(&key) {
+            inner.make_room(now);
+        }
         let bucket = inner
             .buckets
             .entry(key)
@@ -312,6 +427,7 @@ impl DiscoveryLimits {
         account: Option<[u8; ACCOUNT_ID_LEN]>,
         now: Instant,
     ) -> Verdict {
+        let ip = network_key(ip);
         match account {
             None => {
                 if self.anonymous_ip.try_consume_at(ip, now) {
@@ -844,6 +960,112 @@ mod tests {
     fn source_ip_falls_back_to_connect_info() {
         let req = request_with(&[], Some("[2001:db8::1]:5000"));
         assert_eq!(source_ip(&req), "2001:db8::1".parse().ok());
+    }
+
+    fn v6(s: &str) -> IpAddr {
+        s.parse().expect("ipv6 parses")
+    }
+
+    #[test]
+    fn network_key_groups_ipv6_by_slash_64() {
+        assert_eq!(
+            network_key(v6("2001:db8:1:2:aaaa:bbbb:cccc:dddd")),
+            v6("2001:db8:1:2::")
+        );
+        assert_eq!(
+            network_key(v6("2001:db8:1:2::1")),
+            network_key(v6("2001:db8:1:2:ffff::"))
+        );
+        assert_ne!(
+            network_key(v6("2001:db8:1:2::1")),
+            network_key(v6("2001:db8:1:3::1"))
+        );
+        // IPv4 is keyed per address, and a mapped IPv4 as the address it carries.
+        assert_eq!(network_key(ip(192, 0, 2, 1)), ip(192, 0, 2, 1));
+        assert_eq!(network_key(v6("::ffff:192.0.2.1")), ip(192, 0, 2, 1));
+        assert_ne!(network_key(ip(192, 0, 2, 1)), network_key(ip(192, 0, 2, 2)));
+    }
+
+    #[test]
+    fn one_ipv6_slash_64_shares_the_anonymous_bucket() {
+        let l = limits(3.0, 5.0, 100.0);
+        let now = Instant::now();
+        // Rotating the interface identifier inside one /64 buys nothing.
+        let admitted = (0..40u16)
+            .filter(|n| {
+                let addr = v6(&format!("2001:db8:7:7::{n:x}"));
+                l.admit_at(addr, None, now) == Verdict::Admit
+            })
+            .count();
+        assert_eq!(admitted, 3);
+        // A neighbouring /64 is a different network.
+        assert_eq!(l.admit_at(v6("2001:db8:7:8::1"), None, now), Verdict::Admit);
+    }
+
+    #[test]
+    fn one_ipv6_slash_64_cycling_accounts_hits_the_ceiling() {
+        let l = limits(3.0, 5.0, 12.0);
+        let now = Instant::now();
+        let admitted = (0..40u8)
+            .filter(|n| {
+                let addr = v6(&format!("2001:db8:9:9::{n:x}"));
+                l.admit_at(addr, Some([*n; 16]), now) == Verdict::Admit
+            })
+            .count();
+        assert_eq!(admitted, 12);
+    }
+
+    #[test]
+    fn the_bucket_map_never_exceeds_its_cap() {
+        let rl = RateLimiter::with_max_buckets(60.0, 5.0, 64);
+        let now = Instant::now();
+        for n in 0..10_000u32 {
+            let [a, b, c, d] = n.to_be_bytes();
+            let _ = rl.try_consume_at(ip(10 + a, b, c, d), now);
+            assert!(rl.bucket_count() <= 64);
+        }
+    }
+
+    #[test]
+    fn an_idle_bucket_is_evicted_before_an_older_active_one() {
+        // 60/min, burst 100: a drained bucket needs 100 s to refill, a bucket
+        // that spent one token needs 1 s.
+        let rl = RateLimiter::with_max_buckets(60.0, 100.0, 2);
+        let t0 = Instant::now();
+        let drained = ip(192, 0, 2, 30);
+        let idle = ip(192, 0, 2, 31);
+        for _ in 0..100 {
+            assert!(rl.try_consume_at(drained, t0));
+        }
+        assert!(!rl.try_consume_at(drained, t0));
+        assert!(rl.try_consume_at(idle, t0 + Duration::from_secs(50)));
+        // At t0+60 `idle` is full again and `drained` holds 60 of 100 tokens.
+        let t1 = t0 + Duration::from_secs(60);
+        assert!(rl.try_consume_at(ip(192, 0, 2, 32), t1));
+        assert_eq!(rl.bucket_count(), 2);
+        // `drained` kept its debt: 60 admits, then refused.
+        let admitted = (0..100).filter(|_| rl.try_consume_at(drained, t1)).count();
+        assert_eq!(admitted, 60);
+    }
+
+    #[test]
+    fn with_no_idle_bucket_the_least_recently_touched_goes() {
+        // Nothing refills within the test (1/min, burst 5).
+        let rl = RateLimiter::with_max_buckets(1.0, 5.0, 8);
+        let t0 = Instant::now();
+        for n in 0..8u8 {
+            let at = t0 + Duration::from_millis(u64::from(n));
+            for _ in 0..5 {
+                assert!(rl.try_consume_at(ip(192, 0, 2, n), at));
+            }
+        }
+        // A ninth key evicts exactly one bucket, the oldest.
+        assert!(rl.try_consume_at(ip(192, 0, 2, 100), t0 + Duration::from_millis(20)));
+        assert_eq!(rl.bucket_count(), 8);
+        let later = t0 + Duration::from_millis(21);
+        // The oldest came back as a fresh bucket; the newest kept its debt.
+        assert!(rl.try_consume_at(ip(192, 0, 2, 0), later));
+        assert!(!rl.try_consume_at(ip(192, 0, 2, 7), later));
     }
 
     #[test]

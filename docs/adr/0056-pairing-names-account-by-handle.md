@@ -155,4 +155,52 @@ lands the fresh device in that account in both designs; what protects the
 person is that their own device shows no prompt and the comparison code is
 never shown to them. A post-redeem cross-check (look the name up with the new
 session and compare) would ask the same server again and adds nothing against
-it.
+it. **Corrected by the security pass (2026-09-28):** that reasoning holds only
+for a malicious server. Against someone who squatted the auth login handle
+(the rename window, a pepper change, a name registered at discovery without an
+auth bind), discovery is an independent registry, and the cross-check catches
+the redirect. All three clients now run it after the redeem and the seed
+verification and before persisting anything: the typed name is looked up with
+the new session and must resolve to the redeemed account, else the device
+refuses and persists nothing.
+
+## Security pass (2026-09-28): iOS and Android
+
+A `lakko-security` review of the join-by-name path found three things on the
+native clients; all three are fixed, host-tested, and not yet walked live.
+
+1. **Nothing lands before the seed verifies (MEDIUM-LOW).** The iOS
+   `acceptByName` and the Android `persistAs` wrote the device-identity seed,
+   the DeviceGroup snapshot, the history rows and the device-global state
+   bundle (contacts, peer TOFU pins, known groups) at join time, before
+   `completeFromDeviceRestore` verified the phrase seed against the published
+   identity, and never rolled them back. Web already held them in memory. Both
+   natives now join, redeem and bind the DeviceGroup in memory, fetch (not
+   apply) the two bundles, and hand the restore a `persistJoin` hook on the
+   recovery outcome (iOS `PendingJoinByName`, Android `PendingJoin` from
+   `JoinByNameSteps.bindAs`). `completeFromDeviceRestore` runs it only after
+   both checks below, and before the session lands.
+2. **The typed name is checked at discovery (MEDIUM, reverses the rejected
+   alternative above).** After the redeem and the seed verification and
+   before anything is written, the typed username is looked up through the
+   ordinary token-spending discovery lookup with the redeemed session, and must
+   resolve to the redeemed account id. A different account or an unknown name
+   refuses with "The name you typed belongs to a different account. Nothing
+   was changed on this device."; a lookup that cannot run (network, token
+   quota, tokens switched off) refuses with the generic network copy. Either
+   way the seed is zeroed, the session is never installed and nothing is
+   persisted. The session has not landed, so its token is drawn without
+   touching the shared pool: iOS through a new `DetachedAnonTokenSource` (one
+   token per request, never pooled or stored), Android through the existing
+   `DiscoveryClient.useTokenSession`. The lookup itself stays on the anonymous
+   client. The gates are `AuthRepository.completeFromDeviceRestore` + iOS
+   `TypedNameCheck` / Android `runCheckedDeviceRestore`, mirroring
+   `apps/web/src/auth/device-restore-name-check.ts`; the web counterpart of
+   this item is handled separately.
+3. **Zeroing reaches the received bytes (LOW, iOS).** `var seed =
+   outcome.phraseSeed; seed.resetBytes(...)` zeroed a copy under `Data`
+   copy-on-write. `JoinRecoveryOutcome` is now a class owning the seed, with
+   `wipeSeed()` zeroing its own storage in place; the refusal paths of the view
+   model and the join call it, the repository no longer zeroes a copy, and the
+   96-byte recovery plaintext copy in `RecoveryPayload.parseRecoveryPayload`
+   is zeroed once the grant and the seed are cut out of it.

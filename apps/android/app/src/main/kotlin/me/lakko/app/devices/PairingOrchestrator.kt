@@ -56,12 +56,21 @@ public object PairingOrchestrator {
      * learns it), `null` exactly when the redeem failed.
      * The consumer (AuthRepository.completeFromPairing /
      * completeFromDeviceRestore) owns zeroizing `phraseSeed`.
+     *
+     * `persistJoin` (ADR-0056 security pass) is set by a join by name: it
+     * holds everything the join received (the DeviceIdentity seed, the
+     * DeviceGroup snapshot, the history rows, the state bundle) and writes
+     * it. The restore runs it only after the phrase seed verified against
+     * the published identity AND the typed name resolved, at discovery, to
+     * the redeemed account. `null` for a join that knew its account (it
+     * persisted at join time, as before).
      */
     public class JoinRecoveryOutcome(
         public val phraseSeed: ByteArray,
         public val sessionToken: String?,
         public val sessionExpiresAtMs: Long?,
         public val accountId: ByteArray?,
+        public val persistJoin: (suspend () -> Unit)? = null,
     )
 
     /**
@@ -249,21 +258,33 @@ public object PairingOrchestrator {
                         override fun groupIdFor(accountId: ByteArray): ByteArray =
                             deviceGroupIdFor(accountId)
 
-                        override suspend fun persistAs(accountId: ByteArray) {
-                            val accountIdB64 = base64Encode(accountId)
-                            DeviceIdentityStore.putDeviceIdentitySeed(context, accountIdB64, seed)
+                        override suspend fun bindAs(accountId: ByteArray): PendingJoin {
+                            // In-memory only: the DeviceGroup is in the
+                            // identity's own storage after the join, and the
+                            // two bundles are fetched, not applied.
                             val joined = loadDeviceGroup(identity, accountId)
                                 ?: throw IllegalStateException("joined DeviceGroup not found in storage")
                             group = joined
-                            // ADR-0050 — the scanning device admits this one to
-                            // the account's chats; say so until they land.
-                            StateBundle.markRestored(context)
-                            DeviceGroupLifecycle.persistSnapshot(
-                                context = context,
-                                identity = identity,
-                                accountIdB64 = accountIdB64,
-                            )
-                            applyCatchUpBundles(joined, accountIdB64, welcomeCursor)
+                            val accountIdB64 = base64Encode(accountId)
+                            val bundles = fetchCatchUpBundles(joined, welcomeCursor)
+                            return object : PendingJoin {
+                                private var written = false
+
+                                override suspend fun persist() {
+                                    if (written) return
+                                    written = true
+                                    DeviceIdentityStore.putDeviceIdentitySeed(context, accountIdB64, seed)
+                                    // ADR-0050 — the scanning device admits this one to
+                                    // the account's chats; say so until they land.
+                                    StateBundle.markRestored(context)
+                                    DeviceGroupLifecycle.persistSnapshot(
+                                        context = context,
+                                        identity = identity,
+                                        accountIdB64 = accountIdB64,
+                                    )
+                                    applyFetchedBundles(joined, accountIdB64, bundles)
+                                }
+                            }
                         }
                     },
                 )
@@ -272,6 +293,84 @@ public object PairingOrchestrator {
                     plain.close()
                 } catch (_: Throwable) {
                     // best-effort
+                }
+            }
+        }
+
+        /** The two catch-up bundles of a join by name, fetched and held
+         *  until the restore has passed its checks (ADR-0056 security pass). */
+        private class FetchedBundles(
+            val historySealed: ByteArray?,
+            val stateBundle: StateBundle.Bundle?,
+        )
+
+        /** Fetch (not apply) the history and state bundles. Best-effort. */
+        private suspend fun fetchCatchUpBundles(joined: DeviceGroup, welcomeCursor: Long): FetchedBundles {
+            val history = try {
+                val outcome = WelcomeCourier.pollForHistoryBundle(
+                    rendezvousPseudonym = rendezvous,
+                    welcomeCursor = welcomeCursor,
+                )
+                (outcome as? WelcomeCourier.HistoryBundleOutcome.Received)?.sealedBytes
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                android.util.Log.w("PairingOrchestrator", "history bundle fetch failed", cause)
+                null
+            }
+            var key: ByteArray? = null
+            val state = try {
+                val sealed = StateBundle.poll(rendezvous, welcomeCursor)
+                if (sealed == null) {
+                    null
+                } else {
+                    key = joined.exportSecret(
+                        identity,
+                        StateBundle.EXPORTER_LABEL,
+                        rendezvous,
+                        StateBundle.EXPORTER_KEY_LENGTH.toUInt(),
+                    )
+                    StateBundle.decode(openWithKey(key, sealed))
+                }
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Throwable) {
+                android.util.Log.w("PairingOrchestrator", "state bundle fetch failed", cause)
+                null
+            } finally {
+                key?.fill(0)
+            }
+            return FetchedBundles(history, state)
+        }
+
+        /** Apply what [fetchCatchUpBundles] held. Best-effort. */
+        private fun applyFetchedBundles(joined: DeviceGroup, accountIdB64: String, bundles: FetchedBundles) {
+            val sealed = bundles.historySealed
+            if (sealed != null) {
+                try {
+                    val secret = joined.historyBundleSecret(identity)
+                    try {
+                        val applied = HistoryBundleCodec.applyToMessageLog(
+                            context = context,
+                            accountIdB64 = accountIdB64,
+                            secret = secret,
+                            sealedBytes = sealed,
+                        )
+                        android.util.Log.i("PairingOrchestrator", "history catch-up: applied $applied rows")
+                    } finally {
+                        secret.fill(0)
+                    }
+                } catch (cause: Throwable) {
+                    android.util.Log.w("PairingOrchestrator", "history bundle apply failed", cause)
+                }
+            }
+            val bundle = bundles.stateBundle
+            if (bundle != null) {
+                try {
+                    val (contacts, pins) = StateBundle.apply(context, bundle)
+                    android.util.Log.i("PairingOrchestrator", "state bundle: $contacts contacts, $pins pins")
+                } catch (cause: Throwable) {
+                    android.util.Log.w("PairingOrchestrator", "state bundle apply failed", cause)
                 }
             }
         }

@@ -228,6 +228,16 @@ pub(crate) async fn load_or_init_server_setup(
     Ok(setup)
 }
 
+/// A stored `opaque_registrations` row that does not deserialize: a `500`,
+/// logged, never a panic.
+fn corrupted_registration(e: opaque_ke::errors::ProtocolError) -> (StatusCode, String) {
+    tracing::error!(error = ?e, "opaque_registrations row does not deserialize");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal db error".to_string(),
+    )
+}
+
 /// Decode a base64 `account_id` and validate its length.
 fn decode_account_id(b64: &str) -> Result<[u8; ACCOUNT_ID_LEN], (StatusCode, String)> {
     let bytes = B64.decode(b64).map_err(|e| {
@@ -704,8 +714,10 @@ async fn take_login_state(
         .await?;
     tx.commit().await?;
 
-    let server_login = ServerLogin::<LakkoCipherSuite>::deserialize(&state_bytes)
-        .expect("ServerLogin deserialize failed — DB row corrupted");
+    let server_login = ServerLogin::<LakkoCipherSuite>::deserialize(&state_bytes).map_err(|e| {
+        tracing::error!(error = ?e, "opaque_login_states row does not deserialize");
+        sqlx::Error::Protocol("corrupted opaque_login_states row".to_string())
+    })?;
     let mut acct = [0u8; ACCOUNT_ID_LEN];
     if account_id_vec.len() != ACCOUNT_ID_LEN {
         return Ok(None);
@@ -823,17 +835,9 @@ async fn login_start_inner(
 ) -> Result<Json<LoginStartResponse>, OpaqueError> {
     let pepper = crate::login_handle::pepper(state)?;
     let handle = crate::login_handle::decode_handle(&payload.handle)?;
-    let scope = if kind == KIND_RECOVERY {
-        crate::limits::Scope::LoginRecovery
-    } else {
-        crate::limits::Scope::LoginPassword
-    };
-    crate::limits::charge_name(&state.db, &state.limits, scope, &handle).await?;
-    let account_id = crate::login_handle::resolve(&state.db, &pepper, &handle)
-        .await?
-        .account_id;
-    let credential_id = build_credential_id(&account_id, kind);
-
+    // Decode the whole body before charging the counter, so a malformed
+    // request (a 400 that does no work) does not spend the named handle's
+    // budget. Still before any lookup: a 400 says nothing about the handle.
     let request_bytes = B64.decode(&payload.request).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -847,6 +851,16 @@ async fn login_start_inner(
                 format!("invalid CredentialRequest: {e:?}"),
             )
         })?;
+    let scope = if kind == KIND_RECOVERY {
+        crate::limits::Scope::LoginRecovery
+    } else {
+        crate::limits::Scope::LoginPassword
+    };
+    crate::limits::charge_name(&state.db, &state.limits, scope, &handle).await?;
+    let account_id = crate::login_handle::resolve(&state.db, &pepper, &handle)
+        .await?
+        .account_id;
+    let credential_id = build_credential_id(&account_id, kind);
 
     let stored: Option<ServerRegistration<LakkoCipherSuite>> = sqlx::query_as::<_, (Vec<u8>,)>(
         "SELECT registration_bytes FROM opaque_registrations \
@@ -863,10 +877,9 @@ async fn login_start_inner(
             "internal db error".to_string(),
         )
     })?
-    .map(|(bytes,)| {
-        ServerRegistration::<LakkoCipherSuite>::deserialize(&bytes)
-            .expect("ServerRegistration deserialize failed — DB row corrupted")
-    });
+    .map(|(bytes,)| ServerRegistration::<LakkoCipherSuite>::deserialize(&bytes))
+    .transpose()
+    .map_err(corrupted_registration)?;
 
     let mut rng = OsRng;
     let server_start = ServerLogin::<LakkoCipherSuite>::start(
@@ -1139,22 +1152,10 @@ pub(crate) async fn password_reset_start(
 ) -> Result<Json<PasswordResetStartResponse>, OpaqueError> {
     let pepper = crate::login_handle::pepper(&state)?;
     let handle = crate::login_handle::decode_handle(&payload.handle)?;
-    crate::limits::charge_name(
-        &state.db,
-        &state.limits,
-        crate::limits::Scope::PasswordReset,
-        &handle,
-    )
-    .await?;
-    // An unknown handle resolves to its stand-in id: every lookup below
-    // misses and OPAQUE takes its fake-credentials path, as for an account
-    // without a recovery envelope.
-    let account_id = crate::login_handle::resolve(&state.db, &pepper, &handle)
-        .await?
-        .account_id;
 
-    // Decode both client messages up-front; surfaces wire errors as
-    // 400 before we touch the DB.
+    // Decode both client messages up-front; surfaces wire errors as 400
+    // before the counter is charged (a malformed request does not spend the
+    // named handle's budget) and before we touch the DB.
     let recovery_request_bytes = B64.decode(&payload.recovery_request).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -1171,6 +1172,20 @@ pub(crate) async fn password_reset_start(
         )
     })?;
     let new_password_request = decode_registration_request(&payload.new_password_request)?;
+
+    crate::limits::charge_name(
+        &state.db,
+        &state.limits,
+        crate::limits::Scope::PasswordReset,
+        &handle,
+    )
+    .await?;
+    // An unknown handle resolves to its stand-in id: every lookup below
+    // misses and OPAQUE takes its fake-credentials path, as for an account
+    // without a recovery envelope.
+    let account_id = crate::login_handle::resolve(&state.db, &pepper, &handle)
+        .await?
+        .account_id;
 
     // Look up the stored KIND_RECOVERY envelope. None → unknown account
     // (or no recovery enrolled); ServerLogin::start takes the
@@ -1192,10 +1207,9 @@ pub(crate) async fn password_reset_start(
             "internal db error".to_string(),
         )
     })?
-    .map(|(bytes,)| {
-        ServerRegistration::<LakkoCipherSuite>::deserialize(&bytes)
-            .expect("ServerRegistration deserialize failed — DB row corrupted")
-    });
+    .map(|(bytes,)| ServerRegistration::<LakkoCipherSuite>::deserialize(&bytes))
+    .transpose()
+    .map_err(corrupted_registration)?;
 
     let mut rng = OsRng;
     let recovery_start = ServerLogin::<LakkoCipherSuite>::start(
@@ -2387,7 +2401,12 @@ mod signup_login_limits_e2e_tests {
             eprintln!("skipping login-handle e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
             return;
         };
-        let state = build_state(pool.clone(), Limits::defaults());
+        // No minimum interval here: this test re-binds within seconds (the
+        // interval has its own test below).
+        let state = build_state(
+            pool.clone(),
+            Limits::defaults().with_handle_change_interval(0),
+        );
         let pw = b"a password for login by name";
         let seed = [0x31u8; 64];
         let (a, a_token) = signup_account(&state, pw, &seed).await;
@@ -2753,6 +2772,295 @@ mod signup_login_limits_e2e_tests {
             .await;
             assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(err_code(&bytes), "login-by-name-disabled");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // ADR-0054, what the security pass found
+    // ------------------------------------------------------------------
+
+    /// An account row and a session token for it, without the OPAQUE dance.
+    async fn raw_account(pool: &MySqlPool, state: &crate::AppState) -> ([u8; 16], String) {
+        let (id, _) = new_account();
+        sqlx::query("INSERT INTO accounts (id) VALUES (?)")
+            .bind(id.as_slice())
+            .execute(pool)
+            .await
+            .unwrap();
+        let now_ms = i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        let token = state
+            .session_token_secret
+            .issue(&id, now_ms + 3_600_000)
+            .unwrap();
+        (id, token)
+    }
+
+    async fn put_handle(state: &crate::AppState, token: &str, handle: &str) -> (StatusCode, Bytes) {
+        send_json(
+            state,
+            Method::PUT,
+            "/auth/login-handle",
+            Some(token),
+            Some(&serde_json::json!({ "handle": handle })),
+        )
+        .await
+    }
+
+    async fn drop_accounts(pool: &MySqlPool, ids: &[[u8; 16]]) {
+        for id in ids {
+            sqlx::query("DELETE FROM accounts WHERE id = ?")
+                .bind(id.as_slice())
+                .execute(pool)
+                .await
+                .ok();
+        }
+    }
+
+    /// Finding 1: one account cannot sweep the handle registry through the
+    /// 409. The 409 stays; every bind is counted per account, a change is
+    /// refused within the minimum interval of the last one (restoring the
+    /// previous handle excepted, a DELETE not reopening it), and the route
+    /// has its own per-address bucket.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines, clippy::many_single_char_names)]
+    async fn login_handle_binds_are_rationed() {
+        let Some(pool) = pool().await else {
+            eprintln!("skipping login-handle e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
+            return;
+        };
+        let state = build_state(pool.clone(), Limits::defaults());
+        let limited = |body: &Bytes| {
+            let v: serde_json::Value = serde_json::from_slice(body).unwrap();
+            assert_eq!(v["error"], crate::limits::CODE_HANDLE_BIND_LIMITED);
+            assert!(v["retry_after_secs"].as_u64().unwrap() >= 1);
+        };
+        let (a, a_token) = raw_account(&pool, &state).await;
+        let (b, b_token) = raw_account(&pool, &state).await;
+        let (_, hb) = crate::login_handle::random_handle();
+        let (_, h1) = crate::login_handle::random_handle();
+        let (_, h2) = crate::login_handle::random_handle();
+        assert_eq!(put_handle(&state, &b_token, &hb).await.0, StatusCode::OK);
+
+        // A probes: a taken name is still 409 (the claim order needs it).
+        let (st, body) = put_handle(&state, &a_token, &hb).await;
+        assert_eq!(st, StatusCode::CONFLICT);
+        assert_eq!(err_code(&body), "handle-taken");
+        assert_eq!(
+            put_handle(&state, &a_token, &hb).await.0,
+            StatusCode::CONFLICT
+        );
+        // A free name binds; the next change is refused for the interval,
+        // whether the probed name is free or taken.
+        assert_eq!(put_handle(&state, &a_token, &h1).await.0, StatusCode::OK);
+        let (st, body) = put_handle(&state, &a_token, &h2).await;
+        assert_eq!(st, StatusCode::TOO_MANY_REQUESTS);
+        limited(&body);
+        let (st, body) = put_handle(&state, &a_token, &hb).await;
+        assert_eq!(
+            st,
+            StatusCode::TOO_MANY_REQUESTS,
+            "no 409 inside the interval"
+        );
+        limited(&body);
+        // Five binds spent: the sixth is refused whatever it asks for, even
+        // re-binding the handle A already holds.
+        let (st, body) = put_handle(&state, &a_token, &h1).await;
+        assert_eq!(st, StatusCode::TOO_MANY_REQUESTS);
+        limited(&body);
+        let h1_bytes = crate::login_handle::decode_handle(&h1).ok().unwrap();
+        let r = crate::login_handle::resolve(&pool, &crate::login_handle::TEST_PEPPER, &h1_bytes)
+            .await
+            .ok()
+            .unwrap();
+        assert_eq!(r.account_id, a, "the refusals changed nothing");
+
+        // Restoring the handle held just before is exempt from the interval.
+        let (c, c_token) = raw_account(&pool, &state).await;
+        let (_, c0) = crate::login_handle::random_handle();
+        let (_, c1) = crate::login_handle::random_handle();
+        let (_, c2) = crate::login_handle::random_handle();
+        assert_eq!(put_handle(&state, &c_token, &c0).await.0, StatusCode::OK);
+        sqlx::query(
+            "UPDATE login_handle_changes SET last_changed_at = NOW(3) - INTERVAL 1 HOUR \
+             WHERE account_id = ?",
+        )
+        .bind(c.as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(put_handle(&state, &c_token, &c1).await.0, StatusCode::OK);
+        assert_eq!(
+            put_handle(&state, &c_token, &c2).await.0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            put_handle(&state, &c_token, &c0).await.0,
+            StatusCode::OK,
+            "a rename can be rolled back at once"
+        );
+
+        // A DELETE does not reopen the interval; the released handle can be
+        // taken back.
+        let (d, d_token) = raw_account(&pool, &state).await;
+        let (_, d0) = crate::login_handle::random_handle();
+        let (_, d1) = crate::login_handle::random_handle();
+        assert_eq!(put_handle(&state, &d_token, &d0).await.0, StatusCode::OK);
+        let (st, _) = send_json(
+            &state,
+            Method::DELETE,
+            "/auth/login-handle",
+            Some(&d_token),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(
+            put_handle(&state, &d_token, &d1).await.0,
+            StatusCode::TOO_MANY_REQUESTS,
+            "release-and-rebind is still inside the interval"
+        );
+        assert_eq!(
+            put_handle(&state, &d_token, &d0).await.0,
+            StatusCode::OK,
+            "the handle just released can be bound again"
+        );
+
+        // The per-address bucket on the route.
+        let tight = build_state(
+            pool.clone(),
+            Limits::defaults().with_ip_window(Category::HandleBind, Window::new(1, 3600)),
+        );
+        let (e, e_token) = raw_account(&pool, &tight).await;
+        let (_, e0) = crate::login_handle::random_handle();
+        assert_eq!(put_handle(&tight, &e_token, &e0).await.0, StatusCode::OK);
+        let (st, body) = put_handle(&tight, &e_token, &e0).await;
+        assert_eq!(st, StatusCode::TOO_MANY_REQUESTS);
+        limited(&body);
+
+        drop_accounts(&pool, &[a, b, c, d, e]).await;
+    }
+
+    /// Finding 7: concurrent binds of one account are serialised, so none of
+    /// them answers a spurious 409 (a unique violation on the account key
+    /// rather than on the handle).
+    #[tokio::test]
+    async fn concurrent_binds_of_one_account_never_conflict() {
+        let Some(pool) = pool().await else {
+            eprintln!("skipping login-handle e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
+            return;
+        };
+        let state = build_state(
+            pool.clone(),
+            Limits::defaults()
+                .with_handle_change_interval(0)
+                .with_name_window(Scope::HandleBind, Window::new(100, 86_400))
+                .with_ip_window(Category::HandleBind, Window::new(100, 3600)),
+        );
+        let (a, token) = raw_account(&pool, &state).await;
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let state = state.clone();
+            let token = token.clone();
+            let (_, h) = crate::login_handle::random_handle();
+            tasks.spawn(async move { put_handle(&state, &token, &h).await });
+        }
+        while let Some(res) = tasks.join_next().await {
+            let (st, body) = res.unwrap();
+            assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        }
+        let rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM login_handles WHERE account_id = ?")
+                .bind(a.as_slice())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows, 1);
+        drop_accounts(&pool, &[a]).await;
+    }
+
+    /// Finding 3: a request whose body does not decode is refused (400)
+    /// before the named handle's counter is charged, so junk cannot lock a
+    /// name.
+    #[tokio::test]
+    async fn a_malformed_start_does_not_spend_the_named_counter() {
+        let Some(pool) = pool().await else {
+            eprintln!("skipping login-handle e2e: LAKKO_AUTH_TEST_DATABASE_URL unset");
+            return;
+        };
+        let state = build_state(
+            pool.clone(),
+            Limits::defaults()
+                .with_name_window(Scope::LoginPassword, Window::new(2, 900))
+                .with_name_window(Scope::PasswordReset, Window::new(2, 900)),
+        );
+        let (_, handle) = crate::login_handle::random_handle();
+        let valid_request = || {
+            let cl = ClientLogin::<LakkoCipherSuite>::start(&mut OsRng, b"guess").unwrap();
+            B64.encode(cl.message.serialize())
+        };
+        for junk in ["!!!not base64", "AAAA"] {
+            for _ in 0..3 {
+                let (st, _, _) = post(
+                    &state,
+                    "/login/start",
+                    "198.51.100.50",
+                    &serde_json::json!({ "handle": handle, "request": junk }),
+                )
+                .await;
+                assert_eq!(st, StatusCode::BAD_REQUEST);
+                let (st, _, _) = post(
+                    &state,
+                    "/password/reset/start",
+                    "198.51.100.50",
+                    &serde_json::json!({
+                        "handle": handle,
+                        "recovery_request": valid_request(),
+                        "new_password_request": junk,
+                    }),
+                )
+                .await;
+                assert_eq!(st, StatusCode::BAD_REQUEST);
+            }
+        }
+        // The whole budget is still there, then it runs out.
+        for expected in [
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::TOO_MANY_REQUESTS,
+        ] {
+            let (st, _, _) = post(
+                &state,
+                "/login/start",
+                "198.51.100.50",
+                &serde_json::json!({ "handle": handle, "request": valid_request() }),
+            )
+            .await;
+            assert_eq!(st, expected);
+        }
+        let (_, pw_req) = reg_start(b"new password");
+        for expected in [
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::TOO_MANY_REQUESTS,
+        ] {
+            let (st, _, _) = post(
+                &state,
+                "/password/reset/start",
+                "198.51.100.50",
+                &serde_json::json!({
+                    "handle": handle,
+                    "recovery_request": valid_request(),
+                    "new_password_request": pw_req,
+                }),
+            )
+            .await;
+            assert_eq!(st, expected);
         }
     }
 }

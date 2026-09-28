@@ -65,29 +65,36 @@ Or:
 
 ## 4. Route B: confirm on another device
 
+**Amended 2026-09-28 (security pass):** the code is shown on the OLD device and
+TYPED on the new one. A code both devices compute from the request can be
+ground by a malicious relay (about a million tries, milliseconds), so the new
+device now proves it knows a code the old device chose and the server never
+saw; the devices agree on a key from that code with a PAKE, so a relay gets
+one guess per request, not a million.
+
 ### On the new device
 
 ```
 Confirm on another device
 
-Open Lakko on a device that is already signed in
-and confirm this sign-in there.
+Open Lakko on a device that is already signed in.
+It will show a six-digit code. Enter it here.
 
-Comparison code
-   47 19 03
-
-Make sure the other device shows the same code.
+[ __ __ __ ]
 
 [ Show a QR code instead ]        [ Cancel ]
 ```
 
-- The code is six digits in three pairs, large.
-- "Show a QR code instead" flips to the existing QR pairing screen; the same
-  request stays valid in both forms.
-- The screen polls. States: **waiting** (spinner under the code), **confirmed
-  on another device** (changes to "Restoring…" then the app opens),
-  **declined** ("Declined on another device."), **expired** after 10 minutes
-  ("This request expired. Start again.").
+- The field takes six digits (the three pairs are only visual); it accepts a
+  paste; Continue is enabled at six digits.
+- "Show a QR code instead" flips to the existing QR pairing screen.
+- States: **waiting for the other device** (before the other device has
+  answered, the field is disabled with "Waiting for your other device..."),
+  **checking** after Continue, **wrong code** (`That code does not match. Start
+  again and enter the code your other device shows.` - one try per request;
+  Start again posts a new request), **confirmed** ("Restoring..." then the app
+  opens), **declined** ("Declined on another device."), **expired** after 10
+  minutes ("This request expired. Start again.").
 
 ### On the old device
 
@@ -98,24 +105,30 @@ it.
 New sign-in request
 
 Someone is signing in to your account on a new device.
+If it is you, enter this code on the new device:
 
-Comparison code
    47 19 03
 
-Does the new device show the same code?
+Never read this code to anyone. Lakko will never ask for it.
 
-[ It is not me ]            [ Confirm ]
+[ It is not me ]
 ```
 
-- **Confirm** runs the pairing. The modal shows "Adding the device…" and then
-  "Adding it to your chats… (12 of 30)" as the group adds land; it can be
-  dismissed, the work continues in the background and a failure surfaces as
-  a banner ("Some chats could not be added. Open Devices to retry.").
+- The code is chosen by this device and shown large, three pairs.
+- When the new device enters the right code, the modal changes to "Adding the
+  device..." and then "Adding it to your chats... (12 of 30)" as the group
+  adds land; it can be dismissed, the work continues in the background and a
+  failure surfaces as a banner ("Some chats could not be added. Open Devices
+  to retry.").
+- A wrong code on the new device closes the modal with "The code did not
+  match. Nothing was added."
 - **It is not me** deletes the request; the modal closes with "Declined. If
   this keeps happening, change your password."
 - Only one request is shown at a time; a newer one replaces an older one.
 - The modal never shows the new device's name or location; there is none the
   server could vouch for, and a fake one would be worse than none.
+
+  The new device's copy says "open Lakko in a browser or on your phone".
 
 ## 5. Route C: all 24 words
 
@@ -184,4 +197,4 @@ One screen, three routes, same order, same copy. Divergences:
   The new device's copy says "open Lakko in a browser or on your phone".
 - iOS and Android: the old-device prompt is a notification that opens the
   modal; the app polls on foreground as well.
-- The comparison code is always compared, never typed, on every platform.
+- The code is always shown on the signed-in device and typed on the new one, on every platform (amended 2026-09-28).

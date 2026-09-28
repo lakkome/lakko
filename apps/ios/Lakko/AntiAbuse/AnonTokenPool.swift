@@ -335,3 +335,50 @@ private final class ResumeOnce: @unchecked Sendable {
         }
     }
 }
+
+/// Anonymous tokens drawn with a session that has NOT landed on this device,
+/// one per ``take(_:)``, never pooled and never stored.
+///
+/// ADR-0056 security pass: a join-by-name restore checks the typed name at
+/// discovery with the freshly redeemed session BEFORE anything is persisted.
+/// Binding ``AnonTokenPool/shared`` to that session would write tokens to the
+/// Keychain for an account the restore may still refuse; this source holds
+/// nothing, so a refusal leaves no token behind. Each call issues exactly the
+/// one token the request spends (not a pool batch), rebuilt once for the
+/// issuer's epoch on `epoch-not-issuable`.
+public final class DetachedAnonTokenSource: AnonTokenSource, @unchecked Sendable {
+
+    private let issuer: AnonTokenIssuing
+    private let sessionToken: String
+    private let now: @Sendable () -> Date
+    private let windowSecs: UInt64
+
+    public init(
+        issuer: AnonTokenIssuing,
+        sessionToken: String,
+        now: @escaping @Sendable () -> Date = { Date() },
+        windowSecs: UInt64 = anonTokenDefaultWindowSecs()
+    ) {
+        self.issuer = issuer
+        self.sessionToken = sessionToken
+        self.now = now
+        self.windowSecs = windowSecs
+    }
+
+    public func take(_ context: AnonTokenContext) async throws -> AnonToken {
+        let secs = UInt64(max(0, now().timeIntervalSince1970))
+        let epoch = (try? anonTokenEpochAt(unixSecs: secs, windowSecs: windowSecs)) ?? 0
+        let tokens: [AnonToken]
+        do {
+            tokens = try await issuer.issue(
+                context: context, epoch: epoch, count: 1, sessionToken: sessionToken)
+        } catch AnonTokenUnavailable.epochNotIssuable(let current) {
+            tokens = try await issuer.issue(
+                context: context, epoch: current, count: 1, sessionToken: sessionToken)
+        }
+        guard let token = tokens.first(where: { $0.context == context.rawValue }) else {
+            throw AnonTokenUnavailable.issuanceFailed("the issuer returned no token")
+        }
+        return token
+    }
+}

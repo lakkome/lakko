@@ -8,10 +8,14 @@
  * arrive end-to-end encrypted. The grant redeems for a session, so neither a
  * password nor the phrase is typed here.
  *
- * ADR-0056: nothing here looks the name up. The typed username becomes its
- * login handle locally; the pairing payload and the device request carry
- * the handle, and the account id is learned from the grant redeem, after
- * the other device confirmed.
+ * ADR-0056: nothing here looks the name up before the redeem. The typed
+ * username becomes its login handle locally; the pairing payload and the
+ * device request carry the handle, and the account id is learned from the
+ * grant redeem, after the other device confirmed. `completeFromDeviceRestore`
+ * then looks the typed name up at discovery with the redeemed session and
+ * refuses, persisting nothing, unless it resolves to that same account (a
+ * squatted login handle at auth must not land this device in another
+ * account under the typed name).
  */
 import type { JSX } from "solid-js";
 import { useAuth } from "../AuthContext";

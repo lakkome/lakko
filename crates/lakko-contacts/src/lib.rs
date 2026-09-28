@@ -172,3 +172,19 @@ pub use username::{
     check_canonical_username, login_handle, UsernameError, LOGIN_HANDLE_DOMAIN, LOGIN_HANDLE_LEN,
     USERNAME_MAX_LEN, USERNAME_MIN_LEN,
 };
+
+/// Entry points for the fuzz harnesses in `crates/lakko-contacts/fuzz`.
+///
+/// Not part of the supported API: it reaches parsers that sit behind a
+/// cryptographic check a fuzzer cannot pass on random input.
+#[doc(hidden)]
+pub mod fuzz_api {
+    /// Decode a group-invite preview **plaintext** (the bytes inside the
+    /// AEAD of a v2 `/g/` capability). `None` when the decoder refuses,
+    /// `Some(true)` when the accepted preview validates and re-encodes to the
+    /// same bytes, `Some(false)` on a decoder / encoder disagreement (a bug).
+    #[must_use]
+    pub fn group_invite_preview_plaintext(plain: &[u8]) -> Option<bool> {
+        crate::group_invite::fuzz_preview_plaintext(plain)
+    }
+}

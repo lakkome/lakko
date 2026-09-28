@@ -27,6 +27,9 @@
 //!   per-name and per-address attempt limits that replaced proof of work on
 //!   every other route, each `N/SECS` (see `src/limits.rs` for the names and
 //!   the defaults, which are chosen, not measured)
+//! - `LAKKO_AUTH_HANDLE_CHANGE_MIN_INTERVAL_SECS` — minimum seconds between
+//!   two binds of one account that change its login handle (default 60;
+//!   restoring the handle held just before is exempt; 0 = no minimum)
 //! - `LAKKO_SESSION_TOKEN_SECRET` — base64-encoded HMAC-SHA256 key
 //!   (≥ 32 bytes after decode) shared with `lakko-svc-discovery` for
 //!   Phase 1.5b session-token issuance + verification. **Required**
@@ -92,7 +95,9 @@
 //! - `GET  /.well-known/jwks.json`   — publish call-JWT public key (Phase 3b4 forward, anonymous)
 //! - `POST /auth/tokens`             — issue anonymous tokens against a quota (ADR-0054, bearer-auth)
 //! - `GET  /auth/tokens/key/{context}/{epoch}` — anonymous-token public key (ADR-0054, anonymous)
-//! - `PUT  /auth/login-handle`       — bind the caller's login handle (ADR-0054 S5, bearer-auth)
+//! - `PUT  /auth/login-handle`       — bind the caller's login handle (ADR-0054 S5, bearer-auth;
+//!   `429 handle-bind-limited` per account, per address, and within the minimum interval
+//!   between handle changes)
 //! - `DELETE /auth/login-handle`     — remove it (ADR-0054 S5, bearer-auth)
 
 #![forbid(unsafe_code)]
@@ -439,7 +444,9 @@ async fn main() -> Result<()> {
         login_handle::load_handle_pepper().context("load LAKKO_AUTH_HANDLE_PEPPER")?;
     login_handle::log_startup(handle_pepper.as_ref());
     // ADR-0054 S4 — attempt limits. Loud-fail on a malformed knob.
-    let limits = Arc::new(limits::Limits::from_env().context("load auth attempt limits")?);
+    let limits = Arc::new(
+        limits::Limits::from_env(handle_pepper.as_ref()).context("load auth attempt limits")?,
+    );
     limits.log_startup();
 
     let state = AppState {
@@ -572,10 +579,14 @@ fn build_app(state: AppState) -> Router {
             delete(device_request::delete),
         )
         // ADR-0054 S5 — bind / remove the login handle the name routes
-        // resolve. Bearer-auth: the caller binds its own account.
+        // resolve. Bearer-auth: the caller binds its own account. A bind is
+        // an existence probe (409), so it is also limited per address (the
+        // per-account counter and minimum interval run in the handler).
         .route(
             "/auth/login-handle",
-            put(login_handle::put).delete(login_handle::delete),
+            put(login_handle::put)
+                .route_layer(ip(limits::Category::HandleBind))
+                .delete(login_handle::delete),
         )
         // ADR-0018 factor (d) — phone / email contact enrollment. Bearer-auth:
         // the caller is an already-logged-in account adding an OTP-recovery

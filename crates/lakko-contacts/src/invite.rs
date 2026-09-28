@@ -39,13 +39,18 @@
 //!     short pointer in the URL. This codec still produces the
 //!     full capability bytes; whether they ride directly in the
 //!     URL or behind an indirection is a transport choice the
-//!     server already supports: `services/discovery` content-
-//!     addresses an uploaded capability as
-//!     `blob_id = SHA-256(capability_bytes)` and serves it from
+//!     server already supports: `services/discovery` stores an
+//!     uploaded capability under a random [`BLOB_ID_LEN`]-byte id
+//!     it mints at upload ([`generate_blob_id`]; since the
+//!     2026-09-27 short-link amendment of ADR-0028, no longer a
+//!     hash of the bytes) and serves it from
 //!     `GET /discovery/invite/{blob_id}`, so a client can embed
 //!     the short `/i/<blob_id>` pointer instead of the ~150-220
 //!     char inline form. The capability struct is unchanged
-//!     either way — only the URL shape differs.
+//!     either way — only the URL shape differs. The id binds
+//!     nothing: a malicious discovery could serve another
+//!     validly-signed capability under a live id, and an `/i/`
+//!     link carries no secret that would catch it.
 //!   * `ephemeral_prekey` — ADR keeps it for forward secrecy on
 //!     the owner→joiner direction. Our flow has joiner→owner as
 //!     the first sealed message, and the joiner generates a
@@ -357,8 +362,10 @@ pub const JOINER_TAG_LEN: usize = 32;
 /// AND a candidate `joiner_account_id` can recompute the tag
 /// and submit it as a consume. The server's PK conflict
 /// disambiguates "joiner X has consumed" from "joiner X has
-/// not consumed", which is a probing oracle. PoW + rate
-/// limits on consume attempts mitigate at scale; full
+/// not consumed", which is a probing oracle. Each consume
+/// attempt spends an anonymous `invite-consume` token
+/// (ADR-0054 S3) and is charged to discovery's per-IP token
+/// bucket, which mitigates at scale; full
 /// privacy against a determined attacker requires an OPRF
 /// step the server runs blind, which is the deferred
 /// alternative noted in the ROADMAP.
@@ -374,11 +381,11 @@ pub fn compute_joiner_tag(
     use lakko_crypto::hash::{hmac_sha256, sha256};
 
     // Stage 1: derive a per-blob salt from the capability
-    // bytes. Using `sha256` (not BLAKE3) here keeps the
-    // protocol surface in lock-step with the rest of the
-    // invite codec — `blob_id` is also SHA-256-of-bytes
-    // (server-side, see services/discovery), so the salt and
-    // the id share the same hash family.
+    // bytes. SHA-256 (not BLAKE3) is a frozen choice of this
+    // tag's v1 domain; the ledger `blob_id` it once shared a
+    // hash family with is a random id since the short-link
+    // amendment of ADR-0028 and no longer derives from the
+    // bytes at all.
     let mut salt_input =
         Vec::with_capacity(JOINER_TAG_SALT_DOMAIN_V1.len() + capability_bytes.len());
     salt_input.extend_from_slice(JOINER_TAG_SALT_DOMAIN_V1);

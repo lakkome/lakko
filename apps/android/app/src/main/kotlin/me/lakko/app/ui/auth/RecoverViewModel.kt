@@ -176,6 +176,10 @@ public class RecoverViewModel(
             phraseSeed = done.phraseSeed,
             sessionToken = done.sessionToken,
             sessionExpiresAtMs = done.sessionExpiresAtMs,
+            // ADR-0056 security pass: the pairing's held writes, run by the
+            // repository only after the seed verified and the typed name
+            // resolved at discovery to the redeemed account.
+            persistJoin = outcome.persistJoin ?: {},
         )
     }
 

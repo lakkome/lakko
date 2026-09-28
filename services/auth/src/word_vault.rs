@@ -23,8 +23,12 @@
 //!   per 15 minutes, `429` `too-many-attempts`, unknown and known alike) and to the
 //!   per-address bucket; then a constant-time compare of the guess against
 //!   the stored verifier; a match returns the sealed entropy; a miss counts
-//!   toward the 10-strike destruction of the row (answered with the same
-//!   `401` as any miss).
+//!   toward the 10-strike destruction (answered with the same `401` as any
+//!   miss). Destruction leaves a **tombstone**: the row keeps its positions,
+//!   salt and cost and loses its sealed body, so `/recover/start` answers
+//!   exactly as it did before and every later guess misses. (Deleting the
+//!   row made start switch to decoys, which told a caller a vault had
+//!   existed.)
 //!
 //! **Trust class — the stated invariant-#2 exception.** An operator who
 //! ignores the counter and holds `LAKKO_VAULT_ENC_KEY` can search the 2^33
@@ -37,9 +41,7 @@ use axum::Extension;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
 use lakko_crypto::hash::{blake3_derive_key_from_material, blake3_keyed_xof};
-use lakko_mnemonic::vault::{
-    positions_are_valid, Positions, DEFAULT_PARAMS, SALT_LEN, VERIFIER_LEN,
-};
+use lakko_mnemonic::vault::{positions_are_valid, Positions, SALT_LEN, VERIFIER_LEN};
 use serde::{Deserialize, Serialize};
 
 use crate::webauthn::{ApiError, AuthenticatedAccount};
@@ -61,8 +63,23 @@ const MAX_M_KIB: u32 = 1 << 20;
 const MAX_T: u32 = 16;
 const MAX_P: u32 = 8;
 
-/// The `/vault/recover/finish` row shape: `(body_enc, failed_attempts)`.
-type FinishRow = (Vec<u8>, u8);
+/// The `/vault/recover/finish` row shape: `(body_enc, failed_attempts)`;
+/// `body_enc` is `None` on a tombstone.
+type FinishRow = (Option<Vec<u8>>, u8);
+
+/// The Argon2id cost `/vault/recover/start` serves for a handle with no
+/// vault. Frozen here rather than read from `lakko_mnemonic`'s default at
+/// run time: a stored row carries the cost it was enrolled with, so if the
+/// client default moved and the decoy followed it, every row enrolled
+/// under the old default would stand out as real (a cost oracle). The test
+/// `decoy_cost_is_the_enrolled_default` fails when the client default
+/// changes, which is the moment to decide how decoys cover both costs
+/// (ADR-0054, what the security pass found).
+const DECOY_PARAMS: lakko_crypto::kdf::Argon2Params = lakko_crypto::kdf::Argon2Params {
+    m_kib: 256 * 1024,
+    t: 3,
+    p: 1,
+};
 
 /// The `/vault/recover/start` row shape:
 /// `(positions, salt, argon2_m_kib, argon2_t, argon2_p)`.
@@ -241,12 +258,13 @@ pub(crate) async fn status(
     Extension(auth): Extension<AuthenticatedAccount>,
 ) -> Result<Json<StatusRes>, ApiError> {
     require_key(&state)?;
-    let row: Option<(Vec<u8>,)> =
-        sqlx::query_as("SELECT positions FROM word_vaults WHERE account_id = ?")
-            .bind(auth.0.as_slice())
-            .fetch_optional(&state.db)
-            .await
-            .map_err(ApiError::Db)?;
+    let row: Option<(Vec<u8>,)> = sqlx::query_as(
+        "SELECT positions FROM word_vaults WHERE account_id = ? AND body_enc IS NOT NULL",
+    )
+    .bind(auth.0.as_slice())
+    .fetch_optional(&state.db)
+    .await
+    .map_err(ApiError::Db)?;
     Ok(Json(StatusRes {
         enrolled: row.is_some(),
         positions: row.map(|(p,)| p),
@@ -295,9 +313,9 @@ pub(crate) async fn recover_start(
         RecoverStartRes {
             positions: positions.to_vec(),
             salt_b64: STANDARD.encode(salt),
-            argon2_m_kib: DEFAULT_PARAMS.m_kib,
-            argon2_t: DEFAULT_PARAMS.t,
-            argon2_p: DEFAULT_PARAMS.p,
+            argon2_m_kib: DECOY_PARAMS.m_kib,
+            argon2_t: DECOY_PARAMS.t,
+            argon2_p: DECOY_PARAMS.p,
         }
     };
     Ok(Json(res))
@@ -340,9 +358,9 @@ pub(crate) async fn recover_finish(
             .await
             .map_err(ApiError::Db)?;
 
-    // Unknown account (or a destroyed vault): a dummy compare so the shape
-    // and timing match a miss, then the same generic 401. No DB write.
-    let Some((body_enc, failed)) = row else {
+    // Unknown account, no vault, or a tombstone: a dummy compare so the
+    // shape and timing match a miss, then the same generic 401. No DB write.
+    let Some((Some(body_enc), failed)) = row else {
         let _ = constant_time_eq(&guess, &[0u8; VERIFIER_LEN]);
         return Err(ApiError::InvalidCredential);
     };
@@ -362,12 +380,16 @@ pub(crate) async fn recover_finish(
     if !constant_time_eq(&guess, stored_verifier) {
         let account_id_b64 = URL_SAFE_NO_PAD.encode(account_id);
         if failed + 1 >= DESTRUCTION_CAP {
-            sqlx::query("DELETE FROM word_vaults WHERE account_id = ?")
-                .bind(account_id.as_slice())
-                .execute(&state.db)
-                .await
-                .map_err(ApiError::Db)?;
-            tracing::warn!(account_id = %account_id_b64, "vault: destroyed after repeated wrong guesses");
+            // Tombstone: keep positions, salt and cost so /recover/start
+            // answers as before; drop the only thing that opens anything.
+            sqlx::query(
+                "UPDATE word_vaults SET body_enc = NULL, failed_attempts = 0 WHERE account_id = ?",
+            )
+            .bind(account_id.as_slice())
+            .execute(&state.db)
+            .await
+            .map_err(ApiError::Db)?;
+            tracing::warn!(account_id = %account_id_b64, "vault: destroyed after repeated wrong guesses (tombstone kept)");
         } else {
             sqlx::query(
                 "UPDATE word_vaults SET failed_attempts = failed_attempts + 1 WHERE account_id = ?",
@@ -574,6 +596,7 @@ fn constant_time_eq(candidate: &[u8; VERIFIER_LEN], stored: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lakko_mnemonic::vault::DEFAULT_PARAMS;
 
     #[test]
     fn decoys_are_stable_valid_and_account_specific() {
@@ -631,6 +654,23 @@ mod tests {
         b[31] ^= 1;
         assert!(!constant_time_eq(&a, &b));
         assert!(!constant_time_eq(&a, &a[..31]));
+    }
+
+    #[test]
+    fn decoy_cost_is_the_enrolled_default() {
+        // If this fails, the client's default vault cost moved. Rows enrolled
+        // under the old cost keep it, so a decoy that simply follows the new
+        // default would single them out as real vaults. Decide how decoys
+        // cover both costs (for example, draw each handle's decoy cost from
+        // the costs in use), then update DECOY_PARAMS and this test.
+        assert_eq!(DECOY_PARAMS.m_kib, DEFAULT_PARAMS.m_kib);
+        assert_eq!(DECOY_PARAMS.t, DEFAULT_PARAMS.t);
+        assert_eq!(DECOY_PARAMS.p, DEFAULT_PARAMS.p);
+        assert!(cost_in_bounds(
+            DECOY_PARAMS.m_kib,
+            DECOY_PARAMS.t,
+            DECOY_PARAMS.p
+        ));
     }
 
     #[test]
@@ -847,7 +887,7 @@ mod vault_e2e_tests {
         let d2 = start(state.clone(), handle_b64.clone()).await;
         assert_eq!(d1, d2);
         assert_eq!(d1["positions"].as_array().unwrap().len(), 3);
-        assert_eq!(d1["argon2_m_kib"], DEFAULT_PARAMS.m_kib);
+        assert_eq!(d1["argon2_m_kib"], DECOY_PARAMS.m_kib);
         // A handle nobody holds gets decoys of the same shape, stable per
         // handle and different from another handle's.
         let (_, unknown_b64) = crate::login_handle::random_handle();
@@ -961,7 +1001,12 @@ mod vault_e2e_tests {
         // the right one. The counter already holds this test's two earlier
         // guesses; start it from zero.
         let reset = || {
-            crate::limits::reset_name(&pool, crate::limits::Scope::VaultGuess, handle.as_slice())
+            crate::limits::reset_name(
+                &pool,
+                &state.limits,
+                crate::limits::Scope::VaultGuess,
+                handle.as_slice(),
+            )
         };
         reset().await;
         let limit = state
@@ -1017,6 +1062,21 @@ mod vault_e2e_tests {
         assert_eq!(
             v["enrolled"], false,
             "the vault is destroyed after the 10th miss"
+        );
+        // A tombstone: nothing left to open, and /recover/start answers
+        // byte for byte as before the destruction (no switch to decoys, so
+        // a caller cannot tell that a vault existed).
+        let (body_left,): (Option<Vec<u8>>,) =
+            sqlx::query_as("SELECT body_enc FROM word_vaults WHERE account_id = ?")
+                .bind(account_id.as_slice())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(body_left.is_none(), "the sealed body is gone");
+        assert_eq!(
+            start(state.clone(), handle_b64.clone()).await,
+            s,
+            "start answers identically before and after destruction"
         );
         // The right words no longer open anything: same 401 as an unknown account.
         let (st, body) = guess(&state, &handle_b64, keys.verifier()).await;

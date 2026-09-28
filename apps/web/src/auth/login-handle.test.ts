@@ -206,6 +206,10 @@ describe("recover by name: no lookup before the session, the id from the finish,
   it("AuthContext's sign-in and recovery paths hold no discovery lookup", () => {
     const src = readFileSync(fileURLToPath(new URL("./AuthContext.tsx", import.meta.url)), "utf8");
     expect(src).not.toMatch(/discovery\.lookup\(/);
+    // The one sanctioned lookup is the ADR-0056 post-redeem name check of a
+    // join-by-name device restore, which runs with the redeemed session
+    // attached (ordering pinned in device-restore-name-check.test.ts).
+    expect(src.match(/discoveryAccountLookup\(/g)?.length ?? 0).toBe(1);
     const resolution = readFileSync(fileURLToPath(new URL("./recover-resolution.ts", import.meta.url)), "utf8");
     expect(resolution).not.toMatch(/lookup/);
   });

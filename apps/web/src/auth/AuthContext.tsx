@@ -149,6 +149,10 @@ import { clearOwnProfile } from "../profile/own-profile";
 import { rehydrateMlsState } from "../chat/rehydrate";
 import { subscribeToPush, unsubscribeFromPush } from "../push/subscribe";
 import { anonTokens } from "../tokens/anon-token-pool";
+import {
+  discoveryAccountLookup,
+  runNameCheckedDeviceRestore,
+} from "./device-restore-name-check";
 import { bootstrapBackupFromPhraseString } from "../backup/bootstrap";
 import { startAutoBackup } from "../backup/auto-backup-driver";
 import { clearAutoBackupState } from "../backup/auto-backup";
@@ -2337,86 +2341,110 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         );
       }
       const wasm = await loadWasm();
-      // FAIL CLOSED FIRST — before ANY persistence. A mismatched /
-      // unverifiable seed must leave this browser untouched.
-      await verifySeedAgainstPublishedIdentity({
-        wasm,
-        discovery,
-        accountIdBytes,
-        accountIdentitySeed: phraseSeed,
-        mismatchMessage:
-          "The identity received from your other device doesn't match " +
-          "this account's published identity — refusing to use it.",
-      });
-
-      // Bootstrap the device root key FROM the identity seed — there
-      // is no password (hence no OPAQUE export key) on this device
-      // yet. Later password logins PREFER this stored key over
-      // re-deriving from the export key, so the wrapped stores stay
-      // readable.
-      const deviceKey = await deriveDeviceRootKeyFromIdentitySeed(
-        phraseSeed,
-        accountIdB64,
-      );
-      await putDeviceKey(accountIdB64, deviceKey);
-      try {
-        await putAccountIdentitySeed(accountIdB64, phraseSeed, deviceKey);
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          "account-identity-seed persist (completeFromDeviceRestore) failed",
-          err,
-        );
-      }
-      // The redeemed token is REQUIRED on this path — persist it so
-      // a reload re-attaches without any credential. Best-effort.
-      try {
-        await putSessionToken(
+      // The persistence and the session landing; runs only after every
+      // gate below passed.
+      const landDeviceRestore = async (): Promise<void> => {
+        // Bootstrap the device root key FROM the identity seed — there
+        // is no password (hence no OPAQUE export key) on this device
+        // yet. Later password logins PREFER this stored key over
+        // re-deriving from the export key, so the wrapped stores stay
+        // readable.
+        const deviceKey = await deriveDeviceRootKeyFromIdentitySeed(
+          phraseSeed,
           accountIdB64,
-          sessionToken,
-          sessionExpiresAtMs,
-          deviceKey,
         );
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          "session-token persist (completeFromDeviceRestore) failed",
-          err,
-        );
-      }
-      savePersisted({ v: 1, accountIdB64, username });
-      // Land the pairing's in-memory DeviceIdentity seed +
-      // DeviceGroup snapshot under the fresh device key. Best-effort
-      // — a failure orphans the DeviceGroup leaf locally; a re-pair
-      // recovers it.
-      if (persistJoinState !== undefined) {
+        await putDeviceKey(accountIdB64, deviceKey);
         try {
-          await persistJoinState(deviceKey);
+          await putAccountIdentitySeed(accountIdB64, phraseSeed, deviceKey);
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn(
-            "join-state persist (completeFromDeviceRestore) failed",
+            "account-identity-seed persist (completeFromDeviceRestore) failed",
             err,
           );
         }
-      }
+        // The redeemed token is REQUIRED on this path — persist it so
+        // a reload re-attaches without any credential. Best-effort.
+        try {
+          await putSessionToken(
+            accountIdB64,
+            sessionToken,
+            sessionExpiresAtMs,
+            deviceKey,
+          );
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            "session-token persist (completeFromDeviceRestore) failed",
+            err,
+          );
+        }
+        savePersisted({ v: 1, accountIdB64, username });
+        // Land the pairing's in-memory DeviceIdentity seed +
+        // DeviceGroup snapshot under the fresh device key. Best-effort
+        // — a failure orphans the DeviceGroup leaf locally; a re-pair
+        // recovers it.
+        if (persistJoinState !== undefined) {
+          try {
+            await persistJoinState(deviceKey);
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              "join-state persist (completeFromDeviceRestore) failed",
+              err,
+            );
+          }
+        }
 
-      installSessionToken(sessionToken);
-      setPendingRecovery(null);
-      await finishCanonicalSession({
-        wasm,
-        accountIdentitySeed: phraseSeed,
-        accountIdBytes,
-        accountIdB64,
-        // ADR-0018 path (b): no password on this device yet, so no
-        // OPAQUE export key exists. The device root key is
-        // identity-seed-derived; downstream consumers of
-        // `identitySecrets.exportKey` only use it as an auth-factor
-        // cache, which this device legitimately does not have.
-        exportKey: new Uint8Array(0),
-        sessionToken,
-        sessionExpiresAtMs,
+        installSessionToken(sessionToken);
+        setPendingRecovery(null);
+        await finishCanonicalSession({
+          wasm,
+          accountIdentitySeed: phraseSeed,
+          accountIdBytes,
+          accountIdB64,
+          // ADR-0018 path (b): no password on this device yet, so no
+          // OPAQUE export key exists. The device root key is
+          // identity-seed-derived; downstream consumers of
+          // `identitySecrets.exportKey` only use it as an auth-factor
+          // cache, which this device legitimately does not have.
+          exportKey: new Uint8Array(0),
+          sessionToken,
+          sessionExpiresAtMs,
+          username,
+        });
+      };
+      // FAIL CLOSED FIRST — before ANY persistence. A mismatched /
+      // unverifiable seed must leave this browser untouched. Then
+      // (ADR-0056 security follow-up) the typed name must resolve, at
+      // discovery, to the account the grant redeem answered for: a
+      // squatted auth login handle can route the request to another
+      // account, and discovery is a registry auth does not control. The
+      // lookup spends an anonymous token drawn with the redeemed session;
+      // a mismatch, an unknown name or a lookup that cannot run refuses
+      // with the seed zeroed and the session dropped, nothing persisted.
+      await runNameCheckedDeviceRestore({
         username,
+        accountIdBytes,
+        phraseSeed,
+        sessionToken,
+        verifySeed: () =>
+          verifySeedAgainstPublishedIdentity({
+            wasm,
+            discovery,
+            accountIdBytes,
+            accountIdentitySeed: phraseSeed,
+            mismatchMessage:
+              "The identity received from your other device doesn't match " +
+              "this account's published identity — refusing to use it.",
+          }),
+        attachSession: (token) => anonTokens.setSessionToken(token),
+        dropSession: () => {
+          installSessionToken(null);
+          anonTokens.clear();
+        },
+        lookup: discoveryAccountLookup(discovery),
+        land: landDeviceRestore,
       });
     },
     async mintFreshIdentity() {

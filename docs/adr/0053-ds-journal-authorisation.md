@@ -169,13 +169,17 @@ promised to prevent, and neither reveals content.
 ### 4. The knock: how a non-member asks
 
 `POST /ds/group/<hex>/knock` is the only unauthenticated write to a claimed
-group: a small (16 KiB), PoW-gated (`lakko-pow-server`, the discovery-side gate
-[ADR-0028](0028-group-join-ticket.md) already names) row into a separate
-`ds_group_knocks` table, pruned after seven days. The response carries the
+group: a small (16 KiB) row into a separate `ds_group_knocks` table, pruned
+after seven days. As first written it was PoW-gated (`lakko-pow-server`); since
+[ADR-0054](0054-anti-abuse-without-client-work.md) S3 it spends one `ds-knock`
+anonymous token instead (header `x-lakko-anon-token`, spent only after the body
+validates), and the DS no longer carries a `pow_challenges` table (migration
+`0004` drops it). The response carries the
 **latest registered access epoch**, which is the group's epoch - so the joiner
 no longer pages the whole journal to learn it (the 2026-09-19 finding of
 ADR-0028 disappears with the read that caused it). Members read knocks with an
-authenticated `GET /ds/group/<hex>/knocks?after=`, through the same receive path
+authenticated `GET /ds/group/<hex>/knocks?after=` under a **write-tier** key
+(the two newest epochs; see the client contract and the security pass), through the same receive path
 that classifies an `ExternalJoinProposal` today; the ADR-0027 quarantine and the
 ADR-0045 sweep are unchanged. The joiner's Welcome, which the sweep posts to the
 group journal as a `WelcomeRendezvous` (C-69) because the journal was the only
@@ -250,7 +254,8 @@ rather than engineered around.
 
 - **Positive:** an identifier is an address again, not a pass. A leaked
   `group_id` - by forward, link, screenshot or backup - reads nothing, writes
-  nothing and cannot be knocked on without paying the PoW. A stranger who knows a
+  nothing and cannot be knocked on without spending a `ds-knock` token (the
+  PoW of the first draft, replaced by ADR-0054). A stranger who knows a
   username can no longer watch that person's inbox fill. Eviction revokes access
   at the epoch, with no rotation protocol. The `/g/` joiner stops paging a
   journal it is not in. One Welcome path instead of two.
@@ -278,8 +283,8 @@ rather than engineered around.
    with a wrong clock get a distinguishable failure only client-side (the
    server's answer is the same as for a nonexistent journal by design), so the
    client must surface "check the device clock" itself.
-3. **Knock cost.** The PoW effort and the per-pseudonym knock rate are deploy
-   knobs; the per-group pending cap and dedup of ADR-0027 stay the anti-spam
+3. **Knock cost.** The PoW effort (since ADR-0054 S3, the anonymous-token
+   issuance budget) and the per-pseudonym knock rate are deploy knobs; the per-group pending cap and dedup of ADR-0027 stay the anti-spam
    boundary behind them.
 4. **Channels.** `services/channels` authenticates its subscriber fetches by a
    registered subscriber key already; whether its post fetch for a private
@@ -338,7 +343,11 @@ rather than engineered around.
   of work is consumed in `pow_challenges` by the shared `lakko-pow-server`
   verifier before the row is written; a repeated proof is refused there, so a
   knock cannot be replayed for free even though the knock route itself carries
-  no proof header.
+  no proof header. *Superseded by [ADR-0054](0054-anti-abuse-without-client-work.md)
+  S3:* the knock now spends a single-use `ds-knock` anonymous token (the spent
+  set is `anon_token_spent`, migration `0003`) and `pow_challenges` is dropped
+  (migration `0004`); the replay argument is the same, carried by the token's
+  spent set instead of the challenge table.
 - **Only the registration rows and the routes are new on the DS.** The journal
   tables, the wire of `messages` and the long-poll are untouched; the
   unclaimed posture is byte-for-byte Phase 1.3, which is what lets the flag
@@ -363,7 +372,7 @@ amends sections 2, 4 and open question 1 where S2 and S3 found them short.
 - **Re-sending an already-registered `(epoch, key)` needs no proof** and is a
   no-op: it is what claim-on-open sends, and it grants nothing.
 - **The knock takes `payloads_b64: [..]`** (at most 4 rows, 16 KiB in total,
-  one PoW), and **an empty list is a probe**: nothing is stored, the response
+  one PoW - one `ds-knock` token since ADR-0054 S3), and **an empty list is a probe**: nothing is stored, the response
   carries the epoch. The joiner probes, builds its proposal for that epoch,
   then knocks with the attribution and the proposal. The response is
   `{ ids: [..], epoch }`.
@@ -424,16 +433,18 @@ second refusal surfaces: if the response `Date` header is more than 60 seconds
 from the device clock, the copy is "Check this device's date and time";
 otherwise the ordinary delivery error.
 
-**6. The link joiner goes through the knock.** `POST /pow/challenge` on the DS,
-solve with the client's existing PoW solver, `POST /ds/group/<hex>/knock` with
+**6. The link joiner goes through the knock.** `POST /ds/group/<hex>/knock` with
 `payloads_b64: []` to learn the epoch, build the external-join proposal for it,
-solve a second challenge, knock with `[attribution, proposal]`. No journal read.
+knock with `[attribution, proposal]`. Each knock pays one `ds-knock` anonymous
+token ([ADR-0054](0054-anti-abuse-without-client-work.md) S3; this step
+originally solved a DS `POST /pow/challenge` per knock, which no longer exists). No journal read.
 The joiner's Welcome arrives in its **identity mailbox**, so the joiner's
 wait is on its own mailbox receive path, not on the group journal. The
 co-publisher joiner does the same against the PublisherGroup journal.
 
 **7. Members read knocks.** Next to the group journal poll, an owner or admin
-client polls `GET /ds/group/<hex>/knocks?after=` (signed, its own cursor) and
+client polls `GET /ds/group/<hex>/knocks?after=` (signed under a write-tier
+key - the current or previous epoch - with its own cursor) and
 feeds each row to the same classifier the journal rows use for an attribution
 and an external-join proposal. The ADR-0027 quarantine and the sweep are
 unchanged.
@@ -542,6 +553,98 @@ messages both ways.
   keyed on the account. `Group::pending_external_join_account_key` (core + both
   FFI surfaces) names the account from the retained KeyPackage's verified device
   binding; re-walked, the request reads "Maria Lopez".
+
+## What the security pass found (2026-09-28)
+
+A `lakko-security` review of `services/ds` after the live walk. Four findings
+were fixed in `services/ds` the same day, each with a test against a real
+MariaDB (`LAKKO_DS_TEST_DATABASE_URL`); one HIGH finding is open, pending a
+design decision.
+
+**Fixed.**
+
+- **MEDIUM - one registration could stop the epoch-key pruner for every
+  group.** The first claim accepted any `u64` epoch. A claim at `u64::MAX`
+  committed its row, and then two statements did epoch arithmetic in SQL on
+  `BIGINT UNSIGNED`: the registration-time prune (`epoch + ? <= ?`) failed with
+  a 500, and the hourly global prune (`a.epoch + 1 < m.latest`) failed with
+  `ERROR 1690` on every tick - one DELETE across all groups, so no group's
+  read tier ever aged out again (reproduced on MariaDB 12; re-confirmed on
+  11.8 while fixing). Fixed twice over: every registration refuses an epoch
+  above `MAX_ACCESS_EPOCH = 2^48 - 1` with `400` before anything is read (an
+  MLS epoch advances by one per commit, so no real group comes near it), and
+  no statement does epoch arithmetic in the database any more - the
+  registration prune computes its floor in Rust with `checked_sub`, and the
+  global prune expresses "not one of the two newest" as "below the group's
+  second-newest epoch", by comparison alone, so even a row at `u64::MAX`
+  written before the cap cannot abort it. Tests:
+  `an_epoch_above_the_cap_is_refused`,
+  `the_pruner_survives_rows_at_and_beyond_the_cap`.
+- **LOW-MEDIUM - an evicted member could keep reading knocks.** `GET knocks`
+  was gated to the read tier while this ADR (the client contract) puts it in
+  the write tier. A knock row is a cleartext external-join proposal - the
+  joiner's KeyPackage and credential - so the read-only tail an evicted member
+  keeps would have let it go on watching who asks to join. Now gated to the
+  write tier. Test: `knocks_are_read_only_by_the_write_tier`.
+- **LOW - the epoch rule answered before the proof.** On a claimed journal a
+  registration that named neither `latest` nor `latest + 1` got `409` before
+  its proof was looked at, so anyone who knew a journal's name could
+  binary-search its latest epoch for free, and tell the refusals apart. The
+  proof is now checked first, under either write-tier key, and a caller
+  without one gets the uniform `401` whatever epoch it names; only then is the
+  epoch rule applied (the replacement case still requires the proof to come
+  from the epoch *before* `latest`). The first claim of an unclaimed journal
+  is unchanged. The live walk's "a competing registration: 409" above was an
+  unproven one and now reads `401`. Test:
+  `a_claimed_journal_checks_the_proof_before_the_epoch_rule`.
+- **INFO - registration was read-check-write outside a transaction.** Two
+  concurrent first claims of one journal both succeeded, the last writer's key
+  winning. The read, the epoch rule, the nonce, the write and the bounded
+  prune now run in one transaction that starts by upserting the group's row in
+  a new `ds_group_access_lock` table (migration `0005`): an exclusive record
+  lock on a primary-key row, held to commit. The transaction runs at READ
+  COMMITTED, so the read after the lock sees every registration committed
+  before it. A locking read of `ds_group_access` itself was tried first and
+  failed its own test under parallel load: the lock on an empty group's range
+  is a gap lock shared with neighbouring group ids, so first claims of
+  *different* groups deadlocked each other. A deadlock or lock-wait timeout
+  still maps to `409 concurrent registration; retry` with nothing committed.
+  A decision (stored, unchanged or refused) commits, so a refusal after a
+  valid proof keeps its nonce consumed. Test:
+  `concurrent_first_claims_leave_exactly_one_key` (with the lock row disabled
+  in a scratch copy it recorded four winners out of six).
+
+**Open (HIGH), pending a design decision - not addressed by the fixes above.**
+
+- **A write-tier key-holder can register epochs only it holds.** The server
+  checks that a registration of `latest + 1` is signed by a write-tier key; it
+  cannot check that the new public key is the one the group's MLS exporter
+  yields at that epoch (it parses no MLS, by design). A member about to be
+  removed - or any holder of a write-tier key - can register `latest + 1`, then
+  `latest + 2`, with keys only it holds. The honest members' registration of
+  the real next epoch then lands as a replacement at best, or as a `409` skip
+  once the attacker is two ahead, and their own keys fall out of the write
+  tier: the evicted member keeps the journal (reads and writes) and can block
+  its own removal from taking effect at the DS. The heal-on-apply rule of the
+  client contract (section 4) repairs only the single-epoch race it was
+  written for.
+- **A re-founded group with a deterministic id can never re-claim its
+  journal.** A DeviceGroup ([ADR-0007](0007-multi-device-identity.md)) or a
+  channel PublisherGroup ([ADR-0010](0010-channels-two-tier-broadcast.md))
+  whose `group_id` is derived rather than random keeps its registration rows
+  after the group is lost; a re-founded group starts at epoch 0 with keys the
+  server has never seen, and every registration it makes is refused (`401`)
+  for as long as the old rows exist - which is forever, since the pruner
+  never removes a group's two newest epochs.
+- **First-claim squatting on deterministic ids.** The first claim of an
+  unclaimed journal is unauthenticated on the argument that a 256-bit random
+  name cannot be probed (section 2). That argument does not cover a
+  deterministic id: anyone who can compute it can claim the journal first
+  with a key of their own, and the rightful group is then refused as above.
+
+These three share one root - the server accepts registrations it cannot bind
+to the group's actual MLS state - and are recorded together rather than
+patched separately.
 
 ## References
 

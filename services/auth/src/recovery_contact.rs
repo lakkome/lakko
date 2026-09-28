@@ -23,9 +23,12 @@
 //!   bucket (`429` `recovery-code-send-limited` — every message costs the
 //!   operator), and only if it matches a CONFIRMED row generates + stores +
 //!   sends a code. ENUMERATION-SAFE: the counter is charged whether or not
-//!   the contact matches, and the answer is always the same
-//!   `{ "sent": true }`.
-//! - **`POST /recovery-contact/recover/finish`** — anonymous. Charges the
+//!   the contact matches, the answer is always the same `{ "sent": true }`,
+//!   and it is sent before the code is: the challenge write and the
+//!   SMTP / SMS call run in a spawned task, so a match does not answer
+//!   slower than a miss.
+//! - **`POST /recovery-contact/recover/finish`** — anonymous. Refuses a code
+//!   that is not six ASCII digits (`400`, nothing charged), then charges the
 //!   named (handle, kind) attempt counter and the per-address bucket (`429`
 //!   `too-many-attempts`), then verifies the code (per-challenge attempt
 //!   cap, expiry, single-use delete-on-success) and on match issues the
@@ -228,6 +231,17 @@ fn code_hash(pepper: &[u8; 32], kind: ContactKind, code: &str) -> [u8; 32] {
 fn generate_code() -> String {
     let n = OsRng.next_u32() % 1_000_000;
     format!("{n:06}")
+}
+
+/// Refuse a code that cannot be one [`generate_code`] made (six ASCII
+/// digits), before anything is charged: a malformed request must not spend
+/// the named handle's attempt budget.
+fn check_code_format(code: &str) -> Result<(), ApiError> {
+    if code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()) {
+        Ok(())
+    } else {
+        Err(ApiError::BadInput("code must be six digits"))
+    }
 }
 
 /// Parse the wire `kind` integer (1 = email, 2 = phone) into a [`ContactKind`].
@@ -461,8 +475,10 @@ pub(crate) async fn enroll_finish(
 /// Anonymous. ENUMERATION-SAFE: always returns `{ "sent": true }`
 /// whether or not the supplied contact matches a confirmed row, and charges
 /// the contact hash's send counter on both paths (a `429` therefore says
-/// nothing about a match). The no-match path still hashes the contact (the
-/// expensive comparable step) and simply skips the actual send.
+/// nothing about a match). Both paths run the same queries before the
+/// answer; on a match the challenge write and the delivery (an SMTP or SMS
+/// round trip, the slow part) run in a spawned task after it, so the
+/// answer's timing does not depend on the match either.
 #[axum::debug_handler]
 pub(crate) async fn recover_start(
     State(state): State<AppState>,
@@ -500,21 +516,27 @@ pub(crate) async fn recover_start(
     .map_err(ApiError::Db)?;
 
     if matched.is_some() {
-        // Real path: store + send a fresh code.
-        let code = generate_code();
-        let code_h = code_hash(&pepper, kind, &code);
-        upsert_challenge(&state, &account_id, kind, &code_h).await?;
-        if let Err(e) = state.otp_sender.send(kind, &normalized, &code).await {
-            // Even on a delivery failure we return the SAME generic response
-            // (no oracle); log for ops.
-            tracing::error!(error = %e, kind = kind.as_str(), "recovery-contact: recover send failed");
-        } else {
-            tracing::info!(
-                account_id = %URL_SAFE_NO_PAD.encode(account_id),
-                kind = kind.as_str(),
-                "recovery-contact: recover code sent",
-            );
-        }
+        // Real path: store + send a fresh code, after the answer. A failure
+        // in either step is logged for ops and never reaches the caller (no
+        // oracle); the user asks for another code.
+        let task_state = state.clone();
+        tokio::spawn(async move {
+            let code = generate_code();
+            let code_h = code_hash(&pepper, kind, &code);
+            if let Err(e) = upsert_challenge(&task_state, &account_id, kind, &code_h).await {
+                tracing::error!(error = ?e, kind = kind.as_str(), "recovery-contact: recover challenge write failed");
+                return;
+            }
+            if let Err(e) = task_state.otp_sender.send(kind, &normalized, &code).await {
+                tracing::error!(error = %e, kind = kind.as_str(), "recovery-contact: recover send failed");
+            } else {
+                tracing::info!(
+                    account_id = %URL_SAFE_NO_PAD.encode(account_id),
+                    kind = kind.as_str(),
+                    "recovery-contact: recover code sent",
+                );
+            }
+        });
     } else {
         // No-match path: we already paid the hash cost above. Do NOT send and
         // do NOT write a challenge. Return the SAME response so the endpoint
@@ -545,6 +567,7 @@ pub(crate) async fn recover_finish(
     let handle_pepper = crate::login_handle::pepper(&state)?;
     let handle = crate::login_handle::decode_handle(&req.handle)?;
     let kind = parse_kind(req.kind)?;
+    check_code_format(&req.code)?;
 
     // The attempt counter is keyed on what the request names (the handle and
     // the kind), charged before any lookup. (The per-challenge cap it
@@ -776,6 +799,15 @@ mod tests {
     }
 
     #[test]
+    fn code_format_is_six_ascii_digits() {
+        assert!(check_code_format("012345").is_ok());
+        assert!(check_code_format(&generate_code()).is_ok());
+        for bad in ["", "12345", "1234567", "12a456", " 12345", "١٢٣٤٥٦"] {
+            assert!(check_code_format(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
     fn parse_kind_validates() {
         assert_eq!(parse_kind(1).unwrap(), ContactKind::Email);
         assert_eq!(parse_kind(2).unwrap(), ContactKind::Phone);
@@ -857,6 +889,23 @@ mod recovery_contact_e2e_tests {
 
         fn send_count(&self) -> u32 {
             *self.sends.lock().expect("lock")
+        }
+
+        /// Wait for the recover route's spawned send to land.
+        async fn wait_for_sends(&self, n: u32) {
+            for _ in 0..200 {
+                if self.send_count() >= n {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            panic!("expected {n} sends, saw {}", self.send_count());
+        }
+
+        /// Give a spawned send (if any) the time to land before asserting
+        /// that none happened.
+        async fn settle(&self) {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         }
     }
 
@@ -1060,6 +1109,8 @@ mod recovery_contact_e2e_tests {
         );
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["sent"], true);
+        recorder.wait_for_sends(sends_before + 1).await;
+        recorder.settle().await;
         assert_eq!(
             recorder.send_count(),
             sends_before + 1,
@@ -1107,6 +1158,7 @@ mod recovery_contact_e2e_tests {
         );
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["sent"], true, "same {{sent:true}} on no-match");
+        recorder.settle().await;
         assert_eq!(
             recorder.send_count(),
             sends_before,
@@ -1124,6 +1176,7 @@ mod recovery_contact_e2e_tests {
         )
         .await;
         assert_eq!(st, StatusCode::OK);
+        recorder.settle().await;
         assert_eq!(
             recorder.send_count(),
             sends_before,
@@ -1164,13 +1217,26 @@ mod recovery_contact_e2e_tests {
         // Let the window pass.
         crate::limits::reset_name(
             &pool,
+            &state.limits,
             crate::limits::Scope::CodeSendContact,
             &super::contact_hash(&PEPPER, ContactKind::Email, contact),
         )
         .await;
 
         // (8) ATTEMPT LIMIT: send a fresh code, then exhaust the attempt limit
-        // with a wrong code -> 429.
+        // with a wrong code -> 429. A code that is not six digits is a 400
+        // and spends nothing.
+        for junk in ["", "12345", "1234567", "12a456", "---"] {
+            let (st, _) = json_post(
+                &state,
+                "/recovery-contact/recover/finish",
+                None,
+                serde_json::json!({ "handle": handle_b64, "kind": 1, "code": junk }),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "junk code {junk:?} is a 400");
+        }
+        let sends_before = recorder.send_count();
         let (st, _) = json_post(
             &state,
             "/recovery-contact/recover/start",
@@ -1179,6 +1245,7 @@ mod recovery_contact_e2e_tests {
         )
         .await;
         assert_eq!(st, StatusCode::OK, "fresh code for the lockout test");
+        recorder.wait_for_sends(sends_before + 1).await;
 
         // MAX_OTP_ATTEMPTS wrong submissions bump the counter; the next is 429.
         for _ in 0..super::MAX_OTP_ATTEMPTS {

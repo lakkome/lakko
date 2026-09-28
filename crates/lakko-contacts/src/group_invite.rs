@@ -523,6 +523,17 @@ fn encode_signing_prefix(
     out
 }
 
+/// Fuzz hook behind [`crate::fuzz_api::group_invite_preview_plaintext`]:
+/// feed bytes straight into the preview plaintext decoder, which the AEAD
+/// otherwise keeps out of reach of a fuzzer (a random sealed preview never
+/// opens). `None` when the decoder refuses; `Some(true)` when what it accepts
+/// also passes the compose-side validation and re-encodes to the same bytes;
+/// `Some(false)` would be a decoder / encoder disagreement.
+pub(crate) fn fuzz_preview_plaintext(plain: &[u8]) -> Option<bool> {
+    let preview = GroupInvitePreview::decode(plain).ok()?;
+    Some(preview.validate().is_ok() && preview.encode() == plain)
+}
+
 fn take_u8(cur: &mut &[u8]) -> Result<u8> {
     if cur.is_empty() {
         return Err(ContactError::InvalidEncoding("unexpected EOF".to_string()));
@@ -605,6 +616,49 @@ mod tests {
         gid[0] = 0xCA;
         gid[31] = 0xFE;
         gid
+    }
+
+    /// The fuzz hook reaches the plaintext decoder directly: a real preview
+    /// round-trips, and what the decoder refuses (a wrong version, a name that
+    /// fails the display-name rule, trailing bytes, a truncation) is `None`.
+    #[test]
+    fn fuzz_hook_decodes_preview_plaintext() {
+        let preview = GroupInvitePreview {
+            group_name: Some("Book club".into()),
+            inviter_name: None,
+            member_count: 7,
+        };
+        let plain = preview.encode();
+        assert_eq!(
+            crate::fuzz_api::group_invite_preview_plaintext(&plain),
+            Some(true)
+        );
+
+        let mut wrong_version = plain.clone();
+        wrong_version[0] = PREVIEW_VERSION + 1;
+        assert_eq!(
+            crate::fuzz_api::group_invite_preview_plaintext(&wrong_version),
+            None
+        );
+
+        let mut trailing = plain.clone();
+        trailing.push(0);
+        assert_eq!(
+            crate::fuzz_api::group_invite_preview_plaintext(&trailing),
+            None
+        );
+
+        assert_eq!(
+            crate::fuzz_api::group_invite_preview_plaintext(&plain[..plain.len() - 1]),
+            None
+        );
+        // A name carrying a line break fails the display-name rule.
+        let bad_name = [PREVIEW_VERSION, 2, b'a', b'\n', 0, 0, 1];
+        assert_eq!(
+            crate::fuzz_api::group_invite_preview_plaintext(&bad_name),
+            None
+        );
+        assert_eq!(crate::fuzz_api::group_invite_preview_plaintext(&[]), None);
     }
 
     #[test]

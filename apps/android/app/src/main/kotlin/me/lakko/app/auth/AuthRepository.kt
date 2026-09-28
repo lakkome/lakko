@@ -2199,6 +2199,19 @@ public class AuthRepository(
      * canonical identity + backup signing are phrase-seeded per
      * ADR-0017), and a later password login replaces it.
      *
+     * ADR-0056 security pass — after the seed verification and before ANY
+     * persistence, the typed [username] must resolve at discovery (the
+     * ordinary token-spending lookup, the token drawn with the redeemed
+     * session) to [accountIdBytes]: a squatted auth login handle can route
+     * the pairing request to another account, and discovery is a registry
+     * auth does not control. A mismatch or an unknown name refuses with
+     * [TypedNameOtherAccount], a lookup that could not run with
+     * [TypedNameCheckUnavailable]; nothing is written and the session is
+     * never installed. [persistJoin] is the pairing's held writes (device
+     * seed, DeviceGroup snapshot, history, state bundle); it runs only once
+     * both checks passed, before the session lands. The gates are
+     * [runCheckedDeviceRestore].
+     *
      * Takes ownership of `phraseSeed` (zeroized on every refusal).
      */
     public suspend fun completeFromDeviceRestore(
@@ -2208,73 +2221,125 @@ public class AuthRepository(
         phraseSeed: ByteArray,
         sessionToken: String,
         sessionExpiresAtMs: Long,
+        persistJoin: suspend () -> Unit = {},
     ) {
         var seedHandedOff = false
         try {
-            verifySeedAgainstPublishedIdentity(
+            runCheckedDeviceRestore(
+                username = username,
                 accountIdBytes = accountIdBytes,
-                sessionToken = sessionToken,
-                accountIdentitySeed = phraseSeed,
-            )
-            val deviceRootKey =
-                deriveDeviceRootKeyFromIdentitySeed(phraseSeed, accountIdB64)
-            try {
-                deviceKeyStore.putDeviceKey(
-                    context = applicationContext,
-                    accountIdB64 = accountIdB64,
-                    rootKey = deviceRootKey,
-                )
-            } catch (cause: Throwable) {
-                Log.w(
-                    "lakko-auth",
-                    "device-key persist (completeFromDeviceRestore) failed",
-                    cause,
-                )
-            } finally {
-                deviceRootKey.fill(0)
-            }
-            try {
-                AccountIdentitySeedStore.putAccountIdentitySeed(
-                    applicationContext,
-                    accountIdB64,
-                    phraseSeed,
-                )
-            } catch (cause: Throwable) {
-                Log.w(
-                    "lakko-auth",
-                    "account-identity-seed persist (completeFromDeviceRestore) failed",
-                    cause,
-                )
-            }
-            sessionStore.save(
-                PersistedSession(
-                    accountIdB64 = accountIdB64,
-                    username = username,
-                ),
-            )
-            installIdentitySecrets(
-                accountIdB64,
-                IdentitySecrets(
-                    accountId = accountIdBytes.copyOf(),
-                    exportKey = ByteArray(0),
-                    accountIdentitySeed = phraseSeed,
-                    sessionToken = sessionToken,
-                    sessionExpiresAtMs = sessionExpiresAtMs,
-                ),
-            )
-            seedHandedOff = true
-            pendingRecovery.set(null)
-            mutableState.value = AuthState.Session(
-                account = SessionAccount(
-                    accountIdB64 = accountIdB64,
-                    username = username,
-                ),
+                phraseSeed = phraseSeed,
+                verifySeed = {
+                    verifySeedAgainstPublishedIdentity(
+                        accountIdBytes = accountIdBytes,
+                        sessionToken = sessionToken,
+                        accountIdentitySeed = phraseSeed,
+                    )
+                },
+                lookup = { name -> lookupWithSession(name, accountIdBytes, sessionToken) },
+                persistJoin = persistJoin,
+                land = {
+                    landDeviceRestore(
+                        accountIdBytes = accountIdBytes,
+                        accountIdB64 = accountIdB64,
+                        username = username,
+                        phraseSeed = phraseSeed,
+                        sessionToken = sessionToken,
+                        sessionExpiresAtMs = sessionExpiresAtMs,
+                    )
+                    seedHandedOff = true
+                },
             )
         } finally {
             if (!seedHandedOff) {
                 phraseSeed.fill(0)
             }
         }
+    }
+
+    /**
+     * The ordinary username lookup with a session that has not landed yet
+     * (ADR-0056 security pass): the `discovery-lookup` token is drawn with
+     * [sessionToken] explicitly and never pooled, and the lookup itself goes
+     * out on the anonymous client (invariant #5).
+     */
+    private suspend fun lookupWithSession(
+        username: String,
+        accountIdBytes: ByteArray,
+        sessionToken: String,
+    ): ByteArray? = discoveryClientFactory().use { client ->
+        client.useTokenSession(
+            me.lakko.app.anon.AnonSession(
+                accountKey = base64Encode(accountIdBytes),
+                bearer = sessionToken,
+            ),
+        )
+        client.lookup(username).account
+    }
+
+    /** The writes and the session of a device restore that passed every
+     *  gate of [completeFromDeviceRestore]. */
+    private fun landDeviceRestore(
+        accountIdBytes: ByteArray,
+        accountIdB64: String,
+        username: String,
+        phraseSeed: ByteArray,
+        sessionToken: String,
+        sessionExpiresAtMs: Long,
+    ) {
+        val deviceRootKey =
+            deriveDeviceRootKeyFromIdentitySeed(phraseSeed, accountIdB64)
+        try {
+            deviceKeyStore.putDeviceKey(
+                context = applicationContext,
+                accountIdB64 = accountIdB64,
+                rootKey = deviceRootKey,
+            )
+        } catch (cause: Throwable) {
+            Log.w(
+                "lakko-auth",
+                "device-key persist (completeFromDeviceRestore) failed",
+                cause,
+            )
+        } finally {
+            deviceRootKey.fill(0)
+        }
+        try {
+            AccountIdentitySeedStore.putAccountIdentitySeed(
+                applicationContext,
+                accountIdB64,
+                phraseSeed,
+            )
+        } catch (cause: Throwable) {
+            Log.w(
+                "lakko-auth",
+                "account-identity-seed persist (completeFromDeviceRestore) failed",
+                cause,
+            )
+        }
+        sessionStore.save(
+            PersistedSession(
+                accountIdB64 = accountIdB64,
+                username = username,
+            ),
+        )
+        installIdentitySecrets(
+            accountIdB64,
+            IdentitySecrets(
+                accountId = accountIdBytes.copyOf(),
+                exportKey = ByteArray(0),
+                accountIdentitySeed = phraseSeed,
+                sessionToken = sessionToken,
+                sessionExpiresAtMs = sessionExpiresAtMs,
+            ),
+        )
+        pendingRecovery.set(null)
+        mutableState.value = AuthState.Session(
+            account = SessionAccount(
+                accountIdB64 = accountIdB64,
+                username = username,
+            ),
+        )
     }
 
     /**

@@ -27,14 +27,18 @@
 //! POST body, and lying about it only changes how many requests reach the
 //! admin, who still approves each one individually.
 //!
-//! ## No owner-account binding, no revoke (v1)
+//! ## No owner-account binding; revocation is issuer-signed
 //!
 //! Unlike a call-invite, a group-invite carries no `owner_account_id` — the
 //! issuer is identified solely by its Ed25519 verifying key. So upload has no
 //! anti-impersonation account-match check (there is no account field to match);
-//! the session-token gate is a pure DoS / "logged-in user" rate-limit. Owner-
-//! signed revocation is deferred — `GroupInviteCapability` has no revoke domain
-//! yet; expiry + the periodic pruner are the v1 lifecycle controls.
+//! the session-token gate is a pure DoS / "logged-in user" rate-limit.
+//! Revocation (`DELETE /discovery/group-invite/{blob_id}`) is authorised the
+//! same way: the request carries an Ed25519 signature by the capability's own
+//! issuer key over `group_revoke_canonical_bytes` (domain
+//! `lakko-group-invite-revoke/v1`, the 6-byte id and a timestamp inside
+//! `GROUP_INVITE_REVOKE_REPLAY_WINDOW_MS`). Expiry and the periodic pruner
+//! remain the other lifecycle controls.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -43,18 +47,36 @@ use base64::engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD as B64URL
 use base64::Engine as _;
 use lakko_contacts::group_invite::{
     decode_and_verify, group_revoke_canonical_bytes, GROUP_INVITE_REVOKE_REPLAY_WINDOW_MS,
+    MAX_GROUP_ID_LEN, MAX_SEALED_PREVIEW_LEN,
 };
 use lakko_contacts::invite::JOINER_TAG_LEN;
+use lakko_crypto::signing::{
+    PUBLIC_KEY_LEN as ED25519_PUBLIC_KEY_LEN, SIGNATURE_LEN as ED25519_SIGNATURE_LEN,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 
-/// Server-side ceiling on the capability size. Pinned to the `VARBINARY(512)`
-/// column width in `migrations/0014_group_invites.sql`. The ADR-0028 wire
-/// format tops out near 363 bytes (1 schema + 2 gid_len + 256 gid + 32
-/// issuer_pubkey + 8 expiry + 64 signature); the headroom covers a future
-/// schema bump.
-const MAX_CAPABILITY_BYTES: usize = 512;
+/// Server-side ceiling on the capability size: the longest v2 capability the
+/// `lakko_contacts::group_invite` codec can produce, derived from its bounds
+/// rather than written as a literal, so a codec change moves it. The fields
+/// are schema version (1) + `group_id_len` (2) + `group_id` (up to
+/// `MAX_GROUP_ID_LEN`) + issuer key + `expiry_ms` (8) + `preview_len` (2) +
+/// sealed preview (up to `MAX_SEALED_PREVIEW_LEN`) + signature, which comes to
+/// 908 bytes. The `VARBINARY` width of `group_invites.capability_bytes`
+/// (migration `0021_group_invite_capability_width.sql`) matches it; a test
+/// pins both, and another composes a maximal capability and checks it fits
+/// exactly. Before the 2026-09-28 security pass this was 512, so a link whose
+/// preview carried long names was refused at upload and the client fell back
+/// to the long inline link.
+const MAX_CAPABILITY_BYTES: usize = 1
+    + 2
+    + MAX_GROUP_ID_LEN
+    + ED25519_PUBLIC_KEY_LEN
+    + 8
+    + 2
+    + MAX_SEALED_PREVIEW_LEN
+    + ED25519_SIGNATURE_LEN;
 
 /// Sentinel for "unlimited" `max_uses` — matches the SQL CASE expression in the
 /// consume handler.
@@ -676,16 +698,136 @@ mod tests {
     }
 
     /// `MAX_CAPABILITY_BYTES` pins the `VARBINARY(...)` width declared in
-    /// `0018_short_invite_ids.sql`. Drift surfaces as a test failure rather than a
-    /// silent "everything past N bytes 500s in production".
+    /// `0021_group_invite_capability_width.sql`. Drift surfaces as a test
+    /// failure rather than a silent "everything past N bytes 500s in
+    /// production".
     #[test]
     fn max_capability_bytes_matches_column_width() {
-        let migration = include_str!("../migrations/0018_short_invite_ids.sql");
+        let migration = include_str!("../migrations/0021_group_invite_capability_width.sql");
         assert!(
             migration.contains(&format!("VARBINARY({MAX_CAPABILITY_BYTES})")),
             "MAX_CAPABILITY_BYTES ({MAX_CAPABILITY_BYTES}) must match the \
-             VARBINARY width declared in 0018_short_invite_ids.sql",
+             VARBINARY width declared in 0021_group_invite_capability_width.sql",
         );
+    }
+
+    /// The derivation lands where the security review computed it by hand.
+    #[test]
+    fn max_capability_bytes_is_the_computed_v2_maximum() {
+        assert_eq!(MAX_CAPABILITY_BYTES, 908);
+    }
+
+    /// The largest capability the codec can compose (a 256-byte group id and a
+    /// preview whose two names are each 255 bytes) is exactly the ceiling, so
+    /// every capability a client can mint fits the ledger.
+    #[test]
+    fn a_maximal_capability_fits_the_ceiling_exactly() {
+        use lakko_contacts::group_invite::{
+            compose_with_preview, generate_link_key, GroupInvitePreview, GROUP_INVITE_NEVER_EXPIRES,
+        };
+        use lakko_crypto::signing::SigningKey;
+
+        // 63 four-byte scalars plus one three-byte scalar: 64 scalars and 255
+        // bytes, the display-name rule's two ceilings at once.
+        let long_name = format!("{}{}", "\u{1F600}".repeat(63), '\u{20AC}');
+        assert_eq!(long_name.len(), 255);
+        let preview = GroupInvitePreview {
+            group_name: Some(long_name.clone()),
+            inviter_name: Some(long_name),
+            member_count: u16::MAX,
+        };
+        let issuer = SigningKey::generate();
+        let group_id = vec![0x5a; MAX_GROUP_ID_LEN];
+        let wire = compose_with_preview(
+            &issuer,
+            &group_id,
+            GROUP_INVITE_NEVER_EXPIRES,
+            &preview,
+            &generate_link_key(),
+        )
+        .expect("maximal capability composes");
+        assert_eq!(wire.len(), MAX_CAPABILITY_BYTES);
+        assert!(decode_and_verify(&wire).is_ok());
+    }
+
+    /// A maximal capability survives the real ledger: upload stores it, fetch
+    /// returns it byte for byte. Gated on `LAKKO_DISCOVERY_TEST_DATABASE_URL`
+    /// (skips when unset); before migration 0021 the column truncated or
+    /// refused anything past 512 bytes.
+    #[tokio::test]
+    async fn a_maximal_capability_round_trips_through_the_ledger() {
+        use axum::extract::{Path, State};
+        use axum::{Extension, Json};
+        use lakko_contacts::group_invite::{
+            compose_with_preview, generate_link_key, GroupInvitePreview,
+        };
+        use lakko_crypto::signing::SigningKey;
+
+        let Some(db) =
+            crate::anon_token_route_tests::test_pool("a_maximal_capability_round_trips").await
+        else {
+            return;
+        };
+        let state = crate::anon_token_route_tests::state(db, false);
+
+        let long_name = format!("{}{}", "\u{1F600}".repeat(63), '\u{20AC}');
+        let preview = GroupInvitePreview {
+            group_name: Some(long_name.clone()),
+            inviter_name: Some(long_name),
+            member_count: 3,
+        };
+        let group_id = vec![0x3c; MAX_GROUP_ID_LEN];
+        let expiry_ms = current_unix_ms() + 3_600_000;
+        let wire = compose_with_preview(
+            &SigningKey::generate(),
+            &group_id,
+            expiry_ms,
+            &preview,
+            &generate_link_key(),
+        )
+        .expect("maximal capability composes");
+        assert_eq!(wire.len(), MAX_CAPABILITY_BYTES);
+
+        let Json(stored) = upload(
+            State(state.clone()),
+            Extension(crate::auth::AuthenticatedAccount([0x21; 16])),
+            Json(UploadRequest {
+                capability: B64.encode(&wire),
+                max_uses: 1,
+            }),
+        )
+        .await
+        .expect("a maximal capability uploads");
+        let Json(fetched) = fetch(State(state), Path(stored.blob_id))
+            .await
+            .expect("the stored capability fetches");
+        assert_eq!(B64.decode(fetched.capability).unwrap(), wire);
+    }
+
+    /// One byte over the ceiling is refused before any verification.
+    #[tokio::test]
+    async fn one_byte_over_the_ceiling_is_refused() {
+        use axum::extract::State;
+        use axum::{Extension, Json};
+
+        let Some(db) = crate::anon_token_route_tests::test_pool("one_byte_over_the_ceiling").await
+        else {
+            return;
+        };
+        let state = crate::anon_token_route_tests::state(db, false);
+        let Err((status, _)) = upload(
+            State(state),
+            Extension(crate::auth::AuthenticatedAccount([0x22; 16])),
+            Json(UploadRequest {
+                capability: B64.encode(vec![0u8; MAX_CAPABILITY_BYTES + 1]),
+                max_uses: 1,
+            }),
+        )
+        .await
+        else {
+            panic!("an oversized capability must be refused");
+        };
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[test]

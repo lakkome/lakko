@@ -103,6 +103,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "group_invite_preview_decode"
+path = "fuzz_targets/group_invite_preview_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "group_join_attribution_decode"
 path = "fuzz_targets/group_join_attribution_decode.rs"
 test = false

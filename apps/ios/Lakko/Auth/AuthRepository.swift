@@ -161,6 +161,10 @@ public final class AuthRepository: ObservableObject {
     /// through. Injectable so both can be driven by a fake in tests.
     private let accountDirectory: AccountDirectory
 
+    /// The discovery reads of the identity-seed verification and of the
+    /// ADR-0056 typed-name check. Injectable for tests.
+    private let restoreDirectory: DeviceRestoreDirectory
+
     /// Which `(session, username)` pairs already had their login handle
     /// bound in this process. ``LoginHandleBindLedger/shared`` in the app.
     private let loginHandleBinds: LoginHandleBindLedger
@@ -186,12 +190,14 @@ public final class AuthRepository: ObservableObject {
         persistence: SessionPersistence,
         nowMs: () -> Int64,
         accountDirectory: AccountDirectory,
-        loginHandleBinds: LoginHandleBindLedger = .shared
+        loginHandleBinds: LoginHandleBindLedger = .shared,
+        restoreDirectory: DeviceRestoreDirectory = DiscoveryDeviceRestoreDirectory()
     ) {
         self.sessionStore = sessionStore
         self.authClientFactory = authClientFactory
         self.persistence = persistence
         self.accountDirectory = accountDirectory
+        self.restoreDirectory = restoreDirectory
         self.loginHandleBinds = loginHandleBinds
         rehydrate(nowMs: nowMs())
     }
@@ -1637,7 +1643,7 @@ public final class AuthRepository: ObservableObject {
     /// Used by ``provideRecoveryPhrase(mnemonicPhrase:)``,
     /// ``completeFromPairing(phraseSeed:sessionToken:sessionExpiresAtMs:)``
     /// and
-    /// ``completeFromDeviceRestore(accountIdBytes:accountIdB64:username:phraseSeed:sessionToken:sessionExpiresAtMs:)``;
+    /// ``completeFromDeviceRestore(accountIdBytes:accountIdB64:username:phraseSeed:sessionToken:sessionExpiresAtMs:persistJoin:)``;
     /// the CALLER owns zeroizing the seed on refusal.
     private func verifySeedAgainstPublishedIdentity(
         accountIdBytes: Data,
@@ -1650,9 +1656,9 @@ public final class AuthRepository: ObservableObject {
 
         let bundle: IdentityFetchResponse?
         do {
-            let discovery = DiscoveryClient(sessionToken: sessionToken)
-            bundle = try await discovery.identityFetch(
-                accountId: accountIdBytes
+            bundle = try await restoreDirectory.fetchIdentityBundle(
+                accountId: accountIdBytes,
+                sessionToken: sessionToken
             )
         } catch {
             // Could not reach the directory to verify (network/parse).
@@ -1777,27 +1783,51 @@ public final class AuthRepository: ObservableObject {
     /// canonical identity + backup signing are phrase-seeded per
     /// ADR-0017), and a later password login replaces it.
     ///
-    /// Takes ownership of `phraseSeed` (zeroized on every refusal —
-    /// best-effort under Swift `Data` value semantics).
+    /// ADR-0056 security pass — after the seed verification and before
+    /// ANY persistence, the typed `username` must resolve at discovery
+    /// (the ordinary token-spending lookup, drawn with the redeemed
+    /// session) to `accountIdBytes`: a squatted auth login handle can route
+    /// the pairing request to another account, and discovery is a registry
+    /// auth does not control. A mismatch or an unknown name refuses with
+    /// ``TypedNameCheckRefusal/otherAccount``, a lookup that could not run
+    /// with ``TypedNameCheckRefusal/unavailable``. On every refusal nothing
+    /// is written and the session is never installed. `persistJoin` is the
+    /// pairing's held writes (device seed, DeviceGroup snapshot, history,
+    /// state bundle); it runs only once both checks passed, before the
+    /// session lands.
+    ///
+    /// Does not zero `phraseSeed`: under `Data` copy-on-write a copy made
+    /// here could not reach the caller's buffer. The caller owns it
+    /// (``PairingOrchestrator/JoinRecoveryOutcome/wipeSeed()``) and zeroes
+    /// it on a refusal.
     public func completeFromDeviceRestore(
         accountIdBytes: Data,
         accountIdB64: String,
         username: String,
         phraseSeed: Data,
         sessionToken: String,
-        sessionExpiresAtMs: Int64
+        sessionExpiresAtMs: Int64,
+        persistJoin: () async -> Void = {}
     ) async throws {
-        var seed = phraseSeed
-        do {
-            try await verifySeedAgainstPublishedIdentity(
-                accountIdBytes: accountIdBytes,
-                sessionToken: sessionToken,
-                accountIdentitySeed: seed
+        let seed = phraseSeed
+        try await verifySeedAgainstPublishedIdentity(
+            accountIdBytes: accountIdBytes,
+            sessionToken: sessionToken,
+            accountIdentitySeed: seed
+        )
+        try await TypedNameCheck.check(
+            username: username,
+            accountIdBytes: accountIdBytes
+        ) { name in
+            try await restoreDirectory.lookupAccount(
+                username: name,
+                accountId: accountIdBytes,
+                sessionToken: sessionToken
             )
-        } catch {
-            Self.zeroize(&seed)
-            throw error
         }
+        // Both checks passed: the pairing's held state lands first, so the
+        // DeviceGroup snapshot is on disk before the session bootstraps.
+        await persistJoin()
         // Bootstrap the device root key from the identity seed so the
         // next-launch rehydrate gate sees a key on this device.
         // Best-effort: a Keychain failure leaves the in-memory session
@@ -1863,7 +1893,7 @@ public final class AuthRepository: ObservableObject {
     /// session triple; identity acquisition runs the ADR-0017 state
     /// machine below. NO password is involved, so there is NO OPAQUE
     /// export key on this path — `exportKey` is empty `Data()` (the
-    /// ``completeFromDeviceRestore(accountIdBytes:accountIdB64:username:phraseSeed:sessionToken:sessionExpiresAtMs:)``
+    /// ``completeFromDeviceRestore(accountIdBytes:accountIdB64:username:phraseSeed:sessionToken:sessionExpiresAtMs:persistJoin:)``
     /// convention).
     ///
     ///   * **Warm case** — a cached AccountIdentity (phrase) seed on

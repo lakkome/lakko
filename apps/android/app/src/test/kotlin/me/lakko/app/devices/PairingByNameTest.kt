@@ -279,19 +279,29 @@ class PairingByNameTest {
 
         override fun groupIdFor(accountId: ByteArray): ByteArray = groupIdOf(accountId)
 
-        override suspend fun persistAs(accountId: ByteArray) {
-            calls += "persist"
-            persistedAs = accountId
+        override suspend fun bindAs(accountId: ByteArray): PendingJoin {
+            calls += "bind"
+            return object : PendingJoin {
+                override suspend fun persist() {
+                    calls += "persist"
+                    persistedAs = accountId
+                }
+            }
         }
     }
 
     @Test
-    fun aJoinByNamePersistsOnlyAfterTheRedeemUnderTheRedeemedAccount() = runTest {
+    fun aJoinByNameWritesNothingItselfAndPersistsUnderTheRedeemedAccountOnlyWhenTold() = runTest {
         val account = ByteArray(16) { 3 }
         val steps = FakeSteps(joinedAccount = account, redeemedAccount = account)
         val grantB64 = base64UrlEncodeNoPad(steps.grant)
         val outcome = runJoinByName(steps)!!
-        assertEquals(listOf("poll", "open", "redeem:$grantB64", "persist"), steps.calls)
+        // ADR-0056 security pass: the join binds in memory; the restore
+        // decides when (and whether) anything is written.
+        assertEquals(listOf("poll", "open", "redeem:$grantB64", "bind"), steps.calls)
+        assertNull(steps.persistedAs)
+        outcome.persistJoin!!.invoke()
+        assertEquals(listOf("poll", "open", "redeem:$grantB64", "bind", "persist"), steps.calls)
         assertArrayEquals(account, steps.persistedAs)
         assertArrayEquals(account, outcome.accountId)
         assertEquals("tok", outcome.sessionToken)
@@ -308,7 +318,7 @@ class PairingByNameTest {
             kotlinx.coroutines.runBlocking { runJoinByName(steps) }
         }
         assertEquals(JOIN_WRONG_ACCOUNT_COPY, err.message)
-        assertTrue(steps.calls.none { it == "persist" })
+        assertTrue(steps.calls.none { it == "persist" || it == "bind" })
         assertTrue(steps.calls.any { it.startsWith("redeem:") })
         assertTrue(steps.seed.all { it == 0.toByte() })
         assertTrue(steps.grant.all { it == 0.toByte() })
@@ -318,7 +328,8 @@ class PairingByNameTest {
     fun aFailedRedeemPersistsNothingAndCarriesNoAccount() = runTest {
         val steps = FakeSteps(joinedAccount = ByteArray(16) { 1 }, redeemedAccount = null)
         val outcome = runJoinByName(steps)!!
-        assertTrue(steps.calls.none { it == "persist" })
+        assertTrue(steps.calls.none { it == "persist" || it == "bind" })
+        assertNull(outcome.persistJoin)
         assertNull(outcome.accountId)
         assertNull(outcome.sessionToken)
     }

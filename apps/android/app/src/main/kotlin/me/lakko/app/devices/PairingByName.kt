@@ -203,23 +203,40 @@ public interface JoinByNameSteps {
     /** `deviceGroupIdFor(accountId)`. */
     public fun groupIdFor(accountId: ByteArray): ByteArray
 
-    /** Persist the device seed and the DeviceGroup under [accountId], then
-     *  fetch and apply the history and state bundles. Called only after
-     *  the redeem named the account and its DeviceGroup id matched. */
-    public suspend fun persistAs(accountId: ByteArray)
+    /** Bind the joined group to [accountId] and fetch the history and
+     *  state bundles, all in memory: NOTHING is written. Called only after
+     *  the redeem named the account and its DeviceGroup id matched. The
+     *  returned [PendingJoin] is the one place the join reaches the disk. */
+    public suspend fun bindAs(accountId: ByteArray): PendingJoin
+}
+
+/**
+ * ADR-0056 security pass — what a join by name received, held until the
+ * restore verified the phrase seed against the published identity and
+ * checked the typed name at discovery. [persist] writes the DeviceIdentity
+ * seed, the DeviceGroup snapshot, the history rows and the state bundle
+ * under the redeemed account; never calling it leaves the device as it was.
+ */
+public interface PendingJoin {
+    /** Write everything held. Runs once; each write is best-effort. */
+    public suspend fun persist()
 }
 
 /**
  * The ordering of a join by name (ADR-0056): open the recovery row, redeem the
  * grant, check that the DeviceGroup of the account the redeem named is the
- * group the Welcome joined, and only then persist anything. A Welcome for
- * another account's group is refused after the redeem with nothing persisted
- * and the seed zeroized.
+ * group the Welcome joined, and bind to it in memory. A Welcome for another
+ * account's group is refused after the redeem with the seed zeroized.
  *
- * @return `null` when the recovery row never came (nothing persisted); an
- *   outcome with no session and no account id when the redeem failed
- *   (nothing persisted; the caller refuses a seed-only restore); the full
- *   outcome after [JoinByNameSteps.persistAs].
+ * Nothing is persisted here (ADR-0056 security pass): the returned outcome
+ * carries [PairingOrchestrator.JoinRecoveryOutcome.persistJoin], which the
+ * restore runs only after the phrase seed verified and the typed name
+ * resolved at discovery to the redeemed account ([runCheckedDeviceRestore]).
+ *
+ * @return `null` when the recovery row never came; an outcome with no
+ *   session and no account id when the redeem failed (the caller refuses a
+ *   seed-only restore); the full outcome, whose `persistJoin` writes what
+ *   [JoinByNameSteps.bindAs] held.
  * @throws IllegalStateException on a group mismatch.
  */
 public suspend fun runJoinByName(steps: JoinByNameSteps): PairingOrchestrator.JoinRecoveryOutcome? {
@@ -240,12 +257,13 @@ public suspend fun runJoinByName(steps: JoinByNameSteps): PairingOrchestrator.Jo
                 PairingOrchestrator.JoinRecoveryOutcome(parsed.phraseSeed, null, null, null)
             JoinByNameResult.WrongGroup -> throw IllegalStateException(JOIN_WRONG_ACCOUNT_COPY)
             is JoinByNameResult.Joined -> {
-                steps.persistAs(result.accountId)
+                val pending = steps.bindAs(result.accountId)
                 PairingOrchestrator.JoinRecoveryOutcome(
                     phraseSeed = parsed.phraseSeed,
                     sessionToken = result.sessionToken,
                     sessionExpiresAtMs = result.sessionExpiresAtMs,
                     accountId = result.accountId,
+                    persistJoin = { pending.persist() },
                 )
             }
         }

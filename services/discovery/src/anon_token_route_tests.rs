@@ -37,7 +37,7 @@ fn master() -> MasterSecret {
     MasterSecret::from_hex(MASTER_HEX).unwrap()
 }
 
-fn state(db: MySqlPool, enabled: bool) -> AppState {
+pub(crate) fn state(db: MySqlPool, enabled: bool) -> AppState {
     let secret = Arc::new(TokenSecret::new(vec![7u8; 32]).unwrap());
     let limit = rate_limit::Limit {
         per_minute: 6_000.0,
@@ -96,7 +96,7 @@ fn error_code(body: &str) -> String {
         .unwrap_or_default()
 }
 
-async fn test_pool(name: &str) -> Option<MySqlPool> {
+pub(crate) async fn test_pool(name: &str) -> Option<MySqlPool> {
     let Ok(url) = std::env::var("LAKKO_DISCOVERY_TEST_DATABASE_URL") else {
         eprintln!("skipping {name}: LAKKO_DISCOVERY_TEST_DATABASE_URL unset");
         return None;

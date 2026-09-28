@@ -9,8 +9,9 @@
 //! posture (anyone who names it) - which is every journal until its owner
 //! claims it, and the rendezvous mailboxes by design.
 //!
-//! What is gated: a claimed group's `GET`/`POST messages`, `GET knocks` and
-//! every registration after the first; a claimed mailbox's `GET messages`.
+//! What is gated: a claimed group's `GET`/`POST messages`, `GET knocks` (write
+//! tier) and every registration after the first; a claimed mailbox's
+//! `GET messages`.
 //! What is not: a mailbox `POST` (the cold inbox strangers are meant to
 //! reach), a group's `POST knock` (it spends an anonymous token instead,
 //! ADR-0054 S3), and the first claim of
@@ -26,8 +27,9 @@
 //! epoch of a group, and the identity key a mailbox's pseudonym is the hash of.
 //!
 //! **Two tiers of epoch key** (ADR-0053 open question 1, resolved in S3):
-//! the two newest registered epochs may write (publish, register the next
-//! epoch); every retained older epoch may still **read**. Without the read
+//! the two newest registered epochs may write (publish, read knocks, register
+//! the next epoch); every retained older epoch may still **read** the
+//! messages. Without the read
 //! tier a device offline across two commits would hold only a key the server
 //! had dropped, could not fetch the commits that would bring it forward, and
 //! would be stranded for good. Old keys are kept for the journal's own
@@ -47,7 +49,7 @@ use base64::Engine as _;
 use lakko_anon_token::TokenContext;
 use lakko_ds_proof::{Proof, RequestParts, VerifyingKey, MAILBOX_EPOCH, PROOF_HEADER_NAME};
 use serde::{Deserialize, Serialize};
-use sqlx::MySqlPool;
+use sqlx::mysql::{MySql, MySqlConnection, MySqlDatabaseError, MySqlPool};
 
 use crate::journal::{self, Queue, DEFAULT_LIMIT, PSEUDONYM_LEN};
 use crate::AppState;
@@ -71,6 +73,12 @@ pub(crate) const NONCE_RETENTION_SECS: i64 = {
 /// knob: the retention window prunes first in any group that commits less
 /// than this many times a month.
 pub(crate) const MAX_RETAINED_EPOCHS: u64 = 64;
+/// The highest epoch a group may register. An MLS epoch advances by one per
+/// commit, so a real group stays many orders of magnitude below 2^48; the cap
+/// keeps every epoch the server stores far from `u64::MAX`, where epoch
+/// arithmetic would overflow. Refused with `400` (ADR-0053, *What the
+/// security pass found*).
+pub(crate) const MAX_ACCESS_EPOCH: u64 = (1 << 48) - 1;
 /// The two newest registered epochs are the write tier.
 const WRITE_EPOCHS: usize = 2;
 /// At most this many payloads in one knock (the attribution and the proposal
@@ -114,6 +122,15 @@ fn now_ms() -> u64 {
 // Registrations
 // ============================================================================
 
+/// The rows of a group's registered access keys, newest epoch first, as the
+/// query returns them. A row that does not parse is skipped rather than
+/// trusted (this server wrote every row from a validated key).
+fn parse_key_rows(rows: Vec<(u64, Vec<u8>)>) -> Vec<(u64, VerifyingKey)> {
+    rows.into_iter()
+        .filter_map(|(epoch, pk)| VerifyingKey::from_bytes(&pk).ok().map(|key| (epoch, key)))
+        .collect()
+}
+
 /// The registered access keys of a group, newest epoch first. Empty means
 /// unclaimed. The first [`WRITE_EPOCHS`] are the write tier.
 async fn group_keys(
@@ -127,15 +144,38 @@ async fn group_keys(
     .fetch_all(pool)
     .await
     .map_err(db_error("load group access keys"))?;
-    let mut keys = Vec::with_capacity(rows.len());
-    for (epoch, pk) in rows {
-        // A row this server wrote from a validated key; a row that does not
-        // parse is skipped rather than trusted.
-        if let Ok(key) = VerifyingKey::from_bytes(&pk) {
-            keys.push((epoch, key));
-        }
-    }
-    Ok(keys)
+    Ok(parse_key_rows(rows))
+}
+
+/// Take the group's registration lock, then read its keys, inside a
+/// registration transaction. The upsert holds an exclusive record lock on the
+/// group's `ds_group_access_lock` row until the transaction ends (a
+/// primary-key record lock: no gap, so other groups never wait), and the
+/// transaction runs at READ COMMITTED, so the plain read that follows sees
+/// every registration committed before the lock was granted. Two
+/// registrations of one group therefore serialize instead of both deciding
+/// against the same read.
+async fn lock_and_read_group_keys(
+    conn: &mut MySqlConnection,
+    group_id: &[u8; PSEUDONYM_LEN],
+) -> Result<Vec<(u64, VerifyingKey)>, HandlerError> {
+    sqlx::query(
+        "INSERT INTO ds_group_access_lock (group_id) VALUES (?) \
+         ON DUPLICATE KEY UPDATE group_id = VALUES(group_id)",
+    )
+    .bind(&group_id[..])
+    .execute(&mut *conn)
+    .await
+    .map_err(registration_db_error("lock group registration"))?;
+    let rows: Vec<(u64, Vec<u8>)> = sqlx::query_as(
+        "SELECT epoch, access_pk FROM ds_group_access WHERE group_id = ? \
+         ORDER BY epoch DESC LIMIT 64",
+    )
+    .bind(&group_id[..])
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(registration_db_error("read group access keys"))?;
+    Ok(parse_key_rows(rows))
 }
 
 /// The identity key a claimed mailbox is named after, or `None` when unclaimed.
@@ -156,6 +196,44 @@ async fn mailbox_key(
 // The check
 // ============================================================================
 
+/// Parse the proof header and verify it under `key_for_epoch`, touching no
+/// store. Every failure is [`refused`]. The nonce is not yet consumed: the
+/// caller does that with [`consume_nonce`] on the connection it decides on.
+fn verify_header(
+    headers: &HeaderMap,
+    parts: &RequestParts<'_>,
+    key_for_epoch: impl Fn(u64) -> Option<VerifyingKey>,
+) -> Result<Proof, HandlerError> {
+    let value = headers
+        .get(PROOF_HEADER_NAME)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(refused)?;
+    let proof = Proof::parse(value).map_err(|_| refused())?;
+    let key = key_for_epoch(proof.epoch).ok_or_else(refused)?;
+    lakko_ds_proof::verify(&proof, parts, &key, now_ms()).map_err(|_| refused())?;
+    Ok(proof)
+}
+
+/// Record a verified proof's nonce. `false` is a replay. The primary key
+/// makes a repeat a duplicate (zero rows affected); any other DB error is an
+/// error.
+async fn consume_nonce<'e, E>(
+    exec: E,
+    pseudonym: &[u8; PSEUDONYM_LEN],
+    nonce: &[u8; lakko_ds_proof::NONCE_LEN],
+) -> Result<bool, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = MySql>,
+{
+    let inserted =
+        sqlx::query("INSERT IGNORE INTO ds_proof_nonces (pseudonym, nonce) VALUES (?, ?)")
+            .bind(&pseudonym[..])
+            .bind(&nonce[..])
+            .execute(exec)
+            .await?;
+    Ok(inserted.rows_affected() > 0)
+}
+
 /// Parse the proof header, verify it under `key_for_epoch`, and consume the
 /// nonce. Every failure is [`refused`].
 async fn check_proof(
@@ -165,26 +243,15 @@ async fn check_proof(
     parts: &RequestParts<'_>,
     key_for_epoch: impl Fn(u64) -> Option<VerifyingKey>,
 ) -> Result<(), HandlerError> {
-    let value = headers
-        .get(PROOF_HEADER_NAME)
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(refused)?;
-    let proof = Proof::parse(value).map_err(|_| refused())?;
-    let key = key_for_epoch(proof.epoch).ok_or_else(refused)?;
-    lakko_ds_proof::verify(&proof, parts, &key, now_ms()).map_err(|_| refused())?;
-    // Consume the nonce. The primary key makes a repeat a duplicate-key
-    // error, which is the replay refusal; any other DB error is a 500.
-    let inserted =
-        sqlx::query("INSERT IGNORE INTO ds_proof_nonces (pseudonym, nonce) VALUES (?, ?)")
-            .bind(&pseudonym[..])
-            .bind(&proof.nonce[..])
-            .execute(pool)
-            .await
-            .map_err(db_error("record proof nonce"))?;
-    if inserted.rows_affected() == 0 {
-        return Err(refused());
+    let proof = verify_header(headers, parts, key_for_epoch)?;
+    if consume_nonce(pool, pseudonym, &proof.nonce)
+        .await
+        .map_err(db_error("record proof nonce"))?
+    {
+        Ok(())
+    } else {
+        Err(refused())
     }
-    Ok(())
 }
 
 fn parts<'a>(method: &'a Method, uri: &'a Uri, body: &'a [u8]) -> RequestParts<'a> {
@@ -280,6 +347,30 @@ fn decode_pk(b64: &str) -> Result<VerifyingKey, HandlerError> {
     })
 }
 
+/// MariaDB's "deadlock found" and "lock wait timeout" error numbers.
+const ER_LOCK_DEADLOCK: u16 = 1213;
+const ER_LOCK_WAIT_TIMEOUT: u16 = 1205;
+
+/// [`db_error`] for the registration transaction: a deadlock or lock-wait
+/// timeout against a concurrent registration is a `409` the client retries
+/// (that transaction committed nothing), every other failure a `500`.
+fn registration_db_error(what: &'static str) -> impl Fn(sqlx::Error) -> HandlerError {
+    move |e| {
+        let lost_race = e
+            .as_database_error()
+            .and_then(|d| d.try_downcast_ref::<MySqlDatabaseError>())
+            .is_some_and(|m| matches!(m.number(), ER_LOCK_DEADLOCK | ER_LOCK_WAIT_TIMEOUT));
+        if lost_race {
+            tracing::debug!("{what}: lost a lock race to a concurrent registration");
+            return (
+                StatusCode::CONFLICT,
+                "concurrent registration; retry".to_string(),
+            );
+        }
+        db_error(what)(e)
+    }
+}
+
 /// `PUT /ds/group/{hex}/access` - register the access key of an epoch.
 ///
 /// The first registration of an unclaimed journal needs no proof, and neither
@@ -290,6 +381,15 @@ fn decode_pk(b64: &str) -> Result<VerifyingKey, HandlerError> {
 /// latest epoch again (a replacement, proven under the epoch before it - the
 /// shape an abandoned staged sweep leaves behind). Older epochs stay as the
 /// read tier, up to [`MAX_RETAINED_EPOCHS`] and the journal retention window.
+///
+/// Three properties the security pass asked for (ADR-0053, *What the
+/// security pass found*): an epoch above [`MAX_ACCESS_EPOCH`] is a `400`
+/// before anything is read; on a claimed journal the proof is checked
+/// **before** the epoch rule, so a caller without a write-tier key learns
+/// only the uniform `401` and never which epoch is latest; and the read, the
+/// rule and the write run in one transaction behind a per-group lock row, so
+/// two registrations of one group serialize (a lock wait that times out is a
+/// `409` with nothing committed).
 pub(crate) async fn put_group_access(
     State(state): State<AppState>,
     AxumPath(group_hex): AxumPath<String>,
@@ -301,41 +401,89 @@ pub(crate) async fn put_group_access(
     let group_id = journal::decode_pseudonym(&group_hex)?;
     let parsed: GroupAccessBody = serde_json::from_slice(&body)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("bad json: {e}")))?;
+    if parsed.epoch > MAX_ACCESS_EPOCH {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("epoch must be at most {MAX_ACCESS_EPOCH}"),
+        ));
+    }
     let new_key = decode_pk(&parsed.access_pk_b64)?;
-    let keys = group_keys(&state.db, &group_id).await?;
+    let req = parts(&method, &uri, &body);
+
+    let mut conn = state
+        .db
+        .acquire()
+        .await
+        .map_err(db_error("acquire registration connection"))?;
+    // Applies to the next transaction on this connection only: READ
+    // COMMITTED so the read after the registration lock is current, and so
+    // no statement in it takes gap locks shared with neighbouring groups.
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        .execute(&mut *conn)
+        .await
+        .map_err(db_error("set registration isolation"))?;
+    let mut tx = sqlx::Connection::begin(&mut *conn)
+        .await
+        .map_err(db_error("begin registration"))?;
+    // A DB failure drops `tx`, which rolls it back. A decision - stored,
+    // unchanged or refused - commits: a refusal after a valid proof has
+    // consumed its nonce, and that must stay consumed.
+    let decision =
+        register_locked(&mut tx, &group_id, parsed.epoch, &new_key, &headers, &req).await?;
+    tx.commit()
+        .await
+        .map_err(registration_db_error("commit registration"))?;
+    decision.map(|()| StatusCode::NO_CONTENT.into_response())
+}
+
+/// The body of [`put_group_access`], run inside its transaction. The outer
+/// `Result` is a DB failure (roll back); the inner one is the decision.
+async fn register_locked(
+    conn: &mut MySqlConnection,
+    group_id: &[u8; PSEUDONYM_LEN],
+    epoch: u64,
+    new_key: &VerifyingKey,
+    headers: &HeaderMap,
+    req: &RequestParts<'_>,
+) -> Result<Result<(), HandlerError>, HandlerError> {
+    let keys = lock_and_read_group_keys(&mut *conn, group_id).await?;
     if keys
         .iter()
-        .any(|(e, k)| *e == parsed.epoch && k.to_bytes() == new_key.to_bytes())
+        .any(|(e, k)| *e == epoch && k.to_bytes() == new_key.to_bytes())
     {
-        return Ok(StatusCode::NO_CONTENT.into_response());
+        return Ok(Ok(()));
     }
-    let write_tier = &keys[..WRITE_EPOCHS.min(keys.len())];
 
-    if let Some((latest, _)) = keys.first() {
-        let latest = *latest;
-        let req = parts(&method, &uri, &body);
-        // Which registered epochs may vouch for this registration.
-        let allowed: Vec<u64> = if parsed.epoch == latest.saturating_add(1) {
-            write_tier.iter().map(|(e, _)| *e).collect()
-        } else if parsed.epoch == latest {
-            write_tier
-                .iter()
-                .map(|(e, _)| *e)
-                .filter(|e| *e < latest)
-                .collect()
-        } else {
-            return Err((
-                StatusCode::CONFLICT,
-                "epoch must be the latest registered epoch or the one after it".to_string(),
-            ));
+    if let Some(&(latest, _)) = keys.first() {
+        let write_tier = &keys[..WRITE_EPOCHS.min(keys.len())];
+        // The proof first, under any write-tier key: nothing about the epoch
+        // rule is answered to a caller who cannot produce one.
+        let proof = match verify_header(headers, req, |e| {
+            write_tier.iter().find(|(we, _)| *we == e).map(|(_, k)| *k)
+        }) {
+            Ok(proof) => proof,
+            Err(refusal) => return Ok(Err(refusal)),
         };
-        check_proof(&state.db, &group_id, &headers, &req, |epoch| {
-            allowed
-                .contains(&epoch)
-                .then(|| keys.iter().find(|(e, _)| *e == epoch).map(|(_, k)| *k))
-                .flatten()
-        })
-        .await?;
+        if !consume_nonce(&mut *conn, group_id, &proof.nonce)
+            .await
+            .map_err(registration_db_error("record proof nonce"))?
+        {
+            return Ok(Err(refused()));
+        }
+        // Then the rule. `latest + 1` may be vouched for by either write-tier
+        // epoch; a replacement of `latest` only by the epoch before it, never
+        // by the key it replaces.
+        if latest.checked_add(1) != Some(epoch) {
+            if epoch != latest {
+                return Ok(Err((
+                    StatusCode::CONFLICT,
+                    "epoch must be the latest registered epoch or the one after it".to_string(),
+                )));
+            }
+            if proof.epoch >= latest {
+                return Ok(Err(refused()));
+            }
+        }
     }
 
     sqlx::query(
@@ -343,20 +491,23 @@ pub(crate) async fn put_group_access(
          ON DUPLICATE KEY UPDATE access_pk = VALUES(access_pk), created_at = CURRENT_TIMESTAMP(3)",
     )
     .bind(&group_id[..])
-    .bind(parsed.epoch)
+    .bind(epoch)
     .bind(&new_key.to_bytes()[..])
-    .execute(&state.db)
+    .execute(&mut *conn)
     .await
-    .map_err(db_error("register group access key"))?;
-    // Bound the read tier; age-based pruning is the journal pruner's.
-    sqlx::query("DELETE FROM ds_group_access WHERE group_id = ? AND epoch + ? <= ?")
-        .bind(&group_id[..])
-        .bind(MAX_RETAINED_EPOCHS)
-        .bind(parsed.epoch)
-        .execute(&state.db)
-        .await
-        .map_err(db_error("prune group access keys"))?;
-    Ok(StatusCode::NO_CONTENT.into_response())
+    .map_err(registration_db_error("register group access key"))?;
+    // Bound the read tier; age-based pruning is the journal pruner's. The
+    // floor is computed here, not in SQL, so no epoch arithmetic can
+    // overflow in the database.
+    if let Some(floor) = epoch.checked_sub(MAX_RETAINED_EPOCHS) {
+        sqlx::query("DELETE FROM ds_group_access WHERE group_id = ? AND epoch <= ?")
+            .bind(&group_id[..])
+            .bind(floor)
+            .execute(&mut *conn)
+            .await
+            .map_err(registration_db_error("prune group access keys"))?;
+    }
+    Ok(Ok(()))
 }
 
 #[derive(Deserialize)]
@@ -480,8 +631,11 @@ pub(crate) async fn post_knock(
     Ok((StatusCode::CREATED, Json(KnockResponse { ids, epoch })).into_response())
 }
 
-/// `GET /ds/group/{hex}/knocks` - the members read what was knocked; gated
-/// exactly like the group's messages.
+/// `GET /ds/group/{hex}/knocks` - the members read what was knocked. Gated
+/// to the **write** tier, unlike the messages: a knock row is a cleartext
+/// external-join proposal (the joiner's KeyPackage and credential), so the
+/// read-only tail an evicted member keeps must not let it go on watching who
+/// asks to join.
 pub(crate) async fn get_knocks(
     State(state): State<AppState>,
     AxumPath(group_hex): AxumPath<String>,
@@ -494,7 +648,7 @@ pub(crate) async fn get_knocks(
     gate_group(
         &state,
         &group_id,
-        Access::Read,
+        Access::Write,
         &method,
         &uri,
         &headers,
@@ -523,19 +677,45 @@ pub(crate) async fn get_knocks(
 /// never touching a group's two newest epochs (a quiet group that has not
 /// committed in a month must stay openable). Runs on the journal pruner's tick.
 pub(crate) async fn prune_group_access(pool: &MySqlPool, retention_secs: i64) {
-    // MariaDB refuses a DELETE whose subquery reads the same table unless the
-    // subquery is materialised, hence the derived table.
-    let sql = "DELETE a FROM ds_group_access a \
-               JOIN (SELECT group_id, MAX(epoch) AS latest FROM ds_group_access GROUP BY group_id) m \
-                 ON m.group_id = a.group_id \
-               WHERE a.created_at < NOW(3) - INTERVAL ? SECOND AND a.epoch + 1 < m.latest";
-    match sqlx::query(sql).bind(retention_secs).execute(pool).await {
-        Ok(r) if r.rows_affected() > 0 => {
-            tracing::debug!(rows = r.rows_affected(), "pruned read-tier epoch keys");
+    match prune_group_access_rows(pool, retention_secs).await {
+        Ok(rows) if rows > 0 => {
+            tracing::debug!(rows, "pruned read-tier epoch keys");
         },
         Ok(_) => {},
         Err(e) => tracing::warn!(error = %e, "epoch key prune failed"),
     }
+}
+
+/// The statement behind [`prune_group_access`], returning the rows deleted.
+///
+/// It is one DELETE across every group, so one row must never be able to
+/// abort it: the predicate does **no epoch arithmetic** (an earlier
+/// `a.epoch + 1 < m.latest` overflowed `BIGINT UNSIGNED` on a row at
+/// `u64::MAX` and failed the whole statement, for every group, on every
+/// tick). "Not one of the two newest" is expressed as "below the group's
+/// second-newest epoch", computed by comparison alone. A group with a single
+/// registered epoch has no second-newest row and loses nothing.
+async fn prune_group_access_rows(
+    pool: &MySqlPool,
+    retention_secs: i64,
+) -> Result<u64, sqlx::Error> {
+    // MariaDB refuses a DELETE whose subquery reads the same table unless the
+    // subquery is materialised; a derived table with GROUP BY always is.
+    let sql = "DELETE a FROM ds_group_access a \
+               JOIN (SELECT b.group_id, MAX(b.epoch) AS second_newest \
+                       FROM ds_group_access b \
+                       JOIN (SELECT group_id, MAX(epoch) AS newest \
+                               FROM ds_group_access GROUP BY group_id) n \
+                         ON n.group_id = b.group_id \
+                      WHERE b.epoch < n.newest \
+                      GROUP BY b.group_id) s \
+                 ON s.group_id = a.group_id \
+               WHERE a.created_at < NOW(3) - INTERVAL ? SECOND AND a.epoch < s.second_newest";
+    Ok(sqlx::query(sql)
+        .bind(retention_secs)
+        .execute(pool)
+        .await?
+        .rows_affected())
 }
 
 /// Delete nonce rows past their usefulness. Runs on the journal pruner's tick.
@@ -1402,6 +1582,270 @@ mod tests {
         let (status, resp) = knock(&app, &uri, &[b"x"], Some(&knock_token())).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(error_code(&resp), "anon-tokens-disabled");
+    }
+
+    /// Security pass, finding 1: an epoch above the cap is a 400 on the first
+    /// claim and on a proven registration alike, and a group AT the cap
+    /// registers and prunes without overflowing.
+    #[tokio::test]
+    async fn an_epoch_above_the_cap_is_refused() {
+        let Some((app, pool)) = app().await else {
+            return;
+        };
+        let gid = fresh_name(30);
+        let k = key(60);
+        for epoch in [MAX_ACCESS_EPOCH + 1, u64::MAX] {
+            assert_eq!(
+                claim_group(&app, &gid, epoch, &k, None).await,
+                StatusCode::BAD_REQUEST,
+                "epoch {epoch}"
+            );
+        }
+        let stored: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM ds_group_access WHERE group_id = ?")
+                .bind(&gid[..])
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored.0, 0, "a refused claim left a row");
+
+        assert_eq!(
+            claim_group(&app, &gid, MAX_ACCESS_EPOCH, &k, None).await,
+            StatusCode::NO_CONTENT
+        );
+        // The next epoch would be above the cap: refused even with a valid
+        // proof, and the cap is checked before the proof is.
+        assert_eq!(
+            claim_group(
+                &app,
+                &gid,
+                MAX_ACCESS_EPOCH + 1,
+                &key(61),
+                Some((&k, MAX_ACCESS_EPOCH))
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        // A replacement at the cap (proven under the epoch before it, which
+        // this group does not have) is refused as a proof failure, and the
+        // registration-time prune near the cap ran without a 500.
+        assert_eq!(
+            claim_group(
+                &app,
+                &gid,
+                MAX_ACCESS_EPOCH,
+                &key(62),
+                Some((&k, MAX_ACCESS_EPOCH))
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        prune_group_access_rows(&pool, 1).await.expect("prune");
+    }
+
+    /// Security pass, finding 1: rows at and beyond the cap (a row at
+    /// `u64::MAX` stands for one written before the cap existed) never abort
+    /// the global prune, and the prune still keeps each group's two newest
+    /// epochs and nothing else of an aged group.
+    #[tokio::test]
+    async fn the_pruner_survives_rows_at_and_beyond_the_cap() {
+        let Some((_app, pool)) = app().await else {
+            return;
+        };
+        let near = fresh_name(31);
+        let beyond = fresh_name(32);
+        let fresh = fresh_name(33);
+        let pk = key(63).verifying_key().to_bytes();
+        let insert = |gid: [u8; PSEUDONYM_LEN], epoch: u64, old: bool| {
+            let pool = pool.clone();
+            async move {
+                let sql = if old {
+                    "INSERT INTO ds_group_access (group_id, epoch, access_pk, created_at) \
+                     VALUES (?, ?, ?, '2000-01-01 00:00:00')"
+                } else {
+                    "INSERT INTO ds_group_access (group_id, epoch, access_pk) VALUES (?, ?, ?)"
+                };
+                sqlx::query(sql)
+                    .bind(&gid[..])
+                    .bind(epoch)
+                    .bind(&pk[..])
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+        };
+        for e in MAX_ACCESS_EPOCH - 3..=MAX_ACCESS_EPOCH {
+            insert(near, e, true).await;
+        }
+        for e in [u64::MAX - 5, u64::MAX - 1, u64::MAX] {
+            insert(beyond, e, true).await;
+        }
+        for e in 1..=4 {
+            insert(fresh, e, false).await;
+        }
+        // Ten years: only the rows back-dated to 2000 are old enough, so the
+        // groups of tests running in parallel are never touched.
+        prune_group_access_rows(&pool, 10 * 365 * 24 * 60 * 60)
+            .await
+            .expect("the global prune must not fail on any row");
+        let epochs = |gid: [u8; PSEUDONYM_LEN]| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_as::<_, (u64,)>(
+                    "SELECT epoch FROM ds_group_access WHERE group_id = ? ORDER BY epoch",
+                )
+                .bind(&gid[..])
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|(e,)| e)
+                .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(
+            epochs(near).await,
+            vec![MAX_ACCESS_EPOCH - 1, MAX_ACCESS_EPOCH]
+        );
+        assert_eq!(epochs(beyond).await, vec![u64::MAX - 1, u64::MAX]);
+        assert_eq!(epochs(fresh).await, vec![1, 2, 3, 4]);
+    }
+
+    /// Security pass, finding 2: an evicted member keeps the read-only tail
+    /// for the messages, but reading knocks takes a write-tier key.
+    #[tokio::test]
+    async fn knocks_are_read_only_by_the_write_tier() {
+        let Some((app, _pool)) = app().await else {
+            return;
+        };
+        let gid = fresh_name(34);
+        let (k1, k2, k3) = (key(64), key(65), key(66));
+        assert_eq!(
+            claim_group(&app, &gid, 1, &k1, None).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            claim_group(&app, &gid, 2, &k2, Some((&k1, 1))).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            claim_group(&app, &gid, 3, &k3, Some((&k2, 2))).await,
+            StatusCode::NO_CONTENT
+        );
+        let read = |uri: String, signer: SigningKey, epoch: u64| {
+            let app = app.clone();
+            async move {
+                send(
+                    &app,
+                    Req {
+                        method: "GET",
+                        uri: &uri,
+                        body: vec![],
+                        proof: Some((&signer, epoch)),
+                    },
+                )
+                .await
+                .0
+            }
+        };
+        let messages = format!("{}?after=0", messages_uri("group", &gid));
+        let knocks = format!("/ds/group/{}/knocks?after=0", hex::encode(gid));
+        assert_eq!(read(messages, k1.clone(), 1).await, StatusCode::OK);
+        assert_eq!(read(knocks.clone(), k1, 1).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(read(knocks.clone(), k2, 2).await, StatusCode::OK);
+        assert_eq!(read(knocks, k3, 3).await, StatusCode::OK);
+    }
+
+    /// Security pass, finding 3: on a claimed journal the epoch rule is
+    /// answered only to a caller with a write-tier proof; everyone else gets
+    /// the same 401 whatever epoch they name.
+    #[tokio::test]
+    async fn a_claimed_journal_checks_the_proof_before_the_epoch_rule() {
+        let Some((app, _pool)) = app().await else {
+            return;
+        };
+        let gid = fresh_name(35);
+        let (k4, k5, k6) = (key(67), key(68), key(69));
+        assert_eq!(
+            claim_group(&app, &gid, 4, &k4, None).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            claim_group(&app, &gid, 5, &k5, Some((&k4, 4))).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            claim_group(&app, &gid, 6, &k6, Some((&k5, 5))).await,
+            StatusCode::NO_CONTENT
+        );
+        let probe = key(70);
+        // No proof: the same answer below, at, next to and far past latest.
+        for epoch in [0, 3, 6, 7, 9, 1_000] {
+            assert_eq!(
+                claim_group(&app, &gid, epoch, &probe, None).await,
+                StatusCode::UNAUTHORIZED,
+                "unproven epoch {epoch}"
+            );
+        }
+        // A read-tier key (epoch 4) is no better than none.
+        for epoch in [5, 9] {
+            assert_eq!(
+                claim_group(&app, &gid, epoch, &probe, Some((&k4, 4))).await,
+                StatusCode::UNAUTHORIZED,
+                "read-tier proof at epoch {epoch}"
+            );
+        }
+        // A write-tier caller learns the rule.
+        assert_eq!(
+            claim_group(&app, &gid, 9, &probe, Some((&k6, 6))).await,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            claim_group(&app, &gid, 7, &probe, Some((&k5, 5))).await,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    /// Security pass, finding 4: concurrent first claims of one journal
+    /// serialize. Exactly one lands; every other waits on the group's lock,
+    /// then finds the journal claimed and gets its 401 (a lock-wait timeout
+    /// would be a 409), and the stored key is the winner's. Before the
+    /// transaction every one of them upserted and the last writer won.
+    #[tokio::test]
+    async fn concurrent_first_claims_leave_exactly_one_key() {
+        let Some((app, pool)) = app().await else {
+            return;
+        };
+        for round in 0..4u8 {
+            let gid = fresh_name(36);
+            let tasks: Vec<_> = (0..6u8)
+                .map(|i| {
+                    let app = app.clone();
+                    let signer = key(100 + round * 10 + i);
+                    tokio::spawn(async move {
+                        let status = claim_group(&app, &gid, 0, &signer, None).await;
+                        (status, signer.verifying_key().to_bytes())
+                    })
+                })
+                .collect();
+            let mut winners = Vec::new();
+            for t in tasks {
+                let (status, pk) = t.await.unwrap();
+                match status {
+                    StatusCode::NO_CONTENT => winners.push(pk),
+                    StatusCode::UNAUTHORIZED | StatusCode::CONFLICT => {},
+                    other => panic!("unexpected {other}"),
+                }
+            }
+            assert_eq!(winners.len(), 1, "round {round}");
+            let stored: Vec<(u64, Vec<u8>)> =
+                sqlx::query_as("SELECT epoch, access_pk FROM ds_group_access WHERE group_id = ?")
+                    .bind(&gid[..])
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(stored, vec![(0, winners[0].to_vec())], "round {round}");
+        }
     }
 
     #[test]
