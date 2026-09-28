@@ -18,7 +18,7 @@ export function AuthLayout(props: { children: JSX.Element }): JSX.Element {
           <span>Lakko</span>
         </div>
         <div>
-          <h2>Messages that stay between you.</h2>
+          <h2>Your messages, your rules.</h2>
           <p>
             Chats, groups, channels and calls, end-to-end encrypted by default.
             Lakko's servers never see your messages.

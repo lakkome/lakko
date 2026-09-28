@@ -48,7 +48,7 @@ public fun WelcomeScreen(
             Text("Lakko", style = MaterialTheme.typography.displaySmall)
             Spacer(Modifier.height(8.dp))
             Text(
-                "Messages that stay between you.",
+                "Your messages, your rules.",
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
