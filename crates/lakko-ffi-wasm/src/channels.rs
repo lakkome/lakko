@@ -77,18 +77,18 @@
 use wasm_bindgen::prelude::*;
 
 use lakko_channels::{
-    compose_post, decode_post,
+    compose_post, decode_post, member_card_epoch as inner_member_card_epoch,
     meta::{
         channel_meta_is_newer as inner_channel_meta_is_newer, classify_post_plaintext,
         compose_channel_meta as inner_compose_channel_meta, ChannelMeta, ChannelMetaError,
         PostContent,
     },
-    open_seed,
+    open_member_card as inner_open_member_card, open_seed,
     post::ChannelPost as RustChannelPost,
-    seal_seed, verify_and_decrypt, ContentKeySeed, EpochId, CHANNEL_ID_LEN, EXPORTER_LABEL_V1,
-    SEED_ENVELOPE_LEN,
+    seal_member_card as inner_seal_member_card, seal_seed, sign_member_card_request,
+    verify_and_decrypt, ContentKeySeed, EpochId, CHANNEL_ID_LEN, EXPORTER_LABEL_V1,
+    MAX_MEMBER_CARD_PROFILE_LEN, MEMBER_CARD_SIG_HEADER, SEED_ENVELOPE_LEN, SUBSCRIBER_PK_LEN,
 };
-use lakko_crypto::agreement::{PublicKey as X25519PublicKey, SecretKey as X25519SecretKey};
 use lakko_crypto::signing::SigningKey;
 
 const SIGNING_KEY_SEED_LEN: usize = 32;
@@ -350,68 +350,113 @@ pub fn channel_exporter_label() -> String {
 // Subscriber-side surface (G4-3c) — HPKE seed envelope
 // =========================================================
 
-const X25519_KEY_LEN: usize = 32;
+const SUBSCRIBER_SEED_LEN: usize = 32;
 
-/// X25519 keypair the subscriber holds locally. JS treats
-/// this as an opaque handle; the secret never leaves the
-/// boundary unless the caller explicitly invokes
-/// `secret()` to persist it in their secure-store
-/// equivalent (IndexedDB-encrypted on the web).
+/// The subscriber's key pair (ADR-0058: Ed25519). The public
+/// half is the subscriber identifier everywhere - what gets
+/// registered on the channel, the envelope and member-card
+/// path key, and the key member-card requests are signed with.
+/// The seed envelope is sealed to its X25519 image and opened
+/// with the X25519 secret derived from the same seed. JS
+/// treats this as an opaque handle; the seed never leaves the
+/// boundary unless the caller explicitly invokes `secret()`
+/// to persist it in their secure-store equivalent
+/// (IndexedDB-encrypted on the web).
 #[wasm_bindgen(js_name = "ChannelSubscriberKeypair")]
 pub struct WasmChannelSubscriberKeypair {
-    inner: X25519SecretKey,
+    inner: SigningKey,
 }
 
 #[wasm_bindgen(js_class = "ChannelSubscriberKeypair")]
 impl WasmChannelSubscriberKeypair {
-    /// Fresh random keypair. Backed by
+    /// Fresh random Ed25519 key pair. Backed by
     /// `crypto.getRandomValues` via the `getrandom + js`
     /// feature.
     #[wasm_bindgen(js_name = "generate")]
     #[must_use]
     pub fn generate_js() -> WasmChannelSubscriberKeypair {
         WasmChannelSubscriberKeypair {
-            inner: X25519SecretKey::generate(),
+            inner: SigningKey::generate(),
         }
     }
 
-    /// Reconstruct from a 32-byte secret seed.
+    /// Reconstruct from the 32-byte Ed25519 seed `secret()`
+    /// exported.
     #[wasm_bindgen(constructor)]
     pub fn new(secret: &[u8]) -> Result<WasmChannelSubscriberKeypair, JsError> {
-        let arr: [u8; X25519_KEY_LEN] = secret
+        let arr: [u8; SUBSCRIBER_SEED_LEN] = secret
             .try_into()
             .map_err(|_| JsError::new("subscriber secret must be exactly 32 bytes"))?;
         Ok(WasmChannelSubscriberKeypair {
-            inner: X25519SecretKey::from_bytes(arr),
+            inner: SigningKey::from_seed(&arr),
         })
     }
 
-    /// Export the 32-byte secret for persistence. Caller-
-    /// side responsibility to keep it encrypted.
+    /// Export the 32-byte Ed25519 seed for persistence.
+    /// Caller-side responsibility to keep it encrypted.
     #[wasm_bindgen(js_name = "secret")]
     #[must_use]
     pub fn secret(&self) -> Vec<u8> {
-        self.inner.to_bytes().to_vec()
+        self.inner.to_seed().to_vec()
     }
 
-    /// 32-byte X25519 public key — the value the
+    /// 32-byte Ed25519 public key — the value the
     /// subscriber registers on the channel.
     #[wasm_bindgen(js_name = "public")]
     #[must_use]
     pub fn public(&self) -> Vec<u8> {
-        self.inner.public_key().to_bytes().to_vec()
+        self.inner.verifying_key().to_bytes().to_vec()
+    }
+
+    /// The `memberCardSigHeaderName()` header value for
+    /// uploading `card` (`PUT .../members/<public hex>`) or,
+    /// with an empty `card`, deleting it: the Ed25519
+    /// signature over `lakko_channels::member_card_signed_bytes`,
+    /// base64url without padding. Throws on a wrong-length
+    /// channel id.
+    #[wasm_bindgen(js_name = "memberCardRequestSignature")]
+    pub fn member_card_request_signature(
+        &self,
+        channel_id: &[u8],
+        card: &[u8],
+    ) -> Result<String, JsError> {
+        member_card_request_signature_inner(&self.inner, channel_id, card)
+            .map_err(|m| JsError::new(&m))
     }
 }
 
+fn member_card_request_signature_inner(
+    key: &SigningKey,
+    channel_id: &[u8],
+    card: &[u8],
+) -> Result<String, String> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    let channel: [u8; CHANNEL_ID_LEN] = channel_id
+        .try_into()
+        .map_err(|_| format!("channel_id must be exactly {CHANNEL_ID_LEN} bytes"))?;
+    Ok(URL_SAFE_NO_PAD.encode(sign_member_card_request(key, &channel, card)))
+}
+
+/// The request header a member-card upload or delete carries
+/// its subscriber signature in (`x-lakko-member-card-sig`).
+#[wasm_bindgen(js_name = "memberCardSigHeaderName")]
+#[must_use]
+pub fn member_card_sig_header_name() -> String {
+    MEMBER_CARD_SIG_HEADER.to_string()
+}
+
 /// Seal a 32-byte content-key seed against a subscriber's
-/// X25519 public key. Returns the wire bytes ready to
+/// Ed25519 public key (sealed to its X25519 image). Returns
+/// the wire bytes ready to
 /// `POST /v1/channels/:id/subscribers/:pk/envelope`.
 ///
 /// Always returns exactly [`channel_seed_envelope_len`]
 /// bytes (`eph_pub(32) || sealed_seed(32) || tag(16) = 80`).
 ///
-/// Throws on wrong-length args / non-X25519 public /
-/// AEAD seal failure.
+/// Throws on wrong-length args / a public key that is not a
+/// valid Ed25519 point or is of small order / AEAD seal
+/// failure.
 #[wasm_bindgen(js_name = "sealSubscriberSeedEnvelope")]
 pub fn seal_subscriber_seed_envelope(
     subscriber_pub: &[u8],
@@ -419,18 +464,28 @@ pub fn seal_subscriber_seed_envelope(
     epoch_id: u32,
     seed: &[u8],
 ) -> Result<Vec<u8>, JsError> {
-    let channel = channel_id_from_slice(channel_id)?;
-    let pub_arr: [u8; X25519_KEY_LEN] = subscriber_pub
+    seal_subscriber_seed_envelope_inner(subscriber_pub, channel_id, epoch_id, seed)
+        .map_err(|m| JsError::new(&m))
+}
+
+fn seal_subscriber_seed_envelope_inner(
+    subscriber_pub: &[u8],
+    channel_id: &[u8],
+    epoch_id: u32,
+    seed: &[u8],
+) -> Result<Vec<u8>, String> {
+    let channel: [u8; CHANNEL_ID_LEN] = channel_id
         .try_into()
-        .map_err(|_| JsError::new("subscriber public must be exactly 32 bytes"))?;
-    let pubkey = X25519PublicKey::from_bytes(&pub_arr)
-        .map_err(|_| JsError::new("subscriber public did not parse as X25519"))?;
+        .map_err(|_| format!("channel_id must be exactly {CHANNEL_ID_LEN} bytes"))?;
+    let pub_arr: [u8; SUBSCRIBER_PK_LEN] = subscriber_pub
+        .try_into()
+        .map_err(|_| "subscriber public must be exactly 32 bytes".to_string())?;
     let seed_arr: [u8; CONTENT_KEY_SEED_LEN] = seed
         .try_into()
-        .map_err(|_| JsError::new("content-key seed must be exactly 32 bytes"))?;
+        .map_err(|_| "content-key seed must be exactly 32 bytes".to_string())?;
     let seed_handle = ContentKeySeed::from_bytes_for_test(seed_arr);
-    seal_seed(&pubkey, &channel, EpochId::new(epoch_id), &seed_handle)
-        .map_err(|e| JsError::new(&format!("seal_seed: {e}")))
+    seal_seed(&pub_arr, &channel, EpochId::new(epoch_id), &seed_handle)
+        .map_err(|e| format!("seal_seed: {e}"))
 }
 
 /// Open a seed envelope with the subscriber's keypair.
@@ -616,6 +671,109 @@ pub fn classify_channel_post_plaintext(plaintext: &[u8]) -> WasmChannelPostConte
 #[must_use]
 pub fn channel_meta_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u64) -> bool {
     inner_channel_meta_is_newer(incoming_updated_at_ms, stored_updated_at_ms)
+}
+
+// ---------------------------------------------------------
+// Channel member card (ADR-0058 §3)
+// ---------------------------------------------------------
+//
+// A subscriber's (or publisher's) profile envelope sealed under the channel's
+// current epoch seed, uploaded to `PUT /v1/channels/:id/members/:pk`. Same
+// 32-byte content-key seed as the post functions; re-upload after every
+// epoch rotation. A reader picks the seed with `memberCardEpoch`, then opens.
+
+fn member_card_args(
+    seed: &[u8],
+    channel_id: &[u8],
+    subscriber_pk: &[u8],
+) -> Result<
+    (
+        ContentKeySeed,
+        [u8; CHANNEL_ID_LEN],
+        [u8; SUBSCRIBER_PK_LEN],
+    ),
+    String,
+> {
+    let seed: [u8; CONTENT_KEY_SEED_LEN] = seed
+        .try_into()
+        .map_err(|_| "content-key seed must be exactly 32 bytes".to_string())?;
+    let channel: [u8; CHANNEL_ID_LEN] = channel_id
+        .try_into()
+        .map_err(|_| "channel_id must be exactly 16 bytes".to_string())?;
+    let pk: [u8; SUBSCRIBER_PK_LEN] = subscriber_pk
+        .try_into()
+        .map_err(|_| format!("subscriber key must be exactly {SUBSCRIBER_PK_LEN} bytes"))?;
+    Ok((ContentKeySeed::from_bytes_for_test(seed), channel, pk))
+}
+
+fn seal_member_card_inner(
+    seed: &[u8],
+    epoch_id: u32,
+    channel_id: &[u8],
+    subscriber_pk: &[u8],
+    profile: &[u8],
+) -> Result<Vec<u8>, String> {
+    let (seed, channel, pk) = member_card_args(seed, channel_id, subscriber_pk)?;
+    inner_seal_member_card(&seed, EpochId::new(epoch_id), &channel, &pk, profile)
+        .map_err(|e| format!("seal_member_card: {e}"))
+}
+
+/// Seal `profile` (a profile envelope, ADR-0048 v3) into a member card for
+/// `subscriberPk` in `channelId` under the 32-byte seed of `epochId`.
+///
+/// Throws on a wrong-length seed, channel id or subscriber key, or a profile
+/// over `maxMemberCardProfileLen()` bytes.
+#[wasm_bindgen(js_name = "sealMemberCard")]
+pub fn seal_member_card(
+    seed: &[u8],
+    epoch_id: u32,
+    channel_id: &[u8],
+    subscriber_pk: &[u8],
+    profile: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    seal_member_card_inner(seed, epoch_id, channel_id, subscriber_pk, profile)
+        .map_err(|m| JsError::new(&m))
+}
+
+/// The clear epoch of a member card, to pick the matching seed before
+/// `openMemberCard`. Not authenticated until the card opens. Throws on a
+/// malformed card.
+#[wasm_bindgen(js_name = "memberCardEpoch")]
+pub fn member_card_epoch(card: &[u8]) -> Result<u32, JsError> {
+    inner_member_card_epoch(card)
+        .map(EpochId::as_u32)
+        .map_err(|e| JsError::new(&format!("member_card_epoch: {e}")))
+}
+
+fn open_member_card_inner(
+    seed: &[u8],
+    card: &[u8],
+    channel_id: &[u8],
+    subscriber_pk: &[u8],
+) -> Result<Vec<u8>, String> {
+    let (seed, channel, pk) = member_card_args(seed, channel_id, subscriber_pk)?;
+    inner_open_member_card(&seed, card, &channel, &pk).map_err(|e| format!("open_member_card: {e}"))
+}
+
+/// Open a member card served for `subscriberPk` in `channelId` with the
+/// 32-byte seed of the epoch it names; returns the profile envelope (decode
+/// it with `decodeProfileEnvelope`). Fail-closed: a card sealed for another
+/// subscriber, channel or epoch does not open. Throws on any failure.
+#[wasm_bindgen(js_name = "openMemberCard")]
+pub fn open_member_card(
+    seed: &[u8],
+    card: &[u8],
+    channel_id: &[u8],
+    subscriber_pk: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    open_member_card_inner(seed, card, channel_id, subscriber_pk).map_err(|m| JsError::new(&m))
+}
+
+/// Longest profile a member card seals, in bytes.
+#[wasm_bindgen(js_name = "maxMemberCardProfileLen")]
+#[must_use]
+pub fn max_member_card_profile_len() -> usize {
+    MAX_MEMBER_CARD_PROFILE_LEN
 }
 
 // ---------------------------------------------------------
@@ -841,6 +999,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn member_card_seals_and_opens_through_the_boundary() {
+        let (seed, channel, pk) = ([0x33u8; 32], [0x44u8; 16], [0x55u8; 32]);
+        let card = seal_member_card(&seed, 7, &channel, &pk, b"profile").unwrap();
+        assert_eq!(member_card_epoch(&card).unwrap(), 7);
+        assert_eq!(
+            open_member_card(&seed, &card, &channel, &pk).unwrap(),
+            b"profile".to_vec()
+        );
+        assert!(open_member_card_inner(&seed, &card, &channel, &[0x56; 32]).is_err());
+        assert!(seal_member_card_inner(
+            &seed,
+            7,
+            &channel,
+            &pk,
+            &vec![0; max_member_card_profile_len() + 1]
+        )
+        .is_err());
+        assert!(seal_member_card_inner(&seed[..31], 7, &channel, &pk, b"p").is_err());
+    }
+
+    #[test]
     fn signing_key_round_trip_via_seed() {
         let a = WasmChannelSigningKey::generate_js();
         let seed = a.to_seed();
@@ -929,7 +1108,32 @@ mod tests {
     #[test]
     fn subscriber_public_is_32_bytes_wasm_host() {
         let kp = WasmChannelSubscriberKeypair::generate_js();
-        assert_eq!(kp.public().len(), X25519_KEY_LEN);
+        assert_eq!(kp.public().len(), SUBSCRIBER_PK_LEN);
+    }
+
+    #[test]
+    fn the_subscriber_key_is_ed25519_and_signs_member_card_requests_wasm_host() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine as _;
+        let kp = WasmChannelSubscriberKeypair::generate_js();
+        let seed: [u8; 32] = kp.secret().try_into().unwrap();
+        assert_eq!(
+            kp.public(),
+            SigningKey::from_seed(&seed)
+                .verifying_key()
+                .to_bytes()
+                .to_vec()
+        );
+        let channel = [0x0Cu8; CHANNEL_ID_LEN];
+        let card = [0x01u8; 40];
+        let header = member_card_request_signature_inner(&kp.inner, &channel, &card).unwrap();
+        let sig = URL_SAFE_NO_PAD.decode(header).unwrap();
+        let pk: [u8; 32] = kp.public().try_into().unwrap();
+        lakko_channels::verify_member_card_request(&channel, &pk, &card, &sig).unwrap();
+        assert_eq!(member_card_sig_header_name(), "x-lakko-member-card-sig");
+        let mut identity = [0u8; 32];
+        identity[0] = 1;
+        assert!(seal_subscriber_seed_envelope_inner(&identity, &channel, 1, &[0x33; 32]).is_err());
     }
 
     #[test]

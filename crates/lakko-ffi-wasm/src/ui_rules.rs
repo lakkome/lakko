@@ -36,7 +36,15 @@ use lakko_ui_rules::ring::{
     remaining_ring_ms as rust_remaining_ring_ms, ring_decision as rust_ring_decision,
     RingDecision as RustRingDecision, CALL_RING_WINDOW_MS,
 };
+use lakko_ui_rules::visibility::{
+    choose_mode as rust_choose_mode, exclude_scope_under_all as rust_exclude_scope_under_all,
+    set_contacts_of_contacts as rust_set_contacts_of_contacts, set_groups as rust_set_groups,
+    set_groups_form as rust_set_groups_form, set_scope_chosen as rust_set_scope_chosen,
+};
 use wasm_bindgen::prelude::*;
+
+use crate::scoped_discovery::{GroupsForm, Refusal, ScopeId, VisibilityMode, VisibilitySetting};
+use lakko_contacts::visibility::ScopeId as RustScopeId;
 
 /// Which screen a conversation row opens.
 ///
@@ -611,9 +619,142 @@ pub fn call_holds_capture(call_is_live: bool, unanswered_incoming_ring: bool) ->
     rust_call_holds_capture(call_is_live, unanswered_incoming_ring)
 }
 
+// ============================================================================
+// "Who can find me" — the Settings transitions (UX section 11, ADR-0058 §7)
+// ============================================================================
+//
+// Each takes the current setting and returns the next; none stamps
+// `updatedAtMs` (call `withUpdatedAtMs`, then compose the envelope). Every
+// result satisfies the setting's rule.
+
+/// Choose one of the three positions. Leaving Some people remembers its
+/// parts; coming back restores them (or the default parts).
+#[wasm_bindgen(js_name = chooseVisibilityMode)]
+#[must_use]
+pub fn choose_visibility_mode(
+    setting: &VisibilitySetting,
+    mode: VisibilityMode,
+) -> VisibilitySetting {
+    VisibilitySetting::from_rust(rust_choose_mode(setting.rust(), mode.into()))
+}
+
+/// Switch part 2.1 (contacts of my contacts). Turning the last part off
+/// moves to Nobody; turning a part on from Nobody or Everyone moves to Some
+/// people.
+#[wasm_bindgen(js_name = setContactsOfContacts)]
+#[must_use]
+pub fn set_contacts_of_contacts(setting: &VisibilitySetting, on: bool) -> VisibilitySetting {
+    VisibilitySetting::from_rust(rust_set_contacts_of_contacts(setting.rust(), on))
+}
+
+/// Switch part 2.2 (groups and channels), keeping its form.
+#[wasm_bindgen(js_name = setGroupsVisible)]
+#[must_use]
+pub fn set_groups_visible(setting: &VisibilitySetting, on: bool) -> VisibilitySetting {
+    VisibilitySetting::from_rust(rust_set_groups(setting.rust(), on))
+}
+
+/// All groups and channels, or only the chosen ones. No effect unless part
+/// 2.2 is on.
+#[wasm_bindgen(js_name = setGroupsForm)]
+#[must_use]
+pub fn set_groups_form(setting: &VisibilitySetting, form: GroupsForm) -> VisibilitySetting {
+    VisibilitySetting::from_rust(rust_set_groups_form(setting.rust(), form.into()))
+}
+
+fn exclude_scope_under_all_inner(
+    setting: &VisibilitySetting,
+    all_scopes: &[ScopeId],
+    excluded: &ScopeId,
+) -> Result<VisibilitySetting, Refusal> {
+    let all: Vec<RustScopeId> = all_scopes.iter().map(Into::into).collect();
+    Ok(VisibilitySetting::from_rust(rust_exclude_scope_under_all(
+        setting.rust(),
+        &all,
+        &excluded.into(),
+    )?))
+}
+
+/// Exclude one group or channel while "all" is on: the form becomes "only
+/// the ones I choose" with every other scope in `allScopes` chosen.
+///
+/// # Errors
+///
+/// Throws an `Error` with `visibilityError` `scopeIdLength` /
+/// `tooManyChosen`.
+#[wasm_bindgen(js_name = excludeScopeUnderAll)]
+pub fn exclude_scope_under_all(
+    setting: &VisibilitySetting,
+    all_scopes: Vec<ScopeId>,
+    excluded: &ScopeId,
+) -> Result<VisibilitySetting, JsValue> {
+    exclude_scope_under_all_inner(setting, &all_scopes, excluded).map_err(Refusal::into_js)
+}
+
+fn set_scope_chosen_inner(
+    setting: &VisibilitySetting,
+    scope: &ScopeId,
+    on: bool,
+) -> Result<VisibilitySetting, Refusal> {
+    Ok(VisibilitySetting::from_rust(rust_set_scope_chosen(
+        setting.rust(),
+        &scope.into(),
+        on,
+    )?))
+}
+
+/// Choose or unchoose one group or channel in the chosen list.
+///
+/// # Errors
+///
+/// Throws an `Error` with `visibilityError` `scopeIdLength` /
+/// `tooManyChosen`.
+#[wasm_bindgen(js_name = setScopeChosen)]
+pub fn set_scope_chosen(
+    setting: &VisibilitySetting,
+    scope: &ScopeId,
+    on: bool,
+) -> Result<VisibilitySetting, JsValue> {
+    set_scope_chosen_inner(setting, scope, on).map_err(Refusal::into_js)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visibility_transitions_cross_the_boundary_intact() {
+        use crate::scoped_discovery::{default_visibility_setting, ScopeKind};
+        let s = default_visibility_setting();
+        let nobody = choose_visibility_mode(&s, VisibilityMode::Nobody);
+        assert_eq!(nobody.mode(), VisibilityMode::Nobody);
+        assert_eq!(choose_visibility_mode(&nobody, VisibilityMode::Some), s);
+        let off = set_contacts_of_contacts(&set_groups_visible(&s, false), false);
+        assert_eq!(off.mode(), VisibilityMode::Nobody);
+
+        let scope = |b: u8| ScopeId::new(ScopeKind::Group, vec![b; 8]);
+        let excluded = exclude_scope_under_all(&s, vec![scope(1), scope(2)], &scope(2)).unwrap();
+        assert_eq!(excluded.groups(), Some(GroupsForm::Chosen));
+        assert_eq!(excluded.chosen(), vec![scope(1)]);
+        let chosen = set_scope_chosen(&excluded, &scope(3), true).unwrap();
+        assert_eq!(chosen.chosen(), vec![scope(1), scope(3)]);
+        assert_eq!(
+            set_groups_form(&chosen, GroupsForm::All).groups(),
+            Some(GroupsForm::All)
+        );
+        let e = set_scope_chosen_inner(&s, &ScopeId::new(ScopeKind::Channel, vec![]), true)
+            .unwrap_err();
+        assert_eq!(
+            (e.property, e.code.as_str()),
+            ("visibilityError", "scopeIdLength")
+        );
+        assert!(exclude_scope_under_all_inner(
+            &s,
+            &[ScopeId::new(ScopeKind::Group, vec![])],
+            &scope(1)
+        )
+        .is_err());
+    }
 
     fn row(id: &str, kind: ConversationKind, at: Option<i64>) -> ConversationRow {
         ConversationRow::new(id.to_string(), kind, "Same".to_string(), at, false, false)

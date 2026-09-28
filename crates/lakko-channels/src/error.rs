@@ -86,6 +86,12 @@ pub enum ChannelError {
     /// in the verifier crate).
     #[error("sender public key is not a valid Ed25519 verifying key")]
     BadSenderKey,
+
+    /// A subscriber key is not a valid Ed25519 verifying key (wrong
+    /// length, not a curve point) or is of small order (ADR-0058: the
+    /// subscriber key is Ed25519, its X25519 seed-envelope key derived).
+    #[error("subscriber key is not a valid Ed25519 key of full order")]
+    BadSubscriberKey,
 }
 
 impl From<lakko_crypto::error::Error> for ChannelError {

@@ -57,9 +57,9 @@
 //! C-41:
 //!
 //! ```swift
-//! let kp        = ChannelSubscriberKeypair.generate()
+//! let kp        = ChannelSubscriberKeypair.generate()   // Ed25519 (ADR-0058)
 //! let envelope  = try sealSubscriberSeedEnvelope(
-//!     subscriberPub: kp.public(),
+//!     subscriberPub: kp.public(),                        // the Ed25519 public key
 //!     channelId:     channelIdBytes,
 //!     epochId:       1,
 //!     seed:          seed,            // publisher's content-key seed
@@ -81,18 +81,18 @@
 use std::sync::Mutex;
 
 use lakko_channels::{
-    compose_post, decode_post,
+    compose_post, decode_post, member_card_epoch as inner_member_card_epoch,
     meta::{
         channel_meta_is_newer as inner_channel_meta_is_newer, classify_post_plaintext,
         compose_channel_meta as inner_compose_channel_meta, ChannelMeta, ChannelMetaError,
         PostContent,
     },
-    open_seed,
+    open_member_card as inner_open_member_card, open_seed,
     post::ChannelPost as InnerPost,
-    seal_seed, verify_and_decrypt, ContentKeySeed, EpochId, CHANNEL_ID_LEN, EXPORTER_LABEL_V1,
-    SEED_ENVELOPE_LEN,
+    seal_member_card as inner_seal_member_card, seal_seed, sign_member_card_request,
+    verify_and_decrypt, ContentKeySeed, EpochId, CHANNEL_ID_LEN, EXPORTER_LABEL_V1,
+    MAX_MEMBER_CARD_PROFILE_LEN, MEMBER_CARD_SIG_HEADER, SEED_ENVELOPE_LEN, SUBSCRIBER_PK_LEN,
 };
-use lakko_crypto::agreement::{PublicKey as X25519PublicKey, SecretKey as X25519SecretKey};
 use lakko_crypto::signing::SigningKey;
 
 use crate::FfiError;
@@ -412,64 +412,67 @@ pub fn channel_exporter_label() -> String {
 // Subscriber-side surface (G4-3c) — HPKE seed envelope
 // =========================================================
 
-const X25519_KEY_LEN: usize = 32;
+const SUBSCRIBER_SEED_LEN: usize = 32;
 
-/// X25519 keypair the subscriber holds locally — the public
-/// half is what gets registered on the
-/// `POST /v1/channels/:id/subscribers` endpoint; the secret
-/// half unwraps the per-subscriber seed envelopes a
-/// publisher fans out at every rotation.
+/// The subscriber's key pair (ADR-0058: Ed25519). The public
+/// half is the subscriber identifier everywhere - what gets
+/// registered on `POST /v1/channels/:id/subscribers`, the
+/// envelope and member-card path key, and the key member-card
+/// requests are signed with. The seed envelope is sealed to
+/// its X25519 image, and opened with the X25519 secret
+/// derived from the same seed.
 ///
 /// Like [`ChannelSigningKey`], deliberately not `Debug` —
-/// a Debug impl would leak the 32-byte secret in panic
+/// a Debug impl would leak the 32-byte seed in panic
 /// messages.
 #[derive(uniffi::Object)]
 pub struct ChannelSubscriberKeypair {
-    inner: Mutex<X25519SecretKey>,
+    inner: Mutex<SigningKey>,
 }
 
 #[uniffi::export]
 impl ChannelSubscriberKeypair {
-    /// Fresh random keypair. Backed by `getrandom` (system
-    /// CSPRNG on both iOS and Android).
+    /// Fresh random Ed25519 key pair. Backed by `getrandom`
+    /// (system CSPRNG on both iOS and Android).
     #[uniffi::constructor]
     #[must_use]
     pub fn generate() -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self {
-            inner: Mutex::new(X25519SecretKey::generate()),
+            inner: Mutex::new(SigningKey::generate()),
         })
     }
 
-    /// Reconstruct from a 32-byte secret seed.
+    /// Reconstruct from the 32-byte Ed25519 seed [`Self::secret`]
+    /// exported.
     ///
     /// # Errors
     ///
     /// [`FfiError::Channels`] if `secret.len() != 32`.
     #[uniffi::constructor]
     pub fn from_secret(secret: Vec<u8>) -> Result<std::sync::Arc<Self>, FfiError> {
-        let arr: [u8; X25519_KEY_LEN] = secret
+        let arr: [u8; SUBSCRIBER_SEED_LEN] = secret
             .as_slice()
             .try_into()
             .map_err(|_| FfiError::Channels("subscriber secret must be exactly 32 bytes".into()))?;
         Ok(std::sync::Arc::new(Self {
-            inner: Mutex::new(X25519SecretKey::from_bytes(arr)),
+            inner: Mutex::new(SigningKey::from_seed(&arr)),
         }))
     }
 
-    /// Export the 32-byte secret for persistence. Caller-
-    /// side responsibility to keep this in a secure store
-    /// (Keychain / Keystore).
+    /// Export the 32-byte Ed25519 seed for persistence.
+    /// Caller-side responsibility to keep this in a secure
+    /// store (Keychain / Keystore).
     #[uniffi::method]
     #[must_use]
     pub fn secret(&self) -> Vec<u8> {
         self.inner
             .lock()
             .expect("subscriber-keypair lock")
-            .to_bytes()
+            .to_seed()
             .to_vec()
     }
 
-    /// 32-byte X25519 public key — the value the
+    /// 32-byte Ed25519 public key — the value the
     /// subscriber registers on the channel.
     #[uniffi::method]
     #[must_use]
@@ -477,14 +480,45 @@ impl ChannelSubscriberKeypair {
         self.inner
             .lock()
             .expect("subscriber-keypair lock")
-            .public_key()
+            .verifying_key()
             .to_bytes()
             .to_vec()
     }
+
+    /// The [`member_card_sig_header_name`] header value for
+    /// uploading `card` (`PUT .../members/<public hex>`) or,
+    /// with an empty `card`, deleting it: the Ed25519
+    /// signature over `lakko_channels::member_card_signed_bytes`,
+    /// base64url without padding.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::Channels`] on a wrong-length `channel_id`.
+    #[uniffi::method]
+    pub fn member_card_request_signature(
+        &self,
+        channel_id: Vec<u8>,
+        card: Vec<u8>,
+    ) -> Result<String, FfiError> {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine as _;
+        let channel = channel_id_from_vec(channel_id)?;
+        let key = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(URL_SAFE_NO_PAD.encode(sign_member_card_request(&key, &channel, &card)))
+    }
+}
+
+/// The request header a member-card upload or delete carries
+/// its subscriber signature in (`x-lakko-member-card-sig`).
+#[uniffi::export]
+#[must_use]
+pub fn member_card_sig_header_name() -> String {
+    MEMBER_CARD_SIG_HEADER.to_string()
 }
 
 /// Seal a 32-byte content-key seed against a subscriber's
-/// X25519 public key. Returns the wire bytes ready to
+/// Ed25519 public key (sealed to its X25519 image). Returns
+/// the wire bytes ready to
 /// `POST /v1/channels/:id/subscribers/:pk/envelope`.
 ///
 /// Always returns exactly [`channel_seed_envelope_len`]
@@ -494,7 +528,8 @@ impl ChannelSubscriberKeypair {
 ///
 /// [`FfiError::Channels`] on:
 /// - wrong-length `subscriber_pub` / `channel_id` / `seed`
-/// - `subscriber_pub` not parseable as an X25519 point
+/// - `subscriber_pub` not a valid Ed25519 point, or of small
+///   order
 /// - AEAD seal failure (impossible with ChaCha20-Poly1305
 ///   + valid lengths; surfaced for completeness)
 #[uniffi::export]
@@ -505,19 +540,14 @@ pub fn seal_subscriber_seed_envelope(
     seed: Vec<u8>,
 ) -> Result<Vec<u8>, FfiError> {
     let channel = channel_id_from_vec(channel_id)?;
-    let pub_arr: [u8; X25519_KEY_LEN] = subscriber_pub
-        .as_slice()
-        .try_into()
-        .map_err(|_| FfiError::Channels("subscriber public must be exactly 32 bytes".into()))?;
-    let pubkey = X25519PublicKey::from_bytes(&pub_arr)
-        .map_err(|_| FfiError::Channels("subscriber public did not parse as X25519".into()))?;
+    let pub_arr = subscriber_pk_from_vec(&subscriber_pub)?;
     let seed_arr: [u8; CONTENT_KEY_SEED_LEN] = seed
         .as_slice()
         .try_into()
         .map_err(|_| FfiError::Channels("content-key seed must be exactly 32 bytes".into()))?;
     let seed_handle = ContentKeySeed::from_bytes_for_test(seed_arr);
     Ok(seal_seed(
-        &pubkey,
+        &pub_arr,
         &channel,
         EpochId::new(epoch_id),
         &seed_handle,
@@ -697,6 +727,102 @@ pub fn channel_meta_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: 
     inner_channel_meta_is_newer(incoming_updated_at_ms, stored_updated_at_ms)
 }
 
+// =========================================================
+// Channel member card (ADR-0058 §3)
+// =========================================================
+//
+// A subscriber's (or publisher's) profile envelope sealed under the channel's
+// current epoch seed, uploaded to `PUT /v1/channels/:id/members/:pk`. The
+// seed is the same 32-byte content-key seed the post functions above take;
+// re-upload after every epoch rotation. A reader picks the seed for the
+// card's clear epoch with `memberCardEpoch`, then opens it.
+
+fn content_seed(seed: &[u8]) -> Result<ContentKeySeed, FfiError> {
+    let arr: [u8; CONTENT_KEY_SEED_LEN] = seed
+        .try_into()
+        .map_err(|_| FfiError::Channels("content-key seed must be exactly 32 bytes".into()))?;
+    Ok(ContentKeySeed::from_bytes_for_test(arr))
+}
+
+fn subscriber_pk_from_vec(pk: &[u8]) -> Result<[u8; SUBSCRIBER_PK_LEN], FfiError> {
+    pk.try_into().map_err(|_| {
+        FfiError::Channels(format!(
+            "subscriber key must be exactly {SUBSCRIBER_PK_LEN} bytes, got {}",
+            pk.len()
+        ))
+    })
+}
+
+/// Seal `profile` (a profile envelope, ADR-0048 v3) into a member card for
+/// `subscriber_pk` in `channel_id` under the 32-byte seed of `epoch_id`.
+///
+/// # Errors
+///
+/// [`FfiError::Channels`] for a wrong-length seed, channel id or subscriber
+/// key, or a profile over [`max_member_card_profile_len`] bytes.
+#[uniffi::export]
+pub fn seal_member_card(
+    seed: Vec<u8>,
+    epoch_id: u32,
+    channel_id: Vec<u8>,
+    subscriber_pk: Vec<u8>,
+    profile: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    let channel = channel_id_from_vec(channel_id)?;
+    let pk = subscriber_pk_from_vec(&subscriber_pk)?;
+    Ok(inner_seal_member_card(
+        &content_seed(&seed)?,
+        EpochId::new(epoch_id),
+        &channel,
+        &pk,
+        &profile,
+    )?)
+}
+
+/// The clear epoch of a member card, to pick the matching seed before
+/// [`open_member_card`]. Not authenticated until the card opens.
+///
+/// # Errors
+///
+/// [`FfiError::Channels`] for a malformed card.
+#[uniffi::export]
+pub fn member_card_epoch(card: Vec<u8>) -> Result<u32, FfiError> {
+    Ok(inner_member_card_epoch(&card)?.as_u32())
+}
+
+/// Open a member card served for `subscriber_pk` in `channel_id` with the
+/// 32-byte seed of the epoch it names; returns the profile envelope, which
+/// the caller decodes with `decodeProfileEnvelope`. Fail-closed: a card
+/// sealed for another subscriber, channel or epoch does not open.
+///
+/// # Errors
+///
+/// [`FfiError::Channels`] for a malformed card, a wrong-length argument, or
+/// a card the authenticator refuses.
+#[uniffi::export]
+pub fn open_member_card(
+    seed: Vec<u8>,
+    card: Vec<u8>,
+    channel_id: Vec<u8>,
+    subscriber_pk: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    let channel = channel_id_from_vec(channel_id)?;
+    let pk = subscriber_pk_from_vec(&subscriber_pk)?;
+    Ok(inner_open_member_card(
+        &content_seed(&seed)?,
+        &card,
+        &channel,
+        &pk,
+    )?)
+}
+
+/// Longest profile a member card seals, in bytes.
+#[uniffi::export]
+#[must_use]
+pub fn max_member_card_profile_len() -> u32 {
+    u32::try_from(MAX_MEMBER_CARD_PROFILE_LEN).unwrap_or(u32::MAX)
+}
+
 // ---------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------
@@ -714,6 +840,42 @@ fn channel_id_from_vec(slice: Vec<u8>) -> Result<[u8; CHANNEL_ID_LEN], FfiError>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn member_card_seals_and_opens_through_the_boundary() {
+        let seed = vec![0x33; 32];
+        let channel = vec![0x44; 16];
+        let pk = vec![0x55; 32];
+        let card = super::seal_member_card(
+            seed.clone(),
+            7,
+            channel.clone(),
+            pk.clone(),
+            b"profile".to_vec(),
+        )
+        .unwrap();
+        assert_eq!(super::member_card_epoch(card.clone()).unwrap(), 7);
+        assert_eq!(
+            super::open_member_card(seed.clone(), card.clone(), channel.clone(), pk).unwrap(),
+            b"profile".to_vec()
+        );
+        // Served under another subscriber key, the card does not open.
+        assert!(matches!(
+            super::open_member_card(seed.clone(), card, channel.clone(), vec![0x56; 32]),
+            Err(crate::FfiError::Channels(_))
+        ));
+        assert!(matches!(
+            super::seal_member_card(
+                seed,
+                7,
+                channel,
+                vec![0x55; 32],
+                vec![0; super::max_member_card_profile_len() as usize + 1],
+            ),
+            Err(crate::FfiError::Channels(_))
+        ));
+        assert!(super::member_card_epoch(vec![1, 2, 3]).is_err());
+    }
+
     use super::*;
 
     #[test]
@@ -882,7 +1044,45 @@ mod tests {
     #[test]
     fn subscriber_public_is_32_bytes() {
         let kp = ChannelSubscriberKeypair::generate();
-        assert_eq!(kp.public().len(), X25519_KEY_LEN);
+        assert_eq!(kp.public().len(), SUBSCRIBER_PK_LEN);
+    }
+
+    #[test]
+    fn the_subscriber_key_is_ed25519_and_signs_member_card_requests() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine as _;
+        let kp = ChannelSubscriberKeypair::generate();
+        // The public half is the Ed25519 key of the exported seed.
+        let seed: [u8; 32] = kp.secret().try_into().unwrap();
+        assert_eq!(
+            kp.public(),
+            SigningKey::from_seed(&seed)
+                .verifying_key()
+                .to_bytes()
+                .to_vec()
+        );
+        let channel = vec![0x0Cu8; CHANNEL_ID_LEN];
+        let card = vec![0x01u8; 40];
+        let header = kp
+            .member_card_request_signature(channel.clone(), card.clone())
+            .unwrap();
+        let sig = URL_SAFE_NO_PAD.decode(header).unwrap();
+        let pk: [u8; 32] = kp.public().try_into().unwrap();
+        lakko_channels::verify_member_card_request(
+            &channel.clone().try_into().unwrap(),
+            &pk,
+            &card,
+            &sig,
+        )
+        .unwrap();
+        assert_eq!(member_card_sig_header_name(), "x-lakko-member-card-sig");
+        // A small-order key is refused at seal.
+        let mut identity = vec![0u8; 32];
+        identity[0] = 1;
+        assert!(matches!(
+            seal_subscriber_seed_envelope(identity, channel, 1, vec![0x33; 32]),
+            Err(FfiError::Channels(_))
+        ));
     }
 
     #[test]

@@ -512,6 +512,17 @@ pub struct FfiProfile {
     /// 16 bytes or absent; anything else is refused. On receipt, the value
     /// the call roster derives the ADR-0021 peer tag from (ADR-0048 v2).
     pub account_id: Option<Vec<u8>>,
+    /// The discovery-signed username certificate (ADR-0058 §5), exactly 153
+    /// bytes, or `None`. Requires `username`. On receipt, show the username
+    /// only after `verify_username_binding` accepts this certificate for the
+    /// OPRF of the claimed username and the sender's account id.
+    pub username_certificate: Option<Vec<u8>>,
+    /// Reach grants handed to the group's members (ADR-0058 §3): at most
+    /// two, one per class, of class `Group`, `Member` or `Channel`. SECRET —
+    /// see [`crate::scoped_discovery::FfiReachGrant`]. Send the `Group` /
+    /// `Channel` grant only where the setting allows the scope; the `Member`
+    /// grant rides in every group.
+    pub grants: Vec<crate::scoped_discovery::FfiReachGrant>,
 }
 
 impl From<RustProfile> for FfiProfile {
@@ -521,6 +532,8 @@ impl From<RustProfile> for FfiProfile {
             username: p.username,
             updated_at_ms: p.updated_at_ms,
             account_id: p.account_id.map(|id| id.to_vec()),
+            username_certificate: p.username_certificate,
+            grants: p.grants.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -547,14 +560,18 @@ fn prepare_profile(p: FfiProfile) -> Result<RustProfile, FfiError> {
             ))
         })?),
     };
+    let grants = p
+        .grants
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect::<Result<Vec<_>, FfiError>>()?;
     Ok(RustProfile {
         display_name,
         username,
         updated_at_ms: p.updated_at_ms,
         account_id,
-        // ADR-0058 fields are not surfaced on this FFI until sprint S3.
-        username_certificate: None,
-        grants: Vec::new(),
+        username_certificate: p.username_certificate,
+        grants,
     })
 }
 
@@ -572,6 +589,10 @@ fn prepare_profile(p: FfiProfile) -> Result<RustProfile, FfiError> {
 ///   `DisplayNameTooLong` / `DisplayNameTooManyBytes` — the name.
 /// * `UsernameEmpty` / `UsernameTooShort` / `UsernameTooLong` /
 ///   `UsernameInvalidCharacters` — the username.
+/// * [`FfiError::Reach`] `seedLength` — a grant seed is not 32 bytes.
+/// * [`FfiError::Contacts`] for the ADR-0058 bounds: a certificate that is
+///   not 153 bytes or has no username, more than two grants, two grants of
+///   one class, or a grant of a class a profile may not carry.
 #[uniffi::export]
 pub fn compose_profile_envelope(profile: FfiProfile) -> Result<Vec<u8>, FfiError> {
     let prepared = prepare_profile(profile)?;
@@ -1754,6 +1775,29 @@ pub enum FfiIncomingEnvelopeKind {
     /// of a one-to-one), then keep it only when [`pin_is_newer`] for that
     /// message.
     Pin,
+    /// A contact's introduction record to relay (ADR-0058 §4). The record
+    /// wire rides the `introduction_record` field; `payload` is empty. Never
+    /// render it. **Accept only from the other participant of a 1:1
+    /// conversation**, keep the newest per contact, and put it in the
+    /// bundles this device sends its contacts. Appended last so every
+    /// earlier variant keeps its ordinal.
+    IntroductionOffer,
+    /// A contact's bundle of introduction records (ADR-0058 §4). The bundle
+    /// rides the `introductions` field; `payload` is empty. Never render it.
+    /// Keep the newest per contact via
+    /// [`crate::scoped_discovery::bundle_is_newer`] and search it locally;
+    /// never re-relay it.
+    Introductions,
+    /// The owner's "who can find me" setting from another of their devices
+    /// (ADR-0058 §7). Rides the `visibility` field; `payload` is empty.
+    /// **Accept only on the owner's DeviceGroup**, keep via
+    /// [`crate::scoped_discovery::visibility_is_newer`].
+    Visibility,
+    /// The owner's reach-key version counters from another of their devices
+    /// (ADR-0058 §7). Rides the `reach_state` field; `payload` is empty. Same
+    /// rules as `Visibility`, ordered by
+    /// [`crate::scoped_discovery::reach_state_is_newer`].
+    ReachState,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -1794,6 +1838,18 @@ pub struct FfiIncomingEnvelope {
     /// Set only for `Pin` (ADR-0052): the decoded pin operation. `None` for
     /// every other kind.
     pub pin: Option<FfiPinOp>,
+    /// Set only for `IntroductionOffer` (ADR-0058): the record wire,
+    /// structurally checked and still sealed. `None` for every other kind.
+    pub introduction_record: Option<Vec<u8>>,
+    /// Set only for `Introductions` (ADR-0058): the decoded bundle. `None`
+    /// for every other kind.
+    pub introductions: Option<crate::scoped_discovery::FfiIntroductionsBundle>,
+    /// Set only for `Visibility` (ADR-0058): the decoded setting. `None` for
+    /// every other kind.
+    pub visibility: Option<crate::scoped_discovery::FfiVisibilitySetting>,
+    /// Set only for `ReachState` (ADR-0058): the decoded reach state. `None`
+    /// for every other kind.
+    pub reach_state: Option<crate::scoped_discovery::FfiReachState>,
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts.
@@ -1812,85 +1868,82 @@ pub struct FfiIncomingEnvelope {
 ///   payload).
 #[uniffi::export]
 pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvelope, FfiError> {
+    use FfiIncomingEnvelopeKind as K;
     let parsed = rust_dispatch_incoming_envelope(&plaintext)
         .map_err(|err| FfiError::Contacts(err.to_string()))?;
-    let mut profile = None;
-    let mut group_name = None;
-    let mut pin = None;
-    let (kind, payload, camera_on, mint_epoch) = match parsed {
-        IncomingEnvelope::CallWelcome(p) => {
-            (FfiIncomingEnvelopeKind::CallWelcome, p.to_vec(), None, None)
+    Ok(match parsed {
+        IncomingEnvelope::CallWelcome(p) => FfiIncomingEnvelope {
+            payload: p.to_vec(),
+            ..FfiIncomingEnvelope::of(K::CallWelcome)
         },
-        IncomingEnvelope::CallKeyPackage(p) => (
-            FfiIncomingEnvelopeKind::CallKeyPackage,
-            p.to_vec(),
-            None,
-            None,
-        ),
-        IncomingEnvelope::MediaState { camera_on } => (
-            FfiIncomingEnvelopeKind::MediaState,
-            Vec::new(),
-            Some(camera_on),
-            None,
-        ),
-        IncomingEnvelope::PushRoutingSecret { mint_epoch, secret } => (
-            FfiIncomingEnvelopeKind::PushRoutingSecret,
-            secret.to_vec(),
-            None,
-            Some(mint_epoch),
-        ),
-        IncomingEnvelope::CommitterBeacon => (
-            FfiIncomingEnvelopeKind::CommitterBeacon,
-            Vec::new(),
-            None,
-            None,
-        ),
-        IncomingEnvelope::Profile(p) => {
-            profile = Some(p.into());
-            (FfiIncomingEnvelopeKind::Profile, Vec::new(), None, None)
+        IncomingEnvelope::CallKeyPackage(p) => FfiIncomingEnvelope {
+            payload: p.to_vec(),
+            ..FfiIncomingEnvelope::of(K::CallKeyPackage)
         },
-        IncomingEnvelope::GroupName(g) => {
-            group_name = Some(g.into());
-            (FfiIncomingEnvelopeKind::GroupName, Vec::new(), None, None)
+        IncomingEnvelope::MediaState { camera_on } => FfiIncomingEnvelope {
+            camera_on: Some(camera_on),
+            ..FfiIncomingEnvelope::of(K::MediaState)
         },
-        IncomingEnvelope::ProfileRequest => (
-            FfiIncomingEnvelopeKind::ProfileRequest,
-            Vec::new(),
-            None,
-            None,
-        ),
-        IncomingEnvelope::Pin(op) => {
-            pin = Some(op.into());
-            (FfiIncomingEnvelopeKind::Pin, Vec::new(), None, None)
+        IncomingEnvelope::PushRoutingSecret { mint_epoch, secret } => FfiIncomingEnvelope {
+            payload: secret.to_vec(),
+            mint_epoch: Some(mint_epoch),
+            ..FfiIncomingEnvelope::of(K::PushRoutingSecret)
         },
-        // ADR-0058 envelopes are classified by the core (so they never fall
-        // through to the intro-message path) but not yet surfaced on this
-        // FFI; that is sprint S3. Until then they are refused, which the
-        // caller treats as "drop, never render".
-        IncomingEnvelope::IntroductionOffer(_)
-        | IncomingEnvelope::Introductions(_)
-        | IncomingEnvelope::Visibility(_)
-        | IncomingEnvelope::ReachState(_) => {
-            return Err(FfiError::Contacts(
-                "envelope kind not yet surfaced on this FFI (ADR-0058 S3)".to_string(),
-            ));
+        IncomingEnvelope::CommitterBeacon => FfiIncomingEnvelope::of(K::CommitterBeacon),
+        IncomingEnvelope::Profile(p) => FfiIncomingEnvelope {
+            profile: Some(p.into()),
+            ..FfiIncomingEnvelope::of(K::Profile)
         },
-        IncomingEnvelope::IntroMessage(p) => (
-            FfiIncomingEnvelopeKind::IntroMessage,
-            p.to_vec(),
-            None,
-            None,
-        ),
-    };
-    Ok(FfiIncomingEnvelope {
-        kind,
-        payload,
-        camera_on,
-        mint_epoch,
-        profile,
-        group_name,
-        pin,
+        IncomingEnvelope::GroupName(g) => FfiIncomingEnvelope {
+            group_name: Some(g.into()),
+            ..FfiIncomingEnvelope::of(K::GroupName)
+        },
+        IncomingEnvelope::ProfileRequest => FfiIncomingEnvelope::of(K::ProfileRequest),
+        IncomingEnvelope::Pin(op) => FfiIncomingEnvelope {
+            pin: Some(op.into()),
+            ..FfiIncomingEnvelope::of(K::Pin)
+        },
+        IncomingEnvelope::IntroductionOffer(record) => FfiIncomingEnvelope {
+            introduction_record: Some(record.encode()?),
+            ..FfiIncomingEnvelope::of(K::IntroductionOffer)
+        },
+        IncomingEnvelope::Introductions(bundle) => FfiIncomingEnvelope {
+            introductions: Some(crate::scoped_discovery::introductions_to_ffi(bundle)?),
+            ..FfiIncomingEnvelope::of(K::Introductions)
+        },
+        IncomingEnvelope::Visibility(setting) => FfiIncomingEnvelope {
+            visibility: Some(setting.into()),
+            ..FfiIncomingEnvelope::of(K::Visibility)
+        },
+        IncomingEnvelope::ReachState(state) => FfiIncomingEnvelope {
+            reach_state: Some(state.into()),
+            ..FfiIncomingEnvelope::of(K::ReachState)
+        },
+        IncomingEnvelope::IntroMessage(p) => FfiIncomingEnvelope {
+            payload: p.to_vec(),
+            ..FfiIncomingEnvelope::of(K::IntroMessage)
+        },
     })
+}
+
+impl FfiIncomingEnvelope {
+    /// A result of `kind` with every kind-specific field empty; each arm of
+    /// the dispatcher fills in its own.
+    const fn of(kind: FfiIncomingEnvelopeKind) -> Self {
+        Self {
+            kind,
+            payload: Vec::new(),
+            camera_on: None,
+            mint_epoch: None,
+            profile: None,
+            group_name: None,
+            pin: None,
+            introduction_record: None,
+            introductions: None,
+            visibility: None,
+            reach_state: None,
+        }
+    }
 }
 
 // ===========================================================================
@@ -3838,6 +3891,8 @@ mod tests {
             username: Some("@Alice".to_string()),
             updated_at_ms: 1_700_000_000_000,
             account_id: None,
+            username_certificate: None,
+            grants: Vec::new(),
         }
     }
 
@@ -3847,6 +3902,8 @@ mod tests {
             username: Some("alice".to_string()),
             updated_at_ms: 1_700_000_000_000,
             account_id: None,
+            username_certificate: None,
+            grants: Vec::new(),
         }
     }
 
@@ -3867,6 +3924,8 @@ mod tests {
             username: Some(String::new()),
             updated_at_ms: 1,
             account_id: None,
+            username_certificate: None,
+            grants: Vec::new(),
         })
         .expect("compose blank");
         let decoded = decode_profile_envelope(blank).expect("decode blank");
@@ -3906,6 +3965,101 @@ mod tests {
         ));
         assert!(profile_is_newer(2, 1));
         assert!(!profile_is_newer(1, 1));
+    }
+
+    /// ADR-0058: profile v3 carries the username certificate and the reach
+    /// grants across the boundary, both ways, and refuses the new bounds.
+    #[test]
+    fn profile_v3_carries_certificate_and_grants() {
+        use crate::scoped_discovery::{derive_reach_grant, FfiReachClass};
+        let seed = vec![0x42; 32];
+        let mut p = canonical_profile();
+        p.username_certificate = Some(vec![9; 153]);
+        p.grants = vec![
+            derive_reach_grant(seed.clone(), FfiReachClass::Group, vec![1; 8], 2).unwrap(),
+            derive_reach_grant(seed.clone(), FfiReachClass::Member, vec![1; 8], 1).unwrap(),
+        ];
+        let wire = compose_profile_envelope(p.clone()).expect("compose v3");
+        assert_eq!(decode_profile_envelope(wire.clone()).unwrap(), p);
+        assert_eq!(dispatch_incoming_envelope(wire).unwrap().profile, Some(p));
+
+        let mut bad = canonical_profile();
+        bad.username_certificate = Some(vec![9; 152]);
+        assert!(matches!(
+            compose_profile_envelope(bad),
+            Err(FfiError::Contacts(_))
+        ));
+        let mut bad = canonical_profile();
+        bad.grants =
+            vec![derive_reach_grant(seed.clone(), FfiReachClass::Contact, vec![], 1).unwrap()];
+        assert!(matches!(
+            compose_profile_envelope(bad),
+            Err(FfiError::Contacts(_))
+        ));
+        let mut bad = canonical_profile();
+        let mut grant = derive_reach_grant(seed, FfiReachClass::Group, vec![1; 8], 1).unwrap();
+        grant.seed.pop();
+        bad.grants = vec![grant];
+        assert!(matches!(
+            compose_profile_envelope(bad),
+            Err(FfiError::Reach(_))
+        ));
+    }
+
+    /// ADR-0058: the four envelopes the core classified but S1 refused now
+    /// dispatch as their own kinds, carrying their decoded data.
+    #[test]
+    fn dispatch_surfaces_the_adr_0058_envelopes() {
+        use crate::scoped_discovery::{
+            compose_introduction, compose_introduction_offer, compose_introductions_bundle,
+            compose_reach_state_envelope, compose_visibility_envelope, default_visibility_setting,
+            derive_reach_grant, FfiIntroductionPayload, FfiReachClass, FfiReachState,
+            FfiReachStateEntry,
+        };
+        let payload = FfiIntroductionPayload {
+            identity_pk: vec![1; 32],
+            account_id: vec![2; 16],
+            display_name: Some("Anna".to_string()),
+            username: None,
+            username_certificate: None,
+            fof: derive_reach_grant(vec![3; 32], FfiReachClass::Fof, vec![], 1).unwrap(),
+        };
+        let record = compose_introduction(payload, vec![vec![5; 64]], 1).unwrap();
+
+        let offer = dispatch_incoming_envelope(compose_introduction_offer(record.clone()).unwrap())
+            .unwrap();
+        assert_eq!(offer.kind, FfiIncomingEnvelopeKind::IntroductionOffer);
+        assert!(offer.payload.is_empty());
+        assert_eq!(offer.introduction_record, Some(record.clone()));
+        assert_eq!(offer.introductions, None);
+
+        let bundle =
+            dispatch_incoming_envelope(compose_introductions_bundle(vec![record], 3).unwrap())
+                .unwrap();
+        assert_eq!(bundle.kind, FfiIncomingEnvelopeKind::Introductions);
+        let b = bundle.introductions.expect("bundle surfaced");
+        assert_eq!((b.updated_at_ms, b.records.len()), (3, 1));
+
+        let setting = default_visibility_setting();
+        let vis = dispatch_incoming_envelope(compose_visibility_envelope(setting.clone()).unwrap())
+            .unwrap();
+        assert_eq!(vis.kind, FfiIncomingEnvelopeKind::Visibility);
+        assert_eq!(vis.visibility, Some(setting));
+
+        let state = FfiReachState {
+            entries: vec![FfiReachStateEntry {
+                class: FfiReachClass::Fof,
+                scope_id: vec![],
+                version: 4,
+            }],
+            updated_at_ms: 5,
+        };
+        let rs = dispatch_incoming_envelope(compose_reach_state_envelope(state.clone()).unwrap())
+            .unwrap();
+        assert_eq!(rs.kind, FfiIncomingEnvelopeKind::ReachState);
+        assert_eq!(rs.reach_state, Some(state));
+        assert_eq!(rs.visibility, None);
+        assert_eq!(rs.profile, None);
     }
 
     /// ADR-0051: the group-name envelope prepares (trims), round-trips, and

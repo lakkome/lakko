@@ -10,6 +10,9 @@
 //! / `DeviceGroup.dsAccessSigner` / `PublisherGroup.dsAccessSigner`, or
 //! [`ds_mailbox_signer`] for the device's own mailbox) and the two claim
 //! bodies, so `DsClient` neither derives a key nor spells a field name.
+//! `DsProofSigner.forReach(seed)` signs a write to someone else's closed
+//! mailbox under a reach key (ADR-0058 §2), and `signDelegation` hands one
+//! such write to another key.
 //!
 //! The clock is `Date.now()` on wasm32 (there is no `SystemTime` in the
 //! browser) and the system clock on the host, where the unit tests run; the
@@ -18,8 +21,9 @@
 //! [ADR-0053]: ../../../docs/adr/0053-ds-journal-authorisation.md
 
 use lakko_ds_proof::{
-    DsProofSigner as Inner, RequestParts, ACCESS_KEY_LABEL, MAILBOX_EPOCH, NONCE_LEN,
-    PROOF_HEADER_NAME,
+    sign_delegation as inner_sign_delegation, DsProofSigner as Inner, RequestParts,
+    ACCESS_KEY_LABEL, DELEGATION_HEADER_NAME, MAILBOX_EPOCH, MAX_DELEGATION_TTL_MS, NONCE_LEN,
+    PROOF_HEADER_NAME, REACH_EPOCH,
 };
 use lakko_mls::{Group as MlsGroup, Identity as MlsIdentity};
 use wasm_bindgen::prelude::*;
@@ -59,10 +63,40 @@ fn fresh_nonce() -> [u8; NONCE_LEN] {
     nonce
 }
 
+fn reach_len_refusal(code: &str, what: &str, want: usize, got: usize) -> JsValue {
+    crate::contacts::coded_error(
+        &format!("{what} must be {want} bytes, got {got}"),
+        "reachError",
+        code,
+    )
+}
+
+fn for_reach_inner(reach_seed: &[u8]) -> Option<DsProofSigner> {
+    let seed = <[u8; 32]>::try_from(reach_seed).ok()?;
+    Some(DsProofSigner {
+        inner: Inner::for_reach(&seed),
+    })
+}
+
 #[wasm_bindgen]
 impl DsProofSigner {
+    /// A reach-key signer (ADR-0058 §2) at `dsReachEpoch()`: signs a write to
+    /// a closed identity mailbox with a 32-byte reach seed the owner
+    /// registered (or a delegate seed, next to a delegation). Its proof header
+    /// names the signing key (a sixth field, inside the signed bytes) so the
+    /// DS checks exactly that key; nothing for the caller to add.
+    ///
+    /// # Errors
+    ///
+    /// Throws an `Error` with `reachError` `seedLength`.
+    #[wasm_bindgen(js_name = forReach)]
+    pub fn for_reach(reach_seed: &[u8]) -> Result<DsProofSigner, JsValue> {
+        for_reach_inner(reach_seed)
+            .ok_or_else(|| reach_len_refusal("seedLength", "reach seed", 32, reach_seed.len()))
+    }
+
     /// The epoch this signer proves membership at (`dsMailboxEpoch()` for a
-    /// mailbox signer). A `bigint`.
+    /// mailbox signer, `dsReachEpoch()` for a reach signer). A `bigint`.
     #[wasm_bindgen(getter)]
     pub fn epoch(&self) -> u64 {
         self.inner.epoch()
@@ -123,6 +157,69 @@ pub fn ds_proof_header_name() -> String {
 #[must_use]
 pub fn ds_mailbox_epoch() -> u64 {
     MAILBOX_EPOCH
+}
+
+/// The epoch label a reach-key proof carries (`2n ** 64n - 1n`): never a
+/// group epoch, never `dsMailboxEpoch()`. A `bigint`.
+#[wasm_bindgen(js_name = dsReachEpoch)]
+#[must_use]
+pub fn ds_reach_epoch() -> u64 {
+    REACH_EPOCH
+}
+
+/// The request header a reach-key delegation travels in.
+#[wasm_bindgen(js_name = delegationHeaderName)]
+#[must_use]
+pub fn delegation_header_name() -> String {
+    DELEGATION_HEADER_NAME.to_string()
+}
+
+/// The longest a delegation may still have to live when the DS checks it,
+/// in ms (24 hours). A `bigint`.
+#[wasm_bindgen(js_name = maxDelegationTtlMs)]
+#[must_use]
+pub fn max_delegation_ttl_ms() -> u64 {
+    MAX_DELEGATION_TTL_MS
+}
+
+fn sign_delegation_inner(
+    issuer_seed: &[u8],
+    mailbox: &[u8],
+    delegate_pk: &[u8],
+    expires_at_ms: u64,
+    nonce: &[u8],
+) -> Result<String, (&'static str, &'static str, usize, usize)> {
+    let seed = <[u8; 32]>::try_from(issuer_seed)
+        .map_err(|_| ("seedLength", "issuer seed", 32, issuer_seed.len()))?;
+    let mailbox = <[u8; 32]>::try_from(mailbox)
+        .map_err(|_| ("keyLength", "mailbox pseudonym", 32, mailbox.len()))?;
+    let delegate = <[u8; 32]>::try_from(delegate_pk)
+        .map_err(|_| ("keyLength", "delegate key", 32, delegate_pk.len()))?;
+    let nonce = <[u8; NONCE_LEN]>::try_from(nonce)
+        .map_err(|_| ("nonceLength", "nonce", NONCE_LEN, nonce.len()))?;
+    Ok(inner_sign_delegation(&seed, &mailbox, &delegate, expires_at_ms, nonce).to_header_value())
+}
+
+/// Sign a delegation (ADR-0058 §2): the holder of the reach seed
+/// `issuerSeed` authorises ONE write by `delegatePk` to the 32-byte `mailbox`
+/// pseudonym until `expiresAtMs`, under a fresh 16-byte `nonce` the DS
+/// consumes. Returns the `delegationHeaderName()` header value; the delegate
+/// sends it with a proof signed by `DsProofSigner.forReach(delegateSeed)`.
+///
+/// # Errors
+///
+/// Throws an `Error` with `reachError` `seedLength` / `keyLength` /
+/// `nonceLength`.
+#[wasm_bindgen(js_name = signDelegation)]
+pub fn sign_delegation(
+    issuer_seed: &[u8],
+    mailbox: &[u8],
+    delegate_pk: &[u8],
+    expires_at_ms: u64,
+    nonce: &[u8],
+) -> Result<String, JsValue> {
+    sign_delegation_inner(issuer_seed, mailbox, delegate_pk, expires_at_ms, nonce)
+        .map_err(|(code, what, want, got)| reach_len_refusal(code, what, want, got))
 }
 
 /// The signer for `identity`'s own mailbox: its identity key at
@@ -194,6 +291,50 @@ mod tests {
         };
         assert!(verify(&proof, &parts, &key, now_ms()).is_ok());
         assert!(signer.group_claim_body_json().starts_with("{\"epoch\":"));
+    }
+
+    #[test]
+    fn a_delegate_writes_under_a_delegation_the_server_verifies() {
+        let delegate = DsProofSigner::for_reach(&[0x72u8; 32]).unwrap();
+        assert_eq!(delegate.epoch(), ds_reach_epoch());
+        assert_ne!(ds_reach_epoch(), ds_mailbox_epoch());
+        let mailbox = [0x70u8; 32];
+        let expires = now_ms() + 60_000;
+        let header = sign_delegation(
+            &[0x71u8; 32],
+            &mailbox,
+            &delegate.verifying_key(),
+            expires,
+            &[0x73u8; 16],
+        )
+        .unwrap();
+        let d = lakko_ds_proof::Delegation::parse_header_value(&header).unwrap();
+        lakko_ds_proof::verify_delegation(&d, &mailbox, now_ms()).unwrap();
+        // The delegate's proof names the delegate key, as the DS requires.
+        let proof_header = delegate.sign("POST", "/ds/mailbox/00/messages", "", b"welcome");
+        assert_eq!(proof_header.split('.').count(), 6);
+        let proof = Proof::parse(&proof_header).unwrap();
+        lakko_ds_proof::verify_delegated_proof(
+            &d,
+            &proof,
+            &RequestParts {
+                method: "POST",
+                canonical_path: "/ds/mailbox/00/messages",
+                query: "",
+                body: b"welcome",
+            },
+            now_ms(),
+        )
+        .unwrap();
+        assert_eq!(delegation_header_name(), "x-lakko-ds-delegation");
+        assert_eq!(max_delegation_ttl_ms(), 86_400_000);
+        assert!(for_reach_inner(&[0; 31]).is_none());
+        assert_eq!(
+            sign_delegation_inner(&[0; 32], &mailbox, &[0; 32], expires, &[0; 15])
+                .unwrap_err()
+                .0,
+            "nonceLength"
+        );
     }
 
     #[test]

@@ -104,6 +104,12 @@ reqwest = { version = "0.12", default-features = false, features = [
 # a regular dep for the derivation.
 lakko-transparency.workspace = true
 
+# ADR-0058 — username certificates: discovery signs
+# `(OPRF(username), account_id, issued_at)` with a dedicated key at
+# registration. lakko-attest's whole dependency set is lakko-crypto +
+# thiserror, both already here.
+lakko-attest.workspace = true
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
@@ -118,3 +124,6 @@ http-body-util = "0.1"
 lakko-mls.workspace = true
 # Mint spendable tokens in-process for the route tests.
 lakko-anon-token-server = { workspace = true, features = ["testing"] }
+# ADR-0058 — pin the server's name-term cap to the client crate's and compute
+# real name terms in the route tests.
+lakko-discovery-client.workspace = true

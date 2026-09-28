@@ -9,7 +9,8 @@
 //! `/discovery/register` is session-token-gated (Phase 1.5b) and the
 //! body's `account_id` must equal the token's; it is counted per account
 //! by the write limiter and, since ADR-0054 S3, carries no proof of work.
-//! `/discovery/lookup` is anonymous and rate-limited per source address;
+//! `/discovery/lookup` is anonymous and rate-limited per source address, and
+//! since ADR-0058 answers only for a person who chose Everyone;
 //! the enumeration step it follows (`/discovery/oprf`) spends an
 //! anonymous token.
 //!
@@ -71,6 +72,9 @@ pub(crate) struct RegisterRequest {
 #[derive(Serialize)]
 pub(crate) struct RegisterResponse {
     pub(crate) ok: bool,
+    /// ADR-0058: standard base64 of the 153-byte username certificate
+    /// (`lakko_attest::username_cert`) binding this OPRF hash to the account.
+    pub(crate) username_certificate_b64: String,
 }
 
 /// `POST /discovery/register` — bind an OPRF-hashed username to an
@@ -115,7 +119,14 @@ pub(crate) async fn register(
                 account_id = %B64.encode(account_id),
                 "username registered",
             );
-            Ok(Json(RegisterResponse { ok: true }))
+            Ok(Json(RegisterResponse {
+                ok: true,
+                username_certificate_b64: crate::visibility::sign_certificate(
+                    &state.username_cert_key,
+                    oprf_hash,
+                    account_id,
+                ),
+            }))
         },
         Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => Err((
             StatusCode::CONFLICT,
@@ -148,7 +159,9 @@ pub(crate) struct LookupResponse {
 }
 
 /// `POST /discovery/lookup` — resolve an OPRF-hashed username to its
-/// `account_id`. Returns **404 Not Found** for unknown hashes.
+/// `account_id`. Returns **404 Not Found** for unknown hashes, and for a
+/// username whose owner is not in Everyone (ADR-0058: the same status and
+/// body, so a lookup cannot tell hidden from unregistered).
 ///
 /// Exact-match only: there is intentionally no prefix search /
 /// autocomplete from the server (which would either need plaintext
@@ -160,8 +173,10 @@ pub(crate) async fn lookup(
 ) -> Result<Json<LookupResponse>, (StatusCode, String)> {
     let oprf_hash = decode_fixed::<OPRF_HASH_LEN>(&payload.oprf_hash, "oprf_hash")?;
 
+    // ADR-0058: only a person in Everyone answers; a hidden username gets the
+    // very response an unregistered one does.
     let row: Option<(Vec<u8>,)> =
-        sqlx::query_as("SELECT account_id FROM usernames WHERE oprf_hash = ?")
+        sqlx::query_as("SELECT account_id FROM usernames WHERE oprf_hash = ? AND is_public = TRUE")
             .bind(&oprf_hash[..])
             .fetch_optional(&state.db)
             .await

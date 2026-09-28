@@ -49,7 +49,12 @@
 //! - [`member_card`] — a subscriber's profile sealed under the channel's
 //!   current epoch seed for the channel member list, keyed and bound per
 //!   `(channel, epoch, subscriber)` so the server cannot swap two cards.
-//!   `seal_member_card` / `member_card_epoch` / `open_member_card`.
+//!   `seal_member_card` / `member_card_epoch` / `open_member_card`, and the
+//!   upload signature `member_card_signed_bytes` / `sign_member_card_request`
+//!   / `verify_member_card_request` shared with `services/channels`.
+//! - The subscriber key is Ed25519 ([`subscribe`]): the same key signs
+//!   member-card requests and, converted to X25519, receives the seed
+//!   envelope.
 //!
 //! ## What's NOT here yet
 //!
@@ -103,9 +108,10 @@ pub mod subscribe;
 pub use epoch::{EpochId, EPOCH_ID_LEN};
 pub use error::{ChannelError, Result};
 pub use member_card::{
-    member_card_epoch, open_member_card, seal_member_card, MAX_MEMBER_CARD_PROFILE_LEN,
-    MEMBER_CARD_KEY_INFO_V1, MEMBER_CARD_MAX_LEN, MEMBER_CARD_MIN_LEN, MEMBER_CARD_VERSION_V1,
-    SUBSCRIBER_PK_LEN,
+    member_card_epoch, member_card_signed_bytes, open_member_card, seal_member_card,
+    sign_member_card_request, verify_member_card_request, MAX_MEMBER_CARD_PROFILE_LEN,
+    MEMBER_CARD_KEY_INFO_V1, MEMBER_CARD_MAX_LEN, MEMBER_CARD_MIN_LEN, MEMBER_CARD_SIG_DOMAIN_V1,
+    MEMBER_CARD_SIG_HEADER, MEMBER_CARD_SIG_LEN, MEMBER_CARD_VERSION_V1, SUBSCRIBER_PK_LEN,
 };
 pub use meta::{
     channel_meta_is_newer, classify_post_plaintext, compose_channel_meta, decode_channel_meta,
@@ -118,7 +124,9 @@ pub use post::{
 };
 pub use rotation_policy::{RotationPolicy, RotationState, DEFAULT_INTERVAL_MS, DEFAULT_MAX_POSTS};
 pub use seed::{ContentKeySeed, CONTENT_KEY_SEED_LEN, EXPORTER_LABEL_V1};
-pub use subscribe::{open_seed, seal_seed, EPH_PUB_LEN, SEED_ENVELOPE_LEN, TAG_LEN};
+pub use subscribe::{
+    open_seed, seal_seed, subscriber_public_key, EPH_PUB_LEN, SEED_ENVELOPE_LEN, TAG_LEN,
+};
 
 /// Channel identifier length — 16 bytes (the pseudonym chosen at
 /// channel creation, per ADR-0010 § "Server can correlate" mitigation).

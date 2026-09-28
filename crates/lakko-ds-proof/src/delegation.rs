@@ -46,9 +46,11 @@
 //!    signature verifies under `issuer_pk`;
 //! 3. `issuer_pk` is a reach key registered for that mailbox and not
 //!    expired (the server's state, so not this crate's);
-//! 4. the request proof parses, carries [`crate::REACH_EPOCH`], and
-//!    verifies under `delegate_pk` ([`crate::verify`]) - the delegate signs
-//!    with [`crate::DsProofSigner::for_reach`] over its own delegate seed;
+//! 4. the request proof parses, carries [`crate::REACH_EPOCH`], names
+//!    `delegate_pk` as its reach key (the proof's sixth field, inside its
+//!    signed bytes), and verifies under it - [`verify_delegated_proof`]; the
+//!    delegate signs with [`crate::DsProofSigner::for_reach`] over its own
+//!    delegate seed, which names the delegate key automatically;
 //! 5. the delegation nonce is consumed (a second write with the same
 //!    delegation is refused - a delegation is good for one write), and the
 //!    proof nonce is consumed as for any proof.
@@ -127,6 +129,39 @@ pub enum DelegationError {
     /// not a valid key.
     #[error("delegation signature invalid")]
     BadSignature,
+    /// The request proof does not name the delegate key, or is not a reach
+    /// proof.
+    #[error("request proof is not the delegate's")]
+    NotTheDelegate,
+    /// The request proof names the delegate key but does not verify under it
+    /// (or is outside the time window).
+    #[error("request proof invalid")]
+    BadProof,
+}
+
+/// Step 4 of the contract: `proof` is a reach proof that names the
+/// delegation's `delegate_pk` and verifies under it over `req` at `now_ms`.
+///
+/// Does not check the delegation itself ([`verify_delegation`]) or consume
+/// any nonce.
+///
+/// # Errors
+///
+/// [`DelegationError::NotTheDelegate`] when the proof is not a reach proof or
+/// names another key; [`DelegationError::BadProof`] when it names the
+/// delegate but does not verify (including an invalid delegate key).
+pub fn verify_delegated_proof(
+    delegation: &Delegation,
+    proof: &crate::Proof,
+    req: &crate::RequestParts<'_>,
+    now_ms: u64,
+) -> Result<(), DelegationError> {
+    if proof.epoch != crate::REACH_EPOCH || proof.reach_key != Some(delegation.delegate_pk) {
+        return Err(DelegationError::NotTheDelegate);
+    }
+    let delegate =
+        VerifyingKey::from_bytes(&delegation.delegate_pk).map_err(|_| DelegationError::BadProof)?;
+    crate::verify(proof, req, &delegate, now_ms).map_err(|_| DelegationError::BadProof)
 }
 
 /// The bytes a delegation signs. Fixed length.

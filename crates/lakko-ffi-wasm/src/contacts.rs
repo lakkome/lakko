@@ -97,6 +97,8 @@ use lakko_crypto::secret::SecretBytes;
 use lakko_crypto::signing::{SigningKey, VerifyingKey, PUBLIC_KEY_LEN};
 use wasm_bindgen::prelude::*;
 
+use crate::scoped_discovery::{IntroductionsBundle, ReachGrant, ReachState, VisibilitySetting};
+
 fn contact_err(e: ContactError) -> JsError {
     JsError::new(&format!("{e}"))
 }
@@ -108,7 +110,7 @@ fn crypto_err(e: lakko_crypto::error::Error) -> JsError {
 /// A real `Error` carrying one stable reason code as an own property —
 /// the `mls.rs` `refusalReason` pattern. The message keeps the core's
 /// sentence (never the rejected input); a client branches on the property.
-fn coded_error(message: &str, property: &str, code: &str) -> JsValue {
+pub(crate) fn coded_error(message: &str, property: &str, code: &str) -> JsValue {
     let err = js_sys::Error::new(message);
     // Best-effort: a failed property write must not replace the error.
     let _ = js_sys::Reflect::set(
@@ -148,6 +150,8 @@ fn prepare_profile(
     username: Option<String>,
     updated_at_ms: u64,
     account_id: Option<Vec<u8>>,
+    username_certificate: Option<Vec<u8>>,
+    grants: Option<Vec<ReachGrant>>,
 ) -> Result<RustProfile, JsValue> {
     let account_id = match account_id {
         None => None,
@@ -175,9 +179,12 @@ fn prepare_profile(
         username,
         updated_at_ms,
         account_id,
-        // ADR-0058 fields are not surfaced on this FFI until sprint S3.
-        username_certificate: None,
-        grants: Vec::new(),
+        username_certificate,
+        grants: grants
+            .unwrap_or_default()
+            .iter()
+            .map(|g| g.rust().clone())
+            .collect(),
     })
 }
 
@@ -522,6 +529,8 @@ pub struct WasmProfile {
     username: Option<String>,
     updated_at_ms: u64,
     account_id: Option<Vec<u8>>,
+    username_certificate: Option<Vec<u8>>,
+    grants: Vec<ReachGrant>,
 }
 
 impl From<RustProfile> for WasmProfile {
@@ -531,6 +540,8 @@ impl From<RustProfile> for WasmProfile {
             username: p.username,
             updated_at_ms: p.updated_at_ms,
             account_id: p.account_id.map(|id| id.to_vec()),
+            username_certificate: p.username_certificate,
+            grants: p.grants.into_iter().map(ReachGrant::from_rust).collect(),
         }
     }
 }
@@ -561,6 +572,22 @@ impl WasmProfile {
     pub fn account_id(&self) -> Option<Vec<u8>> {
         self.account_id.clone()
     }
+
+    /// The 153-byte discovery-signed username certificate (ADR-0058 §5), or
+    /// `undefined`. Show the username only after `verifyUsernameBinding`
+    /// accepts it for the OPRF of the claimed username and this account id.
+    #[wasm_bindgen(getter, js_name = usernameCertificate)]
+    pub fn username_certificate(&self) -> Option<Vec<u8>> {
+        self.username_certificate.clone()
+    }
+
+    /// The reach grants handed to the group's members (ADR-0058 §3), at most
+    /// two (`Group` / `Member` / `Channel`). SECRET: store encrypted, never
+    /// log.
+    #[wasm_bindgen(getter)]
+    pub fn grants(&self) -> Vec<ReachGrant> {
+        self.grants.clone()
+    }
 }
 
 /// Compose a profile envelope (ADR-0048) — the inner plaintext to publish as
@@ -573,15 +600,31 @@ impl WasmProfile {
 /// # Errors
 ///
 /// Throws an `Error` with a `profileError` code such as
-/// `"displayName.controlOrFormatCharacter"` or `"username.tooShort"`.
+/// `"displayName.controlOrFormatCharacter"`, `"username.tooShort"`, or the
+/// ADR-0058 bounds `"certificate.length"`, `"certificate.withoutUsername"`,
+/// `"grants.tooMany"`, `"grants.duplicateClass"`, `"grants.classNotAllowed"`.
+///
+/// `usernameCertificate` (153 bytes) and `grants` (at most two, `Group` /
+/// `Member` / `Channel`, one per class) are optional: `undefined` means none.
+/// Send a `Group` / `Channel` grant only where the setting allows the scope;
+/// the `Member` grant rides in every group.
 #[wasm_bindgen(js_name = composeProfileEnvelope)]
 pub fn compose_profile_envelope(
     display_name: Option<String>,
     username: Option<String>,
     updated_at_ms: u64,
     account_id: Option<Vec<u8>>,
+    username_certificate: Option<Vec<u8>>,
+    grants: Option<Vec<ReachGrant>>,
 ) -> Result<Vec<u8>, JsValue> {
-    let profile = prepare_profile(display_name, username, updated_at_ms, account_id)?;
+    let profile = prepare_profile(
+        display_name,
+        username,
+        updated_at_ms,
+        account_id,
+        username_certificate,
+        grants,
+    )?;
     rust_compose_profile(&profile).map_err(profile_error_value)
 }
 
@@ -1670,6 +1713,22 @@ pub enum WasmIncomingEnvelopeKind {
     /// authority is the receiver's role-table check, then `pinIsNewer` for
     /// that message.
     Pin = 9,
+    /// A contact's introduction record to relay (ADR-0058 §4). The record
+    /// wire rides the `introductionRecord` getter; `payload` is empty. Never
+    /// render it; accept it only from the other participant of a 1:1
+    /// conversation and keep the newest per contact.
+    IntroductionOffer = 10,
+    /// A contact's bundle of introduction records (ADR-0058 §4), on the
+    /// `introductions` getter. Keep the newest per contact via
+    /// `bundleIsNewer`, search it locally, never re-relay it.
+    Introductions = 11,
+    /// The owner's "who can find me" setting from another of their devices
+    /// (ADR-0058 §7), on the `visibility` getter. Accept only on the owner's
+    /// DeviceGroup, keep via `visibilityIsNewer`.
+    Visibility = 12,
+    /// The owner's reach-key version counters (ADR-0058 §7), on the
+    /// `reachState` getter. Same rules, ordered by `reachStateIsNewer`.
+    ReachState = 13,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -1685,6 +1744,30 @@ pub struct WasmIncomingEnvelope {
     profile: Option<WasmProfile>,
     group_name: Option<WasmGroupName>,
     pin: Option<WasmPinOp>,
+    introduction_record: Option<Vec<u8>>,
+    introductions: Option<IntroductionsBundle>,
+    visibility: Option<VisibilitySetting>,
+    reach_state: Option<ReachState>,
+}
+
+impl WasmIncomingEnvelope {
+    /// A result of `kind` with every kind-specific field empty; each arm of
+    /// the dispatcher fills in its own.
+    const fn of(kind: WasmIncomingEnvelopeKind) -> Self {
+        Self {
+            kind,
+            payload: Vec::new(),
+            camera_on: None,
+            mint_epoch: None,
+            profile: None,
+            group_name: None,
+            pin: None,
+            introduction_record: None,
+            introductions: None,
+            visibility: None,
+            reach_state: None,
+        }
+    }
 }
 
 #[wasm_bindgen(js_class = IncomingEnvelope)]
@@ -1749,6 +1832,34 @@ impl WasmIncomingEnvelope {
     pub fn pin(&self) -> Option<WasmPinOp> {
         self.pin.clone()
     }
+
+    /// Set only for `IntroductionOffer` (ADR-0058): the record wire,
+    /// structurally checked and still sealed. `undefined` otherwise.
+    #[wasm_bindgen(getter, js_name = introductionRecord)]
+    pub fn introduction_record(&self) -> Option<Vec<u8>> {
+        self.introduction_record.clone()
+    }
+
+    /// Set only for `Introductions` (ADR-0058): the decoded bundle.
+    /// `undefined` otherwise.
+    #[wasm_bindgen(getter)]
+    pub fn introductions(&self) -> Option<IntroductionsBundle> {
+        self.introductions.clone()
+    }
+
+    /// Set only for `Visibility` (ADR-0058): the decoded setting. `undefined`
+    /// otherwise.
+    #[wasm_bindgen(getter)]
+    pub fn visibility(&self) -> Option<VisibilitySetting> {
+        self.visibility.clone()
+    }
+
+    /// Set only for `ReachState` (ADR-0058): the decoded reach state.
+    /// `undefined` otherwise.
+    #[wasm_bindgen(getter, js_name = reachState)]
+    pub fn reach_state(&self) -> Option<ReachState> {
+        self.reach_state.clone()
+    }
 }
 
 /// Single-call dispatcher for opaque relay-payload plaintexts
@@ -1766,110 +1877,66 @@ impl WasmIncomingEnvelope {
 /// is malformed (below the Welcome / KP-forward minimum floor,
 /// or an invalid media-state payload).
 #[wasm_bindgen(js_name = dispatchIncomingEnvelope)]
-// One arm per envelope kind; splitting the table would hide which kinds exist.
-#[allow(clippy::too_many_lines)]
 pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelope, JsError> {
-    let parsed =
-        rust_dispatch_incoming_envelope(plaintext).map_err(|err| JsError::new(&err.to_string()))?;
+    dispatch_incoming_envelope_inner(plaintext).map_err(|msg| JsError::new(&msg))
+}
+
+/// The `JsError`-free core of [`dispatch_incoming_envelope`], so the refusal
+/// is exercisable on the host.
+fn dispatch_incoming_envelope_inner(plaintext: &[u8]) -> Result<WasmIncomingEnvelope, String> {
+    use WasmIncomingEnvelopeKind as K;
+    let parsed = rust_dispatch_incoming_envelope(plaintext).map_err(|err| err.to_string())?;
     Ok(match parsed {
         IncomingEnvelope::CallWelcome(p) => WasmIncomingEnvelope {
-            kind: WasmIncomingEnvelopeKind::CallWelcome,
             payload: p.to_vec(),
-            camera_on: None,
-            mint_epoch: None,
-            profile: None,
-            group_name: None,
-            pin: None,
+            ..WasmIncomingEnvelope::of(K::CallWelcome)
         },
         IncomingEnvelope::CallKeyPackage(p) => WasmIncomingEnvelope {
-            kind: WasmIncomingEnvelopeKind::CallKeyPackage,
             payload: p.to_vec(),
-            camera_on: None,
-            mint_epoch: None,
-            profile: None,
-            group_name: None,
-            pin: None,
+            ..WasmIncomingEnvelope::of(K::CallKeyPackage)
         },
         IncomingEnvelope::MediaState { camera_on } => WasmIncomingEnvelope {
-            kind: WasmIncomingEnvelopeKind::MediaState,
-            payload: Vec::new(),
             camera_on: Some(camera_on),
-            mint_epoch: None,
-            profile: None,
-            group_name: None,
-            pin: None,
+            ..WasmIncomingEnvelope::of(K::MediaState)
         },
         IncomingEnvelope::PushRoutingSecret { mint_epoch, secret } => WasmIncomingEnvelope {
-            kind: WasmIncomingEnvelopeKind::PushRoutingSecret,
             payload: secret.to_vec(),
-            camera_on: None,
             mint_epoch: Some(mint_epoch),
-            profile: None,
-            group_name: None,
-            pin: None,
+            ..WasmIncomingEnvelope::of(K::PushRoutingSecret)
         },
-        IncomingEnvelope::CommitterBeacon => WasmIncomingEnvelope {
-            kind: WasmIncomingEnvelopeKind::CommitterBeacon,
-            payload: Vec::new(),
-            camera_on: None,
-            mint_epoch: None,
-            profile: None,
-            group_name: None,
-            pin: None,
-        },
+        IncomingEnvelope::CommitterBeacon => WasmIncomingEnvelope::of(K::CommitterBeacon),
         IncomingEnvelope::Profile(p) => WasmIncomingEnvelope {
-            kind: WasmIncomingEnvelopeKind::Profile,
-            payload: Vec::new(),
-            camera_on: None,
-            mint_epoch: None,
             profile: Some(p.into()),
-            group_name: None,
-            pin: None,
+            ..WasmIncomingEnvelope::of(K::Profile)
         },
         IncomingEnvelope::GroupName(g) => WasmIncomingEnvelope {
-            kind: WasmIncomingEnvelopeKind::GroupName,
-            payload: Vec::new(),
-            camera_on: None,
-            mint_epoch: None,
-            profile: None,
             group_name: Some(g.into()),
-            pin: None,
+            ..WasmIncomingEnvelope::of(K::GroupName)
         },
-        IncomingEnvelope::ProfileRequest => WasmIncomingEnvelope {
-            kind: WasmIncomingEnvelopeKind::ProfileRequest,
-            payload: Vec::new(),
-            camera_on: None,
-            mint_epoch: None,
-            profile: None,
-            group_name: None,
-            pin: None,
-        },
+        IncomingEnvelope::ProfileRequest => WasmIncomingEnvelope::of(K::ProfileRequest),
         IncomingEnvelope::Pin(op) => WasmIncomingEnvelope {
-            kind: WasmIncomingEnvelopeKind::Pin,
-            payload: Vec::new(),
-            camera_on: None,
-            mint_epoch: None,
-            profile: None,
-            group_name: None,
             pin: Some(op.into()),
+            ..WasmIncomingEnvelope::of(K::Pin)
         },
-        // ADR-0058: refused (dropped, never rendered) until surfaced in S3.
-        IncomingEnvelope::IntroductionOffer(_)
-        | IncomingEnvelope::Introductions(_)
-        | IncomingEnvelope::Visibility(_)
-        | IncomingEnvelope::ReachState(_) => {
-            return Err(JsError::new(
-                "envelope kind not yet surfaced on this FFI (ADR-0058 S3)",
-            ));
+        IncomingEnvelope::IntroductionOffer(record) => WasmIncomingEnvelope {
+            introduction_record: Some(record.encode().map_err(|e| e.to_string())?),
+            ..WasmIncomingEnvelope::of(K::IntroductionOffer)
+        },
+        IncomingEnvelope::Introductions(bundle) => WasmIncomingEnvelope {
+            introductions: Some(IntroductionsBundle::from_rust(&bundle).map_err(|e| e.message)?),
+            ..WasmIncomingEnvelope::of(K::Introductions)
+        },
+        IncomingEnvelope::Visibility(setting) => WasmIncomingEnvelope {
+            visibility: Some(VisibilitySetting::from_rust(setting)),
+            ..WasmIncomingEnvelope::of(K::Visibility)
+        },
+        IncomingEnvelope::ReachState(state) => WasmIncomingEnvelope {
+            reach_state: Some(ReachState::from_rust(state)),
+            ..WasmIncomingEnvelope::of(K::ReachState)
         },
         IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
-            kind: WasmIncomingEnvelopeKind::IntroMessage,
             payload: p.to_vec(),
-            camera_on: None,
-            mint_epoch: None,
-            profile: None,
-            group_name: None,
-            pin: None,
+            ..WasmIncomingEnvelope::of(K::IntroMessage)
         },
     })
 }
@@ -2921,6 +2988,8 @@ mod tests {
             Some("@Alice".to_string()),
             42,
             Some(vec![9; 16]),
+            None,
+            None,
         )
         .unwrap();
         let decoded = decode_profile_envelope(&envelope).unwrap();
@@ -2958,6 +3027,99 @@ mod tests {
             .unwrap();
         assert_eq!(opened.profile(), Some(decoded));
         assert_eq!(opened.intro_message(), b"hi bob");
+    }
+
+    /// ADR-0058: profile v3 carries the certificate and the grants across
+    /// the boundary, both ways. Success paths only (a throw panics off
+    /// wasm32); the refusal matrix is the core's.
+    #[test]
+    fn profile_v3_carries_certificate_and_grants() {
+        use crate::scoped_discovery::{derive_reach_grant, ReachClass};
+        let grants = vec![
+            derive_reach_grant(&[0x42; 32], ReachClass::Group, &[1; 8], 2).unwrap(),
+            derive_reach_grant(&[0x42; 32], ReachClass::Member, &[1; 8], 1).unwrap(),
+        ];
+        let envelope = compose_profile_envelope(
+            Some("Alice".to_string()),
+            Some("alice".to_string()),
+            7,
+            None,
+            Some(vec![9; 153]),
+            Some(grants.clone()),
+        )
+        .unwrap();
+        let decoded = decode_profile_envelope(&envelope).unwrap();
+        assert_eq!(decoded.username_certificate(), Some(vec![9; 153]));
+        assert_eq!(decoded.grants(), grants);
+        let dispatched = dispatch_incoming_envelope(&envelope).unwrap();
+        assert_eq!(dispatched.profile(), Some(decoded));
+        // The ADR-0058 bounds refuse before any bytes exist.
+        let mut too_many = grants.clone();
+        too_many.push(derive_reach_grant(&[0x42; 32], ReachClass::Channel, &[1; 8], 1).unwrap());
+        let p = prepare_profile(None, None, 1, None, None, Some(too_many)).unwrap();
+        assert!(matches!(
+            rust_compose_profile(&p),
+            Err(ProfileError::TooManyGrants { count: 3 })
+        ));
+    }
+
+    /// ADR-0058: the four envelopes S1 refused dispatch as their own kinds.
+    #[test]
+    fn dispatch_surfaces_the_adr_0058_envelopes() {
+        use crate::scoped_discovery::{
+            compose_reach_state_envelope, compose_visibility_envelope, default_visibility_setting,
+            ReachClass, ReachStateEntry,
+        };
+        use lakko_contacts::introduction::{
+            compose_bundle, compose_introduction, compose_introduction_offer, IntroductionRecord,
+        };
+        let rust_payload = lakko_contacts::introduction::IntroductionPayload {
+            identity_pk: [1; 32],
+            account_id: [2; 16],
+            display_name: Some("Anna".into()),
+            username: None,
+            username_certificate: None,
+            fof: lakko_contacts::reach::ReachGrant::derive(
+                &[3; 32],
+                lakko_contacts::reach::ReachClass::Fof,
+                b"",
+                1,
+            )
+            .unwrap(),
+        };
+        let record = compose_introduction(&rust_payload, &[[5; 64]], 1).unwrap();
+
+        let offer =
+            dispatch_incoming_envelope(&compose_introduction_offer(&record).unwrap()).unwrap();
+        assert_eq!(offer.kind(), WasmIncomingEnvelopeKind::IntroductionOffer);
+        assert!(offer.payload().is_empty());
+        assert_eq!(offer.introduction_record(), Some(record.clone()));
+
+        let bundle = compose_bundle(&[IntroductionRecord::decode(&record).unwrap()], 3).unwrap();
+        let b = dispatch_incoming_envelope(&bundle).unwrap();
+        assert_eq!(b.kind(), WasmIncomingEnvelopeKind::Introductions);
+        let bundle = b.introductions().unwrap();
+        assert_eq!((bundle.updated_at_ms(), bundle.record_count()), (3, 1));
+
+        let setting = default_visibility_setting();
+        let v =
+            dispatch_incoming_envelope(&compose_visibility_envelope(&setting).unwrap()).unwrap();
+        assert_eq!(v.kind(), WasmIncomingEnvelopeKind::Visibility);
+        assert_eq!(v.visibility(), Some(setting));
+
+        let state = crate::scoped_discovery::ReachState::new(
+            vec![ReachStateEntry::new(ReachClass::Fof, vec![], 4)],
+            5,
+        );
+        let r = dispatch_incoming_envelope(&compose_reach_state_envelope(&state).unwrap()).unwrap();
+        assert_eq!(r.kind(), WasmIncomingEnvelopeKind::ReachState);
+        assert_eq!(r.reach_state(), Some(state));
+        assert_eq!(r.visibility(), None);
+
+        // A malformed ADR-0058 envelope is refused, never an intro message.
+        let mut broken = compose_visibility_envelope(&default_visibility_setting()).unwrap();
+        broken.push(0);
+        assert!(dispatch_incoming_envelope_inner(&broken).is_err());
     }
 
     /// ADR-0051: the group-name envelope is trimmed on compose, round-trips,

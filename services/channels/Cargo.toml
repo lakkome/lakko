@@ -68,21 +68,21 @@ sqlx = { version = "0.9", default-features = false, features = [
 # uses the `async-trait` crate, so we stay consistent.
 async-trait = "0.1"
 
-# We do NOT pull lakko-channels here: the server treats
-# every ChannelPost as opaque bytes (ADR-0010 §"What the
-# SFU does NOT do" extends to this service — no payload
-# inspection). Clients verify signatures + decrypt; the
-# server only stores and forwards. Keeping the workspace
-# crate out of the dep graph keeps the proof of opacity
-# obvious to an auditor.
+# ADR-0058 member cards. The server still treats every
+# ChannelPost, seed envelope and card as opaque bytes
+# (ADR-0010 — no payload inspection). From lakko-channels
+# it calls `member_card_epoch` (the clear frame reader:
+# length bounds + version + the clear epoch),
+# `subscriber_public_key` (the Ed25519 point check at
+# registration) and `verify_member_card_request` (the
+# subscriber's signature over a card upload, whose signed
+# bytes are defined there for clients and server alike) -
+# never a key derivation or an open. lakko-channels' own
+# dependencies are lakko-crypto, thiserror, tracing.
+lakko-channels.workspace = true
 
 [dev-dependencies]
+# Test fixtures sign member-card uploads and draw random ids.
+lakko-crypto.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-# Integration tests assert that the wire-level envelope-
-# length constant matches the crypto crate's
-# SEED_ENVELOPE_LEN at compile time. Pulling lakko-channels
-# in as a dev-only dep keeps the production binary's
-# opacity invariant intact while still letting the test
-# crate cross-check.
-lakko-channels.workspace = true
 base64 = "0.22"

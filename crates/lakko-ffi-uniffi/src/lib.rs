@@ -49,6 +49,7 @@ pub mod mnemonic;
 pub mod pairing;
 pub mod pow;
 pub mod release;
+pub mod scoped_discovery;
 pub mod sframe;
 pub mod sfu_signaling;
 pub mod shamir;
@@ -449,6 +450,45 @@ pub enum FfiError {
     /// (and the blinding factors it held) is consumed by the first call.
     #[error("anonymous-token request already finalized")]
     AnonTokenAlreadyFinalized,
+
+    // ------------------------------------------------------------------
+    // ADR-0058 scoped discovery — appended, for the ordinal reason above.
+    //
+    // Each message starts with the frozen `code()` of the core error (or,
+    // where the core has none, a code this crate documents on the function)
+    // followed by `": "` and the reason, the `ChannelMeta` / `AnonToken`
+    // shape: a client branches on the code, never on the prose.
+    // ------------------------------------------------------------------
+    /// A reach derivation or a reach grant refused (`ReachError::code()`:
+    /// `unknownClass`, `scopeIdTooLong`, `scopeIdNotEmpty`, `scopeIdEmpty`,
+    /// `badLength`), or a reach / delegation seed or key of the wrong length
+    /// (`seedLength`, `keyLength`, `nonceLength`).
+    #[error("{0}")]
+    Reach(String),
+
+    /// An introduction record, offer or bundle refused
+    /// (`IntroductionError::code()`, for example `noTerms`, `duplicateTag`,
+    /// `badRecordCount`, `open`), or an argument of the wrong length
+    /// (`identityPkLength`, `accountIdLength`, `oprfLength`). A display-name
+    /// or username refusal in a payload surfaces as the typed
+    /// `DisplayName*` / `Username*` variants instead, as for a profile.
+    #[error("{0}")]
+    Introduction(String),
+
+    /// A "who can find me" setting or reach-state envelope refused, or a
+    /// Settings transition that would break the setting's rule
+    /// (`VisibilityError::code()`, for example `someWithNoPart`,
+    /// `tooManyChosen`, `duplicateEntry`, `reach.scopeIdEmpty`).
+    #[error("{0}")]
+    Visibility(String),
+
+    /// A username certificate refused: `badLength`, `badVersion`,
+    /// `badSignature`, `usernameMismatch`, `accountMismatch`, or an argument
+    /// that is not a key / hash / account id (`badVerifyingKey`,
+    /// `oprfHashLength`, `accountIdLength`). A client that sees any of these
+    /// does not show the username (invariant #4).
+    #[error("{0}")]
+    UsernameCertificate(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {

@@ -48,14 +48,32 @@
 //! certificate plus reach seeds), and small enough to bound a paged member-list
 //! response.
 //!
+//! ## The upload signature
+//!
+//! `services/channels` stores a card only when the request is signed by the
+//! subscriber key the path names (the Ed25519 key of [`crate::subscribe`]).
+//! The signed bytes are defined here, once, for the clients and the server:
+//!
+//! ```text
+//! "lakko/channel/member-card-sig/v1" ‖ channel_id(16) ‖ subscriber_pk(32) ‖ SHA-256(card)
+//! ```
+//!
+//! The domain is distinct from the card key's HKDF info label
+//! ([`MEMBER_CARD_KEY_INFO_V1`]) and from every other signature domain in the
+//! crate (`lakko/channel/v1/post-sig`), so a card signature is never a post
+//! signature. A delete signs the same bytes over the empty card; no card is
+//! empty (a card is at least [`MEMBER_CARD_MIN_LEN`] bytes), so a delete
+//! signature never authorises a write and the other way round.
+//!
 //! [ADR-0058]: ../../../docs/adr/0058-scoped-discovery.md
 //! [ADR-0048]: ../../../docs/adr/0048-profile-names.md
 
 use lakko_crypto::aead::{self, Algorithm, KEY_LEN, NONCE_LEN};
+use lakko_crypto::hash;
 use lakko_crypto::kdf::hkdf_sha256;
 use lakko_crypto::random;
 use lakko_crypto::secret::SecretBytes;
-use lakko_crypto::signing::PUBLIC_KEY_LEN;
+use lakko_crypto::signing::{Signature, SigningKey, PUBLIC_KEY_LEN, SIGNATURE_LEN};
 
 use crate::epoch::{EpochId, EPOCH_ID_LEN};
 use crate::error::{ChannelError, Result};
@@ -67,6 +85,18 @@ pub const MEMBER_CARD_VERSION_V1: u8 = 1;
 
 /// HKDF info label for the per-subscriber card key, frozen at v1.
 pub const MEMBER_CARD_KEY_INFO_V1: &[u8] = b"lakko/channel/member-card/v1";
+
+/// Domain that opens the bytes a member-card upload or delete signature covers,
+/// frozen at v1. Distinct from [`MEMBER_CARD_KEY_INFO_V1`].
+pub const MEMBER_CARD_SIG_DOMAIN_V1: &[u8] = b"lakko/channel/member-card-sig/v1";
+
+/// The request header carrying a member-card upload or delete signature: the
+/// 64-byte signature in base64url without padding. Shared by the clients and
+/// `services/channels`.
+pub const MEMBER_CARD_SIG_HEADER: &str = "x-lakko-member-card-sig";
+
+/// Length of a member-card request signature (Ed25519).
+pub const MEMBER_CARD_SIG_LEN: usize = SIGNATURE_LEN;
 
 /// Maximum length of the sealed profile, in bytes. Chosen, not measured (see
 /// the module docs).
@@ -165,6 +195,63 @@ pub fn open_member_card(
         &bytes[HEADER_LEN..],
     )
     .map_err(|_| ChannelError::AeadOpen)
+}
+
+/// The bytes a subscriber signs to upload `card` (or, with an empty `card`, to
+/// delete its card): `domain ‖ channel_id ‖ subscriber_pk ‖ SHA-256(card)`.
+#[must_use]
+pub fn member_card_signed_bytes(
+    channel_id: &[u8; CHANNEL_ID_LEN],
+    subscriber_pk: &[u8; SUBSCRIBER_PK_LEN],
+    card: &[u8],
+) -> Vec<u8> {
+    let digest = hash::sha256(card);
+    let mut out = Vec::with_capacity(
+        MEMBER_CARD_SIG_DOMAIN_V1.len() + CHANNEL_ID_LEN + SUBSCRIBER_PK_LEN + digest.len(),
+    );
+    out.extend_from_slice(MEMBER_CARD_SIG_DOMAIN_V1);
+    out.extend_from_slice(channel_id);
+    out.extend_from_slice(subscriber_pk);
+    out.extend_from_slice(&digest);
+    out
+}
+
+/// Sign a member-card upload (or, with an empty `card`, a delete) with the
+/// subscriber key. The subscriber key the bytes name is this key's public
+/// half.
+#[must_use]
+pub fn sign_member_card_request(
+    subscriber_key: &SigningKey,
+    channel_id: &[u8; CHANNEL_ID_LEN],
+    card: &[u8],
+) -> [u8; MEMBER_CARD_SIG_LEN] {
+    let pk = subscriber_key.verifying_key().to_bytes();
+    subscriber_key
+        .sign(&member_card_signed_bytes(channel_id, &pk, card))
+        .to_bytes()
+}
+
+/// Verify a member-card request signature by `subscriber_pk`, which must be a
+/// valid subscriber key ([`crate::subscribe::subscriber_public_key`]).
+///
+/// # Errors
+///
+/// [`ChannelError::BadSubscriberKey`] for an invalid or small-order key,
+/// [`ChannelError::BadSignature`] for a signature of the wrong length or one
+/// that does not verify.
+pub fn verify_member_card_request(
+    channel_id: &[u8; CHANNEL_ID_LEN],
+    subscriber_pk: &[u8; SUBSCRIBER_PK_LEN],
+    card: &[u8],
+    signature: &[u8],
+) -> Result<()> {
+    let key = crate::subscribe::subscriber_public_key(subscriber_pk)?;
+    let sig = Signature::from_bytes(signature).map_err(|_| ChannelError::BadSignature)?;
+    key.verify(
+        &member_card_signed_bytes(channel_id, subscriber_pk, card),
+        &sig,
+    )
+    .map_err(|_| ChannelError::BadSignature)
 }
 
 // ----------------------------------------------------------------
@@ -343,6 +430,55 @@ mod tests {
             Err(ChannelError::MemberCardTooLong { max, got })
                 if max == MAX_MEMBER_CARD_PROFILE_LEN && got == MAX_MEMBER_CARD_PROFILE_LEN + 1
         ));
+    }
+
+    #[test]
+    fn a_request_signature_binds_channel_key_and_card() {
+        let sub = SigningKey::from_seed(&[0x51; 32]);
+        let pk = sub.verifying_key().to_bytes();
+        let wire = card(b"alice");
+        let sig = sign_member_card_request(&sub, &CHANNEL, &wire);
+        verify_member_card_request(&CHANNEL, &pk, &wire, &sig).unwrap();
+        // Another card, another channel, another key, a delete: all refused.
+        assert!(matches!(
+            verify_member_card_request(&CHANNEL, &pk, &card(b"alice"), &sig),
+            Err(ChannelError::BadSignature)
+        ));
+        assert!(verify_member_card_request(&[0x0D; CHANNEL_ID_LEN], &pk, &wire, &sig).is_err());
+        let other = SigningKey::from_seed(&[0x52; 32])
+            .verifying_key()
+            .to_bytes();
+        assert!(verify_member_card_request(&CHANNEL, &other, &wire, &sig).is_err());
+        assert!(verify_member_card_request(&CHANNEL, &pk, &[], &sig).is_err());
+        // A delete signature verifies over the empty card only.
+        let del = sign_member_card_request(&sub, &CHANNEL, &[]);
+        verify_member_card_request(&CHANNEL, &pk, &[], &del).unwrap();
+        assert!(verify_member_card_request(&CHANNEL, &pk, &wire, &del).is_err());
+        assert!(matches!(
+            verify_member_card_request(&CHANNEL, &pk, &wire, &sig[..63]),
+            Err(ChannelError::BadSignature)
+        ));
+        let mut identity = [0u8; 32];
+        identity[0] = 1;
+        assert!(matches!(
+            verify_member_card_request(&CHANNEL, &identity, &wire, &sig),
+            Err(ChannelError::BadSubscriberKey)
+        ));
+    }
+
+    const GOLDEN_SIGNED_BYTES_SHA256: &str =
+        "1465d24894cdfaeec3f962da20cc17fa0519038a7320e40249f29cd9d7fe49aa";
+
+    #[test]
+    fn the_signed_bytes_are_pinned() {
+        let bytes = member_card_signed_bytes(&[0xAA; CHANNEL_ID_LEN], &[0xBB; 32], b"card");
+        assert!(bytes.starts_with(b"lakko/channel/member-card-sig/v1"));
+        assert_eq!(bytes.len(), MEMBER_CARD_SIG_DOMAIN_V1.len() + 16 + 32 + 32);
+        assert_ne!(MEMBER_CARD_SIG_DOMAIN_V1, MEMBER_CARD_KEY_INFO_V1);
+        assert_eq!(
+            hex::encode(hash::sha256(&bytes)),
+            GOLDEN_SIGNED_BYTES_SHA256
+        );
     }
 
     #[test]

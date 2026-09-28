@@ -77,6 +77,13 @@ impl PublicKey {
         Ok(Self(DalekPublicKey::from(arr)))
     }
 
+    /// Build from a 32-byte array (any 32 bytes are a Montgomery
+    /// `u`-coordinate X25519 accepts).
+    #[must_use]
+    pub fn from_array(bytes: [u8; PUBLIC_KEY_LEN]) -> Self {
+        Self(DalekPublicKey::from(bytes))
+    }
+
     /// Encode to 32 bytes.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; PUBLIC_KEY_LEN] {

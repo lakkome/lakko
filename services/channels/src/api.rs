@@ -10,6 +10,9 @@
 //! | `POST` | `/v1/channels` | Register a fresh channel. Body carries the 32-hex `channel_id`. |
 //! | `POST` | `/v1/channels/:channel_id/posts` | Publish an opaque ChannelPost. Body is application/octet-stream. |
 //! | `GET`  | `/v1/channels/:channel_id/posts?after=<cursor>&limit=<n>` | Cursor-paginated fetch. |
+//! | `PUT`  | `/v1/channels/:channel_id/members/:pubkey_hex` | Upload a member card (ADR-0058), signed by the subscriber key. |
+//! | `DELETE` | `/v1/channels/:channel_id/members/:pubkey_hex` | Remove it, signed likewise. |
+//! | `GET`  | `/v1/channels/:channel_id/members?after=<pk_b64>&limit=<n>` | A page of member cards. |
 //!
 //! Every error path returns a JSON envelope with a stable
 //! machine-readable `code` so clients can branch without
@@ -25,7 +28,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
@@ -38,11 +41,10 @@ use crate::config::Config;
 use crate::storage::{ChannelId, ChannelStore, StorageError, StoredPost, SubscriberId};
 
 /// Seed-envelope wire length pinned to
-/// `lakko_channels::subscribe::SEED_ENVELOPE_LEN`. We don't
-/// pull that crate in here (the opacity invariant — see
-/// Cargo.toml comment) so the constant is mirrored as a
-/// `const _: () = assert!(...)` test in the integration
-/// suite where both crates are visible.
+/// `lakko_channels::subscribe::SEED_ENVELOPE_LEN`, mirrored here and
+/// cross-checked by a `const _: () = assert!(...)` in the integration
+/// suite. (The service links `lakko-channels` only for the member-card
+/// frame reader, ADR-0058; see the Cargo.toml comment.)
 pub const EXPECTED_ENVELOPE_LEN: usize = 80;
 
 /// Shared application state — config + storage handle.
@@ -136,8 +138,9 @@ pub struct FetchResponse {
 /// Body for `POST /v1/channels/:id/subscribers`.
 #[derive(Deserialize)]
 pub struct SubscribeRequest {
-    /// 64-char lowercase hex of the subscriber's X25519
-    /// identity public key.
+    /// 64-char lowercase hex of the subscriber's Ed25519
+    /// public key (ADR-0058; the seed envelope is sealed to
+    /// its X25519 image).
     pub subscriber_pubkey_hex: String,
 }
 
@@ -440,12 +443,19 @@ async fn subscribe(
         )
             .into_response();
     };
-    let Ok(sub) = SubscriberId::from_hex(&req.subscriber_pubkey_hex) else {
+    // ADR-0058: the subscriber key is Ed25519. A key that is not a curve
+    // point, or is of small order, is refused here - the one entry point to
+    // the subscriber table - so every later path (envelope, member card)
+    // holds only valid keys.
+    let Some(sub) = SubscriberId::from_hex(&req.subscriber_pubkey_hex)
+        .ok()
+        .filter(|sub| lakko_channels::subscriber_public_key(sub.as_bytes()).is_ok())
+    else {
         return (
             StatusCode::BAD_REQUEST,
             Json(err(
                 "bad-subscriber-id",
-                "subscriber_pubkey_hex must be 64 hex chars",
+                "subscriber_pubkey_hex must be 64 hex chars of a valid Ed25519 key",
             )),
         )
             .into_response();
@@ -1002,6 +1012,303 @@ async fn rotate_commit(
     }
 }
 
+// ---------------------------------------------------------
+// ADR-0058 section 3 — member cards
+// ---------------------------------------------------------
+
+/// The header carrying a subscriber's signature over a member-card write
+/// or delete: 64 bytes, base64url without padding. Defined in
+/// `lakko-channels` so clients and server share it.
+pub use lakko_channels::MEMBER_CARD_SIG_HEADER;
+
+/// Domain that opens the bytes a member-card signature covers
+/// (`lakko/channel/member-card-sig/v1`, distinct from the card key's HKDF
+/// info label).
+pub use lakko_channels::MEMBER_CARD_SIG_DOMAIN_V1 as MEMBER_CARD_SIG_DOMAIN;
+
+/// Default and maximum page size of `GET .../members`.
+pub const MEMBER_PAGE_DEFAULT: usize = 100;
+/// The largest page `GET .../members` returns.
+pub const MEMBER_PAGE_MAX: usize = 500;
+
+/// The bytes a subscriber signs to write (`card` = the card) or delete
+/// (`card` = empty) its member card - `lakko_channels::member_card_signed_bytes`,
+/// the one definition the clients sign.
+#[must_use]
+pub fn member_card_signed_bytes(
+    channel: &ChannelId,
+    subscriber: &SubscriberId,
+    card: &[u8],
+) -> Vec<u8> {
+    lakko_channels::member_card_signed_bytes(channel.as_bytes(), subscriber.as_bytes(), card)
+}
+
+/// Whether the request carries a valid signature by `subscriber` (its
+/// Ed25519 key, ADR-0058) over [`member_card_signed_bytes`].
+fn member_signature_valid(
+    headers: &HeaderMap,
+    channel: &ChannelId,
+    subscriber: &SubscriberId,
+    card: &[u8],
+) -> bool {
+    let Some(value) = headers
+        .get(MEMBER_CARD_SIG_HEADER)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    let Ok(sig_bytes) = URL_SAFE_NO_PAD.decode(value) else {
+        return false;
+    };
+    lakko_channels::verify_member_card_request(
+        channel.as_bytes(),
+        subscriber.as_bytes(),
+        card,
+        &sig_bytes,
+    )
+    .is_ok()
+}
+
+fn bad_ids(channel_id: &str, pubkey_hex: &str) -> Result<(ChannelId, SubscriberId), Box<Response>> {
+    let Ok(channel) = ChannelId::from_hex(channel_id) else {
+        return Err(Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+            )
+                .into_response(),
+        ));
+    };
+    let Ok(sub) = SubscriberId::from_hex(pubkey_hex) else {
+        return Err(Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(err(
+                    "bad-subscriber-id",
+                    "subscriber pubkey must be 64 hex chars",
+                )),
+            )
+                .into_response(),
+        ));
+    };
+    Ok((channel, sub))
+}
+
+fn bad_member_signature() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(err(
+            "bad-member-signature",
+            "the request must be signed by the subscriber key it names",
+        )),
+    )
+        .into_response()
+}
+
+fn member_store_error(e: StorageError) -> Response {
+    match e {
+        StorageError::UnknownChannel => (
+            StatusCode::NOT_FOUND,
+            Json(err("unknown-channel", "no such channel")),
+        )
+            .into_response(),
+        StorageError::UnknownSubscriber => (
+            StatusCode::NOT_FOUND,
+            Json(err(
+                "unknown-subscriber",
+                "subscriber has not registered against this channel",
+            )),
+        )
+            .into_response(),
+        StorageError::MemberCardEpochInFuture { current, got } => (
+            StatusCode::CONFLICT,
+            Json(err(
+                "member-card-epoch-in-future",
+                format!("epoch {got} exceeds the channel's current epoch {current}"),
+            )),
+        )
+            .into_response(),
+        StorageError::MemberCardStale { stored, got } => (
+            StatusCode::CONFLICT,
+            Json(err(
+                "member-card-stale",
+                format!("epoch {got} is older than the stored card's {stored}"),
+            )),
+        )
+            .into_response(),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(err("internal", "unexpected error")),
+        )
+            .into_response(),
+    }
+}
+
+/// `PUT /v1/channels/:channel_id/members/:pubkey_hex` — upload the
+/// subscriber's member card (ADR-0058). The body is the opaque card; the
+/// server reads only its clear epoch. Signed by the subscriber key the path
+/// names ([`MEMBER_CARD_SIG_HEADER`] over [`member_card_signed_bytes`]).
+async fn put_member_card(
+    State(state): State<Arc<AppState>>,
+    Path((channel_id, pubkey_hex)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let (channel, sub) = match bad_ids(&channel_id, &pubkey_hex) {
+        Ok(ids) => ids,
+        Err(resp) => return *resp,
+    };
+    // `member_card_epoch` checks the frame (length bounds and version)
+    // without opening anything.
+    let Ok(epoch) = lakko_channels::member_card_epoch(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(err(
+                "bad-member-card",
+                format!(
+                    "a member card is {}..={} bytes of a known version",
+                    lakko_channels::MEMBER_CARD_MIN_LEN,
+                    lakko_channels::MEMBER_CARD_MAX_LEN
+                ),
+            )),
+        )
+            .into_response();
+    };
+    if !member_signature_valid(&headers, &channel, &sub, &body) {
+        return bad_member_signature();
+    }
+    match state
+        .store
+        .put_member_card(channel, sub, epoch.as_u32(), body.to_vec())
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => member_store_error(e),
+    }
+}
+
+/// `DELETE /v1/channels/:channel_id/members/:pubkey_hex` — remove the
+/// subscriber's member card (unsubscribe). Signed like the upload, over the
+/// empty card. Idempotent.
+async fn delete_member_card(
+    State(state): State<Arc<AppState>>,
+    Path((channel_id, pubkey_hex)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let (channel, sub) = match bad_ids(&channel_id, &pubkey_hex) {
+        Ok(ids) => ids,
+        Err(resp) => return *resp,
+    };
+    if !member_signature_valid(&headers, &channel, &sub, &[]) {
+        return bad_member_signature();
+    }
+    match state.store.delete_member_card(channel, sub).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => member_store_error(e),
+    }
+}
+
+/// Query string for `GET /v1/channels/:id/members`.
+#[derive(Deserialize)]
+pub struct MembersQuery {
+    /// Base64url (no padding) of the last subscriber key of the previous
+    /// page; the page starts strictly after it.
+    #[serde(default)]
+    pub after: Option<String>,
+    /// Page size, at most [`MEMBER_PAGE_MAX`] (default
+    /// [`MEMBER_PAGE_DEFAULT`]).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// One entry of `GET /v1/channels/:id/members`.
+#[derive(Serialize)]
+pub struct MemberView {
+    /// Base64url (no padding) of the subscriber key.
+    pub subscriber_pk_b64: String,
+    /// Base64url (no padding) of the opaque member card.
+    pub card_b64: String,
+}
+
+/// Response of `GET /v1/channels/:id/members`.
+#[derive(Serialize)]
+pub struct MembersResponse {
+    /// Cards ascending by subscriber key.
+    pub members: Vec<MemberView>,
+    /// The `after` for the next page; `null` when this page was the last
+    /// one (shorter than the limit).
+    pub next_after: Option<String>,
+}
+
+/// `GET /v1/channels/:channel_id/members` — a page of member cards
+/// (ADR-0058). Unauthenticated like every read here: a card opens only
+/// under the channel's epoch seed.
+async fn list_member_cards(
+    State(state): State<Arc<AppState>>,
+    Path(channel_id): Path<String>,
+    Query(q): Query<MembersQuery>,
+) -> Response {
+    let Ok(channel) = ChannelId::from_hex(&channel_id) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+        )
+            .into_response();
+    };
+    let after = match q.after.as_deref() {
+        None | Some("") => None,
+        Some(b64) => {
+            match URL_SAFE_NO_PAD
+                .decode(b64)
+                .ok()
+                .and_then(|b| SubscriberId::from_bytes(&b).ok())
+            {
+                Some(sub) => Some(sub),
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(err(
+                            "bad-after",
+                            "after must be a 32-byte key in base64url without padding",
+                        )),
+                    )
+                        .into_response()
+                },
+            }
+        },
+    };
+    let limit = q
+        .limit
+        .unwrap_or(MEMBER_PAGE_DEFAULT)
+        .clamp(1, MEMBER_PAGE_MAX);
+    match state.store.list_member_cards(channel, after, limit).await {
+        Ok(page) => {
+            let next_after = (page.len() == limit)
+                .then(|| {
+                    page.last()
+                        .map(|(sub, _)| URL_SAFE_NO_PAD.encode(sub.as_bytes()))
+                })
+                .flatten();
+            let members = page
+                .into_iter()
+                .map(|(sub, card)| MemberView {
+                    subscriber_pk_b64: URL_SAFE_NO_PAD.encode(sub.as_bytes()),
+                    card_b64: URL_SAFE_NO_PAD.encode(card),
+                })
+                .collect();
+            (
+                StatusCode::OK,
+                Json(MembersResponse {
+                    members,
+                    next_after,
+                }),
+            )
+                .into_response()
+        },
+        Err(e) => member_store_error(e),
+    }
+}
+
 fn unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1038,6 +1345,12 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(rotate_commit),
         )
         .route("/v1/channels/{channel_id}/epoch", get(fetch_epoch))
+        // ADR-0058 — channel member cards.
+        .route("/v1/channels/{channel_id}/members", get(list_member_cards))
+        .route(
+            "/v1/channels/{channel_id}/members/{pubkey_hex}",
+            axum::routing::put(put_member_card).delete(delete_member_card),
+        )
         .route("/health", get(health))
         .route("/version", get(version))
         .with_state(state)

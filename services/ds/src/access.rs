@@ -6,14 +6,19 @@
 //! A journal with a registration row (`ds_group_access` / `ds_mailbox_access`)
 //! is **claimed**: its gated routes answer only a request that carries a valid
 //! [`lakko_ds_proof`] header. A journal with no row keeps the Phase 1.3
-//! posture (anyone who names it) - which is every journal until its owner
-//! claims it, and the rendezvous mailboxes by design.
+//! posture (anyone who names it) - which is every group journal until its
+//! owner claims it. A mailbox is different since ADR-0058: it is personal, so
+//! its `GET messages` needs the identity proof whether or not it is claimed
+//! (an unclaimed one has no key and always answers the uniform `401`); the
+//! proofless meeting points moved to their own `/ds/rendezvous/` namespace.
 //!
 //! What is gated: a claimed group's `GET`/`POST messages`, `GET knocks` (write
-//! tier) and every registration after the first; a claimed mailbox's
+//! tier) and every registration after the first; every mailbox's
 //! `GET messages`.
-//! What is not: a mailbox `POST` (the cold inbox strangers are meant to
-//! reach), a group's `POST knock` (it spends an anonymous token instead,
+//! A mailbox `POST` is gated by reach keys, not here (ADR-0058,
+//! `src/reach.rs`): ADR-0053 left it the open cold inbox, and a claimed
+//! mailbox is now closed to a stranger.
+//! What is not gated: a group's `POST knock` (it spends an anonymous token instead,
 //! ADR-0054 S3), and the first claim of
 //! an unclaimed journal (a 256-bit name cannot be probed, and the flag day has
 //! no production data).
@@ -94,14 +99,14 @@ pub(crate) enum Access {
     Write,
 }
 
-type HandlerError = (StatusCode, String);
+pub(crate) type HandlerError = (StatusCode, String);
 
 /// The one refusal every failed proof maps to.
-fn refused() -> HandlerError {
+pub(crate) fn refused() -> HandlerError {
     (StatusCode::UNAUTHORIZED, "proof required".to_string())
 }
 
-fn db_error(what: &'static str) -> impl Fn(sqlx::Error) -> HandlerError {
+pub(crate) fn db_error(what: &'static str) -> impl Fn(sqlx::Error) -> HandlerError {
     move |e| {
         tracing::error!(error = %e, "{what}");
         (
@@ -112,7 +117,7 @@ fn db_error(what: &'static str) -> impl Fn(sqlx::Error) -> HandlerError {
 }
 
 /// The server's clock in unix milliseconds. Saturating, never panicking.
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
@@ -199,7 +204,7 @@ async fn mailbox_key(
 /// Parse the proof header and verify it under `key_for_epoch`, touching no
 /// store. Every failure is [`refused`]. The nonce is not yet consumed: the
 /// caller does that with [`consume_nonce`] on the connection it decides on.
-fn verify_header(
+pub(crate) fn verify_header(
     headers: &HeaderMap,
     parts: &RequestParts<'_>,
     key_for_epoch: impl Fn(u64) -> Option<VerifyingKey>,
@@ -217,7 +222,7 @@ fn verify_header(
 /// Record a verified proof's nonce. `false` is a replay. The primary key
 /// makes a repeat a duplicate (zero rows affected); any other DB error is an
 /// error.
-async fn consume_nonce<'e, E>(
+pub(crate) async fn consume_nonce<'e, E>(
     exec: E,
     pseudonym: &[u8; PSEUDONYM_LEN],
     nonce: &[u8; lakko_ds_proof::NONCE_LEN],
@@ -254,7 +259,7 @@ async fn check_proof(
     }
 }
 
-fn parts<'a>(method: &'a Method, uri: &'a Uri, body: &'a [u8]) -> RequestParts<'a> {
+pub(crate) fn parts<'a>(method: &'a Method, uri: &'a Uri, body: &'a [u8]) -> RequestParts<'a> {
     RequestParts {
         method: method.as_str(),
         canonical_path: uri.path(),
@@ -302,8 +307,11 @@ pub(crate) async fn gate_group(
     Ok(Gated::Proven)
 }
 
-/// Gate a mailbox read: open when the mailbox is unclaimed, else a valid
-/// proof under the identity key at `MAILBOX_EPOCH`.
+/// Gate a mailbox read: a valid proof under the identity key at
+/// `MAILBOX_EPOCH`. An unclaimed mailbox has no key, so every read of it is
+/// the uniform [`refused`] - the same answer a claimed mailbox gives a read
+/// without a proof - and the answer never tells whether a mailbox is claimed
+/// (ADR-0058; proofless meeting points use `/ds/rendezvous/`).
 pub(crate) async fn gate_mailbox_read(
     state: &AppState,
     device_id: &[u8; PSEUDONYM_LEN],
@@ -312,7 +320,7 @@ pub(crate) async fn gate_mailbox_read(
     headers: &HeaderMap,
 ) -> Result<(), HandlerError> {
     let Some(key) = mailbox_key(&state.db, device_id).await? else {
-        return Ok(());
+        return Err(refused());
     };
     let req = parts(method, uri, &[]);
     check_proof(&state.db, device_id, headers, &req, |epoch| {
@@ -332,7 +340,7 @@ pub(crate) struct GroupAccessBody {
     pub(crate) access_pk_b64: String,
 }
 
-fn decode_pk(b64: &str) -> Result<VerifyingKey, HandlerError> {
+pub(crate) fn decode_pk(b64: &str) -> Result<VerifyingKey, HandlerError> {
     let bytes = B64.decode(b64).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
@@ -738,7 +746,7 @@ pub(crate) async fn prune_nonces(pool: &MySqlPool) {
 // ============================================================================
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
@@ -753,7 +761,7 @@ mod tests {
     /// two concurrent runs on it, so migrate once per process.
     static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
-    async fn app() -> Option<(Router, MySqlPool)> {
+    pub(crate) async fn app() -> Option<(Router, MySqlPool)> {
         let Ok(url) = std::env::var("LAKKO_DS_TEST_DATABASE_URL") else {
             eprintln!("skipping: LAKKO_DS_TEST_DATABASE_URL unset");
             return None;
@@ -842,7 +850,7 @@ mod tests {
 
     /// A fresh, unique 32-byte name per call so parallel tests never share
     /// a journal.
-    fn fresh_name(tag: u8) -> [u8; PSEUDONYM_LEN] {
+    pub(crate) fn fresh_name(tag: u8) -> [u8; PSEUDONYM_LEN] {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let mut out = [0u8; PSEUDONYM_LEN];
         out[0] = tag;
@@ -851,7 +859,7 @@ mod tests {
         out
     }
 
-    fn fresh_nonce() -> [u8; lakko_ds_proof::NONCE_LEN] {
+    pub(crate) fn fresh_nonce() -> [u8; lakko_ds_proof::NONCE_LEN] {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let mut out = [0u8; lakko_ds_proof::NONCE_LEN];
         out[..8].copy_from_slice(&n.to_be_bytes());
@@ -859,19 +867,19 @@ mod tests {
         out
     }
 
-    fn key(seed: u8) -> SigningKey {
+    pub(crate) fn key(seed: u8) -> SigningKey {
         SigningKey::from_seed(&[seed; 32])
     }
 
-    fn pk_b64(key: &SigningKey) -> String {
+    pub(crate) fn pk_b64(key: &SigningKey) -> String {
         B64.encode(key.verifying_key().to_bytes())
     }
 
-    struct Req<'a> {
-        method: &'a str,
-        uri: &'a str,
-        body: Vec<u8>,
-        proof: Option<(&'a SigningKey, u64)>,
+    pub(crate) struct Req<'a> {
+        pub(crate) method: &'a str,
+        pub(crate) uri: &'a str,
+        pub(crate) body: Vec<u8>,
+        pub(crate) proof: Option<(&'a SigningKey, u64)>,
     }
 
     fn proof_header(req: &Req<'_>) -> Option<String> {
@@ -886,11 +894,11 @@ mod tests {
         Some(sign(key, &parts, epoch, now_ms(), fresh_nonce()).encode())
     }
 
-    async fn send(app: &Router, req: Req<'_>) -> (StatusCode, Vec<u8>) {
+    pub(crate) async fn send(app: &Router, req: Req<'_>) -> (StatusCode, Vec<u8>) {
         send_with(app, req, &[]).await
     }
 
-    async fn send_with(
+    pub(crate) async fn send_with(
         app: &Router,
         req: Req<'_>,
         extra: &[(&str, &str)],
@@ -921,7 +929,7 @@ mod tests {
         (status, body)
     }
 
-    fn messages_uri(kind: &str, name: &[u8; PSEUDONYM_LEN]) -> String {
+    pub(crate) fn messages_uri(kind: &str, name: &[u8; PSEUDONYM_LEN]) -> String {
         format!("/ds/{kind}/{}/messages", hex::encode(name))
     }
 
@@ -1344,7 +1352,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_claimed_mailbox_is_read_by_its_owner_and_written_by_anyone() {
+    async fn a_claimed_mailbox_is_read_by_its_owner_only() {
         let Some((app, _pool)) = app().await else {
             return;
         };
@@ -1384,7 +1392,8 @@ mod tests {
             assert_eq!(status, StatusCode::NO_CONTENT);
         }
         let uri = messages_uri("mailbox", &device);
-        // Anyone still posts.
+        // A proofless post is answered as stored; since ADR-0058 a claimed,
+        // closed mailbox drops it (`src/reach.rs` covers the reach keys).
         let (status, _) = send(
             &app,
             Req {
@@ -1431,7 +1440,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(parsed["messages"].as_array().map(Vec::len), Some(1));
+        assert_eq!(parsed["messages"].as_array().map(Vec::len), Some(0));
     }
 
     #[tokio::test]

@@ -92,10 +92,17 @@ the Residuals section records what it costs.
   closed. Every client claims its mailbox at signup already (ADR-0053).
 - `POST /ds/mailbox/{hex}/messages` on a claimed, closed mailbox requires an
   `x-lakko-ds-proof` signed by a registered, unexpired reach key, or by a
-  delegated key (below); the nonce is consumed as in ADR-0053.
+  delegated key (below); the nonce is consumed as in ADR-0053. A reach proof
+  names its signing key inside the signed bytes, so the DS verifies one
+  signature rather than trying every registered key (amended 2026-09-28 after
+  S2, the maintainer's call): proofs at `REACH_EPOCH` (`u64::MAX`) carry a
+  sixth header field, `v1.<epoch>.<ms>.<nonce>.<sig>.<reach_pk>`, appended to
+  the canonical bytes; any other proof carrying it, or a reach proof without
+  it, is malformed. A delegate's proof names the delegate key.
 - **The refusal must not say whether an account is behind the pseudonym.** A
-  write with **no proof** to a closed mailbox is answered `202` and dropped,
-  the same answer an unclaimed mailbox gives. A write with a proof that does
+  write with **no proof** to a closed mailbox is answered as a stored write
+  (`201 {id, created_at}`, the id taken from the same sequence) and dropped,
+  the same answer an unclaimed or open mailbox gives. A write with a proof that does
   not verify is `401` everywhere, claimed or not. Only a writer who once held
   a valid key can learn that a key stopped working, and they already knew the
   person existed.
@@ -112,8 +119,16 @@ the Residuals section records what it costs.
   result, so narrowing takes effect on the next search, not at the next
   rotation (UX section 8). Rate-limited per address; no token (the proof is
   the gate).
-- Rendezvous mailboxes (pairing, recovery, welcome courier) are unclaimed and
-  stay as they are.
+- **Rendezvous moves to its own namespace** (amended 2026-09-28 after S2, the
+  maintainer's call). Pairing, recovery, the welcome courier and the state
+  bundle use random ids under `/ds/rendezvous/{hex}/messages`, open, never
+  claimable, stored in their own table (`ds_rendezvous_messages`, DS
+  migration `0008`) so an id can never reach a personal mailbox, and refusing
+  any proof, delegation or wake header. `/ds/mailbox/` becomes
+  personal only, and a `GET` without a valid identity proof is `401` whether
+  the mailbox is claimed or not: before the split an unclaimed mailbox had to
+  stay readable for rendezvous, so a `GET` told anyone holding an identity
+  key whether it had claimed its mailbox.
 
 ### 3. Groups and channels: the grant rides in the profile
 
@@ -141,13 +156,20 @@ The `member` reach seed rides in every group's profile regardless.
 **Channels get a member list.** A subscriber uploads a **member card** -
 its profile v3, sealed under the channel's current epoch seed with the
 `lakko-channels` post AEAD - to `PUT /v1/channels/:id/members/:subscriber_pk`,
-signed with the subscriber key it registered; members fetch
+signed with the subscriber key it registered (domain
+`lakko/channel/member-card-sig/v1`); members fetch
 `GET /v1/channels/:id/members` (paged). The server stores ciphertext per
 subscriber key it already holds; it learns nothing new about who subscribes.
 A card is re-uploaded after each epoch rotation (a newcomer holds only current
 seeds), deleted on unsubscribe (a signed `DELETE`) and by the existing 90-day
 subscriber prune. The `channel` reach key is versioned by the channel epoch.
 Publishers upload a card like anyone else.
+
+**A subscriber's key becomes Ed25519** (amended 2026-09-28 after S2, the
+maintainer's call). The key a subscriber registered was the X25519 key of the
+seed envelope, which cannot sign a card. A subscriber now holds one Ed25519
+key pair; the seed envelope's X25519 key is derived from it by the standard
+conversion, so the channel still sees one key per subscriber.
 
 ### 4. Contacts of contacts: relayed, sealed under the searched terms
 
