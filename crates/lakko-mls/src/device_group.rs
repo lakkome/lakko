@@ -704,6 +704,10 @@ impl DeviceGroup {
     /// - [`Error::Unsupported`] when the payload's `body` is
     ///   absent or a variant this build doesn't recognise (an
     ///   older client reading a future-version payload).
+    /// - [`Error::PayloadBounds`] when a `FolderChanges` or
+    ///   `StateSnapshot` breaks an ADR-0058 section 4 bound. The whole
+    ///   payload is refused; the next write of those registers from any
+    ///   device supersedes it.
     pub fn parse_devicegroup_payload(bytes: &[u8]) -> Result<ParsedDeviceGroupPayload> {
         use prost::Message as _;
 
@@ -712,7 +716,7 @@ impl DeviceGroup {
         let body = payload
             .body
             .ok_or(Error::Unsupported("DeviceGroupPayload missing body"))?;
-        let parsed_body = DeviceGroupBody::from_proto(body);
+        let parsed_body = DeviceGroupBody::from_proto(body)?;
         Ok(ParsedDeviceGroupPayload {
             hlc: payload.hlc,
             sender_leaf: payload.sender_leaf,
@@ -736,8 +740,23 @@ pub struct ParsedDeviceGroupPayload {
     /// epochs.
     pub sender_leaf: u32,
     /// Concrete payload — one of `ReadCursor` / `DraftUpdate`
-    /// / `ThreadFlags` / `ConversationOrder`.
+    /// / `ThreadFlags` / `ConversationOrder` / `FolderChanges` /
+    /// `StateSnapshot`.
     pub body: DeviceGroupBody,
+}
+
+impl ParsedDeviceGroupPayload {
+    /// Every register this payload writes, as stamped
+    /// [`lakko_sync::synced::SyncEntry`] values ready for
+    /// [`lakko_sync::SyncedState::apply`] (ADR-0058 section 3).
+    ///
+    /// The four older kinds take their stamp from the envelope
+    /// ([`Self::hlc`]); `FolderChanges` and `StateSnapshot` carry a stamp
+    /// per register and the envelope stamp is ignored for them.
+    #[must_use]
+    pub fn stamped_entries(&self) -> Vec<(u64, lakko_sync::synced::SyncEntry)> {
+        self.body.stamped_entries(self.hlc)
+    }
 }
 
 /// Typed body of a DeviceGroup application payload. Wraps the
@@ -803,10 +822,78 @@ pub enum DeviceGroupBody {
         /// top-to-bottom.
         group_ids: Vec<Vec<u8>>,
     },
+    /// A live chat-folder edit (ADR-0058): only the registers that
+    /// changed, each with its own stamp. Bounds-checked on decode.
+    FolderChanges(lakko_sync::synced::FolderChanges),
+    /// One part of the catch-up re-send of the sender's whole folded
+    /// state (ADR-0058 section 5), every entry with its original stamp.
+    /// Bounds-checked on decode.
+    StateSnapshot(lakko_sync::synced::StateSnapshot),
 }
 
 impl DeviceGroupBody {
-    fn into_proto(self) -> lakko_proto::mls_app::devicegroup::v1::device_group_payload::Body {
+    /// Every register this body writes, stamped. `envelope_hlc` stamps the
+    /// four older kinds; the two ADR-0058 kinds carry their own stamps.
+    #[must_use]
+    pub fn stamped_entries(&self, envelope_hlc: u64) -> Vec<(u64, lakko_sync::synced::SyncEntry)> {
+        use lakko_sync::synced::{
+            ConversationOrderEntry, DraftEntry, FlagsEntry, ReadCursorEntry, SyncEntry,
+        };
+        match self {
+            Self::ReadCursor {
+                group_id,
+                up_to_message_id,
+                read_at_ms,
+            } => vec![(
+                envelope_hlc,
+                SyncEntry::ReadCursor(ReadCursorEntry {
+                    group_id: group_id.clone(),
+                    up_to_message_id: up_to_message_id.clone(),
+                    read_at_ms: *read_at_ms,
+                }),
+            )],
+            Self::Draft {
+                group_id,
+                text,
+                reply_to_id,
+            } => vec![(
+                envelope_hlc,
+                SyncEntry::Draft(DraftEntry {
+                    group_id: group_id.clone(),
+                    text: text.clone(),
+                    reply_to_id: reply_to_id.clone(),
+                }),
+            )],
+            Self::Flags {
+                group_id,
+                pinned,
+                muted,
+                archived,
+                unread_override,
+            } => vec![(
+                envelope_hlc,
+                SyncEntry::Flags(FlagsEntry {
+                    group_id: group_id.clone(),
+                    pinned: *pinned,
+                    muted: *muted,
+                    archived: *archived,
+                    unread_override: *unread_override,
+                }),
+            )],
+            Self::Order { group_ids } => vec![(
+                envelope_hlc,
+                SyncEntry::ConversationOrder(ConversationOrderEntry {
+                    group_ids: group_ids.clone(),
+                }),
+            )],
+            Self::FolderChanges(c) => c.stamped_entries(),
+            Self::StateSnapshot(s) => s.stamped_entries(),
+        }
+    }
+
+    pub(crate) fn into_proto(
+        self,
+    ) -> lakko_proto::mls_app::devicegroup::v1::device_group_payload::Body {
         use lakko_proto::mls_app::devicegroup::v1::{
             device_group_payload::Body, ConversationOrder, DraftUpdate, ReadCursor, ThreadFlags,
         };
@@ -843,16 +930,25 @@ impl DeviceGroupBody {
                 unread_override,
             }),
             Self::Order { group_ids } => Body::Order(ConversationOrder { group_ids }),
+            Self::FolderChanges(c) => {
+                Body::FolderChanges(crate::device_group_sync::folder_changes_to_proto(&c))
+            },
+            Self::StateSnapshot(s) => {
+                Body::StateSnapshot(crate::device_group_sync::state_snapshot_to_proto(&s))
+            },
         }
     }
 
-    /// Infallible — every proto `Body` variant maps onto a
-    /// concrete `Self` case. A future proto extension that adds
-    /// a variant we don't recognise would surface earlier as a
-    /// prost-decode failure, not here.
-    fn from_proto(body: lakko_proto::mls_app::devicegroup::v1::device_group_payload::Body) -> Self {
+    /// Every proto `Body` variant maps onto a concrete `Self` case; a
+    /// variant a future build adds is skipped by prost as an unknown field
+    /// and surfaces as a missing body ([`Error::Unsupported`]). The two
+    /// ADR-0058 kinds are bounds-checked here and refused whole
+    /// ([`Error::PayloadBounds`]) on any violation.
+    fn from_proto(
+        body: lakko_proto::mls_app::devicegroup::v1::device_group_payload::Body,
+    ) -> Result<Self> {
         use lakko_proto::mls_app::devicegroup::v1::device_group_payload::Body;
-        match body {
+        Ok(match body {
             Body::ReadCursor(b) => Self::ReadCursor {
                 group_id: b.group_id,
                 up_to_message_id: b.up_to_message_id,
@@ -873,7 +969,13 @@ impl DeviceGroupBody {
             Body::Order(b) => Self::Order {
                 group_ids: b.group_ids,
             },
-        }
+            Body::FolderChanges(c) => {
+                Self::FolderChanges(crate::device_group_sync::folder_changes_from_proto(c)?)
+            },
+            Body::StateSnapshot(s) => {
+                Self::StateSnapshot(crate::device_group_sync::state_snapshot_from_proto(s)?)
+            },
+        })
     }
 }
 
@@ -1623,7 +1725,7 @@ mod tests {
 
     #[test]
     fn devicegroup_payload_each_variant_roundtrips() {
-        // Smoke-test all four variants survive the
+        // Smoke-test every variant survives the
         // proto-encode + proto-decode trip via the typed
         // `DeviceGroupBody` wrappers. Doesn't need a real MLS
         // group — encode + decode round-trips the bytes
@@ -1652,6 +1754,27 @@ mod tests {
             DeviceGroupBody::Order {
                 group_ids: vec![vec![0xAA; 32], vec![0xBB; 32]],
             },
+            DeviceGroupBody::FolderChanges({
+                let mut c = lakko_sync::synced::FolderChanges::default();
+                c.push(
+                    11,
+                    lakko_sync::synced::SyncEntry::FolderMeta(lakko_sync::synced::FolderMeta {
+                        folder_id: [0x0F; 16],
+                        name: "Work".into(),
+                        include_kinds: lakko_sync::synced::INCLUDE_GROUPS,
+                        exclude_flags: lakko_sync::synced::EXCLUDE_ARCHIVED,
+                    }),
+                );
+                c.push(12, lakko_sync::synced::SyncEntry::FolderRemoved([0x0E; 16]));
+                c
+            }),
+            DeviceGroupBody::StateSnapshot(lakko_sync::synced::StateSnapshot {
+                entries: vec![],
+                conversation_order: None,
+                folders: lakko_sync::synced::FolderChanges::default(),
+                part: 0,
+                parts: 1,
+            }),
         ];
         for body in cases {
             let payload = lakko_proto::mls_app::devicegroup::v1::DeviceGroupPayload {

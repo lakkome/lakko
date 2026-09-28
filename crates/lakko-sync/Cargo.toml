@@ -10,10 +10,16 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Hybrid logical clock + edit chain + drafts (single-device Phase 1.12). DeviceGroup multi-device sync arrives in Phase 2."
+description = "Hybrid logical clock + edit chain + drafts, and the ADR-0058 multi-device fold (chat folders + synced flags, cursors, drafts, order)"
 
 [lints]
 workspace = true
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
+# The display-name character rule a folder name follows (ADR-0058 section 4).
+lakko-contacts.workspace = true
+
+[dev-dependencies]
+proptest = "1"

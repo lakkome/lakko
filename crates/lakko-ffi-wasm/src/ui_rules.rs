@@ -21,6 +21,11 @@ use lakko_ui_rules::conversation::{
     order_conversations as rust_order_conversations, ConversationKind as RustConversationKind,
     ConversationRow as RustConversationRow,
 };
+use lakko_ui_rules::folder::{
+    folder_matches as rust_folder_matches,
+    order_conversations_in_folder as rust_order_conversations_in_folder,
+    FolderRule as RustFolderRule,
+};
 use lakko_ui_rules::info::{
     channel_info_sections as rust_channel_info_sections,
     group_info_sections as rust_group_info_sections, info_target as rust_info_target,
@@ -78,6 +83,7 @@ impl From<ConversationKind> for RustConversationKind {
 /// `undefined` already expresses.
 #[wasm_bindgen]
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ConversationRow {
     id: String,
     kind: ConversationKind,
@@ -85,6 +91,8 @@ pub struct ConversationRow {
     last_activity_ms: Option<i64>,
     pinned: bool,
     archived: bool,
+    muted: bool,
+    has_unread: bool,
 }
 
 #[wasm_bindgen]
@@ -96,8 +104,14 @@ impl ConversationRow {
     /// conversation nothing has happened in yet. A row that draws nothing does
     /// not move a conversation to the top: a signal nobody sees is not
     /// activity.
+    ///
+    /// `muted` and `hasUnread` (ADR-0058) are read only by the folder rule;
+    /// both are optional and default to `false`, so a six-argument call
+    /// stays valid. `hasUnread` means what the unread badge means: something
+    /// unread, or a manual "mark as unread".
     #[wasm_bindgen(constructor)]
     #[must_use]
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     pub fn new(
         id: String,
         kind: ConversationKind,
@@ -105,6 +119,8 @@ impl ConversationRow {
         last_activity_ms: Option<i64>,
         pinned: bool,
         archived: bool,
+        muted: Option<bool>,
+        has_unread: Option<bool>,
     ) -> Self {
         Self {
             id,
@@ -113,7 +129,23 @@ impl ConversationRow {
             last_activity_ms,
             pinned,
             archived,
+            muted: muted.unwrap_or(false),
+            has_unread: has_unread.unwrap_or(false),
         }
+    }
+
+    /// Muted by this person.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn muted(&self) -> bool {
+        self.muted
+    }
+
+    /// Something unread in it, or marked unread by hand.
+    #[wasm_bindgen(getter, js_name = hasUnread)]
+    #[must_use]
+    pub fn has_unread(&self) -> bool {
+        self.has_unread
     }
 
     /// Stable within a kind; `(kind, id)` is unique in the list.
@@ -168,6 +200,8 @@ impl From<ConversationRow> for RustConversationRow {
             last_activity_ms: r.last_activity_ms,
             pinned: r.pinned,
             archived: r.archived,
+            muted: r.muted,
+            has_unread: r.has_unread,
         }
     }
 }
@@ -191,6 +225,66 @@ impl From<ConversationRow> for RustConversationRow {
 pub fn order_conversations(rows: Vec<ConversationRow>) -> Vec<u32> {
     let rust: Vec<RustConversationRow> = rows.into_iter().map(Into::into).collect();
     rust_order_conversations(&rust)
+}
+
+/// A chat folder's rule in row terms (ADR-0058 section 6).
+///
+/// `includeKinds` / `excludeFlags` are the folder's bits as the synced
+/// state returns them (include: bit0 one-to-one, bit1 groups, bit2
+/// channels; exclude: bit0 muted, bit1 read, bit2 archived). `included` /
+/// `excluded` are the row ids the client maps the folder's hand-added and
+/// hand-excluded references to.
+#[wasm_bindgen]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FolderRule {
+    inner: RustFolderRule,
+}
+
+#[wasm_bindgen]
+impl FolderRule {
+    /// Build the rule.
+    #[wasm_bindgen(constructor)]
+    #[must_use]
+    pub fn new(
+        include_kinds: u32,
+        exclude_flags: u32,
+        included: Vec<String>,
+        excluded: Vec<String>,
+    ) -> Self {
+        Self {
+            inner: RustFolderRule {
+                include_kinds,
+                exclude_flags,
+                included,
+                excluded,
+            },
+        }
+    }
+}
+
+/// Whether `row` is in the folder: excluded by hand beats everything; then
+/// included by kind toggle or by hand; then not muted / read / archived
+/// while the matching exclude toggle is on (`docs/ux/chat-folders.md` 3.2).
+/// Borrows both arguments; neither is consumed.
+#[wasm_bindgen(js_name = folderMatches)]
+#[must_use]
+pub fn folder_matches(folder: &FolderRule, row: &ConversationRow) -> bool {
+    rust_folder_matches(&folder.inner, &row.clone().into())
+}
+
+/// Order a folder's rows: the folder's own pins first in their stored
+/// order (`folderPins` are row ids; unknown ids skipped), then the
+/// `orderConversations` rule with the global pin ignored. Returns input
+/// indices, every row exactly once. Consumes the rows, like
+/// `orderConversations`.
+#[wasm_bindgen(js_name = orderConversationsInFolder)]
+#[must_use]
+pub fn order_conversations_in_folder(
+    rows: Vec<ConversationRow>,
+    folder_pins: Vec<String>,
+) -> Vec<u32> {
+    let rust: Vec<RustConversationRow> = rows.into_iter().map(Into::into).collect();
+    rust_order_conversations_in_folder(&rust, &folder_pins)
 }
 
 /// Strip the leading `@` people type and no namespace stores.
@@ -616,7 +710,16 @@ mod tests {
     use super::*;
 
     fn row(id: &str, kind: ConversationKind, at: Option<i64>) -> ConversationRow {
-        ConversationRow::new(id.to_string(), kind, "Same".to_string(), at, false, false)
+        ConversationRow::new(
+            id.to_string(),
+            kind,
+            "Same".to_string(),
+            at,
+            false,
+            false,
+            None,
+            None,
+        )
     }
 
     #[test]

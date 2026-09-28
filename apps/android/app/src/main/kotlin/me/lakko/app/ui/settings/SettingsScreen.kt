@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Gavel
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Restore
@@ -88,6 +89,8 @@ public fun SettingsScreen(
     onLogout: () -> Unit,
     onForgetDevice: () -> Unit,
     modifier: Modifier = Modifier,
+    /** docs/ux/chat-folders.md section 4 — between Notifications and Appearance. */
+    onOpenChatFolders: () -> Unit = {},
 ) {
     val mode by ThemePreference.mode.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -166,6 +169,9 @@ public fun SettingsScreen(
                 onOpenRecovery,
                 supporting = "Recovery phrase, authenticator, email or phone",
             )
+
+            SectionLabel("Chat folders")
+            SettingsRow("Chat folders", Icons.Filled.Folder, onOpenChatFolders)
 
             SectionLabel("Appearance")
             Row(

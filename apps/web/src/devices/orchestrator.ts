@@ -21,6 +21,7 @@
  * walks to the other device); the scanner side is a single
  * acknowledged transaction (scan happens, ack happens, done).
  */
+import { announceDeviceGroupChangedHere } from "./sync/growth";
 import { loadWasm } from "../wasm";
 import type {
   DeviceGroup as WasmDeviceGroup,
@@ -776,6 +777,17 @@ export async function runScanFlow(args: {
   // BEFORE the create call. Freed with the ephemeral group below.
   const signerN = takeSigner(() => ensured.group.dsAccessSigner(ensured.identity));
   try {
+    // ADR-0058 section 5.1 — who was a member before this add, for the
+    // growth re-send the sync runtime runs once the add is on disk.
+    let priorLeaves: number[] = [];
+    try {
+      priorLeaves = ensured.group
+        .devices()
+        .map((m: { leafIndex: number }) => m.leafIndex)
+        .sort((a: number, b: number) => a - b);
+    } catch {
+      priorLeaves = [];
+    }
     const addition = ensured.group.addDeviceFromWire(
       ensured.identity,
       decoded.keyPackage,
@@ -800,6 +812,22 @@ export async function runScanFlow(args: {
       args.accountIdB64,
       args.deviceKey,
     );
+
+    // The sync runtime holds a long-lived handle that is now an epoch
+    // behind. Tell it BEFORE the commit is published, so it stops before it
+    // can see the commit and write its stale state over this one, reloads,
+    // and - if this device is the lowest prior leaf - re-sends the account's
+    // synced state to the new device (ADR-0058 section 5.1).
+    if (priorLeaves.length > 0) {
+      try {
+        announceDeviceGroupChangedHere({
+          growth: { priorLeaves, ownLeaf: ensured.group.ownLeafIndex() },
+        });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("DeviceGroup growth announce failed", err);
+      }
+    }
 
     // Push the Welcome to the rendezvous mailbox the joining
     // device is polling.

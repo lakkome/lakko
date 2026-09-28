@@ -40,6 +40,12 @@ export interface ConversationRow {
    */
   readonly lastActivityMs: number | null;
   readonly unread: number;
+  /**
+   * Something unread, or marked unread by hand - what the unread badge means
+   * and what a folder's "Read" toggle reads (`docs/ux/chat-folders.md` 3.2).
+   * Absent means `unread > 0`.
+   */
+  readonly hasUnread?: boolean;
   readonly pinned: boolean;
   readonly muted: boolean;
   readonly archived: boolean;
@@ -76,7 +82,12 @@ export function sortConversations(
 
 type WasmConversationKind = UiRules["ConversationKind"][keyof UiRules["ConversationKind"]];
 
-function kindFor(rules: UiRules, kind: ConversationRowKind): WasmConversationKind {
+/** Whether a row counts as unread (the badge's meaning). */
+export function rowHasUnread(row: ConversationRow): boolean {
+  return row.hasUnread ?? row.unread > 0;
+}
+
+export function kindFor(rules: UiRules, kind: ConversationRowKind): WasmConversationKind {
   switch (kind) {
     case "group":
       return rules.ConversationKind.Group;

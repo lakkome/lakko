@@ -1810,6 +1810,13 @@ pub enum WasmIncomingEnvelopeKind {
     /// authority is the receiver's role-table check, then `pinIsNewer` for
     /// that message.
     Pin = 9,
+    /// A registrar seed addressed to one member (ADR-0057). Classified so
+    /// it never falls through to `IntroMessage` and renders as a chat
+    /// bubble; `payload` carries the whole plaintext for a later decode.
+    /// No client consumes it yet (ADR-0057 client work is unbuilt), so a
+    /// client that sees this kind drops it. Appended as `10` so the existing
+    /// ordinals stay fixed.
+    RegistrarSeed = 10,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -1906,6 +1913,9 @@ impl WasmIncomingEnvelope {
 /// is malformed (below the Welcome / KP-forward minimum floor,
 /// or an invalid media-state payload).
 #[wasm_bindgen(js_name = dispatchIncomingEnvelope)]
+// One arm per envelope kind, each a full struct literal; splitting it would
+// only move the table somewhere else.
+#[allow(clippy::too_many_lines)]
 pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelope, JsError> {
     let parsed =
         rust_dispatch_incoming_envelope(plaintext).map_err(|err| JsError::new(&err.to_string()))?;
@@ -1990,6 +2000,15 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             profile: None,
             group_name: None,
             pin: Some(op.into()),
+        },
+        IncomingEnvelope::RegistrarSeed(_) => WasmIncomingEnvelope {
+            kind: WasmIncomingEnvelopeKind::RegistrarSeed,
+            payload: plaintext.to_vec(),
+            camera_on: None,
+            mint_epoch: None,
+            profile: None,
+            group_name: None,
+            pin: None,
         },
         IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::IntroMessage,

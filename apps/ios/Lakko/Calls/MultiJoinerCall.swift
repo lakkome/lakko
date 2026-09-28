@@ -658,6 +658,10 @@ final class MultiJoinerCall {
             // JOURNAL (standing-gated in `ChatRepository.receivePin`), never
             // the SFU signal-relay. Out of place here — drop.
             break
+        case .registrarSeed:
+            // ADR-0057 — a journal registrar seed. No client consumes it yet,
+            // and it never rides the SFU signal-relay. Drop, never render.
+            break
         }
     }
 

@@ -63,11 +63,29 @@ public object ConversationMute {
                 accountIdB64 = account,
                 dir = DeviceGroupSnapshotStore.SYNC_STATE_DIR,
             ) ?: return false
-            DeviceGroupSyncStateCodec.decode(blob)?.flags?.get(key)?.muted == true
+            val groupId = hexToBytesOrNull(key) ?: return false
+            uniffi.lakko_ffi_uniffi.SyncedState.fromBytes(blob).use { state ->
+                state.flags(groupId)?.muted == true
+            }
         } catch (cause: Throwable) {
             // Fail toward ringing; see the class documentation.
             Log.w(TAG, "could not read the conversation's mute flag", cause)
             false
         }
     }
+}
+
+/** Lowercase or uppercase hex to bytes, or `null` when it is not hex. */
+internal fun hexToBytesOrNull(hex: String): ByteArray? {
+    if (hex.length % 2 != 0) return null
+    val out = ByteArray(hex.length / 2)
+    var i = 0
+    while (i < hex.length) {
+        val hi = Character.digit(hex[i], 16)
+        val lo = Character.digit(hex[i + 1], 16)
+        if (hi < 0 || lo < 0) return null
+        out[i / 2] = ((hi shl 4) or lo).toByte()
+        i += 2
+    }
+    return out
 }

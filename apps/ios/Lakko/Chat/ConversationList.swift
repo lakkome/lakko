@@ -55,6 +55,9 @@ public struct ConversationListRow: Identifiable, Equatable {
     /// device's membership has ended. Always `nil` for a channel, which has no
     /// membership to end.
     public let endedLine: String?
+    /// A manual "mark as unread" (the synced `unread_override` flag). Read by
+    /// a folder's Read exclude toggle, which means what the badge means.
+    public let markedUnread: Bool
 
     public init(
         id: String,
@@ -66,7 +69,8 @@ public struct ConversationListRow: Identifiable, Equatable {
         pinned: Bool = false,
         muted: Bool = false,
         archived: Bool = false,
-        endedLine: String? = nil
+        endedLine: String? = nil,
+        markedUnread: Bool = false
     ) {
         self.id = id
         self.kind = kind
@@ -78,6 +82,7 @@ public struct ConversationListRow: Identifiable, Equatable {
         self.muted = muted
         self.archived = archived
         self.endedLine = endedLine
+        self.markedUnread = markedUnread
     }
 
     /// The row's second line as it is drawn: the ended line takes the preview's
@@ -99,16 +104,7 @@ public enum ConversationList {
     /// the preview and the unread count never cross the FFI boundary at all:
     /// this reorders the array it was already given.
     public static func sorted(_ rows: [ConversationListRow]) -> [ConversationListRow] {
-        let order = LakkoCore.orderConversations(
-            rows: rows.map {
-                LakkoCore.ConversationRow(
-                    id: $0.id,
-                    kind: $0.kind,
-                    title: $0.title,
-                    lastActivityMs: $0.lastActivityMs,
-                    pinned: $0.pinned,
-                    archived: $0.archived)
-            })
+        let order = LakkoCore.orderConversations(rows: rows.map(ChatFolders.ffiRow))
         return order.compactMap { index in
             let i = Int(index)
             return i < rows.count ? rows[i] : nil

@@ -46,4 +46,19 @@ public object Hlc {
         }
         lastWallMs * 1000u + counter
     }
+
+    /**
+     * Make every later [mint] strictly greater than [value].
+     *
+     * Called after the synced state is seeded from disk or a backup
+     * (ADR-0058): a stamp this device wrote in an earlier run, or one a
+     * sibling wrote with a clock ahead of ours, must never out-rank the next
+     * local edit, or that edit would lose to the stale write it replaces.
+     */
+    public fun advancePast(value: ULong): Unit = synchronized(lock) {
+        val current = lastWallMs * 1000u + counter
+        if (value < current) return@synchronized
+        lastWallMs = value / 1000u
+        counter = value % 1000u
+    }
 }

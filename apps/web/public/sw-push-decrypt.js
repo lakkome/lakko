@@ -1048,29 +1048,54 @@ export function senderNameFromProfileRow(payload, senderKeyB64) {
  * the decrypted cross-device sync row the app wrote
  * (`src/devices/sync/sync-state-idb.ts` + `sync-state-store.ts`)?
  *
- * The wire shape is that module's: `{ v: 1, f: { <groupHex>: { m: boolean } } }`,
- * where the key is the lowercase hex of the REAL DS `group_id` (the same
- * `groupIdHex` the app uses everywhere) and `m` is the mute flag. Short keys
- * because the app rewrites that row on every keystroke of a draft.
+ * The row's shape is that module's: `{ v: 2, s: <base64>, p: [...] }`, where
+ * `s` is `SyncedState.toBytes()` - the ADR-0058 fold, shared with iOS and
+ * Android - and `p` the folder edits not yet sent (not read here). The mute
+ * flag is read out of the fold through the wasm core the worker already
+ * loaded, keyed on the REAL DS `group_id`, given here as lowercase hex.
  *
- * Anything else — a schema this build does not know, no entry for the group,
- * a flag that is not a boolean — is `false`, NOT muted. This is the one read
- * on the push path that fails toward ringing; see `lookupMuted` on
+ * Anything else — a schema this build does not know, bytes the fold refuses,
+ * no flags for the group, a malformed id — is `false`, NOT muted. This is the
+ * one read on the push path that fails toward ringing; see `lookupMuted` on
  * {@link DecryptPushDeps} for why that direction is the safe one here.
  *
- * Pure; exported for `sw.js` and the tests.
+ * Pure apart from the wasm read; exported for `sw.js` and the tests.
  *
  * @param {any} payload
  * @param {string} groupHex
+ * @param {any} wasm the wasm namespace (`SyncedState`)
  * @returns {boolean}
  */
-export function mutedFromSyncStateRow(payload, groupHex) {
-  if (payload === null || typeof payload !== "object" || payload.v !== 1) return false;
-  const flags = payload.f;
-  if (flags === null || typeof flags !== "object") return false;
-  const entry = flags[groupHex];
-  if (entry === null || typeof entry !== "object") return false;
-  return entry.m === true;
+export function mutedFromSyncStateRow(payload, groupHex, wasm) {
+  if (payload === null || typeof payload !== "object" || payload.v !== 2) return false;
+  if (typeof payload.s !== "string" || payload.s.length === 0) return false;
+  if (typeof groupHex !== "string" || groupHex.length === 0 || groupHex.length % 2 !== 0) {
+    return false;
+  }
+  if (!/^[0-9a-f]+$/.test(groupHex)) return false;
+  if (wasm === null || typeof wasm !== "object" || typeof wasm.SyncedState !== "function") {
+    return false;
+  }
+  let state = null;
+  try {
+    const raw = atob(payload.s);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i += 1) bytes[i] = raw.charCodeAt(i);
+    const groupId = new Uint8Array(groupHex.length / 2);
+    for (let i = 0; i < groupId.length; i += 1) {
+      groupId[i] = parseInt(groupHex.slice(i * 2, i * 2 + 2), 16);
+    }
+    state = wasm.SyncedState.fromBytes(bytes);
+    const flags = state.flags(groupId);
+    if (flags === undefined || flags === null) return false;
+    const muted = flags.muted === true;
+    if (typeof flags.free === "function") flags.free();
+    return muted;
+  } catch {
+    return false;
+  } finally {
+    if (state !== null && typeof state.free === "function") state.free();
+  }
 }
 
 /**

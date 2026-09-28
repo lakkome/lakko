@@ -172,6 +172,9 @@ impl From<lakko_mls::Error> for FfiError {
             // match is exhaustive, so the arm is written rather than
             // wildcarded, and it keeps the sentence.
             lakko_mls::Error::MembershipRefused { detail, .. } => Self::Group(detail),
+            // ADR-0058 DeviceGroup folder payloads are never parsed here;
+            // the arm exists because the match is exhaustive.
+            lakko_mls::Error::PayloadBounds(e) => Self::Codec(e.to_string()),
         }
     }
 }

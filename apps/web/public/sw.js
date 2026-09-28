@@ -610,7 +610,7 @@ function buildDecryptDeps(wasm, core) {
       try {
         const plain = await aesGcmUnwrap(deviceKey, row.ciphertext);
         const payload = JSON.parse(new TextDecoder().decode(plain));
-        return core.mutedFromSyncStateRow(payload, groupHex);
+        return core.mutedFromSyncStateRow(payload, groupHex, wasm);
       } catch {
         return null;
       }

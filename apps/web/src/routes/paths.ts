@@ -59,7 +59,15 @@ export const paths = {
    *  is reached from Security (authenticator, email or phone), not from the
    *  section list. */
   settingsSection(
-    section: "profile" | "security" | "appearance" | "media" | "about" | "account" | "recovery",
+    section:
+      | "profile"
+      | "security"
+      | "folders"
+      | "appearance"
+      | "media"
+      | "about"
+      | "account"
+      | "recovery",
   ): string {
     return `/settings/${section}`;
   },

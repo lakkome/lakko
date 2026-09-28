@@ -4304,6 +4304,15 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
+    /// Chat folders' Mark all as read (`docs/ux/chat-folders.md` 2.2): the
+    /// same local effect opening the chat has on the badge, without opening
+    /// it. The cross-device half is the read cursor the caller broadcasts.
+    func clearUnread(groupIdHex: String) {
+        if unreadCounts.removeValue(forKey: groupIdHex) != nil {
+            state = state.with(threads: buildThreadList())
+        }
+    }
+
     /// The matching close for ``chatScreenOpened(groupIdHex:)``.
     func chatScreenClosed(groupIdHex: String) {
         guard let count = openChats[groupIdHex] else { return }

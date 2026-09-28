@@ -7,6 +7,12 @@
 //! Delivery Service, so a malicious / corrupt entry reaches this prost-decode +
 //! body-variant-extraction path before any group state is consulted. Any
 //! panic / overflow / runaway here is a vulnerability.
+//!
+//! ADR-0058: the same bytes reach the `FolderChanges` / `StateSnapshot`
+//! bounds (folder id length, name rule, ref kind and id length, unknown
+//! bitfield bits, pin / order / register caps, snapshot part bounds). The
+//! harness ASSERTS that nothing the decoder accepts breaks one of them, and
+//! that the fold accepts every register of an accepted payload.
 
 #![no_main]
 
@@ -14,4 +20,5 @@ use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     let _ = lakko_mls::fuzz_api::parse_devicegroup_payload(data);
+    assert!(lakko_mls::fuzz_api::devicegroup_payload_accepted_within_bounds(data));
 });

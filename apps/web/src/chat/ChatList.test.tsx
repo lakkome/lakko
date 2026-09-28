@@ -89,7 +89,10 @@ vi.mock("../devices/sync/DeviceGroupSyncContext", () => ({
   useDeviceGroupSync: () => ({
     flags: () => flags,
     readCursors: () => ({}),
+    folders: () => [],
+    pendingFolderSync: () => false,
     setFlags: () => Promise.resolve(),
+    applyFolderEdits: () => Promise.resolve(),
   }),
 }));
 vi.mock("../auth/AuthContext", () => ({

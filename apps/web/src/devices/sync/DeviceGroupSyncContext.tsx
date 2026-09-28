@@ -28,9 +28,16 @@
  *   3. **Inbound state mutations.** A background poll loop
  *      pulls the DeviceGroup journal, runs `processIncoming`
  *      on each row, dispatches application payloads through
- *      [`parseDeviceGroupPayload`], and folds the typed result
- *      into the per-state reactive maps with the last-write-
- *      wins resolver in `state.ts`.
+ *      [`parseDeviceGroupPayload`], and folds them into ONE
+ *      `SyncedState` (ADR-0058, the Rust fold shared with iOS
+ *      and Android). The reactive maps the app reads are
+ *      projections of it (`synced-projection.ts`).
+ *
+ *   4. **Chat folders and catch-up (ADR-0058).** Folder edits are
+ *      folded here at once and sent through an outbox that
+ *      survives a reload; when the DeviceGroup gains a device, the
+ *      lowest prior leaf re-sends the whole fold so the newcomer
+ *      starts with the account's pins, drafts and folders.
  *
  * Same wasm Identity / DeviceGroup handle pair the
  * `apps/web/src/devices` orchestrator uses on the add-device
@@ -59,6 +66,7 @@ import type {
   DeviceGroup as WasmDeviceGroup,
   Identity as WasmIdentity,
   ParsedDeviceGroupPayload,
+  SyncedState as WasmSyncedState,
 } from "../../../wasm/lakko_ffi_wasm";
 
 import {
@@ -70,19 +78,37 @@ import { getDeviceGroupJournalCursor } from "../device-group-snapshot-store";
 import { applyDeviceJournalBatch, startingCursor } from "./journal-batch";
 import { decodeJournalEntry, encodeJournalEntry } from "../journal-envelope";
 import { fetchDeviceAttestKey } from "../../auth/device-attest-key";
-import { mintHlc } from "./hlc";
+import { mintHlc, observeHlc } from "./hlc";
 import {
   groupIdHex,
-  shouldApply,
   type DraftState,
   type FlagsState,
   type OrderState,
   type ReadCursorState,
 } from "./state";
+import { buildFolderChangeSet, mergeRestoredFold, projectSyncedState } from "./synced-projection";
+import { drainOutbox, type OutboxBatch } from "./folder-outbox";
+import {
+  detectGrowth,
+  onDeviceGroupChangedHere,
+  snapshotDelayMs,
+  type LeafMember,
+} from "./growth";
+import { onRestoredSyncedState, registerSyncedStateSource } from "./synced-state-source";
+import {
+  bytesToHex,
+  stampEdits,
+  type FolderModel,
+  type RegisterEdit,
+} from "../../chat/folders/folder-model";
 
-/** How long a change waits before the snapshot is rewritten. A draft moves on
- *  a keystroke, and the row is one encrypt plus one IndexedDB write. */
+/** How long a change waits before the stored row is rewritten. A draft moves
+ *  on a keystroke, and the row is one encrypt plus one IndexedDB write. */
 const SYNC_PERSIST_DEBOUNCE_MS = 500;
+
+/** How long a folder edit that could not be sent waits before the next try,
+ *  when no poll success prompts one sooner. */
+const OUTBOX_RETRY_MS = 15_000;
 
 // ---------- Reactive maps + public API shape ---------------------
 
@@ -99,8 +125,7 @@ interface ReadCursorMap {
 /** Public surface of the cross-device sync context. */
 export interface DeviceGroupSyncApi {
   /** Reactive: `true` once the per-session DeviceGroup handle
-   *  is loaded and the poll loop has started. UI uses this to
-   *  decide whether to render "syncing…" vs the live state. */
+   *  is loaded and the poll loop has started. */
   readonly ready: Accessor<boolean>;
   /** Reactive snapshot of the per-group draft map. */
   readonly drafts: Accessor<DraftMap>;
@@ -109,9 +134,14 @@ export interface DeviceGroupSyncApi {
   /** Reactive snapshot of the per-group read cursor map. */
   readonly readCursors: Accessor<ReadCursorMap>;
   /** Reactive snapshot of the whole-account explicit
-   *  conversation ordering. `null` when no Order payload has
-   *  arrived yet (UI falls back to "by latest message"). */
+   *  conversation ordering. `null` when none is held. */
   readonly order: Accessor<OrderState | null>;
+  /** Reactive: the person's chat folders, in bar order (ADR-0058). Only
+   *  folders whose name has arrived; a deleted folder never comes back. */
+  readonly folders: Accessor<readonly FolderModel[]>;
+  /** Reactive: a folder edit made here has not reached the other devices
+   *  yet (UX spec section 6). */
+  readonly pendingFolderSync: Accessor<boolean>;
 
   /** Convenience helper — return the draft for `groupId` or
    *  `undefined` if none. `groupId` is the raw bytes. */
@@ -124,8 +154,7 @@ export interface DeviceGroupSyncApi {
   getReadCursor(groupId: Uint8Array): ReadCursorState | undefined;
 
   /** Compose + publish a `Draft` payload. Empty `text` clears
-   *  the receivers' draft for the same group (the wire shape
-   *  permits this canonically). */
+   *  the receivers' draft for the same group. */
   setDraft(
     groupId: Uint8Array,
     text: string,
@@ -154,6 +183,15 @@ export interface DeviceGroupSyncApi {
   /** Compose + publish an `Order` payload — explicit display
    *  ordering for the conversation list. */
   setOrder(groupIds: readonly Uint8Array[]): Promise<void>;
+
+  /**
+   * One folder edit (ADR-0058): the registers it changes and nothing else.
+   * Stamped here, folded here at once, then sent - now if this device is
+   * online, later if not. Throws only when the edit itself is invalid (a
+   * bound broken) or the runtime has not started; a send failure is not an
+   * error, it waits in the outbox.
+   */
+  applyFolderEdits(edits: readonly RegisterEdit[]): Promise<void>;
 }
 
 const DeviceGroupSyncContext = createContext<DeviceGroupSyncApi>();
@@ -165,20 +203,33 @@ export function DeviceGroupSyncProvider(props: {
 }): JSX.Element {
   const auth = useAuth();
 
-  // Reactive state maps.
+  // Reactive projections of the fold.
   const [drafts, setDrafts] = createSignal<DraftMap>({});
   const [flags, setFlags] = createSignal<FlagsMap>({});
   const [readCursors, setReadCursors] = createSignal<ReadCursorMap>({});
   const [order, setOrder] = createSignal<OrderState | null>(null);
+  const [folders, setFolders] = createSignal<readonly FolderModel[]>([]);
+  const [outbox, setOutbox] = createSignal<readonly OutboxBatch[]>([]);
   const [ready, setReady] = createSignal(false);
+  /** Bumped on every change worth writing to disk. */
+  const [stateVersion, setStateVersion] = createSignal(0);
 
   // Long-lived handles for the active session. `null` between
   // sessions. The poll loop reads them every iteration; the
   // send paths reads them per call.
   let identity: WasmIdentity | null = null;
   let group: WasmDeviceGroup | null = null;
+  /** The one fold of the account's synced state (ADR-0058). */
+  let synced: WasmSyncedState | null = null;
   let pollAbort: AbortController | null = null;
+  let pollDone: Promise<void> | null = null;
   let activeAccountIdB64: string | null = null;
+  /** While the handle is being reloaded after a change made through another
+   *  handle on this device, nothing is sent from the stale one. */
+  let reloading = false;
+  let snapshotTimer: ReturnType<typeof setTimeout> | null = null;
+  let outboxTimer: ReturnType<typeof setTimeout> | null = null;
+  let draining = false;
   /** DS ids of the journal rows THIS provider published this page lifetime.
    *  The DS does not de-duplicate, so each comes straight back on the next
    *  poll; the loop skips it by id instead of handing OpenMLS a message it
@@ -200,6 +251,50 @@ export function DeviceGroupSyncProvider(props: {
   });
   onCleanup(unregisterDsSource);
 
+  // ADR-0058 section 5.2 — the backup carries the fold.
+  const unregisterSource = registerSyncedStateSource(() =>
+    synced === null ? null : synced.toBytes(),
+  );
+  onCleanup(unregisterSource);
+
+  // A backup restore that finished after this runtime started: merge the
+  // restored fold into the running one (ADR-0058 section 5.2). Always a
+  // merge - the fold keeps the newer register from each side.
+  onCleanup(
+    onRestoredSyncedState((account, bytes) => {
+      if (account !== activeAccountIdB64 || synced === null || bytes.length === 0) return;
+      void loadWasm().then((wasm) => {
+        if (synced === null || account !== activeAccountIdB64) return;
+        let backupFold: WasmSyncedState | null = null;
+        try {
+          backupFold = wasm.SyncedState.fromBytes(bytes);
+          if (mergeRestoredFold(synced, backupFold)) {
+            observeHlc(synced.maxHlc());
+            refresh();
+          }
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("restored synced state not merged", err);
+        } finally {
+          backupFold?.free();
+        }
+      });
+    }),
+  );
+
+
+  /** Re-read the fold into the reactive maps, and schedule the disk write. */
+  function refresh(): void {
+    if (synced === null) return;
+    const p = projectSyncedState(synced);
+    setDrafts(p.drafts);
+    setFlags(p.flags);
+    setReadCursors(p.readCursors);
+    setOrder(p.order);
+    setFolders(p.folders);
+    setStateVersion((v) => v + 1);
+  }
+
   // ----- Lifecycle: session ↔ anon transitions --------------------
 
   createEffect(() => {
@@ -213,13 +308,7 @@ export function DeviceGroupSyncProvider(props: {
     const secrets = auth.identitySecrets();
     if (secrets === null) {
       // Session restored from cache without an export key
-      // (cold-start). DeviceGroup needs the DeviceIdentity
-      // seed which lives behind the device key — we can fetch
-      // that without the export key, so this branch CAN still
-      // bootstrap. The bootstrap function below pulls
-      // `accountIdBytes` from `secrets`, so we have to wait.
-      //
-      // No-op for now; the effect re-runs when secrets land.
+      // (cold-start); the effect re-runs when secrets land.
       return;
     }
     // Idempotent — if we already bootstrapped for the same
@@ -232,6 +321,23 @@ export function DeviceGroupSyncProvider(props: {
     teardown();
   });
 
+  // A pairing on this device commits through a handle of its own; the
+  // long-lived one here is then an epoch behind. Stop it before it can see
+  // that commit, reload from disk, and - for an add - run the growth re-send.
+  onCleanup(
+    onDeviceGroupChangedHere((change) => {
+      void reloadHandle().then(async () => {
+        if (change.growth !== undefined) {
+          // The add's commit is published right after the announce; a floor
+          // keeps the re-send behind it on the journal.
+          await maybeScheduleSnapshot(change.growth.ownLeaf, change.growth.priorLeaves, 5_000);
+        }
+      });
+    }),
+  );
+
+  let accountIdBytesActive: Uint8Array | null = null;
+
   async function bootstrap(
     accountIdB64: string,
     accountIdBytes: Uint8Array,
@@ -239,6 +345,7 @@ export function DeviceGroupSyncProvider(props: {
     // Already bootstrapping concurrently — drop the duplicate.
     if (activeAccountIdB64 === accountIdB64 && identity !== null) return;
     activeAccountIdB64 = accountIdB64;
+    accountIdBytesActive = accountIdBytes;
 
     const deviceKey = await getDeviceKey(accountIdB64);
     if (deviceKey === null) {
@@ -268,37 +375,86 @@ export function DeviceGroupSyncProvider(props: {
     identity = ensured.identity;
     group = ensured.group;
 
-    // Seed the four maps from this device's own disk BEFORE the poll starts.
-    // They used to begin empty on every load and the journal could not refill
-    // them - this client resumes from a persisted cursor, so the rows that
-    // carried a pin or a draft are behind it and are never read again. The
-    // snapshot is a head start, not an authority: the poll folds newer rows
-    // on top through the same HLC comparison, so a sibling device's later
-    // write still wins.
+    // Seed the fold from this device's own disk BEFORE the poll starts - this
+    // client resumes the journal from a persisted cursor, so the rows behind
+    // it are never read again. The stored state is a head start, not an
+    // authority: the poll folds newer rows on top by stamp.
+    const wasm = await loadWasm();
+    let restored: Awaited<ReturnType<typeof loadSyncState>> = null;
     try {
-      const restored = await loadSyncState(accountIdB64, deviceKey);
-      if (restored !== null) {
-        setDrafts(restored.drafts);
-        setFlags(restored.flags);
-        setReadCursors(restored.readCursors);
-        setOrder(restored.order);
-      }
+      restored = await loadSyncState(accountIdB64, deviceKey);
     } catch (err) {
       // eslint-disable-next-line no-console
-      console.warn("device-sync snapshot restore failed; starting empty", err);
+      console.warn("device-sync state restore failed; starting empty", err);
     }
+    synced = null;
+    if (restored !== null && restored.synced.length > 0) {
+      try {
+        synced = wasm.SyncedState.fromBytes(restored.synced);
+      } catch (err) {
+        // A row this build cannot read: start empty, the other devices'
+        // growth re-send and the journal refill it.
+        // eslint-disable-next-line no-console
+        console.warn("stored synced state unreadable; starting empty", err);
+      }
+    }
+    synced ??= new wasm.SyncedState();
+    try {
+      observeHlc(synced.maxHlc());
+    } catch {
+      // best-effort
+    }
+    setOutbox(restored?.pending ?? []);
+    refresh();
     setReady(true);
 
-    // Kick off the poll loop. The abort controller is the
-    // only handle we need to stop it cleanly.
+    startPollLoop(accountIdB64, deviceKey);
+    void drainFolderOutbox();
+  }
+
+  function startPollLoop(accountIdB64: string, deviceKey: CryptoKey): void {
+    if (group === null || identity === null) return;
     pollAbort = new AbortController();
-    void runPollLoop(
-      ensured.group,
-      ensured.identity,
-      accountIdB64,
-      deviceKey,
-      pollAbort.signal,
-    );
+    pollDone = runPollLoop(group, identity, accountIdB64, deviceKey, pollAbort.signal);
+  }
+
+  /**
+   * Replace the long-lived handle with a fresh one read from disk. Used when
+   * another handle on this device (the pairing flow) committed: the one held
+   * here is an epoch behind and anything it sent or persisted would be wrong.
+   */
+  async function reloadHandle(): Promise<void> {
+    const account = activeAccountIdB64;
+    const accountBytes = accountIdBytesActive;
+    if (account === null || accountBytes === null || group === null) return;
+    reloading = true;
+    try {
+      pollAbort?.abort();
+      pollAbort = null;
+      if (pollDone !== null) await pollDone;
+      pollDone = null;
+      const deviceKey = await getDeviceKey(account);
+      if (deviceKey === null || activeAccountIdB64 !== account) return;
+      const seed = await ensureDeviceIdentitySeed(account, deviceKey);
+      const ensured = await ensureDeviceGroup(accountBytes, account, seed, deviceKey);
+      seed.fill(0);
+      try {
+        group?.free();
+        identity?.free();
+      } catch {
+        // best-effort
+      }
+      group = ensured.group;
+      identity = ensured.identity;
+      ownPublishedIds.clear();
+      startPollLoop(account, deviceKey);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("DeviceGroup handle reload failed", err);
+    } finally {
+      reloading = false;
+    }
+    void drainFolderOutbox();
   }
 
   function teardown(): void {
@@ -306,6 +462,11 @@ export function DeviceGroupSyncProvider(props: {
       pollAbort.abort();
       pollAbort = null;
     }
+    pollDone = null;
+    if (snapshotTimer !== null) clearTimeout(snapshotTimer);
+    snapshotTimer = null;
+    if (outboxTimer !== null) clearTimeout(outboxTimer);
+    outboxTimer = null;
     if (group !== null) {
       try {
         group.free();
@@ -322,50 +483,59 @@ export function DeviceGroupSyncProvider(props: {
       }
       identity = null;
     }
+    if (synced !== null) {
+      try {
+        synced.free();
+      } catch {
+        // best-effort
+      }
+      synced = null;
+    }
     const closing = activeAccountIdB64;
     activeAccountIdB64 = null;
+    accountIdBytesActive = null;
     ownPublishedIds.clear();
     setReady(false);
     setDrafts({});
     setFlags({});
     setReadCursors({});
     setOrder(null);
-    // Forget the snapshot too. Logout and forget-this-device both come
+    setFolders([]);
+    setOutbox([]);
+    // Forget the stored row too. Logout and forget-this-device both come
     // through here, and a draft left behind for the next account to sign in
     // on this browser is the one piece of this state that reads as a message.
     if (closing !== null) {
       void deleteSyncState(closing).catch((err: unknown) => {
         // eslint-disable-next-line no-console
-        console.warn("device-sync snapshot delete failed", err);
+        console.warn("device-sync state delete failed", err);
       });
     }
   }
 
-  // Write the snapshot whenever any of the four maps moves - a local set or a
-  // sibling's row folded by the poll, since both land in these signals.
-  // Debounced because a draft changes on a keystroke.
+  // Write the row whenever the fold or the outbox moves - a local set or a
+  // sibling's row folded by the poll. Debounced because a draft changes on a
+  // keystroke.
   let persistTimer: ReturnType<typeof setTimeout> | null = null;
   createEffect(() => {
-    const snapshot = {
-      drafts: drafts(),
-      flags: flags(),
-      readCursors: readCursors(),
-      order: order(),
-    };
+    stateVersion();
+    const pending = outbox();
     const account = activeAccountIdB64;
-    if (account === null) return;
+    if (account === null || synced === null) return;
     if (persistTimer !== null) clearTimeout(persistTimer);
     persistTimer = setTimeout(() => {
       persistTimer = null;
       void (async () => {
         try {
+          if (synced === null || activeAccountIdB64 !== account) return;
+          const bytes = synced.toBytes();
           const deviceKey = await getDeviceKey(account);
-          await saveSyncState(account, deviceKey, snapshot);
+          await saveSyncState(account, deviceKey, { synced: bytes, pending });
         } catch (err) {
           // Best-effort: the in-memory state stays good and the next change
           // rewrites the row.
           // eslint-disable-next-line no-console
-          console.warn("device-sync snapshot persist failed", err);
+          console.warn("device-sync state persist failed", err);
         }
       })();
     }, SYNC_PERSIST_DEBOUNCE_MS);
@@ -373,6 +543,54 @@ export function DeviceGroupSyncProvider(props: {
   onCleanup(() => {
     if (persistTimer !== null) clearTimeout(persistTimer);
   });
+
+  // ----- Growth re-send (ADR-0058 section 5.1) -------------------
+
+  function membersOf(g: WasmDeviceGroup): LeafMember[] | null {
+    try {
+      return g.devices().map((m: { leafIndex: number; signaturePublicKey: Uint8Array }) => ({
+        leaf: m.leafIndex,
+        key: bytesToHex(m.signaturePublicKey),
+      }));
+    } catch {
+      return null;
+    }
+  }
+
+  async function maybeScheduleSnapshot(
+    ownLeaf: number,
+    priorLeaves: number[],
+    minDelayMs = 0,
+  ): Promise<void> {
+    const wasm = await loadWasm();
+    if (!wasm.shouldSendSnapshot(ownLeaf, Uint32Array.from(priorLeaves))) return;
+    if (snapshotTimer !== null) return; // one re-send already waiting covers this
+    snapshotTimer = setTimeout(() => {
+      snapshotTimer = null;
+      void sendSnapshot();
+    }, Math.max(minDelayMs, snapshotDelayMs()));
+  }
+
+  /** Every part of the fold, each its own message with a fresh envelope
+   *  stamp; the registers inside keep their ORIGINAL stamps. */
+  async function sendSnapshot(): Promise<void> {
+    if (synced === null || group === null || identity === null) return;
+    const parts = synced.snapshotParts();
+    try {
+      for (const part of parts) {
+        if (group === null || identity === null) return;
+        const bytes = group.createDeviceGroupSnapshotMessage(identity, part, mintHlc());
+        await publishGroupMessage(bytes);
+      }
+    } catch (err) {
+      // The next growth, or the new device's own writes, carry the state
+      // forward; a failed re-send is not retried in a loop.
+      // eslint-disable-next-line no-console
+      console.warn("synced-state snapshot send failed", err);
+    } finally {
+      for (const part of parts) part.free();
+    }
+  }
 
   // ----- Inbound poll loop ---------------------------------------
 
@@ -423,6 +641,12 @@ export function DeviceGroupSyncProvider(props: {
         await sleepCancellable(5000, signal);
         continue;
       }
+      // Stopped while the long poll was out (the handle is being replaced):
+      // apply nothing and persist nothing with this one.
+      if (signal.aborted) return;
+
+      // The journal answered, so this device is online: send what waited.
+      if (outbox().length > 0) void drainFolderOutbox();
 
       // G-13 (ADR-0015): the 32-byte verifying key peers feed to
       // `processIncomingVerifyingRemovals`. Cached (24 h). A zero key is a
@@ -437,6 +661,9 @@ export function DeviceGroupSyncProvider(props: {
         console.warn("device-attest key fetch failed; attested removals will be refused", err);
         attestVk = new Uint8Array(32);
       }
+
+      // ADR-0058 section 5.1 — who was here before this batch.
+      const membersBefore = membersOf(g);
 
       // ADR-0053 contract point 4 — the key of the epoch before this batch.
       const signerBefore = takeSigner(() => g.dsAccessSigner(id));
@@ -463,8 +690,15 @@ export function DeviceGroupSyncProvider(props: {
             try {
               const wasm = await loadWasm();
               const parsed = wasm.parseDeviceGroupPayload(data);
-              applyParsed(parsed);
+              try {
+                applyParsed(parsed);
+              } finally {
+                parsed.free();
+              }
             } catch (err) {
+              // A payload refused by the decoder (ADR-0058 section 4) or of a
+              // kind this build does not know is skipped; the next write of
+              // those registers from any device supersedes it.
               // eslint-disable-next-line no-console
               console.warn("parseDeviceGroupPayload failed", err);
             }
@@ -496,6 +730,21 @@ export function DeviceGroupSyncProvider(props: {
         signerBefore?.free();
         signerAfter?.free();
       });
+
+      // A device joined in this batch: the lowest prior leaf re-sends.
+      const membersAfter = membersOf(g);
+      if (membersBefore !== null && membersAfter !== null) {
+        const growth = detectGrowth(membersBefore, membersAfter);
+        if (growth.grew) {
+          try {
+            void maybeScheduleSnapshot(g.ownLeafIndex(), growth.priorLeaves);
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn("growth re-send check failed", err);
+          }
+        }
+      }
+
       if (batch.persisted) {
         cursor = batch.nextCursor;
         // Past the cursor on disk now, so these ids can never come back.
@@ -508,72 +757,22 @@ export function DeviceGroupSyncProvider(props: {
   }
 
   function applyParsed(parsed: ParsedDeviceGroupPayload): void {
-    const hlc = parsed.hlc;
-    switch (parsed.kind) {
-      case "readCursor": {
-        const key = groupIdHex(parsed.groupId);
-        const next: ReadCursorState = {
-          upToMessageId: parsed.upToMessageId,
-          readAtMs: parsed.readAtMs,
-          updatedAtHlc: hlc,
-        };
-        setReadCursors((prev) => {
-          if (!shouldApply(hlc, prev[key]?.updatedAtHlc)) return prev;
-          return { ...prev, [key]: next };
-        });
-        break;
-      }
-      case "draft": {
-        const key = groupIdHex(parsed.groupId);
-        const next: DraftState = {
-          text: parsed.text,
-          replyToId: parsed.replyToId,
-          updatedAtHlc: hlc,
-        };
-        setDrafts((prev) => {
-          if (!shouldApply(hlc, prev[key]?.updatedAtHlc)) return prev;
-          return { ...prev, [key]: next };
-        });
-        break;
-      }
-      case "flags": {
-        const key = groupIdHex(parsed.groupId);
-        const next: FlagsState = {
-          pinned: parsed.pinned,
-          muted: parsed.muted,
-          archived: parsed.archived,
-          unreadOverride: parsed.unreadOverride,
-          updatedAtHlc: hlc,
-        };
-        setFlags((prev) => {
-          if (!shouldApply(hlc, prev[key]?.updatedAtHlc)) return prev;
-          return { ...prev, [key]: next };
-        });
-        break;
-      }
-      case "order": {
-        const next: OrderState = {
-          groupIds: parsed.orderGroupIds(),
-          updatedAtHlc: hlc,
-        };
-        setOrder((prev) => {
-          if (!shouldApply(hlc, prev?.updatedAtHlc)) return prev;
-          return next;
-        });
-        break;
-      }
-      default:
-        // Older client + future-version payload (or new
-        // discriminant our build doesn't know). Drop.
-        // eslint-disable-next-line no-console
-        console.warn("Unknown DeviceGroup payload kind", parsed.kind);
+    if (synced === null) return;
+    // Every kind - the four maps, folder changes, a catch-up snapshot - folds
+    // through the one Rust fold, with its bytewise tiebreak on equal stamps.
+    const changed = synced.applyPayload(parsed);
+    try {
+      observeHlc(synced.maxHlc());
+    } catch {
+      // best-effort
     }
+    if (changed) refresh();
   }
 
   // ----- Outbound send paths -------------------------------------
 
   async function publishGroupMessage(wireBytes: Uint8Array): Promise<void> {
-    if (group === null || identity === null || activeAccountIdB64 === null) {
+    if (group === null || identity === null || activeAccountIdB64 === null || reloading) {
       throw new Error("DeviceGroupSyncProvider is not ready");
     }
     const ds = new DsClient();
@@ -587,7 +786,7 @@ export function DeviceGroupSyncProvider(props: {
     // so the loop skips it rather than failing to decrypt its own message.
     ownPublishedIds.add(published.id);
     const deviceKey = await getDeviceKey(activeAccountIdB64);
-    if (deviceKey !== null) {
+    if (deviceKey !== null && identity !== null) {
       await persistDeviceGroupSnapshot(
         identity,
         activeAccountIdB64,
@@ -596,34 +795,26 @@ export function DeviceGroupSyncProvider(props: {
     }
   }
 
+  function requireReady(): { g: WasmDeviceGroup; id: WasmIdentity; s: WasmSyncedState } {
+    if (group === null || identity === null || synced === null) {
+      throw new Error("DeviceGroupSyncProvider is not ready");
+    }
+    return { g: group, id: identity, s: synced };
+  }
+
   async function setDraftImpl(
     groupId: Uint8Array,
     text: string,
     replyToId?: Uint8Array,
   ): Promise<void> {
-    if (group === null || identity === null) {
-      throw new Error("DeviceGroupSyncProvider is not ready");
-    }
+    const { g, id } = requireReady();
     const hlc = mintHlc();
-    const bytes = group.createDeviceGroupDraftMessage(
-      identity,
-      groupId,
-      text,
-      replyToId ?? new Uint8Array(0),
-      hlc,
-    );
+    const reply = replyToId ?? new Uint8Array(0);
+    const bytes = g.createDeviceGroupDraftMessage(id, groupId, text, reply, hlc);
     await publishGroupMessage(bytes);
-    // Update local state optimistically — the wire echo will
-    // be deduped by the LWW resolver on the same HLC value.
-    const key = groupIdHex(groupId);
-    setDrafts((prev) => ({
-      ...prev,
-      [key]: {
-        text,
-        replyToId: replyToId ?? new Uint8Array(0),
-        updatedAtHlc: hlc,
-      },
-    }));
+    // A device never receives its own DeviceGroup messages: fold the write
+    // in here, at the same stamp.
+    if (synced?.applyDraft(hlc, groupId, text, reply) === true) refresh();
   }
 
   async function setFlagsImpl(
@@ -635,12 +826,10 @@ export function DeviceGroupSyncProvider(props: {
       readonly unreadOverride: boolean;
     },
   ): Promise<void> {
-    if (group === null || identity === null) {
-      throw new Error("DeviceGroupSyncProvider is not ready");
-    }
+    const { g, id } = requireReady();
     const hlc = mintHlc();
-    const bytes = group.createDeviceGroupFlagsMessage(
-      identity,
+    const bytes = g.createDeviceGroupFlagsMessage(
+      id,
       groupId,
       next.pinned,
       next.muted,
@@ -649,11 +838,12 @@ export function DeviceGroupSyncProvider(props: {
       hlc,
     );
     await publishGroupMessage(bytes);
-    const key = groupIdHex(groupId);
-    setFlags((prev) => ({
-      ...prev,
-      [key]: { ...next, updatedAtHlc: hlc },
-    }));
+    if (
+      synced?.applyFlags(hlc, groupId, next.pinned, next.muted, next.archived, next.unreadOverride) ===
+      true
+    ) {
+      refresh();
+    }
   }
 
   async function setReadCursorImpl(
@@ -661,39 +851,92 @@ export function DeviceGroupSyncProvider(props: {
     upToMessageId: Uint8Array,
     readAtMs: bigint,
   ): Promise<void> {
-    if (group === null || identity === null) {
-      throw new Error("DeviceGroupSyncProvider is not ready");
-    }
+    const { g, id } = requireReady();
     const hlc = mintHlc();
-    const bytes = group.createDeviceGroupReadCursorMessage(
-      identity,
-      groupId,
-      upToMessageId,
-      readAtMs,
-      hlc,
-    );
+    const bytes = g.createDeviceGroupReadCursorMessage(id, groupId, upToMessageId, readAtMs, hlc);
     await publishGroupMessage(bytes);
-    const key = groupIdHex(groupId);
-    setReadCursors((prev) => ({
-      ...prev,
-      [key]: { upToMessageId, readAtMs, updatedAtHlc: hlc },
-    }));
+    if (synced?.applyReadCursor(hlc, groupId, upToMessageId, readAtMs) === true) refresh();
   }
 
   async function setOrderImpl(
     groupIds: readonly Uint8Array[],
   ): Promise<void> {
-    if (group === null || identity === null) {
-      throw new Error("DeviceGroupSyncProvider is not ready");
-    }
+    const { g, id } = requireReady();
     const hlc = mintHlc();
-    // Defensive copy — `createDeviceGroupOrderMessage` takes a
-    // plain array of Uint8Arrays; mutating later shouldn't
-    // affect the wire bytes.
-    const ids = groupIds.map((g) => new Uint8Array(g));
-    const bytes = group.createDeviceGroupOrderMessage(identity, ids, hlc);
+    // Defensive copy — mutating the caller's arrays later must not affect
+    // the wire bytes.
+    const ids = groupIds.map((x) => new Uint8Array(x));
+    const bytes = g.createDeviceGroupOrderMessage(id, ids, hlc);
     await publishGroupMessage(bytes);
-    setOrder({ groupIds: ids, updatedAtHlc: hlc });
+    if (synced?.applyConversationOrder(hlc, ids.map((x) => new Uint8Array(x))) === true) {
+      refresh();
+    }
+  }
+
+  // ----- Folders (ADR-0058) ----------------------------------------
+
+  async function applyFolderEditsImpl(edits: readonly RegisterEdit[]): Promise<void> {
+    if (edits.length === 0) return;
+    const { s } = requireReady();
+    const wasm = await loadWasm();
+    const stamped = stampEdits(edits, mintHlc);
+    // Build (and so validate) before anything is applied: a broken bound
+    // throws here with nothing changed.
+    const cs = buildFolderChangeSet(wasm, stamped);
+    try {
+      s.applyFolderChanges(cs);
+    } finally {
+      cs.free();
+    }
+    setOutbox((q) => [...q, stamped]);
+    refresh();
+    void drainFolderOutbox();
+  }
+
+  function scheduleOutboxRetry(): void {
+    if (outboxTimer !== null) return;
+    outboxTimer = setTimeout(() => {
+      outboxTimer = null;
+      void drainFolderOutbox();
+    }, OUTBOX_RETRY_MS);
+  }
+
+  async function drainFolderOutbox(): Promise<void> {
+    if (draining || outbox().length === 0) return;
+    if (group === null || identity === null || reloading) {
+      scheduleOutboxRetry();
+      return;
+    }
+    draining = true;
+    try {
+      const wasm = await loadWasm();
+      const queue = outbox();
+      const result = await drainOutbox(
+        queue,
+        async (batch) => {
+          if (group === null || identity === null) throw new Error("not ready");
+          const cs = buildFolderChangeSet(wasm, batch);
+          try {
+            const bytes = group.createDeviceGroupFolderChangesMessage(identity, cs, mintHlc());
+            await publishGroupMessage(bytes);
+          } finally {
+            cs.free();
+          }
+        },
+        // A batch the builder refuses can never be sent; it already applied
+        // here. Anything else (the network) is retried.
+        (err) => err instanceof Error && /bound|folder id|not hex|invalid/i.test(err.message),
+      );
+      // Batches added while this ran are kept after what is still waiting.
+      setOutbox((current) => [...result.remaining, ...current.slice(queue.length)]);
+      if (result.failed) scheduleOutboxRetry();
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("folder outbox drain failed", err);
+      scheduleOutboxRetry();
+    } finally {
+      draining = false;
+    }
   }
 
   // ----- Hook API ------------------------------------------------
@@ -704,6 +947,8 @@ export function DeviceGroupSyncProvider(props: {
     flags,
     readCursors,
     order,
+    folders,
+    pendingFolderSync: () => outbox().length > 0,
     getDraft(groupId) {
       return drafts()[groupIdHex(groupId)];
     },
@@ -717,6 +962,7 @@ export function DeviceGroupSyncProvider(props: {
     setFlags: setFlagsImpl,
     setReadCursor: setReadCursorImpl,
     setOrder: setOrderImpl,
+    applyFolderEdits: applyFolderEditsImpl,
   };
 
   return (

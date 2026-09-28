@@ -1023,6 +1023,9 @@ private fun SessionRoot(
                         }
                     },
                     snapshot = { chatRepository.currentStorageSnapshot() },
+                    // ADR-0058 section 5.2 — the folded synced state (folders,
+                    // pins, mutes, archive, read cursors, drafts, order).
+                    syncedState = { deviceGroupSync.currentSyncedStateBytes() },
                 ),
             )
             driver.start()
@@ -1236,6 +1239,15 @@ private fun SessionRoot(
                         },
                         channels = channelsState,
                         deviceGroupSync = deviceGroupSync,
+                        // docs/ux/chat-folders.md — the editor and Settings >
+                        // Chat folders are pushed destinations.
+                        onEditFolder = { id -> navController.navigate(Routes.folderEdit(id, null)) },
+                        onNewFolder = { row ->
+                            navController.navigate(
+                                Routes.folderEdit(null, row?.let { me.lakko.app.chat.refOf(it) }),
+                            )
+                        },
+                        onOpenFolderSettings = { navController.navigate(Routes.FOLDERS) },
                         // docs/ux/calls.md section 2.1.1 — a muted
                         // conversation's call never takes the screen over, so
                         // the list offers it on that chat's own row instead.
@@ -1473,6 +1485,7 @@ private fun SessionRoot(
                         onOpenDevices = { navController.navigate(Routes.DEVICES) },
                         onOpenRecovery = { navController.navigate(Routes.RECOVERY) },
                         onOpenAntiCensorship = { navController.navigate(Routes.ANTI_CENSORSHIP) },
+                        onOpenChatFolders = { navController.navigate(Routes.FOLDERS) },
                         onLogout = logout,
                         onForgetDevice = forgetDevice,
                     )
@@ -1670,6 +1683,43 @@ private fun SessionRoot(
                         chatRepository = chatRepository,
                     )
                 }
+                // docs/ux/chat-folders.md section 4 — Settings > Chat folders.
+                composable(Routes.FOLDERS) {
+                    me.lakko.app.ui.chat.ChatFoldersSettingsScreen(
+                        repository = chatRepository,
+                        channels = channelsState,
+                        deviceGroupSync = deviceGroupSync,
+                        onBack = { navController.popBackStack() },
+                        onEditFolder = { id -> navController.navigate(Routes.folderEdit(id, null)) },
+                        onNewFolder = { navController.navigate(Routes.folderEdit(null, null)) },
+                    )
+                }
+                // Section 3 — the folder editor: an existing folder, or a new
+                // one optionally holding the chat "New folder..." came from.
+                composable(
+                    Routes.FOLDER_EDIT,
+                    arguments = listOf(
+                        androidx.navigation.navArgument("folder") {
+                            type = androidx.navigation.NavType.StringType
+                            nullable = true
+                            defaultValue = null
+                        },
+                        androidx.navigation.navArgument("prefill") {
+                            type = androidx.navigation.NavType.StringType
+                            nullable = true
+                            defaultValue = null
+                        },
+                    ),
+                ) { entry ->
+                    me.lakko.app.ui.chat.FolderEditorScreen(
+                        repository = chatRepository,
+                        channels = channelsState,
+                        deviceGroupSync = deviceGroupSync,
+                        folderIdHex = entry.arguments?.getString("folder")?.takeIf { it.isNotEmpty() },
+                        prefill = Routes.decodeFolderPrefill(entry.arguments?.getString("prefill")),
+                        onDone = { navController.popBackStack() },
+                    )
+                }
                 composable(Routes.RECOVERY) {
                     me.lakko.app.ui.settings.RecoveryScreen(
                         authRepository = authRepository,
@@ -1776,6 +1826,32 @@ private object Routes {
     const val DEVICES_ADD = "settings/devices/add"
     const val RECOVERY = "settings/recovery"
     const val ANTI_CENSORSHIP = "settings/anti_censorship"
+    /** docs/ux/chat-folders.md section 4. */
+    const val FOLDERS = "settings/folders"
+    /** The folder editor; both arguments are hex (URL-safe by construction). */
+    const val FOLDER_EDIT = "folder_edit?folder={folder}&prefill={prefill}"
+    fun folderEdit(folderIdHex: String?, prefill: uniffi.lakko_ffi_uniffi.FolderConversationRef?): String {
+        val p = prefill?.let { ref ->
+            val k = when (ref.kind) {
+                uniffi.lakko_ffi_uniffi.FolderConversationKind.ONE_TO_ONE -> "o"
+                uniffi.lakko_ffi_uniffi.FolderConversationKind.GROUP -> "g"
+                uniffi.lakko_ffi_uniffi.FolderConversationKind.CHANNEL -> "c"
+            }
+            k + me.lakko.app.chat.rowIdOf(ref)
+        }
+        return "folder_edit?folder=${folderIdHex.orEmpty()}&prefill=${p.orEmpty()}"
+    }
+    fun decodeFolderPrefill(arg: String?): uniffi.lakko_ffi_uniffi.FolderConversationRef? {
+        if (arg.isNullOrEmpty()) return null
+        val kind = when (arg[0]) {
+            'o' -> uniffi.lakko_ffi_uniffi.FolderConversationKind.ONE_TO_ONE
+            'g' -> uniffi.lakko_ffi_uniffi.FolderConversationKind.GROUP
+            'c' -> uniffi.lakko_ffi_uniffi.FolderConversationKind.CHANNEL
+            else -> return null
+        }
+        val id = me.lakko.app.devices.sync.hexToBytesOrNull(arg.substring(1)) ?: return null
+        return uniffi.lakko_ffi_uniffi.FolderConversationRef(kind = kind, id = id)
+    }
     /** The contact detail; `key` is the base64url signature key (URL-safe by construction). */
     const val CONTACT_DETAIL = "contact/{key}"
     fun contact(key: String): String = "contact/$key"

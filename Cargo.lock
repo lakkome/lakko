@@ -2545,6 +2545,7 @@ dependencies = [
  "getrandom 0.2.17",
  "lakko-attest",
  "lakko-crypto",
+ "lakko-sync",
  "rand 0.8.6",
  "thiserror 1.0.69",
 ]
@@ -2694,6 +2695,7 @@ dependencies = [
  "lakko-proto",
  "lakko-sfu-proto",
  "lakko-shamir",
+ "lakko-sync",
  "lakko-transparency",
  "lakko-transport",
  "lakko-ui-rules",
@@ -2750,6 +2752,7 @@ dependencies = [
  "lakko-attest",
  "lakko-crypto",
  "lakko-proto",
+ "lakko-sync",
  "openmls",
  "openmls_basic_credential",
  "openmls_rust_crypto",
@@ -3204,7 +3207,10 @@ dependencies = [
 name = "lakko-sync"
 version = "0.0.0"
 dependencies = [
+ "lakko-contacts",
+ "proptest",
  "serde",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -3269,6 +3275,7 @@ name = "lakko-ui-rules"
 version = "0.0.0"
 dependencies = [
  "lakko-contacts",
+ "lakko-sync",
 ]
 
 [[package]]

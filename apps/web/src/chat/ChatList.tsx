@@ -28,51 +28,48 @@ import {
 } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
 
-import { useAuth } from "../auth/AuthContext";
 import { useCallHost } from "../calls/CallHostContext";
 import { quietCallKindLabel, quietCallOfferFor } from "../calls/quiet-call-offer";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
-import { getDeviceKey } from "../auth/key-store";
 import { restoredKind } from "../auth/restore-marker";
-import { ownPersonKeyB64, peopleCountOf, personKeysOf } from "./person-key";
-import { decideConversationKind, type ConversationKind } from "./conversation-kind";
-import { conversationTitle } from "./conversation-title";
 import { findByName, findByNameMessage } from "./find-by-name";
 import { DiscoveryClient } from "../discovery/client";
 import { bytesToHex } from "../channels/composer";
-import { channelRowModel } from "../channels/channel-row";
-import { channelsState } from "../state/channels-state";
-import { sortConversations, type ConversationRow } from "./conversation-list";
+import { rowHasUnread, type ConversationRow } from "./conversation-list";
+import { createConversationRows } from "./conversation-rows";
 import { uiRules } from "./ui-rules";
-import {
-  observeConversationKind,
-  persistedConversationKind,
-  subscribeConversationKindChanged,
-} from "./conversation-kind-store";
-import { groupTitle } from "./group-title";
 import { formatListTime } from "./list-time";
-import { previewLine, rowMatchesQuery } from "./list-preview";
-import { memberNameOf } from "../profile/member-label";
+import { rowMatchesQuery } from "./list-preview";
 import { useChats, type ActiveGroup } from "./ChatContext";
-import { chatListLine, membershipState, readIsActive } from "./membership-ended";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { groupIdHex as syncGroupIdHex } from "../devices/sync/state";
-import { loadMessageLog, type PersistedGroup } from "./message-log-store";
-import { summarizeGroupSlot, type ChatListSummary } from "./background-log";
-import { subscribeMessageLogChanged } from "./message-log-events";
+import type { ChatListSummary } from "./background-log";
 import { pendingKnownGroups } from "../devices/state-bundle";
-import {
-  loadAccepted,
-  peerContactByMemberPubkeys,
-  subscribeAcceptedChanged,
-  type AcceptedContact,
-} from "../contacts/local-store";
-import { useProfiles } from "../profile/ProfileContext";
-import { useGroupNames } from "./GroupNameContext";
 import { paths } from "../routes/paths";
 import { Avatar } from "../ui/Avatar";
 import { Icon } from "../ui/icons";
 import { createLongPress } from "../ui/long-press";
+import { FolderBar, type FolderTab } from "./folders/FolderBar";
+import { AddToFolderItems } from "./folders/AddToFolderMenu";
+import {
+  deleteFolder,
+  openFolderEditor,
+  togglePinInFolder,
+  toggleMembership,
+} from "./folders/folder-actions";
+import {
+  MAX_FOLDER_PINS,
+  membershipOf,
+  refOfRow,
+  type FolderModel,
+} from "./folders/folder-model";
+import {
+  folderRowsOrdered,
+  folderUnreadCount,
+  isPinnedInFolder,
+  rowIsInFolder,
+} from "./folders/folder-view";
+import { ALL_CHATS, loadSelectedTab, resolveTab, selectTab, selectedTab } from "./folders/selected-tab";
 
 type Flag = "pinned" | "muted" | "archived";
 
@@ -151,13 +148,29 @@ function CreateMenu(props: { onClose: () => void }): JSX.Element {
  * carry, and giving a channel a badge that can never be non-zero would be a
  * worse lie than leaving it out.
  */
-function ChannelRow(props: { row: ConversationRow }): JSX.Element {
+function ChannelRow(props: {
+  row: ConversationRow;
+  /** Pinned inside the open folder (a channel has no global pin). */
+  pinned: boolean;
+  onMenu: (x: number, y: number) => void;
+}): JSX.Element {
+  const press = createLongPress((x, y) => props.onMenu(x, y));
   return (
     <A
       href={paths.channel(props.row.id)}
       class="lk-row"
       activeClass=""
       inactiveClass=""
+      onContextMenu={(e) => {
+        e.preventDefault();
+        props.onMenu(e.clientX, e.clientY);
+      }}
+      onPointerDown={press.onPointerDown}
+      onPointerMove={press.onPointerMove}
+      onPointerUp={press.onPointerUp}
+      onPointerCancel={press.onPointerCancel}
+      onPointerLeave={press.onPointerLeave}
+      onClick={(e) => press.swallowClick(e)}
     >
       <Avatar label={props.row.title} id={props.row.id} />
       <div class="lk-row-body">
@@ -168,6 +181,11 @@ function ChannelRow(props: { row: ConversationRow }): JSX.Element {
         </div>
         <div class="lk-row-line">
           <span class="lk-row-sub">{props.row.preview}</span>
+          <span class="lk-row-trail">
+            <Show when={props.pinned}>
+              <Icon name="pin" size={14} title="Pinned" />
+            </Show>
+          </span>
         </div>
       </div>
     </A>
@@ -176,266 +194,119 @@ function ChannelRow(props: { row: ConversationRow }): JSX.Element {
 
 export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Element {
   const chats = useChats();
-  const profiles = useProfiles();
-  const groupNames = useGroupNames();
   const sync = useDeviceGroupSync();
-  const auth = useAuth();
   const navigate = useNavigate();
   const callHost = useCallHost();
   const copy = (): (typeof COPY)["chat"] => COPY.chat;
 
-  const accountId = (): string | null => {
-    const s = auth.state();
-    return s.kind === "session" ? s.account.accountId : null;
-  };
+  const {
+    accountId,
+    kindOf,
+    chatLabel,
+    summaryFor,
+    endedLine,
+    subOf,
+    clock,
+    orderedRows,
+    groupById,
+    newestIdFor,
+  } = createConversationRows();
 
-  // Accepted contacts name a chat linked to one; a rename propagates here.
-  const [accepted, setAccepted] = createSignal<AcceptedContact[]>(loadAccepted());
-  onMount(() => {
-    const unsubscribe = subscribeAcceptedChanged(() => setAccepted(loadAccepted()));
-    onCleanup(unsubscribe);
-  });
+  // ----- chat folders (`docs/ux/chat-folders.md`) ------------------------
 
-  // docs/ux section 3 — the persisted kind. The effect records every
-  // conversation's kind at first sight (a Welcome, a restore) and the one
-  // allowed flip, chat -> group; the memo below reads what is stored.
-  const [kindVersion, setKindVersion] = createSignal(0);
-  onMount(() => {
-    const unsubscribe = subscribeConversationKindChanged(() => setKindVersion((v) => v + 1));
-    onCleanup(unsubscribe);
-  });
-  createEffect(() => {
-    const account = accountId();
-    if (account === null) return;
-    for (const g of chats.groups()) {
-      observeConversationKind(account, g.groupIdB64, peopleCountOf(g.group));
-    }
-  });
-  const kindOf = (g: ActiveGroup): ConversationKind => {
-    kindVersion();
-    const account = accountId();
-    const persisted = account === null ? null : persistedConversationKind(account, g.groupIdB64);
-    return decideConversationKind(persisted, peopleCountOf(g.group));
-  };
-
-  /** The other member's key in a 1x1 chat, else `null`. */
-  const peerKeyOf = (g: ActiveGroup): string | null => {
-    const ownB64 = ownPersonKeyB64(chats.identity());
-    const memberB64s = personKeysOf(g.group);
-    if (memberB64s.length === 0) return null;
-    const peers = memberB64s.filter((k) => k !== ownB64);
-    return memberB64s.length === 2 && peers.length === 1 ? (peers[0] ?? null) : null;
-  };
-
-  /** Best label for a row (ADR-0048 section 5). A 1x1 chat is the other
-   *  person, through the one resolver, read live from the roster so it works
-   *  however the chat was created. A group keeps its own label. */
-  const chatLabel = (g: ActiveGroup): string => {
-    accepted();
-    const ownB64 = ownPersonKeyB64(chats.identity());
-    // ADR-0050 — people, not leaves.
-    const memberB64s = personKeysOf(g.group);
-    return conversationTitle({
-      kind: kindOf(g),
-      memberKeysB64: memberB64s,
-      ownKeyB64: ownB64,
-      fallbackLabel: g.label,
-      sharedName: groupNames.nameOf(g.groupIdB64),
-      contactNameById: accepted().find((c) => c.groupIdB64 === g.groupIdB64)?.displayName,
-      contactNameByMember: peerContactByMemberPubkeys(memberB64s, ownB64, accepted())
-        ?.displayName,
-      nameOf: (k) => profiles.resolve(k).name,
-      groupTitle,
-    });
-  };
-
-  // Unread badge + last-message preview + time, from the persisted message
-  // log. Reloads live on every log write (another tab, the open chat, the
-  // background receive), filtered to this account.
-  const [logSlots, setLogSlots] = createSignal<{ readonly [groupIdHex: string]: PersistedGroup }>(
-    {},
-  );
-
-  async function reloadLog(): Promise<void> {
-    const s = auth.state();
-    if (s.kind !== "session") return;
-    const accountIdB64 = s.account.accountId;
-    const deviceKey = await getDeviceKey(accountIdB64);
-    if (deviceKey === null) return;
-    const log = await loadMessageLog(accountIdB64, deviceKey);
-    if (log === null) return;
-    setLogSlots(log.groups);
-  }
-
-  onMount(() => {
-    void reloadLog();
-    const unsubscribe = subscribeMessageLogChanged((account) => {
-      const s = auth.state();
-      if (s.kind === "session" && s.account.accountId === account) {
-        void reloadLog();
-      }
-    });
-    onCleanup(unsubscribe);
-  });
-
-  // The row time relabels itself as the day turns ("14:05" becomes "Tue").
-  const [clock, setClock] = createSignal(new Date());
-  onMount(() => {
-    const t = setInterval(() => setClock(new Date()), 60_000);
-    onCleanup(() => clearInterval(t));
-  });
-
-  /** Unread count + preview for one row: rows above the later of the
-   *  cross-device read cursor and the newest row this device has shown. */
-  function summaryFor(groupIdBytes: Uint8Array): ChatListSummary {
-    const hex = syncGroupIdHex(groupIdBytes);
-    const cursor = sync.readCursors()[hex];
-    let syncedReadUpTo: bigint | null = null;
-    if (cursor !== undefined && cursor.upToMessageId.length >= 8) {
-      let id = 0n;
-      for (let i = 0; i < 8; i += 1) {
-        id = (id << 8n) | BigInt(cursor.upToMessageId[i] as number);
-      }
-      syncedReadUpTo = id;
-    }
-    return summarizeGroupSlot(logSlots()[hex], syncedReadUpTo);
-  }
-
-  /** The last message's time as a sort key: the DS stamp, else the moment
-   *  the conversation was created on this device. */
-  const lastActivityMs = (g: ActiveGroup): number => {
-    const at = summaryFor(g.group.groupId).lastAt;
-    if (at !== null) {
-      const t = new Date(at).getTime();
-      if (!Number.isNaN(t)) return t;
-    }
-    return g.createdAtMs;
-  };
-
-  /** ADR-0045 UX section 6.2.4: the row's one muted line once the membership
-   *  is over, or `null` while the reader is still a member. The chat stays in
-   *  the list; only the badge goes quiet. */
-  const endedLine = (g: ActiveGroup): string | null =>
-    chatListLine(
-      membershipState({
-        isActive: readIsActive(g.group),
-        leaveRequestedAtMs: undefined,
-      }),
-    );
-
-  /** The second line: the ended notice, else the last message with its
-   *  prefix, else the person's username (1x1) or the group's size. */
-  const subOf = (g: ActiveGroup): string => {
-    const ended = endedLine(g);
-    if (ended !== null) return ended;
-    const s = summaryFor(g.group.groupId);
-    const line = previewLine({
-      preview: s.preview,
-      isOwn: s.previewIsOwn,
-      senderName:
-        s.lastAuthorKeyB64 === null ? null : memberNameOf(profiles.resolve(s.lastAuthorKeyB64)),
-      isGroup: kindOf(g) === "group",
-    });
-    if (line.length > 0) return line;
-    // Nothing said yet: a 1x1 shows the person's username, a group its size.
-    // A member count on a 1x1 says nothing.
-    const peer = kindOf(g) === "chat" ? peerKeyOf(g) : null;
-    if (peer !== null) return profiles.resolve(peer).username ?? "";
-    const n = peopleCountOf(g.group);
-    return `${n} ${n === 1 ? "person" : "people"}`;
-  };
-
-  /**
-   * Every conversation, ordered.
-   *
-   * The rule lives in `conversation-list.ts` rather than here, because it is
-   * the rule all three clients need and because a comparator written inside
-   * a component cannot be run by a test. This maps the store into the shape
-   * that module takes; when channels join the list they are mapped the same
-   * way and nothing about the ordering changes.
-   */
-  /** A subscribed channel, in the shape the ordering takes. Its title,
-   *  second line and time come from `channelRowModel`, which the Channels
-   *  screen already uses - one vocabulary, not a second one. */
-  const channelRows = (): readonly ConversationRow[] => {
-    const meta = channelsState.metaByChannel();
-    const posts = channelsState.postsByChannel();
-    return channelsState.channels().map((c) => {
-      const lastPostMs = posts.get(c.id)?.at(-1)?.serverTsMs ?? null;
-      const model = channelRowModel(
-        {
-          id: c.id,
-          sharedName: meta.get(c.id)?.name,
-          localName: c.localName,
-          localHandle: c.localHandle,
-          isOwner: false,
-          subscriberCount: null,
-          lastPostMs,
-        },
-        clock(),
-      );
-      return {
-        id: c.id,
-        kind: "channel" as const,
-        title: model.title,
-        preview: model.subtitle,
-        // Nothing posted yet sorts by when it was added, the same way a chat
-        // with no messages sorts by when it was created.
-        lastActivityMs: lastPostMs ?? c.addedAtMs,
-        unread: 0,
-        pinned: false,
-        muted: false,
-        archived: false,
-      };
-    });
-  };
-
-  const orderedRows = createMemo((): readonly ConversationRow[] => {
-    const flagsMap = sync.flags();
-    // The order is the shared rule, so the list waits for it rather than
-    // falling back to a second, drifting copy. In the running app the rules
-    // have resolved long before a session exists.
-    const rules = uiRules();
-    if (rules === null) return [];
-    return sortConversations(
-      [
-      ...channelRows(),
-      ...chats.groups().map((g) => {
-        const f = flagsMap[syncGroupIdHex(g.group.groupId)];
-        return {
-          id: g.groupIdB64,
-          kind: kindOf(g),
-          title: chatLabel(g),
-          preview: subOf(g),
-          lastActivityMs: lastActivityMs(g),
-          unread: summaryFor(g.group.groupId).unread,
-          pinned: f?.pinned === true,
-          muted: f?.muted === true,
-          archived: f?.archived === true,
-        };
-      }),
-      ],
-      rules,
-    );
-  });
-
+  // The selected tab is this device's, never synced (UX 2.5).
+  createEffect(() => loadSelectedTab(accountId()));
+  const folders = (): readonly FolderModel[] => sync.folders();
+  /** The open tab, falling back to All chats when that folder is gone. */
+  const tab = (): string => resolveTab(selectedTab(), folders().map((f) => f.idHex));
+  const currentFolder = (): FolderModel | null =>
+    folders().find((f) => f.idHex === tab()) ?? null;
 
   // The search field in the pane head filters by name and preview.
   const [query, setQuery] = createSignal("");
-  /** The ordered list, filtered by what was typed. Local and loose, over
-   *  data this device already holds - the network lookup is a different
-   *  thing and `docs/ux/navigation.md` section 4 leaves it open. */
+  const searching = (): boolean => query().trim().length > 0;
+
+  /** The rows of the open tab: All chats, or the folder's own view. */
+  const tabRows = createMemo((): readonly ConversationRow[] => {
+    const all = orderedRows();
+    const folder = currentFolder();
+    const rules = uiRules();
+    if (folder === null || rules === null) return all;
+    return folderRowsOrdered(all, folder, rules);
+  });
+
+  /** The ordered list, filtered by what was typed. A search is "where is
+   *  it", so it searches EVERYTHING whichever tab is open (UX 2.4). */
   const visibleRows = (): readonly ConversationRow[] => {
     const q = query();
-    if (q.trim().length === 0) return orderedRows();
+    if (!searching()) return tabRows();
     return orderedRows().filter((row) => rowMatchesQuery(q, row.title, row.preview));
   };
 
-  /** The store entry behind a chat or group row. */
-  const groupById = createMemo(
-    (): ReadonlyMap<string, ActiveGroup> =>
-      new Map(chats.groups().map((g) => [g.groupIdB64, g])),
-  );
+  /** The bar's tabs with their counts. */
+  const tabs = createMemo((): FolderTab[] => {
+    const rules = uiRules();
+    const all = orderedRows();
+    return [
+      { id: ALL_CHATS, name: "All chats", count: 0 },
+      ...folders().map((f) => ({
+        id: f.idHex,
+        name: f.name,
+        count: rules === null ? 0 : folderUnreadCount(all, f, rules),
+      })),
+    ];
+  });
+
+  const [tabMenu, setTabMenu] = createSignal<{ id: string; x: number; y: number } | null>(null);
+
+  /** Mark every conversation in the tab as read: for each, the same read
+   *  cursor opening the chat moves, and a manual "unread" cleared. */
+  async function markAllRead(tabId: string): Promise<void> {
+    const rules = uiRules();
+    const folder = folders().find((f) => f.idHex === tabId) ?? null;
+    const rows =
+      folder === null || rules === null ? orderedRows() : folderRowsOrdered(orderedRows(), folder, rules);
+    for (const row of rows) {
+      if (row.kind === "channel" || !rowHasUnread(row)) continue;
+      const g = groupById().get(row.id);
+      if (g === undefined) continue;
+      const groupId = g.group.groupId;
+      const newest = newestIdFor(groupId);
+      try {
+        if (newest !== null) {
+          const idBytes = new Uint8Array(8);
+          let v = newest;
+          for (let i = 7; i >= 0; i -= 1) {
+            idBytes[i] = Number(v & 0xffn);
+            v >>= 8n;
+          }
+          await sync.setReadCursor(groupId, idBytes, BigInt(Date.now()));
+        }
+        const f = sync.flags()[syncGroupIdHex(groupId)];
+        if (f?.unreadOverride === true) {
+          await sync.setFlags(groupId, { ...f, unreadOverride: false });
+        }
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("mark all as read: one conversation failed", err);
+      }
+    }
+  }
+
+  // Ctrl+1..9 (Cmd on macOS) select the first nine tabs, All chats being 1.
+  onMount(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+      if (e.key < "1" || e.key > "9") return;
+      if (folders().length === 0) return;
+      const t = tabs()[Number(e.key) - 1];
+      if (t === undefined) return;
+      e.preventDefault();
+      selectTab(accountId(), t.id);
+    };
+    window.addEventListener("keydown", onKey);
+    onCleanup(() => window.removeEventListener("keydown", onKey));
+  });
 
   /**
    * Look the typed name up on the network.
@@ -504,6 +375,20 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
   };
 
   async function toggleFlag(g: ActiveGroup, field: Flag): Promise<void> {
+    // Inside a folder, Pin acts on the folder's own pins (UX 2.3); the
+    // All-chats pin is untouched.
+    const folder = currentFolder();
+    if (field === "pinned" && folder !== null) {
+      const ref = refOfRow(kindOf(g), g.groupIdB64);
+      if (ref === null) return;
+      try {
+        await togglePinInFolder(sync, folder, ref);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("folder pin failed", err);
+      }
+      return;
+    }
     const groupId = g.group.groupId;
     const key = syncGroupIdHex(groupId);
     const cur = sync.flags()[key];
@@ -524,7 +409,24 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
 
   // The context menu: one open at a time, anchored where the pointer was.
   // Opened by a right click or by a long press (the touch path).
-  const [menu, setMenu] = createSignal<{ g: ActiveGroup; x: number; y: number } | null>(null);
+  const [menu, setMenu] = createSignal<{
+    row: ConversationRow;
+    g: ActiveGroup | null;
+    x: number;
+    y: number;
+  } | null>(null);
+
+  /** Whether the row shows as pinned in the open tab: the folder's own pin
+   *  inside a folder, the global pin in All chats. */
+  const pinnedHere = (row: ConversationRow): boolean => {
+    const folder = currentFolder();
+    return folder === null ? row.pinned : isPinnedInFolder(row, folder);
+  };
+  /** Pin is disabled inside a folder that already holds ten pins. */
+  const pinBlocked = (row: ConversationRow): boolean => {
+    const folder = currentFolder();
+    return folder !== null && !isPinnedInFolder(row, folder) && folder.pinned.length >= MAX_FOLDER_PINS;
+  };
 
   /** The create menu of `docs/ux/navigation.md` section 3: three items, no
    *  descriptions. Opened by the compose button and by the empty state
@@ -580,6 +482,16 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
           />
         </label>
       </Show>
+      {/* `docs/ux/chat-folders.md` section 2: the folder bar, once one folder
+          exists. Hidden while searching - a search covers everything. */}
+      <Show when={folders().length > 0 && !searching() && orderedRows().length > 0}>
+        <FolderBar
+          tabs={tabs()}
+          selected={tab()}
+          onSelect={(id) => selectTab(accountId(), id)}
+          onMenu={(id, x, y) => setTabMenu({ id, x, y })}
+        />
+      </Show>
       <Show
         when={orderedRows().length > 0}
         fallback={
@@ -601,8 +513,24 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
         }
       >
         <div class="lk-pane-body">
-          <Show when={visibleRows().length === 0}>
+          <Show when={visibleRows().length === 0 && (searching() || currentFolder() === null)}>
             <p class="lk-pane-nomatch">No results</p>
+          </Show>
+          {/* UX 2.4 - one sentence whatever the filter; the person made it. */}
+          <Show when={visibleRows().length === 0 && !searching() && currentFolder() !== null}>
+            <div class="lk-folder-empty">
+              <p>Nothing here right now</p>
+              <button
+                type="button"
+                class="secondary"
+                onClick={() => {
+                  const f = currentFolder();
+                  if (f !== null) openFolderEditor({ mode: "edit", folderIdHex: f.idHex });
+                }}
+              >
+                Edit folder
+              </button>
+            </div>
           </Show>
           {/* `docs/ux/navigation.md` section 4 - a group and a channel are
               kinds of conversation, so finding one belongs here rather than
@@ -641,7 +569,15 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
               // written against - no roster, no unread summary, no flags
               // keyed on a conversation id - so it draws its own short row
               // and the group row below is untouched.
-              if (row.kind === "channel") return <ChannelRow row={row} />;
+              if (row.kind === "channel") {
+                return (
+                  <ChannelRow
+                    row={row}
+                    pinned={currentFolder() !== null && pinnedHere(row)}
+                    onMenu={(x, y) => setMenu({ row, g: null, x, y })}
+                  />
+                );
+              }
               const g = groupById().get(row.id);
               if (g === undefined) return null;
               const key = syncGroupIdHex(g.group.groupId);
@@ -670,7 +606,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                */
               const quietCall = () =>
                 quietCallOfferFor(callHost.quietIncomingCall(), g.groupIdB64, Date.now());
-              const press = createLongPress((x, y) => setMenu({ g, x, y }));
+              const press = createLongPress((x, y) => setMenu({ row, g, x, y }));
               return (
                 <A
                   href={hrefOf(g)}
@@ -684,7 +620,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                   inactiveClass=""
                   onContextMenu={(e) => {
                     e.preventDefault();
-                    setMenu({ g, x: e.clientX, y: e.clientY });
+                    setMenu({ row, g, x: e.clientX, y: e.clientY });
                   }}
                   onPointerDown={press.onPointerDown}
                   onPointerMove={press.onPointerMove}
@@ -715,7 +651,7 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                         <Show when={flags().muted}>
                           <Icon name="bellOff" size={14} title="Muted" />
                         </Show>
-                        <Show when={flags().pinned}>
+                        <Show when={pinnedHere(row)}>
                           <Icon name="pin" size={14} title="Pinned" />
                         </Show>
                         <Show when={unread() > 0}>
@@ -731,9 +667,10 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
                       <span class="lk-row-actions" role="group" aria-label="Conversation actions">
                         <button
                           type="button"
-                          title={flags().pinned ? "Unpin" : "Pin"}
-                          aria-label={flags().pinned ? "Unpin" : "Pin"}
-                          aria-pressed={flags().pinned}
+                          title={pinnedHere(row) ? "Unpin" : "Pin"}
+                          aria-label={pinnedHere(row) ? "Unpin" : "Pin"}
+                          aria-pressed={pinnedHere(row)}
+                          disabled={pinBlocked(row)}
                           onClick={(e) => {
                             e.preventDefault();
                             void toggleFlag(g, "pinned");
@@ -840,18 +777,37 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
       </Show>
       <Show when={menu()}>
         {(m) => {
-          const f = (): { pinned: boolean; muted: boolean; archived: boolean } => {
-            const cur = sync.flags()[syncGroupIdHex(m().g.group.groupId)];
-            return {
-              pinned: cur?.pinned === true,
-              muted: cur?.muted === true,
-              archived: cur?.archived === true,
-            };
+          const g = (): ActiveGroup | null => m().g;
+          const f = (): { muted: boolean; archived: boolean } => {
+            const grp = g();
+            const cur = grp === null ? undefined : sync.flags()[syncGroupIdHex(grp.group.groupId)];
+            return { muted: cur?.muted === true, archived: cur?.archived === true };
           };
           const act = (field: Flag): void => {
-            const g = m().g;
+            const grp = g();
             setMenu(null);
-            void toggleFlag(g, field);
+            if (grp !== null) void toggleFlag(grp, field);
+          };
+          const ref = () => refOfRow(m().row.kind, m().row.id);
+          /** Pin on a channel: only a folder's own pin exists for it. */
+          const pinChannel = (): void => {
+            const folder = currentFolder();
+            const r = ref();
+            setMenu(null);
+            if (folder !== null && r !== null) void togglePinInFolder(sync, folder, r);
+          };
+          const canPin = (): boolean => m().row.kind !== "channel" || currentFolder() !== null;
+          // Every read of `m()` happens BEFORE `setMenu(null)`: the accessor is
+          // stale once the menu's `<Show>` closes.
+          const removeFromFolder = (): void => {
+            const folder = currentFolder();
+            const r = ref();
+            const rules = uiRules();
+            const row = m().row;
+            setMenu(null);
+            if (folder === null || r === null || rules === null) return;
+            const inFolder = rowIsInFolder(row, folder, rules);
+            void toggleMembership(sync, folder, r, membershipOf(folder, r, inFolder));
           };
           return (
             <>
@@ -866,21 +822,169 @@ export function ChatList(props: { activeGroupIdB64: string | null }): JSX.Elemen
               <div
                 class="lk-menu lk-menu-floating"
                 role="menu"
-                aria-label={chatLabel(m().g)}
+                aria-label={m().row.title}
                 style={{ left: `${m().x}px`, top: `${m().y}px` }}
               >
-                <button type="button" role="menuitem" onClick={() => act("pinned")}>
-                  <Icon name="pin" size={18} />
-                  {f().pinned ? "Unpin" : "Pin"}
-                </button>
-                <button type="button" role="menuitem" onClick={() => act("muted")}>
-                  <Icon name="bellOff" size={18} />
-                  {f().muted ? "Unmute" : "Mute"}
-                </button>
-                <button type="button" role="menuitem" onClick={() => act("archived")}>
-                  <Icon name="archive" size={18} />
-                  {f().archived ? "Unarchive" : "Archive"}
-                </button>
+                <Show when={canPin()}>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={pinBlocked(m().row)}
+                    onClick={() => {
+                      const grp = g();
+                      if (grp === null) pinChannel();
+                      else act("pinned");
+                    }}
+                  >
+                    <Icon name="pin" size={18} />
+                    {pinnedHere(m().row) ? "Unpin" : "Pin"}
+                  </button>
+                  <Show when={pinBlocked(m().row)}>
+                    <p class="lk-menu-note">You can pin up to 10 chats in a folder.</p>
+                  </Show>
+                </Show>
+                <Show when={g() !== null}>
+                  <button type="button" role="menuitem" onClick={() => act("muted")}>
+                    <Icon name="bellOff" size={18} />
+                    {f().muted ? "Unmute" : "Mute"}
+                  </button>
+                  <button type="button" role="menuitem" onClick={() => act("archived")}>
+                    <Icon name="archive" size={18} />
+                    {f().archived ? "Unarchive" : "Archive"}
+                  </button>
+                </Show>
+                <Show when={ref()}>
+                  {(r) => (
+                    <AddToFolderItems
+                      row={m().row}
+                      conversation={r()}
+                      folders={folders()}
+                      onDone={() => setMenu(null)}
+                    />
+                  )}
+                </Show>
+                <Show when={currentFolder() !== null && ref() !== null}>
+                  <button type="button" role="menuitem" onClick={removeFromFolder}>
+                    <Icon name="close" size={18} />
+                    Remove from folder
+                  </button>
+                </Show>
+              </div>
+            </>
+          );
+        }}
+      </Show>
+      <Show when={tabMenu()}>
+        {(tm) => {
+          const folder = (): FolderModel | null =>
+            folders().find((x) => x.idHex === tm().id) ?? null;
+          const count = (): number => tabs().find((t) => t.id === tm().id)?.count ?? 0;
+          const anyUnread = (): boolean => orderedRows().some((r) => rowHasUnread(r));
+          const close = (): void => {
+            setTabMenu(null);
+          };
+          return (
+            <>
+              <div
+                class="lk-menu-backdrop"
+                onClick={close}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  close();
+                }}
+              />
+              <div
+                class="lk-menu lk-menu-floating"
+                role="menu"
+                aria-label={folder()?.name ?? "All chats"}
+                style={{ left: `${tm().x}px`, top: `${tm().y}px` }}
+              >
+                <Show
+                  when={folder()}
+                  fallback={
+                    <>
+                      <Show when={anyUnread()}>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={() => {
+                            close();
+                            void markAllRead(ALL_CHATS);
+                          }}
+                        >
+                          <Icon name="dcheck" size={18} />
+                          Mark all as read
+                        </button>
+                      </Show>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          close();
+                          navigate(paths.settingsSection("folders"));
+                        }}
+                      >
+                        <Icon name="folder" size={18} />
+                        Edit folders
+                      </button>
+                    </>
+                  }
+                >
+                  {(fo) => (
+                    <>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          const id = fo().idHex;
+                          close();
+                          openFolderEditor({ mode: "edit", folderIdHex: id });
+                        }}
+                      >
+                        <Icon name="pencil" size={18} />
+                        Edit folder
+                      </button>
+                      <Show when={count() > 0}>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={() => {
+                            const id = fo().idHex;
+                            close();
+                            void markAllRead(id);
+                          }}
+                        >
+                          <Icon name="dcheck" size={18} />
+                          Mark all as read
+                        </button>
+                      </Show>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          close();
+                          navigate(paths.settingsSection("folders"));
+                        }}
+                      >
+                        <Icon name="lines" size={18} />
+                        Reorder folders
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        class="danger-item"
+                        onClick={() => {
+                          const target = fo();
+                          close();
+                          void deleteFolder(sync, target);
+                        }}
+                      >
+                        <Icon name="trash" size={18} />
+                        Delete folder
+                      </button>
+                    </>
+                  )}
+                </Show>
               </div>
             </>
           );

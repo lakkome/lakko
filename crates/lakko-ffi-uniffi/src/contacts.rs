@@ -1865,6 +1865,13 @@ pub enum FfiIncomingEnvelopeKind {
     /// of a one-to-one), then keep it only when [`pin_is_newer`] for that
     /// message.
     Pin,
+    /// A registrar seed addressed to one member (ADR-0057). Classified so
+    /// it never falls through to `IntroMessage` and renders as a chat
+    /// bubble; `payload` carries the whole plaintext for a later decode.
+    /// No client consumes it yet (ADR-0057 client work is unbuilt), so a
+    /// client that sees this kind drops it. Appended last so the existing
+    /// ordinals stay fixed.
+    RegistrarSeed,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -1974,6 +1981,12 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
             pin = Some(op.into());
             (FfiIncomingEnvelopeKind::Pin, Vec::new(), None, None)
         },
+        IncomingEnvelope::RegistrarSeed(_) => (
+            FfiIncomingEnvelopeKind::RegistrarSeed,
+            plaintext.clone(),
+            None,
+            None,
+        ),
         IncomingEnvelope::IntroMessage(p) => (
             FfiIncomingEnvelopeKind::IntroMessage,
             p.to_vec(),

@@ -2695,6 +2695,46 @@ impl DeviceGroup {
         )
     }
 
+    /// Compose a `FolderChanges` cross-device payload (ADR-0058): a live
+    /// chat-folder edit carrying only the changed registers, each with its
+    /// own stamp. `hlc` is the message stamp and is ignored by the fold for
+    /// this kind. Throws when the change set breaks an ADR-0058 bound, so an
+    /// out-of-bounds edit is never sent. Fold the same change set locally
+    /// with `SyncedState.applyFolderChanges`.
+    #[wasm_bindgen(js_name = createDeviceGroupFolderChangesMessage)]
+    pub fn create_devicegroup_folder_changes_message(
+        &self,
+        identity: &Identity,
+        changes: &crate::synced_state::FolderChangeSet,
+        hlc: u64,
+    ) -> Result<Vec<u8>, JsValue> {
+        changes
+            .inner
+            .validate()
+            .map_err(|e| js_error(&e.to_string()))?;
+        self.create_devicegroup_body(
+            identity,
+            lakko_mls::device_group::DeviceGroupBody::FolderChanges(changes.inner.clone()),
+            hlc,
+        )
+    }
+
+    /// Compose one `StateSnapshot` part (ADR-0058 section 5): the catch-up
+    /// re-send, from `SyncedState.snapshotParts()`. Send every part.
+    #[wasm_bindgen(js_name = createDeviceGroupSnapshotMessage)]
+    pub fn create_devicegroup_snapshot_message(
+        &self,
+        identity: &Identity,
+        part: &crate::synced_state::SyncedSnapshotPart,
+        hlc: u64,
+    ) -> Result<Vec<u8>, JsValue> {
+        self.create_devicegroup_body(
+            identity,
+            lakko_mls::device_group::DeviceGroupBody::StateSnapshot(part.inner.clone()),
+            hlc,
+        )
+    }
+
     /// Decrypt / advance the state machine for an inbound
     /// DeviceGroup wire message (Phase 2a3e2). JS layer reads
     /// `kind`:
@@ -2839,6 +2879,8 @@ const KIND_READ_CURSOR: &str = "readCursor";
 const KIND_DRAFT: &str = "draft";
 const KIND_FLAGS: &str = "flags";
 const KIND_ORDER: &str = "order";
+const KIND_FOLDER_CHANGES: &str = "folderChanges";
+const KIND_STATE_SNAPSHOT: &str = "stateSnapshot";
 
 /// JS-side projection of
 /// [`lakko_mls::device_group::ParsedDeviceGroupPayload`]
@@ -2870,6 +2912,15 @@ pub struct ParsedDeviceGroupPayload {
     archived_val: bool,
     unread_override_val: bool,
     order_group_ids_val: Vec<Vec<u8>>,
+    /// The typed body, kept for `SyncedState.applyPayload` (ADR-0058).
+    body_val: lakko_mls::device_group::DeviceGroupBody,
+}
+
+impl ParsedDeviceGroupPayload {
+    /// Every register this payload writes, stamped (ADR-0058).
+    pub(crate) fn stamped_entries(&self) -> Vec<(u64, lakko_sync::synced::SyncEntry)> {
+        self.body_val.stamped_entries(self.hlc_val)
+    }
 }
 
 #[wasm_bindgen]
@@ -2887,8 +2938,9 @@ impl ParsedDeviceGroupPayload {
     }
 
     /// One of `"readCursor"` / `"draft"` / `"flags"` /
-    /// `"order"`. JS reads this to decide which other fields
-    /// are meaningful.
+    /// `"order"` / `"folderChanges"` / `"stateSnapshot"`. JS reads this to
+    /// decide which other fields are meaningful. The last two carry no
+    /// flat fields: fold them with `SyncedState.applyPayload`.
     #[wasm_bindgen(getter)]
     pub fn kind(&self) -> String {
         self.kind_val.to_string()
@@ -2961,6 +3013,24 @@ impl ParsedDeviceGroupPayload {
             .map(|g| js_sys::Uint8Array::from(g.as_slice()))
             .collect()
     }
+
+    /// `stateSnapshot` only: the 0-based part index (else 0).
+    #[wasm_bindgen(getter, js_name = snapshotPart)]
+    pub fn snapshot_part(&self) -> u32 {
+        match &self.body_val {
+            lakko_mls::device_group::DeviceGroupBody::StateSnapshot(s) => s.part,
+            _ => 0,
+        }
+    }
+
+    /// `stateSnapshot` only: the number of parts (else 0).
+    #[wasm_bindgen(getter, js_name = snapshotParts)]
+    pub fn snapshot_parts(&self) -> u32 {
+        match &self.body_val {
+            lakko_mls::device_group::DeviceGroupBody::StateSnapshot(s) => s.parts,
+            _ => 0,
+        }
+    }
 }
 
 /// Parse a DeviceGroup application-payload plaintext (the
@@ -2984,6 +3054,7 @@ pub fn parse_devicegroup_payload(plaintext: &[u8]) -> Result<ParsedDeviceGroupPa
         archived_val: false,
         unread_override_val: false,
         order_group_ids_val: Vec::new(),
+        body_val: parsed.body.clone(),
     };
     match parsed.body {
         Body::ReadCursor {
@@ -3024,6 +3095,8 @@ pub fn parse_devicegroup_payload(plaintext: &[u8]) -> Result<ParsedDeviceGroupPa
             out.kind_val = KIND_ORDER;
             out.order_group_ids_val = group_ids;
         },
+        Body::FolderChanges(_) => out.kind_val = KIND_FOLDER_CHANGES,
+        Body::StateSnapshot(_) => out.kind_val = KIND_STATE_SNAPSHOT,
     }
     Ok(out)
 }

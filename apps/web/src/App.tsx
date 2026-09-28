@@ -27,6 +27,7 @@
  * No business logic in this file on purpose: every screen lives in
  * its own module so swapping a route is a single import change.
  */
+import { FolderEditorHost } from "./chat/folders/FolderEditor";
 import type { Component } from "solid-js";
 import { Router, type RouteSectionProps } from "@solidjs/router";
 import { AuthProvider } from "./auth/AuthContext";
@@ -189,6 +190,13 @@ const App: Component = () => (
            * request resolves `false`, so this mount is what makes the
            * destructive controls live at all.
            */}
+          {/*
+           * docs/ux/chat-folders.md section 3 - the one folder editor, opened
+           * from the folder bar, a row menu and Settings. Before the
+           * confirmation dialog so "Discard changes?" and "Delete folder?"
+           * draw over it.
+           */}
+          <FolderEditorHost />
           <ConfirmDialog />
         </BackgroundReceiveProvider>
         </CallHostProvider>

@@ -12,14 +12,16 @@
  * ```
  *
  * One row per account; the plaintext is the JSON of
- * `sync-state-store.ts`'s {@link encodeSyncState}. It holds DRAFTS, which are
- * messages the person has not sent yet, so it is never written in the clear.
+ * `sync-state-store.ts`'s {@link encodeSyncState}: the ADR-0058 synced state
+ * bytes plus the folder edits not yet sent. It holds DRAFTS, which are
+ * messages the person has not sent yet, and folder names, so it is never
+ * written in the clear.
  */
 
 import {
   decodeSyncState,
   encodeSyncState,
-  type SyncStateSnapshot,
+  type SyncStateRow,
 } from "./sync-state-store";
 
 const DB_NAME = "lakko-device-sync";
@@ -88,7 +90,7 @@ async function decryptBlob(deviceKey: CryptoKey, blob: Uint8Array): Promise<Uint
 export async function loadSyncState(
   accountId: string,
   deviceKey: CryptoKey | null,
-): Promise<SyncStateSnapshot | null> {
+): Promise<SyncStateRow | null> {
   if (deviceKey === null) return null;
   const db = await openDb();
   let row: PersistedRow | undefined;
@@ -118,7 +120,7 @@ export async function loadSyncState(
 export async function saveSyncState(
   accountId: string,
   deviceKey: CryptoKey | null,
-  state: SyncStateSnapshot,
+  state: SyncStateRow,
 ): Promise<void> {
   if (deviceKey === null) return;
   const plain = new TextEncoder().encode(encodeSyncState(state));
@@ -143,4 +145,26 @@ export async function deleteSyncState(accountId: string): Promise<void> {
   } finally {
     db.close();
   }
+}
+
+/**
+ * Merge a restored backup's synced state into this account's stored row
+ * (ADR-0058 section 5.2). Always a merge, never "seed only when empty": the
+ * fold keeps the newer register from each side. `merge` combines two fold
+ * byte strings (`mergeRestoredFold` over the wasm core); the pending folder
+ * edits already stored are kept as they are.
+ */
+export async function mergeSyncStateFromBackup(
+  accountId: string,
+  deviceKey: CryptoKey | null,
+  synced: Uint8Array,
+  merge: (local: Uint8Array | null, backup: Uint8Array) => Uint8Array,
+): Promise<void> {
+  if (deviceKey === null || synced.length === 0) return;
+  const existing = await loadSyncState(accountId, deviceKey);
+  const local = existing !== null && existing.synced.length > 0 ? existing.synced : null;
+  await saveSyncState(accountId, deviceKey, {
+    synced: merge(local, synced),
+    pending: existing?.pending ?? [],
+  });
 }

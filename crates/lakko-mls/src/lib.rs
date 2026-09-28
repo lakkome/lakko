@@ -18,6 +18,7 @@
 pub mod ciphersuite;
 pub mod device_binding;
 pub mod device_group;
+pub mod device_group_sync;
 pub mod error;
 pub mod group;
 pub mod group_proposals;
@@ -97,6 +98,32 @@ pub mod fuzz_api {
     #[must_use]
     pub fn parse_devicegroup_payload(bytes: &[u8]) -> bool {
         crate::DeviceGroup::parse_devicegroup_payload(bytes).is_ok()
+    }
+
+    /// ADR-0058 oracle over the same parser: `true` unless the decoder
+    /// ACCEPTED a `FolderChanges` / `StateSnapshot` that breaks a section 4
+    /// bound, or accepted one whose registers the fold then refuses. The
+    /// harness asserts it, so a decoder that lets an out-of-bounds register
+    /// through fails the fuzz run instead of reaching a client's state.
+    #[must_use]
+    pub fn devicegroup_payload_accepted_within_bounds(bytes: &[u8]) -> bool {
+        use crate::device_group::DeviceGroupBody;
+        let Ok(parsed) = crate::DeviceGroup::parse_devicegroup_payload(bytes) else {
+            return true;
+        };
+        let bounded = match &parsed.body {
+            DeviceGroupBody::FolderChanges(c) => c.validate().is_ok(),
+            DeviceGroupBody::StateSnapshot(s) => s.validate().is_ok(),
+            _ => true,
+        };
+        if !bounded {
+            return false;
+        }
+        let mut state = lakko_sync::SyncedState::new();
+        parsed
+            .stamped_entries()
+            .into_iter()
+            .all(|(hlc, entry)| state.apply(hlc, entry).is_ok())
     }
 
     /// Try to decode a Welcome rendezvous envelope

@@ -53,6 +53,7 @@ pub mod release;
 pub mod sframe;
 pub mod sfu_signaling;
 pub mod shamir;
+pub mod synced_state;
 pub mod transport;
 pub mod ui_rules;
 pub mod ws;
@@ -476,6 +477,21 @@ pub enum FfiError {
     /// One variant on purpose: the page says "this link is damaged".
     #[error("{0}")]
     InviteLinkDamaged(String),
+
+    // ------------------------------------------------------------------
+    // ADR-0058 chat folders — appended, for the ordinal reason above.
+    // ------------------------------------------------------------------
+    /// A DeviceGroup `FolderChanges` / `StateSnapshot` payload broke an
+    /// ADR-0058 section 4 bound and was refused whole; skip it. Also a
+    /// snapshot that would need more than 64 parts.
+    #[error("device-group payload refused: {0}")]
+    DeviceGroupPayloadRefused(String),
+
+    /// A synced-state operation was refused: a locally built folder change
+    /// set that breaks a bound, or persisted synced-state bytes that do not
+    /// decode.
+    #[error("synced state refused: {0}")]
+    SyncedState(String),
 }
 
 impl From<lakko_contacts::username::UsernameError> for FfiError {
@@ -545,6 +561,7 @@ impl From<lakko_mls::Error> for FfiError {
             lakko_mls::Error::MembershipRefused { reason, detail } => {
                 Self::from_refusal(reason, detail)
             },
+            lakko_mls::Error::PayloadBounds(e) => Self::DeviceGroupPayloadRefused(e.to_string()),
         }
     }
 }
@@ -1192,6 +1209,21 @@ pub enum DeviceGroupBody {
         /// Conversation group_ids in display order, top-to-bottom.
         group_ids: Vec<Vec<u8>>,
     },
+    /// A live chat-folder edit (ADR-0058): only the registers that
+    /// changed, each with its own stamp (the envelope `hlc` is ignored for
+    /// this kind). Bounds-checked on compose and on parse.
+    FolderChanges {
+        /// The changed registers.
+        changes: synced_state::FolderChangeSet,
+    },
+    /// One part of the catch-up re-send of a device's whole folded state
+    /// (ADR-0058 section 5). Build parts with
+    /// [`synced_state::SyncedState::snapshot_parts`]; fold received ones with
+    /// [`synced_state::SyncedState::apply_payload`].
+    StateSnapshot {
+        /// The part.
+        part: std::sync::Arc<synced_state::SyncedSnapshotPart>,
+    },
 }
 
 /// Parsed envelope returned by
@@ -1209,10 +1241,12 @@ pub struct ParsedDeviceGroupPayload {
     pub body: DeviceGroupBody,
 }
 
-impl From<DeviceGroupBody> for lakko_mls::device_group::DeviceGroupBody {
-    fn from(value: DeviceGroupBody) -> Self {
+impl DeviceGroupBody {
+    /// Convert to the core body. A `FolderChanges` built on the client is
+    /// bounds-checked here, so an out-of-bounds edit is never composed.
+    pub(crate) fn into_mls(self) -> Result<lakko_mls::device_group::DeviceGroupBody, FfiError> {
         use lakko_mls::device_group::DeviceGroupBody as Inner;
-        match value {
+        Ok(match self {
             DeviceGroupBody::ReadCursor {
                 group_id,
                 up_to_message_id,
@@ -1245,7 +1279,11 @@ impl From<DeviceGroupBody> for lakko_mls::device_group::DeviceGroupBody {
                 unread_override,
             },
             DeviceGroupBody::Order { group_ids } => Inner::Order { group_ids },
-        }
+            DeviceGroupBody::FolderChanges { changes } => {
+                Inner::FolderChanges(changes.into_core()?)
+            },
+            DeviceGroupBody::StateSnapshot { part } => Inner::StateSnapshot(part.inner.clone()),
+        })
     }
 }
 
@@ -1285,6 +1323,12 @@ impl From<lakko_mls::device_group::DeviceGroupBody> for DeviceGroupBody {
                 unread_override,
             },
             Inner::Order { group_ids } => Self::Order { group_ids },
+            Inner::FolderChanges(c) => Self::FolderChanges {
+                changes: synced_state::FolderChangeSet::from_core(c),
+            },
+            Inner::StateSnapshot(inner) => Self::StateSnapshot {
+                part: std::sync::Arc::new(synced_state::SyncedSnapshotPart { inner }),
+            },
         }
     }
 }
@@ -2974,7 +3018,7 @@ impl DeviceGroup {
         hlc: u64,
     ) -> Result<Vec<u8>, FfiError> {
         let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
-        let bytes = g.create_devicegroup_message(&identity.inner, body.into(), hlc)?;
+        let bytes = g.create_devicegroup_message(&identity.inner, body.into_mls()?, hlc)?;
         Ok(bytes)
     }
 

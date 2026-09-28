@@ -444,6 +444,12 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 is FfiException.AnonToken,
                 is FfiException.AnonTokenAlreadyFinalized,
                 -> null
+                // ADR-0058 - a refused DeviceGroup folder / snapshot payload
+                // and a refused synced-state operation; not membership
+                // refusals.
+                is FfiException.DeviceGroupPayloadRefused,
+                is FfiException.SyncedState,
+                -> null
 
                 // Everything that is NOT a membership refusal. Enumerated
                 // rather than defaulted, so a new `FfiException` subclass has

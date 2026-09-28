@@ -296,7 +296,9 @@ needs an index that does not exist and is out of this spec.
 - **Message search.** It needs a local index no client has, and it is what
   the remaining open part of section 4 is about.
 - **Folders / custom filters.** The merged list is the point; a filter
-  mechanism on top of it is a separate decision.
+  mechanism on top of it is a separate decision - taken in
+  [`chat-folders.md`](chat-folders.md): a folder is a saved view of this
+  list, and All chats stays this list unchanged.
 - **Call history sync across devices.** The calls list is this device's, like
   the message log. Making it follow the person is the same question as
   cross-device message history and belongs with it.

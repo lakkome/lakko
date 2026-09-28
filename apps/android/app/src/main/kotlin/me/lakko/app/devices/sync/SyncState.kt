@@ -12,8 +12,10 @@ package me.lakko.app.devices.sync
  *   * `apps/ios/Lakko/Devices/Sync/DeviceGroupSyncState.swift`
  *
  * Four record shapes — one per typed body variant in
- * `schemas/mls-app/devicegroup_v1.proto` — plus a per-record
- * `updatedAtHlc` for last-write-wins resolution.
+ * `schemas/mls-app/devicegroup_v1.proto` — plus the per-record
+ * `updatedAtHlc`. Since ADR-0058 these are read-only views the
+ * repository derives from the Rust `SyncedState` fold; nothing on this
+ * side decides which write wins any more.
  */
 
 /** Per-group composer draft. Empty `text` clears the
@@ -90,12 +92,6 @@ public data class OrderState(
         result = 31 * result + updatedAtHlc.hashCode()
         return result
     }
-}
-
-/** Last-write-wins resolver. Strict greater-than. */
-public fun shouldApply(candidateHlc: ULong, existingHlc: ULong?): Boolean {
-    if (existingHlc == null) return true
-    return candidateHlc > existingHlc
 }
 
 /** Hex-encode a `group_id` byte slice for map key use.

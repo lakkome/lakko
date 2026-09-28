@@ -26,7 +26,16 @@ import LakkoCore
 ///     ``AuthRepository/forgetDevice``.
 ///
 /// The poll loop runs in a single `Task` cancelled on `clear`;
-/// the four send paths await on the main actor.
+/// the send paths await on the main actor.
+///
+/// ADR-0058: the maps are no longer folded here. One `SyncedState` (the
+/// `lakko-sync` fold over the FFI) takes every received payload and every
+/// local write, is persisted as its own bytes, and the published maps plus
+/// the chat folders are projections of it. A local write is folded first and
+/// published after; a publish that fails sets a persisted pending flag, and the
+/// next successful poll fetch re-sends the whole state (``PendingSyncTracker``).
+/// When the DeviceGroup grows, the lowest prior leaf re-sends the whole state
+/// so a new device starts with it.
 @MainActor
 public final class DeviceGroupSyncRepository: ObservableObject {
 
@@ -38,31 +47,31 @@ public final class DeviceGroupSyncRepository: ObservableObject {
 
     /// Per-group draft (composer text) snapshot. Key is the
     /// `groupIdHex(groupId)` value the receiver-side helper
-    /// produces.
-    @Published public private(set) var drafts: [String: DraftState] = [:] {
-        didSet { scheduleSyncStatePersist() }
-    }
+    /// produces. A projection of ``syncedState``, rebuilt after every fold.
+    @Published public private(set) var drafts: [String: DraftState] = [:]
 
     /// Per-group UI flags snapshot (pin / mute / archive /
     /// unread-override).
     @Published public private(set) var flags: [String: FlagsState] = [:] {
         didSet {
-            scheduleSyncStatePersist()
-            mirrorMutedConversations()
+            if flags != oldValue { mirrorMutedConversations() }
         }
     }
 
     /// Per-group read cursor snapshot.
-    @Published public private(set) var readCursors: [String: ReadCursorState] =
-        [:] {
-        didSet { scheduleSyncStatePersist() }
-    }
+    @Published public private(set) var readCursors: [String: ReadCursorState] = [:]
 
     /// Whole-account explicit conversation order. `nil` when no
     /// `Order` payload has arrived yet.
-    @Published public private(set) var order: OrderState? {
-        didSet { scheduleSyncStatePersist() }
-    }
+    @Published public private(set) var order: OrderState?
+
+    /// ADR-0058 — the person's chat folders, in bar order. Only folders
+    /// whose name has arrived, never a deleted one (the fold decides both).
+    @Published public private(set) var folders: [FolderView] = []
+
+    /// UX spec chat-folders section 6 — something folded here is still
+    /// waiting to reach the other devices (this device is offline).
+    @Published public private(set) var pendingSync: Bool = false
 
     // MARK: - Internals
 
@@ -72,13 +81,30 @@ public final class DeviceGroupSyncRepository: ObservableObject {
     /// The pending debounced snapshot write, cancelled by the next change.
     private var persistTask: Task<Void, Never>?
     private var activeAccountIdB64: String?
-    /// Where the four maps live between launches. Its own folder under
-    /// Application Support, sealed with the same Keychain wrap key the
-    /// DeviceGroup snapshot uses - isolation there comes from the path.
-    private let syncStateStore = DeviceGroupSnapshotStore(
-        directoryName: "lakko-device-sync-state")
+    /// ADR-0058 — the one fold. Every received payload and every local write
+    /// goes through it; the published maps above are read back from it.
+    /// Persisted by ``SyncedStateStore`` (its own folder under Application
+    /// Support, sealed with the same Keychain wrap key the DeviceGroup
+    /// snapshot uses).
+    private var syncedState = SyncedState()
+    /// Whether a publish failed and the state still has to be re-sent.
+    /// Persisted per account; `nil` before bootstrap.
+    private var pending: PendingSyncTracker?
+    /// The pending growth re-send, so two growths in a row send once.
+    private var resendTask: Task<Void, Never>?
+    private var restoreObserver: NSObjectProtocol?
 
-    public init() {}
+    public init() {
+        restoreObserver = NotificationCenter.default.addObserver(
+            forName: .lakkoSyncedStateRestored, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let account = note.userInfo?["accountIdB64"] as? String,
+                  let bytes = note.userInfo?["bytes"] as? Data else { return }
+            MainActor.assumeIsolated {
+                self?.foldRestored(bytes: bytes, accountIdB64: account)
+            }
+        }
+    }
 
     // MARK: - Lifecycle
 
@@ -118,20 +144,15 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         identity = ensured.identity
         group = ensured.group
 
-        // Seed the four maps from this device's own disk BEFORE the poll
-        // starts. They used to begin empty on every launch, and the journal
-        // cannot refill them: the poll runs from cursor 0, but the MLS
-        // snapshot was restored above, so every row it re-fetches is one this
-        // state has already consumed. The snapshot is a head start, not an
-        // authority - the poll folds newer rows on top through the same HLC
-        // comparison, so a sibling device's later write still wins.
-        if let blob = syncStateStore.getSnapshot(accountIdB64: accountIdB64),
-           let restored = DeviceGroupSyncStateCodec.decode(blob) {
-            drafts = restored.drafts
-            flags = restored.flags
-            readCursors = restored.readCursors
-            order = restored.order
-        }
+        // Seed the fold from this device's own disk BEFORE the poll starts.
+        // The journal cannot refill it: the poll runs from cursor 0, but the
+        // MLS snapshot was restored above, so every row it re-fetches is one
+        // this state has already consumed. A backup restore merged its state
+        // into the same store before this ran (``SyncedStateStore``).
+        syncedState = SyncedStateStore.load(accountIdB64: accountIdB64)
+        pending = PendingSyncTracker(accountIdB64: accountIdB64)
+        if let maxHlc = try? syncedState.maxHlc() { Hlc.observe(maxHlc) }
+        refreshDerived()
         ready = true
 
         let groupId: Data
@@ -163,14 +184,14 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         // in on this device is the one piece of this state that reads as a
         // message.
         if let closing = activeAccountIdB64 {
-            syncStateStore.deleteSnapshot(accountIdB64: closing)
+            SyncedStateStore.delete(accountIdB64: closing)
         }
         activeAccountIdB64 = nil
         ready = false
-        drafts = [:]
-        flags = [:]
-        readCursors = [:]
-        order = nil
+        syncedState = SyncedState()
+        pending?.clear()
+        pending = nil
+        refreshDerived()
     }
 
     /// Publish the muted set into the App Group container
@@ -187,13 +208,10 @@ public final class DeviceGroupSyncRepository: ObservableObject {
             mutedGroupIdsHex: Set(flags.filter { $0.value.muted }.keys))
     }
 
-    /// Write the four maps to disk, shortly.
+    /// Write the fold to disk, shortly.
     ///
     /// Debounced because a draft moves on a keystroke and each write is an
-    /// AES seal plus a file replace. Restoring the maps at bootstrap trips
-    /// this too, writing back what was just read; harmless, and cheaper than
-    /// a flag that has to be cleared correctly on every path out of
-    /// ``bootstrap(secrets:)``.
+    /// AES seal plus a file replace.
     private func scheduleSyncStatePersist() {
         persistTask?.cancel()
         persistTask = Task { [weak self] in
@@ -203,22 +221,69 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         }
     }
 
-    /// Write the four maps to disk.
-    ///
-    /// Called after anything that moves them - a local set or a sibling's row
-    /// folded by the poll. Best-effort: the in-memory state stays good and
-    /// the next change rewrites the envelope.
+    /// Write the fold to disk. Best-effort: the in-memory state stays good
+    /// and the next change rewrites the envelope.
     private func persistSyncState() {
         guard let accountIdB64 = activeAccountIdB64 else { return }
-        let snapshot = DeviceGroupSyncStateCodec.Snapshot(
-            drafts: drafts, flags: flags, readCursors: readCursors, order: order)
-        guard let blob = DeviceGroupSyncStateCodec.encode(snapshot) else { return }
-        syncStateStore.putSnapshot(accountIdB64: accountIdB64, blob: blob)
+        SyncedStateStore.save(syncedState, accountIdB64: accountIdB64)
+    }
+
+    /// The fold changed: rebuild the published projections and schedule the
+    /// write.
+    private func stateChanged() {
+        refreshDerived()
+        scheduleSyncStatePersist()
+    }
+
+    /// Rebuild every published projection from ``syncedState``. Assignments
+    /// that would not change a value are skipped, so an unrelated fold does
+    /// not re-render every screen that observes one map.
+    private func refreshDerived() {
+        let s = syncedState
+        var d: [String: DraftState] = [:]
+        for r in (try? s.allDrafts()) ?? [] {
+            d[groupIdHex(r.groupId)] = DraftState(
+                text: r.text, replyToId: r.replyToId, updatedAtHlc: r.hlc)
+        }
+        var f: [String: FlagsState] = [:]
+        for r in (try? s.allFlags()) ?? [] {
+            f[groupIdHex(r.groupId)] = FlagsState(
+                pinned: r.pinned, muted: r.muted, archived: r.archived,
+                unreadOverride: r.unreadOverride, updatedAtHlc: r.hlc)
+        }
+        var c: [String: ReadCursorState] = [:]
+        for r in (try? s.allReadCursors()) ?? [] {
+            c[groupIdHex(r.groupId)] = ReadCursorState(
+                upToMessageId: r.upToMessageId, readAtMs: r.readAtMs, updatedAtHlc: r.hlc)
+        }
+        let o = (try? s.conversationOrder()).flatMap { $0 }.map {
+            OrderState(groupIds: $0.groupIds, updatedAtHlc: $0.hlc)
+        }
+        let folderList = (try? s.folders()) ?? []
+        if d != drafts { drafts = d }
+        if f != flags { flags = f }
+        if c != readCursors { readCursors = c }
+        if o != order { order = o }
+        if folderList != folders { folders = folderList }
+        let isPending = pending?.isPending ?? false
+        if pendingSync != isPending { pendingSync = isPending }
+    }
+
+    /// Fold a restored backup state in, when it is this account's.
+    private func foldRestored(bytes: Data, accountIdB64: String) {
+        guard accountIdB64 == activeAccountIdB64,
+              let incoming = try? SyncedState.fromBytes(bytes: bytes) else { return }
+        if SyncedStateMerge.merge(incoming, into: syncedState) {
+            if let maxHlc = try? syncedState.maxHlc() { Hlc.observe(maxHlc) }
+            stateChanged()
+        }
     }
 
     private func cancelPollAndDropHandles() {
         pollTask?.cancel()
         pollTask = nil
+        resendTask?.cancel()
+        resendTask = nil
         persistTask?.cancel()
         persistTask = nil
         identity = nil
@@ -248,21 +313,7 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         text: String,
         replyToId: Data = Data()
     ) async throws {
-        let hlc = Hlc.mint()
-        let body = DeviceGroupBody.draft(
-            groupId: groupId,
-            text: text,
-            replyToId: replyToId
-        )
-        try await sendBody(body, hlc: hlc)
-        // Optimistic local update — same HLC the wire echo
-        // carries, so LWW dedups.
-        let key = groupIdHex(groupId)
-        drafts[key] = DraftState(
-            text: text,
-            replyToId: replyToId,
-            updatedAtHlc: hlc
-        )
+        try await write(.draft(groupId: groupId, text: text, replyToId: replyToId))
     }
 
     /// Compose + publish a `Flags` payload. Whole-snapshot
@@ -274,23 +325,13 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         archived: Bool,
         unreadOverride: Bool
     ) async throws {
-        let hlc = Hlc.mint()
-        let body = DeviceGroupBody.flags(
+        try await write(.flags(
             groupId: groupId,
             pinned: pinned,
             muted: muted,
             archived: archived,
-            unreadOverride: unreadOverride
-        )
-        try await sendBody(body, hlc: hlc)
-        let key = groupIdHex(groupId)
-        flags[key] = FlagsState(
-            pinned: pinned,
-            muted: muted,
-            archived: archived,
-            unreadOverride: unreadOverride,
-            updatedAtHlc: hlc
-        )
+            unreadOverride: unreadOverride))
+        markBackupDirty()
     }
 
     /// Compose + publish a `ReadCursor` payload.
@@ -299,27 +340,74 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         upToMessageId: Data,
         readAtMs: UInt64
     ) async throws {
-        let hlc = Hlc.mint()
-        let body = DeviceGroupBody.readCursor(
-            groupId: groupId,
-            upToMessageId: upToMessageId,
-            readAtMs: readAtMs
-        )
-        try await sendBody(body, hlc: hlc)
-        let key = groupIdHex(groupId)
-        readCursors[key] = ReadCursorState(
-            upToMessageId: upToMessageId,
-            readAtMs: readAtMs,
-            updatedAtHlc: hlc
-        )
+        try await write(.readCursor(
+            groupId: groupId, upToMessageId: upToMessageId, readAtMs: readAtMs))
     }
 
     /// Compose + publish an `Order` payload.
     public func setOrder(groupIds: [Data]) async throws {
+        try await write(.order(groupIds: groupIds))
+    }
+
+    /// ADR-0058 — publish a folder edit: only the registers it changed, each
+    /// already stamped by the caller (``mintHlc()``). Folded here first, so
+    /// the edit shows at once whether or not the publish goes through.
+    public func applyFolderChanges(_ changes: FolderChangeSet) async throws {
+        if ChatFolders.isEmpty(changes) { return }
+        try await write(.folderChanges(changes: changes))
+        markBackupDirty()
+    }
+
+    /// ADR-0058 section 5.2 — the backup carries this state, so a person's
+    /// own folder or flag edit is a change worth backing up. Read cursors and
+    /// drafts move too often to count on their own; they ride along with the
+    /// next upload.
+    private func markBackupDirty() {
+        guard let account = activeAccountIdB64 else { return }
+        AutoBackupStore.markDirty(
+            accountIdB64: account, nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+    }
+
+    /// A fresh stamp for a register, from the same clock every write uses.
+    public func mintHlc() -> UInt64 { Hlc.mint() }
+
+    /// One local write: fold it into this device's state (a device never
+    /// receives its own DeviceGroup messages back), then publish it. A
+    /// publish that fails marks the state pending instead of failing the
+    /// write: it has already happened here, and it travels with the re-send
+    /// after the next poll fetch that succeeds.
+    private func write(_ body: DeviceGroupBody) async throws {
+        guard ready, activeAccountIdB64 != nil else {
+            throw NSError(
+                domain: "DeviceGroupSync",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Sync not ready"]
+            )
+        }
         let hlc = Hlc.mint()
-        let body = DeviceGroupBody.order(groupIds: groupIds)
-        try await sendBody(body, hlc: hlc)
-        order = OrderState(groupIds: groupIds, updatedAtHlc: hlc)
+        let own = (try? group?.ownLeafIndex()) ?? 0
+        let local = ParsedDeviceGroupPayload(hlc: hlc, senderLeaf: own, body: body)
+        if try syncedState.applyPayload(payload: local) {
+            stateChanged()
+        }
+        do {
+            try await sendBody(body, hlc: hlc)
+        } catch {
+            NSLog("DeviceGroupSync publish failed, pending: %@", error.localizedDescription)
+            pending?.markFailed()
+            refreshDerived()
+        }
+    }
+
+    /// After a poll fetch succeeded: if a publish failed earlier (in this
+    /// process or before a relaunch), re-send the whole state. The flag
+    /// clears only when no publish failed while the re-send ran.
+    private func flushPending() async {
+        guard let tracker = pending, tracker.isPending else { return }
+        let token = tracker.beginFlush()
+        await sendSnapshot()
+        tracker.finishFlush(token)
+        refreshDerived()
     }
 
     private func sendBody(_ body: DeviceGroupBody, hlc: UInt64) async throws {
@@ -391,6 +479,11 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 continue
             }
 
+            // ADR-0058 / UX spec chat-folders section 6 — the fetch went
+            // through, so the network is back: whatever failed to publish
+            // earlier goes out now, as the whole state.
+            await flushPending()
+
             // G-13 (ADR-0015): the 32-byte verifying key peers feed to
             // processIncomingVerifyingRemovals. A zero key is a fail-closed
             // fallback when the device-attest endpoint is unreachable — it
@@ -423,6 +516,9 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                     continue
                 }
                 let attestations: [Data] = entry.attestation.map { [$0] } ?? []
+                // ADR-0058 section 5.1 — the members before this row, to tell
+                // whether a commit grew the group.
+                let devicesBefore = (try? g.devices()) ?? []
                 let processed: ProcessedMessage
                 do {
                     processed = try g.processIncomingVerifyingRemovals(
@@ -446,11 +542,13 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                     // ignored here.
                     do {
                         let parsed = try parseDevicegroupPayload(plaintext: data)
-                        applyParsed(parsed)
+                        applyReceived(parsed)
                     } catch {
                         NSLog("DeviceGroupSync parseDevicegroupPayload failed: %@", error.localizedDescription)
                     }
-                case .commit, .proposal, .externalJoinProposal:
+                case .commit:
+                    noteMembershipChange(before: devicesBefore, group: g)
+                case .proposal, .externalJoinProposal:
                     // No application-state mutation.
                     break
                 }
@@ -474,42 +572,84 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         }
     }
 
-    private func applyParsed(_ parsed: ParsedDeviceGroupPayload) {
-        let hlc = parsed.hlc
-        switch parsed.body {
-        case .readCursor(let groupId, let upToMessageId, let readAtMs):
-            let key = groupIdHex(groupId)
-            if shouldApply(candidateHlc: hlc, existingHlc: readCursors[key]?.updatedAtHlc) {
-                readCursors[key] = ReadCursorState(
-                    upToMessageId: upToMessageId,
-                    readAtMs: readAtMs,
-                    updatedAtHlc: hlc
-                )
+    /// Fold one payload another device sent. Every kind goes through the one
+    /// fold, the ADR-0058 catch-up parts included; a payload that changes
+    /// nothing (older, or already held) is a no-op.
+    private func applyReceived(_ parsed: ParsedDeviceGroupPayload) {
+        do {
+            if try syncedState.applyPayload(payload: parsed) {
+                if let maxHlc = try? syncedState.maxHlc() { Hlc.observe(maxHlc) }
+                stateChanged()
             }
-        case .draft(let groupId, let text, let replyToId):
-            let key = groupIdHex(groupId)
-            if shouldApply(candidateHlc: hlc, existingHlc: drafts[key]?.updatedAtHlc) {
-                drafts[key] = DraftState(
-                    text: text,
-                    replyToId: replyToId,
-                    updatedAtHlc: hlc
-                )
+        } catch {
+            NSLog("DeviceGroupSync fold refused a payload: %@", error.localizedDescription)
+        }
+    }
+
+    // MARK: - Growth re-send (ADR-0058 section 5.1)
+
+    /// A commit changed the DeviceGroup (received here, or made on this
+    /// device through its own handle). When it added a device and this is
+    /// the lowest leaf among the members before, re-send the whole folded
+    /// state after a random wait of up to 30 seconds.
+    private func noteMembershipChange(before: [DeviceLeaf], group g: DeviceGroup) {
+        guard let after = try? g.devices(), let own = try? g.ownLeafIndex() else { return }
+        guard DeviceGroupGrowth.shouldResend(ownLeaf: own, before: before, after: after) else {
+            return
+        }
+        if resendTask != nil { return }
+        resendTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: DeviceGroupGrowth.randomDelayNanoseconds())
+            guard !Task.isCancelled else { return }
+            await self?.sendSnapshot()
+            self?.resendTask = nil
+        }
+    }
+
+    /// Publish every catch-up part as its own DeviceGroup message, each under
+    /// a fresh envelope stamp; the registers inside keep their original
+    /// stamps. Not folded here: it is this device's own state already. A part
+    /// that cannot be sent marks the state pending, so the next successful
+    /// poll re-sends it.
+    private func sendSnapshot() async {
+        let parts: [SyncedSnapshotPart]
+        do {
+            parts = try syncedState.snapshotParts()
+        } catch {
+            NSLog("DeviceGroupSync snapshot build failed: %@", error.localizedDescription)
+            return
+        }
+        for part in parts {
+            do {
+                try await sendBody(.stateSnapshot(part: part), hlc: Hlc.mint())
+            } catch {
+                NSLog("DeviceGroupSync snapshot part %u/%u not sent: %@",
+                      part.part() + 1, part.parts(), error.localizedDescription)
+                pending?.markFailed()
             }
-        case .flags(let groupId, let pinned, let muted, let archived, let unreadOverride):
-            let key = groupIdHex(groupId)
-            if shouldApply(candidateHlc: hlc, existingHlc: flags[key]?.updatedAtHlc) {
-                flags[key] = FlagsState(
-                    pinned: pinned,
-                    muted: muted,
-                    archived: archived,
-                    unreadOverride: unreadOverride,
-                    updatedAtHlc: hlc
-                )
-            }
-        case .order(let groupIds):
-            if shouldApply(candidateHlc: hlc, existingHlc: order?.updatedAtHlc) {
-                order = OrderState(groupIds: groupIds, updatedAtHlc: hlc)
-            }
+        }
+    }
+
+    /// This device changed the DeviceGroup through a handle of its own (the
+    /// pairing scan, a removal): reload the handle from the snapshot that flow
+    /// persisted, and treat the change like a received commit. Without the
+    /// reload this repository would keep sealing sync messages at the epoch
+    /// before its own commit.
+    public func reloadAfterLocalMembershipChange(secrets: IdentitySecrets) {
+        guard let accountIdB64 = activeAccountIdB64,
+              accountIdB64 == base64Encode(secrets.accountId) else { return }
+        let before = (try? group?.devices()) ?? []
+        do {
+            let seed = try DeviceIdentityStore.ensureDeviceIdentitySeed(accountIdB64: accountIdB64)
+            let ensured = try DeviceGroupLifecycle.ensureDeviceGroup(
+                accountIdBytes: secrets.accountId,
+                accountIdB64: accountIdB64,
+                deviceIdentitySeed: seed)
+            identity = ensured.identity
+            group = ensured.group
+            noteMembershipChange(before: before, group: ensured.group)
+        } catch {
+            NSLog("DeviceGroupSync reload failed: %@", error.localizedDescription)
         }
     }
 }
