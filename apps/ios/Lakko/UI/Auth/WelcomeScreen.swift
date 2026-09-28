@@ -22,7 +22,7 @@ struct WelcomeScreen: View {
                             Text("Lakko")
                                 .font(.system(size: 28, weight: .bold))
                                 .foregroundStyle(Color.lakkoText)
-                            Text("Messages that stay between you.")
+                            Text("Your messages, your rules.")
                                 .font(.body)
                                 .foregroundStyle(Color.lakkoTextMuted)
                                 .multilineTextAlignment(.center)

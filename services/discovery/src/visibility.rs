@@ -253,7 +253,25 @@ pub(crate) async fn put_visibility(
     terms.dedup();
 
     let account = &authed.0[..];
-    let mut tx = state.db.begin().await.map_err(db_err("begin visibility"))?;
+    let mut conn = state
+        .db
+        .acquire()
+        .await
+        .map_err(db_err("acquire visibility connection"))?;
+    // READ COMMITTED for the next transaction on this connection only (the
+    // DS reach update does the same). Under the default REPEATABLE READ the
+    // UPDATE and DELETE below take gap locks on the `account_id` indexes, and
+    // two accounts updating at once deadlocked on each other's inserts (seen
+    // as an intermittent 500 when the tests ran in parallel). Updates of one
+    // account need no further serialization: the last commit wins, and each
+    // one replaces the whole term set.
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err("set visibility isolation"))?;
+    let mut tx = sqlx::Connection::begin(&mut *conn)
+        .await
+        .map_err(db_err("begin visibility"))?;
     sqlx::query("UPDATE usernames SET is_public = ? WHERE account_id = ?")
         .bind(req.public)
         .bind(account)

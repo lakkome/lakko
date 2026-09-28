@@ -74,6 +74,7 @@ pub mod auth;
 pub mod backup;
 pub mod channels;
 pub mod contacts;
+pub mod device_link;
 pub mod discovery;
 pub mod ds_proof;
 pub mod mls;

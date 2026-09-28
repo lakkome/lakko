@@ -5,13 +5,13 @@
 //!
 //! Sibling of `call_invite_capability_decode_and_verify` for the
 //! **contact-invite** codec (ADR-0005 scenario A; `/i/<slug>`
-//! URL). The discovery service runs this on every uploaded
-//! `InviteCapability` blob server-side AND the joiner re-runs
-//! it locally on every server-fetched blob before consuming
-//! (defence-in-depth re-verify per `contact_invite_full_e2e_via_envelope`).
-//! Both sides handle attacker-controlled bytes — any panic is
-//! a DoS vector for the discovery service and the joiner-side
-//! landing page alike.
+//! URL). Since the 2026-09-28 security pass the link carries
+//! the capability SEALED under a secret in its fragment; the
+//! joiner reaches this parser on the bytes the sealed link
+//! opens to (`open_link`; the open is fuzzed by
+//! `invite_link_open`), and the discovery service no longer
+//! parses capabilities. The link's minter chooses those bytes,
+//! so any panic is a DoS vector on the joiner's landing page.
 
 #![no_main]
 

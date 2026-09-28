@@ -22,6 +22,7 @@ members = [
     "crates/lakko-auth-client",
     "crates/lakko-auth-token",
     "crates/lakko-ds-proof",
+    "crates/lakko-device-link",
     "crates/lakko-call-jwt",
     "crates/lakko-attest",
     "crates/lakko-sfu-proto",
@@ -130,6 +131,7 @@ lakko-backup = { path = "crates/lakko-backup", version = "0.0.0" }
 lakko-auth-client = { path = "crates/lakko-auth-client", version = "0.0.0" }
 lakko-auth-token = { path = "crates/lakko-auth-token", version = "0.0.0" }
 lakko-ds-proof = { path = "crates/lakko-ds-proof", version = "0.0.0" }
+lakko-device-link = { path = "crates/lakko-device-link", version = "0.0.0" }
 lakko-call-jwt = { path = "crates/lakko-call-jwt", version = "0.0.0" }
 lakko-attest = { path = "crates/lakko-attest", version = "0.0.0" }
 lakko-sfu-proto = { path = "crates/lakko-sfu-proto", version = "0.0.0" }

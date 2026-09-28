@@ -50,8 +50,11 @@
 //!    role table), and keeps it only if
 //!    [`crate::group_name::group_name_is_newer`] than the stored
 //!    stamp for that group. An empty name clears the name.
-//! 8. [`crate::profile_request::try_unwrap_profile_request`] and
-//!    [`crate::pin::try_unwrap_pin`] (ADR-0048 trigger 4, ADR-0052).
+//! 8. [`crate::profile_request::try_unwrap_profile_request`],
+//!    [`crate::pin::try_unwrap_pin`] and
+//!    [`crate::registrar_seed::try_unwrap_registrar_seed`] (ADR-0048
+//!    trigger 4, ADR-0052, ADR-0057): service envelopes the caller acts
+//!    on and never renders.
 //! 9. [`crate::introduction::try_unwrap_introduction_offer`] and
 //!    [`crate::introduction::try_unwrap_introductions`] — a contact's
 //!    introduction record to relay, and a contact's bundle of records to
@@ -105,6 +108,7 @@ use crate::pin::{try_unwrap_pin, PinError, PinOp};
 use crate::profile::{try_unwrap_profile, Profile, ProfileError};
 use crate::profile_request::{try_unwrap_profile_request, ProfileRequestError};
 use crate::push_routing::{try_unwrap_push_routing_secret, PushRoutingSecretError};
+use crate::registrar_seed::{try_unwrap_registrar_seed, RegistrarSeedEnvelope, RegistrarSeedError};
 use crate::visibility::{
     try_unwrap_reach_state, try_unwrap_visibility, ReachState, VisibilityError, VisibilitySetting,
 };
@@ -236,6 +240,14 @@ pub enum IncomingEnvelope<'a> {
     /// devices (ADR-0058 §7). Same rules as [`Self::Visibility`], ordered by
     /// [`crate::visibility::reach_state_is_newer`].
     ReachState(ReachState),
+    /// A journal root hands one member its Delivery Service registrar seed
+    /// (ADR-0057), sealed to that member's account X25519 key. Never a chat
+    /// bubble. **The caller keeps it only when addressed to its own account
+    /// key** ([`RegistrarSeedEnvelope::is_addressed_to`]) and the MLS sender
+    /// resolves at receipt (C-68) to the group's owner; it opens the seed
+    /// with its account X25519 secret and drops the envelope on a failed
+    /// open. Every other member drops it unopened.
+    RegistrarSeed(RegistrarSeedEnvelope),
     /// Plain free-text intro message (ADR-0005 scenario A).
     /// Caller renders as a UTF-8 ContactRequest.
     IntroMessage(&'a [u8]),
@@ -293,6 +305,9 @@ pub enum DispatchError {
     /// malformed.
     #[error(transparent)]
     Visibility(#[from] VisibilityError),
+    /// The registrar-seed domain (ADR-0057) with a malformed payload.
+    #[error(transparent)]
+    RegistrarSeed(#[from] RegistrarSeedError),
 }
 
 /// Single-call dispatcher. Runs the two unwrap helpers in
@@ -355,6 +370,10 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<IncomingEnvelope<'
     if let Some(op) = try_unwrap_pin(plaintext)? {
         return Ok(IncomingEnvelope::Pin(op));
     }
+    // 7d. Registrar seed — ADR-0057.
+    if let Some(envelope) = try_unwrap_registrar_seed(plaintext)? {
+        return Ok(IncomingEnvelope::RegistrarSeed(envelope));
+    }
     // 8. Plain intro message — ADR-0005 scenario A.
     if let Some(record) = try_unwrap_introduction_offer(plaintext)? {
         return Ok(IncomingEnvelope::IntroductionOffer(record));
@@ -380,6 +399,33 @@ mod tests {
     use super::*;
     use crate::call_kp_forward::{wrap_call_kp_forward, CALL_KP_FORWARD_ENVELOPE_DOMAIN_V1};
     use crate::call_welcome::{wrap_call_welcome, CALL_WELCOME_ENVELOPE_DOMAIN_V1};
+
+    #[test]
+    fn dispatches_a_registrar_seed_and_never_renders_it() {
+        use crate::registrar_seed::{compose_registrar_seed, RegistrarSeedRank};
+        use lakko_crypto::agreement::SecretKey;
+        let secret = SecretKey::from_bytes([0x21; 32]);
+        let wire = compose_registrar_seed(
+            &[1; 32],
+            &[2; 32],
+            &secret.public_key(),
+            RegistrarSeedRank::Admin,
+            &[3; 32],
+        )
+        .unwrap();
+        match dispatch_incoming_envelope(&wire).unwrap() {
+            IncomingEnvelope::RegistrarSeed(env) => {
+                assert_eq!(env.rank, RegistrarSeedRank::Admin);
+                assert_eq!(env.open(&secret).unwrap(), [3; 32]);
+            },
+            other => panic!("expected a registrar seed, got {other:?}"),
+        }
+        // A truncated one is a dispatch error, not an intro message.
+        assert!(matches!(
+            dispatch_incoming_envelope(&wire[..wire.len() - 1]),
+            Err(DispatchError::RegistrarSeed(_))
+        ));
+    }
 
     #[test]
     fn dispatches_call_welcome_envelope() {

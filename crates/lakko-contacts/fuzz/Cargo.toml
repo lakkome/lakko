@@ -17,6 +17,8 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 lakko-contacts = { path = ".." }
+# The registrar-seed target opens a hostile seal under a fixed X25519 key.
+lakko-crypto = { path = "../../lakko-crypto" }
 
 [[bin]]
 name = "call_welcome_unwrap"
@@ -145,6 +147,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "invite_link_open"
+path = "fuzz_targets/invite_link_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "introductions_bundle_decode"
 path = "fuzz_targets/introductions_bundle_decode.rs"
 test = false
@@ -168,6 +177,13 @@ bench = false
 [[bin]]
 name = "reach_grant_decode"
 path = "fuzz_targets/reach_grant_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "registrar_seed_decode"
+path = "fuzz_targets/registrar_seed_decode.rs"
 test = false
 doc = false
 bench = false

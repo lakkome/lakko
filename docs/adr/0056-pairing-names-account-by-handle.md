@@ -204,3 +204,19 @@ native clients; all three are fixed, host-tested, and not yet walked live.
    model and the join call it, the repository no longer zeroes a copy, and the
    96-byte recovery plaintext copy in `RecoveryPayload.parseRecoveryPayload`
    is zeroed once the grant and the seed are cut out of it.
+
+## Amendment (2026-09-28): the posted payload is sealed by the device-link key
+
+The same security pass found that the comparison code of the camera-less
+route (ADR-0049 section 2) was a hash of this payload, and that a relay could
+grind the payload's free rendezvous pseudonym until the codes matched. That
+route no longer posts the payload in the clear: the signed-in device shows a
+code it chose, the person types it on the new device, and the new device
+seals this payload under a SPAKE2 key derived from the code
+(`crates/lakko-device-link`, ADR-0049 section 2 as amended). `POST
+/device/request` now takes `{handle}` only and the payload arrives sealed on
+`POST /device/request/payload`. The payload format, its version 2 and the
+handle check on decode are unchanged: the signed-in device decodes the opened
+bytes with `pairing::decode(bytes, own_handle)` exactly as a scanned QR, and
+the SPAKE2 transcript binds the same handle, so a request routed to the wrong
+account fails as a wrong code before any decode. The QR route is untouched.

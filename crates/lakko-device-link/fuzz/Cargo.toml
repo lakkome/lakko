@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-device-link-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Opt out of the parent workspace - cargo-fuzz crates require nightly and
+# libfuzzer-sys, which we don't want as a workspace-wide dep.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lakko-device-link = { path = ".." }
+
+# `Responder::accept` runs on the signed-in device over three values a relay
+# (or a malicious server) fully controls: the new device's SPAKE2 message, its
+# key confirmation and the sealed pairing payload. The length gates, the
+# SPAKE2 side-byte and point decode, the key schedule, the constant-time MAC
+# compare and the AEAD open must never panic, and nothing may be accepted.
+[[bin]]
+name = "device_link_accept"
+path = "fuzz_targets/device_link_accept.rs"
+test = false
+doc = false
+bench = false

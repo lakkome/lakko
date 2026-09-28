@@ -36,14 +36,17 @@
 //!
 //! - The payload is **not** signed — see the proto docstring.
 //!   The trust anchor is the user pointing the camera at their
-//!   own device's screen, or comparing the six-digit code on the
-//!   camera-less route.
+//!   own device's screen, or, on the camera-less route, typing the
+//!   six-digit code the signed-in device shows into the new device:
+//!   the payload then travels sealed under a SPAKE2 key derived from
+//!   that code (`lakko-device-link`, ADR-0049 section 2 as amended
+//!   2026-09-28).
 //! - The handle check is the only structural guard: it stops the
 //!   confirming device from enrolling a device meant for another
 //!   account's name into the local DeviceGroup by mistake. It does
 //!   **not** stop an active attacker who can present an arbitrary
 //!   payload (the handle is a public function of the username) —
-//!   that is what the comparison code covers.
+//!   that is what the camera or the device-link code covers.
 //! - The comparison is constant time ([`SecretBytes`]' equality, which is
 //!   `subtle::ConstantTimeEq`). The handle is not a secret, so this is
 //!   defence in depth that the ADR asks for, not a load-bearing property.

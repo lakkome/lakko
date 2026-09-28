@@ -4,13 +4,15 @@
 //! Fuzz target — `call_invite::decode_and_verify`
 //! (Phase 3c3-fuzz-envelopes).
 //!
-//! The owner-side discovery service runs this on every uploaded
-//! `CallInviteCapability` blob before storing it; the joiner
-//! re-runs it locally on every server-fetched blob before
-//! consuming (defence-in-depth against malicious-server
-//! substitution per C-31). Both sides handle attacker-controlled
-//! bytes — any panic is a DoS vector for the discovery service
-//! and the joiner-side landing page alike.
+//! The plaintext capability parser. Since the 2026-09-28
+//! security pass a `/c/` link carries the capability SEALED
+//! under a secret in its fragment, so the joiner reaches this
+//! parser on the bytes a sealed link opens to (`open_link`; the
+//! open itself is fuzzed by `invite_link_open`). The discovery
+//! service no longer parses capabilities at all. The bytes are
+//! still attacker-controlled — whoever mints a link chooses what
+//! it opens to — so any panic is a DoS vector on the joiner's
+//! landing page.
 
 #![no_main]
 

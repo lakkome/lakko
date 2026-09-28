@@ -69,10 +69,28 @@
 //! key holder may also hand one write to another key through a
 //! [`Delegation`] (module [`delegation`], which states the server contract).
 //!
+//! # Ownership statements ([ADR-0057])
+//!
+//! Who may register a journal's epoch keys is a second, separate surface:
+//! the [`statement`] module - the root and registrar seed derivations and
+//! the signed statements (claim, root reset, register epoch, registrar
+//! management, root transfer, push binding) the DS routes take as bodies.
+//!
+//! [ADR-0057]: ../../../docs/adr/0057-journal-ownership.md
+//!
 //! [ADR-0053]: ../../../docs/adr/0053-ds-journal-authorisation.md
 //! [ADR-0058]: ../../../docs/adr/0058-scoped-discovery.md
 
 #![forbid(unsafe_code)]
+
+pub mod statement;
+
+pub use statement::{
+    journal_registrar_seed, journal_root_seed, push_binding_key, sign_statement,
+    statement_signing_key, Rank, RegistrarChange, RegistrarEntry, SignedStatement, StatementBody,
+    StatementError, StatementKind, StatementSigner, JOURNAL_ID_LEN, MAX_LIST_ENTRIES,
+    MAX_STATEMENT_LEN, ROOT_RANK_BYTE, STATEMENT_DOMAIN,
+};
 
 use base64::engine::general_purpose::{STANDARD as B64_STD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
@@ -586,6 +604,24 @@ pub mod fuzz_api {
             }
         }
         parsed
+    }
+
+    /// Decode the bytes as an ADR-0057 ownership statement and, when they
+    /// parse, re-encode (the encoding is canonical, so the bytes must come
+    /// back unchanged) and verify at the statement's own time. `true` when
+    /// the decode succeeds. Panics only on a broken canonical-form property.
+    #[must_use]
+    pub fn decode_statement(data: &[u8]) -> bool {
+        let Ok(statement) = super::SignedStatement::decode(data) else {
+            return false;
+        };
+        assert_eq!(
+            statement.encode(),
+            data,
+            "statement encoding is not canonical"
+        );
+        let _ = statement.verify(statement.unix_ms);
+        true
     }
 }
 

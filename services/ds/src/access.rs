@@ -12,16 +12,19 @@
 //! (an unclaimed one has no key and always answers the uniform `401`); the
 //! proofless meeting points moved to their own `/ds/rendezvous/` namespace.
 //!
-//! What is gated: a claimed group's `GET`/`POST messages`, `GET knocks` (write
-//! tier) and every registration after the first; every mailbox's
-//! `GET messages`.
+//! What is gated: a claimed group's `GET`/`POST messages` and `GET knocks`
+//! (write tier); every mailbox's `GET messages` (the identity proof, whether
+//! or not the mailbox is claimed, ADR-0058).
 //! A mailbox `POST` is gated by reach keys, not here (ADR-0058,
 //! `src/reach.rs`): ADR-0053 left it the open cold inbox, and a claimed
 //! mailbox is now closed to a stranger.
-//! What is not gated: a group's `POST knock` (it spends an anonymous token instead,
-//! ADR-0054 S3), and the first claim of
-//! an unclaimed journal (a 256-bit name cannot be probed, and the flag day has
-//! no production data).
+//! What is not gated: a group's `POST knock` (it spends an anonymous token
+//! instead, ADR-0054 S3).
+//!
+//! **Who registers epoch keys is ADR-0057's, not this module's**
+//! (`src/ownership.rs`): a journal is claimed under a root key, and only the
+//! root and the registrars it appoints register epochs. An epoch key opens
+//! the journal; it no longer extends it.
 //!
 //! A failed check - no header, unknown epoch, bad signature, stale time,
 //! replayed nonce - is one uniform `401` with no detail (the ADR's amendment:
@@ -32,8 +35,8 @@
 //! epoch of a group, and the identity key a mailbox's pseudonym is the hash of.
 //!
 //! **Two tiers of epoch key** (ADR-0053 open question 1, resolved in S3):
-//! the two newest registered epochs may write (publish, read knocks, register
-//! the next epoch); every retained older epoch may still **read** the
+//! the two newest registered epochs may write (publish, read knocks); every
+//! retained older epoch may still **read** the
 //! messages. Without the read
 //! tier a device offline across two commits would hold only a key the server
 //! had dropped, could not fetch the commits that would bring it forward, and
@@ -45,7 +48,6 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Json, Response};
@@ -152,18 +154,18 @@ async fn group_keys(
     Ok(parse_key_rows(rows))
 }
 
-/// Take the group's registration lock, then read its keys, inside a
-/// registration transaction. The upsert holds an exclusive record lock on the
-/// group's `ds_group_access_lock` row until the transaction ends (a
-/// primary-key record lock: no gap, so other groups never wait), and the
-/// transaction runs at READ COMMITTED, so the plain read that follows sees
-/// every registration committed before the lock was granted. Two
-/// registrations of one group therefore serialize instead of both deciding
-/// against the same read.
-async fn lock_and_read_group_keys(
+/// Take the group's ownership lock inside a statement transaction. The
+/// upsert holds an exclusive record lock on the group's
+/// `ds_group_access_lock` row until the transaction ends (a primary-key
+/// record lock: no gap, so other groups never wait), and the transaction runs
+/// at READ COMMITTED, so every read that follows sees every statement
+/// committed before the lock was granted. Two statements about one group
+/// therefore serialize instead of both deciding against the same read
+/// (ADR-0053 security pass, finding 4; ADR-0057 reuses it for every kind).
+pub(crate) async fn lock_group(
     conn: &mut MySqlConnection,
     group_id: &[u8; PSEUDONYM_LEN],
-) -> Result<Vec<(u64, VerifyingKey)>, HandlerError> {
+) -> Result<(), HandlerError> {
     sqlx::query(
         "INSERT INTO ds_group_access_lock (group_id) VALUES (?) \
          ON DUPLICATE KEY UPDATE group_id = VALUES(group_id)",
@@ -171,16 +173,21 @@ async fn lock_and_read_group_keys(
     .bind(&group_id[..])
     .execute(&mut *conn)
     .await
-    .map_err(registration_db_error("lock group registration"))?;
-    let rows: Vec<(u64, Vec<u8>)> = sqlx::query_as(
-        "SELECT epoch, access_pk FROM ds_group_access WHERE group_id = ? \
-         ORDER BY epoch DESC LIMIT 64",
-    )
-    .bind(&group_id[..])
-    .fetch_all(&mut *conn)
-    .await
-    .map_err(registration_db_error("read group access keys"))?;
-    Ok(parse_key_rows(rows))
+    .map_err(registration_db_error("lock group"))?;
+    Ok(())
+}
+
+/// Whether the journal has an owner row (ADR-0057).
+async fn journal_owned(
+    pool: &MySqlPool,
+    group_id: &[u8; PSEUDONYM_LEN],
+) -> Result<bool, HandlerError> {
+    let row: Option<(i32,)> = sqlx::query_as("SELECT 1 FROM ds_group_owner WHERE group_id = ?")
+        .bind(&group_id[..])
+        .fetch_optional(pool)
+        .await
+        .map_err(db_error("load journal owner"))?;
+    Ok(row.is_some())
 }
 
 /// The identity key a claimed mailbox is named after, or `None` when unclaimed.
@@ -292,7 +299,13 @@ pub(crate) async fn gate_group(
 ) -> Result<Gated, HandlerError> {
     let keys = group_keys(&state.db, group_id).await?;
     if keys.is_empty() {
-        return Ok(Gated::Unclaimed);
+        // No epoch keys: unclaimed - unless an owner row exists, which a
+        // claim never leaves without an epoch; then nothing opens it.
+        return if journal_owned(&state.db, group_id).await? {
+            Err(refused())
+        } else {
+            Ok(Gated::Unclaimed)
+        };
     }
     let tier = match access {
         Access::Read => keys.len(),
@@ -330,17 +343,10 @@ pub(crate) async fn gate_mailbox_read(
 }
 
 // ============================================================================
-// Routes: claim
+// Routes: mailbox claim
 // ============================================================================
 
-#[derive(Deserialize)]
-pub(crate) struct GroupAccessBody {
-    pub(crate) epoch: u64,
-    /// Standard base64 of the 32-byte Ed25519 verifying key.
-    pub(crate) access_pk_b64: String,
-}
-
-pub(crate) fn decode_pk(b64: &str) -> Result<VerifyingKey, HandlerError> {
+fn decode_pk(b64: &str) -> Result<VerifyingKey, HandlerError> {
     let bytes = B64.decode(b64).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
@@ -362,7 +368,7 @@ const ER_LOCK_WAIT_TIMEOUT: u16 = 1205;
 /// [`db_error`] for the registration transaction: a deadlock or lock-wait
 /// timeout against a concurrent registration is a `409` the client retries
 /// (that transaction committed nothing), every other failure a `500`.
-fn registration_db_error(what: &'static str) -> impl Fn(sqlx::Error) -> HandlerError {
+pub(crate) fn registration_db_error(what: &'static str) -> impl Fn(sqlx::Error) -> HandlerError {
     move |e| {
         let lost_race = e
             .as_database_error()
@@ -377,145 +383,6 @@ fn registration_db_error(what: &'static str) -> impl Fn(sqlx::Error) -> HandlerE
         }
         db_error(what)(e)
     }
-}
-
-/// `PUT /ds/group/{hex}/access` - register the access key of an epoch.
-///
-/// The first registration of an unclaimed journal needs no proof, and neither
-/// does re-sending a key already registered for that epoch (it changes
-/// nothing, and it is what a client's claim-on-open sends). Every other
-/// registration must be proven under a write-tier key and must name either the
-/// next epoch (`latest + 1`, proven under either of the two newest) or the
-/// latest epoch again (a replacement, proven under the epoch before it - the
-/// shape an abandoned staged sweep leaves behind). Older epochs stay as the
-/// read tier, up to [`MAX_RETAINED_EPOCHS`] and the journal retention window.
-///
-/// Three properties the security pass asked for (ADR-0053, *What the
-/// security pass found*): an epoch above [`MAX_ACCESS_EPOCH`] is a `400`
-/// before anything is read; on a claimed journal the proof is checked
-/// **before** the epoch rule, so a caller without a write-tier key learns
-/// only the uniform `401` and never which epoch is latest; and the read, the
-/// rule and the write run in one transaction behind a per-group lock row, so
-/// two registrations of one group serialize (a lock wait that times out is a
-/// `409` with nothing committed).
-pub(crate) async fn put_group_access(
-    State(state): State<AppState>,
-    AxumPath(group_hex): AxumPath<String>,
-    method: Method,
-    uri: Uri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, HandlerError> {
-    let group_id = journal::decode_pseudonym(&group_hex)?;
-    let parsed: GroupAccessBody = serde_json::from_slice(&body)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("bad json: {e}")))?;
-    if parsed.epoch > MAX_ACCESS_EPOCH {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("epoch must be at most {MAX_ACCESS_EPOCH}"),
-        ));
-    }
-    let new_key = decode_pk(&parsed.access_pk_b64)?;
-    let req = parts(&method, &uri, &body);
-
-    let mut conn = state
-        .db
-        .acquire()
-        .await
-        .map_err(db_error("acquire registration connection"))?;
-    // Applies to the next transaction on this connection only: READ
-    // COMMITTED so the read after the registration lock is current, and so
-    // no statement in it takes gap locks shared with neighbouring groups.
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
-        .execute(&mut *conn)
-        .await
-        .map_err(db_error("set registration isolation"))?;
-    let mut tx = sqlx::Connection::begin(&mut *conn)
-        .await
-        .map_err(db_error("begin registration"))?;
-    // A DB failure drops `tx`, which rolls it back. A decision - stored,
-    // unchanged or refused - commits: a refusal after a valid proof has
-    // consumed its nonce, and that must stay consumed.
-    let decision =
-        register_locked(&mut tx, &group_id, parsed.epoch, &new_key, &headers, &req).await?;
-    tx.commit()
-        .await
-        .map_err(registration_db_error("commit registration"))?;
-    decision.map(|()| StatusCode::NO_CONTENT.into_response())
-}
-
-/// The body of [`put_group_access`], run inside its transaction. The outer
-/// `Result` is a DB failure (roll back); the inner one is the decision.
-async fn register_locked(
-    conn: &mut MySqlConnection,
-    group_id: &[u8; PSEUDONYM_LEN],
-    epoch: u64,
-    new_key: &VerifyingKey,
-    headers: &HeaderMap,
-    req: &RequestParts<'_>,
-) -> Result<Result<(), HandlerError>, HandlerError> {
-    let keys = lock_and_read_group_keys(&mut *conn, group_id).await?;
-    if keys
-        .iter()
-        .any(|(e, k)| *e == epoch && k.to_bytes() == new_key.to_bytes())
-    {
-        return Ok(Ok(()));
-    }
-
-    if let Some(&(latest, _)) = keys.first() {
-        let write_tier = &keys[..WRITE_EPOCHS.min(keys.len())];
-        // The proof first, under any write-tier key: nothing about the epoch
-        // rule is answered to a caller who cannot produce one.
-        let proof = match verify_header(headers, req, |e| {
-            write_tier.iter().find(|(we, _)| *we == e).map(|(_, k)| *k)
-        }) {
-            Ok(proof) => proof,
-            Err(refusal) => return Ok(Err(refusal)),
-        };
-        if !consume_nonce(&mut *conn, group_id, &proof.nonce)
-            .await
-            .map_err(registration_db_error("record proof nonce"))?
-        {
-            return Ok(Err(refused()));
-        }
-        // Then the rule. `latest + 1` may be vouched for by either write-tier
-        // epoch; a replacement of `latest` only by the epoch before it, never
-        // by the key it replaces.
-        if latest.checked_add(1) != Some(epoch) {
-            if epoch != latest {
-                return Ok(Err((
-                    StatusCode::CONFLICT,
-                    "epoch must be the latest registered epoch or the one after it".to_string(),
-                )));
-            }
-            if proof.epoch >= latest {
-                return Ok(Err(refused()));
-            }
-        }
-    }
-
-    sqlx::query(
-        "INSERT INTO ds_group_access (group_id, epoch, access_pk) VALUES (?, ?, ?) \
-         ON DUPLICATE KEY UPDATE access_pk = VALUES(access_pk), created_at = CURRENT_TIMESTAMP(3)",
-    )
-    .bind(&group_id[..])
-    .bind(epoch)
-    .bind(&new_key.to_bytes()[..])
-    .execute(&mut *conn)
-    .await
-    .map_err(registration_db_error("register group access key"))?;
-    // Bound the read tier; age-based pruning is the journal pruner's. The
-    // floor is computed here, not in SQL, so no epoch arithmetic can
-    // overflow in the database.
-    if let Some(floor) = epoch.checked_sub(MAX_RETAINED_EPOCHS) {
-        sqlx::query("DELETE FROM ds_group_access WHERE group_id = ? AND epoch <= ?")
-            .bind(&group_id[..])
-            .bind(floor)
-            .execute(&mut *conn)
-            .await
-            .map_err(registration_db_error("prune group access keys"))?;
-    }
-    Ok(Ok(()))
 }
 
 #[derive(Deserialize)]
@@ -748,216 +615,13 @@ pub(crate) async fn prune_nonces(pool: &MySqlPool) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::test_support::*;
     use axum::body::Body;
     use axum::http::Request;
     use axum::Router;
-    use http_body_util::BodyExt as _;
     use lakko_ds_proof::{sign, SigningKey};
     use sqlx::mysql::MySqlPoolOptions;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use tower::ServiceExt as _;
-
-    /// Parallel tests share one database; sqlx's migrator does not tolerate
-    /// two concurrent runs on it, so migrate once per process.
-    static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
-
-    pub(crate) async fn app() -> Option<(Router, MySqlPool)> {
-        let Ok(url) = std::env::var("LAKKO_DS_TEST_DATABASE_URL") else {
-            eprintln!("skipping: LAKKO_DS_TEST_DATABASE_URL unset");
-            return None;
-        };
-        let pool = MySqlPoolOptions::new()
-            .max_connections(4)
-            .connect(&url)
-            .await
-            .expect("connect test db");
-        MIGRATED
-            .get_or_init(|| async {
-                crate::MIGRATIONS.run(&pool).await.expect("migrate");
-            })
-            .await;
-        let state = AppState {
-            db: pool.clone(),
-            notifiers: journal::Notifiers::default(),
-            waker: std::sync::Arc::new(crate::wake::Waker::dormant()),
-            anon_tokens: lakko_anon_token_server::TokenVerifier::new(
-                pool.clone(),
-                Some(
-                    lakko_anon_token_server::AnonTokenServerConfig::from_values(
-                        Some(TOKEN_MASTER_HEX),
-                        None,
-                    )
-                    .unwrap()
-                    .unwrap(),
-                ),
-            ),
-        };
-        Some((crate::build_app(state), pool))
-    }
-
-    const TOKEN_MASTER_HEX: &str =
-        "6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b";
-
-    /// A spendable anonymous token for `context` at `epochs_ago` epochs
-    /// before the current one, as the `x-lakko-anon-token` header value.
-    fn token_at(context: TokenContext, epochs_ago: u64) -> String {
-        let now = lakko_anon_token_server::current_epoch(lakko_anon_token::DEFAULT_WINDOW_SECS);
-        lakko_anon_token_server::testing::mint_header(
-            &lakko_anon_token::MasterSecret::from_hex(TOKEN_MASTER_HEX).unwrap(),
-            context,
-            now - epochs_ago,
-        )
-    }
-
-    fn knock_token() -> String {
-        token_at(TokenContext::DsKnock, 0)
-    }
-
-    fn error_code(body: &[u8]) -> String {
-        serde_json::from_slice::<serde_json::Value>(body)
-            .ok()
-            .and_then(|v| v["error"].as_str().map(str::to_owned))
-            .unwrap_or_default()
-    }
-
-    async fn knock(
-        app: &Router,
-        uri: &str,
-        payloads: &[&[u8]],
-        token: Option<&str>,
-    ) -> (StatusCode, Vec<u8>) {
-        let payloads: Vec<String> = payloads.iter().map(|p| B64.encode(p)).collect();
-        let body = serde_json::json!({ "payloads_b64": payloads })
-            .to_string()
-            .into_bytes();
-        let headers: Vec<(&str, &str)> = token
-            .map(|t| vec![(lakko_anon_token::TOKEN_HEADER, t)])
-            .unwrap_or_default();
-        send_with(
-            app,
-            Req {
-                method: "POST",
-                uri,
-                body,
-                proof: None,
-            },
-            &headers,
-        )
-        .await
-    }
-
-    static COUNTER: AtomicU64 = AtomicU64::new(1);
-
-    /// A fresh, unique 32-byte name per call so parallel tests never share
-    /// a journal.
-    pub(crate) fn fresh_name(tag: u8) -> [u8; PSEUDONYM_LEN] {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let mut out = [0u8; PSEUDONYM_LEN];
-        out[0] = tag;
-        out[1..9].copy_from_slice(&n.to_be_bytes());
-        out[9..17].copy_from_slice(&now_ms().to_be_bytes());
-        out
-    }
-
-    pub(crate) fn fresh_nonce() -> [u8; lakko_ds_proof::NONCE_LEN] {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let mut out = [0u8; lakko_ds_proof::NONCE_LEN];
-        out[..8].copy_from_slice(&n.to_be_bytes());
-        out[8..].copy_from_slice(&now_ms().to_be_bytes());
-        out
-    }
-
-    pub(crate) fn key(seed: u8) -> SigningKey {
-        SigningKey::from_seed(&[seed; 32])
-    }
-
-    pub(crate) fn pk_b64(key: &SigningKey) -> String {
-        B64.encode(key.verifying_key().to_bytes())
-    }
-
-    pub(crate) struct Req<'a> {
-        pub(crate) method: &'a str,
-        pub(crate) uri: &'a str,
-        pub(crate) body: Vec<u8>,
-        pub(crate) proof: Option<(&'a SigningKey, u64)>,
-    }
-
-    fn proof_header(req: &Req<'_>) -> Option<String> {
-        let (key, epoch) = req.proof?;
-        let (path, query) = req.uri.split_once('?').unwrap_or((req.uri, ""));
-        let parts = RequestParts {
-            method: req.method,
-            canonical_path: path,
-            query,
-            body: &req.body,
-        };
-        Some(sign(key, &parts, epoch, now_ms(), fresh_nonce()).encode())
-    }
-
-    pub(crate) async fn send(app: &Router, req: Req<'_>) -> (StatusCode, Vec<u8>) {
-        send_with(app, req, &[]).await
-    }
-
-    pub(crate) async fn send_with(
-        app: &Router,
-        req: Req<'_>,
-        extra: &[(&str, &str)],
-    ) -> (StatusCode, Vec<u8>) {
-        let mut builder = Request::builder().method(req.method).uri(req.uri);
-        for (name, value) in extra {
-            builder = builder.header(*name, *value);
-        }
-        if !req.body.is_empty() {
-            builder = builder.header(header::CONTENT_TYPE, "application/json");
-        }
-        if let Some(h) = proof_header(&req) {
-            builder = builder.header(PROOF_HEADER_NAME, h);
-        }
-        let response = app
-            .clone()
-            .oneshot(builder.body(Body::from(req.body)).unwrap())
-            .await
-            .unwrap();
-        let status = response.status();
-        let body = response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes()
-            .to_vec();
-        (status, body)
-    }
-
-    pub(crate) fn messages_uri(kind: &str, name: &[u8; PSEUDONYM_LEN]) -> String {
-        format!("/ds/{kind}/{}/messages", hex::encode(name))
-    }
-
-    fn access_body(epoch: u64, key: &SigningKey) -> Vec<u8> {
-        serde_json::json!({ "epoch": epoch, "access_pk_b64": pk_b64(key) })
-            .to_string()
-            .into_bytes()
-    }
-
-    async fn claim_group(
-        app: &Router,
-        gid: &[u8; PSEUDONYM_LEN],
-        epoch: u64,
-        key: &SigningKey,
-        proof: Option<(&SigningKey, u64)>,
-    ) -> StatusCode {
-        send(
-            app,
-            Req {
-                method: "PUT",
-                uri: &format!("/ds/group/{}/access", hex::encode(gid)),
-                body: access_body(epoch, key),
-                proof,
-            },
-        )
-        .await
-        .0
-    }
 
     #[tokio::test]
     async fn an_unclaimed_group_stays_open() {
@@ -1002,7 +666,7 @@ pub(crate) mod tests {
         let gid = fresh_name(7);
         let k = key(7);
         assert_eq!(
-            claim_group(&app, &gid, 1, &k, None).await,
+            claim(&app, &gid, &fresh_signer(0x52), 1, &k).await,
             StatusCode::NO_CONTENT
         );
         let uri = messages_uri("group", &gid);
@@ -1101,7 +765,7 @@ pub(crate) mod tests {
         let gid = fresh_name(2);
         let k3 = key(3);
         assert_eq!(
-            claim_group(&app, &gid, 3, &k3, None).await,
+            claim(&app, &gid, &fresh_signer(0x52), 3, &k3).await,
             StatusCode::NO_CONTENT
         );
         let uri = messages_uri("group", &gid);
@@ -1215,7 +879,7 @@ pub(crate) mod tests {
         let gid = fresh_name(4);
         let k = key(5);
         assert_eq!(
-            claim_group(&app, &gid, 1, &k, None).await,
+            claim(&app, &gid, &fresh_signer(0x52), 1, &k).await,
             StatusCode::NO_CONTENT
         );
         let uri = format!("{}?after=0", messages_uri("group", &gid));
@@ -1241,114 +905,6 @@ pub(crate) mod tests {
                 .unwrap();
             assert_eq!(response.status(), expected);
         }
-    }
-
-    #[tokio::test]
-    async fn registration_rotates_with_a_two_epoch_write_tier() {
-        let Some((app, pool)) = app().await else {
-            return;
-        };
-        let gid = fresh_name(6);
-        let (k1, k2, k3, k3b) = (key(11), key(12), key(13), key(14));
-        // First claim: open.
-        assert_eq!(
-            claim_group(&app, &gid, 1, &k1, None).await,
-            StatusCode::NO_CONTENT
-        );
-        // A second unproven claim is refused.
-        assert_eq!(
-            claim_group(&app, &gid, 2, &k2, None).await,
-            StatusCode::UNAUTHORIZED
-        );
-        // Re-sending the registered key is a no-op that needs no proof (the
-        // client's claim-on-open).
-        assert_eq!(
-            claim_group(&app, &gid, 1, &k1, None).await,
-            StatusCode::NO_CONTENT
-        );
-        // Epoch 2 proven under epoch 1.
-        assert_eq!(
-            claim_group(&app, &gid, 2, &k2, Some((&k1, 1))).await,
-            StatusCode::NO_CONTENT
-        );
-        // Epoch 3 proven under the previous epoch (1) - the grace window.
-        assert_eq!(
-            claim_group(&app, &gid, 3, &k3, Some((&k1, 1))).await,
-            StatusCode::NO_CONTENT
-        );
-        // Epoch 1 is kept as the read tier.
-        let epochs: Vec<(u64,)> =
-            sqlx::query_as("SELECT epoch FROM ds_group_access WHERE group_id = ? ORDER BY epoch")
-                .bind(&gid[..])
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        assert_eq!(epochs, vec![(1,), (2,), (3,)]);
-        // A device still at epoch 1 (offline across two commits) can READ the
-        // journal to catch up, but can no longer write or vouch.
-        let uri = messages_uri("group", &gid);
-        let (status, _) = send(
-            &app,
-            Req {
-                method: "GET",
-                uri: &format!("{uri}?after=0"),
-                body: vec![],
-                proof: Some((&k1, 1)),
-            },
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let (status, _) = send(
-            &app,
-            Req {
-                method: "POST",
-                uri: &uri,
-                body: b"stale".to_vec(),
-                proof: Some((&k1, 1)),
-            },
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert_eq!(
-            claim_group(&app, &gid, 4, &key(15), Some((&k1, 1))).await,
-            StatusCode::UNAUTHORIZED
-        );
-        // A skip (epoch 5) is a conflict even with a valid proof.
-        assert_eq!(
-            claim_group(&app, &gid, 5, &k3b, Some((&k3, 3))).await,
-            StatusCode::CONFLICT
-        );
-        // Replacing the latest epoch needs the epoch before it, not itself.
-        assert_eq!(
-            claim_group(&app, &gid, 3, &k3b, Some((&k3, 3))).await,
-            StatusCode::UNAUTHORIZED
-        );
-        assert_eq!(
-            claim_group(&app, &gid, 3, &k3b, Some((&k2, 2))).await,
-            StatusCode::NO_CONTENT
-        );
-        let (status, _) = send(
-            &app,
-            Req {
-                method: "GET",
-                uri: &format!("{uri}?after=0"),
-                body: vec![],
-                proof: Some((&k3b, 3)),
-            },
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let (status, _) = send(
-            &app,
-            Req {
-                method: "GET",
-                uri: &format!("{uri}?after=0"),
-                body: vec![],
-                proof: Some((&k3, 3)),
-            },
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -1451,7 +1007,7 @@ pub(crate) mod tests {
         let gid = fresh_name(8);
         let k = key(41);
         assert_eq!(
-            claim_group(&app, &gid, 7, &k, None).await,
+            claim(&app, &gid, &fresh_signer(0x52), 7, &k).await,
             StatusCode::NO_CONTENT
         );
         let knock_uri = format!("/ds/group/{}/knock", hex::encode(gid));
@@ -1492,7 +1048,7 @@ pub(crate) mod tests {
         let gid = fresh_name(7);
         let k = key(31);
         assert_eq!(
-            claim_group(&app, &gid, 4, &k, None).await,
+            claim(&app, &gid, &fresh_signer(0x52), 4, &k).await,
             StatusCode::NO_CONTENT
         );
         let knock_uri = format!("/ds/group/{}/knock", hex::encode(gid));
@@ -1550,7 +1106,7 @@ pub(crate) mod tests {
         let gid = fresh_name(9);
         let k = key(51);
         assert_eq!(
-            claim_group(&app, &gid, 2, &k, None).await,
+            claim(&app, &gid, &fresh_signer(0x52), 2, &k).await,
             StatusCode::NO_CONTENT
         );
         let knock_uri = format!("/ds/group/{}/knock", hex::encode(gid));
@@ -1585,71 +1141,13 @@ pub(crate) mod tests {
             notifiers: journal::Notifiers::default(),
             waker: std::sync::Arc::new(crate::wake::Waker::dormant()),
             anon_tokens: lakko_anon_token_server::TokenVerifier::new(db, None),
+            binding_pepper: None,
         };
         let app = crate::build_app(state);
         let uri = format!("/ds/group/{}/knock", hex::encode([3u8; PSEUDONYM_LEN]));
         let (status, resp) = knock(&app, &uri, &[b"x"], Some(&knock_token())).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(error_code(&resp), "anon-tokens-disabled");
-    }
-
-    /// Security pass, finding 1: an epoch above the cap is a 400 on the first
-    /// claim and on a proven registration alike, and a group AT the cap
-    /// registers and prunes without overflowing.
-    #[tokio::test]
-    async fn an_epoch_above_the_cap_is_refused() {
-        let Some((app, pool)) = app().await else {
-            return;
-        };
-        let gid = fresh_name(30);
-        let k = key(60);
-        for epoch in [MAX_ACCESS_EPOCH + 1, u64::MAX] {
-            assert_eq!(
-                claim_group(&app, &gid, epoch, &k, None).await,
-                StatusCode::BAD_REQUEST,
-                "epoch {epoch}"
-            );
-        }
-        let stored: (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM ds_group_access WHERE group_id = ?")
-                .bind(&gid[..])
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(stored.0, 0, "a refused claim left a row");
-
-        assert_eq!(
-            claim_group(&app, &gid, MAX_ACCESS_EPOCH, &k, None).await,
-            StatusCode::NO_CONTENT
-        );
-        // The next epoch would be above the cap: refused even with a valid
-        // proof, and the cap is checked before the proof is.
-        assert_eq!(
-            claim_group(
-                &app,
-                &gid,
-                MAX_ACCESS_EPOCH + 1,
-                &key(61),
-                Some((&k, MAX_ACCESS_EPOCH))
-            )
-            .await,
-            StatusCode::BAD_REQUEST
-        );
-        // A replacement at the cap (proven under the epoch before it, which
-        // this group does not have) is refused as a proof failure, and the
-        // registration-time prune near the cap ran without a 500.
-        assert_eq!(
-            claim_group(
-                &app,
-                &gid,
-                MAX_ACCESS_EPOCH,
-                &key(62),
-                Some((&k, MAX_ACCESS_EPOCH))
-            )
-            .await,
-            StatusCode::UNAUTHORIZED
-        );
-        prune_group_access_rows(&pool, 1).await.expect("prune");
     }
 
     /// Security pass, finding 1: rows at and beyond the cap (a row at
@@ -1669,14 +1167,18 @@ pub(crate) mod tests {
             let pool = pool.clone();
             async move {
                 let sql = if old {
-                    "INSERT INTO ds_group_access (group_id, epoch, access_pk, created_at) \
-                     VALUES (?, ?, ?, '2000-01-01 00:00:00')"
+                    "INSERT INTO ds_group_access \
+                       (group_id, epoch, access_pk, registered_by, registered_rank, created_at) \
+                     VALUES (?, ?, ?, ?, 3, '2000-01-01 00:00:00')"
                 } else {
-                    "INSERT INTO ds_group_access (group_id, epoch, access_pk) VALUES (?, ?, ?)"
+                    "INSERT INTO ds_group_access \
+                       (group_id, epoch, access_pk, registered_by, registered_rank) \
+                     VALUES (?, ?, ?, ?, 3)"
                 };
                 sqlx::query(sql)
                     .bind(&gid[..])
                     .bind(epoch)
+                    .bind(&pk[..])
                     .bind(&pk[..])
                     .execute(&pool)
                     .await
@@ -1729,16 +1231,17 @@ pub(crate) mod tests {
         };
         let gid = fresh_name(34);
         let (k1, k2, k3) = (key(64), key(65), key(66));
+        let root = fresh_signer(0x53);
         assert_eq!(
-            claim_group(&app, &gid, 1, &k1, None).await,
+            claim(&app, &gid, &root, 1, &k1).await,
             StatusCode::NO_CONTENT
         );
         assert_eq!(
-            claim_group(&app, &gid, 2, &k2, Some((&k1, 1))).await,
+            register(&app, &gid, &root, 2, &k2, &[]).await,
             StatusCode::NO_CONTENT
         );
         assert_eq!(
-            claim_group(&app, &gid, 3, &k3, Some((&k2, 2))).await,
+            register(&app, &gid, &root, 3, &k3, &[]).await,
             StatusCode::NO_CONTENT
         );
         let read = |uri: String, signer: SigningKey, epoch: u64| {
@@ -1768,95 +1271,11 @@ pub(crate) mod tests {
     /// Security pass, finding 3: on a claimed journal the epoch rule is
     /// answered only to a caller with a write-tier proof; everyone else gets
     /// the same 401 whatever epoch they name.
-    #[tokio::test]
-    async fn a_claimed_journal_checks_the_proof_before_the_epoch_rule() {
-        let Some((app, _pool)) = app().await else {
-            return;
-        };
-        let gid = fresh_name(35);
-        let (k4, k5, k6) = (key(67), key(68), key(69));
-        assert_eq!(
-            claim_group(&app, &gid, 4, &k4, None).await,
-            StatusCode::NO_CONTENT
-        );
-        assert_eq!(
-            claim_group(&app, &gid, 5, &k5, Some((&k4, 4))).await,
-            StatusCode::NO_CONTENT
-        );
-        assert_eq!(
-            claim_group(&app, &gid, 6, &k6, Some((&k5, 5))).await,
-            StatusCode::NO_CONTENT
-        );
-        let probe = key(70);
-        // No proof: the same answer below, at, next to and far past latest.
-        for epoch in [0, 3, 6, 7, 9, 1_000] {
-            assert_eq!(
-                claim_group(&app, &gid, epoch, &probe, None).await,
-                StatusCode::UNAUTHORIZED,
-                "unproven epoch {epoch}"
-            );
-        }
-        // A read-tier key (epoch 4) is no better than none.
-        for epoch in [5, 9] {
-            assert_eq!(
-                claim_group(&app, &gid, epoch, &probe, Some((&k4, 4))).await,
-                StatusCode::UNAUTHORIZED,
-                "read-tier proof at epoch {epoch}"
-            );
-        }
-        // A write-tier caller learns the rule.
-        assert_eq!(
-            claim_group(&app, &gid, 9, &probe, Some((&k6, 6))).await,
-            StatusCode::CONFLICT
-        );
-        assert_eq!(
-            claim_group(&app, &gid, 7, &probe, Some((&k5, 5))).await,
-            StatusCode::NO_CONTENT
-        );
-    }
-
     /// Security pass, finding 4: concurrent first claims of one journal
     /// serialize. Exactly one lands; every other waits on the group's lock,
     /// then finds the journal claimed and gets its 401 (a lock-wait timeout
     /// would be a 409), and the stored key is the winner's. Before the
     /// transaction every one of them upserted and the last writer won.
-    #[tokio::test]
-    async fn concurrent_first_claims_leave_exactly_one_key() {
-        let Some((app, pool)) = app().await else {
-            return;
-        };
-        for round in 0..4u8 {
-            let gid = fresh_name(36);
-            let tasks: Vec<_> = (0..6u8)
-                .map(|i| {
-                    let app = app.clone();
-                    let signer = key(100 + round * 10 + i);
-                    tokio::spawn(async move {
-                        let status = claim_group(&app, &gid, 0, &signer, None).await;
-                        (status, signer.verifying_key().to_bytes())
-                    })
-                })
-                .collect();
-            let mut winners = Vec::new();
-            for t in tasks {
-                let (status, pk) = t.await.unwrap();
-                match status {
-                    StatusCode::NO_CONTENT => winners.push(pk),
-                    StatusCode::UNAUTHORIZED | StatusCode::CONFLICT => {},
-                    other => panic!("unexpected {other}"),
-                }
-            }
-            assert_eq!(winners.len(), 1, "round {round}");
-            let stored: Vec<(u64, Vec<u8>)> =
-                sqlx::query_as("SELECT epoch, access_pk FROM ds_group_access WHERE group_id = ?")
-                    .bind(&gid[..])
-                    .fetch_all(&pool)
-                    .await
-                    .unwrap();
-            assert_eq!(stored, vec![(0, winners[0].to_vec())], "round {round}");
-        }
-    }
-
     #[test]
     fn the_spent_set_migration_is_the_shared_crate_schema_byte_for_byte() {
         assert_eq!(

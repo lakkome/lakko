@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-device-link"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The camera-less add-device confirmation (ADR-0049 section 2): a six-digit code shown on the signed-in device, typed on the new one, and a SPAKE2 exchange that seals the pairing payload so a relay gets one guess per request"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+# HKDF-SHA-256, HMAC-SHA-256, SHA-256, ChaCha20-Poly1305 and the
+# constant-time `SecretBytes`. Everything but the PAKE itself comes from here.
+lakko-crypto.workspace = true
+
+# SPAKE2 over the Ed25519 group (RustCrypto/PAKEs). Justification: the
+# comparison code this replaces could be ground by a relay (ADR-0049 section 2,
+# amended 2026-09-28), and closing that needs a password-authenticated key
+# exchange, which nothing in the tree provides. This crate brings no new
+# cryptographic backend: its dependencies are curve25519-dalek 4, hkdf 0.12,
+# sha2 0.10 and rand_core 0.6, all already in the workspace graph (through
+# ed25519-dalek / x25519-dalek and lakko-crypto). MIT OR Apache-2.0. Default
+# features off so it never reaches for `getrandom` on its own: every random
+# scalar comes from the caller's RNG (lakko-crypto's OsRng in production).
+# Stated plainly for the review: the crate has not been independently audited,
+# and it does not zeroize its internal scalar or password copy on drop.
+spake2 = { version = "0.4", default-features = false }
+
+# The `RngCore + CryptoRng` bounds of the start functions.
+rand_core = { version = "0.6", default-features = false }
+
+# `Zeroizing` for the code and the derived keys this crate owns.
+zeroize = "1"
+
+# `getrandom` arrives through lakko-crypto's `rand_core/getrandom`; on wasm32
+# it needs its WebCrypto backend, the same arrangement as every other crate
+# the web client links.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+proptest = "1"
+rand_chacha = "0.3"

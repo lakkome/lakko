@@ -48,9 +48,12 @@
 //!     the short `/i/<blob_id>` pointer instead of the ~150-220
 //!     char inline form. The capability struct is unchanged
 //!     either way — only the URL shape differs. The id binds
-//!     nothing: a malicious discovery could serve another
-//!     validly-signed capability under a live id, and an `/i/`
-//!     link carries no secret that would catch it.
+//!     nothing on its own; since the 2026-09-28 security pass
+//!     the ledger stores the capability SEALED under a secret
+//!     in the link fragment ([`crate::link_seal`], see
+//!     [`seal_link`] / [`open_link`]), so a malicious discovery
+//!     serving another blob under a live id is caught: it does
+//!     not open under the link's secret.
 //!   * `ephemeral_prekey` — ADR keeps it for forward secrecy on
 //!     the owner→joiner direction. Our flow has joiner→owner as
 //!     the first sealed message, and the joiner generates a
@@ -94,14 +97,18 @@
 //!     bootstrap_referral,
 //!     "Alice's home",
 //! )?;
-//! let url = format!("https://lakko.me/i/{}", base64_url(&bytes));
+//! let secret = lakko_contacts::link_seal::generate_link_secret();
+//! let sealed = lakko_contacts::invite::seal_link(&secret, &bytes)?;
+//! // Upload `sealed` to the ledger and get an id back; the link is
+//! // https://lakko.me/i/<id>#<secret>, or /i/<sealed>#<secret> inline.
 //! ```
 //!
 //! Receiver side:
 //!
 //! ```ignore
-//! let bytes = base64_url_decode(slug)?;
-//! let cap = lakko_contacts::invite::decode_and_verify(&bytes)?;
+//! let sealed = /* fetched by id, or base64url_decode(slug) inline */;
+//! let secret = lakko_contacts::link_seal::link_secret_from_slice(&fragment_bytes)?;
+//! let (cap, wire) = lakko_contacts::invite::open_link(&secret, &sealed)?;
 //! if !cap.is_valid_now(now_ms) { /* expired */ }
 //! // Use `cap.owner_signature_pubkey`, `cap.owner_account_id`,
 //! // `cap.owner_x25519_pubkey` to seed the first ContactRequest.
@@ -166,15 +173,71 @@ pub const REVOKE_REPLAY_WINDOW_MS: u64 = 10 * 60 * 1_000;
 /// content); it is now CSPRNG output, so uploading the same capability twice
 /// yields two ids. The id space is 2^48, so resistance to guessing live ids
 /// rests on the per-IP rate limit on the open fetch / consume routes, not on
-/// the id width. The fetched capability is still Ed25519-verified by the
-/// joiner, and a `/g/` link's preview key is bound to the capability's group
-/// and issuer, so a substituted capability does not open that link's preview.
+/// the id width. A guessed id is still worthless on its own since the
+/// 2026-09-28 security pass: the ledger stores every capability sealed under
+/// a 96-bit secret carried only in the link fragment ([`crate::link_seal`]),
+/// so the fetched blob neither opens nor can be swapped without that secret.
+/// What a bare id still allows is spending consumes (see
+/// [`compute_joiner_tag`]).
 pub const BLOB_ID_LEN: usize = 6;
 
 /// Length of a `blob_id` in its URL form: base64url without padding of
 /// [`BLOB_ID_LEN`] bytes. `https://<host>/i/<8 chars>` (likewise `/c/`,
 /// `/g/`).
 pub const BLOB_ID_B64URL_LEN: usize = 8;
+
+/// Longest capability wire [`compose`] can produce: the fixed fields plus a
+/// [`MAX_LABEL_LEN`]-byte label and the signature (224 bytes).
+pub const MAX_WIRE_LEN: usize = 1
+    + ED25519_PUB_LEN
+    + ACCOUNT_ID_LEN
+    + X25519_PUB_LEN
+    + 8
+    + 4
+    + 1
+    + 2
+    + MAX_LABEL_LEN
+    + SIGNATURE_LEN;
+
+/// Longest sealed `/i/` link blob (what the discovery ledger stores).
+pub const MAX_SEALED_LEN: usize = crate::link_seal::sealed_len(MAX_WIRE_LEN);
+
+/// Seal a composed capability wire for an `/i/` link under `link_secret`
+/// (see [`crate::link_seal`]). The secret goes in the URL fragment only.
+///
+/// # Errors
+///
+/// [`ContactError::InvalidArgument`] for an empty wire; a crypto failure.
+pub fn seal_link(
+    link_secret: &[u8; crate::link_seal::LINK_SECRET_LEN],
+    capability_wire: &[u8],
+) -> Result<Vec<u8>> {
+    crate::link_seal::seal(
+        crate::link_seal::LinkKind::Contact,
+        link_secret,
+        capability_wire,
+    )
+}
+
+/// Open a sealed `/i/` link blob under the fragment's secret and verify the
+/// capability inside. Returns the capability and its plaintext wire (the
+/// joiner tag is computed over the plaintext, see [`compute_joiner_tag`]).
+///
+/// # Errors
+///
+/// [`ContactError::LinkDamaged`] on any failure (wrong or missing secret,
+/// swapped / tampered / truncated blob, a capability that does not verify).
+pub fn open_link(
+    link_secret: &[u8; crate::link_seal::LINK_SECRET_LEN],
+    sealed: &[u8],
+) -> Result<(InviteCapability, Vec<u8>)> {
+    crate::link_seal::open_and_verify(
+        crate::link_seal::LinkKind::Contact,
+        link_secret,
+        sealed,
+        decode_and_verify,
+    )
+}
 
 /// Mint a fresh random ledger id. The discovery service calls this at upload
 /// and retries on a primary-key collision; a client never mints one.
@@ -369,6 +432,17 @@ pub const JOINER_TAG_LEN: usize = 32;
 /// privacy against a determined attacker requires an OPRF
 /// step the server runs blind, which is the deferred
 /// alternative noted in the ROADMAP.
+///
+/// **Computed over the PLAINTEXT capability** (the bytes a sealed
+/// link opens to, [`open_link`]), never over the sealed blob. Since
+/// the 2026-09-28 security pass the server stores only the sealed
+/// blob, so the server itself can no longer recompute a candidate
+/// joiner's tag; the probing oracle above needs the link's secret.
+/// The server needs nothing else from the plaintext to count a
+/// consume. **Residual (burn):** the tag is opaque to the server, so
+/// anyone holding a live id can submit random tags, each counted as a
+/// distinct joiner against `max_uses`, for the price of one anonymous
+/// token and the per-IP limit per attempt.
 ///
 /// Pure deterministic helper. Both web client (via wasm-bindgen)
 /// and server (verifying tag uniqueness) drive the same
@@ -683,6 +757,65 @@ mod tests {
         let x25519_secret = X25519SecretKey::generate();
         let x25519_pub = x25519_secret.public_key();
         (signing, account_id, x25519_pub)
+    }
+
+    /// A maximal capability is exactly MAX_WIRE_LEN; the sealed link opens
+    /// under its secret, and under nothing else.
+    #[test]
+    fn sealed_link_round_trips_and_refuses_a_wrong_secret() {
+        let (signing, account_id, x25519_pub) = fixture();
+        let label = "x".repeat(MAX_LABEL_LEN);
+        let wire = compose(&signing, &account_id, &x25519_pub, 0, 3, true, &label).unwrap();
+        assert_eq!(wire.len(), MAX_WIRE_LEN);
+        let secret = crate::link_seal::generate_link_secret();
+        let sealed = seal_link(&secret, &wire).unwrap();
+        assert_eq!(sealed.len(), MAX_SEALED_LEN);
+        let (cap, opened) = open_link(&secret, &sealed).unwrap();
+        assert_eq!(opened, wire);
+        assert_eq!(cap.label, label);
+        // The joiner tag is over the plaintext, and matches what the joiner
+        // computes from the opened wire.
+        assert_eq!(
+            compute_joiner_tag(&opened, b"joiner"),
+            compute_joiner_tag(&wire, b"joiner")
+        );
+        let wrong = crate::link_seal::generate_link_secret();
+        assert!(matches!(
+            open_link(&wrong, &sealed),
+            Err(ContactError::LinkDamaged)
+        ));
+    }
+
+    /// A validly-signed capability sealed under another secret (the ledger
+    /// substituting a capability it holds) does not open under this link's.
+    #[test]
+    fn a_substituted_capability_is_damaged() {
+        let (signing, account_id, x25519_pub) = fixture();
+        let secret = crate::link_seal::generate_link_secret();
+        let theirs = compose(
+            &SigningKey::generate(),
+            &account_id,
+            &x25519_pub,
+            0,
+            0,
+            false,
+            "",
+        )
+        .unwrap();
+        let substituted = seal_link(&crate::link_seal::generate_link_secret(), &theirs).unwrap();
+        assert!(matches!(
+            open_link(&secret, &substituted),
+            Err(ContactError::LinkDamaged)
+        ));
+        // A capability that does not verify inside a well-sealed blob is damaged too.
+        let mut bad = compose(&signing, &account_id, &x25519_pub, 0, 0, false, "").unwrap();
+        let n = bad.len();
+        bad[n - 1] ^= 1;
+        let sealed_bad = seal_link(&secret, &bad).unwrap();
+        assert!(matches!(
+            open_link(&secret, &sealed_bad),
+            Err(ContactError::LinkDamaged)
+        ));
     }
 
     #[test]

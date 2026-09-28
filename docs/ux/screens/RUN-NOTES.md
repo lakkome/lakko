@@ -86,5 +86,5 @@ so the run can be repeated.
 - iOS Devices does offer both directions ("Show a code on the new device and
   scan it here, or the other way round"), so the drawn note that only web
   offered both was wrong.
-- The web auth panel headline is "Messages that stay between you.", not a
+- The web auth panel headline is "Your messages, your rules.", not a
   per-screen headline.

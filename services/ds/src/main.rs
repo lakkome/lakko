@@ -56,6 +56,11 @@
 //!   journal and per woken `push_gid` (defaults 30 and 60; see
 //!   `src/wake.rs` for why). Over the cap the message is still appended, the
 //!   wake is dropped.
+//! - `LAKKO_DS_BINDING_PEPPER` — 64 hex characters, server-only (ADR-0057):
+//!   push bindings are stored as keyed-BLAKE3 of the `push_gid` under it, and
+//!   a wake goes out only for the `push_gid` bound to the publishing journal.
+//!   Unset: `PUT .../push-binding` answers 503 `push-binding-disabled` and
+//!   every wake is dropped (startup warning). Malformed: startup fails.
 //!
 //! Endpoints:
 //!
@@ -75,7 +80,12 @@
 //!   (pairing, recovery, courier, state bundle): no proof, never claimable,
 //!   its own table, so no rendezvous id names a mailbox's rows (ADR-0058)
 //! - `GET    /ds/rendezvous/{id_hex}/messages`     — `?after=<id>&limit=<n>&wait=<secs>`, no proof
-//! - `PUT    /ds/group/{group_id_hex}/access`      — register an epoch's access key (ADR-0053)
+//! - `PUT    /ds/group/{group_id_hex}/claim`       — first claim, by the journal's root (ADR-0057)
+//! - `PUT    /ds/group/{group_id_hex}/reset`       — the root replaces the epoch chain
+//! - `PUT    /ds/group/{group_id_hex}/access`      — a registrar registers an epoch's access key
+//! - `PUT    /ds/group/{group_id_hex}/registrars`  — the root manages registrars
+//! - `PUT    /ds/group/{group_id_hex}/root`        — the root names a new root
+//! - `PUT    /ds/group/{group_id_hex}/push-binding` — root or admin binds one `push_gid`
 //! - `PUT    /ds/mailbox/{device_id_hex}/access`   — claim a mailbox under its identity key
 //! - `PUT    /ds/mailbox/{device_id_hex}/reach`    — register / remove reach keys, set open (ADR-0058)
 //! - `POST   /ds/mailbox/{device_id_hex}/reach/check` — is this reach key registered? (ADR-0058)
@@ -88,7 +98,10 @@
 
 mod access;
 mod journal;
+mod ownership;
 mod reach;
+#[cfg(test)]
+mod test_support;
 mod wake;
 
 use std::net::SocketAddr;
@@ -132,6 +145,10 @@ pub(crate) struct AppState {
     /// over this service's spent-set (`anon_token_spent`). Dormant (the knock
     /// answers 503) when `LAKKO_ANON_TOKEN_MASTER_SECRET` is unset.
     pub(crate) anon_tokens: TokenVerifier,
+    /// ADR-0057 - the pepper push bindings are keyed under
+    /// (`LAKKO_DS_BINDING_PEPPER`). `None`: the binding route answers 503
+    /// and every wake is dropped.
+    pub(crate) binding_pepper: Option<[u8; 32]>,
 }
 
 #[tokio::main]
@@ -177,6 +194,16 @@ async fn main() -> Result<()> {
         );
     }
 
+    let binding_pepper = ownership::pepper_from_lookup(|name| std::env::var(name).ok())
+        .map_err(anyhow::Error::msg)
+        .context("push binding pepper")?;
+    if binding_pepper.is_none() {
+        tracing::warn!(
+            "LAKKO_DS_BINDING_PEPPER unset - push bindings are refused (503) and every \
+             x-lakko-wake is dropped; devices are not woken by a publish"
+        );
+    }
+
     let pool = MySqlPoolOptions::new()
         .max_connections(32)
         .acquire_timeout(Duration::from_secs(5))
@@ -199,6 +226,7 @@ async fn main() -> Result<()> {
         notifiers: journal::Notifiers::default(),
         waker: Arc::new(waker),
         anon_tokens,
+        binding_pepper,
     };
 
     let _pruner = journal::spawn_pruner(pool.clone());
@@ -236,9 +264,17 @@ pub(crate) fn build_app(state: AppState) -> Router {
             "/ds/mailbox/{device_hex}/messages",
             post(journal::post_mailbox).get(journal::get_mailbox),
         )
+        .route("/ds/group/{group_hex}/claim", put(ownership::put_claim))
+        .route("/ds/group/{group_hex}/reset", put(ownership::put_reset))
+        .route("/ds/group/{group_hex}/access", put(ownership::put_register))
         .route(
-            "/ds/group/{group_hex}/access",
-            put(access::put_group_access),
+            "/ds/group/{group_hex}/registrars",
+            put(ownership::put_registrars),
+        )
+        .route("/ds/group/{group_hex}/root", put(ownership::put_root))
+        .route(
+            "/ds/group/{group_hex}/push-binding",
+            put(ownership::put_push_binding),
         )
         .route(
             "/ds/rendezvous/{rendezvous_hex}/messages",

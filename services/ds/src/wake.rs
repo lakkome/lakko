@@ -35,12 +35,13 @@
 //!
 //! - per **journal** (the group id the publish went to), which is what the
 //!   ADR names: a member who spams wakes through their own group is cut here;
-//! - per **target** (the `push_gid` being woken). The DS cannot check that a
-//!   `push_gid` belongs to the journal it arrived on (ADR-0054 decision 1), and
-//!   the first claim of a journal needs no proof, so a caller who knows a
-//!   `push_gid` could claim any number of fresh journals and wake through each;
-//!   the journal cap alone would bound nothing. The target cap bounds how often
-//!   one group is woken no matter how many journals the wakes arrive through.
+//! - per **target** (the `push_gid` being woken). Written when the DS could
+//!   not check that a `push_gid` belongs to the journal it arrived on (ADR-0054
+//!   decision 1). Since ADR-0057 it can: a journal wakes only the one
+//!   `push_gid` its root or an admin bound to it (`src/ownership.rs`), and
+//!   one `push_gid` is bound to at most one journal, so a caller can no longer
+//!   wake a group through journals of its own. The target cap stays as the
+//!   bound on how often one group is woken through its own journal.
 //!   Its cost, stated: someone who holds a group's `push_gid` can spend that
 //!   group's wake budget and delay its genuine wakes by up to a refill window -
 //!   a delayed notification, never a lost message, where the alternative is a
@@ -415,6 +416,10 @@ pub(crate) struct Waker {
     forward: Option<Forwarder>,
     per_journal: WakeCap,
     per_target: WakeCap,
+    /// Every `push_gid` handed to [`Self::fire`], so a route test can tell a
+    /// fired wake from a dropped one without a push-gw.
+    #[cfg(test)]
+    fired: Mutex<Vec<[u8; PSEUDONYM_LEN]>>,
 }
 
 impl Waker {
@@ -447,6 +452,8 @@ impl Waker {
             forward,
             per_journal: WakeCap::new(config.cap, MAX_TRACKED),
             per_target: WakeCap::new(config.cap, MAX_TRACKED),
+            #[cfg(test)]
+            fired: Mutex::new(Vec::new()),
         })
     }
 
@@ -457,7 +464,17 @@ impl Waker {
             forward: None,
             per_journal: WakeCap::new(CapConfig::default(), MAX_TRACKED),
             per_target: WakeCap::new(CapConfig::default(), MAX_TRACKED),
+            fired: Mutex::new(Vec::new()),
         }
+    }
+
+    /// The `push_gid`s handed to [`Self::fire`] so far.
+    #[cfg(test)]
+    pub(crate) fn fired_targets(&self) -> Vec<[u8; PSEUDONYM_LEN]> {
+        self.fired
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// `true` when wakes are forwarded.
@@ -488,6 +505,11 @@ impl Waker {
     /// Returns at once; the forward (if any) runs on its own task.
     pub(crate) fn fire(&self, journal: &[u8; PSEUDONYM_LEN], wake: WakeRequest, message_id: u64) {
         let kind = wake.kind.as_str();
+        #[cfg(test)]
+        self.fired
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(wake.push_gid);
         match self.admit_at(journal, &wake, Instant::now()) {
             Admission::Admitted => {},
             Admission::JournalCapped => {

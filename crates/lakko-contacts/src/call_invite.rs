@@ -27,12 +27,13 @@
 //!     │── mint one-time KeyPackage         │
 //!     │── compose CallInviteCapability    │
 //!     │       (signed by Alice's Ed25519) │
-//!     │── publish via https://lakko.me/c/<base64url>
+//!     │── seal under a fresh link secret (crate::link_seal)
+//!     │── publish via https://lakko.me/c/<id>#<secret>
 //!     │
 //!     │           link out-of-band        │
 //!     │ ────────────────────────────────► │
 //!     │                                   │
-//!     │                                   │ ── decode_and_verify
+//!     │                                   │ ── open_link (secret) + verify
 //!     │                                   │ ── check is_valid_now
 //!     │                                   │ ── extract one_time_key_package
 //!     │                                   │ ── join_from_welcome(...)
@@ -54,9 +55,12 @@
 //! - The `services/discovery /discovery/call-invite/{blob_id}`
 //!   server endpoint holds the capability blob and enforces
 //!   `max_uses` (atomic `consume` handler + per-joiner dedup
-//!   via the `call_invite_consumers` side table). A client may
-//!   embed the short `blob_id` pointer or the bytes inline; the
-//!   codec only produces the bytes.
+//!   via the `call_invite_consumers` side table). Since the
+//!   2026-09-28 security pass the ledger holds the capability
+//!   SEALED under a secret carried only in the link fragment
+//!   ([`seal_link`] / [`open_link`]): a link is
+//!   `/c/<id>#<secret>` or, when the upload failed,
+//!   `/c/<sealed blob>#<secret>`. A 48-bit id alone opens nothing.
 //! - Joiner-side orchestration that turns the embedded KP into
 //!   a live `GroupCallSession` lives in `lakko-calls`
 //!   (`link_invite::accept_call_invite`).
@@ -247,6 +251,62 @@ pub const fn call_invite_expiry_ms(now_ms: u64) -> u64 {
 /// would stop the tenth guest at the door of a room the host was holding
 /// open.
 pub const CALL_INVITE_MAX_USES: u32 = u32::MAX;
+
+/// Longest capability wire [`compose`] can produce: the fixed fields, a
+/// [`MAX_KEY_PACKAGE_LEN`] KeyPackage, a [`MAX_LABEL_LEN`] label and the
+/// signature (4308 bytes).
+pub const MAX_WIRE_LEN: usize = 1
+    + ED25519_PUB_LEN
+    + ACCOUNT_ID_LEN
+    + CALL_ID_LEN
+    + 8
+    + 4
+    + 1
+    + 4
+    + MAX_KEY_PACKAGE_LEN
+    + 2
+    + MAX_LABEL_LEN
+    + SIGNATURE_LEN;
+
+/// Longest sealed `/c/` link blob (what the discovery ledger stores).
+pub const MAX_SEALED_LEN: usize = crate::link_seal::sealed_len(MAX_WIRE_LEN);
+
+/// Seal a composed capability wire for a `/c/` link under `link_secret` (the
+/// 2026-09-28 security pass, see [`crate::link_seal`]). The secret goes in
+/// the URL fragment only; without it a fetched `/c/<id>` blob is not a seat in
+/// the call.
+///
+/// # Errors
+///
+/// [`ContactError::InvalidArgument`] for an empty wire; a crypto failure.
+pub fn seal_link(
+    link_secret: &[u8; crate::link_seal::LINK_SECRET_LEN],
+    capability_wire: &[u8],
+) -> Result<Vec<u8>> {
+    crate::link_seal::seal(
+        crate::link_seal::LinkKind::Call,
+        link_secret,
+        capability_wire,
+    )
+}
+
+/// Open a sealed `/c/` link blob under the fragment's secret and verify the
+/// capability inside. Returns the capability and its plaintext wire.
+///
+/// # Errors
+///
+/// [`ContactError::LinkDamaged`] on any failure.
+pub fn open_link(
+    link_secret: &[u8; crate::link_seal::LINK_SECRET_LEN],
+    sealed: &[u8],
+) -> Result<(CallInviteCapability, Vec<u8>)> {
+    crate::link_seal::open_and_verify(
+        crate::link_seal::LinkKind::Call,
+        link_secret,
+        sealed,
+        decode_and_verify,
+    )
+}
 
 /// Media kinds the invited call supports. Wire bitmap:
 /// `bit 0 = audio`, `bit 1 = video`. Other bits are
@@ -656,6 +716,38 @@ mod tests {
         kp[0] = 0xCA;
         kp[1] = 0xFE;
         kp
+    }
+
+    /// A maximal capability is exactly MAX_WIRE_LEN; the sealed `/c/` link
+    /// opens under its secret only, and not behind another path.
+    #[test]
+    fn sealed_link_round_trips_and_refuses_a_wrong_secret() {
+        let wire = compose(
+            &fixture_signing(),
+            &fixture_account_id(),
+            &fixture_call_id(),
+            0,
+            CALL_INVITE_MAX_USES,
+            CallInviteMedia::audio_video(),
+            &vec![0x42; MAX_KEY_PACKAGE_LEN],
+            &"y".repeat(MAX_LABEL_LEN),
+        )
+        .unwrap();
+        assert_eq!(wire.len(), MAX_WIRE_LEN);
+        let secret = crate::link_seal::generate_link_secret();
+        let sealed = seal_link(&secret, &wire).unwrap();
+        assert_eq!(sealed.len(), MAX_SEALED_LEN);
+        let (cap, opened) = open_link(&secret, &sealed).unwrap();
+        assert_eq!(opened, wire);
+        assert_eq!(cap.call_id, fixture_call_id());
+        assert!(matches!(
+            open_link(&crate::link_seal::generate_link_secret(), &sealed),
+            Err(ContactError::LinkDamaged)
+        ));
+        assert!(matches!(
+            crate::group_invite::open_link(&secret, &sealed),
+            Err(ContactError::LinkDamaged)
+        ));
     }
 
     #[test]

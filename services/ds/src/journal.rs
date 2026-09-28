@@ -476,12 +476,19 @@ pub(crate) async fn post_group(
     // claimed journal gets one. Fire-and-forget: it cannot delay or fail
     // this response.
     if let Some(wake) = wake {
-        if gated == crate::access::Gated::Proven {
-            state.waker.fire(&owner, wake, resp.id);
-        } else {
+        if gated != crate::access::Gated::Proven {
             tracing::debug!(
                 kind = wake.kind.as_str(),
                 outcome = "unclaimed",
+                "wake dropped"
+            );
+        } else if crate::ownership::wake_is_bound(&state, &owner, &wake.push_gid).await {
+            state.waker.fire(&owner, wake, resp.id);
+        } else {
+            // ADR-0057: a journal wakes only the push_gid bound to it.
+            tracing::debug!(
+                kind = wake.kind.as_str(),
+                outcome = "unbound",
                 "wake dropped"
             );
         }

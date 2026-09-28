@@ -6,9 +6,13 @@
 //! Since the short-link amendment of ADR-0028 (2026-09-27) a ledger row is
 //! addressed by a random [`BLOB_ID_LEN`]-byte id the server mints at upload
 //! ([`lakko_contacts::invite::generate_blob_id`]), not by a hash of the
-//! capability. The id is a lookup handle only: the joiner still verifies the
-//! capability's Ed25519 signature, and uploading the same capability twice
-//! gives two rows under two ids.
+//! capability. The id is a lookup handle only, and uploading the same blob
+//! twice gives two rows under two ids. Since the 2026-09-28 security pass the
+//! row holds the capability SEALED under a secret in the link fragment
+//! (`lakko_contacts::link_seal`); the joiner opens it and verifies the
+//! Ed25519 signature inside, and the server can neither read nor substitute
+//! it. The upload helpers that check the sealed blob's outer frame and the
+//! clear issuer key live here too, shared by the three ledgers.
 //!
 //! A fresh id can collide with a live row (the space is 2^48). The insert is a
 //! plain `INSERT` - never an upsert, so a collision can never overwrite another
@@ -96,6 +100,95 @@ pub(crate) fn parse_blob_id(slug: &str) -> Result<[u8; BLOB_ID_LEN], (StatusCode
     })
 }
 
+/// Decode and bound-check the `sealed` upload field (standard base64) of a
+/// link of `kind`. The server cannot open the blob; it checks only what it
+/// can see: a non-empty body longer than the seal overhead, no longer than
+/// `max_len` (the kind's `MAX_SEALED_LEN`), whose outer kind and version bytes
+/// name this ledger, so a blob uploaded to the wrong ledger is refused here
+/// rather than at the joiner.
+///
+/// # Errors
+///
+/// 400 for bad base64, a short blob or a foreign kind / version; 413 past
+/// `max_len`.
+pub(crate) fn parse_sealed_upload(
+    b64: &str,
+    kind: lakko_contacts::link_seal::LinkKind,
+    max_len: usize,
+) -> Result<Vec<u8>, (StatusCode, String)> {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+    use lakko_contacts::link_seal::{LINK_SEAL_OVERHEAD, LINK_SEAL_VERSION};
+    let bytes = B64.decode(b64).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid sealed base64: {e}"),
+        )
+    })?;
+    if bytes.len() > max_len {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "sealed link exceeds the {max_len}-byte ceiling (got {} bytes)",
+                bytes.len()
+            ),
+        ));
+    }
+    if bytes.len() <= LINK_SEAL_OVERHEAD {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("sealed link must be longer than {LINK_SEAL_OVERHEAD} bytes"),
+        ));
+    }
+    if bytes[0] != kind.byte() || bytes[1] != LINK_SEAL_VERSION {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "sealed link is not of this ledger's kind or version".to_string(),
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Decode the clear `issuer_pubkey` upload field (standard base64 of a
+/// 32-byte Ed25519 verifying key) — the key a later revoke must be signed
+/// by. The server cannot check it against the sealed capability; an uploader
+/// who names someone else's key only gives that person, not themselves, the
+/// power to revoke the row.
+///
+/// # Errors
+///
+/// 400 for bad base64 or a value that is not a valid Ed25519 key.
+pub(crate) fn parse_issuer_pubkey(
+    b64: &str,
+) -> Result<[u8; lakko_crypto::signing::PUBLIC_KEY_LEN], (StatusCode, String)> {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+    let bytes = B64.decode(b64).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid issuer_pubkey base64: {e}"),
+        )
+    })?;
+    lakko_crypto::signing::VerifyingKey::from_bytes(&bytes).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "issuer_pubkey is not an Ed25519 verifying key".to_string(),
+        )
+    })?;
+    <[u8; lakko_crypto::signing::PUBLIC_KEY_LEN]>::try_from(bytes.as_slice()).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "issuer_pubkey must be 32 bytes".to_string(),
+        )
+    })
+}
+
+/// Recover the stored issuer key of a row for a revoke. A malformed stored
+/// key folds into `None` (the caller answers 404, like a missing row).
+pub(crate) fn stored_issuer_key(bytes: &[u8]) -> Option<lakko_crypto::signing::VerifyingKey> {
+    lakko_crypto::signing::VerifyingKey::from_bytes(bytes).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,13 +229,12 @@ mod tests {
         ) -> Result<sqlx::mysql::MySqlQueryResult, sqlx::Error> {
             sqlx::query(
                 "INSERT INTO group_invites \
-                    (blob_id, capability_bytes, issuer_pubkey, group_id, expiry_ms, max_uses) \
-                 VALUES (?, ?, ?, ?, 0, 0)",
+                    (blob_id, sealed_capability, issuer_pubkey, expiry_ms, max_uses) \
+                 VALUES (?, ?, ?, 0, 0)",
             )
             .bind(id.to_vec())
             .bind(cap.to_vec())
             .bind(vec![0x11u8; 32])
-            .bind(vec![0x22u8; 16])
             .execute(pool)
             .await
         }
@@ -159,7 +251,7 @@ mod tests {
             .connect(&url)
             .await
             .expect("connect test DB");
-        crate::MIGRATIONS.run(&pool).await.expect("run migrations");
+        crate::anon_token_route_tests::migrate_once(&pool).await;
 
         // A first row under a fresh id.
         let first = insert_with_fresh_id("group_invites", |id| {
@@ -183,7 +275,7 @@ mod tests {
         assert_ne!(second, first);
 
         let stored: Vec<u8> =
-            sqlx::query_scalar("SELECT capability_bytes FROM group_invites WHERE blob_id = ?")
+            sqlx::query_scalar("SELECT sealed_capability FROM group_invites WHERE blob_id = ?")
                 .bind(first.to_vec())
                 .fetch_one(&pool)
                 .await
@@ -202,13 +294,12 @@ mod tests {
         assert!(
             sqlx::query(
                 "INSERT INTO group_invites \
-                    (blob_id, capability_bytes, issuer_pubkey, group_id, expiry_ms, max_uses) \
-                 VALUES (?, ?, ?, ?, 0, 0)",
+                    (blob_id, sealed_capability, issuer_pubkey, expiry_ms, max_uses) \
+                 VALUES (?, ?, ?, 0, 0)",
             )
             .bind(vec![0x33u8; 32])
             .bind(b"x".to_vec())
             .bind(vec![0x11u8; 32])
-            .bind(vec![0x22u8; 16])
             .execute(&pool)
             .await
             .is_err(),
@@ -222,6 +313,51 @@ mod tests {
                 .await
                 .expect("cleanup");
         }
+    }
+
+    #[test]
+    fn a_sealed_upload_is_checked_for_kind_version_and_bounds() {
+        use base64::engine::general_purpose::STANDARD as B64;
+        use lakko_contacts::link_seal::{generate_link_secret, seal, LinkKind, LINK_SEAL_OVERHEAD};
+        let good = seal(LinkKind::Group, &generate_link_secret(), b"cap").unwrap();
+        assert_eq!(
+            parse_sealed_upload(&B64.encode(&good), LinkKind::Group, 64).unwrap(),
+            good
+        );
+        // Another ledger's blob, a wrong version, a bare frame, over the
+        // ceiling, not base64.
+        assert_eq!(
+            parse_sealed_upload(&B64.encode(&good), LinkKind::Call, 64)
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        let mut version = good.clone();
+        version[1] ^= 1;
+        assert!(parse_sealed_upload(&B64.encode(version), LinkKind::Group, 64).is_err());
+        let bare = vec![b'g'; LINK_SEAL_OVERHEAD];
+        assert!(parse_sealed_upload(&B64.encode(bare), LinkKind::Group, 64).is_err());
+        assert_eq!(
+            parse_sealed_upload(&B64.encode(&good), LinkKind::Group, good.len() - 1)
+                .unwrap_err()
+                .0,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert!(parse_sealed_upload("not base64!", LinkKind::Group, 64).is_err());
+    }
+
+    #[test]
+    fn an_issuer_key_must_be_a_verifying_key() {
+        use base64::engine::general_purpose::STANDARD as B64;
+        let key = lakko_crypto::signing::SigningKey::generate()
+            .verifying_key()
+            .to_bytes();
+        assert_eq!(parse_issuer_pubkey(&B64.encode(key)).unwrap(), key);
+        assert!(parse_issuer_pubkey(&B64.encode([1u8; 31])).is_err());
+        assert!(parse_issuer_pubkey(&B64.encode([1u8; 33])).is_err());
+        assert!(parse_issuer_pubkey("%%").is_err());
+        assert!(stored_issuer_key(&key).is_some());
+        assert!(stored_issuer_key(&[0u8; 3]).is_none());
     }
 
     #[tokio::test]

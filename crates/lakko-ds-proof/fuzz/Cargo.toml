@@ -42,3 +42,15 @@ path = "fuzz_targets/delegation_parse.rs"
 test = false
 doc = false
 bench = false
+
+# ADR-0057: `SignedStatement::decode` is the first thing every ownership route
+# of services/ds (claim, reset, register epoch, registrars, root transfer, push
+# binding) runs on a request body anyone can send, before any root or
+# registrar is looked up. Bounded, exact and panic-free on arbitrary input; a
+# statement that parses must re-encode to the same bytes.
+[[bin]]
+name = "statement_decode"
+path = "fuzz_targets/statement_decode.rs"
+test = false
+doc = false
+bench = false

@@ -135,6 +135,9 @@ services:
       # to turn wakes off; setting only one refuses to start.
       LAKKO_DS_PUSH_GW_URL: ${LAKKO_DS_PUSH_GW_URL:-http://push-gw:8092}
       LAKKO_DS_PUSH_GW_SECRET: ${LAKKO_PUSH_GW_INTERNAL_SECRET:-ZGV2LXB1c2gtZ3ctaW50ZXJuYWwtd2FrZS1zZWNyZXQ=}
+      # ADR-0057 - keys the stored push bindings; DS only. Unset: binding
+      # answers 503 push-binding-disabled and every wake is dropped.
+      LAKKO_DS_BINDING_PEPPER: ${LAKKO_DS_BINDING_PEPPER:-6465762d64732d62696e64696e672d7065707065722d66697874757265212121}
       # ADR-0054 - the anonymous-token master secret; MUST match auth's.
       # Unset: the knock answers 503 anon-tokens-disabled.
       LAKKO_ANON_TOKEN_MASTER_SECRET: ${LAKKO_ANON_TOKEN_MASTER_SECRET:-}

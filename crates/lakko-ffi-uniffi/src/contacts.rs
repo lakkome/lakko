@@ -37,7 +37,8 @@ use lakko_contacts::call_invite::{
 };
 use lakko_contacts::call_invite::{
     call_sign_revocation as rust_call_sign_revocation, compose as rust_call_invite_compose,
-    decode_and_verify as rust_call_invite_decode, CallInviteCapability as RustCallInviteCapability,
+    decode_and_verify as rust_call_invite_decode, open_link as rust_call_invite_open_link,
+    seal_link as rust_call_invite_seal_link, CallInviteCapability as RustCallInviteCapability,
     CallInviteMedia as RustCallInviteMedia, CALL_ID_LEN, MAX_KEY_PACKAGE_LEN,
 };
 use lakko_contacts::call_kp_forward::{
@@ -61,8 +62,8 @@ use lakko_contacts::group_invite::{
     compose as rust_group_invite_compose,
     compose_with_preview as rust_group_invite_compose_with_preview,
     decode_and_verify as rust_group_invite_decode, generate_link_key as rust_generate_link_key,
-    group_sign_revocation as rust_group_sign_revocation,
-    GroupInviteCapability as RustGroupInviteCapability,
+    group_sign_revocation as rust_group_sign_revocation, open_link as rust_group_invite_open_link,
+    seal_link as rust_group_invite_seal_link, GroupInviteCapability as RustGroupInviteCapability,
     GroupInvitePreview as RustGroupInvitePreview,
     LINK_SECRET_B64URL_LEN as GROUP_INVITE_LINK_SECRET_B64URL_LEN,
     LINK_SECRET_LEN as GROUP_INVITE_LINK_SECRET_LEN, MAX_GROUP_ID_LEN,
@@ -81,8 +82,15 @@ use lakko_contacts::incoming_envelope::{
 };
 use lakko_contacts::invite::{
     compose as rust_invite_compose, compute_joiner_tag as rust_compute_joiner_tag,
-    decode_and_verify as rust_invite_decode, sign_owner_list as rust_sign_owner_list,
+    decode_and_verify as rust_invite_decode, open_link as rust_invite_open_link,
+    seal_link as rust_invite_seal_link, sign_owner_list as rust_sign_owner_list,
     sign_revocation as rust_sign_revocation, BLOB_ID_B64URL_LEN, BLOB_ID_LEN,
+};
+use lakko_contacts::link_seal::{
+    generate_link_secret as rust_generate_link_secret,
+    link_secret_from_slice as rust_link_secret_from_slice,
+    LINK_SECRET_B64URL_LEN as INVITE_LINK_SECRET_B64URL_LEN,
+    LINK_SECRET_LEN as INVITE_LINK_SECRET_LEN,
 };
 use lakko_contacts::media_state::{
     compose_media_state as rust_compose_media_state, decode_media_state as rust_decode_media_state,
@@ -123,8 +131,58 @@ use crate::FfiError;
 
 impl From<ContactError> for FfiError {
     fn from(e: ContactError) -> Self {
-        Self::Contacts(e.to_string())
+        match e {
+            // The one typed refusal of an invite link's open (the
+            // 2026-09-28 security pass): the page says "damaged".
+            ContactError::LinkDamaged => Self::InviteLinkDamaged(e.to_string()),
+            other => Self::Contacts(other.to_string()),
+        }
     }
+}
+
+// ============================================================================
+// Sealed invite links — the 2026-09-28 security pass (ADR-0028, ADR-0009)
+// ============================================================================
+
+/// What every invite compose returns (`/i/`, `/c/`, `/g/`): the sealed blob
+/// the client uploads (or, when the upload fails, base64url-encodes into the
+/// inline `/<k>/<sealed>#<secret>` link), the fresh 12-byte link secret the
+/// client puts in the URL fragment and nowhere a server reads, and the
+/// issuer's 32-byte Ed25519 key the upload carries in clear for the revoke.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct InviteLinkMint {
+    pub sealed: Vec<u8>,
+    pub link_secret: Vec<u8>,
+    pub issuer_pubkey: Vec<u8>,
+}
+
+fn seal_mint(
+    signing: &SigningKey,
+    seal: impl FnOnce(&[u8; INVITE_LINK_SECRET_LEN]) -> Result<Vec<u8>, ContactError>,
+    secret: [u8; INVITE_LINK_SECRET_LEN],
+) -> Result<InviteLinkMint, FfiError> {
+    let sealed = seal(&secret)?;
+    Ok(InviteLinkMint {
+        sealed,
+        link_secret: secret.to_vec(),
+        issuer_pubkey: signing.verifying_key().to_bytes().to_vec(),
+    })
+}
+
+/// Width in bytes of an invite link secret (the URL fragment), every kind: 12.
+#[uniffi::export]
+#[must_use]
+pub fn invite_link_secret_len() -> u32 {
+    u32::try_from(INVITE_LINK_SECRET_LEN).unwrap_or(u32::MAX)
+}
+
+/// Length of an invite link secret in the URL fragment: base64url without
+/// padding, 16 characters. A fragment of any other length (or none) is a
+/// damaged link.
+#[uniffi::export]
+#[must_use]
+pub fn invite_link_secret_url_len() -> u32 {
+    u32::try_from(INVITE_LINK_SECRET_B64URL_LEN).unwrap_or(u32::MAX)
 }
 
 impl From<lakko_crypto::error::Error> for FfiError {
@@ -819,7 +877,8 @@ pub fn group_name_is_newer(incoming_updated_at_ms: u64, stored_updated_at_ms: u6
 // InviteCapability — ADR-0005 §13.3 / §13.4
 // ============================================================================
 
-/// Compose a signed invite capability. Returns the wire bytes.
+/// Compose a signed invite capability and seal it for an `/i/` link under a
+/// fresh link secret. Returns the [`InviteLinkMint`].
 ///
 /// Top-level free function rather than an associated function on
 /// [`InviteCapability`] for the same reason as
@@ -860,7 +919,7 @@ pub fn compose_invite_capability(
     max_uses: u32,
     bootstrap_referral: bool,
     label: String,
-) -> Result<Vec<u8>, FfiError> {
+) -> Result<InviteLinkMint, FfiError> {
     if owner_signing_seed.len() != 32 {
         return Err(FfiError::Contacts(
             "ownerSigningSeed must be 32 bytes".to_string(),
@@ -903,7 +962,11 @@ pub fn compose_invite_capability(
         bootstrap_referral,
         &label,
     )?;
-    Ok(wire)
+    seal_mint(
+        &signing,
+        |secret| rust_invite_seal_link(secret, &wire),
+        rust_generate_link_secret(),
+    )
 }
 
 /// Composed and verified invite capability — capability-based
@@ -931,12 +994,14 @@ pub fn compose_invite_capability(
 #[derive(uniffi::Object)]
 pub struct InviteCapability {
     inner: RustInviteCapability,
+    wire: Vec<u8>,
 }
 
 #[uniffi::export]
 impl InviteCapability {
-    /// Joiner-side: decode wire bytes, verify the Ed25519
-    /// signature, return the validated [`InviteCapability`].
+    /// Decode PLAINTEXT capability wire bytes and verify the Ed25519
+    /// signature. A link never carries plaintext since the 2026-09-28
+    /// security pass — a joiner opens the link with [`Self::open_link`].
     ///
     /// Does **not** check expiry — call [`is_valid_now`]
     /// separately so the UI can render "this invite expired N
@@ -944,7 +1009,30 @@ impl InviteCapability {
     #[uniffi::constructor]
     pub fn decode_and_verify(wire: Vec<u8>) -> Result<Self, FfiError> {
         let inner = rust_invite_decode(&wire)?;
-        Ok(Self { inner })
+        Ok(Self { inner, wire })
+    }
+
+    /// Joiner-side: open an `/i/` link's sealed blob (fetched by id, or the
+    /// inline path segment) with the link secret from the URL fragment, and
+    /// verify the capability inside. Does **not** check expiry.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::InviteLinkDamaged`] for a missing or wrong secret (any
+    /// length other than 12 bytes included), a blob of another kind, a
+    /// truncated, tampered or substituted blob, or a capability that does not
+    /// verify — the page says "this link is damaged" for all of them.
+    #[uniffi::constructor]
+    pub fn open_link(sealed: Vec<u8>, link_secret: Vec<u8>) -> Result<Self, FfiError> {
+        let secret = rust_link_secret_from_slice(&link_secret)?;
+        let (inner, wire) = rust_invite_open_link(&secret, &sealed)?;
+        Ok(Self { inner, wire })
+    }
+
+    /// The plaintext capability wire — what the joiner tag is computed over
+    /// ([`compute_joiner_invite_tag`]). Never goes back to the server.
+    pub fn wire(&self) -> Vec<u8> {
+        self.wire.clone()
     }
 
     /// Inviter's long-term Ed25519 verifying key (32 bytes).
@@ -1400,9 +1488,10 @@ impl FfiCallInviteMedia {
     }
 }
 
-/// Compose + sign a call-invite capability (Phase 3c3).
-/// Returns the wire bytes the platform base64url-encodes
-/// into a `https://<host>/c/<...>` link.
+/// Compose + sign a call-invite capability (Phase 3c3) and seal it for a
+/// `/c/` link under a fresh link secret (the 2026-09-28 security pass).
+/// Returns the [`InviteLinkMint`]; the link is `https://<host>/c/<id>#<secret>`
+/// after the upload, or `/c/<base64url sealed>#<secret>` inline.
 ///
 /// `owner_signing_seed` is the 32-byte Ed25519 seed (same
 /// source as `compose_invite_capability`).
@@ -1431,7 +1520,7 @@ pub fn compose_call_invite_capability(
     media: FfiCallInviteMedia,
     one_time_key_package: Vec<u8>,
     label: String,
-) -> Result<Vec<u8>, FfiError> {
+) -> Result<InviteLinkMint, FfiError> {
     if owner_signing_seed.len() != 32 {
         return Err(FfiError::Contacts(
             "ownerSigningSeed must be 32 bytes".to_string(),
@@ -1479,7 +1568,11 @@ pub fn compose_call_invite_capability(
         &one_time_key_package,
         &label,
     )?;
-    Ok(wire)
+    seal_mint(
+        &signing,
+        |secret| rust_call_invite_seal_link(secret, &wire),
+        rust_generate_link_secret(),
+    )
 }
 
 /// Composed and verified call-invite capability (Phase 3c3).
@@ -1487,18 +1580,39 @@ pub fn compose_call_invite_capability(
 #[derive(uniffi::Object)]
 pub struct CallInviteCapability {
     pub(crate) inner: RustCallInviteCapability,
+    wire: Vec<u8>,
 }
 
 #[uniffi::export]
 impl CallInviteCapability {
-    /// Joiner-side: decode wire bytes, verify the Ed25519
-    /// signature, return the validated capability. Does
-    /// **not** check expiry — call [`Self::is_valid_now`]
-    /// separately.
+    /// Decode PLAINTEXT capability wire bytes and verify the Ed25519
+    /// signature. A link never carries plaintext — a joiner opens it with
+    /// [`Self::open_link`]. Does **not** check expiry — call
+    /// [`Self::is_valid_now`] separately.
     #[uniffi::constructor]
     pub fn decode_and_verify(wire: Vec<u8>) -> Result<Self, FfiError> {
         let inner = rust_call_invite_decode(&wire)?;
-        Ok(Self { inner })
+        Ok(Self { inner, wire })
+    }
+
+    /// Joiner-side: open a `/c/` link's sealed blob with the link secret from
+    /// the URL fragment and verify the capability inside. Without the secret a
+    /// fetched blob is not a seat in the call. Does **not** check expiry.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::InviteLinkDamaged`] on any failure (see
+    /// [`InviteCapability::open_link`]).
+    #[uniffi::constructor]
+    pub fn open_link(sealed: Vec<u8>, link_secret: Vec<u8>) -> Result<Self, FfiError> {
+        let secret = rust_link_secret_from_slice(&link_secret)?;
+        let (inner, wire) = rust_call_invite_open_link(&secret, &sealed)?;
+        Ok(Self { inner, wire })
+    }
+
+    /// The plaintext capability wire — what the joiner tag is computed over.
+    pub fn wire(&self) -> Vec<u8> {
+        self.wire.clone()
     }
 
     /// Inviter's long-term Ed25519 verifying key (32 bytes).
@@ -1798,6 +1912,11 @@ pub enum FfiIncomingEnvelopeKind {
     /// rules as `Visibility`, ordered by
     /// [`crate::scoped_discovery::reach_state_is_newer`].
     ReachState,
+    /// A journal root handing this member its Delivery Service registrar
+    /// seed (ADR-0057). `payload` is the whole envelope as received; the
+    /// ADR-0057 client surface (addressee check, open) is not on this FFI
+    /// yet, so a caller only drops it and never renders it.
+    RegistrarSeed,
 }
 
 /// FFI-portable result of [`dispatch_incoming_envelope`].
@@ -1918,6 +2037,10 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
         IncomingEnvelope::ReachState(state) => FfiIncomingEnvelope {
             reach_state: Some(state.into()),
             ..FfiIncomingEnvelope::of(K::ReachState)
+        },
+        IncomingEnvelope::RegistrarSeed(_) => FfiIncomingEnvelope {
+            payload: plaintext.clone(),
+            ..FfiIncomingEnvelope::of(K::RegistrarSeed)
         },
         IncomingEnvelope::IntroMessage(p) => FfiIncomingEnvelope {
             payload: p.to_vec(),
@@ -2480,12 +2603,14 @@ pub fn committer_beacon_envelope_len() -> u32 {
 // GroupInviteCapability — ADR-0028 (group join-ticket, G-3)
 // ============================================================================
 
-/// Owner-side: compose + sign a group join-ticket capability (ADR-0028).
+/// Owner-side: compose + sign a group join-ticket capability without a
+/// preview (ADR-0028) and seal it for a `/g/` link under a fresh link secret.
 ///
 /// `issuer_signing_seed` is the 32-byte Ed25519 seed of the owner/admin minting
 /// the link; `group_id` is the target group's opaque MLS `GroupId` bytes;
-/// `expiry_ms` is UNIX millis (`0` = never expires). Returns the wire bytes the
-/// client base64url-encodes into the `/g/<slug>` link.
+/// `expiry_ms` is UNIX millis (`0` = never expires). Returns the
+/// [`InviteLinkMint`]; the link is `/g/<id>#<secret>` after the upload, or
+/// `/g/<base64url sealed>#<secret>` inline.
 ///
 /// # Errors
 ///
@@ -2496,7 +2621,7 @@ pub fn compose_group_invite_capability(
     issuer_signing_seed: Vec<u8>,
     group_id: Vec<u8>,
     expiry_ms: u64,
-) -> Result<Vec<u8>, FfiError> {
+) -> Result<InviteLinkMint, FfiError> {
     if issuer_signing_seed.len() != 32 {
         return Err(FfiError::Contacts(
             "issuerSigningSeed must be 32 bytes".to_string(),
@@ -2510,7 +2635,12 @@ pub fn compose_group_invite_capability(
             "groupId must be 1..={MAX_GROUP_ID_LEN} bytes",
         )));
     }
-    Ok(rust_group_invite_compose(&signing, &group_id, expiry_ms)?)
+    let wire = rust_group_invite_compose(&signing, &group_id, expiry_ms)?;
+    seal_mint(
+        &signing,
+        |secret| rust_group_invite_seal_link(secret, &wire),
+        rust_generate_link_key(),
+    )
 }
 
 /// Owner-side: sign a group-invite revocation (ADR-0028 revoke). Returns the
@@ -2590,21 +2720,12 @@ pub struct GroupInvitePreview {
     pub member_count: u16,
 }
 
-/// What `compose_group_invite_capability_with_preview` mints: the signed
-/// capability bytes (the slug) and the fresh link secret
-/// ([`group_invite_link_secret_len`] = 12 bytes, 16 base64url characters) the
-/// caller puts in the URL fragment and nowhere a server reads. The field keeps
-/// its `link_key` name; it carries the secret the preview key is derived from.
-#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
-pub struct GroupInviteMint {
-    pub wire: Vec<u8>,
-    pub link_key: Vec<u8>,
-}
-
-/// Mint a `/g/` capability that carries a sealed preview (ADR-0028 v2). Names
-/// are prepared like a profile / group name (trimmed; blank = none) and
-/// refused past the display-name rule. `member_count` is what the issuer's
-/// roster says now.
+/// Mint a `/g/` capability that carries a sealed preview (ADR-0028 v2) and
+/// seal the whole capability for the link under the same fresh link secret
+/// (the 2026-09-28 security pass). Names are prepared like a profile / group
+/// name (trimmed; blank = none) and refused past the display-name rule.
+/// `member_count` is what the issuer's roster says now. Returns the
+/// [`InviteLinkMint`].
 ///
 /// # Errors
 ///
@@ -2618,7 +2739,7 @@ pub fn compose_group_invite_capability_with_preview(
     group_name: Option<String>,
     inviter_name: Option<String>,
     member_count: u16,
-) -> Result<GroupInviteMint, FfiError> {
+) -> Result<InviteLinkMint, FfiError> {
     if issuer_signing_seed.len() != 32 {
         return Err(FfiError::Contacts(
             "issuerSigningSeed must be 32 bytes".to_string(),
@@ -2641,30 +2762,55 @@ pub fn compose_group_invite_capability_with_preview(
     let wire = rust_group_invite_compose_with_preview(
         &signing, &group_id, expiry_ms, &preview, &link_key,
     )?;
-    Ok(GroupInviteMint {
-        wire,
-        link_key: link_key.to_vec(),
-    })
+    seal_mint(
+        &signing,
+        |secret| rust_group_invite_seal_link(secret, &wire),
+        link_key,
+    )
 }
 
 #[derive(uniffi::Object)]
 pub struct GroupInviteCapability {
     pub(crate) inner: RustGroupInviteCapability,
+    wire: Vec<u8>,
 }
 
 #[uniffi::export]
 impl GroupInviteCapability {
-    /// Joiner-side: decode wire bytes, verify the Ed25519 signature, return the
-    /// validated capability. Does **not** check expiry — call
-    /// [`Self::is_valid_now`] separately.
+    /// Decode PLAINTEXT capability wire bytes and verify the Ed25519
+    /// signature (the join attribution carries plaintext; a link never does
+    /// since the 2026-09-28 security pass — open it with [`Self::open_link`]).
+    /// Does **not** check expiry — call [`Self::is_valid_now`] separately.
     ///
     /// # Errors
     ///
-    /// [`FfiError::Contacts`] on a malformed / forged / truncated link.
+    /// [`FfiError::Contacts`] on a malformed / forged / truncated capability.
     #[uniffi::constructor]
     pub fn decode_and_verify(wire: Vec<u8>) -> Result<Self, FfiError> {
         let inner = rust_group_invite_decode(&wire)?;
-        Ok(Self { inner })
+        Ok(Self { inner, wire })
+    }
+
+    /// Joiner-side: open a `/g/` link's sealed blob with the link secret from
+    /// the URL fragment and verify the capability inside. The same secret then
+    /// opens the preview ([`Self::open_preview`]). A `/g/` link without its
+    /// fragment has nothing to open this with. Does **not** check expiry.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::InviteLinkDamaged`] on any failure (see
+    /// [`InviteCapability::open_link`]).
+    #[uniffi::constructor]
+    pub fn open_link(sealed: Vec<u8>, link_secret: Vec<u8>) -> Result<Self, FfiError> {
+        let secret = rust_link_secret_from_slice(&link_secret)?;
+        let (inner, wire) = rust_group_invite_open_link(&secret, &sealed)?;
+        Ok(Self { inner, wire })
+    }
+
+    /// The plaintext capability wire — what the joiner tag and the join
+    /// attribution ([`compose_group_join_attribution`]) are computed over.
+    pub fn wire(&self) -> Vec<u8> {
+        self.wire.clone()
     }
 
     /// The target group's opaque MLS `GroupId` bytes — the joiner passes these
@@ -2962,7 +3108,7 @@ mod tests {
         // Positional args — Rust function calls don't have
         // named-arg syntax; the parameter order matches the
         // signature on `compose_invite_capability` above.
-        let wire = compose_invite_capability(
+        let mint = compose_invite_capability(
             alice_signing.to_seed().to_vec(),
             alice_account_id.to_vec(),
             alice_x25519.to_bytes().to_vec(),
@@ -2972,8 +3118,27 @@ mod tests {
             "lunch group".to_string(),
         )
         .expect("compose");
+        assert_eq!(mint.link_secret.len(), 12);
+        assert_eq!(
+            mint.issuer_pubkey,
+            alice_signing.verifying_key().to_bytes().to_vec()
+        );
 
-        let cap = InviteCapability::decode_and_verify(wire).expect("decode");
+        let cap = InviteCapability::open_link(mint.sealed.clone(), mint.link_secret.clone())
+            .expect("open");
+        let again = InviteCapability::decode_and_verify(cap.wire()).expect("decode plaintext");
+        assert_eq!(again.label(), "lunch group");
+        // No secret, a wrong one, or another kind's path: damaged.
+        for secret in [vec![], vec![0u8; 12], vec![0u8; 32]] {
+            assert!(matches!(
+                InviteCapability::open_link(mint.sealed.clone(), secret),
+                Err(FfiError::InviteLinkDamaged(_))
+            ));
+        }
+        assert!(matches!(
+            GroupInviteCapability::open_link(mint.sealed.clone(), mint.link_secret.clone()),
+            Err(FfiError::InviteLinkDamaged(_))
+        ));
         assert_eq!(
             cap.owner_signature_pubkey(),
             alice_signing.verifying_key().to_bytes().to_vec(),
@@ -3141,7 +3306,7 @@ mod tests {
         // relies on).
         let alice_signing = SigningKey::from_seed(&[0xAAu8; 32]);
         let alice_x25519 = InnerX25519SecretKey::from_bytes([0xBBu8; 32]).public_key();
-        let wire = compose_invite_capability(
+        let mint = compose_invite_capability(
             alice_signing.to_seed().to_vec(),
             vec![0u8; ACCOUNT_ID_LEN],
             alice_x25519.to_bytes().to_vec(),
@@ -3151,6 +3316,10 @@ mod tests {
             String::new(),
         )
         .expect("compose");
+        // The tag is over the PLAINTEXT capability the link opens to.
+        let wire = InviteCapability::open_link(mint.sealed, mint.link_secret)
+            .expect("open")
+            .wire();
         let joiner_account_id = vec![0xCCu8; ACCOUNT_ID_LEN];
 
         let tag1 = compute_joiner_invite_tag(wire.clone(), joiner_account_id.clone()).expect("tag");
@@ -4112,23 +4281,30 @@ mod tests {
             4,
         )
         .expect("mint");
-        let cap = GroupInviteCapability::decode_and_verify(mint.wire.clone()).expect("decode");
+        let cap = GroupInviteCapability::open_link(mint.sealed.clone(), mint.link_secret.clone())
+            .expect("open");
         assert!(cap.has_preview());
         let preview = cap
-            .open_preview(mint.link_key.clone())
+            .open_preview(mint.link_secret.clone())
             .expect("open")
             .expect("some");
         assert_eq!(preview.group_name.as_deref(), Some("Weekend plans"));
         assert_eq!(preview.inviter_name.as_deref(), Some("Anna"));
         assert_eq!(preview.member_count, 4);
-        assert_eq!(mint.link_key.len(), 12);
+        assert_eq!(mint.link_secret.len(), 12);
         assert!(cap.open_preview(vec![0u8; 12]).is_err(), "wrong secret");
         assert!(cap.open_preview(vec![0u8; 32]).is_err(), "old key width");
         assert!(cap.open_preview(vec![0u8; 5]).is_err());
+        assert!(matches!(
+            GroupInviteCapability::open_link(mint.sealed.clone(), vec![0u8; 12]),
+            Err(FfiError::InviteLinkDamaged(_))
+        ));
+        // The join attribution carries the plaintext capability.
+        assert!(GroupInviteCapability::decode_and_verify(cap.wire()).is_ok());
         let plain = compose_group_invite_capability(seed, vec![1, 2, 3, 4], 0).expect("plain");
-        let cap = GroupInviteCapability::decode_and_verify(plain).expect("decode");
+        let cap = GroupInviteCapability::open_link(plain.sealed, plain.link_secret).expect("open");
         assert!(!cap.has_preview());
-        assert_eq!(cap.open_preview(mint.link_key).expect("open"), None);
+        assert_eq!(cap.open_preview(mint.link_secret).expect("open"), None);
     }
 
     #[test]
@@ -4137,6 +4313,8 @@ mod tests {
         assert_eq!(invite_blob_id_url_len(), 8);
         assert_eq!(group_invite_link_secret_len(), 12);
         assert_eq!(group_invite_link_secret_url_len(), 16);
+        assert_eq!(invite_link_secret_len(), 12);
+        assert_eq!(invite_link_secret_url_len(), 16);
     }
 
     #[test]

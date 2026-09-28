@@ -515,7 +515,7 @@ const _: () = assert!(NONCE_LEN == 16);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::access::tests::{
+    use crate::test_support::{
         app, fresh_name, fresh_nonce, key, messages_uri, pk_b64, send, send_with, Req,
     };
     use axum::Router;

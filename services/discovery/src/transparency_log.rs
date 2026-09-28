@@ -380,7 +380,7 @@ mod tests {
             .connect(&url)
             .await
             .expect("connect test DB");
-        crate::MIGRATIONS.run(&pool).await.expect("run migrations");
+        crate::anon_token_route_tests::migrate_once(&pool).await;
 
         // Three isolated accounts so this test never collides with other
         // rows. Clean them up at the end.
