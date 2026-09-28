@@ -26,7 +26,7 @@ Keep it lightweight — prose + a state/flow list, not a pixel mockup. It is the
 
 ## Design system — read `design-system.md` FIRST
 
-Every user-facing change starts from [`design-system.md`](design-system.md) in this directory: the brand (logo, palette, gradient rule), the colour / shape / type tokens for light and dark, the component vocabulary, the information architecture (Chats · Contacts · Channels · Calls · Settings), and the voice + banned-words list. A screen that invents its own colours, its own component, its own section of the IA, or shows protocol names to the user is wrong even if it works. When the design system does not cover a case, extend the document in the same change rather than improvising in one client.
+Every user-facing change starts from [`design-system.md`](design-system.md) in this directory: the brand (logo, palette, gradient rule), the colour / shape / type tokens for light and dark, the component vocabulary, the information architecture (Chats · Feed · Contacts · Calls · Settings), and the voice + banned-words list. A screen that invents its own colours, its own component, its own section of the IA, or shows protocol names to the user is wrong even if it works. When the design system does not cover a case, extend the document in the same change rather than improvising in one client.
 
 Copy checklist before any UI text lands (all three clients):
 - no protocol / crate / function names (OPAQUE, OPRF, PAKE, MLS, KeyPackage, Welcome, DS, pseudonym, epoch, commit, exporter, HPKE, SFrame, KT log, rendezvous);

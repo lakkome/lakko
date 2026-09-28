@@ -42,12 +42,15 @@ throughout. The two documents disagreed and the code followed the wrong one.
 
 ## 1. Destinations
 
-Four, in this order, identical on the three clients:
+Five, in this order, identical on the three clients:
 
 1. **Chats** - every conversation: one-to-one, groups, channels. The home.
-2. **Contacts** - accepted contacts, incoming requests, add by username.
-3. **Calls** - recent calls, newest first. Create a call link, join by link.
-4. **Settings** - unchanged.
+2. **Feed** - messages from groups and channel posts, ranked by rules the
+   person picks or writes, plus channel suggestions. Specified in
+   [`feed.md`](feed.md) (added 2026-09-28; this list read "Four" before).
+3. **Contacts** - accepted contacts, incoming requests, add by username.
+4. **Calls** - recent calls, newest first. Create a call link, join by link.
+5. **Settings** - unchanged.
 
 Gone as destinations: **Groups** and **Channels**. Both remain as *kinds* of
 conversation inside Chats, and both keep their creation flows, reached from
