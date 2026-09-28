@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0058: The feed is ranked on the device, by one shared rule engine
 
-- **Status:** Proposed
+- **Status:** Accepted (maintainer, 2026-09-28). S1, the `lakko-feed` crate, built the same day; this text was corrected to what it built
 - **Date:** 2026-09-28
 - **Context:** product completeness, new destination. UX spec:
   [`docs/ux/feed.md`](../ux/feed.md). Recommendations (Discover) are a
@@ -80,7 +80,9 @@ that leaves the device.**
 A new crate, not a module of `lakko-ui-rules`: that crate states that
 nothing in it is security-relevant and nothing should become so, and this
 one owns a parser for files strangers send. Dependencies: `thiserror`
-only. `#![forbid(unsafe_code)]`.
+and `lakko-contacts`, for the display-name rule (a feed's name) and the
+canonical username rule (mentions), so neither is spelled twice.
+`#![forbid(unsafe_code)]`.
 
 **Rule.** `FeedRule`:
 
@@ -95,8 +97,9 @@ only. `#![forbid(unsafe_code)]`.
 | `half_life` | FewHours / Day / Week | |
 | `window_days` | u8 | 1..=30 |
 | `media_only`, `hide_own` | bool | |
+| `for_me` | bool | only mentions, replies to the person, and the person's own messages that drew a reaction (the "For me" preset) |
 | `min_reactions` | u16 | |
-| `hide_words`, `only_words` | strings | each <= 32 entries, <= 64 bytes, no line breaks |
+| `hide_words`, `only_words` | strings | each <= 32 entries, <= 64 bytes, trimmed, lowercase, no control characters, no duplicates |
 | `suggestions` | Never / Rarely / Sometimes | read by ADR-0059; carried here |
 
 **Wire.** `DOMAIN "lakko/feed-rule/v1\0" ‖ version(1) ‖ fields`, bounded,
@@ -114,35 +117,46 @@ conversation id.
 ADR-0059's) so the three clients cannot disagree about what "Popular"
 means.
 
-**Candidate.** The client builds one `FeedCandidate` per message in the
-window, with only what ranking needs: `kind`, `conversation` (index into
-the client's own list, so no id crosses the boundary twice), `message_id`,
+**Conversations and candidates.** The client passes its conversations
+once, as `FeedConversation { id, kind (Group | Channel), muted, audience }`
+(the id is compared with the rule's include / exclude lists; `audience` is
+the member count), and one `FeedCandidate` per message in the window, with
+only what ranking needs: `conversation` (index into that list), `message_id`,
 `reply_to` (message id in the same conversation, optional), `time_ms`,
 `from_self`, `from_contact`, `mentions_me`, `replies_to_me`,
-`reactions_distinct` (people, not emoji), `audience` (member count;
-0 for a channel), `has_media`, `muted`, and `text` (for the word filters;
-never logged).
+`reactions_distinct` (people, not emoji), `has_media`, and `text` (for the
+word filters; never logged).
 
-**Order.** `rank(rule, candidates, now_ms) -> Vec<FeedEntry { index,
-replies: Vec<u32> }>`:
+**Order.** `rank(rule, conversations, candidates, now_ms) ->
+Vec<FeedEntry { index, replies: Vec<u32> }>`:
 
 1. filter: kind, include/exclude, muted, window, media_only, hide_own,
-   words (case-insensitive, on word boundaries), min_reactions;
-2. fold: a candidate whose `reply_to` names another candidate joins that
-   parent's `replies` in time order; a reply whose parent is absent stays
-   an item of its own;
+   for_me, min_reactions, words (case-insensitive, whole words: no letter,
+   digit or `_` directly before or after); a candidate whose conversation
+   index is out of range is dropped, and of two with the same conversation
+   and message id only the first is kept;
+2. fold: a reply joins the top of its reply chain (followed at most 8
+   steps; a cycle leaves each message standing alone), replies oldest
+   first; a reply whose parent is absent or filtered out stays an item of
+   its own;
 3. score each item: `recency * decay(age, half_life) + reactions *
    e(reactions_distinct, audience) + replies * e(reply_count, audience) +
    from_contacts * [from_contact] + mentions_me * [mentions_me or
-   replies_to_me] + has_media * [has_media]`, with `decay` exponential and
-   `e(n, a) = ln(1 + n) / ln(2 + a)` for a group (so the same count weighs
-   more in a smaller group) and 0 for a channel. These shapes are
-   **chosen, not measured**; they are constants in the crate so a change is
-   one reviewed diff;
+   replies_to_me] + has_media * [has_media]`, each component in fixed point
+   `0..=65536`: `decay = 2^(-age / half_life)` from a 16-step table with
+   linear interpolation, and `e(n, a) = n / (n + 1 + isqrt(a))` for a group
+   (so the same count weighs more in a smaller group) and 0 for a channel.
+   **Integer arithmetic only**: floating-point `ln` / `exp` go through each
+   platform's maths library, and wasm, iOS and Android need not agree on
+   the last bit, which would reorder near-equal items differently on
+   different phones. These shapes are **chosen, not measured**; they are
+   constants in the crate so a change is one reviewed diff;
 4. sort by score descending, then time descending, then conversation,
    then message id: total and deterministic.
 
-`rank` is total over arbitrary input and never panics (a property test).
+`rank` is total over arbitrary input and never panics, and its order does
+not depend on the order the client passes candidates in (both property
+tests).
 
 **Read state.** `contiguous_seen(ids_ascending, seen) -> Option<i64>`:
 the highest id such that every id at or below it in that conversation is
@@ -150,7 +164,8 @@ seen. One definition, used by the three clients for the read receipt, the
 DeviceGroup `ReadCursor` and the unread count.
 
 Both FFI surfaces expose `FeedRule` (construct, encode, decode, export),
-the presets, `FeedCandidate`, `rank` and `contiguous_seen`, following the
+the presets, `FeedConversation`, `FeedCandidate`, `rank`,
+`mentions_username` and `contiguous_seen`, following the
 `orderConversations` shape. Not on the extension surface: the notification
 process ranks nothing.
 
@@ -275,7 +290,12 @@ same open question as the rest of per-device state.
 ## Plan
 
 - **S1** `lakko-feed`: rule codec, export, presets, `rank`, `contiguous_seen`,
-  property tests, fuzz target.
+  property tests, fuzz target. **Built 2026-09-28**: 31 tests (28 in the
+  crate, among them order-independence and no-duplicate-index property
+  tests and an unseen-never-claimed property test for `contiguous_seen`,
+  plus 3 property tests driving the fuzz harness's assertions over random
+  bytes and damaged valid encodings); fuzz target `feed_rule_decode` builds
+  but was not run (cargo-fuzz is not installed where it was built).
 - **S2** both FFI surfaces.
 - **S3** web: post log, channel polling, seen set and the new read state,
   the Feed destination, editor, share and import; measure a feed build.

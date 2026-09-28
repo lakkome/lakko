@@ -33,6 +33,7 @@ members = [
     "crates/lakko-mnemonic",
     "crates/lakko-shamir",
     "crates/lakko-ui-rules",
+    "crates/lakko-feed",
     "crates/lakko-discovery-client",
     "crates/lakko-tuf",
     "crates/lakko-ffi-uniffi",
@@ -142,6 +143,7 @@ lakko-anon-token-server = { path = "crates/lakko-anon-token-server", version = "
 lakko-mnemonic = { path = "crates/lakko-mnemonic", version = "0.0.0" }
 lakko-shamir = { path = "crates/lakko-shamir", version = "0.0.0" }
 lakko-ui-rules = { path = "crates/lakko-ui-rules", version = "0.0.0" }
+lakko-feed = { path = "crates/lakko-feed", version = "0.0.0" }
 lakko-discovery-client = { path = "crates/lakko-discovery-client", version = "0.0.0" }
 
 [workspace.lints.rust]

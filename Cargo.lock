@@ -2656,6 +2656,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-feed"
+version = "0.0.0"
+dependencies = [
+ "lakko-contacts",
+ "proptest",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "lakko-ffi-extension"
 version = "0.0.0"
 dependencies = [

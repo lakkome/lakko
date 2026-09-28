@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-feed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The on-device feed: a declarative rule, its bounded codec, and the one ranking every client draws (ADR-0058)"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The display-name rule (a feed's name) and the canonical username rule
+# (mention matching), so neither is a second spelling of the rule the
+# rest of the workspace enforces.
+lakko-contacts.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest = "1"
