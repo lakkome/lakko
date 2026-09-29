@@ -36,6 +36,8 @@ public final class AutoBackupDriver {
         public let knownGroupIds: @MainActor () -> [String]?
         /// The whole MLS storage snapshot, or `nil` when no identity is loaded.
         public let snapshot: @MainActor () -> Data?
+        /// ADR-0058 — the synced state's bytes, or `nil` when none is held.
+        public let syncedState: @MainActor () -> Data?
 
         public init(
             accountId: @escaping @MainActor () -> Data?,
@@ -43,7 +45,8 @@ public final class AutoBackupDriver {
             sessionToken: @escaping @MainActor () -> String?,
             accountIdentitySeed: @escaping @MainActor () -> Data?,
             knownGroupIds: @escaping @MainActor () -> [String]?,
-            snapshot: @escaping @MainActor () -> Data?
+            snapshot: @escaping @MainActor () -> Data?,
+            syncedState: @escaping @MainActor () -> Data? = { nil }
         ) {
             self.accountId = accountId
             self.accountIdB64 = accountIdB64
@@ -51,6 +54,7 @@ public final class AutoBackupDriver {
             self.accountIdentitySeed = accountIdentitySeed
             self.knownGroupIds = knownGroupIds
             self.snapshot = snapshot
+            self.syncedState = syncedState
         }
     }
 
@@ -145,7 +149,8 @@ public final class AutoBackupDriver {
             // The index the snapshot cannot supply. Read from the same
             // accessor the membership check above uses, so an upload always
             // carries the set it was marked dirty for.
-            knownGroupIdsHex: inputs.knownGroupIds() ?? []
+            knownGroupIdsHex: inputs.knownGroupIds() ?? [],
+            syncedState: inputs.syncedState()
         )
         guard case .uploaded = result else {
             // `cacheMiss` is the ordinary state for a device that joined by

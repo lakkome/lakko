@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * `/settings/:section?` — Profile · Security · Appearance · Media · About ·
+ * `/settings/:section?` — Profile · Security · Chat folders · Appearance · Media · About ·
  * Account (docs/ux/client-redesign.md section 5.5). A section list on the
  * left, the section on the right; a narrow screen shows one of the two.
  * `/settings` lands on Profile. `recovery` (authenticator, email or phone) is
@@ -23,14 +23,18 @@ import { Avatar } from "../ui/Avatar";
 import { Icon, type IconName } from "../ui/icons";
 import { setTheme, useTheme, type Theme } from "../ui/theme";
 import Profile from "./Profile";
+import { ChatFoldersSection } from "../chat/folders/ChatFoldersSection";
 import { paths } from "./paths";
 
-type Section = "profile" | "security" | "appearance" | "media" | "about" | "account";
+type Section = "profile" | "security" | "folders" | "appearance" | "media" | "about" | "account";
 type Page = Section | "recovery";
 
 const SECTIONS: ReadonlyArray<{ id: Section; label: string; icon: IconName }> = [
   { id: "profile", label: "Profile", icon: "user" },
   { id: "security", label: "Security", icon: "shield" },
+  // docs/ux/chat-folders.md section 4 - between Notifications (which the web
+  // does not have) and Appearance.
+  { id: "folders", label: "Chat folders", icon: "folder" },
   { id: "appearance", label: "Appearance", icon: "palette" },
   { id: "media", label: "Media", icon: "video" },
   { id: "about", label: "About", icon: "info" },
@@ -110,6 +114,9 @@ export default function Settings(): JSX.Element {
           </Show>
           <Show when={shown() === "recovery"}>
             <RecoverySection />
+          </Show>
+          <Show when={shown() === "folders"}>
+            <ChatFoldersSection />
           </Show>
           <Show when={shown() === "appearance"}>
             <AppearanceSection />

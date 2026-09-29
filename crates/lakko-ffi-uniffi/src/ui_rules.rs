@@ -22,6 +22,11 @@ use lakko_ui_rules::conversation::{
     order_conversations as rust_order_conversations, ConversationKind as RustConversationKind,
     ConversationRow as RustConversationRow,
 };
+use lakko_ui_rules::folder::{
+    folder_matches as rust_folder_matches,
+    order_conversations_in_folder as rust_order_conversations_in_folder,
+    FolderRule as RustFolderRule,
+};
 use lakko_ui_rules::info::{
     channel_info_sections as rust_channel_info_sections,
     group_info_sections as rust_group_info_sections, info_target as rust_info_target,
@@ -70,6 +75,7 @@ impl From<ConversationKind> for RustConversationKind {
 /// reads six fields and nothing else, so an avatar, a preview, an unread count
 /// and a handle to open all stay on the client side where they already are.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ConversationRow {
     /// Stable within a kind; `(kind, id)` is unique in the list.
     pub id: String,
@@ -88,6 +94,15 @@ pub struct ConversationRow {
     /// Archived by this person. Sinks below everything, including something
     /// newer.
     pub archived: bool,
+    /// Muted by this person. Read only by a folder's Muted exclude toggle
+    /// (ADR-0058); the list order ignores it. Defaults to `false`, so
+    /// existing initializer calls stay source-compatible.
+    #[uniffi(default = false)]
+    pub muted: bool,
+    /// Something unread in it, or a manual "mark as unread" - what the
+    /// unread badge means. Read only by a folder's Read exclude toggle.
+    #[uniffi(default = false)]
+    pub has_unread: bool,
 }
 
 impl From<ConversationRow> for RustConversationRow {
@@ -99,8 +114,63 @@ impl From<ConversationRow> for RustConversationRow {
             last_activity_ms: r.last_activity_ms,
             pinned: r.pinned,
             archived: r.archived,
+            muted: r.muted,
+            has_unread: r.has_unread,
         }
     }
+}
+
+/// A chat folder's rule in row terms (ADR-0058 section 6).
+///
+/// `include_kinds` / `exclude_flags` are the folder's meta-register bits as
+/// the synced state returns them (include: bit0 one-to-one, bit1 groups,
+/// bit2 channels; exclude: bit0 muted, bit1 read, bit2 archived).
+/// `included` / `excluded` are the [`ConversationRow::id`]s the client maps
+/// the folder's hand-added and hand-excluded references to.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FolderRule {
+    /// Kind toggles.
+    pub include_kinds: u32,
+    /// Exclude toggles.
+    pub exclude_flags: u32,
+    /// Row ids added by hand.
+    pub included: Vec<String>,
+    /// Row ids excluded by hand.
+    pub excluded: Vec<String>,
+}
+
+impl From<FolderRule> for RustFolderRule {
+    fn from(r: FolderRule) -> Self {
+        Self {
+            include_kinds: r.include_kinds,
+            exclude_flags: r.exclude_flags,
+            included: r.included,
+            excluded: r.excluded,
+        }
+    }
+}
+
+/// Whether `row` is in the folder: excluded by hand beats everything; then
+/// included by kind toggle or by hand; then not muted / read / archived
+/// while the matching exclude toggle is on (`docs/ux/chat-folders.md` 3.2).
+#[uniffi::export]
+#[must_use]
+pub fn folder_matches(folder: FolderRule, row: ConversationRow) -> bool {
+    rust_folder_matches(&folder.into(), &row.into())
+}
+
+/// Order a folder's rows: the folder's own pins first in their stored order
+/// (`folder_pins` are row ids; unknown ids skipped), then the
+/// [`order_conversations`] rule with the global pin ignored. Returns input
+/// indices, every row exactly once.
+#[uniffi::export]
+#[must_use]
+pub fn order_conversations_in_folder(
+    rows: Vec<ConversationRow>,
+    folder_pins: Vec<String>,
+) -> Vec<u32> {
+    let rust: Vec<RustConversationRow> = rows.into_iter().map(Into::into).collect();
+    rust_order_conversations_in_folder(&rust, &folder_pins)
 }
 
 /// Order the one conversation list: pinned first, archived last, newest
@@ -521,7 +591,42 @@ mod tests {
             last_activity_ms: at,
             pinned: false,
             archived: false,
+            muted: false,
+            has_unread: false,
         }
+    }
+
+    #[test]
+    fn the_folder_rule_crosses_the_boundary() {
+        let rule = FolderRule {
+            include_kinds: 0b100,
+            exclude_flags: 0b010,
+            included: vec!["g".into()],
+            excluded: vec!["c2".into()],
+        };
+        let mut unread = row("c1", ConversationKind::Channel, Some(1));
+        unread.has_unread = true;
+        assert!(folder_matches(rule.clone(), unread.clone()));
+        // Read is excluded while the Read toggle is on.
+        assert!(!folder_matches(
+            rule.clone(),
+            row("c1", ConversationKind::Channel, Some(1))
+        ));
+        let mut hand = row("g", ConversationKind::Group, Some(1));
+        hand.has_unread = true;
+        assert!(folder_matches(rule.clone(), hand));
+        let mut excluded = row("c2", ConversationKind::Channel, Some(1));
+        excluded.has_unread = true;
+        assert!(!folder_matches(rule, excluded));
+
+        let rows = vec![
+            row("a", ConversationKind::Chat, Some(1)),
+            row("b", ConversationKind::Chat, Some(2)),
+        ];
+        assert_eq!(
+            order_conversations_in_folder(rows, vec!["a".into()]),
+            vec![0, 1]
+        );
     }
 
     #[test]

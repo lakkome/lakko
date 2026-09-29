@@ -117,6 +117,12 @@ struct SettingsScreen: View {
                 row("Recovery", systemImage: "lifepreserver") { onOpen(.recoveryFactors) }
             }
 
+            // `docs/ux/chat-folders.md` section 4 — between Notifications
+            // (not a section on this client) and Appearance.
+            Section {
+                row("Chat folders", systemImage: "folder") { onOpen(.chatFolders(reorder: false)) }
+            }
+
             Section("Appearance") {
                 Picker(selection: appearance) {
                     ForEach(AppearanceSetting.allCases) { setting in

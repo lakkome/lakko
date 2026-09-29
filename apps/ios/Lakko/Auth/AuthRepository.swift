@@ -2569,6 +2569,17 @@ public final class AuthRepository: ObservableObject {
         // `ChatRepository.bootstrap` rebuilds handles from a separately
         // persisted set of ids. Without this the restored device held every
         // group and listed none.
+        // ADR-0058 section 5.2 — the folded synced state (folders, pins,
+        // mutes, archive, read cursors, drafts), merged into this device's
+        // store before the DeviceGroup poll seeds from it. A running sync
+        // runtime for the account folds it too.
+        if !parsed.syncedState.isEmpty {
+            SyncedStateStore.mergeIntoStored(bytes: parsed.syncedState, accountIdB64: accountIdB64)
+            NotificationCenter.default.post(
+                name: .lakkoSyncedStateRestored, object: nil,
+                userInfo: ["accountIdB64": accountIdB64, "bytes": parsed.syncedState])
+            NSLog("backup restore (\(context)): synced state restored")
+        }
         let restoredGroupIdsHex = parsed.knownGroupIds.map(Self.hexString(fromBytes:))
         if !restoredGroupIdsHex.isEmpty {
             NSLog(
@@ -2661,7 +2672,11 @@ public final class AuthRepository: ObservableObject {
                 ed25519Seed: seedBytes,
                 phraseBytes: phraseBytes,
                 contacts: contactRecords,
-                wholeStorageSnapshot: wholeStorageSnapshot
+                wholeStorageSnapshot: wholeStorageSnapshot,
+                // ADR-0058 — whatever synced state this device already holds
+                // (after a recover, the one just restored), so the baseline
+                // does not overwrite the backup's folders with none.
+                syncedState: SyncedStateStore.bytes(accountIdB64: accountIdB64)
             )
         } catch {
             NSLog("backup baseline upload (\(context)) failed: \(error)")

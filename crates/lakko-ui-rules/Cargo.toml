@@ -19,3 +19,7 @@ workspace = true
 # The canonical username rule, so "is this worth a lookup" is the SAME
 # predicate the blinder enforces rather than a third spelling of it.
 lakko-contacts.workspace = true
+
+[dev-dependencies]
+# Only to pin that the folder bitfield constants equal the wire ones.
+lakko-sync.workspace = true

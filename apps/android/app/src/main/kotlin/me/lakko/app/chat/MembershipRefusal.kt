@@ -449,6 +449,11 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 is FfiException.DeviceLink,
                 is FfiException.DeviceLinkWrongCode,
                 is FfiException.InviteLinkDamaged,
+                // ADR-0058 - a refused DeviceGroup folder / snapshot payload
+                // and a refused synced-state operation; not membership
+                // refusals.
+                is FfiException.DeviceGroupPayloadRefused,
+                is FfiException.SyncedState,
                 -> null
 
                 // Everything that is NOT a membership refusal. Enumerated

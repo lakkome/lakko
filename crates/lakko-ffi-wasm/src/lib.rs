@@ -91,6 +91,7 @@ pub mod shamir;
 pub mod storage;
 pub mod supersession;
 pub mod sync;
+pub mod synced_state;
 pub mod transparency;
 pub mod ui_rules;
 pub mod word_vault;

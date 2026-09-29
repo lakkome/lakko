@@ -47,6 +47,7 @@
 import { loadWasm } from "../wasm";
 import { base64Decode, base64Encode } from "../auth/account-id";
 import { groupIdHex } from "../devices/sync/state";
+import { currentSyncedStateBytes } from "../devices/sync/synced-state-source";
 import { StorageClient } from "../storage/client";
 import { requestConfirm } from "../ui/confirm-dialog";
 import { staleRestoreConfirmation } from "./stale-restore-confirm";
@@ -118,6 +119,11 @@ export type RestoreResult =
        *  payload v4, and for a device that knew no groups; a restore treats
        *  both the same and rebuilds nothing rather than guessing. */
       readonly knownGroupIds: string[];
+      /** ADR-0058 section 5.2 — the account's folded synced state (pins,
+       *  mutes, archive, drafts, read cursors, chat folders) as
+       *  `SyncedState.toBytes()` wrote it; empty when none was held. The
+       *  restore seeds the sync runtime from it before its first poll. */
+      readonly syncedState: Uint8Array;
     }
   | { readonly kind: "no-backup" }
   | { readonly kind: "wrong-phrase-or-tampered" }
@@ -469,6 +475,7 @@ export class BackupClient {
       acceptedContacts,
       wholeStorageSnapshot: parsed.wholeStorageSnapshot,
       knownGroupIds: splitGroupIds(parsed.knownGroupIds),
+      syncedState: parsed.syncedState,
     };
   }
 
@@ -524,6 +531,9 @@ export class BackupClient {
       contacts,
       wholeStorageSnapshot,
       flatGroupIds,
+      // ADR-0058 section 5.2 — the folded synced state, so a restore with no
+      // other device alive still gets its pins, drafts and folders back.
+      currentSyncedStateBytes() ?? undefined,
     );
     return wasm.sealBackup(phraseBytes, payload);
   }

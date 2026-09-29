@@ -30,6 +30,7 @@ pub enum ConversationKind {
 
 /// One row of the merged list, reduced to what the order reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ConversationRow {
     /// Stable within a kind; `(kind, id)` is unique in the list.
     pub id: String,
@@ -48,6 +49,12 @@ pub struct ConversationRow {
     /// Archived by this person. Sinks below everything, including something
     /// newer.
     pub archived: bool,
+    /// Muted by this person. Read only by a folder's "Muted" exclude toggle
+    /// (ADR-0058); the list order ignores it.
+    pub muted: bool,
+    /// Something unread in it, or a manual "mark as unread" on it - what the
+    /// unread badge means. Read only by a folder's "Read" exclude toggle.
+    pub has_unread: bool,
 }
 
 /// Order the list: pinned first, archived last, newest between.
@@ -70,6 +77,13 @@ pub struct ConversationRow {
 /// a bug and is impossible to report.
 #[must_use]
 pub fn order_conversations(rows: &[ConversationRow]) -> Vec<u32> {
+    order_by(rows, compare)
+}
+
+pub(crate) fn order_by(
+    rows: &[ConversationRow],
+    compare: fn(&ConversationRow, &ConversationRow) -> core::cmp::Ordering,
+) -> Vec<u32> {
     let mut order: Vec<u32> = (0..rows.len())
         .map(|i| u32::try_from(i).unwrap_or(u32::MAX))
         .collect();
@@ -87,6 +101,14 @@ fn compare(l: &ConversationRow, r: &ConversationRow) -> core::cmp::Ordering {
         (false, true) => return Ordering::Greater,
         _ => {},
     }
+    compare_unpinned(l, r)
+}
+
+/// The order without the global pin: archived last, newest first, then the
+/// title and `(kind, id)` tie breaks. Shared with the folder order, which
+/// replaces the global pin with the folder's own pins.
+pub(crate) fn compare_unpinned(l: &ConversationRow, r: &ConversationRow) -> core::cmp::Ordering {
+    use core::cmp::Ordering;
     match (l.archived, r.archived) {
         (true, false) => return Ordering::Greater,
         (false, true) => return Ordering::Less,
@@ -120,6 +142,8 @@ mod tests {
             last_activity_ms: at,
             pinned: false,
             archived: false,
+            muted: false,
+            has_unread: false,
         }
     }
 

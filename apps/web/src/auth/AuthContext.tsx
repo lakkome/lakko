@@ -74,6 +74,9 @@ import {
   type NameTarget,
 } from "./login-handle";
 import { createLoginHandleSync } from "./login-handle-sync";
+import { mergeSyncStateFromBackup } from "../devices/sync/sync-state-idb";
+import { mergeRestoredFold } from "../devices/sync/synced-projection";
+import { announceRestoredSyncedState } from "../devices/sync/synced-state-source";
 import { decideSilentRestore } from "./silent-restore";
 import { createKeyPackagePublisher } from "../chat/keypackage-publisher";
 import {
@@ -2974,6 +2977,42 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
                 );
               }
             } else if (restored.kind === "restored") {
+              // ADR-0058 section 5.2 — seed the synced state (pins, drafts,
+              // folders) before the sync runtime's first poll. Only when
+              // this device holds none; best effort.
+              try {
+                await mergeSyncStateFromBackup(
+                  accountIdB64,
+                  deviceKey,
+                  restored.syncedState,
+                  (localBytes, backupBytes) => {
+                    const backupFold = wasm.SyncedState.fromBytes(backupBytes);
+                    if (localBytes === null) {
+                      backupFold.free();
+                      return backupBytes;
+                    }
+                    let localFold: InstanceType<typeof wasm.SyncedState> | null = null;
+                    try {
+                      localFold = wasm.SyncedState.fromBytes(localBytes);
+                    } catch {
+                      // A stored row this build cannot read holds nothing to keep.
+                      backupFold.free();
+                      return backupBytes;
+                    }
+                    mergeRestoredFold(localFold, backupFold);
+                    const out = localFold.toBytes();
+                    localFold.free();
+                    backupFold.free();
+                    return out;
+                  },
+                );
+                // The session landed before this restore, so the sync
+                // runtime may already be running on an empty fold.
+                announceRestoredSyncedState(accountIdB64, restored.syncedState);
+              } catch (err) {
+                // eslint-disable-next-line no-console
+                console.warn("post-restore synced-state seed failed", err);
+              }
               if (restored.wholeStorageSnapshot.length > 0) {
                 // Apply to the freshly-derived canonical Identity
                 // so the new device lands with the same MLS group

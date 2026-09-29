@@ -197,6 +197,9 @@ pub fn build_backup_payload(
     // cannot be enumerated, so without this a restored device holds every
     // group and lists none.
     known_group_ids: &[u8],
+    // ADR-0058: `SyncedState.toBytes()`, or omitted / empty when none is
+    // held. Optional so an existing six-argument call stays valid.
+    synced_state: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, JsError> {
     if account_id.len() != 16 {
         return Err(JsError::new("account_id must be 16 bytes"));
@@ -231,6 +234,7 @@ pub fn build_backup_payload(
             .chunks(GROUP_ID_LEN)
             .map(<[u8]>::to_vec)
             .collect(),
+        synced_state: synced_state.unwrap_or_default(),
     };
     payload.encode().map_err(err_to_js)
 }
@@ -300,6 +304,13 @@ impl ParsedBackupPayload {
     #[wasm_bindgen(getter, js_name = knownGroupIds)]
     pub fn known_group_ids(&self) -> Vec<u8> {
         self.inner.known_group_ids.concat()
+    }
+
+    /// The ADR-0058 folded synced state, as `SyncedState.toBytes()` wrote
+    /// it; restore with `SyncedState.fromBytes(...)`. Empty = none held.
+    #[wasm_bindgen(getter, js_name = syncedState)]
+    pub fn synced_state(&self) -> Vec<u8> {
+        self.inner.synced_state.clone()
     }
 }
 
@@ -687,6 +698,7 @@ mod tests {
             contacts,
             &snapshot,
             &[],
+            None,
         )
         .unwrap();
         let parsed = parse_backup_payload(&wire).unwrap();
@@ -714,8 +726,16 @@ mod tests {
         let without_id = sample_contact();
         let account_id = vec![0xA1u8; 16];
         let seed = vec![0x42u8; 32];
-        let wire = build_backup_payload(&account_id, 1, &seed, vec![with_id, without_id], &[], &[])
-            .unwrap();
+        let wire = build_backup_payload(
+            &account_id,
+            1,
+            &seed,
+            vec![with_id, without_id],
+            &[],
+            &[],
+            None,
+        )
+        .unwrap();
         let parsed = parse_backup_payload(&wire).unwrap();
         let recovered = parsed.contacts();
         assert_eq!(recovered.len(), 2);
@@ -738,7 +758,8 @@ mod tests {
         let account_id = vec![0xCDu8; 16];
         let seed = vec![0x77u8; 32];
         let contacts = vec![sample_contact()];
-        let payload = build_backup_payload(&account_id, 99, &seed, contacts, &[], &[]).unwrap();
+        let payload =
+            build_backup_payload(&account_id, 99, &seed, contacts, &[], &[], None).unwrap();
         let envelope = seal_backup(phrase, &payload).unwrap();
         let opened = open_backup(phrase, &envelope).unwrap();
         let parsed = parse_backup_payload(&opened).unwrap();

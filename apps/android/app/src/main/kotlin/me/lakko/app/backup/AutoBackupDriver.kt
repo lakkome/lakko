@@ -51,6 +51,10 @@ public class AutoBackupDriver(
         /** The whole MLS storage snapshot, or `null` when no identity is
          *  loaded. Suspending because it is taken under the provider lock. */
         val snapshot: suspend () -> ByteArray?,
+        /** ADR-0058 — `SyncedState.toBytes()`, or `null` when the sync
+         *  runtime holds none; carried in the backup so a restore with no
+         *  other device alive gets the folders and flags back. */
+        val syncedState: () -> ByteArray? = { null },
     )
 
     public enum class Outcome { CLEAN, THROTTLED, NOT_READY, UPLOADED, FAILED }
@@ -138,6 +142,7 @@ public class AutoBackupDriver(
                 // accessor the membership check above uses, so an upload
                 // always carries the set it was marked dirty for.
                 knownGroupIdsHex = groups ?: emptyList(),
+                syncedState = inputs.syncedState(),
             )
         } catch (cause: Throwable) {
             Log.w(TAG, "upload threw", cause)

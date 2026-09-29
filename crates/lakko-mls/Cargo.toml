@@ -37,6 +37,9 @@ lakko-attest.workspace = true
 # lakko-proto. The pairing module wraps encode/decode +
 # account_id binding around the generated `PairingQr` type.
 lakko-proto.workspace = true
+# ADR-0058: the synced-state register types the DeviceGroup folder payloads
+# decode into. lakko-sync depends on nothing in this crate.
+lakko-sync.workspace = true
 prost = "0.13"
 
 [dev-dependencies]

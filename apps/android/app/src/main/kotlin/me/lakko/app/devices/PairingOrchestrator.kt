@@ -672,6 +672,11 @@ public object PairingOrchestrator {
                     ds = ds,
                 )
             }
+            // ADR-0058 section 5.1 — the members before the add, so the sync
+            // runtime can decide whether this device re-sends its state.
+            val leavesBeforeAdd = runCatching {
+                ensured.group.devices().map { it.leafIndex }
+            }.getOrNull()
             val signerBeforeCommit = DeviceGroupJournalAccess.signerOf(ensured.group, ensured.identity)
             val addition = ensured.group.addDeviceFromWire(
                 identity = ensured.identity,
@@ -730,6 +735,16 @@ public object PairingOrchestrator {
                     payload = envelope,
                     signer = commitSigner,
                 )
+            }
+
+            // ADR-0058 section 5.1 — this device never receives its own commit
+            // back, so tell the sync runtime: it reopens its DeviceGroup handle
+            // at the new epoch and, when it is the lowest prior leaf, re-sends
+            // the folded state (folders, pins, drafts) the new device cannot
+            // decrypt from the journal.
+            if (leavesBeforeAdd != null) {
+                me.lakko.app.devices.sync.DeviceGroupSyncRepository.active
+                    ?.onLocalDeviceAdded(leavesBeforeAdd)
             }
 
             // Phase 2a3d8-ui — best-effort history catch-up

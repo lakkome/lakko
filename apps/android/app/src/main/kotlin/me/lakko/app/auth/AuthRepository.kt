@@ -1224,6 +1224,9 @@ public class AuthRepository(
                         phrase = mnemonicPhrase,
                         context = "recover",
                         wholeStorageSnapshot = restoredSnapshot,
+                        // ADR-0058 — re-publish the restored folded state too,
+                        // or this baseline would drop it from the backup.
+                        syncedState = restoredBackup.syncedState,
                     )
                     // 1.20d — best-effort push subscribe.
                     subscribePushBestEffort("recover")
@@ -2738,11 +2741,11 @@ public class AuthRepository(
                 is me.lakko.app.backup.GatedRestoreOutcome.Restored -> outcome.payload
                 is me.lakko.app.backup.GatedRestoreOutcome.NoBackup -> {
                     Log.i("lakko-auth", "backup restore ($context): no prior backup")
-                    return RestoredBackup(ByteArray(0), emptyList())
+                    return RestoredBackup(ByteArray(0), emptyList(), ByteArray(0))
                 }
                 is me.lakko.app.backup.GatedRestoreOutcome.WrongPhraseOrTampered -> {
                     Log.w("lakko-auth", "backup restore ($context): wrong phrase or tampered")
-                    return RestoredBackup(ByteArray(0), emptyList())
+                    return RestoredBackup(ByteArray(0), emptyList(), ByteArray(0))
                 }
                 is me.lakko.app.backup.GatedRestoreOutcome.RollbackBlocked -> {
                     if (outcome.hard) {
@@ -2760,11 +2763,11 @@ public class AuthRepository(
                             "backup restore ($context): stale head override declined - ${outcome.reason}",
                         )
                     }
-                    return RestoredBackup(ByteArray(0), emptyList())
+                    return RestoredBackup(ByteArray(0), emptyList(), ByteArray(0))
                 }
                 is me.lakko.app.backup.GatedRestoreOutcome.TransportFailed -> {
                     Log.w("lakko-auth", "backup restore ($context) failed", outcome.cause)
-                    return RestoredBackup(ByteArray(0), emptyList())
+                    return RestoredBackup(ByteArray(0), emptyList(), ByteArray(0))
                 }
             }
             Log.i(
@@ -2824,7 +2827,17 @@ public class AuthRepository(
                     "backup restore ($context): ${groupIdsHex.size} known group(s)",
                 )
             }
-            return RestoredBackup(parsed.wholeStorageSnapshot, groupIdsHex)
+            // ADR-0058 section 5.2 — the folded synced state (folders, pins,
+            // mutes, archive, read cursors, drafts, order). Seeded into the
+            // store the sync runtime reads at bootstrap, merged with anything
+            // this device already held, so a restore with no other device
+            // alive still gets them back.
+            me.lakko.app.devices.sync.DeviceGroupSyncRepository.seedFromBackup(
+                context = applicationContext,
+                accountIdB64 = accountIdB64,
+                bytes = parsed.syncedState,
+            )
+            return RestoredBackup(parsed.wholeStorageSnapshot, groupIdsHex, parsed.syncedState)
         } finally {
             client.close()
             phraseBytes.fill(0)
@@ -2836,6 +2849,8 @@ public class AuthRepository(
     private data class RestoredBackup(
         val snapshot: ByteArray,
         val knownGroupIdsHex: List<String>,
+        /** ADR-0058 — `SyncedState.toBytes()` from the backup, empty when none. */
+        val syncedState: ByteArray,
     )
 
     /**
@@ -2856,6 +2871,7 @@ public class AuthRepository(
         phrase: String,
         context: String,
         wholeStorageSnapshot: ByteArray = ByteArray(0),
+        syncedState: ByteArray? = null,
     ) {
         val phraseBytes = phrase.toByteArray(Charsets.UTF_8)
         val backupClient = me.lakko.app.backup.BackupClient()
@@ -2910,6 +2926,7 @@ public class AuthRepository(
                     // monotonic version floor under the Keystore-backed store.
                     context = applicationContext,
                     accountIdB64 = accountIdB64,
+                    syncedState = syncedState,
                 )
             } catch (cause: Throwable) {
                 Log.w("lakko-auth", "backup baseline upload ($context) failed", cause)

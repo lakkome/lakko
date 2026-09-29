@@ -670,6 +670,9 @@ enum TabRoute: Hashable {
     case addDevice
     case recoveryFactors
     case antiCensorship
+    /// `docs/ux/chat-folders.md` section 4 — Settings > Chat folders, opened
+    /// in its reorder state from a folder tab's Reorder folders.
+    case chatFolders(reorder: Bool)
     /// Deep links (`/i/`, `/g/`, `/c/`), pushed over the current tab rather
     /// than replacing the app (UX spec section 3).
     case inviteLanding(slug: String)
@@ -810,7 +813,10 @@ private struct SessionRoot: View, Equatable {
                     onFoundChannel: { channelId, handle in
                         push(.channelFound(channelId: channelId, handle: handle), on: .chats)
                     },
-                    onFoundPerson: { handOffToContacts(username: $0) }
+                    onFoundPerson: { handOffToContacts(username: $0) },
+                    onOpenFolderSettings: { reorder in
+                        push(.chatFolders(reorder: reorder), on: .chats)
+                    }
                 )
                 .navigationDestination(for: TabRoute.self) { routeView($0, tab: .chats) }
             }
@@ -915,7 +921,14 @@ private struct SessionRoot: View, Equatable {
                         ? chatRepository.state.threads.map(\.groupIdHex)
                         : nil
                 },
-                snapshot: { chatRepository.currentStorageSnapshot() }
+                snapshot: { chatRepository.currentStorageSnapshot() },
+                // ADR-0058 section 5.2 — the folded synced state (folders,
+                // pins, mutes, archive, read cursors, drafts).
+                syncedState: {
+                    authRepository.identitySecrets.flatMap {
+                        SyncedStateStore.bytes(accountIdB64: base64Encode($0.accountId))
+                    }
+                }
             ))
             driver.start()
             // The task is cancelled when the account changes or the shell goes
@@ -1171,6 +1184,11 @@ private struct SessionRoot: View, Equatable {
                 authRepository: authRepository,
                 onAddDevice: { push(.addDevice, on: tab) },
                 onDeviceRemoved: { deviceKey in
+                    // The removal ran on a DeviceGroup handle of its own; the
+                    // sync runtime reloads from the snapshot it persisted.
+                    if let secrets = authRepository.identitySecrets {
+                        services.deviceGroupSync.reloadAfterLocalMembershipChange(secrets: secrets)
+                    }
                     // ADR-0050 section 2.10 — retire the removed device
                     // from every chat, then from the directory.
                     Task { @MainActor in
@@ -1182,6 +1200,13 @@ private struct SessionRoot: View, Equatable {
             AddDeviceScreen(
                 authRepository: authRepository,
                 onDeviceAdded: { deviceKey in
+                    // ADR-0058 section 5.1 — the add ran on a DeviceGroup
+                    // handle of its own; the sync runtime reloads, sees the
+                    // group grew, and re-sends its state to the new device
+                    // when this is the lowest prior leaf.
+                    if let secrets = authRepository.identitySecrets {
+                        services.deviceGroupSync.reloadAfterLocalMembershipChange(secrets: secrets)
+                    }
                     // ADR-0050 section 2.8 — admit the new device to
                     // every chat once its KeyPackage is published.
                     Task { @MainActor in
@@ -1199,6 +1224,9 @@ private struct SessionRoot: View, Equatable {
             RecoveryFactorsScreen(authRepository: authRepository)
         case .antiCensorship:
             AntiCensorshipSettingsView(manager: AntiCensorshipManager.shared)
+        case .chatFolders(let reorder):
+            ChatFoldersSettingsScreen(
+                startInReorder: reorder, viewModel: chatListVM, channels: channelsState)
         case .inviteLanding(let slug):
             InviteLandingScreen(
                 viewModel: InviteLandingViewModel(

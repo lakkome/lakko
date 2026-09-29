@@ -62,6 +62,13 @@ public data class ConversationListRow(
     val pinned: Boolean = false,
     val muted: Boolean = false,
     val archived: Boolean = false,
+    /** A manual "mark as unread" (the synced flag). With [unread] it is what
+     *  a folder's Read toggle reads (`docs/ux/chat-folders.md` 3.2). */
+    val unreadOverride: Boolean = false,
+    /** This device's membership has ended (left, or removed). Still listed in
+     *  All chats with its ended line; a folder matches nothing it cannot
+     *  open (`docs/ux/chat-folders.md` 3.2). */
+    val membershipEnded: Boolean = false,
 )
 
 /** The shared kind a chat-or-group row opens under. */
