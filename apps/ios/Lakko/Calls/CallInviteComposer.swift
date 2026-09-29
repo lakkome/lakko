@@ -56,18 +56,24 @@ public enum CallInviteComposer {
     /// revoke flow, and keeps ``callId`` around for the in-
     /// call signaling layer.
     public struct Composed: Sendable, Equatable {
-        /// Raw 6-byte ledger `blob_id` the server minted. Pass to
+        /// Raw 6-byte ledger `blob_id` the server minted, or `nil`
+        /// for the inline link a TRANSPORT failure of the upload
+        /// falls back to (no ledger row, nothing to revoke). Pass
+        /// a present id to
         /// ``DiscoveryClient/revokeCallInvite(blobId:signingSeed:)``
         /// when the owner cancels the link.
-        public let blobId: Data
-        /// The full `<origin>/c/<slug>` URL the owner
-        /// shares — base64url-no-pad of ``blobId``.
+        public let blobId: Data?
+        /// The full `<origin>/c/<slug>#<secret>` URL the owner
+        /// shares — base64url-no-pad of ``blobId`` (or of the
+        /// sealed link bytes for the inline form), the link
+        /// secret after `#`.
         public let url: String
         /// The 16-byte `call_id` embedded in the capability —
         /// the live call's, so a person who follows the link
         /// arrives in THAT call.
         public let callId: Data
-        /// Wire-format capability bytes the server now holds.
+        /// The PLAINTEXT capability wire (the server holds only its
+        /// sealed form).
         /// Returned for the rare case where the UI wants to
         /// drive `CallInviteCapability.decodeAndVerify(...)`
         /// against the same bytes (e.g. to read back
@@ -141,28 +147,41 @@ public enum CallInviteComposer {
 
         // ---- 2. The values every link carries ----------------
         // Fixed, not asked (`docs/ux/call-links.md` section 4).
-        let capabilityBytes = try composeCallInviteCapability(
+        let expiryMs = CallInviteValues.expiryMs(nowMs: nowMs)
+        let mint = try composeCallInviteCapability(
             ownerSigningSeed: ownerSigningSeed,
             ownerAccountId: ownerAccountId,
             callId: callId,
-            expiryMs: CallInviteValues.expiryMs(nowMs: nowMs),
+            expiryMs: expiryMs,
             maxUses: CallInviteValues.maxUses,
             media: FfiCallInviteMedia(
                 audio: CallInviteValues.audio, video: CallInviteValues.video),
             oneTimeKeyPackage: oneTimeKeyPackage,
             label: CallInviteValues.label
         )
+        // The plaintext capability, for the caller that reads it back.
+        let capabilityBytes = try CallInviteCapability
+            .openLink(sealed: mint.sealed, linkSecret: mint.linkSecret).wire()
 
         // ---- 3. uploadCallInvite via HTTP --------------------
-        let blobId = try await discoveryClient.uploadCallInvite(
-            capabilityBytes: capabilityBytes
-        )
+        // ADR-0028 amendment 2026-09-28 — the ledger gets the SEALED blob and
+        // the clear fields only. Only a TRANSPORT failure (a censored or
+        // offline network) falls back to the inline form, which carries the
+        // sealed blob in the URL; a refusal from the server surfaces.
+        let (blobId, base) = try await pointerOrInlineBase(
+            sealed: mint.sealed,
+            origin: origin,
+            upload: {
+                try await discoveryClient.uploadCallInvite(
+                    mint: mint,
+                    expiryMs: expiryMs,
+                    maxUses: CallInviteValues.maxUses
+                )
+            })
 
         // ---- 4. URL build ------------------------------------
-        let url = try CallInviteUrl.composePointerCallInviteUrl(
-            blobId: blobId,
-            origin: origin
-        )
+        // The secret rides the fragment: `<origin>/c/<id>#<secret>`.
+        let url = InviteLinkSecret.link(base: base, secret: mint.linkSecret)
 
         return Composed(
             blobId: blobId,
@@ -170,6 +189,36 @@ public enum CallInviteComposer {
             callId: callId,
             capabilityBytes: capabilityBytes
         )
+    }
+}
+
+extension CallInviteComposer {
+    /// Upload the sealed link and build the pointer base
+    /// `<origin>/c/<id>`; on a TRANSPORT failure of the upload
+    /// only, the inline base `<origin>/c/<b64url sealed>` with no
+    /// ledger id (web and Android do the same). Any other upload
+    /// error is rethrown. Split out so the rule is host-testable.
+    static func pointerOrInlineBase(
+        sealed: Data,
+        origin: String,
+        upload: () async throws -> Data
+    ) async throws -> (blobId: Data?, base: String) {
+        do {
+            let blobId = try await upload()
+            return (blobId, try CallInviteUrl.composePointerCallInviteUrl(blobId: blobId, origin: origin))
+        } catch let error where uploadFallsBackInline(error) {
+            NSLog("call invite upload failed (network); sharing the inline link")
+            let base = (try? CallInviteUrl.composeInlineCallInviteUrl(capabilityBytes: sealed, origin: origin))
+                ?? CallInviteUrl.composeCallInviteUrl(sealed, origin: origin)
+            return (nil, base)
+        }
+    }
+
+    /// Whether an upload error is a transport failure (the one case that
+    /// falls back to the inline link).
+    static func uploadFallsBackInline(_ error: Swift.Error) -> Bool {
+        if let discovery = error as? DiscoveryClientError, case .network = discovery { return true }
+        return error is URLError
     }
 }
 

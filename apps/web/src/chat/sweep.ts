@@ -308,24 +308,37 @@ export interface SweepPorts {
   wrapWelcome(welcome: Uint8Array): Uint8Array;
   /**
    * ADR-0053 contract point 3, the staged half — register the key of the
-   * epoch the staged sweep moves to (`dsStagedAccessSigner`), proven under the
-   * key of the epoch the group still sits at (`dsAccessSigner`). THROWS when
-   * the registration is refused; the sweep then abandons before publishing, so
-   * a commit is never on the wire before the server knows its epoch.
+   * epoch the staged sweep moves to (`dsStagedAccessSigner`), signed with this
+   * device's root or registrar key (ADR-0057 obligation 5), revoking the
+   * registrar keys of the accounts the sweep evicts when this device can
+   * derive them (the owner). THROWS when the registration is refused; the
+   * sweep then abandons before publishing, so a commit is never on the wire
+   * before the server knows its epoch. The registration is an APPEND (the
+   * second security pass): a 409 means another committer registered the
+   * epoch first and is handled exactly as a lost publish race, abandon and
+   * never Replace.
    *
    * Optional only so a port set built for a test that is not about ADR-0053
    * need not stub it; the production adapter always supplies it.
    */
   registerStagedEpoch?(): Promise<void>;
   /**
-   * ADR-0053 contract point 4 — capture the group's current access key before
-   * rows are applied; the returned function, called with `true`, registers the
-   * key of the epoch the apply reached, proven under the captured one, when the
-   * epoch moved, and with `false` only releases what it captured. Best effort:
-   * it never throws. It is called exactly once. The verdict apply below is an apply like the
-   * poll's, and a sweep that LOST applied the winner's commit in it, so this is
-   * how the loser puts the winner's key back if its own registration replaced
-   * it.
+   * ADR-0057 obligation 5 — may this device register an epoch for the group
+   * at all (does it hold the root or a registrar seed)? `false` means it
+   * cannot commit: the sweep is not staged and is left to an admin or the
+   * owner. Optional so a test port set that is not about ADR-0057 need not
+   * stub it (absent = may).
+   */
+  mayRegister?(): boolean;
+  /**
+   * After a LOST verdict — capture the group's current access key before rows
+   * are applied; the returned function, called with `true`, registers the key
+   * of the epoch the apply reached with this device's authority (root or
+   * registrar, ADR-0057) when the epoch moved, and with `false` only releases
+   * what it captured. Best effort: it never throws. It is called exactly once.
+   * A sweep that LOST applied the winner's commit in the verdict read, so this
+   * is how the loser puts the winner's key back if its own (higher-ranked)
+   * registration replaced it.
    */
   beginApply?(): (heal: boolean) => Promise<void>;
   /** Echo-suppress a row this device published, so its own next poll drops it
@@ -355,6 +368,10 @@ export type SweepOutcome =
    *  group with no role table). Nothing happened, and nothing ever will on
    *  this device — distinct from `deferred`, which re-evaluates. */
   | { readonly kind: "not-committer"; readonly rank: number | undefined }
+  /** ADR-0057 — a candidate by rank, but this device holds neither the
+   *  journal's root nor a registrar seed, so the server would refuse its
+   *  epoch. Nothing staged; an admin or the owner sweeps. */
+  | { readonly kind: "no-journal-authority"; readonly rank: number }
   /** ADR-0045 S4b — this device IS a candidate, but a strictly better-placed
    *  one beaconed inside the freshness window. Stood down without staging;
    *  the next poll re-evaluates, and if that candidate goes quiet its beacon
@@ -502,6 +519,13 @@ export async function runCommitterSweep(ports: SweepPorts): Promise<SweepOutcome
   // in both directions.
   const rank = group.ownCommitterRank();
   if (rank === undefined) return { kind: "not-committer", rank };
+
+  // ADR-0057 obligation 5 — a committer whose epochs the server would refuse
+  // (no root, no registrar seed yet) does not stage at all: its commit could
+  // never be registered, so it leaves the sweep to someone who can.
+  if (ports.mayRegister !== undefined && !ports.mayRegister()) {
+    return { kind: "no-journal-authority", rank };
+  }
 
   if (group.pendingProposalCount() === 0) return { kind: "nothing-pending" };
 
@@ -697,15 +721,10 @@ async function publishAndAdjudicate(
     }
   } else {
     entry = owed;
-    // The restart half: the registration landed before the entry was written,
-    // so this is normally a no-op the server answers without a proof. It is
-    // re-sent in case the key was since replaced by a racing committer, and a
-    // refusal does not stop the re-publish - the verdict below decides.
-    try {
-      await ports.registerStagedEpoch?.();
-    } catch {
-      /* the verdict decides; a lost sweep is healed after it abandons */
-    }
+    // The restart half: the registration landed before the entry was written.
+    // It is NOT re-sent (ADR-0057): the verdict below decides, and a commit
+    // path never repairs the chain (an Append re-sent after the chain moved on
+    // would only meet 409).
   }
 
   const commitMessageId = await ports.journal.publishGroup(
@@ -725,9 +744,10 @@ async function publishAndAdjudicate(
   if (verdict === "lost") {
     group.abandonStagedSweep();
     await ports.persist();
-    // ADR-0053 contract point 4 — the winner's commit was applied in the
-    // verdict read; if this device's registration replaced the winner's key,
-    // put it back. Best effort.
+    // The winner's commit was applied in the verdict read; if this device's
+    // registration (a higher rank's) replaced the winner's key, register the
+    // winner's key back with this device's authority (ADR-0057: a committer is
+    // the root or a registrar). Best effort.
     await finishApply?.(true);
     // A commit that lost must never be re-published: the restart sweep would
     // re-adjudicate a commit whose proposals the winner has already swept.

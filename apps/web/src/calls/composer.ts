@@ -20,14 +20,15 @@
  *   2. Mint a one-time MLS `KeyPackage` via
  *      `identity.createKeyPackage()` — the joiner consumes
  *      it to bootstrap the call MLS group.
- *   3. `composeCallInviteCapability(...)` via wasm — produces
- *      wire bytes signed under the owner's Ed25519 identity.
- *   4. `DiscoveryClient.uploadCallInvite(capabilityBytes)` —
- *      pushes the bytes to the server-side ledger; the
- *      server verifies the signature + content-addresses by
- *      SHA-256.
- *   5. `composePointerCallInviteUrl(blobId, origin?)` —
- *      builds the `https://<origin>/c/<slug>` shape the
+ *   3. `composeCallInviteCapability(...)` via wasm — signs the
+ *      capability under the owner's Ed25519 identity and seals
+ *      it under a fresh link secret (`InviteLinkMint`).
+ *   4. `DiscoveryClient.uploadCallInvite(...)` — pushes the
+ *      sealed blob plus the clear fields to the ledger, which
+ *      assigns a random 6-byte id (inline fallback on a
+ *      transport failure only).
+ *   5. `composeSealedInviteLink(...)` — builds the
+ *      `https://<origin>/c/<slug>#<secret>` shape the
  *      owner shares.
  *
  * Sibling of `apps/web/src/contacts/composer.ts` (the
@@ -42,9 +43,9 @@
  */
 
 import { loadWasm } from "../wasm";
-import { DiscoveryClient } from "../discovery/client";
-import { composePointerCallInviteUrl, CALL_ID_LEN, CALL_INVITE_LABEL_MAX_LEN } from "./invite";
-import { inviteLinkWidths } from "../contacts/invite-link";
+import { DiscoveryClient, DiscoveryNetworkError } from "../discovery/client";
+import { CALL_ID_LEN, CALL_INVITE_LABEL_MAX_LEN, CALL_INVITE_URL_PREFIX } from "./invite";
+import { composeSealedInviteLink, inviteLinkWidths } from "../contacts/invite-link";
 
 /** Options bag the UI hands to [`composeAndUploadCallInvite`]. */
 export interface ComposeCallInviteOptions {
@@ -102,10 +103,11 @@ export interface ComposeCallInviteOptions {
  *  revoke flow, and keeps `callId` around for the in-call
  *  signaling layer. */
 export interface ComposedCallInvite {
-  /** Raw 32-byte content-addressed `blob_id`. Pass to
+  /** The 6-byte ledger id, or `null` for the inline link a transport
+   *  failure fell back to. Pass to
    *  `DiscoveryClient.revokeCallInvite(blobId, signingSeed)`
    *  when the owner cancels the link. */
-  readonly blobId: Uint8Array;
+  readonly blobId: Uint8Array | null;
   /** The full `https://<origin>/c/<slug>` URL the owner
    *  shares — base64url-no-pad of `blobId`. */
   readonly url: string;
@@ -113,12 +115,8 @@ export interface ComposedCallInvite {
    *  caller's live call. Returned so a caller that did not keep
    *  it can bind a call-admission JWT to the same id. */
   readonly callId: Uint8Array;
-  /** The wire-format capability bytes the server now holds.
-   *  Returned for the rare case where the UI wants to drive
-   *  `CallInviteCapability.decodeAndVerify(...)` against the
-   *  same bytes (e.g. to read back `expiryMs` for the
-   *  landing-page rendering). */
-  readonly capabilityBytes: Uint8Array;
+  /** The sealed blob the server now holds (opaque to it). */
+  readonly sealed: Uint8Array;
 }
 
 /** Programmer-error path: input validation caught before any
@@ -190,8 +188,11 @@ export async function composeAndUploadCallInvite(
   const mediaAudio = true; // every call carries audio
 
   // ---- 4. composeCallInviteCapability via wasm -------------
+  // Sealed-link amendment of ADR-0009 / ADR-0028 (2026-09-28): the compose
+  // returns the sealed blob, the 12-byte link secret for the fragment, and
+  // the issuer key the upload carries in clear for the revoke.
   const wasm = await loadWasm();
-  const capabilityBytes = wasm.composeCallInviteCapability(
+  const mint = wasm.composeCallInviteCapability(
     opts.ownerSigningSeed,
     opts.ownerAccountId,
     callId,
@@ -202,17 +203,48 @@ export async function composeAndUploadCallInvite(
     oneTimeKeyPackage,
     opts.label,
   );
+  const sealed = mint.sealed;
+  const linkSecret = mint.linkSecret;
+  const issuerPubkey = mint.issuerPubkey;
+  mint.free();
 
   // ---- 5. uploadCallInvite via HTTP ------------------------
-  const blobId = await opts.discoveryClient.uploadCallInvite(capabilityBytes);
+  // The inline sealed form is the fallback for a TRANSPORT failure only; a
+  // server answer surfaces as an error.
+  let blobId: Uint8Array | null;
+  try {
+    blobId = await opts.discoveryClient.uploadCallInvite({
+      sealed,
+      issuerPubkey,
+      expiryMs: opts.expiryMs,
+      maxUses: opts.maxUses,
+    });
+  } catch (err) {
+    if (!(err instanceof DiscoveryNetworkError)) throw err;
+    // eslint-disable-next-line no-console
+    console.warn("call-invite: ledger unreachable, using the inline link");
+    blobId = null;
+  }
 
   // ---- 6. URL build ----------------------------------------
-  const url = composePointerCallInviteUrl(blobId, inviteLinkWidths(wasm), opts.origin);
+  // The fragment carries the secret; a link without it opens nothing.
+  const url = composeSealedInviteLink({
+    origin: opts.origin ?? defaultOrigin(),
+    prefix: CALL_INVITE_URL_PREFIX,
+    blobId,
+    sealed,
+    secret: linkSecret,
+    widths: inviteLinkWidths(wasm),
+  });
 
   return {
     blobId,
     url,
     callId,
-    capabilityBytes,
+    sealed,
   };
+}
+
+function defaultOrigin(): string {
+  return typeof location !== "undefined" ? location.origin : "https://lakko.me";
 }

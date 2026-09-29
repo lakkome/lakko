@@ -13,7 +13,7 @@ final class GroupInviteDiscoveryURLProtocol: URLProtocol {
         case ok
         case status(Int)
         case network
-        /// A `GET` answers 200 with this capability; anything else as `.ok`.
+        /// A `GET` answers 200 with this SEALED link blob; anything else as `.ok`.
         case capability(Data)
         /// An upload answers 200 with this `blob_id` string.
         case uploadAnswers(String)
@@ -82,7 +82,7 @@ final class GroupInviteDiscoveryURLProtocol: URLProtocol {
                 body = Data("refused".utf8)
             case .capability(let wire) where request.httpMethod == "GET":
                 status = 200
-                body = Data(#"{"capability":"\#(wire.base64EncodedString())"}"#.utf8)
+                body = Data(#"{"sealed":"\#(wire.base64EncodedString())"}"#.utf8)
             case .uploadAnswers(let slug):
                 status = 200
                 body = Data(#"{"blob_id":"\#(slug)"}"#.utf8)
@@ -186,7 +186,7 @@ final class GroupInviteUploadAuthTests: XCTestCase {
         let link = try await f.repo.createGroupInviteLink(groupIdHex: f.groupIdHex)
         let slug = try XCTUnwrap(GroupInviteLink.split(link).base
             .components(separatedBy: "/g/").last)
-        XCTAssertGreaterThan(slug.count, 100, "the inline form carries the whole capability")
+        XCTAssertGreaterThan(slug.count, 100, "the inline form carries the whole sealed blob")
         guard case .inline = try GroupInviteUrl.parseGroupInviteSlug(slug) else {
             return XCTFail("the fallback link parses as inline")
         }

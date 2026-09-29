@@ -49,6 +49,10 @@ No work, no waiting. A limit reached shows, in the place the error shows today:
   `We sent a code recently. Wait a few minutes before asking for another.`
 - Signing in on a new device with "Is this you?" on another device, limit
   reached: `Too many requests to your other devices. Try again in a few minutes.`
+- Choosing or changing a username, limit reached (`handle-bind-limited`,
+  added 2026-09-28): `You have changed your username too often. Try again in
+  M minutes.` (M = ceil(retry_after_secs / 60); `Try again later.` when the
+  wait is over an hour). The form keeps its contents.
 
 The three-words destruction cap is unchanged and keeps its own copy.
 

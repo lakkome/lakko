@@ -87,6 +87,7 @@ pub mod pin;
 pub mod profile;
 pub mod profile_request;
 pub mod push_routing;
+pub mod registrar_seed;
 
 uniffi::setup_scaffolding!();
 

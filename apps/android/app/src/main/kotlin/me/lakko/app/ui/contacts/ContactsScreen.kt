@@ -70,7 +70,6 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import me.lakko.app.contacts.GeneratedInvite
-import me.lakko.app.contacts.INVITE_URL_PREFIX
 import me.lakko.app.contacts.IncomingContactRequest
 import me.lakko.app.contacts.SentContactRequest
 import me.lakko.app.discovery.ActiveInvite
@@ -183,7 +182,9 @@ public fun ContactsScreen(
             onRevoke = { row ->
                 val session = state.outstandingInvites.firstOrNull { it.blobIdSlug == row.slug }
                 if (session != null) {
-                    viewModel.onRevokeInviteClicked(session.blobId)
+                    // An inline link (upload failed in transport) has no ledger
+                    // row, so there is nothing to revoke.
+                    session.blobId?.let(viewModel::onRevokeInviteClicked)
                 } else {
                     viewModel.onRevokeActiveInviteClicked(row.slug)
                 }
@@ -662,9 +663,12 @@ private fun GeneratedInvite.toRow(): InviteLinkRow = InviteLinkRow(
     fromSession = true,
 )
 
-private fun ActiveInvite.toRow(): InviteLinkRow = InviteLinkRow(
+private fun ActiveInvite.toRow(heldUrls: Map<String, String>): InviteLinkRow = InviteLinkRow(
     slug = blobIdSlug,
-    url = INVITE_URL_PREFIX + blobIdSlug,
+    // Sealed links: the server list carries no link secret. A link this device
+    // created kept its secret (UX 5.3), so it is shareable; one created on
+    // another device is not.
+    url = heldUrls[blobIdSlug],
     label = label,
     createdAtMs = null,
     expiryMs = expiryMs,
@@ -686,10 +690,10 @@ private fun InviteLinksSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     // The server's list loads when the sheet opens; there is no Refresh button.
     LaunchedEffect(Unit) { onLoad() }
-    val rows = remember(state.outstandingInvites, state.activeInvites) {
+    val rows = remember(state.outstandingInvites, state.activeInvites, state.activeInviteUrls) {
         mergeInviteLinkRows(
             session = state.outstandingInvites.map { it.toRow() },
-            server = state.activeInvites.map { it.toRow() },
+            server = state.activeInvites.map { it.toRow(state.activeInviteUrls) },
         )
     }
     val now = remember(rows) { System.currentTimeMillis() }
@@ -736,11 +740,14 @@ private fun InviteLinksSheet(
                         add(describeInviteExpiry(row.expiryMs, now))
                         describeUsesLeft(row.usesLeft)?.let { add(it) }
                     }.joinToString(" · ")
+                    val share = inviteRowShare(row)
+                    val shareUrl = (share as? InviteRowShare.Shareable)?.url
                     LinkRow(
                         title = row.label.ifBlank { "Invite link" },
                         meta = meta,
-                        onCopy = { onCopy(row.url) },
-                        onShare = { onShare(row.url) },
+                        note = if (share is InviteRowShare.CreatedElsewhere) INVITE_CREATED_ELSEWHERE_COPY else null,
+                        onCopy = shareUrl?.let { url -> { onCopy(url) } },
+                        onShare = shareUrl?.let { url -> { onShare(url) } },
                         trailing = {
                             val revoking = state.revokingActiveInviteSlug == row.slug
                             TextButton(
@@ -784,8 +791,11 @@ private fun InviteLinksSheet(
 private fun LinkRow(
     title: String,
     meta: String,
-    onCopy: () -> Unit,
-    onShare: () -> Unit,
+    onCopy: (() -> Unit)?,
+    /** One line shown under the meta line in place of Copy and Share (UX 5.3:
+     *  a link created on another device). */
+    note: String? = null,
+    onShare: (() -> Unit)?,
     trailing: @Composable () -> Unit = {},
 ) {
     Row(
@@ -803,12 +813,23 @@ private fun LinkRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            if (note != null) {
+                Text(
+                    note,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
-        IconButton(onClick = onCopy) {
-            Icon(Icons.Filled.ContentCopy, contentDescription = "Copy link")
+        if (onCopy != null) {
+            IconButton(onClick = onCopy) {
+                Icon(Icons.Filled.ContentCopy, contentDescription = "Copy link")
+            }
         }
-        IconButton(onClick = onShare) {
-            Icon(Icons.Filled.Share, contentDescription = "Share link")
+        if (onShare != null) {
+            IconButton(onClick = onShare) {
+                Icon(Icons.Filled.Share, contentDescription = "Share link")
+            }
         }
         trailing()
     }

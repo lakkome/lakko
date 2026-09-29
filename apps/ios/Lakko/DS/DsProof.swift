@@ -30,14 +30,12 @@ public protocol DsRequestSigner: AnyObject {
     func sign(method: String, path: String, query: String, body: Data) -> String
 }
 
-/// A group-journal signer that can also produce its own registration body
-/// (`groupClaimBodyJson()`) — what register-before-publish and heal-on-apply
-/// need. The FFI `DsProofSigner` of a conversation group, DeviceGroup or
-/// PublisherGroup.
+/// A group-journal signer that also names the key it proves with — the epoch
+/// key an ADR-0057 registration carries. The FFI `DsProofSigner` of a
+/// conversation group, DeviceGroup or PublisherGroup.
 public protocol DsGroupSigner: DsRequestSigner {
-    /// The JSON body of `PUT /ds/group/<hex>/access` registering this signer's
-    /// key at its epoch.
-    func groupClaimBodyJson() -> String
+    /// The 32-byte Ed25519 verifying key registered for this epoch.
+    func verifyingKey() -> Data
 }
 
 extension DsProofSigner: DsGroupSigner {}
@@ -51,27 +49,37 @@ public struct DsAuth {
     /// server may not yet have the current epoch registered (a lagging
     /// registration), and it still accepts the previous one.
     public var previous: DsRequestSigner?
-    /// Claim the journal again (claim-on-open) and return the signer to retry
-    /// with, or `nil` when there is nothing to retry with.
+    /// ADR-0057 obligation 2 — the owner's lazy claim of an unclaimed journal,
+    /// returning the signer to retry with; `nil` for a member (a member never
+    /// claims) or when there is nothing to retry with.
     public var reclaim: (() async -> DsRequestSigner?)?
+    /// ADR-0057 second security pass, finding 1 — told when the request is
+    /// still refused (`401`) after every retry and the server's clock agrees
+    /// with this one: the journal may have been pushed past this device's
+    /// epoch, so an owner or admin schedules the repair check
+    /// (``JournalRepair``). Only notes; never sends anything itself.
+    public var onRefusedAtHead: (() -> Void)?
 
     public init(
         signer: DsRequestSigner,
         previous: DsRequestSigner? = nil,
-        reclaim: (() async -> DsRequestSigner?)? = nil
+        reclaim: (() async -> DsRequestSigner?)? = nil,
+        onRefusedAtHead: (() -> Void)? = nil
     ) {
         self.signer = signer
         self.previous = previous
         self.reclaim = reclaim
+        self.onRefusedAtHead = onRefusedAtHead
     }
 }
 
-/// ADR-0053 client contract point 3 — the shape of every direct
-/// (eager-merge) commit: take the epoch-N signer BEFORE the create, create
-/// (the group is now at N+1), take the N+1 signer, register it proven under N,
-/// and only then record the ADR-0040 outbox entry and publish the commit
-/// signed under N. A failed registration is handled exactly like a failed
-/// outbox write: roll back, publish nothing.
+/// ADR-0053 client contract point 3, ADR-0057 obligation 5 — the shape of
+/// every direct (eager-merge) commit: take the epoch-N signer BEFORE the
+/// create, create (the group is now at N+1), take the N+1 signer, register its
+/// key with this device's root or registrar key, and only then record the
+/// ADR-0040 outbox entry and publish the commit signed under N. A failed
+/// registration is handled exactly like a failed outbox write: roll back,
+/// publish nothing.
 ///
 /// So a commit is never on the wire before the server knows its epoch, and no
 /// peer that applies it holds an epoch the server refuses.
@@ -80,8 +88,9 @@ public struct DirectCommitSteps<Created, Prepared, Published> {
     public var currentSigner: () throws -> DsGroupSigner
     /// Build the commit. Eager-merges N -> N+1 in memory.
     public var create: () throws -> Created
-    /// `PUT access` for `next`, proven under `provenBy`.
-    public var register: (_ next: DsGroupSigner, _ provenBy: DsGroupSigner) async throws -> Void
+    /// Register `next`'s epoch key (ADR-0057 `PUT .../access`, signed by the
+    /// root or a registrar).
+    public var register: (_ next: DsGroupSigner) async throws -> Void
     /// Everything that must be durable before the publish (the second-artifact
     /// compute + the ADR-0040 entry + the N+1 snapshot). Runs only after a
     /// successful registration.
@@ -95,7 +104,7 @@ public struct DirectCommitSteps<Created, Prepared, Published> {
     public init(
         currentSigner: @escaping () throws -> DsGroupSigner,
         create: @escaping () throws -> Created,
-        register: @escaping (_ next: DsGroupSigner, _ provenBy: DsGroupSigner) async throws -> Void,
+        register: @escaping (_ next: DsGroupSigner) async throws -> Void,
         prepare: @escaping (Created) throws -> Prepared,
         rollback: @escaping () throws -> Void,
         publish: @escaping (Prepared, DsGroupSigner) async throws -> Published
@@ -114,7 +123,7 @@ public struct DirectCommitSteps<Created, Prepared, Published> {
         let prepared: Prepared
         do {
             let signerN1 = try currentSigner()
-            try await register(signerN1, signerN)
+            try await register(signerN1)
             prepared = try prepare(created)
         } catch {
             try rollback()
@@ -129,7 +138,8 @@ public struct DirectCommitSteps<Created, Prepared, Published> {
 public enum DsUnauthorizedRetry: Equatable {
     /// Re-sign with the previous epoch's signer.
     case previousEpoch
-    /// Claim the journal on open, then re-sign with the signer that returns.
+    /// The owner's lazy claim (ADR-0057), then re-sign with the signer that
+    /// returns.
     case reclaim
 
     /// At most one of each, previous epoch first: it costs one request and no
@@ -226,29 +236,9 @@ public final class DsSignerMemory {
     }
 }
 
-/// ADR-0053 client contract point 4 — heal on apply. When a batch moved the
-/// journal's epoch from `before` to `after`, register `after`'s key proven
-/// under `before`. Best effort: a refusal is expected and ignored (another
-/// member registered first, or this device was too far behind). Returns
-/// whether a registration was attempted and accepted.
-@discardableResult
-public func dsHealRegistration(
-    ds: DsClient,
-    groupId: Data,
-    before: DsGroupSigner?,
-    after: DsGroupSigner?
-) async -> Bool {
-    guard let before, let after, after.epoch() > before.epoch() else { return false }
-    do {
-        try await ds.claimGroup(
-            groupId: groupId, bodyJson: after.groupClaimBodyJson(), provenBy: before)
-        return true
-    } catch {
-        NSLog("ADR-0053: heal-on-apply registration not accepted (expected when another "
-              + "member registered first): %@", String(describing: error))
-        return false
-    }
-}
+// ADR-0057 — heal-on-apply (ADR-0053 point 4) is gone: a plain member no
+// longer registers an epoch key it did not commit. On a `401` it waits for the
+// committer's registration and retries on its next poll.
 
 /// The link joiner's side of the knock (contract point 6): probe for the
 /// epoch, build the proposal for it, knock with the attribution and the

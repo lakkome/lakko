@@ -164,16 +164,24 @@ export interface KeyPackageFetchResponse {
 // /discovery/invite   (services/discovery/src/invite.rs — Phase 1.18d1)
 // ----------------------------------------------------------------------------
 
-/** Body of `POST /discovery/invite`. The server runs
- *  `lakko_contacts::invite::decode_and_verify` over the decoded
- *  bytes and rejects junk uploads at ingress, so the only way a
- *  POST succeeds is if `capability` is a real, signature-valid
- *  invite the client just composed. */
+/** Body of `POST /discovery/invite` (sealed links, ADR-0028 amendment of
+ *  2026-09-28). The server stores the sealed blob opaque: it cannot open it
+ *  (the secret rides only in the link's fragment), so what it needs from the
+ *  capability arrives in clear fields. */
 export interface InviteUploadRequest {
-  /** Standard-alphabet base64 of `wasm.InviteCapability.compose(...)`
-   *  output — same wire format as 1.18a / 1.18b / 1.18c. Server
-   *  caps decoded size at 2048 bytes. */
-  capability: string;
+  /** Standard-alphabet base64 of `InviteLinkMint.sealed`. */
+  sealed: string;
+  /** Standard-alphabet base64 of `InviteLinkMint.issuerPubkey` (32 bytes),
+   *  the key an owner-signed revoke verifies against. */
+  issuer_pubkey: string;
+  /** The capability's `expiry_ms` (`0` = never expires). */
+  expiry_ms: number;
+  /** The capability's `max_uses` sentinel. */
+  max_uses: number;
+  /** The capability's label, for the owner's own list. `/i/` only. */
+  label?: string;
+  /** The capability's referral flag, for the owner's own list. `/i/` only. */
+  bootstrap_referral?: boolean;
 }
 
 /** Response body of `POST /discovery/invite`. */
@@ -192,7 +200,9 @@ export interface InviteUploadResponse {
  *  `services/discovery/src/invite.rs::fetch` for why we don't
  *  use 410). */
 export interface InviteFetchResponse {
-  capability: string;
+  /** Standard-alphabet base64 of the stored sealed blob; opened with the
+   *  link secret from the fragment (`XCapability.openLink`). */
+  sealed: string;
 }
 
 /** Body of `POST /discovery/invite/{blob_id_b64url}/consume`
@@ -228,20 +238,18 @@ export interface InviteConsumeResponse {
   already_consumed: boolean;
 }
 
-/** Body of `POST /discovery/group-invite` (ADR-0028, G-3). Mirror of
- *  [`InviteUploadRequest`] but carries an extra `max_uses` field: a
- *  `GroupInviteCapability` does NOT embed `max_uses` in its signed wire (it
- *  conveys only `group_id` + `issuer_pubkey` + `expiry_ms`), so the uploader
- *  supplies the SOFT consume ceiling out-of-band. It is an anti-spam throttle,
- *  not an access control — the security boundary is the admin approval gate
- *  (ADR-0027). The response reuses [`InviteUploadResponse`] (`blob_id`). */
+/** Body of `POST /discovery/group-invite` and `POST /discovery/call-invite`
+ *  (sealed links, ADR-0028 amendment of 2026-09-28). `max_uses` is a SOFT
+ *  consume ceiling for `/g/` (not part of the signed capability, not an
+ *  access control); for `/c/` it is the capability's own sentinel. */
 export interface GroupInviteUploadRequest {
-  /** Standard-alphabet base64 of `wasm.composeGroupInviteCapability(...)`
-   *  output. Server runs `decode_and_verify` at ingress + caps decoded size at
-   *  512 bytes. */
-  capability: string;
-  /** SOFT consume ceiling — `0` = single-use, `0xFFFFFFFF` = unlimited, any
-   *  other N = at most N consumes. NOT part of the signed capability. */
+  /** Standard-alphabet base64 of `InviteLinkMint.sealed`. */
+  sealed: string;
+  /** Standard-alphabet base64 of `InviteLinkMint.issuerPubkey` (32 bytes). */
+  issuer_pubkey: string;
+  /** The capability's `expiry_ms` (`0` = never expires). */
+  expiry_ms: number;
+  /** `0` = single-use, `0xFFFFFFFF` = unlimited, any other N = at most N. */
   max_uses: number;
 }
 

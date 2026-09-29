@@ -17,3 +17,22 @@ export function callLinkSlug(input: string): string | null {
   const m = /^\/c\/([A-Za-z0-9_-]+)\/?$/.exec(path);
   return m === null ? null : (m[1] ?? null);
 }
+
+/**
+ * The slug AND the fragment of a pasted call link. The fragment is the link
+ * secret the capability is sealed under (sealed-link amendment of ADR-0028 /
+ * ADR-0009, 2026-09-28), so the landing page must receive it: dropping it
+ * would turn every pasted link into a damaged one. `hash` is `""` when the
+ * paste carried none (the landing page then shows the damaged state).
+ */
+export function callLinkTarget(input: string): { slug: string; hash: string } | null {
+  const slug = callLinkSlug(input);
+  if (slug === null) return null;
+  let hash = "";
+  try {
+    hash = new URL(input.trim(), "https://lakko.me").hash;
+  } catch {
+    hash = "";
+  }
+  return { slug, hash };
+}

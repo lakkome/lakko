@@ -109,12 +109,21 @@ public fun contactRouteKey(signatureKey: ByteArray): String =
 /** Wire-format `max_uses` sentinel for an unlimited invite. */
 internal const val INVITE_UNLIMITED_USES: Long = 0xFFFF_FFFFL
 
+/** UX 5.3 — the line a row shows in place of Copy and Share when this device
+ *  does not hold the link's secret. Revoke stays. */
+public const val INVITE_CREATED_ELSEWHERE_COPY: String =
+    "Created on another device. Copy it there, or revoke it here."
+
 /** One row of the "Invite links" sheet. */
 public data class InviteLinkRow(
     /** The `/i/<slug>` segment; the row identity. */
     val slug: String,
-    /** The full shareable URL. */
-    val url: String,
+    /** The full shareable URL with its `#<secret>` fragment, or `null` when
+     *  this device does not hold the link's secret: the server never holds it
+     *  (sealed links), so such a row (created on another device) can be
+     *  revoked but not re-shared here. A link this device created keeps its
+     *  secret across restarts, so its server row carries the URL. */
+    val url: String?,
     /** Owner label, or empty. */
     val label: String,
     /** When this device created the link, or `null` when only the server
@@ -129,6 +138,18 @@ public data class InviteLinkRow(
      *  `blob_id` is in memory, so revocation goes through the session path. */
     val fromSession: Boolean,
 )
+
+/** What a row offers: Copy and Share with the full URL, or the
+ *  [INVITE_CREATED_ELSEWHERE_COPY] line; Revoke is offered either way. */
+public sealed interface InviteRowShare {
+    public data class Shareable(val url: String) : InviteRowShare
+
+    public data object CreatedElsewhere : InviteRowShare
+}
+
+/** The share half of [row] (UX 5.3). */
+public fun inviteRowShare(row: InviteLinkRow): InviteRowShare =
+    row.url?.let { InviteRowShare.Shareable(it) } ?: InviteRowShare.CreatedElsewhere
 
 /** Uses left from the wire `max_uses` sentinel and the server-counted
  *  consumes: `null` for unlimited, never negative. */

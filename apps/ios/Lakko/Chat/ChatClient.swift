@@ -633,6 +633,19 @@ public final class ChatClient {
                     createdAt: createdAt
                 )
             }
+            // ADR-0057 — a registrar-seed envelope from the journal root.
+            // Sniffed before the chat parser for the same reason as the arms
+            // above: the lossy-UTF-8 fallback would otherwise render it as a
+            // bubble reading `lakko/ds-registrar-seed/v1` plus binary. Fixed
+            // length; the FFI decode is the verdict.
+            if Self.looksLikeRegistrarSeed(data) {
+                return .registrarSeed(
+                    messageId: messageId,
+                    plaintext: data,
+                    senderLeaf: senderLeaf,
+                    createdAt: createdAt
+                )
+            }
             // ADR-0023 — the identity that leaf names, resolved HERE because
             // here is where the roster is the one the message was sealed
             // under. Every downstream attribution reads this, never the leaf.
@@ -995,6 +1008,26 @@ public final class ChatClient {
     /// fail-closed on an unknown schema version — a v2 request this build
     /// cannot read falls through to the chat parser like any other
     /// unrecognised plaintext rather than being swallowed here.
+    /// ADR-0057 — the registrar-seed envelope's exact length, read from the
+    /// FFI (`registrarSeedEnvelopeLen()`, 173) rather than written as a local
+    /// literal: a stale number fails in the dangerous direction.
+    private static let registrarSeedLen = Int(registrarSeedEnvelopeLen())
+
+    /// First byte of the ADR-0057 registrar-seed domain (`'l'`). Decides
+    /// nothing on its own.
+    private static let registrarSeedFirstByte: UInt8 = 0x6C
+
+    /// ADR-0057 — is this application plaintext a registrar-seed envelope?
+    /// Exact length plus the first domain byte, then the strict FFI decode
+    /// (domain, version, rank, lengths) as the verdict; the seed itself stays
+    /// sealed until the repository's gate passes.
+    static func looksLikeRegistrarSeed(_ bytes: Data) -> Bool {
+        guard bytes.count == registrarSeedLen,
+              bytes.first == registrarSeedFirstByte
+        else { return false }
+        return (try? decodeRegistrarSeedEnvelope(plaintext: bytes)) != nil
+    }
+
     static func looksLikeProfileRequest(_ bytes: Data) -> Bool {
         guard bytes.count == profileRequestLen,
               bytes.first == profileRequestFirstByte
@@ -1238,6 +1271,18 @@ public enum IncomingChatEvent: Equatable {
     case membershipProposal(
         messageId: Int64,
         record: ProposalRecord,
+        createdAt: String
+    )
+
+    /// ADR-0057 — the journal root handed a member its DS registrar seed,
+    /// sealed to that member's account X25519 key. Never a timeline row. The
+    /// whole plaintext rides onward (the repository decodes, gates on the
+    /// addressee and on the sender being the OWNER, then opens it) with the
+    /// MLS-authenticated `senderLeaf` for that gate.
+    case registrarSeed(
+        messageId: Int64,
+        plaintext: Data,
+        senderLeaf: UInt32?,
         createdAt: String
     )
 }

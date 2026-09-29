@@ -329,7 +329,7 @@ public class DiscoveryClient(
      *  `blob_id` back (Phase 3c3-server). Sibling of
      *  [inviteUpload]; wire shape is shared. The high-level
      *  [uploadCallInvite] wrapper is the session-gated write. */
-    public suspend fun callInviteUpload(req: InviteUploadRequest): InviteUploadResponse =
+    public suspend fun callInviteUpload(req: CallInviteUploadRequest): InviteUploadResponse =
         doPost("/discovery/call-invite") {
             contentType(ContentType.Application.Json)
             setBody(req)
@@ -808,21 +808,17 @@ public class DiscoveryClient(
      * `https://<host>/i/<slug>` pointer URL via
      * [base64UrlEncodeNoPad].
      */
-    public suspend fun uploadInvite(capabilityBytes: ByteArray): ByteArray {
-        if (capabilityBytes.isEmpty()) {
-            throw DiscoveryClientArgError("capabilityBytes must be non-empty")
-        }
-        if (capabilityBytes.size > MAX_CAPABILITY_BYTES) {
-            // Mirror the server-side ceiling so a misbehaving
-            // caller fails fast without a round-trip.
-            throw DiscoveryClientArgError(
-                "capabilityBytes exceeds the $MAX_CAPABILITY_BYTES-byte ceiling " +
-                    "(got ${capabilityBytes.size} bytes)",
-            )
-        }
-
+    public suspend fun uploadInvite(upload: SealedInviteUpload): ByteArray {
+        checkSealedUpload(upload, MAX_CAPABILITY_BYTES)
         val resp = inviteUpload(
-            InviteUploadRequest(capability = base64Encode(capabilityBytes)),
+            InviteUploadRequest(
+                sealed = base64Encode(upload.sealed),
+                issuer_pubkey = base64Encode(upload.issuerPubkey),
+                expiry_ms = upload.expiryMs,
+                max_uses = upload.maxUses,
+                label = upload.label,
+                bootstrap_referral = upload.bootstrapReferral,
+            ),
         )
         // Server returns the 8-character base64url id; decode it
         // back to the raw 6 bytes.
@@ -843,7 +839,7 @@ public class DiscoveryClient(
             throw DiscoveryClientArgError("blobId must be $blobIdLen bytes")
         }
         val raw = inviteFetch(blobId) ?: return null
-        return base64Decode(raw.capability)
+        return base64Decode(raw.sealed)
     }
 
     /**
@@ -981,19 +977,15 @@ public class DiscoveryClient(
      * `https://<host>/c/<slug>` pointer URL via
      * [base64UrlEncodeNoPad].
      */
-    public suspend fun uploadCallInvite(capabilityBytes: ByteArray): ByteArray {
-        if (capabilityBytes.isEmpty()) {
-            throw DiscoveryClientArgError("capabilityBytes must be non-empty")
-        }
-        if (capabilityBytes.size > MAX_CALL_CAPABILITY_BYTES) {
-            throw DiscoveryClientArgError(
-                "capabilityBytes exceeds the $MAX_CALL_CAPABILITY_BYTES-byte ceiling " +
-                    "(got ${capabilityBytes.size} bytes)",
-            )
-        }
-
+    public suspend fun uploadCallInvite(upload: SealedInviteUpload): ByteArray {
+        checkSealedUpload(upload, MAX_CALL_CAPABILITY_BYTES)
         val resp = callInviteUpload(
-            InviteUploadRequest(capability = base64Encode(capabilityBytes)),
+            CallInviteUploadRequest(
+                sealed = base64Encode(upload.sealed),
+                issuer_pubkey = base64Encode(upload.issuerPubkey),
+                expiry_ms = upload.expiryMs,
+                max_uses = upload.maxUses,
+            ),
         )
         return uploadedBlobId(resp.blob_id, "/discovery/call-invite")
     }
@@ -1012,7 +1004,7 @@ public class DiscoveryClient(
             throw DiscoveryClientArgError("blobId must be $blobIdLen bytes")
         }
         val raw = callInviteFetch(blobId) ?: return null
-        return base64Decode(raw.capability)
+        return base64Decode(raw.sealed)
     }
 
     /**
@@ -1082,27 +1074,38 @@ public class DiscoveryClient(
      * Returns the 6-byte `blobId`, ready to substitute into a
      * `https://<host>/g/<slug>` pointer URL via [base64UrlEncodeNoPad].
      */
-    public suspend fun uploadGroupInvite(
-        capabilityBytes: ByteArray,
-        maxUses: Long,
-    ): ByteArray {
-        if (capabilityBytes.isEmpty()) {
-            throw DiscoveryClientArgError("capabilityBytes must be non-empty")
-        }
-        if (capabilityBytes.size > MAX_GROUP_CAPABILITY_BYTES) {
-            throw DiscoveryClientArgError(
-                "capabilityBytes exceeds the $MAX_GROUP_CAPABILITY_BYTES-byte ceiling " +
-                    "(got ${capabilityBytes.size} bytes)",
-            )
-        }
-
+    public suspend fun uploadGroupInvite(upload: SealedInviteUpload): ByteArray {
+        // No client ceiling: the sealed preview makes the width depend on
+        // the names; the server enforces the codec's exact bound.
+        checkSealedUpload(upload, capabilityCeiling = null)
         val resp = groupInviteUpload(
             GroupInviteUploadRequest(
-                capability = base64Encode(capabilityBytes),
-                max_uses = maxUses,
+                sealed = base64Encode(upload.sealed),
+                issuer_pubkey = base64Encode(upload.issuerPubkey),
+                expiry_ms = upload.expiryMs,
+                max_uses = upload.maxUses,
             ),
         )
         return uploadedBlobId(resp.blob_id, "/discovery/group-invite")
+    }
+
+    /** Fail fast before the network on an upload the server refuses anyway:
+     *  an empty sealed blob, one past the capability ceiling plus the seal's
+     *  overhead ([SEAL_OVERHEAD_MARGIN], a loose bound), or an issuer key
+     *  that is not 32 bytes. */
+    private fun checkSealedUpload(upload: SealedInviteUpload, capabilityCeiling: Int?) {
+        if (upload.sealed.isEmpty()) {
+            throw DiscoveryClientArgError("sealed must be non-empty")
+        }
+        val ceiling = capabilityCeiling?.let { it + SEAL_OVERHEAD_MARGIN }
+        if (ceiling != null && upload.sealed.size > ceiling) {
+            throw DiscoveryClientArgError(
+                "sealed exceeds the $ceiling-byte ceiling (got ${upload.sealed.size} bytes)",
+            )
+        }
+        if (upload.issuerPubkey.size != SIGNING_SEED_LEN) {
+            throw DiscoveryClientArgError("issuerPubkey must be $SIGNING_SEED_LEN bytes")
+        }
     }
 
     /**
@@ -1118,7 +1121,7 @@ public class DiscoveryClient(
             throw DiscoveryClientArgError("blobId must be $blobIdLen bytes")
         }
         val raw = groupInviteFetch(blobId) ?: return null
-        return base64Decode(raw.capability)
+        return base64Decode(raw.sealed)
     }
 
     /**
@@ -1616,12 +1619,10 @@ public class DiscoveryClient(
          *  `MAX_KEY_PACKAGE_LEN`). */
         private const val MAX_CALL_CAPABILITY_BYTES: Int = 8192
 
-        /** Mirror of `services/discovery`'s group-invite
-         *  `MAX_CAPABILITY_BYTES`. The ADR-0028 wire format tops
-         *  out around 363 bytes (a 256-byte group_id); the 512
-         *  ceiling has comfortable headroom and matches the
-         *  server's `VARBINARY(512)` column. */
-        private const val MAX_GROUP_CAPABILITY_BYTES: Int = 512
+        /** Room above a capability ceiling for the link seal (kind + version
+         *  bytes, nonce, tag). A loose client-side bound; the server enforces
+         *  its own exact ceiling. */
+        private const val SEAL_OVERHEAD_MARGIN: Int = 64
 
         /** Ed25519 signing seed length, mirrors
          *  `me.lakko.app.auth` constants. */

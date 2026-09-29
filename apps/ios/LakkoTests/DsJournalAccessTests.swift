@@ -25,7 +25,7 @@ private final class FakeSigner: DsGroupSigner {
         return label
     }
 
-    func groupClaimBodyJson() -> String { #"{"epoch":\#(epochValue)}"# }
+    func verifyingKey() -> Data { Data(repeating: UInt8(truncatingIfNeeded: epochValue), count: 32) }
 }
 
 /// A DS stand-in whose answers are scripted per request, recording every
@@ -344,14 +344,13 @@ final class DsJournalAccessTests: XCTestCase {
     func testADirectCommitRegistersTheNextEpochBeforeRecordAndPublish() async throws {
         var log: [String] = []
         var epoch: UInt64 = 6
-        var provenBy: UInt64?
         var registered: UInt64?
         var publishedUnder: UInt64?
         let result = try await DirectCommitSteps(
             currentSigner: { log.append("signer"); return FakeSigner(epoch: epoch) },
             create: { () -> String in log.append("create"); epoch += 1; return "commit" },
-            register: { next, proven in
-                log.append("register"); registered = next.epoch(); provenBy = proven.epoch()
+            register: { next in
+                log.append("register"); registered = next.epoch()
             },
             prepare: { created in log.append("record"); return created },
             rollback: { log.append("rollback") },
@@ -362,7 +361,6 @@ final class DsJournalAccessTests: XCTestCase {
         XCTAssertEqual(result, "commit")
         XCTAssertEqual(log, ["signer", "create", "signer", "register", "record", "publish"])
         XCTAssertEqual(registered, 7, "the epoch the commit moves to")
-        XCTAssertEqual(provenBy, 6, "proven under the epoch it moves from")
         XCTAssertEqual(publishedUnder, 6, "the commit POST is signed under N")
     }
 
@@ -373,7 +371,7 @@ final class DsJournalAccessTests: XCTestCase {
             _ = try await DirectCommitSteps(
                 currentSigner: { FakeSigner(epoch: 1) },
                 create: { () -> Int in log.append("create"); return 1 },
-                register: { _, _ in log.append("register"); throw Refused() },
+                register: { _ in log.append("register"); throw Refused() },
                 prepare: { created in log.append("record"); return created },
                 rollback: { log.append("rollback") },
                 publish: { _, _ in log.append("publish") }
@@ -390,7 +388,7 @@ final class DsJournalAccessTests: XCTestCase {
             _ = try await DirectCommitSteps(
                 currentSigner: { FakeSigner(epoch: 1) },
                 create: { () -> Int in 1 },
-                register: { _, _ in log.append("register") },
+                register: { _ in log.append("register") },
                 prepare: { (_: Int) -> Int in log.append("record"); throw Disk() },
                 rollback: { log.append("rollback") },
                 publish: { _, _ in log.append("publish") }
@@ -400,40 +398,8 @@ final class DsJournalAccessTests: XCTestCase {
         XCTAssertEqual(log, ["register", "record", "rollback"])
     }
 
-    // MARK: Point 4 — heal on apply
-
-    func testHealRegistersTheNewEpochProvenUnderThePreBatchSigner() async throws {
-        let scope = DsAccessURLProtocol.freshScope()
-        DsAccessURLProtocol.script(scope, [.init(status: 204, body: Data())])
-        let before = FakeSigner(epoch: 8), after = FakeSigner(epoch: 9)
-        let accepted = await dsHealRegistration(
-            ds: DsAccessURLProtocol.client(scope), groupId: Data([0xCD]), before: before, after: after)
-        XCTAssertTrue(accepted)
-        let seen = try XCTUnwrap(DsAccessURLProtocol.requests(scope).first)
-        XCTAssertEqual(seen.method, "PUT")
-        XCTAssertEqual(seen.url.path, "/native/ds/ds/group/cd/access")
-        XCTAssertEqual(seen.body, Data(after.groupClaimBodyJson().utf8))
-        XCTAssertEqual(seen.proof, "sig-e8", "proven under the epoch before the batch")
-    }
-
-    func testABatchThatDidNotMoveTheEpochRegistersNothing() async {
-        let scope = DsAccessURLProtocol.freshScope()
-        let accepted = await dsHealRegistration(
-            ds: DsAccessURLProtocol.client(scope), groupId: Data([1]),
-            before: FakeSigner(epoch: 4), after: FakeSigner(epoch: 4))
-        XCTAssertFalse(accepted)
-        XCTAssertTrue(DsAccessURLProtocol.requests(scope).isEmpty)
-    }
-
-    /// A refusal is expected (someone registered first) and swallowed.
-    func testARefusedHealIsSwallowed() async {
-        let scope = DsAccessURLProtocol.freshScope()
-        DsAccessURLProtocol.script(scope, [.init(status: 401)])
-        let accepted = await dsHealRegistration(
-            ds: DsAccessURLProtocol.client(scope), groupId: Data([1]),
-            before: FakeSigner(epoch: 1), after: FakeSigner(epoch: 2))
-        XCTAssertFalse(accepted)
-    }
+    // MARK: Point 4 — heal on apply: gone under ADR-0057 (see
+    // `JournalOwnershipTests`, a plain member registers nothing).
 
     // MARK: Point 6 — the knock sequence
 

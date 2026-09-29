@@ -1961,7 +1961,8 @@ a.ghost.small.lk-wide-only {
   border-color: var(--danger);
   background: var(--danger-soft);
 }
-/* Comparison code for the another-device confirmation (ADR-0049). */
+/* The device-link code (ADR-0049 section 2, amended 2026-09-28): shown on
+   the signed-in device, typed on the new one. */
 .lk-sas-code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 34px;
@@ -1969,6 +1970,13 @@ a.ghost.small.lk-wide-only {
   letter-spacing: 0.08em;
   color: var(--accent);
   margin: 4px 0 8px;
+}
+input.lk-sas-code {
+  display: block;
+  width: 100%;
+  max-width: 10ch;
+  margin: 4px auto 8px;
+  text-align: center;
 }
 /* The conversation-info layer (docs/ux/conversation-info.md section 3): a
    centred card over the conversation, which stays where it is behind it.

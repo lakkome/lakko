@@ -4,9 +4,9 @@
 /**
  * ADR-0053 on the receive path (`ChatClient.pollMessages`):
  *
- *   - contract point 4, heal on apply: when a polled batch moved the epoch,
- *     the new epoch's key is registered proven under the key captured BEFORE
- *     the batch; when it did not, nothing is sent;
+ *   - ADR-0057 obligation 6, no heal on apply: a polled batch that moved the
+ *     epoch registers NOTHING (only the root and registrars register, and the
+ *     committer did before publishing); a plain member waits;
  *   - contract point 7, members read knocks: an owner / admin also reads the
  *     group's knock queue and feeds each row to the same receive path, which
  *     turns an external-join proposal into the `externalJoinRequest` event
@@ -16,7 +16,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ChatClient } from "./client";
 import type { DsClient } from "../ds/client";
-import type { ProofSigner } from "../ds/access";
 import { fakeAccessSigner } from "../ds/access-test-doubles";
 import type { Group as WasmGroup, Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 
@@ -89,8 +88,8 @@ function fakeDs(
       knockReads.push(opts.after ?? 0);
       return { messages: knocks, hasMore: false };
     }),
-    registerGroupEpoch: vi.fn(async (_g: Uint8Array, next: ProofSigner, by: ProofSigner | null) => {
-      registrations.push(`${next.epoch}<-${by?.epoch ?? "unsigned"}`);
+    registerGroupEpoch: vi.fn(async (_g: Uint8Array, epoch: bigint) => {
+      registrations.push(`${epoch}`);
     }),
   } as unknown as DsClient;
   return { ds, registrations, knockReads };
@@ -103,15 +102,15 @@ function chat(ds: DsClient): ChatClient {
   );
 }
 
-/** Let the fire-and-forget heal settle. */
+/** Let anything fire-and-forget settle. */
 const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
 afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("ADR-0053 contract point 4 — heal on apply", () => {
-  it("a batch that moved the epoch registers the new key under the pre-batch key", async () => {
+describe("ADR-0057 obligation 6 — plain members no longer heal", () => {
+  it("a batch that moved the epoch registers nothing: the committer already did", async () => {
     const g = fakeGroup(undefined);
     const { ds, registrations } = fakeDs([row(1, [0xc0]), row(2, [0xc0])], []);
 
@@ -119,7 +118,7 @@ describe("ADR-0053 contract point 4 — heal on apply", () => {
     await settle();
 
     expect(g.epoch()).toBe(7n);
-    expect(registrations).toEqual(["7<-5"]);
+    expect(registrations).toEqual([]);
   });
 
   it("a batch that did not move the epoch registers nothing", async () => {

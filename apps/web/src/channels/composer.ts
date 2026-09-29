@@ -18,6 +18,7 @@
 import { loadWasm, type Wasm } from "../wasm";
 import { rethrowAsLegacyChannel } from "./legacy-v1";
 import { DsClient } from "../ds/client";
+import { claimOrReset } from "../ds/ownership";
 
 /** wasm-bindgen-generated Identity handle. Re-exported
  *  here as a type-only alias so caller signatures stay
@@ -153,34 +154,10 @@ export async function freshPublisherKeys(
   // load-or-create dance in `crates/lakko-mls`; the seed
   // is stable across page reloads for the same identity +
   // channel id.
-  let publisher;
-  try {
-    publisher = wasm.PublisherGroup.openOrCreate(identity, channelId);
-  } catch (err) {
-    // Retired v1 state refuses here and cannot be repaired.
-    rethrowAsLegacyChannel(err);
-  }
+  const publisher = await openOrFoundPublisherGroup(wasm, identity, channelId);
   let seed: Uint8Array;
   try {
     seed = publisher.channelSeed(identity);
-    // ADR-0053 contract point 2 — claim the PublisherGroup journal at
-    // creation (and idempotently on every later open). Unsigned: the first
-    // registration of an unclaimed journal; re-sending a key the journal
-    // already holds is answered without a proof. Fired, not awaited, and
-    // logged on failure: channel publishing never waits on the DS.
-    try {
-      const claimSigner = publisher.dsAccessSigner(identity);
-      void new DsClient()
-        .claimGroupWith(publisher.groupId(), claimSigner, null)
-        .catch((err: unknown) => {
-          // eslint-disable-next-line no-console
-          console.warn("ds: PublisherGroup claim failed; retried on the next open", err);
-        })
-        .finally(() => claimSigner.free());
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn("ds: PublisherGroup access key unavailable; not claimed", err);
-    }
   } finally {
     publisher.free();
   }
@@ -430,4 +407,120 @@ export function utf8Encode(s: string): Uint8Array {
  *  list rendering loop. */
 export function utf8Decode(bytes: Uint8Array): string {
   return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+}
+
+/**
+ * ADR-0057 obligations 1 + 7 — open the channel's PublisherGroup, and when
+ * this call FOUNDS it (no persisted group for the channel: a first open, or a
+ * re-found after a lost-state recovery), claim its journal with the channel
+ * owner's ROOT; a 409 (the deterministic id already carries an older group's
+ * chain) becomes a root RESET. A loaded group claims nothing here: a reset of
+ * a live chain would drop every epoch this device has not seen, and an
+ * unclaimed journal is claimed by the owner's first refused request.
+ *
+ * FAIL-CLOSED (the second security pass, finding 3): the claim is awaited and
+ * must land before the handle is returned, so no channel is announced (the
+ * handle registered, the channel created on the service, a post published)
+ * for a journal somebody else could claim first. A failed claim frees the
+ * handle and throws. The founded group stays in the provider (it cannot be
+ * deleted), so an "unconfirmed founding" marker for its id is kept until a
+ * claim lands: the next open of that channel claims again instead of taking
+ * the loaded group as claimed. Throws what `openOrCreate` throws too (a
+ * retired v1 group, surfaced as the legacy-channel copy). The caller owns
+ * the handle.
+ */
+export async function openOrFoundPublisherGroup(
+  wasm: Wasm,
+  identity: WasmIdentity,
+  channelId: Uint8Array,
+  storage: UnconfirmedFoundingStorage | null = defaultFoundingStorage(),
+): Promise<InstanceType<Wasm["PublisherGroup"]>> {
+  let existed = false;
+  try {
+    const loaded = wasm.PublisherGroup.load(identity, channelId);
+    existed = loaded !== undefined;
+    loaded?.free();
+  } catch {
+    existed = false;
+  }
+  let publisher: InstanceType<Wasm["PublisherGroup"]>;
+  try {
+    publisher = wasm.PublisherGroup.openOrCreate(identity, channelId);
+  } catch (err) {
+    // Retired v1 state refuses here and cannot be repaired.
+    rethrowAsLegacyChannel(err);
+  }
+  const groupId = publisher.groupId();
+  const key = foundingKey(groupId);
+  if (!existed || isUnconfirmedFounding(storage, key)) {
+    markUnconfirmedFounding(storage, key);
+    try {
+      const epochSigner = publisher.dsAccessSigner(identity);
+      const root = wasm.dsJournalRootSigner(identity, groupId);
+      try {
+        await claimOrReset(new DsClient(), groupId, root, epochSigner.epoch, epochSigner.verifyingKey());
+      } finally {
+        epochSigner.free();
+        root.free();
+      }
+      clearUnconfirmedFounding(storage, key);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("ds: PublisherGroup claim failed; the channel is not opened", err);
+      try {
+        publisher.free();
+      } catch {
+        /* already freed */
+      }
+      throw err;
+    }
+  }
+  return publisher;
+}
+
+/** Where the unconfirmed-founding marker lives (group ids only). */
+export interface UnconfirmedFoundingStorage {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+}
+
+const FOUNDING_PREFIX = "lakko/publisher-group-unclaimed/v1/";
+
+function defaultFoundingStorage(): UnconfirmedFoundingStorage | null {
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function foundingKey(groupId: Uint8Array): string {
+  let hex = "";
+  for (let i = 0; i < groupId.length; i++) hex += (groupId[i] ?? 0).toString(16).padStart(2, "0");
+  return FOUNDING_PREFIX + hex;
+}
+
+function isUnconfirmedFounding(storage: UnconfirmedFoundingStorage | null, key: string): boolean {
+  try {
+    return storage?.getItem(key) !== null && storage?.getItem(key) !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+function markUnconfirmedFounding(storage: UnconfirmedFoundingStorage | null, key: string): void {
+  try {
+    storage?.setItem(key, "1");
+  } catch {
+    /* best effort */
+  }
+}
+
+function clearUnconfirmedFounding(storage: UnconfirmedFoundingStorage | null, key: string): void {
+  try {
+    storage?.removeItem(key);
+  } catch {
+    /* best effort */
+  }
 }

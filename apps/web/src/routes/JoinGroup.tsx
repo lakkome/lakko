@@ -57,7 +57,6 @@ import { A, useLocation, useNavigate, useParams } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
 import { ContactsClient } from "../contacts/client";
-import { loadWasm } from "../wasm";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
 import { base64Encode } from "../auth/account-id";
 // ADR-0045 S7 residual 1, the joiner's half. The copy and the one repair live
@@ -81,13 +80,11 @@ import { recordConversationKind } from "../chat/conversation-kind-store";
 // ADR-0028 v2 — the sealed preview and the link key in the URL fragment
 // (docs/ux/group-invite-page.md). The copy lives in a plain module for the
 // same `vitest` reason as the wait copy above.
-import { parseGroupInviteSlug } from "../contacts/group-invite";
 import {
   INVITE_LINK_DAMAGED,
   INVITE_LINK_RATE_LIMITED,
   INVITE_LINK_TRY_AGAIN,
-  inviteLinkWidths,
-  parseGroupInviteFragment,
+  isInviteLinkDamaged,
 } from "../contacts/invite-link";
 import { isDiscoveryRateLimited } from "../discovery/client";
 import {
@@ -109,8 +106,8 @@ interface DecodedTicket {
   fingerprint: string;
   valid: boolean;
   /** The sealed preview, opened with the link secret from the URL fragment,
-   *  or `null` when the link has no fragment. A fragment that does not open
-   *  the preview never reaches here: the link is refused as damaged. */
+   *  or `null` when the link was minted without one. A preview that does not
+   *  open never reaches here: the link is refused as damaged. */
   preview: GroupInvitePreviewData | null;
 }
 
@@ -146,34 +143,34 @@ export default function JoinGroup() {
     source,
     async ({ slug, hash }): Promise<DecodedTicket | LinkRefusal | null> => {
       try {
-        const wasm = await loadWasm();
-        const widths = inviteLinkWidths(wasm);
-        // An old-width or malformed slug is invalid (it throws into the
-        // invalid-or-expired state below) and never reaches the network.
-        parseGroupInviteSlug(slug, widths);
-        // A fragment that is present but is not a 16-character link secret
-        // (the pre-amendment 43-character key included) is damaged: refuse it
-        // before any network round-trip.
-        const fragment = parseGroupInviteFragment(hash, widths);
-        if (fragment.kind === "damaged") return "damaged";
-        const { capabilityWire, blobId } = await client.resolveGroupInviteSlug(slug);
-        const cap = wasm.GroupInviteCapability.decodeAndVerify(capabilityWire);
-        // The preview key binds the capability's group id and issuer, so a
-        // capability a server swapped in under a live id does not open under
-        // the link's secret. Fail closed: no preview-less join is offered.
-        const outcome = resolveInvitePreview(cap, fragment);
-        if (outcome.kind === "damaged") return "damaged";
-        return {
-          wire: capabilityWire,
-          blobId,
-          fingerprint: cap.issuerFingerprint(),
-          valid: cap.isValidNow(BigInt(Date.now())),
-          preview: outcome.kind === "preview" ? outcome.preview : null,
-        };
+        // Sealed-link amendment of ADR-0028 (2026-09-28): the capability is
+        // encrypted under the fragment's secret. A missing or malformed
+        // fragment is damaged before any request; a blob that does not open
+        // under it (a wrong secret, a tampered or substituted blob) is
+        // damaged too. An old-width or malformed slug throws into the
+        // invalid-or-expired state below and never reaches the network.
+        const opened = await client.openGroupInviteLink(slug, hash);
+        const cap = opened.capability;
+        try {
+          // A present preview that does not open under the same secret is
+          // damaged as well: no preview-less join is offered.
+          const outcome = resolveInvitePreview(cap, opened.linkSecret);
+          if (outcome.kind === "damaged") return "damaged";
+          return {
+            wire: opened.capabilityWire,
+            blobId: opened.blobId,
+            fingerprint: cap.issuerFingerprint(),
+            valid: cap.isValidNow(BigInt(Date.now())),
+            preview: outcome.kind === "preview" ? outcome.preview : null,
+          };
+        } finally {
+          cap.free();
+        }
       } catch (err) {
         // A 429 says nothing about the link: "try again later", never
         // "invalid" (ADR-0028 short-link amendment).
         if (isDiscoveryRateLimited(err)) return "rate-limited";
+        if (isInviteLinkDamaged(err)) return "damaged";
         // eslint-disable-next-line no-console
         console.warn("group-join: decode/verify failed", err);
         return null;

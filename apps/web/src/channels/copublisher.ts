@@ -52,7 +52,6 @@ import { DsClient } from "../ds/client";
 import { scanJournal } from "../chat/journal-head-epoch";
 import {
   dsAccess,
-  healAfterApply,
   knockToJoin,
   registerBeforePublish,
   takeSigner,
@@ -70,14 +69,16 @@ import {
 import {
   bytesToHex,
   freshPublisherKeys,
+  openOrFoundPublisherGroup,
   type ChannelPublisherKeys,
 } from "./composer";
+import { LegacyChannelError, isLegacyV1PublisherGroupId } from "./legacy-v1";
 import {
-  LegacyChannelError,
-  isLegacyV1PublisherGroupId,
-  rethrowAsLegacyChannel,
-} from "./legacy-v1";
-import { inviteLinkWidths } from "../contacts/invite-link";
+  InviteLinkDamagedError,
+  composeSealedInviteLink,
+  inviteLinkWidths,
+  openSealedInvite,
+} from "../contacts/invite-link";
 import { parseGroupInviteSlug, splitGroupInviteLink } from "../contacts/group-invite";
 
 type Identity = InstanceType<Wasm["Identity"]>;
@@ -97,20 +98,16 @@ export async function openPublisherGroup(
   if (channelId === null) {
     throw new Error(`channel id hex is not valid: ${channelIdHex}`);
   }
-  try {
-    return wasm.PublisherGroup.openOrCreate(identity, channelId);
-  } catch (err) {
-    // A channel minted under the retired v1 derivation refuses here and cannot
-    // be repaired — surface the readable copy instead of the raw Rust string.
-    rethrowAsLegacyChannel(err);
-  }
+  // A channel minted under the retired v1 derivation refuses inside with the
+  // readable copy. A group founded here claims its journal (ADR-0057).
+  return await openOrFoundPublisherGroup(wasm, identity, channelId);
 }
 
 /**
  * ADR-0053 contract points 1 + 2 — let the DS client prove requests to this
  * PublisherGroup's journal under the group's current access key, for as long
- * as the caller holds the handle (the DS client claims the journal on the
- * first request it sees for it in a session). Returns the function that
+ * as the caller holds the handle (a refused request makes the DS client
+ * claim the journal with the channel owner's root, ADR-0057). Returns the function that
  * withdraws it; call that BEFORE freeing the handle.
  */
 export function registerPublisherGroupAccess(
@@ -118,11 +115,25 @@ export function registerPublisherGroupAccess(
   publisherGroup: PublisherGroup,
 ): () => void {
   const own = publisherGroup.groupId();
-  return dsAccess.registerGroupSource((groupId) => {
-    if (groupId.length !== own.length) return null;
-    for (let i = 0; i < own.length; i++) if (groupId[i] !== own[i]) return null;
-    return publisherGroup.dsAccessSigner(identity);
-  });
+  const matches = (groupId: Uint8Array): boolean => {
+    if (groupId.length !== own.length) return false;
+    for (let i = 0; i < own.length; i++) if (groupId[i] !== own[i]) return false;
+    return true;
+  };
+  const unregisterSource = dsAccess.registerGroupSource((groupId) =>
+    matches(groupId) ? publisherGroup.dsAccessSigner(identity) : null,
+  );
+  // ADR-0057 — the channel owner holds the PublisherGroup journal's root
+  // (the handle this panel holds is the owner's). A co-publisher on web holds
+  // no registrar seed: a PublisherGroup carries no application messages to
+  // deliver one in, so its own commits are not registered (stated residual).
+  const unregisterOwner = dsAccess.registerOwnerSource((groupId) =>
+    matches(groupId) ? true : null,
+  );
+  return () => {
+    unregisterSource();
+    unregisterOwner();
+  };
 }
 
 /** Mint a co-publisher invite link over the PublisherGroup's MLS `group_id`. A
@@ -136,8 +147,22 @@ export async function createCoPublisherLink(
 ): Promise<string> {
   const wasm = await loadWasm();
   const groupId = publisherGroup.groupId();
-  const wire = wasm.composeGroupInviteCapability(identity.ed25519Seed, groupId, 0n);
-  return `${origin}${GROUP_INVITE_URL_PREFIX}${bytesToBase64Url(wire)}`;
+  // Sealed-link amendment of ADR-0028 (2026-09-28): the capability is sealed
+  // under a fresh link secret that rides in the fragment. Always the inline
+  // form (never uploaded to the ledger).
+  const mint = wasm.composeGroupInviteCapability(identity.ed25519Seed, groupId, 0n);
+  try {
+    return composeSealedInviteLink({
+      origin,
+      prefix: GROUP_INVITE_URL_PREFIX,
+      blobId: null,
+      sealed: mint.sealed,
+      secret: mint.linkSecret,
+      widths: inviteLinkWidths(wasm),
+    });
+  } finally {
+    mint.free();
+  }
 }
 
 /** Poll the PublisherGroup's DS journal and apply incoming MLS messages
@@ -192,8 +217,6 @@ export async function pollCoPublisherJournal(
   }
   // The APPLY — inside it.
   return withGroupMlsLock(groupIdB64, async () => {
-    // ADR-0053 contract point 4 — the key of the epoch before the apply.
-    const before = takeSigner(() => publisherGroup.dsAccessSigner(identity));
     for (const m of raw.messages) {
       try {
         publisherGroup.processIncomingVerifyingRoles(identity, m.payload);
@@ -219,11 +242,8 @@ export async function pollCoPublisherJournal(
         }
       }
     }
-    const after = takeSigner(() => publisherGroup.dsAccessSigner(identity));
-    void healAfterApply(ds, groupId, before, after).finally(() => {
-      before?.free();
-      after?.free();
-    });
+    // ADR-0057 obligation 6 — no heal on apply: whoever committed registered
+    // its epoch before publishing.
     return pendingCoPublishers(publisherGroup).length;
   });
 }
@@ -272,7 +292,8 @@ export async function approveCoPublisher(
       const added = publisherGroup.approveExternalJoin(identity, proposalRef);
       const signerN1 = takeSigner(() => publisherGroup.dsAccessSigner(identity));
       try {
-        await registerBeforePublish(ds, groupId, signerN, signerN1);
+        // ADR-0057 — registered with the channel owner's root.
+        await registerBeforePublish(ds, groupId, signerN1);
       } finally {
         signerN1?.free();
       }
@@ -325,14 +346,21 @@ export async function requestToCoPublish(
   const widths = inviteLinkWidths(wasm);
   const split = splitGroupInviteLink(link, widths);
   if (split === null) throw new Error("not a /g/ co-publisher link");
-  if (split.fragment.kind === "damaged") throw new Error("co-publisher link is damaged");
+  // A missing or malformed fragment is damaged before anything else runs.
+  if (split.fragment.kind !== "secret") throw new InviteLinkDamagedError();
   const parsed = parseGroupInviteSlug(split.slug, widths);
   if (parsed.kind !== "inline") throw new Error("co-publisher link is not an inline capability");
-  const wire = parsed.capabilityBytes;
-  const cap = wasm.GroupInviteCapability.decodeAndVerify(wire);
+  const cap = openSealedInvite(
+    (sealed, secret) => wasm.GroupInviteCapability.openLink(sealed, secret),
+    parsed.sealed,
+    split.fragment,
+  );
   let groupId: Uint8Array;
+  // The PLAINTEXT wire: the join attribution carries it.
+  let wire: Uint8Array;
   try {
     groupId = cap.groupId;
+    wire = cap.wire;
   } finally {
     cap.free();
   }
@@ -492,9 +520,3 @@ function hexNibble(code: number): number {
   return -1;
 }
 
-function bytesToBase64Url(bytes: Uint8Array): string {
-  return base64Encode(bytes)
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
-}

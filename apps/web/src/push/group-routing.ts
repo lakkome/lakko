@@ -207,7 +207,15 @@ import type {
   Group as WasmGroup,
   Identity as WasmIdentity,
 } from "../../wasm/lakko_ffi_wasm";
-import { base64Encode } from "../auth/account-id";
+import { base64Decode, base64Encode } from "../auth/account-id";
+import { dsAccess } from "../ds/access";
+import { DsClient } from "../ds/client";
+import {
+  bindPushRouting,
+  releaseAuthority,
+  type PushBindingOutcome,
+  type StatementSender,
+} from "../ds/ownership";
 import { getDeviceKey } from "../auth/key-store";
 import { loadWasm } from "../wasm";
 import { PushClient } from "./client";
@@ -1230,7 +1238,13 @@ async function broadcastAndMarkDistributed(
   secret: Uint8Array,
   mintEpoch: bigint,
   broadcast: (envelopeBytes: Uint8Array) => Promise<void>,
+  alreadyBound = false,
 ): Promise<void> {
+  // ADR-0057 obligation 8 (the second security pass, finding 5): the journal
+  // is bound to the routing id BEFORE the secret goes on the wire. A mint or
+  // a rotation has bound already (`mintAndBindSecret`); a re-broadcast binds
+  // here first (a 204 when it is bound already; a member sends nothing).
+  if (!alreadyBound) await bindBounded(groupIdB64, secret);
   try {
     // Compose (wasm, local) OUTSIDE the race; only the send is bounded. A
     // timeout skips `markGroupRoutingDistributed`, so the row stays `pending`
@@ -1242,6 +1256,101 @@ async function broadcastAndMarkDistributed(
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn("push-routing secret broadcast failed", err);
+    return;
+  }
+}
+
+/** The statement sender the binding uses; `null` = a fresh `DsClient`.
+ *  Replaced by the host tests. */
+let bindingSender: StatementSender | null = null;
+
+/** Install the sender the push binding uses (tests), or `null` for the
+ *  default. */
+export function setPushBindingSender(sender: StatementSender | null): void {
+  bindingSender = sender;
+}
+
+/** Groups whose last bind did not land (503 disabled, offline): the next
+ *  provisioning pass binds again. Session-scoped. */
+const bindRetry = new Set<string>();
+
+/** Bind with the network bounded (it runs under the routing row lock). Never
+ *  throws; a timeout counts as `failed`. */
+async function bindBounded(groupIdB64: string, secret: Uint8Array): Promise<PushBindingOutcome> {
+  let outcome: PushBindingOutcome;
+  try {
+    outcome = await withNetworkTimeout("bind", () =>
+      bindJournalToPushGid(groupIdB64, secret, bindingSender ?? new DsClient()),
+    );
+  } catch {
+    outcome = "failed";
+  }
+  if (outcome === "disabled" || outcome === "failed") bindRetry.add(groupIdB64);
+  else bindRetry.delete(groupIdB64);
+  return outcome;
+}
+
+/**
+ * ADR-0057 obligation 8, the second security pass (finding 5) - mint a fresh
+ * secret and bind the journal to its routing id BEFORE the caller persists
+ * and broadcasts it:
+ *
+ *   - 204: bound; broadcast.
+ *   - 503 (binding disabled) or a failure: logged; broadcast anyway (wakes
+ *     are dropped until bound) and the bind is retried on the next
+ *     provisioning pass.
+ *   - 409 (the id is bound to another journal): mint a fresh secret once and
+ *     bind again; if that also fails, log and broadcast it.
+ *   - a member (no admin or root authority) binds nothing (only an owner or
+ *     an admin mints or rotates).
+ *
+ * `mint` and `bind` are injectable for the host tests.
+ */
+export async function mintAndBindSecret(
+  groupIdB64: string,
+  deps: {
+    readonly mint?: () => Uint8Array;
+    readonly bind?: (groupIdB64: string, secret: Uint8Array) => Promise<PushBindingOutcome>;
+  } = {},
+): Promise<Uint8Array> {
+  const mint = deps.mint ?? mintPushRoutingSecret;
+  const bind = deps.bind ?? bindBounded;
+  let secret = mint();
+  let outcome = await bind(groupIdB64, secret);
+  if (outcome === "conflict") {
+    // eslint-disable-next-line no-console
+    console.warn("push-routing: the minted routing id is bound elsewhere; minting another once");
+    secret.fill(0);
+    secret = mint();
+    outcome = await bind(groupIdB64, secret);
+    if (outcome === "conflict") {
+      // eslint-disable-next-line no-console
+      console.warn("push-routing: the second routing id is bound elsewhere too; broadcasting unbound");
+    }
+  }
+  return secret;
+}
+
+/** ADR-0057 obligation 8 — bind the group's journal to `derivePushGid(secret)`
+ *  with this device's authority (root or admin registrar). Never throws. */
+export async function bindJournalToPushGid(
+  groupIdB64: string,
+  secret: Uint8Array,
+  sender: StatementSender = new DsClient(),
+): Promise<PushBindingOutcome> {
+  let groupId: Uint8Array;
+  let pushGid: Uint8Array;
+  try {
+    groupId = base64Decode(groupIdB64);
+    pushGid = await derivePushGid(secret);
+  } catch {
+    return "failed";
+  }
+  const authority = dsAccess.journalAuthority(groupId);
+  try {
+    return await bindPushRouting(sender, groupId, authority, pushGid);
+  } finally {
+    releaseAuthority(authority);
   }
 }
 
@@ -1339,7 +1448,8 @@ export function ensureGroupPushRouting(
           // eslint-disable-next-line no-console
           console.warn("push-routing mint skipped: group epoch unreadable");
         } else {
-          const secret = mintPushRoutingSecret();
+          // Bind BEFORE broadcasting (finding 5 of the second security pass).
+          const secret = await mintAndBindSecret(groupIdB64);
           // Persist BEFORE broadcasting — minting twice (two divergent random
           // secrets) is worse than broadcasting twice (byte-identical, hence
           // idempotent). The `distributed: false` flag is what makes the
@@ -1361,6 +1471,7 @@ export function ensureGroupPushRouting(
               secret,
               mintEpoch,
               broadcast,
+              true,
             );
           }
         }
@@ -1410,6 +1521,19 @@ export function ensureGroupPushRouting(
           record.mintEpoch,
           broadcast,
         );
+      }
+    }
+
+    // A bind that did not land (503 disabled, offline) is retried here, on
+    // the next provisioning pass (finding 5: wakes are dropped until bound).
+    if (state === "distributed" && bindRetry.has(groupIdB64)) {
+      try {
+        const deviceKey = await getDeviceKey(accountId);
+        const held =
+          deviceKey === null ? null : await getGroupRoutingSecret(accountId, groupIdB64, deviceKey);
+        if (held !== null) await bindBounded(groupIdB64, held);
+      } catch {
+        /* retried on the next pass */
       }
     }
 
@@ -1869,7 +1993,8 @@ export function rotatePushRoutingSecret(
       // (4) — mint + persist PENDING. Persist before broadcasting for the
       // same reason the mint path does: two divergent random secrets are worse
       // than two identical envelopes.
-      const next = mintPushRoutingSecret();
+      // Bind BEFORE broadcasting (finding 5 of the second security pass).
+      const next = await mintAndBindSecret(groupIdB64);
       const pushGid = await persistGroupRoutingSecret(
         accountId,
         groupIdB64,
@@ -1888,6 +2013,7 @@ export function rotatePushRoutingSecret(
         next,
         mintEpoch,
         broadcast,
+        true,
       );
 
       // (6) — arm the NEW id first, so a failure between the two never leaves

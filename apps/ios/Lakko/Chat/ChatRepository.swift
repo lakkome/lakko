@@ -247,6 +247,61 @@ public final class ChatRepository: ObservableObject {
     /// ADR-0053 point 2 — groups already claimed this session (claim-on-open
     /// runs on the first poll of each group per session).
     private var claimedGroupsThisSession: Set<String> = []
+    /// ADR-0057 — this device's registrar seeds + the owner's appointment
+    /// ledger, per `(account, group)`.
+    private let registrarSeeds: RegistrarSeedStore
+    /// ADR-0057 — member account key -> account X25519 key (from the identity
+    /// bundle), for sealing registrar seeds. Per session.
+    private var memberX25519Cache: [Data: Data] = [:]
+    /// ADR-0057 — account key -> account id this device learned first-hand
+    /// (the recipient of a chat it founded), for the identity-bundle fetch.
+    private var memberAccountIdHints: [Data: Data] = [:]
+    /// ADR-0057 — groups whose registrar reconcile is running.
+    private var registrarReconcileInflight: Set<String> = []
+    /// ADR-0057 — groups whose reconcile was asked for again while one was
+    /// running; the running one goes round once more (a root takeover must
+    /// not be swallowed by a reconcile that started under the old ledger).
+    private var registrarReconcileRerun: Set<String> = []
+    /// ADR-0057 S2 finding 1 — groups whose root handover is running now.
+    private var rootHandoverInFlight: Set<String> = []
+    /// ADR-0057 S2 finding 1 — a schedule that arrived while the handover ran.
+    private var rootHandoverRerun: Set<String> = []
+    /// ADR-0057 S2 finding 1 — when an unsettled handover may run again.
+    private var rootHandoverNotBefore: [String: Date] = [:]
+    /// ADR-0057 second pass, finding 4 — when this session last sent an owed
+    /// handover envelope per group (re-sent at most every
+    /// ``RootHandover/resendInterval`` while the probe answers 204).
+    private var rootHandoverLastSentAt: [String: Date] = [:]
+    /// ADR-0057 second pass, finding 4 — groups whose takeover (with a kept
+    /// old root seed) is running now, and when a failed one may run again.
+    private var rootTakeoverInFlight: Set<String> = []
+    private var rootTakeoverNotBefore: [String: Date] = [:]
+    /// ADR-0057 second pass, finding 4 — when an owner without the "root
+    /// held" marker may probe again.
+    private var rootProbeNotBefore: [String: Date] = [:]
+    /// ADR-0057 second pass, finding 2 — the registrar set this session last
+    /// sent per group (its fingerprint): sent once per group per session and
+    /// on every roster or role change.
+    private var registrarSetsSent: [String: String] = [:]
+    /// ADR-0057 second pass, finding 1 — the repair-from-above scheduler for
+    /// conversation groups (the only groups with a head poller here).
+    private lazy var journalRepair: JournalRepair = JournalRepair(ports: .init(
+        authority: { [weak self] groupIdHex in
+            guard let self, let record = self.groups[groupIdHex] else { return nil }
+            return self.journalAuthority(record: record, groupIdHex: groupIdHex)
+        },
+        pollToHead: { [weak self] groupIdHex in
+            try await self?.pollToHead(groupIdHex: groupIdHex)
+        },
+        currentEpochKey: { [weak self] groupIdHex in
+            guard let self, let record = self.groups[groupIdHex],
+                  let signer = self.currentDsSigner(record: record, groupIdHex: groupIdHex) else {
+                return nil
+            }
+            return (epoch: signer.epoch(), key: signer.verifyingKey())
+        },
+        journalId: { [weak self] groupIdHex in self?.groups[groupIdHex]?.groupId },
+        ds: dsClient))
     /// ADR-0053 point 7 — the per-group floor on knock reads.
     private let knockThrottle = KnockPollThrottle()
     /// ADR-0053 — the same floor for the attribution read, which reads the
@@ -449,9 +504,11 @@ public final class ChatRepository: ObservableObject {
         sharedPinStore: SharedPinStore = SharedPinStore(),
         personalPinStore: PersonalPinStore = PersonalPinStore(),
         readWatermarkStore: ReadWatermarkStore = ReadWatermarkStore(),
-        groupCallStore: GroupCallStore = GroupCallStore()
+        groupCallStore: GroupCallStore = GroupCallStore(),
+        registrarSeeds: RegistrarSeedStore = RegistrarSeedStore()
     ) {
         self.groupCallStore = groupCallStore
+        self.registrarSeeds = registrarSeeds
         self.conversationKindStore = conversationKindStore
         self.groupNameStore = groupNameStore
         self.sharedPinStore = sharedPinStore
@@ -491,6 +548,13 @@ public final class ChatRepository: ObservableObject {
         // claim-on-open retry included.
         self.chatClient.dsAuthProvider = { [weak self] groupIdHex in
             self?.dsAuth(groupIdHex: groupIdHex)
+        }
+        // ADR-0057 obligation 8, second security pass finding 5 — the journal
+        // is bound to a minted or rotated routing secret's `push_gid` BEFORE
+        // the secret is broadcast.
+        self.pushRouting.bindSecret = { [weak self] accountIdB64, groupIdHex, secret in
+            guard let self, self.currentAccountIdB64 == accountIdB64 else { return .notPermitted }
+            return await self.bindPushRouting(groupIdHex: groupIdHex, secret: secret)
         }
     }
 
@@ -657,6 +721,8 @@ public final class ChatRepository: ObservableObject {
             // ADR-0042 — wipe the push-routing secrets + the `push_gid`
             // reverse index so a forgotten device leaves no routing residue.
             pushRouting.clear(accountIdB64: accountIdB64)
+            // ADR-0057 — this account's registrar seeds + appointment ledger.
+            registrarSeeds.clear(accountIdB64: accountIdB64)
             // ADR-0045 — a forgotten device must leave no beacon observations
             // (they name who was running the app) and no pending-request
             // timings behind for a later session to fold.
@@ -699,6 +765,19 @@ public final class ChatRepository: ObservableObject {
         sweptGroupsThisSession.removeAll()
         // ADR-0053 — the signers belong to the identity of the closing session.
         dsSigners.reset()
+        memberX25519Cache.removeAll()
+        memberAccountIdHints.removeAll()
+        registrarReconcileInflight.removeAll()
+        registrarReconcileRerun.removeAll()
+        rootHandoverInFlight.removeAll()
+        rootHandoverRerun.removeAll()
+        rootHandoverNotBefore.removeAll()
+        rootHandoverLastSentAt.removeAll()
+        rootTakeoverInFlight.removeAll()
+        rootTakeoverNotBefore.removeAll()
+        rootProbeNotBefore.removeAll()
+        registrarSetsSent.removeAll()
+        journalRepair.reset()
         claimedGroupsThisSession.removeAll()
         knockThrottle.reset()
         attributionThrottle.reset()
@@ -797,8 +876,9 @@ public final class ChatRepository: ObservableObject {
         }
         // ADR-0050 — a person is added as ALL of their devices, each its own
         // leaf; the recipient's device binding inside each leaf is what the
-        // core verifies.
-        _ = recipientSignaturePubkey
+        // core verifies. ADR-0057 — remembered so the registrar appointment
+        // can fetch the recipient's identity bundle.
+        memberAccountIdHints[recipientSignaturePubkey] = recipientAccountId
         guard let recipientDevices = try await discovery.fetchKeyPackages(
             accountId: recipientAccountId
         ), !recipientDevices.isEmpty else {
@@ -811,12 +891,9 @@ public final class ChatRepository: ObservableObject {
 
         let group: Group
         let addResult: AddMember
-        let foundingSigner: DsProofSigner
         let joinSigner: DsProofSigner
         do {
             group = try Group.create(identity: identity)
-            // ADR-0053 — the epoch-0 key, taken before the add moves past it.
-            foundingSigner = try group.dsAccessSigner(identity: identity)
             // ONE commit for every device (ADR-0050 2.6): we are the only
             // member, so the commit fans out to nobody and is dropped; the ONE
             // Welcome carries every added leaf's secrets and goes,
@@ -834,22 +911,24 @@ public final class ChatRepository: ObservableObject {
                 underlying: error
             )
         }
-        // ADR-0053 points 2 + 3 — claim the journal at creation (epoch 0,
-        // unsigned: the journal is unclaimed) and register the epoch the
-        // Welcome lands its members at, proven under epoch 0, BEFORE any
-        // Welcome goes out: a member must never hold an epoch the server
-        // refuses. A failure aborts the creation (nothing was published).
+        // ADR-0057 obligation 1 — the founder owns the group, so it claims the
+        // journal with its ROOT key at the epoch the Welcome lands its members
+        // at, BEFORE any Welcome goes out: a member must never hold an epoch
+        // the server refuses. A failure aborts the creation (nothing was
+        // published).
         do {
-            try await dsClient.claimGroup(
-                groupId: try group.groupId(),
-                bodyJson: foundingSigner.groupClaimBodyJson(),
-                provenBy: nil)
-            try await dsClient.claimGroup(
-                groupId: try group.groupId(),
-                bodyJson: joinSigner.groupClaimBodyJson(),
-                provenBy: foundingSigner)
+            try await JournalOwnership.claim(
+                root: try journalRootSigner(groupId: try group.groupId()),
+                journalId: try group.groupId(),
+                epoch: joinSigner.epoch(),
+                epochKey: joinSigner.verifyingKey(),
+                ds: dsClient)
         } catch {
             throw ChatError.wrapped("DS journal claim failed", underlying: error)
+        }
+        if let accountIdB64 = currentAccountIdB64 {
+            registrarSeeds.markRootHeld(
+                accountIdB64: accountIdB64, groupIdHex: DsClient.pseudonymHex(try group.groupId()))
         }
 
         let welcomeEnvelope = wrapEnvelope(kind: .welcome, body: addResult.welcome)
@@ -881,7 +960,6 @@ public final class ChatRepository: ObservableObject {
         let groupId = try group.groupId()
         let groupIdHex = DsClient.pseudonymHex(groupId)
         groups[groupIdHex] = GroupRecord(group: group, groupId: groupId)
-        dsSigners.observe(journal: groupIdHex, signer: foundingSigner)
         dsSigners.observe(journal: groupIdHex, signer: joinSigner)
         claimedGroupsThisSession.insert(groupIdHex)
         persistKnownGroupBestEffort(groupIdHex: groupIdHex)
@@ -897,6 +975,8 @@ public final class ChatRepository: ObservableObject {
         // the DS `group_id`). The owner mints the secret on chat-open
         // (`ensurePushRouting`); until then this is a no-op deferral.
         subscribeGroupUnderPushGid(groupIdHex: groupIdHex)
+        // ADR-0057 obligation 3 — appoint the recipient a registrar.
+        reconcileJournalRegistrarsSoon(groupIdHex: groupIdHex)
         // ADR-0048 §2 — a chat this device just founded has never heard its
         // name; the recipient joins at the epoch this is sealed under.
         publishOwnProfileSoon(groupIdHex: groupIdHex)
@@ -943,11 +1023,10 @@ public final class ChatRepository: ObservableObject {
         persistKnownGroupBestEffort(groupIdHex: groupIdHex)
         persistSnapshotBestEffort()
         state = state.with(threads: buildThreadList())
-        // ADR-0053 point 2 — claim-on-open. The committer registered the epoch
-        // this Welcome lands at before publishing it, so this is normally the
-        // idempotent no-op; it repairs a registration a peer lost.
+        // ADR-0057 — the committer registered the epoch this Welcome lands at
+        // before publishing it; a joiner never claims or heals. (The owner's
+        // other device joining here claims lazily, only after a `401`.)
         claimedGroupsThisSession.insert(groupIdHex)
-        Task { [weak self] in await self?.claimGroupJournal(groupIdHex: groupIdHex) }
         // ADR-0042 — subscribe under `push_gid` (defers until the joiner
         // receives the group's `push_routing_secret` over the distribution
         // envelope on its next poll; never subscribes under `group_id`).
@@ -2233,11 +2312,9 @@ public final class ChatRepository: ObservableObject {
                     throw ChatError.wrapped("addMemberFromWire failed", underlying: error)
                 }
             },
-            register: { [self] next, provenBy in
+            register: { [self] next in
                 do {
-                    try await registerNextEpoch(
-                        groupId: record.groupId, groupIdHex: groupIdHex,
-                        next: next, provenBy: provenBy)
+                    try await registerNextEpoch(record: record, groupIdHex: groupIdHex, next: next)
                 } catch {
                     throw ChatError.wrapped("DS access registration (add-member) failed", underlying: error)
                 }
@@ -2472,6 +2549,10 @@ public final class ChatRepository: ObservableObject {
         // A remove has no Welcome, so the rollback guard of
         // `DirectCommitSteps.run` covers the registration and the FAIL-CLOSED
         // persist — the same F1 invariant the add path enforces.
+        // ADR-0057 — the account this removal evicts, read from the roster
+        // before the commit, so the root can revoke its registrar key in the
+        // same registration.
+        let evicted = evictedAccountKeys(group: record.group, removedLeaves: [leafIndex])
         let commitPublish: PublishResult = try await DirectCommitSteps(
             currentSigner: { try record.group.dsAccessSigner(identity: identity) },
             create: { () throws -> Data in
@@ -2484,11 +2565,11 @@ public final class ChatRepository: ObservableObject {
                     throw ChatError.wrapped("removeMember failed", underlying: error)
                 }
             },
-            register: { [self] next, provenBy in
+            register: { [self] next in
                 do {
                     try await registerNextEpoch(
-                        groupId: record.groupId, groupIdHex: groupIdHex,
-                        next: next, provenBy: provenBy)
+                        record: record, groupIdHex: groupIdHex, next: next,
+                        evictedAccountKeys: evicted)
                 } catch {
                     throw ChatError.wrapped("DS access registration (remove-member) failed", underlying: error)
                 }
@@ -2772,7 +2853,7 @@ public final class ChatRepository: ObservableObject {
         guard let record = groups[groupIdHex] else {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
         }
-        let mint: GroupInviteMint
+        let mint: InviteLinkMint
         do {
             mint = try composeGroupInviteCapabilityWithPreview(
                 issuerSigningSeed: identity.ed25519Seed(),
@@ -2786,34 +2867,35 @@ public final class ChatRepository: ObservableObject {
             throw ChatError.wrapped(
                 "composeGroupInviteCapabilityWithPreview failed", underlying: error)
         }
-        let wire = mint.wire
         // Production default (ADR-0028 OQ1): upload to the discovery ledger —
         // the server-side anti-abuse surface (per-joiner consume dedup + soft
         // max_uses) — and share the short pointer URL. `max_uses` is a soft
         // throttle, not an access control: the admin approval gate stays the
-        // boundary.
+        // boundary. ADR-0028 amendment 2026-09-28: the ledger gets the SEALED
+        // blob and the clear fields; the secret rides the fragment.
         //
         // The upload is session-gated (`require_session` on discovery), so it
         // goes out on a bearer copy of the client; with no session at all the
         // mint fails here rather than quietly producing the long inline link.
         // Only a TRANSPORT failure (a censored / offline network) falls back to
-        // the inline form; a refusal from the server (401, 400, 5xx) surfaces.
+        // the inline form, which carries the sealed blob; a refusal from the
+        // server (401, 400, 5xx) surfaces.
         let bearer = try bearerDiscovery()
         let base: String
         do {
             let blobId = try await bearer.uploadGroupInvite(
-                capabilityBytes: wire, maxUses: UInt32.max)
+                mint: mint, expiryMs: 0, maxUses: UInt32.max)
             base = try GroupInviteUrl.composePointerGroupInviteUrl(blobId: blobId)
         } catch let error where Self.groupInviteUploadFallsBackInline(error) {
             NSLog("group invite upload failed (\(Self.discoveryFailureSummary(error))); "
                 + "sharing the inline link")
-            base = (try? GroupInviteUrl.composeInlineGroupInviteUrl(capabilityBytes: wire))
-                ?? ("https://lakko.me/g/" + base64UrlEncodeNoPad(wire))
+            base = (try? GroupInviteUrl.composeInlineGroupInviteUrl(capabilityBytes: mint.sealed))
+                ?? (GroupInviteUrl.defaultOrigin + GroupInviteUrl.urlPrefix + base64UrlEncodeNoPad(mint.sealed))
         } catch {
             NSLog("group invite upload failed (\(Self.discoveryFailureSummary(error)))")
             throw ChatError.wrapped("group invite upload failed", underlying: error)
         }
-        return GroupInviteLink.withLinkKey(base, linkKey: mint.linkKey)
+        return InviteLinkSecret.link(base: base, secret: mint.linkSecret)
     }
 
     /// The signed-in session's bearer token, read at call time. Defaults to
@@ -2868,7 +2950,7 @@ public final class ChatRepository: ObservableObject {
         }
         // The slug ends where the fragment begins: the link key after `#` is
         // not part of the slug and is never handed to a parser or a server.
-        let withoutFragment = GroupInviteLink.split(link).base
+        let withoutFragment = InviteLinkSecret.split(link).base
         guard let range = withoutFragment.range(of: "/g/", options: .backwards) else {
             return false
         }
@@ -2897,10 +2979,11 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
-    /// ADR-0028 (G-3) — resolve a `/g/<slug>` slug to the capability wire bytes,
-    /// fetching from the discovery ledger when the slug is a 6-byte pointer (the
-    /// production form) or passing the bytes straight through when it is an
-    /// inline capability (the transport-failure fallback). Returns the `blobId`
+    /// ADR-0028 (G-3) — resolve a `/g/<slug>` slug to the SEALED link blob
+    /// (ADR-0028 amendment 2026-09-28), fetching from the discovery ledger when
+    /// the slug is a 6-byte pointer (the production form) or passing the bytes
+    /// straight through when it is an inline blob (the transport-failure
+    /// fallback). The caller opens it with the fragment's secret. Returns the `blobId`
     /// (non-nil only for the pointer form) so the caller can drive the consume
     /// gate before requesting to join.
     ///
@@ -2912,7 +2995,7 @@ public final class ChatRepository: ObservableObject {
     /// "invalid".
     public func resolveGroupInviteSlug(
         slug: String
-    ) async throws -> (capabilityWire: Data, blobId: Data?) {
+    ) async throws -> (sealed: Data, blobId: Data?) {
         let parsed: GroupInviteUrl.ParsedGroupInvite
         do {
             parsed = try GroupInviteUrl.parseGroupInviteSlug(slug)
@@ -2929,10 +3012,10 @@ public final class ChatRepository: ObservableObject {
             } catch {
                 throw ChatError.wrapped("group invite fetch failed", underlying: error)
             }
-            guard let capabilityWire = fetched else {
+            guard let sealed = fetched else {
                 throw GroupInviteLinkError.notFound
             }
-            return (capabilityWire, blobId)
+            return (sealed, blobId)
         }
     }
 
@@ -3859,11 +3942,14 @@ public final class ChatRepository: ObservableObject {
         // G-38 step 2 — the NETWORK half, outside the lock. Both values are read
         // here and re-validated under the lock; `groupId` is the record's cached
         // copy, so the fetch reads no `Group` handle at all.
-        // ADR-0053 point 2 — claim-on-open, once per group per session, before
-        // the first read. Idempotent, and a failure never blocks the poll.
+        // ADR-0057 — no proactive claim-on-open any more: a device that is
+        // behind would register an OLDER epoch under the root and drop the
+        // newer ones. The owner claims lazily, only when its signed read is
+        // refused (`DsAuth.reclaim`). Once per session the owner re-checks the
+        // journal's registrars against the roster (obligation 3).
         if !claimedGroupsThisSession.contains(groupIdHex) {
             claimedGroupsThisSession.insert(groupIdHex)
-            await claimGroupJournal(groupIdHex: groupIdHex)
+            reconcileJournalRegistrarsSoon(groupIdHex: groupIdHex)
         }
         let after = record.cursor
         let groupId = record.groupId
@@ -3902,6 +3988,11 @@ public final class ChatRepository: ObservableObject {
         // itself). A sweep failure is not a poll failure, so it never throws
         // out of here.
         await sweepIfCommitter(groupIdHex: groupIdHex)
+        // ADR-0057 S2 finding 1 — a root handover this account still owes (the
+        // new owner's key did not resolve yet, a send failed, or it is owed
+        // from an earlier session) is retried from the poll tail, no sooner
+        // than its retry interval. Only schedules.
+        scheduleRootHandover(groupIdHex: groupIdHex)
         // ADR-0050 section 2.4 — the scheduled re-admission check, bounded per
         // chat. Not awaited by the poll: it reads the directory.
         Task { @MainActor [weak self] in
@@ -3951,9 +4042,12 @@ public final class ChatRepository: ObservableObject {
         // against any commit landing in the fetch window.
         let membersBeforePoll = PushGroupRouting.memberSignatureKeys(group: record.group)
         let leafKeysBeforePoll = Self.leafKeysB64(group: record.group)
-        // ADR-0053 point 4 — the access signer BEFORE the batch, so a batch
-        // that moves the epoch can register the new key proven under it.
-        let signerBeforeBatch = try? record.group.dsAccessSigner(identity: identity)
+        // ADR-0057 — the epoch BEFORE the batch, so a batch that moved it
+        // (a membership or role change) re-checks the journal's registrars.
+        let epochBeforeBatch = try? record.group.epoch()
+        // ADR-0057 S2 finding 1 — the owner before this batch, so a remote
+        // commit that carried this account's ownership transfer is seen.
+        let ownerBeforeBatch = (try? record.group.groupRoles())?.owner
         let result = chatClient.applyFetchedMessages(
             identity: identity,
             group: record.group,
@@ -4024,6 +4118,11 @@ public final class ChatRepository: ObservableObject {
             // commit chain is held.
             pinSink: { [weak self] op, senderLeaf in
                 self?.receivePin(groupIdHex: groupIdHex, op: op, senderLeaf: senderLeaf)
+            },
+            // ADR-0057 obligation 4 — synchronous gate + store.
+            registrarSeedSink: { [weak self] plaintext, senderLeaf in
+                self?.receiveRegistrarSeed(
+                    groupIdHex: groupIdHex, plaintext: plaintext, senderLeaf: senderLeaf)
             }
         )
         // THE ORDERING RULE — persist first, advance the cursor second, and hold
@@ -4052,13 +4151,19 @@ public final class ChatRepository: ObservableObject {
         // idle long poll still writes no file.
         if !result.events.isEmpty { persistMessageLogBestEffort() }
         state = state.with(threads: buildThreadList())
-        // ADR-0053 point 4 — heal on apply. Only spawns a `Task`, so the apply
-        // region stays non-suspending.
-        healRegistration(
-            groupIdHex: groupIdHex,
-            groupId: record.groupId,
-            before: signerBeforeBatch,
-            after: try? record.group.dsAccessSigner(identity: identity))
+        // ADR-0057 S2 finding 1 — the ownership moved away from this account in
+        // this batch: hand the journal root over (only schedules).
+        noteOwnerTransition(
+            groupIdHex: groupIdHex, before: ownerBeforeBatch,
+            after: (try? record.group.groupRoles())?.owner)
+        // ADR-0057 — no heal-on-apply: a member never registers an epoch it did
+        // not commit. When the batch moved the epoch, the OWNER re-checks the
+        // registrars against the new roster (a join, a promotion, a removal).
+        // Only spawns a `Task`, so the apply region stays non-suspending.
+        if let epochBeforeBatch, let epochAfter = try? record.group.epoch(),
+           epochAfter != epochBeforeBatch {
+            reconcileJournalRegistrarsSoon(groupIdHex: groupIdHex)
+        }
         // ADR-0052 decision 3 — a delete that landed in this batch takes its
         // shared pin record with it. Only spawns a `Task` on the pin chain.
         if !result.events.isEmpty { dropSharedPinsOfDeletedMessages(groupIdHex: groupIdHex) }
@@ -4912,17 +5017,25 @@ public final class ChatRepository: ObservableObject {
                 guard let record = groups[groupIdHex], let identity = canonicalIdentity else {
                     return .notCommitter(rank: nil)
                 }
-                let signerBefore = try? record.group.dsAccessSigner(identity: identity)
+                _ = identity
+                // ADR-0057 S2 finding 1 — a merged sweep (or a remote commit its
+                // verdict applied) that carried this account's ownership
+                // transfer hands the journal root over. Read on every exit,
+                // a thrown verdict included: rows below it may have applied.
+                let ownerBeforeSweep = (try? record.group.groupRoles())?.owner
+                defer {
+                    noteOwnerTransition(
+                        groupIdHex: groupIdHex, before: ownerBeforeSweep,
+                        after: roleTableOwner(groupIdHex: groupIdHex))
+                }
                 let outcome = try await runCommitterSweep(sweepPorts(record: record, groupIdHex: groupIdHex))
-                // ADR-0053 point 4 — a LOST sweep applied the winner's commit in
-                // its verdict read; put the winner's key back over the one this
-                // device registered for its own losing commit. A won sweep
-                // re-sends its own registration, which is an idempotent no-op.
-                healRegistration(
-                    groupIdHex: groupIdHex,
-                    groupId: record.groupId,
-                    before: signerBefore,
-                    after: try? record.group.dsAccessSigner(identity: identity))
+                // ADR-0057 obligation 3 — a sweep that landed changed the
+                // roster: the owner appoints the new members and dismisses the
+                // departed. (No heal: a lost sweep's registration is replaced
+                // by the winner's, or refused before its commit went out.)
+                if case .committed = outcome {
+                    reconcileJournalRegistrarsSoon(groupIdHex: groupIdHex)
+                }
                 return outcome
             }
         } catch {
@@ -4984,9 +5097,23 @@ public final class ChatRepository: ObservableObject {
                     // the caller — which matters here because it is what
                     // addresses the Welcome.
                     var added: [Data] = []
+                    var removedLeaves: Set<UInt32> = []
                     for proposal in staged.swept {
-                        if case .add(let signatureKey) = proposal.kind { added.append(signatureKey) }
+                        switch proposal.kind {
+                        case .add(let signatureKey):
+                            added.append(signatureKey)
+                        case .remove(let targetLeaf):
+                            removedLeaves.insert(targetLeaf)
+                        case .leave:
+                            if let leaf = proposal.senderLeaf { removedLeaves.insert(leaf) }
+                        default:
+                            break
+                        }
                     }
+                    // ADR-0057 — the accounts this sweep evicts, from the roster
+                    // BEFORE the merge, for the registration's revoke list.
+                    record.stagedEvictedAccountKeys = self?.evictedAccountKeys(
+                        group: record.group, removedLeaves: removedLeaves) ?? []
                     return StagedSweepArtifacts(
                         commit: staged.commit,
                         welcome: staged.welcome,
@@ -5081,6 +5208,11 @@ public final class ChatRepository: ObservableObject {
                         pinSink: { [weak self] op, senderLeaf in
                             self?.receivePin(
                                 groupIdHex: groupIdHex, op: op, senderLeaf: senderLeaf)
+                        },
+                        registrarSeedSink: { [weak self] plaintext, senderLeaf in
+                            self?.receiveRegistrarSeed(
+                                groupIdHex: groupIdHex, plaintext: plaintext,
+                                senderLeaf: senderLeaf)
                         }
                     )
                     // Per row, and deliberately not deferred to the end of the
@@ -5140,13 +5272,17 @@ public final class ChatRepository: ObservableObject {
                     guard let self, let identity = self.canonicalIdentity else {
                         throw ChatError.argument("ChatRepository not bootstrapped — cannot register")
                     }
-                    let signerN = try record.group.dsAccessSigner(identity: identity)
                     guard let signerN1 = try record.group.dsStagedAccessSigner(identity: identity) else {
                         throw ChatError.argument("no staged sweep to register an epoch for")
                     }
                     try await self.registerNextEpoch(
-                        groupId: record.groupId, groupIdHex: groupIdHex,
-                        next: signerN1, provenBy: signerN)
+                        record: record, groupIdHex: groupIdHex, next: signerN1,
+                        evictedAccountKeys: record.stagedEvictedAccountKeys)
+                },
+                // ADR-0057 obligation 5 — no root and no registrar seed: this
+                // device cannot register the next epoch, so it never stages.
+                canRegister: { [weak self] in
+                    self?.canRegisterJournalEpochs(groupIdHex: groupIdHex) ?? false
                 }
             ),
             outbox: SweepOutboxPort(
@@ -5657,69 +5793,575 @@ public final class ChatRepository: ObservableObject {
     func dsAuth(groupIdHex: String) -> DsAuth? {
         guard let record = groups[groupIdHex],
               let signer = currentDsSigner(record: record, groupIdHex: groupIdHex) else { return nil }
+        let epoch = signer.epoch()
         return DsAuth(
             signer: signer,
-            previous: dsSigners.previousSigner(journal: groupIdHex, before: signer.epoch()),
-            reclaim: { [weak self] in await self?.claimGroupJournal(groupIdHex: groupIdHex) }
+            previous: dsSigners.previousSigner(journal: groupIdHex, before: epoch),
+            reclaim: { [weak self] in await self?.claimGroupJournal(groupIdHex: groupIdHex) },
+            // Second security pass, finding 1 — refused at this device's own
+            // epoch after every retry: an owner or admin schedules the repair
+            // check (a member's note is dropped there).
+            onRefusedAtHead: { [weak self] in
+                Task { @MainActor in
+                    self?.journalRepair.note(groupIdHex: groupIdHex, epoch: epoch, reason: .refusedAtHead)
+                }
+            }
         )
     }
 
-    /// ADR-0053 client contract point 2 — claim-on-open. Registers the
-    /// current epoch's key; idempotent (a key already registered at its epoch
-    /// is a `204` with no proof). Proven under the older signer when this
-    /// device holds one, unsigned otherwise. A failure is logged and retried
-    /// on the next open; it never blocks anything. Returns the current signer.
+    /// ADR-0057 second pass, finding 1 — poll `groupIdHex` to its journal
+    /// head, applying everything: one page per poll, until the cursor stops
+    /// moving (at most ``JournalRepair/maxPolls``). Throws the DS refusal.
+    func pollToHead(groupIdHex: String) async throws {
+        for _ in 0..<JournalRepair.maxPolls {
+            guard let before = groups[groupIdHex]?.cursor else { return }
+            try await pollGroup(groupIdHex: groupIdHex, waitSecs: 0)
+            guard let after = groups[groupIdHex]?.cursor, after != before else { return }
+        }
+    }
+
+    // MARK: - ADR-0057 journal ownership
+
+    /// Is this account the group's ADR-0022 owner, i.e. does it hold the
+    /// journal's root? A group with no role table has no owner.
+    private func isJournalOwner(record: GroupRecord) -> Bool {
+        guard let identity = canonicalIdentity else { return false }
+        return (try? record.group.ownRole(identity: identity)) == .owner
+    }
+
+    /// The root signer of a group's journal, derived from the ACCOUNT identity.
+    private func journalRootSigner(groupId: Data) throws -> DsStatementSignerProtocol {
+        guard let accountIdentity else {
+            throw ChatError.argument("no account identity — cannot derive the journal root")
+        }
+        return try dsJournalRootSigner(accountIdentity: accountIdentity, journalId: groupId)
+    }
+
+    /// The key this device registers the group's epochs with (obligation 5):
+    /// the root for the owner, the stored registrar seed otherwise, `nil` when
+    /// this device holds neither — it must not commit then.
+    private func journalAuthority(record: GroupRecord, groupIdHex: String) -> JournalAuthority? {
+        JournalAuthority.resolve(
+            isOwner: isJournalOwner(record: record),
+            rootHeld: currentAccountIdB64.map {
+                registrarSeeds.isRootHeld(accountIdB64: $0, groupIdHex: groupIdHex)
+            } ?? false,
+            rootSigner: { try self.journalRootSigner(groupId: record.groupId) },
+            registrar: {
+                guard let accountIdB64 = self.currentAccountIdB64,
+                      let held = self.registrarSeeds.get(
+                          accountIdB64: accountIdB64, groupIdHex: groupIdHex),
+                      let signer = try? dsStatementSigner(seed: held.seed) else { return nil }
+                return (signer, held.rank)
+            })
+    }
+
+    /// Whether this device can register the group's next epoch, i.e. whether
+    /// it may stage a sweep at all.
+    func canRegisterJournalEpochs(groupIdHex: String) -> Bool {
+        guard let record = groups[groupIdHex] else { return false }
+        return journalAuthority(record: record, groupIdHex: groupIdHex) != nil
+    }
+
+    /// The registrar public key the owner appointed for `accountKey` on this
+    /// journal — what a removal's registration revokes. Root only.
+    private func registrarPublicKey(groupId: Data, accountKey: Data) -> Data? {
+        guard let accountIdentity,
+              let rootSeed = try? dsJournalRootSeed(
+                  accountIdentitySeed: accountIdentity.ed25519Seed(), journalId: groupId),
+              let seed = try? dsJournalRegistrarSeed(rootSeed: rootSeed, memberAccountKey: accountKey),
+              let signer = try? dsStatementSigner(seed: seed) else { return nil }
+        return signer.publicKey()
+    }
+
+    /// ADR-0057 obligation 2 — the owner's lazy claim, run as the last retry
+    /// of a request its journal refused with `401`: claim the journal with the
+    /// root at the current epoch (it was unclaimed). A journal claimed already
+    /// (`409`) is left alone — nothing is registered, because a root
+    /// registration replaces every epoch at and above it and a lagging owner
+    /// device would cut the others off. A member never claims. Returns the
+    /// current signer to retry with only when the claim landed; `nil`
+    /// otherwise (this device waits for the committer's registration).
     @discardableResult
     func claimGroupJournal(groupIdHex: String) async -> DsRequestSigner? {
         guard let record = groups[groupIdHex],
               let signer = currentDsSigner(record: record, groupIdHex: groupIdHex) else { return nil }
-        let older = dsSigners.previousSigner(journal: groupIdHex, before: signer.epoch())
-        do {
-            try await dsClient.claimGroup(
-                groupId: record.groupId,
-                bodyJson: signer.groupClaimBodyJson(),
-                provenBy: older
-            )
-        } catch {
-            NSLog("ADR-0053: group journal claim failed, retried on the next open: \(error)")
+        let outcome = await JournalOwnership.lazyClaim(
+            isOwner: isJournalOwner(record: record),
+            root: { try self.journalRootSigner(groupId: record.groupId) },
+            journalId: record.groupId,
+            epoch: signer.epoch(),
+            epochKey: signer.verifyingKey(),
+            ds: dsClient)
+        switch outcome {
+        case .claimed:
+            if let accountIdB64 = currentAccountIdB64 {
+                registrarSeeds.markRootHeld(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+            }
+            reconcileJournalRegistrarsSoon(groupIdHex: groupIdHex)
+            return signer
+        case .alreadyClaimed, .notOwner, .failed:
+            return nil
         }
-        return signer
     }
 
-    /// ADR-0053 point 3 — register `next` (the epoch a commit moves to) proven
-    /// under `provenBy` (the epoch it moves from), BEFORE the commit is
-    /// published. Throws: a failed registration aborts the commit.
+    /// ADR-0057 obligation 5 — register the epoch a commit moves to, BEFORE
+    /// the commit is published, with this device's root or registrar key.
+    /// `evictedAccountKeys` are the accounts the commit removes; the root
+    /// revokes their registrar keys in the same statement, a registrar cannot
+    /// derive them and sends none. Throws: a device with no authority, or a
+    /// refused registration, aborts the commit.
     private func registerNextEpoch(
-        groupId: Data,
+        record: GroupRecord,
         groupIdHex: String,
         next: DsGroupSigner,
-        provenBy: DsGroupSigner
+        evictedAccountKeys: [Data] = []
     ) async throws {
-        try await dsClient.claimGroup(
-            groupId: groupId,
-            bodyJson: next.groupClaimBodyJson(),
-            provenBy: provenBy
-        )
-        dsSigners.observe(journal: groupIdHex, signer: provenBy)
+        guard let authority = journalAuthority(record: record, groupIdHex: groupIdHex) else {
+            throw ChatError.argument(
+                "this device holds neither the journal root nor a registrar seed — cannot commit")
+        }
+        let revoke = JournalOwnership.revokeList(
+            authority: authority,
+            evictedAccountKeys: evictedAccountKeys,
+            registrarPublicKey: { self.registrarPublicKey(groupId: record.groupId, accountKey: $0) })
+        try await JournalOwnership.registerEpoch(
+            authority: authority,
+            journalId: record.groupId,
+            epoch: next.epoch(),
+            epochKey: next.verifyingKey(),
+            revoke: revoke,
+            ds: dsClient,
+            // Second security pass, finding 1 — an Append 409: the commit is
+            // abandoned by the throw (never a Replace here); an owner or admin
+            // schedules the repair check at the epoch it is at.
+            onConflict: { [weak self] current in
+                Task { @MainActor in
+                    self?.journalRepair.note(
+                        groupIdHex: groupIdHex, epoch: current, reason: .appendConflict)
+                }
+            })
         dsSigners.observe(journal: groupIdHex, signer: next)
     }
 
-    /// ADR-0053 point 4 — heal on apply. A batch that moved the epoch
-    /// registers the new epoch's key, proven under the signer taken before the
-    /// batch. Best effort: a refusal is expected and ignored (someone else
-    /// registered first, or this device was too far behind). This is what puts
-    /// the winning key back after a losing committer registered its own.
-    private func healRegistration(
-        groupIdHex: String,
-        groupId: Data,
-        before: DsProofSigner?,
-        after: DsProofSigner?
-    ) {
-        guard let before, let after, after.epoch() > before.epoch() else { return }
-        dsSigners.observe(journal: groupIdHex, signer: before)
-        dsSigners.observe(journal: groupIdHex, signer: after)
-        let client = dsClient
-        Task { await dsHealRegistration(ds: client, groupId: groupId, before: before, after: after) }
+    /// The accounts the leaves in `removedLeaves` belong to, when every leaf of
+    /// the account is removed — read from the roster BEFORE the commit.
+    private func evictedAccountKeys(group: Group, removedLeaves: Set<UInt32>) -> [Data] {
+        guard let members = try? group.members() else { return [] }
+        return JournalOwnership.evictedAccountKeys(
+            members: members.map { (leaf: $0.leafIndex, accountKey: $0.accountKey) },
+            removedLeaves: removedLeaves)
+    }
+
+    /// ADR-0057 obligation 3, second security pass finding 2 — the owner
+    /// converges the journal's registrar set to the roster: a `registrars-set`
+    /// with the WHOLE desired set (admin for ADR-0022 admins, member for every
+    /// other member account, never the owner itself) whenever it differs from
+    /// the set this session last sent, so once per group per session and on
+    /// every roster or role change; the DS drops every registrar not listed,
+    /// whatever any device-local record says. Then every member whose seed
+    /// envelope is owed gets it sealed to its account X25519 key; the local
+    /// record only tracks which envelopes were delivered.
+    ///
+    /// Owner devices only, and only once this account is known to hold the
+    /// root (finding 4): an owner without the marker probes first, at most
+    /// every ``rootProbeRetryInterval``. Fire-and-forget, one run per group at
+    /// a time. A member whose X25519 key cannot be resolved yet is left
+    /// pending and retried on the next reconcile.
+    func reconcileJournalRegistrarsSoon(groupIdHex: String) {
+        guard !registrarReconcileInflight.contains(groupIdHex) else {
+            registrarReconcileRerun.insert(groupIdHex)
+            return
+        }
+        registrarReconcileInflight.insert(groupIdHex)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            repeat {
+                self.registrarReconcileRerun.remove(groupIdHex)
+                await self.reconcileJournalRegistrars(groupIdHex: groupIdHex)
+            } while self.registrarReconcileRerun.contains(groupIdHex)
+            self.registrarReconcileInflight.remove(groupIdHex)
+        }
+    }
+
+    /// How often an owner without the "root held" marker probes. Chosen, not
+    /// measured; the web client's interval.
+    private static let rootProbeRetryInterval: TimeInterval = 60
+
+    /// Finding 4 — an owner that does not know it holds the root probes (a
+    /// `root` statement naming its own root, signed by it); a 204 sets the
+    /// marker. Returns whether the marker is set afterwards.
+    private func probeRootIfUnheld(accountIdB64: String, groupIdHex: String, groupId: Data) async -> Bool {
+        if registrarSeeds.isRootHeld(accountIdB64: accountIdB64, groupIdHex: groupIdHex) { return true }
+        if let wait = rootProbeNotBefore[groupIdHex], Date() < wait { return false }
+        rootProbeNotBefore[groupIdHex] = Date().addingTimeInterval(Self.rootProbeRetryInterval)
+        guard let root = try? journalRootSigner(groupId: groupId) else { return false }
+        do {
+            if try await JournalOwnership.probeRoot(root: root, journalId: groupId, ds: dsClient) == .root {
+                registrarSeeds.markRootHeld(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+                rootProbeNotBefore[groupIdHex] = nil
+                NSLog("ADR-0057: root probe answered 204; this account holds the root")
+                return true
+            }
+            NSLog("ADR-0057: root probe answered 401; still using the registrar seed")
+        } catch {
+            NSLog("ADR-0057: root probe failed; retried later")
+        }
+        return false
+    }
+
+    /// The registrar set the live roster and role table call for, when this
+    /// account is the owner of an active group; `nil` otherwise.
+    private func desiredRegistrars(record: GroupRecord) -> [Data: DsRegistrarRank]? {
+        guard isJournalOwner(record: record),
+              (try? record.group.isActive()) == true,
+              let roles = try? record.group.groupRoles(),
+              let members = try? record.group.members() else { return nil }
+        return JournalOwnership.desiredRanks(
+            memberAccountKeys: members.map(\.accountKey), owner: roles.owner, admins: roles.admins)
+    }
+
+    private func reconcileJournalRegistrars(groupIdHex: String) async {
+        guard let record = groups[groupIdHex], let accountIdB64 = currentAccountIdB64,
+              isJournalOwner(record: record) else { return }
+        let groupId = record.groupId
+        guard await probeRootIfUnheld(accountIdB64: accountIdB64, groupIdHex: groupIdHex, groupId: groupId),
+              currentAccountIdB64 == accountIdB64 else { return }
+        do {
+            _ = try await JournalOwnership.reconcileRegistrars(.init(
+                journalId: groupId,
+                ds: dsClient,
+                desired: { [weak self] in
+                    guard let self, let current = self.groups[groupIdHex] else { return nil }
+                    return self.desiredRegistrars(record: current)
+                },
+                authority: { [weak self] in
+                    guard let self, let current = self.groups[groupIdHex] else { return nil }
+                    return self.journalAuthority(record: current, groupIdHex: groupIdHex)
+                },
+                registrarPublicKey: { [weak self] in
+                    self?.registrarPublicKey(groupId: groupId, accountKey: $0)
+                },
+                lastSentSet: { [weak self] in self?.registrarSetsSent[groupIdHex] },
+                noteSentSet: { [weak self] in self?.registrarSetsSent[groupIdHex] = $0 },
+                loadDelivered: { [registrarSeeds] in
+                    registrarSeeds.delivered(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+                },
+                saveDelivered: { [registrarSeeds] in
+                    registrarSeeds.saveDelivered(accountIdB64: accountIdB64, groupIdHex: groupIdHex, $0)
+                },
+                sendEnvelope: { [weak self] accountKey, rank in
+                    guard let self, let accountIdentity = self.accountIdentity,
+                          let x25519 = await self.memberX25519PublicKey(accountKey: accountKey) else {
+                        return false
+                    }
+                    var rootSeed = try dsJournalRootSeed(
+                        accountIdentitySeed: accountIdentity.ed25519Seed(), journalId: groupId)
+                    defer { RootHandover.wipe(&rootSeed) }
+                    var seed = try dsJournalRegistrarSeed(rootSeed: rootSeed, memberAccountKey: accountKey)
+                    defer { RootHandover.wipe(&seed) }
+                    let envelope = try composeRegistrarSeedEnvelope(
+                        journalId: groupId, memberAccountKey: accountKey,
+                        memberX25519PublicKey: x25519, rank: rank, registrarSeed: seed)
+                    try await self.publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: envelope)
+                    return true
+                }))
+        } catch {
+            NSLog("ADR-0057: registrar reconcile failed, retried on the next change: %@",
+                  String(describing: error))
+        }
+    }
+
+    /// A member's account X25519 key, from its identity bundle: the account id
+    /// comes from a contact record or the member's own profile (a claim), and
+    /// the bundle is accepted only when it names the same account signature
+    /// key the roster does — so a wrong claim finds no key rather than a
+    /// stranger's. Cached per session.
+    private func memberX25519PublicKey(accountKey: Data) async -> Data? {
+        if let cached = memberX25519Cache[accountKey] { return cached }
+        let keyB64 = accountKey.base64EncodedString()
+        var accountId: Data? = memberAccountIdHints[accountKey]
+            ?? ProfileDirectory.shared.accountId(signatureKeyB64: keyB64)
+        if accountId == nil {
+            accountId = AcceptedContactsStore.load()
+                .first(where: { $0.request.fromPubkey == accountKey })?.request.fromAccountId
+        }
+        guard let accountId, accountId.count == 16,
+              let bundle = try? await discovery.identityFetch(accountId: accountId),
+              Data(base64Encoded: bundle.signaturePubkey) == accountKey,
+              let x25519 = Data(base64Encoded: bundle.x25519Pubkey), x25519.count == 32
+        else { return nil }
+        memberX25519Cache[accountKey] = x25519
+        return x25519
+    }
+
+    /// ADR-0057 obligation 4 — a registrar-seed envelope arrived in the group.
+    /// One dispatch (``RootHandover/receiveSeedEnvelope(rank:envelopeJournal:envelopeAddressee:groupId:ownAccountKey:senderAccountKey:owner:open:storeRegistrarSeed:takeOver:onDrop:)``)
+    /// so a rank-root envelope has no path into the registrar-seed store:
+    ///
+    ///   * rank member / admin: kept only when it is addressed to this account
+    ///     AND its MLS sender resolves, at receipt, to the group's owner
+    ///     through the live role table (C-68); then opened with the account
+    ///     identity and stored (a newer one replaces the older).
+    ///   * rank root (ADR-0057 S2 finding 1, a root handover after an
+    ///     ownership transfer): kept only when it names this journal, is
+    ///     addressed to this account AND the live role table names this
+    ///     account owner; no sender check (the DS refuses a seed that is not
+    ///     the current root). The opened old root seed goes to a DETACHED
+    ///     takeover (this region holds the group's MLS lock, which the
+    ///     takeover's reconcile publishes under) and is never persisted.
+    ///
+    /// Everything else is dropped without a trace in the timeline.
+    /// Synchronous: the apply region stays non-suspending.
+    func receiveRegistrarSeed(groupIdHex: String, plaintext: Data, senderLeaf: UInt32?) {
+        guard let record = groups[groupIdHex], let accountIdB64 = currentAccountIdB64,
+              let accountIdentity,
+              let decoded = try? decodeRegistrarSeedEnvelope(plaintext: plaintext) else { return }
+        let owner = (try? record.group.groupRoles())?.owner
+        let senderAccountKey = senderLeaf.flatMap { leaf in
+            (try? record.group.members())?.first(where: { $0.leafIndex == leaf })?.accountKey
+        }
+        _ = RootHandover.receiveSeedEnvelope(
+            rank: decoded.rank,
+            envelopeJournal: decoded.journalId,
+            envelopeAddressee: decoded.memberAccountKey,
+            groupId: record.groupId,
+            ownAccountKey: accountIdentity.signaturePublicKey(),
+            senderAccountKey: senderAccountKey,
+            owner: owner,
+            open: { try openRegistrarSeedEnvelope(plaintext: plaintext, accountIdentity: accountIdentity) },
+            storeRegistrarSeed: { [registrarSeeds] seed, rank in
+                registrarSeeds.put(
+                    accountIdB64: accountIdB64, groupIdHex: groupIdHex, seed: seed, rank: rank)
+            },
+            takeOver: { [weak self, registrarSeeds] oldRootSeed in
+                // Finding 4 — kept sealed under the device key until the
+                // takeover lands or answers 401, so a failure or a restart
+                // retries it.
+                registrarSeeds.putPendingRootSeed(
+                    accountIdB64: accountIdB64, groupIdHex: groupIdHex, seed: oldRootSeed)
+                self?.rootTakeoverNotBefore[groupIdHex] = nil
+                self?.scheduleRootTakeover(groupIdHex: groupIdHex)
+            },
+            onDrop: { reason in NSLog("ADR-0057: %@", reason) })
+    }
+
+    // MARK: - ADR-0057 S2 finding 1 — the journal root moves with an ownership transfer
+
+    /// The retry floor for a handover (and a takeover) whose last attempt did
+    /// not settle. Chosen, not measured; the same interval Android waits
+    /// between appointment attempts.
+    private static let rootHandoverRetryInterval: TimeInterval = 60
+
+    /// The role table's owner now, `nil` for a table-less group or a torn read.
+    private func roleTableOwner(groupIdHex: String) -> Data? {
+        guard let record = groups[groupIdHex] else { return nil }
+        return (try? record.group.groupRoles())?.owner
+    }
+
+    /// Report the role-table owner read `before` and `after` one commit apply
+    /// or sweep merge. Called from inside the group's MLS lock, so it only
+    /// records and schedules; it never awaits the network. When the owner
+    /// moved away from this account: record the handover as owed (it survives
+    /// a restart), forget which seed envelopes were delivered, drop the "root
+    /// held" marker (the root is about to move) and schedule the send. Every
+    /// other change is ignored.
+    private func noteOwnerTransition(groupIdHex: String, before: Data?, after: Data?) {
+        guard RootHandover.ownerMovedAwayFrom(
+            own: accountIdentity?.signaturePublicKey(), before: before, after: after) != nil,
+              let accountIdB64 = currentAccountIdB64 else { return }
+        registrarSeeds.markHandoverOwed(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        registrarSeeds.forgetDelivered(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        registrarSeeds.clearRootHeld(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        registrarSetsSent[groupIdHex] = nil
+        rootHandoverNotBefore[groupIdHex] = nil
+        rootHandoverLastSentAt[groupIdHex] = nil
+        NSLog("ADR-0057: ownership moved away; root handover owed")
+        scheduleRootHandover(groupIdHex: groupIdHex)
+    }
+
+    /// Schedule the root handover for `groupIdHex` when it is owed, not
+    /// already running and not waiting out a retry interval; and resume a
+    /// kept takeover (a received root seed) the same way. Spawned, never
+    /// awaited: the send publishes into the group under its MLS lock. Called
+    /// at the poll tail, so on the first poll of a session and on group
+    /// activity.
+    func scheduleRootHandover(groupIdHex: String) {
+        scheduleRootTakeover(groupIdHex: groupIdHex)
+        guard let accountIdB64 = currentAccountIdB64,
+              registrarSeeds.owedHandovers(accountIdB64: accountIdB64)
+                  .contains(groupIdHex.lowercased()) else { return }
+        if let wait = rootHandoverNotBefore[groupIdHex], Date() < wait { return }
+        if rootHandoverInFlight.contains(groupIdHex) {
+            rootHandoverRerun.insert(groupIdHex)
+            return
+        }
+        rootHandoverInFlight.insert(groupIdHex)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            repeat {
+                self.rootHandoverRerun.remove(groupIdHex)
+                await self.rootHandoverOnce(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+            } while self.rootHandoverRerun.contains(groupIdHex)
+                && self.currentAccountIdB64 == accountIdB64
+            self.rootHandoverInFlight.remove(groupIdHex)
+        }
+    }
+
+    /// One step of an owed handover (sending side, finding 4): probe with this
+    /// account's own root; `401` settles it, `204` (re-)sends the envelope at
+    /// most every ``RootHandover/resendInterval``.
+    private func rootHandoverOnce(accountIdB64: String, groupIdHex: String) async {
+        guard registrarSeeds.owedHandovers(accountIdB64: accountIdB64)
+                  .contains(groupIdHex.lowercased()),
+              let record = groups[groupIdHex] else { return }
+        if (try? record.group.isActive()) == false {
+            // Evicted: there is no group left to post the seed into.
+            registrarSeeds.clearHandoverOwed(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+            return
+        }
+        let groupId = record.groupId
+        let ds = dsClient
+        let outcome = await RootHandover.runOwed(
+            probe: { [weak self] in
+                guard let self else { throw ChatError.argument("ChatRepository deallocated") }
+                // The root is derived from the account identity whatever the
+                // role table says: this is the OUTGOING owner's own root.
+                let root = try self.journalRootSigner(groupId: groupId)
+                return try await JournalOwnership.probeRoot(root: root, journalId: groupId, ds: ds)
+            },
+            lastSentAt: rootHandoverLastSentAt[groupIdHex],
+            now: Date(),
+            send: { [weak self] in
+                guard let self else { return .cancelled }
+                return await self.sendRootHandoverEnvelope(groupIdHex: groupIdHex, groupId: groupId)
+            })
+        guard currentAccountIdB64 == accountIdB64 else { return }
+        if outcome == .sent { rootHandoverLastSentAt[groupIdHex] = Date() }
+        if outcome.settlesObligation {
+            registrarSeeds.clearHandoverOwed(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+            rootHandoverNotBefore[groupIdHex] = nil
+            rootHandoverLastSentAt[groupIdHex] = nil
+        } else {
+            rootHandoverNotBefore[groupIdHex] = Date().addingTimeInterval(Self.rootHandoverRetryInterval)
+        }
+        NSLog("ADR-0057: owed root handover %@", String(describing: outcome))
+    }
+
+    /// Seal this account's root seed to the live owner and post it.
+    private func sendRootHandoverEnvelope(groupIdHex: String, groupId: Data) async -> RootHandover.SendOutcome {
+        await RootHandover.send(
+            ownAccountKey: { [weak self] in self?.accountIdentity?.signaturePublicKey() },
+            liveOwner: { [weak self] in self?.roleTableOwner(groupIdHex: groupIdHex) },
+            ownerX25519: { [weak self] accountKey in
+                await self?.memberX25519PublicKey(accountKey: accountKey)
+            },
+            rootSeed: { [weak self] in
+                guard let account = self?.accountIdentity else {
+                    throw ChatError.argument("no account identity — cannot derive the journal root")
+                }
+                var accountSeed = account.ed25519Seed()
+                defer { RootHandover.wipe(&accountSeed) }
+                return try dsJournalRootSeed(accountIdentitySeed: accountSeed, journalId: groupId)
+            },
+            compose: { newOwner, x25519, rootSeed in
+                try composeRootHandoverEnvelope(
+                    journalId: groupId, newOwnerAccountKey: newOwner,
+                    newOwnerX25519PublicKey: x25519, rootSeed: rootSeed)
+            },
+            sendEnvelope: { [weak self] envelope in
+                guard let self else { throw ChatError.argument("ChatRepository deallocated") }
+                try await self.publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: envelope)
+            })
+    }
+
+    /// Receiving side: run the new owner's takeover with the kept OLD root
+    /// seed (``RegistrarSeedStore/pendingRootSeed(accountIdB64:groupIdHex:)``),
+    /// detached from the locked receive region, when one is kept, none is
+    /// running and a failed one is not waiting out its retry interval.
+    private func scheduleRootTakeover(groupIdHex: String) {
+        guard let accountIdB64 = currentAccountIdB64,
+              groups[groupIdHex] != nil,
+              !rootTakeoverInFlight.contains(groupIdHex),
+              registrarSeeds.pendingRootSeed(accountIdB64: accountIdB64, groupIdHex: groupIdHex) != nil
+        else { return }
+        if let wait = rootTakeoverNotBefore[groupIdHex], Date() < wait { return }
+        rootTakeoverInFlight.insert(groupIdHex)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.runRootTakeover(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+            self.rootTakeoverInFlight.remove(groupIdHex)
+        }
+    }
+
+    private func runRootTakeover(accountIdB64: String, groupIdHex: String) async {
+        guard let record = groups[groupIdHex],
+              var oldRootSeed = registrarSeeds.pendingRootSeed(
+                  accountIdB64: accountIdB64, groupIdHex: groupIdHex) else { return }
+        defer { RootHandover.wipe(&oldRootSeed) }
+        let groupId = record.groupId
+        let ds = dsClient
+        let outcome = await RootHandover.takeOver(
+            journalId: groupId,
+            oldRootSeed: oldRootSeed,
+            ownRootPublicKey: { [weak self] in
+                (try? self?.journalRootSigner(groupId: groupId))?.publicKey()
+            },
+            stillOwner: { [weak self] in
+                guard let self, let current = self.groups[groupIdHex] else { return false }
+                return self.isJournalOwner(record: current)
+            },
+            oldRootTransfer: { seed, newRoot in
+                try dsStatementSigner(seed: seed).rootTransfer(journalId: groupId, newRoot: newRoot)
+            },
+            probeOwnRoot: { [weak self] in
+                guard let self else { throw ChatError.argument("ChatRepository deallocated") }
+                return try await JournalOwnership.probeRoot(
+                    root: try self.journalRootSigner(groupId: groupId), journalId: groupId, ds: ds)
+            },
+            markRootHeld: { [registrarSeeds] in
+                registrarSeeds.markRootHeld(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+            },
+            newRoot: { [weak self] in try? self?.journalRootSigner(groupId: groupId) },
+            desiredRegistrarEntries: { [weak self] in
+                guard let self, let current = self.groups[groupIdHex],
+                      let desired = self.desiredRegistrars(record: current) else { return nil }
+                return JournalOwnership.registrarSetEntries(
+                    desired: desired,
+                    registrarPublicKey: { self.registrarPublicKey(groupId: groupId, accountKey: $0) })
+            },
+            ds: ds,
+            resetAppointments: { [weak self] in
+                self?.registrarSeeds.forgetDelivered(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+                self?.registrarSeeds.remove(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+                self?.registrarSetsSent[groupIdHex] = nil
+            },
+            reconcile: { [weak self] in self?.reconcileJournalRegistrarsSoon(groupIdHex: groupIdHex) },
+            log: { line in NSLog("ADR-0057: %@", line) })
+        guard currentAccountIdB64 == accountIdB64 else { return }
+        if outcome.settlesSeed {
+            registrarSeeds.removePendingRootSeed(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+            rootTakeoverNotBefore[groupIdHex] = nil
+        } else {
+            rootTakeoverNotBefore[groupIdHex] = Date().addingTimeInterval(Self.rootHandoverRetryInterval)
+        }
+        NSLog("ADR-0057: root takeover %@", String(describing: outcome))
+    }
+
+    /// ADR-0057 obligation 8, second security pass finding 5 — bind the
+    /// journal to `derivePushGid(secret)` with the root (owner) or the admin
+    /// registrar key, BEFORE the secret is broadcast (``PushGroupRouting``
+    /// calls this). Members do not bind.
+    private func bindPushRouting(groupIdHex: String, secret: Data) async -> PushBindOutcome {
+        guard let record = groups[groupIdHex],
+              let pushGid = PushGroupRouting.derivePushGid(secret: secret) else { return .failed }
+        guard let authority = journalAuthority(record: record, groupIdHex: groupIdHex),
+              authority.isRootOrAdmin else {
+            NSLog("ADR-0057: push binding skipped, no root or admin registrar key")
+            return .notPermitted
+        }
+        return await JournalOwnership.bindPush(
+            signer: authority.signer, journalId: record.groupId, pushGid: pushGid, ds: dsClient)
     }
 
     /// ADR-0053 point 2 — claim this device's two mailboxes: the account
@@ -6001,7 +6643,15 @@ public final class ChatRepository: ObservableObject {
         // un-nested position.)
         do {
             _ = try await withCommitLock(groupIdHex: groupIdHex) { [self] in
-                try await resolveOwedVerdict(sweepPorts(record: record, groupIdHex: groupIdHex))
+                // ADR-0057 S2 finding 1 — an owed verdict that merges (or the
+                // rows it applies) may carry this account's ownership transfer.
+                let ownerBefore = roleTableOwner(groupIdHex: groupIdHex)
+                defer {
+                    noteOwnerTransition(
+                        groupIdHex: groupIdHex, before: ownerBefore,
+                        after: roleTableOwner(groupIdHex: groupIdHex))
+                }
+                return try await resolveOwedVerdict(sweepPorts(record: record, groupIdHex: groupIdHex))
             }
         } catch {
             // The journal was unreadable, so the verdict stays owed and the
@@ -6576,6 +7226,11 @@ private final class GroupRecord {
     /// Read by the sheet on its next refresh and cleared when an admin acts on
     /// the queue, which is what may have made room.
     var sawUnkeptExternalJoin: Bool = false
+    /// ADR-0057 — the accounts the currently staged sweep evicts, recorded at
+    /// the stage so its registration can revoke their registrar keys. Empty
+    /// after a restart (an owed verdict re-registers nothing; the owner's
+    /// reconcile dismisses the departed registrars afterwards).
+    var stagedEvictedAccountKeys: [Data] = []
     /// ADR-0053 point 7 — how far this device has read the group's knocks. Its
     /// own id space, never mixed with ``cursor``. Seeded from, and written back
     /// to, a per-account `UserDefaults` key by the knock poll.
@@ -6772,7 +7427,8 @@ private final class GroupRecord {
         profileSink: ((ProfileClaim, MemberIdentity?) -> Void)? = nil,
         groupNameSink: ((String, UInt64, UInt32?) -> Void)? = nil,
         profileRequestSink: (() -> Void)? = nil,
-        pinSink: ((FfiPinOp, UInt32?) -> Void)? = nil
+        pinSink: ((FfiPinOp, UInt32?) -> Void)? = nil,
+        registrarSeedSink: ((Data, UInt32?) -> Void)? = nil
     ) {
         for event in events {
             switch event {
@@ -6928,6 +7584,12 @@ private final class GroupRecord {
                 // someone with standing can pin for everyone; the stamp so the
                 // strictly-newer order can refuse a stale re-send.
                 pinSink?(op, senderLeaf)
+            case .registrarSeed(_, let plaintext, let senderLeaf, _):
+                // ADR-0057 — a registrar seed from the journal root. Not a
+                // timeline row: routed out to the repository, which gates it on
+                // the addressee and on the sender being the owner, then opens
+                // and stores it.
+                registrarSeedSink?(plaintext, senderLeaf)
             }
         }
     }

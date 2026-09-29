@@ -279,8 +279,8 @@ export default function RestoreIdentityPrompt(): JSX.Element {
               <Match when={picked() === "device"}>
                 <div class="lk-stack">
                   <p class="lk-muted">
-                    A device that is still logged in shows a prompt; confirm it there and
-                    compare the code. The transfer is end-to-end encrypted; Lakko's servers
+                    A device that is still logged in shows a six-digit code; type it
+                    here. The transfer is end-to-end encrypted; Lakko's servers
                     cannot read it. No camera needed; a QR code is there if you prefer.
                   </p>
                   <Show when={(account()?.username.trim().length ?? 0) === 0}>

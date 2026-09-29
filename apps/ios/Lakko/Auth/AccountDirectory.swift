@@ -94,6 +94,22 @@ public struct UsernameTaken: Error, LocalizedError, Equatable {
     }
 }
 
+/// `429 {"error":"handle-bind-limited"}` from `PUT /auth/login-handle`: the
+/// account changed its username too often (`docs/ux/anti-abuse.md` section 2).
+/// The signup claim stops before discovery, as for a taken name, and the form
+/// keeps its contents.
+public struct UsernameBindLimited: Error, LocalizedError, Equatable {
+    public let retryAfterSecs: Int?
+
+    public init(retryAfterSecs: Int?) {
+        self.retryAfterSecs = retryAfterSecs
+    }
+
+    public var errorDescription: String? {
+        AuthRateLimit.handleBindLimitedCopy(retryAfterSecs: retryAfterSecs)
+    }
+}
+
 /// Binding a login handle at auth (ADR-0054 S5). ``AuthClient`` in
 /// production; a fake in tests.
 protocol LoginHandleBinder {
@@ -116,7 +132,8 @@ extension AuthClient: LoginHandleBinder {}
 /// anywhere yet, which is ordinary first-come naming:
 ///
 ///   1. `PUT /auth/login-handle` with the new account's session. A `409` means
-///      the name is taken: ``UsernameTaken``, and discovery is never asked.
+///      the name is taken: ``UsernameTaken``, and discovery is never asked. A
+///      `429 handle-bind-limited` stops here too: ``UsernameBindLimited``.
 ///   2. `POST /discovery/register`. A `409` there is also ``UsernameTaken``.
 ///      ANY failure of this step releases the handle again
 ///      (`DELETE /auth/login-handle`, best-effort): the signup form keeps the
@@ -149,6 +166,14 @@ func claimSignupUsername(
         try await binder.bindLoginHandle(handle: name.handle, sessionToken: sessionToken)
     } catch AuthClientError.http(let status, _, _) where status == 409 {
         throw UsernameTaken(username: name.canonical)
+    } catch let error as AuthClientError {
+        // ADR-0054 S5 + anti-abuse section 2 — too many handle changes: stop
+        // before discovery like a taken name, with its own copy.
+        if let refusal = AuthRateLimit.refusal(in: error),
+           refusal.code == AuthRateLimit.handleBindLimited {
+            throw UsernameBindLimited(retryAfterSecs: refusal.retryAfterSecs)
+        }
+        throw error
     }
     do {
         return try await directory

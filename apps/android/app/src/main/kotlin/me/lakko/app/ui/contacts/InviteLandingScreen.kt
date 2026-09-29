@@ -131,6 +131,7 @@ public fun InviteLandingScreen(
                     "share it again.",
                 onDone = onDone,
             )
+            InviteLandingState.Damaged -> DamagedPanel(onDone = onDone)
             InviteLandingState.RateLimited -> RateLimitedPanel(
                 onRetry = viewModel::retry,
                 onDone = onDone,
@@ -260,6 +261,21 @@ private fun InfoPanel(
         text = body,
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Spacer(Modifier.height(24.dp))
+    Button(
+        onClick = onDone,
+        modifier = Modifier.fillMaxWidth(),
+    ) { Text("Done") }
+}
+
+/** Sealed links (`docs/ux/group-invite-page.md` section 3): the one
+ *  sentence and Done, nothing else — nothing was opened. */
+@Composable
+private fun DamagedPanel(onDone: () -> Unit) {
+    Text(
+        text = me.lakko.app.discovery.INVITE_LINK_DAMAGED_COPY,
+        style = MaterialTheme.typography.bodyMedium,
     )
     Spacer(Modifier.height(24.dp))
     Button(

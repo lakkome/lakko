@@ -135,6 +135,9 @@ data class JoinCallUiState(
     /** The discovery service answered `429` while resolving the link: not an
      *  invalid link, the screen says to try again later. */
     val rateLimited: Boolean = false,
+    /** Sealed links (2026-09-28): the fragment is missing or malformed, or
+     *  the link does not open under it. Refused with one sentence. */
+    val damaged: Boolean = false,
     val phase: JoinCallPhase = JoinCallPhase.Idle,
     val error: String? = null,
     /** ADR-0048 UX §4 — a guest's "Your name", prefilled `Guest`. */
@@ -185,6 +188,9 @@ class JoinCallViewModel(
     /** Set by [decode] when the ledger answered `429`. */
     private var lastDecodeRateLimited = false
 
+    /** Set by [decode] when the link is damaged (sealed links). */
+    private var lastDecodeDamaged = false
+
     init {
         runDecode()
     }
@@ -192,8 +198,16 @@ class JoinCallViewModel(
     private fun runDecode() {
         viewModelScope.launch {
             lastDecodeRateLimited = false
+            lastDecodeDamaged = false
             val d = decode(slug)
-            local.update { it.copy(loading = false, decoded = d, rateLimited = d == null && lastDecodeRateLimited) }
+            local.update {
+                it.copy(
+                    loading = false,
+                    decoded = d,
+                    rateLimited = d == null && lastDecodeRateLimited,
+                    damaged = d == null && lastDecodeDamaged,
+                )
+            }
         }
     }
 
@@ -219,9 +233,16 @@ class JoinCallViewModel(
     }
 
     private suspend fun decode(slug: String): DecodedCall? {
+        // Sealed links: `<slug>#<secret>`; a missing or malformed secret is
+        // refused before any request.
+        val link = me.lakko.app.discovery.InviteLinkArgument.decode(slug)
+        val secret = me.lakko.app.discovery.inviteLinkSecretOf(link.fragment) ?: run {
+            lastDecodeDamaged = true
+            return null
+        }
         return try {
-            val parsed = parseCallInviteSlug(slug)
-            val capabilityBytes: ByteArray = when (parsed) {
+            val parsed = parseCallInviteSlug(link.slug)
+            val sealedBytes: ByteArray = when (parsed) {
                 is ParsedCallInvite.Pointer -> {
                     val discovery = DiscoveryClient()
                     try {
@@ -232,7 +253,9 @@ class JoinCallViewModel(
                 }
                 is ParsedCallInvite.Inline -> parsed.capabilityBytes
             }
-            CallInviteCapability.decodeAndVerify(capabilityBytes).use { cap ->
+            me.lakko.app.discovery.openSealedInviteLink(sealedBytes, secret) { bytes, key ->
+                CallInviteCapability.openLink(bytes, key)
+            }.use { cap ->
                 val secrets = authRepository.identitySecrets.value
                 val isOwner = secrets != null &&
                     Identity.fromSeed(secrets.accountIdentitySeed).use {
@@ -248,6 +271,9 @@ class JoinCallViewModel(
                     isOwner = isOwner,
                 )
             }
+        } catch (e: me.lakko.app.discovery.InviteLinkDamaged) {
+            lastDecodeDamaged = true
+            null
         } catch (e: DiscoveryHttpError) {
             if (me.lakko.app.discovery.isDiscoveryRateLimited(e)) {
                 lastDecodeRateLimited = true
@@ -531,6 +557,10 @@ fun JoinCallScreen(
             ui.rateLimited -> {
                 Text(me.lakko.app.discovery.INVITE_RATE_LIMITED_COPY)
                 TextButton(onClick = { viewModel.retryDecode() }) { Text("Try again") }
+                TextButton(onClick = onExit) { Text("Go back") }
+            }
+            ui.damaged -> {
+                Text(me.lakko.app.discovery.INVITE_LINK_DAMAGED_COPY)
                 TextButton(onClick = onExit) { Text("Go back") }
             }
             ui.decoded == null || ui.decoded?.valid == false -> {

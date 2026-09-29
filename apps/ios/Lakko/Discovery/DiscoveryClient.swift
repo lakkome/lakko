@@ -602,50 +602,41 @@ public final class DiscoveryClient {
 
     // MARK: - High-level invite flows
 
-    /// Upload a freshly-composed `InviteCapability` blob and
-    /// receive the server-minted `blobId` (6 random bytes,
-    /// ADR-0028 amendment of 2026-09-27). Drives
-    /// `POST /discovery/invite`. A second upload of the same
-    /// bytes gets a second id.
-    public func uploadInvite(capabilityBytes: Data) async throws -> Data {
-        guard !capabilityBytes.isEmpty else {
-            throw DiscoveryClientError.argument(
-                "capabilityBytes must be non-empty"
-            )
-        }
-        guard capabilityBytes.count <= Self.maxCapabilityBytes else {
-            throw DiscoveryClientError.argument(
-                "capabilityBytes exceeds the \(Self.maxCapabilityBytes)-byte ceiling " +
-                "(got \(capabilityBytes.count) bytes)"
-            )
-        }
-
+    /// Upload a freshly-minted SEALED `/i/` link (ADR-0028 amendment
+    /// 2026-09-28) and receive the server-minted `blobId` (6 random bytes).
+    /// The ledger stores only `mint.sealed`; the clear fields carry what the
+    /// server needs (revoke key, expiry, consume ceiling, the owner's label).
+    /// A second upload of the same bytes gets a second id.
+    public func uploadInvite(
+        mint: InviteLinkMint,
+        expiryMs: UInt64,
+        maxUses: UInt32,
+        label: String,
+        bootstrapReferral: Bool
+    ) async throws -> Data {
+        try Self.checkSealed(mint.sealed, ceiling: Self.maxCapabilityBytes)
         let resp = try await inviteUpload(
             InviteUploadRequest(
-                capability: base64Encode(capabilityBytes)
+                sealed: base64Encode(mint.sealed),
+                issuerPubkey: base64Encode(mint.issuerPubkey),
+                expiryMs: expiryMs,
+                maxUses: maxUses,
+                label: label,
+                bootstrapReferral: bootstrapReferral
             )
         )
-        guard let blobId = base64UrlDecodeNoPad(resp.blobId),
-              blobId.count == Self.blobIdLength else {
-            throw DiscoveryClientError.http(
-                status: 200,
-                endpoint: "/discovery/invite",
-                body: "server returned malformed blob_id"
-            )
-        }
-        return blobId
+        return try Self.parseBlobId(resp.blobId, endpoint: "/discovery/invite")
     }
 
-    /// Fetch a previously-uploaded `InviteCapability` by its
-    /// ledger `blobId`. Returns `nil` on 404, raw
-    /// capability bytes on 200 (the caller drives
-    /// `InviteCapability.decodeAndVerify` to re-verify locally so
-    /// a malicious server cannot serve substituted bytes).
+    /// Fetch a previously-uploaded SEALED `/i/` link by its ledger `blobId`.
+    /// Returns `nil` on 404, the sealed bytes on 200; the caller opens them
+    /// with the link's fragment secret (`InviteCapability.openLink`), which
+    /// also re-verifies the signature, so a substituted blob opens nothing.
     public func fetchInvite(blobId: Data) async throws -> Data? {
         guard let raw = try await inviteFetch(blobId: blobId) else {
             return nil
         }
-        return base64Decode(raw.capability)
+        return base64Decode(raw.sealed)
     }
 
     /// Atomically bump the consume counter for the invite at
@@ -883,55 +874,33 @@ public final class DiscoveryClient {
         )
     }
 
-    /// Upload a freshly-composed `CallInviteCapability` blob and
-    /// receive the server-minted `blobId` (6 random bytes).
-    /// Drives `POST /discovery/call-invite`.
-    /// Every upload gets a fresh id.
-    ///
-    /// Sibling of ``uploadInvite(capabilityBytes:)``; the
-    /// client-side ceiling is `maxCallCapabilityBytes` (8 KiB,
-    /// 4× contact-invite) because the call-invite capability
-    /// embeds a one-time MLS KeyPackage.
-    public func uploadCallInvite(capabilityBytes: Data) async throws -> Data {
-        guard !capabilityBytes.isEmpty else {
-            throw DiscoveryClientError.argument(
-                "capabilityBytes must be non-empty"
-            )
-        }
-        guard capabilityBytes.count <= Self.maxCallCapabilityBytes else {
-            throw DiscoveryClientError.argument(
-                "capabilityBytes exceeds the \(Self.maxCallCapabilityBytes)-byte ceiling " +
-                "(got \(capabilityBytes.count) bytes)"
-            )
-        }
-
+    /// Upload a freshly-minted SEALED `/c/` link and receive the
+    /// server-minted `blobId` (6 random bytes). Drives
+    /// `POST /discovery/call-invite`. Every upload gets a fresh id.
+    public func uploadCallInvite(
+        mint: InviteLinkMint,
+        expiryMs: UInt64,
+        maxUses: UInt32
+    ) async throws -> Data {
+        try Self.checkSealed(mint.sealed, ceiling: Self.maxCallCapabilityBytes)
         let resp = try await callInviteUpload(
             InviteUploadRequest(
-                capability: base64Encode(capabilityBytes)
+                sealed: base64Encode(mint.sealed),
+                issuerPubkey: base64Encode(mint.issuerPubkey),
+                expiryMs: expiryMs,
+                maxUses: maxUses
             )
         )
-        guard let blobId = base64UrlDecodeNoPad(resp.blobId),
-              blobId.count == Self.blobIdLength else {
-            throw DiscoveryClientError.http(
-                status: 200,
-                endpoint: "/discovery/call-invite",
-                body: "server returned malformed blob_id"
-            )
-        }
-        return blobId
+        return try Self.parseBlobId(resp.blobId, endpoint: "/discovery/call-invite")
     }
 
-    /// Fetch a previously-uploaded `CallInviteCapability` by
-    /// its ledger `blobId`. Returns `nil` on 404,
-    /// raw capability bytes on 200 (the caller drives
-    /// `CallInviteCapability.decodeAndVerify` to re-verify
-    /// locally so a malicious server cannot serve substituted
-    /// bytes).
+    /// Fetch a previously-uploaded SEALED `/c/` link. `nil` on 404, the
+    /// sealed bytes on 200 (opened with `CallInviteCapability.openLink`).
     public func fetchCallInvite(blobId: Data) async throws -> Data? {
         guard let raw = try await callInviteFetch(blobId: blobId) else {
             return nil
         }
-        return base64Decode(raw.capability)
+        return base64Decode(raw.sealed)
     }
 
     /// Atomically bump the consume counter for the call-invite
@@ -1026,7 +995,7 @@ public final class DiscoveryClient {
     /// `GroupInviteCapability` blob. Low-level helper driven by
     /// ``uploadGroupInvite(capabilityBytes:maxUses:)``.
     public func groupInviteUpload(
-        _ request: GroupInviteUploadRequest
+        _ request: InviteUploadRequest
     ) async throws -> InviteUploadResponse {
         try await post(endpoint: "/discovery/group-invite", body: request)
     }
@@ -1046,53 +1015,37 @@ public final class DiscoveryClient {
         )
     }
 
-    /// Upload a freshly-composed `GroupInviteCapability` blob and receive the
-    /// server-minted `blobId` (6 random bytes). Drives `POST
-    /// /discovery/group-invite`. Every upload gets a fresh id.
+    /// Upload a freshly-minted SEALED `/g/` link and receive the
+    /// server-minted `blobId` (6 random bytes). Drives
+    /// `POST /discovery/group-invite`. Every upload gets a fresh id.
     ///
     /// `maxUses` is a SOFT anti-spam throttle (NOT part of the signed
     /// capability, NOT an access control — the admin approval gate is the
     /// security boundary): `0` = single-use, `0xFFFFFFFF` = unlimited.
     public func uploadGroupInvite(
-        capabilityBytes: Data,
+        mint: InviteLinkMint,
+        expiryMs: UInt64,
         maxUses: UInt32
     ) async throws -> Data {
-        guard !capabilityBytes.isEmpty else {
-            throw DiscoveryClientError.argument("capabilityBytes must be non-empty")
-        }
-        guard capabilityBytes.count <= Self.maxGroupCapabilityBytes else {
-            throw DiscoveryClientError.argument(
-                "capabilityBytes exceeds the \(Self.maxGroupCapabilityBytes)-byte ceiling " +
-                "(got \(capabilityBytes.count) bytes)"
-            )
-        }
-
+        try Self.checkSealed(mint.sealed, ceiling: Self.maxGroupCapabilityBytes)
         let resp = try await groupInviteUpload(
-            GroupInviteUploadRequest(
-                capability: base64Encode(capabilityBytes),
+            InviteUploadRequest(
+                sealed: base64Encode(mint.sealed),
+                issuerPubkey: base64Encode(mint.issuerPubkey),
+                expiryMs: expiryMs,
                 maxUses: maxUses
             )
         )
-        guard let blobId = base64UrlDecodeNoPad(resp.blobId),
-              blobId.count == Self.blobIdLength else {
-            throw DiscoveryClientError.http(
-                status: 200,
-                endpoint: "/discovery/group-invite",
-                body: "server returned malformed blob_id"
-            )
-        }
-        return blobId
+        return try Self.parseBlobId(resp.blobId, endpoint: "/discovery/group-invite")
     }
 
-    /// Fetch a previously-uploaded `GroupInviteCapability` by its
-    /// ledger `blobId`. Returns `nil` on 404, raw capability bytes
-    /// on 200 (the caller drives `GroupInviteCapability.decodeAndVerify` to
-    /// re-verify locally so a malicious server cannot serve substituted bytes).
+    /// Fetch a previously-uploaded SEALED `/g/` link. `nil` on 404, the
+    /// sealed bytes on 200 (opened with `GroupInviteCapability.openLink`).
     public func fetchGroupInvite(blobId: Data) async throws -> Data? {
         guard let raw = try await groupInviteFetch(blobId: blobId) else {
             return nil
         }
-        return base64Decode(raw.capability)
+        return base64Decode(raw.sealed)
     }
 
     /// Atomically bump the consume counter for the group-invite at `blobId`
@@ -1781,21 +1734,41 @@ public final class DiscoveryClient {
     /// misbehaving caller.
     fileprivate static let maxKeyPackageBytes: Int = 2048
 
-    /// Mirror of `services/discovery`'s `MAX_CAPABILITY_BYTES`.
-    fileprivate static let maxCapabilityBytes: Int = 2048
+    /// A sealed blob must be non-empty and within the ledger's ceiling.
+    fileprivate static func checkSealed(_ sealed: Data, ceiling: Int) throws {
+        guard !sealed.isEmpty else {
+            throw DiscoveryClientError.argument("sealed link must be non-empty")
+        }
+        guard sealed.count <= ceiling else {
+            throw DiscoveryClientError.argument(
+                "sealed link exceeds the \(ceiling)-byte ceiling (got \(sealed.count) bytes)")
+        }
+    }
+
+    /// Parse the server-minted ledger id.
+    fileprivate static func parseBlobId(_ slug: String, endpoint: String) throws -> Data {
+        guard let blobId = base64UrlDecodeNoPad(slug), blobId.count == blobIdLength else {
+            throw DiscoveryClientError.http(
+                status: 200, endpoint: endpoint, body: "server returned malformed blob_id")
+        }
+        return blobId
+    }
+
+    /// The `/i/` sealed-blob ceiling (`lakko_contacts::invite::MAX_SEALED_LEN`).
+    fileprivate static let maxCapabilityBytes: Int = 254
 
     /// Mirror of `services/discovery`'s `MAX_CALL_CAPABILITY_BYTES`
     /// — the call-invite ledger uses an 8192-byte ceiling
     /// (vs. contact-invite's 2048) because `CallInviteCapability`
     /// embeds a one-time MLS KeyPackage (~4 KiB upper bound per
     /// `MAX_KEY_PACKAGE_LEN`).
-    fileprivate static let maxCallCapabilityBytes: Int = 8192
+    fileprivate static let maxCallCapabilityBytes: Int = 4338
 
     /// Mirror of `services/discovery`'s group-invite `MAX_CAPABILITY_BYTES`
     /// (ADR-0028) — the group join-ticket wire is leaner than a call-invite
     /// (no embedded KeyPackage); it tops out near 363 bytes, so the ledger
     /// column + this client-side ceiling are 512.
-    fileprivate static let maxGroupCapabilityBytes: Int = 512
+    fileprivate static let maxGroupCapabilityBytes: Int = 938
 
     /// The ledger id of an invite (`/i/`, `/c/`, `/g/`): a random 6-byte id
     /// the discovery service mints at upload (ADR-0028 amendment of

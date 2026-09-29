@@ -73,6 +73,9 @@ public final class JoinCallLandingViewModel: ObservableObject {
     /// The ledger answered `429` on the link fetch: the link may be fine, so
     /// the screen says "try again later" rather than "invalid".
     @Published public private(set) var rateLimited = false
+    /// ADR-0028 amendment 2026-09-28 — the link's fragment secret is missing or
+    /// malformed, or the blob does not open under it.
+    @Published public private(set) var damaged = false
     /// ADR-0048 / UX spec §4 — a guest (no session) is asked for a name here,
     /// prefilled `Guest`. It becomes the new account's own profile.
     @Published public var guestName: String = "Guest"
@@ -295,8 +298,16 @@ public final class JoinCallLandingViewModel: ObservableObject {
 
     private func decode() async {
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
+        // `slug` is the link token `slug#fragment`.
+        let parts = InviteLinkSecret.split(slug)
+        guard let linkSecret = InviteLinkSecret.read(parts.fragment) else {
+            decoded = nil
+            damaged = true
+            loading = false
+            return
+        }
         do {
-            let parsed = try CallInviteUrl.parseCallInviteSlug(slug)
+            let parsed = try CallInviteUrl.parseCallInviteSlug(parts.base)
             let capabilityBytes: Data
             switch parsed {
             case .pointer(let blobId):
@@ -309,7 +320,15 @@ public final class JoinCallLandingViewModel: ObservableObject {
             case .inline(let bytes):
                 capabilityBytes = bytes
             }
-            let cap = try CallInviteCapability.decodeAndVerify(wire: capabilityBytes)
+            let cap: CallInviteCapability
+            do {
+                cap = try CallInviteCapability.openLink(sealed: capabilityBytes, linkSecret: linkSecret)
+            } catch {
+                decoded = nil
+                damaged = true
+                loading = false
+                return
+            }
             var isOwner = false
             if let seed = authRepository.identitySecrets?.accountIdentitySeed {
                 let mine = try Identity.fromSeed(seed: seed).signaturePublicKey()
@@ -404,6 +423,11 @@ public struct JoinCallLandingScreen: View {
                     Task { await viewModel.retryDecode() }
                 }
                 .buttonStyle(.bordered)
+                closeButton
+            } else if viewModel.damaged {
+                Text(inviteLinkDamagedMessage)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
                 closeButton
             } else if viewModel.decoded == nil || viewModel.decoded?.valid == false {
                 Text("This call link is invalid or has expired.")

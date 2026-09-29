@@ -52,12 +52,18 @@ import {
   parseGroupInviteSlug,
   splitGroupInviteLink,
 } from "./group-invite";
-import { inviteLinkWidths } from "./invite-link";
+import {
+  InviteLinkDamagedError,
+  inviteLinkWidths,
+  openSealedInvite,
+  parseInviteLinkFragment,
+} from "./invite-link";
 import { DsClient } from "../ds/client";
 import { withGroupMlsLock } from "../mls/group-lock";
 import type { IdentitySecrets } from "../auth/AuthContext";
 import type {
-  GroupInviteMint as WasmGroupInviteMint,
+  InviteLinkMint as WasmInviteLinkMint,
+  GroupInviteCapability as WasmGroupInviteCapability,
   Group as WasmGroup,
   Identity as WasmIdentity,
 } from "../../wasm/lakko_ffi_wasm";
@@ -109,10 +115,11 @@ import type { ActingCommitter } from "../chat/committer-beacon";
 // timeline event. The sweep's verdict apply consumes journal rows the poll will
 // never fetch again, so it has to build events for them, and it has to build
 // them the same way the poll does.
-import { rosterOf, toEvent } from "../chat/client";
+import { consumeRegistrarSeed, rosterOf, toEvent } from "../chat/client";
+import { noteOwnerTransition, readRoleTableOwner } from "../ds/root-handover";
 import { scanJournal } from "../chat/journal-head-epoch";
 import {
-  healAfterApply,
+  dsAccess,
   knockToJoin,
   registerBeforePublish,
   takeSigner,
@@ -120,6 +127,15 @@ import {
 } from "../ds/access";
 import { resolveLeafSignatureKey, resolveMemberIdentity } from "../chat/author-identity";
 import type { IncomingChatEvent } from "../chat/client";
+import {
+  JournalClaimFailedError,
+  claimAtCreation,
+  evicteeAccountKeys,
+  releaseAuthority,
+  revocationKeys,
+  type OwnershipRosterMember,
+} from "../ds/ownership";
+import { wasmRegistrarDerivation } from "../ds/journal-authority";
 // ADR-0045 UX §6 — the seventh refusal string, defined ONCE beside the rest of
 // the §6.1 copy. Both C-65 directions reuse it verbatim (a pending role change
 // refuses a transfer, a pending transfer refuses a role change), so a single
@@ -633,6 +649,8 @@ function sweepPortsFor(
 ): SweepPorts {
   const groupIdBytes = group.groupId;
   const groupIdB64 = base64Encode(groupIdBytes);
+  /** The leaves the staged sweep removes (set by `stagePendingProposals`). */
+  let stagedRemovedLeaves = new Set<number>();
   return {
     actingCommitter,
     group: {
@@ -650,10 +668,25 @@ function sweepPortsFor(
         // staged commit by the core rather than predicted by the caller — which
         // matters here because it is what addresses the Welcome.
         const added: Uint8Array[] = [];
+        stagedRemovedLeaves = new Set<number>();
         for (const raw of staged.swept()) {
-          const record = raw as { kind: string; addSignatureKey?: Uint8Array };
+          const record = raw as {
+            kind: string;
+            addSignatureKey?: Uint8Array;
+            removeTargetLeaf?: number;
+            senderLeaf?: number;
+          };
           if (record.kind === "add" && record.addSignatureKey !== undefined) {
             added.push(record.addSignatureKey);
+          }
+          // ADR-0057 — the leaves this commit removes, for the owner's
+          // revocation list: a `remove` names its target, a `leave` (RFC 9420
+          // SelfRemove) removes its sender.
+          if (record.kind === "remove" && record.removeTargetLeaf !== undefined) {
+            stagedRemovedLeaves.add(record.removeTargetLeaf);
+          }
+          if (record.kind === "leave" && record.senderLeaf !== undefined) {
+            stagedRemovedLeaves.add(record.senderLeaf);
           }
         }
         return {
@@ -663,7 +696,11 @@ function sweepPortsFor(
         };
       },
       mergeStagedSweep: () => {
+        // ADR-0057 root handover - the sweep that carries this account's own
+        // ownership transfer moves the role table here.
+        const ownerBefore = readRoleTableOwner(group);
         group.mergeStagedSweep(identity);
+        noteOwnerTransition(groupIdBytes, ownerBefore, readRoleTableOwner(group));
       },
       abandonStagedSweep: () => {
         group.abandonStagedSweep(identity);
@@ -678,20 +715,27 @@ function sweepPortsFor(
         // The MLS apply is what the verdict reads, so it is deliberately OUTSIDE
         // the guard below: a throw here must reach `adjudicate`, which skips the
         // row exactly as the poll loop does.
+        const ownerBefore = readRoleTableOwner(group);
         const processed = group.processIncomingVerifyingRoles(identity, row.payload);
+        // ADR-0057 root handover - a remote commit the verdict applies.
+        noteOwnerTransition(groupIdBytes, ownerBefore, readRoleTableOwner(group));
         try {
           // The roster is read HERE, one line after the apply, because that
           // is the epoch this row decrypted at — a leaf resolved any later
           // can name whoever was added into a vacated slot since.
-          onSweptEvent(
-            await toEvent(
-              row.id,
-              row.createdAt,
-              processed,
-              (leaf) => resolveMemberIdentity(rosterOf(group), leaf),
-              (leaf) => resolveLeafSignatureKey(rosterOf(group), leaf),
-            ),
+          const event = await toEvent(
+            row.id,
+            row.createdAt,
+            processed,
+            (leaf) => resolveMemberIdentity(rosterOf(group), leaf),
+            (leaf) => resolveLeafSignatureKey(rosterOf(group), leaf),
           );
+          // ADR-0057 — consumed at receipt, like the poll does, never shown.
+          if (event.kind === "registrarSeed") {
+            await consumeRegistrarSeed(group, event);
+          } else {
+            onSweptEvent(event);
+          }
         } catch (err) {
           // The ratchet has already moved and the row is consumed, so an event
           // that could not be built costs one timeline row — never the verdict,
@@ -786,39 +830,47 @@ function sweepPortsFor(
     welcomeMailbox: (signatureKey) =>
       wasm.IdentityPseudonym.fromIdentity(signatureKey).asBytes(),
     wrapWelcome: (welcome) => wrapEnvelope(KIND_WELCOME, welcome),
-    // ADR-0053 contract point 3 — the staged epoch's key, proven under the
-    // current one, registered before the sweep is published.
+    // ADR-0053 contract point 3 + ADR-0057 obligation 5 — the staged epoch's
+    // key, registered with this device's root or registrar key before the
+    // sweep is published. The owner revokes the registrar keys of the
+    // accounts this sweep evicts in the same statement; an admin cannot
+    // derive them and sends none (the owner's next reconcile removes them).
     registerStagedEpoch: async () => {
-      const signerN = takeSigner(() => group.dsAccessSigner(identity));
       const staged = takeSigner(() => {
         const next = group.dsStagedAccessSigner(identity);
         if (next === undefined) throw new Error("no staged sweep");
         return next;
       });
+      const authority = dsAccess.journalAuthority(groupIdBytes);
       try {
-        await registerBeforePublish(ds, groupIdBytes, signerN, staged);
+        const evictees = evicteeAccountKeys(
+          rosterOf(group) as unknown as OwnershipRosterMember[],
+          stagedRemovedLeaves,
+        );
+        const revoke = revocationKeys(authority, evictees, wasmRegistrarDerivation(wasm));
+        releaseAuthority(authority);
+        // The DS client signs with the same authority it resolves itself.
+        await registerBeforePublish(ds, groupIdBytes, staged, revoke);
       } finally {
-        signerN?.free();
+        releaseAuthority(authority);
         staged?.free();
       }
     },
-    // ADR-0053 contract point 4 — heal after the verdict apply.
-    beginApply: () => {
-      const before = takeSigner(() => group.dsAccessSigner(identity));
-      return async (heal: boolean) => {
-        if (!heal) {
-          before?.free();
-          return;
-        }
-        const after = takeSigner(() => group.dsAccessSigner(identity));
-        try {
-          await healAfterApply(ds, groupIdBytes, before, after);
-        } finally {
-          before?.free();
-          after?.free();
-        }
-      };
+    mayRegister: () => {
+      const authority = dsAccess.journalAuthority(groupIdBytes);
+      try {
+        return authority.kind !== "none";
+      } finally {
+        releaseAuthority(authority);
+      }
     },
+    // After a lost verdict nothing is re-registered (ADR-0057): the winner
+    // registered its own epoch before publishing, and every registration is
+    // an APPEND now (the second security pass), so this device's registration
+    // could not have displaced the winner's - it met 409 or landed first and
+    // the winner's met 409. A Replace is never sent from a commit path; a
+    // journal a lower rank pushed ahead is the repair's (`ds/journal-repair`).
+    beginApply: () => async () => {},
     markOwnPublished,
     persist,
     persistApplied,
@@ -1093,9 +1145,12 @@ export class ContactsClient {
     myIdentity: WasmIdentity,
     signerN: ProofSigner | null,
   ): Promise<void> {
+    // ADR-0057 — the new epoch is registered with this device's root or
+    // registrar key; the key of the epoch it left proves nothing any more.
+    void signerN;
     const signerN1 = takeSigner(() => group.dsAccessSigner(myIdentity));
     try {
-      await registerBeforePublish(this.ds, group.groupId, signerN, signerN1);
+      await registerBeforePublish(this.ds, group.groupId, signerN1);
     } finally {
       signerN1?.free();
     }
@@ -2369,23 +2424,46 @@ export class ContactsClient {
       throw ContactsError.wrap(err);
     }
     void added.commit;
-    // ADR-0053 contract point 2 — claim the journal at creation, at the epoch
-    // the one commit above moved it to (nobody ever holds epoch 0: the commit
-    // fans out to nobody). Unsigned: this is the first registration of an
-    // unclaimed journal. Best effort — a failure leaves the journal unclaimed,
-    // which behaves as before, and the first open claims it.
-    {
+    // ADR-0057 obligation 1 — the owner claims the journal at creation with
+    // its ROOT (derived from the account identity), at the epoch the one
+    // commit above moved it to (nobody ever holds epoch 0: the commit fans out
+    // to nobody), naming that epoch's access key. FAIL-CLOSED (the second
+    // security pass, finding 3): the claim must answer 204 before any Welcome
+    // leaves, else whoever claimed the id first would be its root for good. A
+    // failure aborts the creation with nothing published; the local group is
+    // dropped (its random id is never reused).
+    try {
       const founding = takeSigner(() => group.dsAccessSigner(myIdentity));
-      if (founding !== null) {
+      if (founding === null) throw new Error("ds: the founding epoch's key could not be derived");
+      let account: WasmIdentity | null = null;
+      try {
+        account = await this.resolveAccountIdentity(identity);
+        const root = wasm.dsJournalRootSigner(account, group.groupId);
         try {
-          await this.ds.claimGroupWith(group.groupId, founding, null);
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn("ds: claim at group creation failed; claimed on first open", err);
+          await claimAtCreation(this.ds, group.groupId, root, founding.epoch, founding.verifyingKey());
         } finally {
-          founding.free();
+          root.free();
+        }
+      } finally {
+        founding.free();
+        if (account !== null && account !== this.accountIdentityProvider?.()) {
+          try {
+            account.free();
+          } catch {
+            /* already freed */
+          }
         }
       }
+      dsAccess.markRootHeld(group.groupId);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("ds: claim at group creation failed; the group was not created", err);
+      try {
+        group.free();
+      } catch {
+        /* already freed */
+      }
+      throw ContactsError.wrap(err instanceof JournalClaimFailedError ? err.cause : err);
     }
     let firstWelcomeMessageId = 0;
     for (const dev of devices) {
@@ -3400,10 +3478,8 @@ export class ContactsClient {
         names.inviterName,
         memberCount,
       );
-    let wire: Uint8Array;
-    let linkKey: Uint8Array;
+    let mint: WasmInviteLinkMint;
     try {
-      let mint: WasmGroupInviteMint;
       try {
         mint = mintWith({ groupName: preview.groupName, inviterName: preview.inviterName });
       } catch (err) {
@@ -3413,26 +3489,35 @@ export class ContactsClient {
         console.warn("group-invite: preview names refused, minting without names", err);
         mint = mintWith({});
       }
-      wire = mint.wire;
-      linkKey = mint.linkKey;
     } catch (err) {
       throw ContactsError.wrap(err);
     }
-    // Production default (ADR-0028 OQ1): upload to the discovery ledger — the
-    // server-side anti-abuse surface (per-joiner consume dedup + soft max_uses)
-    // — and return the short pointer URL. `max_uses` is a soft throttle, not
-    // an access control: the admin approval gate stays the security boundary.
+    const sealed = mint.sealed;
+    const linkSecret = mint.linkSecret;
+    const issuerPubkey = mint.issuerPubkey;
+    mint.free();
+    // Production default (ADR-0028 OQ1): upload the SEALED blob to the
+    // discovery ledger (sealed-link amendment, 2026-09-28: the server cannot
+    // open it; the clear fields carry what it needs) and return the short
+    // pointer URL. `max_uses` is a soft throttle, not an access control: the
+    // admin approval gate stays the security boundary.
     //
     // The inline form is the fallback for a TRANSPORT failure only (a
     // censored / offline network), where the link must still work without the
     // round-trip. A server answer (a 401 from a client with no session token,
     // a 429, a 5xx) surfaces instead: falling back there silently hands the
     // user the huge inline URL for a defect that should be fixed. The log
-    // names the status and never the capability.
+    // names the status and never the capability. Both forms carry the link
+    // secret as the fragment; without it the link opens nothing.
     const widths = inviteLinkWidths(wasm);
     let url: string;
     try {
-      const blobId = await this.discovery.uploadGroupInvite(wire, maxUses);
+      const blobId = await this.discovery.uploadGroupInvite({
+        sealed,
+        issuerPubkey,
+        expiryMs,
+        maxUses,
+      });
       url = composePointerGroupInviteUrl(blobId, widths, origin);
     } catch (err) {
       if (!(err instanceof DiscoveryNetworkError)) {
@@ -3447,9 +3532,9 @@ export class ContactsClient {
       }
       // eslint-disable-next-line no-console
       console.warn("group-invite: ledger unreachable, using the inline link");
-      url = composeInlineGroupInviteUrl(wire, origin);
+      url = composeInlineGroupInviteUrl(sealed, origin);
     }
-    return appendGroupInviteLinkSecret(url, linkKey, widths);
+    return appendGroupInviteLinkSecret(url, linkSecret, widths);
   }
 
   /** ADR-0028 revoke — the issuer revokes a previously-created group invite
@@ -3483,17 +3568,17 @@ export class ContactsClient {
     return true;
   }
 
-  /** ADR-0028 (G-3) — resolve a `/g/<slug>` slug to the capability wire bytes,
+  /** ADR-0028 (G-3) — resolve a `/g/<slug>` slug to the SEALED link blob,
    *  fetching from the discovery ledger when the slug is an 8-character
    *  ledger id (the production form) or passing the bytes straight through
-   *  when it is an inline capability (the upload-failed fallback). Returns the
-   *  `blobId` (non-null only for the pointer form) so the caller can drive
+   *  when it is the inline sealed blob (the upload-failed fallback). Returns
+   *  the `blobId` (non-null only for the pointer form) so the caller can drive
    *  `consumeGroupInvite` before requesting to join. A 429 from the ledger
    *  surfaces as a wrapped `DiscoveryRateLimitedError` (see
    *  `isDiscoveryRateLimited`), never as "not found". */
   async resolveGroupInviteSlug(
     slug: string,
-  ): Promise<{ capabilityWire: Uint8Array; blobId: Uint8Array | null }> {
+  ): Promise<{ sealed: Uint8Array; blobId: Uint8Array | null }> {
     let parsed;
     try {
       parsed = parseGroupInviteSlug(slug, inviteLinkWidths(await loadWasm()));
@@ -3501,7 +3586,7 @@ export class ContactsClient {
       throw ContactsError.wrap(err);
     }
     if (parsed.kind === "inline") {
-      return { capabilityWire: parsed.capabilityBytes, blobId: null };
+      return { sealed: parsed.sealed, blobId: null };
     }
     let fetched: Uint8Array | null;
     try {
@@ -3512,7 +3597,42 @@ export class ContactsClient {
     if (fetched === null) {
       throw ContactsError.wrap(new Error("group invite not found or expired"));
     }
-    return { capabilityWire: fetched, blobId: parsed.blobId };
+    return { sealed: fetched, blobId: parsed.blobId };
+  }
+
+  /** Sealed-link amendment of ADR-0028 (2026-09-28): open a `/g/` link. A
+   *  missing or malformed fragment is refused as damaged BEFORE any request;
+   *  otherwise the sealed blob is resolved (ledger or inline) and opened with
+   *  the fragment's secret, which also verifies the capability inside. Any
+   *  open failure is `InviteLinkDamagedError`. The caller owns (and frees) the
+   *  returned capability; `capabilityWire` is its PLAINTEXT wire, the value
+   *  the joiner tag and the join attribution are computed over. */
+  async openGroupInviteLink(
+    slug: string,
+    hash: string | null | undefined,
+  ): Promise<{
+    capability: WasmGroupInviteCapability;
+    capabilityWire: Uint8Array;
+    blobId: Uint8Array | null;
+    linkSecret: Uint8Array;
+  }> {
+    const wasm = await loadWasm();
+    const widths = inviteLinkWidths(wasm);
+    // A malformed slug throws here, before any request.
+    try {
+      parseGroupInviteSlug(slug, widths);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    const fragment = parseInviteLinkFragment(hash, widths);
+    if (fragment.kind !== "secret") throw new InviteLinkDamagedError();
+    const { sealed, blobId } = await this.resolveGroupInviteSlug(slug);
+    const capability = openSealedInvite(
+      (b, k) => wasm.GroupInviteCapability.openLink(b, k),
+      sealed,
+      fragment,
+    );
+    return { capability, capabilityWire: capability.wire, blobId, linkSecret: fragment.secret };
   }
 
   /** ADR-0028 (G-3) — joiner step 1: request to join a group from a `/g/` link

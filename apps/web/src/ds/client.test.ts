@@ -11,7 +11,13 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { DsAccessRegistry, dsClockSkewNotice, CLOCK_SKEW_NOTICE } from "./access";
-import { fakeSigner } from "./access-test-doubles";
+import {
+  fakeRegistrarAuthority,
+  fakeRootAuthority,
+  fakeSigner,
+  parseFakeStatement,
+} from "./access-test-doubles";
+import { NoJournalAuthorityError } from "./ownership";
 import { fakeTokenPool } from "../tokens/anon-token-test-doubles";
 import { DsClient, DsClientArgError, DsHttpError, journalQuery } from "./client";
 
@@ -74,7 +80,6 @@ const EMPTY = { status: 200, json: { messages: [], has_more: false } };
 describe("contract point 1 — a group read is signed over the service path and the exact query", () => {
   it("signs `/ds/group/<hex>/messages` and the query the URL carries, over an empty body", async () => {
     const reg = registryWith(() => fakeSigner(4n));
-    reg.markClaimAttempt(GID); // keep the claim-on-open PUT out of this test
     const { fetchImpl, sent } = fakeFetch([EMPTY]);
     const ds = new DsClient("/api/ds", { access: reg, fetchImpl });
 
@@ -90,7 +95,6 @@ describe("contract point 1 — a group read is signed over the service path and 
 
   it("a publish signs the exact body bytes it sends", async () => {
     const reg = registryWith(() => fakeSigner(4n));
-    reg.markClaimAttempt(GID);
     const { fetchImpl, sent } = fakeFetch([{ status: 201, json: { id: 9, created_at: "t" } }]);
     const ds = new DsClient("/api/ds", { access: reg, fetchImpl });
 
@@ -102,7 +106,6 @@ describe("contract point 1 — a group read is signed over the service path and 
 
   it("a knocks read is signed like a messages read", async () => {
     const reg = registryWith(() => fakeSigner(4n));
-    reg.markClaimAttempt(GID);
     const { fetchImpl, sent } = fakeFetch([EMPTY]);
     const ds = new DsClient("/api/ds", { access: reg, fetchImpl });
 
@@ -120,24 +123,130 @@ describe("contract point 1 — a group read is signed over the service path and 
   });
 });
 
-describe("contract point 2 — claim on open", () => {
-  it("the first request for a group in a session also claims it, unsigned, with the signer's claim body", async () => {
-    const reg = registryWith(() => fakeSigner(4n));
-    // The claim is fired before the read's own attempt, so it takes the
-    // first scripted answer.
-    const { fetchImpl, sent } = fakeFetch([{ status: 204 }, EMPTY, EMPTY]);
-    const ds = new DsClient("/api/ds", { access: reg, fetchImpl });
+/** A registry whose factory hands out fake root / registrar authorities and
+ *  whose owner source answers `owner`. */
+function ownedRegistry(
+  signer: () => ReturnType<typeof fakeSigner> | null,
+  owner: boolean,
+  registrar = false,
+): DsAccessRegistry {
+  const reg = registryWith(signer);
+  reg.registerOwnerSource(() => owner);
+  reg.setAuthorityFactory({
+    root: () => fakeRootAuthority("root"),
+    registrar: () => (registrar ? fakeRegistrarAuthority("reg", 2) : { kind: "none" }),
+  });
+  return reg;
+}
 
-    await ds.fetchGroup(GID, { after: 0 });
-    await new Promise((r) => setTimeout(r, 0));
-    await ds.fetchGroup(GID, { after: 0 });
-    await new Promise((r) => setTimeout(r, 0));
+describe("ADR-0057 obligation 2 — the lazy claim is the owner's alone", () => {
+  it("no claim on open any more: a request that is not refused sends nothing else", async () => {
+    const reg = ownedRegistry(() => fakeSigner(4n), true);
+    const { fetchImpl, sent } = fakeFetch([EMPTY]);
+    await new DsClient("/api/ds", { access: reg, fetchImpl }).fetchGroup(GID, { after: 0 });
+    expect(sent.map((s) => s.method)).toEqual(["GET"]);
+  });
 
-    const claims = sent.filter((s) => s.method === "PUT");
-    expect(claims).toHaveLength(1);
-    expect(claims[0]?.url).toBe(`/api/ds/ds/group/${GID_HEX}/access`);
-    expect(claims[0]?.proof).toBeUndefined();
-    expect(new TextDecoder().decode(claims[0]?.body)).toBe('{"epoch":4,"access_pk_b64":"g4"}');
+  it("the owner, refused, claims with its ROOT at the current epoch and retries once", async () => {
+    const reg = ownedRegistry(() => fakeSigner(4n), true);
+    const { fetchImpl, sent } = fakeFetch([{ status: 401 }, { status: 204 }, EMPTY]);
+    await new DsClient("/api/ds", { access: reg, fetchImpl }).fetchGroup(GID, { after: 0 });
+    expect(sent.map((s) => `${s.method}:${s.url.replace(`/api/ds/ds/group/${GID_HEX}`, "")}`)).toEqual([
+      "GET:/messages?after=0",
+      "PUT:/claim",
+      "GET:/messages?after=0",
+    ]);
+    // A statement carries its own signature: no proof header.
+    expect(sent[1]?.proof).toBeUndefined();
+    const st = parseFakeStatement(new TextDecoder().decode(sent[1]?.body));
+    expect(st.signer).toBe("root");
+    expect(st.epoch).toBe("4");
+  });
+
+  it("an owner whose journal is already claimed (409) sends nothing more and surfaces the refusal", async () => {
+    const reg = ownedRegistry(() => fakeSigner(4n), true);
+    const { fetchImpl, sent } = fakeFetch([{ status: 401 }, { status: 409 }]);
+    const err = await new DsClient("/api/ds", { access: reg, fetchImpl })
+      .fetchGroup(GID, { after: 0 })
+      .catch((e: unknown) => e);
+    expect((err as DsHttpError).status).toBe(401);
+    expect(sent.map((s) => s.url.split("/").pop())).toEqual(["messages?after=0", "claim"]);
+  });
+
+  it("a member (even an admin registrar) never claims and never registers on a refusal", async () => {
+    const reg = ownedRegistry(() => fakeSigner(4n), false, true);
+    const { fetchImpl, sent } = fakeFetch([{ status: 401 }]);
+    const err = await new DsClient("/api/ds", { access: reg, fetchImpl })
+      .fetchGroup(GID, { after: 0 })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DsHttpError);
+    expect(sent.map((s) => s.method)).toEqual(["GET"]);
+  });
+});
+
+describe("ADR-0057 statements", () => {
+  it("putStatement PUTs the signer's body to the service path, unsigned", async () => {
+    const { fetchImpl, sent } = fakeFetch([{ status: 204 }]);
+    const ds = new DsClient("/api/ds", { access: new DsAccessRegistry(), fetchImpl });
+    await ds.putStatement(`/ds/group/${GID_HEX}/registrars`, '{"statement_b64":"AA=="}');
+    expect(sent[0]?.method).toBe("PUT");
+    expect(sent[0]?.url).toBe(`/api/ds/ds/group/${GID_HEX}/registrars`);
+    expect(sent[0]?.proof).toBeUndefined();
+    expect(new TextDecoder().decode(sent[0]?.body)).toBe('{"statement_b64":"AA=="}');
+  });
+
+  it("putStatement refuses a path that does not name a group journal", async () => {
+    const ds = new DsClient("/api/ds", { access: new DsAccessRegistry(), fetchImpl: fakeFetch([]).fetchImpl });
+    await expect(ds.putStatement("/ds/mailbox/x/access", "{}")).rejects.toBeInstanceOf(DsClientArgError);
+  });
+
+  it("registerGroupEpoch signs with the root when this account owns the journal", async () => {
+    const reg = ownedRegistry(() => fakeSigner(4n), true);
+    const { fetchImpl, sent } = fakeFetch([{ status: 204 }]);
+    await new DsClient("/api/ds", { access: reg, fetchImpl }).registerGroupEpoch(
+      GID,
+      5n,
+      new Uint8Array(32).fill(5),
+      [new Uint8Array(32).fill(9)],
+    );
+    const st = parseFakeStatement(new TextDecoder().decode(sent[0]?.body));
+    expect(sent[0]?.url).toBe(`/api/ds/ds/group/${GID_HEX}/access`);
+    expect(st.signer).toBe("root");
+    expect(st.epoch).toBe("5");
+    expect(st.keys).toBe("09".repeat(32));
+  });
+
+  it("registerGroupEpoch signs with the registrar seed otherwise", async () => {
+    const reg = ownedRegistry(() => fakeSigner(4n), false, true);
+    const { fetchImpl, sent } = fakeFetch([{ status: 204 }]);
+    await new DsClient("/api/ds", { access: reg, fetchImpl }).registerGroupEpoch(GID, 5n, new Uint8Array(32));
+    expect(parseFakeStatement(new TextDecoder().decode(sent[0]?.body)).signer).toBe("reg");
+  });
+
+  it("registerGroupEpoch with neither refuses before any request", async () => {
+    const reg = ownedRegistry(() => fakeSigner(4n), false, false);
+    const { fetchImpl, sent } = fakeFetch([]);
+    await expect(
+      new DsClient("/api/ds", { access: reg, fetchImpl }).registerGroupEpoch(GID, 5n, new Uint8Array(32)),
+    ).rejects.toBeInstanceOf(NoJournalAuthorityError);
+    expect(sent).toHaveLength(0);
+  });
+
+  it("a 409 (the server's lock race) is retried once, then surfaces", async () => {
+    const reg = ownedRegistry(() => fakeSigner(4n), true);
+    const once = fakeFetch([{ status: 409 }, { status: 204 }]);
+    await new DsClient("/api/ds", { access: reg, fetchImpl: once.fetchImpl }).registerGroupEpoch(
+      GID,
+      5n,
+      new Uint8Array(32),
+    );
+    expect(once.sent).toHaveLength(2);
+    const twice = fakeFetch([{ status: 409 }, { status: 409 }]);
+    const err = await new DsClient("/api/ds", { access: reg, fetchImpl: twice.fetchImpl })
+      .registerGroupEpoch(GID, 5n, new Uint8Array(32))
+      .catch((e: unknown) => e);
+    expect((err as DsHttpError).status).toBe(409);
+    expect(twice.sent).toHaveLength(2);
   });
 });
 
@@ -145,7 +254,6 @@ describe("contract point 5 — a refused group request", () => {
   it("is retried once under the PREVIOUS epoch's key", async () => {
     let epoch = 4n;
     const reg = registryWith(() => fakeSigner(epoch));
-    reg.markClaimAttempt(GID);
     reg.groupSigners(GID); // epoch 4 cached
     epoch = 5n; // the device applied a commit; the server does not know 5 yet
     const { fetchImpl, sent } = fakeFetch([{ status: 401 }, EMPTY]);
@@ -158,36 +266,11 @@ describe("contract point 5 — a refused group request", () => {
     expect(sent[1]?.proof).toContain("g@4:");
   });
 
-  it("then once more after a claim signed by the previous key", async () => {
-    let epoch = 4n;
-    const reg = registryWith(() => fakeSigner(epoch));
-    reg.markClaimAttempt(GID);
-    reg.groupSigners(GID);
-    epoch = 5n;
-    const { fetchImpl, sent } = fakeFetch([{ status: 401 }, { status: 401 }, { status: 204 }, EMPTY]);
-    const ds = new DsClient("/api/ds", { access: reg, fetchImpl });
-
-    await ds.fetchGroup(GID, { after: 0 });
-
-    expect(sent.map((s) => `${s.method}:${s.proof?.split(":")[1] ?? "-"}`)).toEqual([
-      "GET:g@5",
-      "GET:g@4",
-      "PUT:g@4", // the claim of epoch 5, proven under epoch 4
-      "GET:g@5",
-    ]);
-    expect(new TextDecoder().decode(sent[2]?.body)).toBe('{"epoch":5,"access_pk_b64":"g5"}');
-  });
-
   it("a final refusal surfaces, and says `check the clock` only when the server's Date is off by more than a minute", async () => {
     const now = Date.parse("2026-09-27T12:00:00Z");
     const reg = registryWith(() => fakeSigner(4n));
-    reg.markClaimAttempt(GID);
     const skewDate = new Date(now + 5 * 60_000).toUTCString();
-    const { fetchImpl } = fakeFetch([
-      { status: 401, date: skewDate },
-      { status: 204 },
-      { status: 401, date: skewDate },
-    ]);
+    const { fetchImpl } = fakeFetch([{ status: 401, date: skewDate }]);
     const ds = new DsClient("/api/ds", { access: reg, fetchImpl, now: () => now });
 
     const err = await ds.fetchGroup(GID, { after: 0 }).catch((e: unknown) => e);
@@ -197,11 +280,7 @@ describe("contract point 5 — a refused group request", () => {
     expect(dsClockSkewNotice({ cause: err })).toBe(CLOCK_SKEW_NOTICE);
 
     const inSync = new Date(now + 10_000).toUTCString();
-    const second = fakeFetch([
-      { status: 401, date: inSync },
-      { status: 204 },
-      { status: 401, date: inSync },
-    ]);
+    const second = fakeFetch([{ status: 401, date: inSync }]);
     const ds2 = new DsClient("/api/ds", { access: reg, fetchImpl: second.fetchImpl, now: () => now });
     const err2 = await ds2.fetchGroup(GID, { after: 0 }).catch((e: unknown) => e);
     expect((err2 as DsHttpError).clockSkewed).toBe(false);
@@ -297,7 +376,6 @@ describe("ADR-0054 — the wake rides the signed group publish", () => {
 
   it("adds `x-lakko-wake: <push_gid>;<kind>` beside the proof", async () => {
     const reg = registryWith(() => fakeSigner(4n));
-    reg.markClaimAttempt(GID);
     const { fetchImpl, sent } = fakeFetch([{ status: 201, json: { id: 9, created_at: "t" } }]);
     const ds = new DsClient("/api/ds", { access: reg, fetchImpl });
 
@@ -314,7 +392,6 @@ describe("ADR-0054 — the wake rides the signed group publish", () => {
   it("carries the header on every contract-point-5 retry", async () => {
     let epoch = 4n;
     const reg = registryWith(() => fakeSigner(epoch));
-    reg.markClaimAttempt(GID);
     reg.groupSigners(GID);
     epoch = 5n;
     const { fetchImpl, sent } = fakeFetch([
@@ -333,7 +410,6 @@ describe("ADR-0054 — the wake rides the signed group publish", () => {
 
   it("sends no header without a wake, or with `wake: null`", async () => {
     const reg = registryWith(() => fakeSigner(4n));
-    reg.markClaimAttempt(GID);
     const { fetchImpl, sent } = fakeFetch([
       { status: 201, json: { id: 1, created_at: "t" } },
       { status: 201, json: { id: 2, created_at: "t" } },
@@ -348,7 +424,6 @@ describe("ADR-0054 — the wake rides the signed group publish", () => {
 
   it("refuses a wrong-length push_gid before any request is made", async () => {
     const reg = registryWith(() => fakeSigner(4n));
-    reg.markClaimAttempt(GID);
     const { fetchImpl, sent } = fakeFetch([]);
     const ds = new DsClient("/api/ds", { access: reg, fetchImpl });
 

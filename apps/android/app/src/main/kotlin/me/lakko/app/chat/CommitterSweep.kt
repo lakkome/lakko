@@ -150,6 +150,11 @@ internal class StagedSweepArtifacts(
      * since a not-yet-member does not poll the group journal.
      */
     val addedSignatureKeys: List<ByteArray>,
+    /** ADR-0057 — the leaves this sweep removes (Remove targets, Leave
+     *  proposers), so the registration can revoke the evicted accounts'
+     *  registrar keys. Empty on the restart path (the registration is already
+     *  behind the owed entry). */
+    val removedLeaves: List<UInt> = emptyList(),
 )
 
 /**
@@ -398,14 +403,15 @@ internal class SweepPorts(
     val encodeB64: (ByteArray) -> String,
     val decodeB64: (String) -> ByteArray,
     /**
-     * ADR-0053 client contract point 3 — register the access key of the epoch
-     * the STAGED sweep moves to (`dsStagedAccessSigner`), proven under the
-     * current epoch's key, BEFORE the sweep is durably recorded or published.
+     * ADR-0057 obligation 5 — register the access key of the epoch the STAGED
+     * sweep moves to (`dsStagedAccessSigner`) with this account's root or
+     * registrar signer (revoking the evicted accounts' registrar keys when the
+     * owner commits), BEFORE the sweep is durably recorded or published.
      * THROWS when the Delivery Service does not take it; the sweep is then
      * abandoned exactly as a failed outbox write abandons it, so no peer ever
      * applies a commit whose epoch the server does not know.
      */
-    val registerStagedEpoch: suspend () -> Unit = {},
+    val registerStagedEpoch: suspend (staged: StagedSweepArtifacts) -> Unit = {},
 )
 
 /** What one sweep attempt did. */
@@ -746,7 +752,7 @@ private suspend fun publishAndAdjudicate(
         // the server does not know would leave every peer that applies it
         // refused on its next request.
         try {
-            ports.registerStagedEpoch()
+            ports.registerStagedEpoch(staged)
         } catch (cause: Throwable) {
             group.exclusiveProvider { group.abandonStagedSweep() }
             throw cause

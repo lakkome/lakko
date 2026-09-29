@@ -298,6 +298,91 @@ final class NseServiceEnvelopeTests: XCTestCase {
         return payload[9] == 0x01 || payload[9] == 0x02
     }
 
+    /// The frozen 27-byte ADR-0057 registrar-seed domain
+    /// `lakko/ds-registrar-seed/v1\0`, ASCII + an explicit trailing NUL.
+    fileprivate static let registrarSeedDomain: Data = {
+        var d = Data("lakko/ds-registrar-seed/v1".utf8)
+        d.append(0x00)
+        return d
+    }()
+
+    /// Stand-in for the slim FFI's `registrarSeedEnvelopeLen()` (173 — domain
+    /// 27 + version 1 + journal 32 + addressee 32 + rank 1 + sealed 80).
+    fileprivate static let registrarSeedEnvelopeLen = 173
+
+    /// A well-formed registrar-seed envelope (the sealed part is opaque here).
+    private func registrarSeedEnvelope(version: UInt8 = 0x01, rank: UInt8 = 0x01) -> Data {
+        var out = Self.registrarSeedDomain
+        out.append(version)
+        out.append(Data(repeating: 0x11, count: 32))
+        out.append(Data(repeating: 0x22, count: 32))
+        out.append(rank)
+        out.append(Data(repeating: 0x33, count: 80))
+        return out
+    }
+
+    /// Test double for the slim FFI's `decodeRegistrarSeedEnvelope`: domain,
+    /// version, exact length, known rank.
+    private func decodesAsRegistrarSeed(_ bytes: Data) -> Bool {
+        Self.decodesAsRegistrarSeedDouble(bytes)
+    }
+
+    fileprivate static func decodesAsRegistrarSeedDouble(_ bytes: Data) -> Bool {
+        let domain = Self.registrarSeedDomain
+        guard bytes.count == Self.registrarSeedEnvelopeLen,
+              bytes.prefix(domain.count) == domain else { return false }
+        let payload = Array(bytes.dropFirst(domain.count))
+        return payload[0] == 0x01 && (payload[65] == 0x01 || payload[65] == 0x02)
+    }
+
+    // MARK: - Kind 8: registrar seed (ADR-0057)
+
+    /// WITHOUT THE ARM a registrar seed reaches `parseBodyEnvelope` and the
+    /// notification body reads `lakko/ds-registrar-seed/v1` plus binary.
+    func testRegistrarSeedEnvelopeIsAServiceEnvelope() {
+        XCTAssertEqual(registrarSeedEnvelope().count, Self.registrarSeedEnvelopeLen)
+        XCTAssertEqual(registrarSeedEnvelope().first, 0x6C)
+        XCTAssertTrue(
+            nseIsServiceEnvelope(
+                registrarSeedEnvelope(),
+                decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
+                decodesAsCommitterBeacon: decodesAsCommitterBeacon,
+                committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
+                decodesAsProfile: decodesAsProfile,
+                profileEnvelopeLens: Self.profileEnvelopeLens,
+                decodesAsGroupName: decodesAsGroupName,
+                groupNameEnvelopeLens: Self.groupNameEnvelopeLens,
+                decodesAsProfileRequest: decodesAsProfileRequest,
+                profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
+                decodesAsPin: decodesAsPin,
+                pinEnvelopeLen: Self.pinEnvelopeLen,
+                decodesAsRegistrarSeed: decodesAsRegistrarSeed,
+                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
+            ),
+            "a registrar seed must never be rendered"
+        )
+        // One byte short, or an unknown version, is not the envelope.
+        for wrong in [registrarSeedEnvelope().dropLast(), registrarSeedEnvelope(version: 0x02)] {
+            XCTAssertFalse(
+                nseIsServiceEnvelope(
+                    Data(wrong),
+                    decodesAsPushRoutingSecret: decodesAsPushRoutingSecret,
+                    decodesAsCommitterBeacon: decodesAsCommitterBeacon,
+                    committerBeaconEnvelopeLen: Self.beaconEnvelopeLen,
+                    decodesAsProfile: decodesAsProfile,
+                    profileEnvelopeLens: Self.profileEnvelopeLens,
+                    decodesAsGroupName: decodesAsGroupName,
+                    groupNameEnvelopeLens: Self.groupNameEnvelopeLens,
+                    decodesAsProfileRequest: decodesAsProfileRequest,
+                    profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
+                    decodesAsPin: decodesAsPin,
+                    pinEnvelopeLen: Self.pinEnvelopeLen,
+                    decodesAsRegistrarSeed: decodesAsRegistrarSeed,
+                    registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
+                ))
+        }
+    }
+
     // MARK: - Kind 7: shared pin (ADR-0052 decision 3)
 
     /// WITHOUT THE ARM a pin reaches `parseBodyEnvelope` and the notification
@@ -317,7 +402,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     decodesAsProfileRequest: decodesAsProfileRequest,
                     profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                     decodesAsPin: decodesAsPin,
-                    pinEnvelopeLen: Self.pinEnvelopeLen
+                    pinEnvelopeLen: Self.pinEnvelopeLen,
+                    decodesAsRegistrarSeed: decodesAsRegistrarSeed,
+                    registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
                 ),
                 "a pin envelope must never be rendered"
             )
@@ -364,7 +451,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     decodesAsProfileRequest: decodesAsProfileRequest,
                     profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                     decodesAsPin: decodesAsPin,
-                    pinEnvelopeLen: Self.pinEnvelopeLen
+                    pinEnvelopeLen: Self.pinEnvelopeLen,
+                    decodesAsRegistrarSeed: decodesAsRegistrarSeed,
+                    registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
                 ))
         }
     }
@@ -399,7 +488,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsProfileRequest: decodesAsProfileRequest,
                 profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                 decodesAsPin: decodesAsPin,
-                pinEnvelopeLen: Self.pinEnvelopeLen
+                pinEnvelopeLen: Self.pinEnvelopeLen,
+                decodesAsRegistrarSeed: decodesAsRegistrarSeed,
+                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
             ),
             "a profile request must never be rendered"
         )
@@ -440,7 +531,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     decodesAsProfileRequest: decodesAsProfileRequest,
                     profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                     decodesAsPin: decodesAsPin,
-                    pinEnvelopeLen: Self.pinEnvelopeLen
+                    pinEnvelopeLen: Self.pinEnvelopeLen,
+                    decodesAsRegistrarSeed: decodesAsRegistrarSeed,
+                    registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
                 ))
         }
     }
@@ -484,7 +577,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     decodesAsProfileRequest: decodesAsProfileRequest,
                     profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                     decodesAsPin: decodesAsPin,
-                    pinEnvelopeLen: Self.pinEnvelopeLen
+                    pinEnvelopeLen: Self.pinEnvelopeLen,
+                    decodesAsRegistrarSeed: decodesAsRegistrarSeed,
+                    registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
                 ),
                 "a group-name envelope of \(envelope.count) bytes must never be rendered"
             )
@@ -529,7 +624,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsProfileRequest: decodesAsProfileRequest,
                 profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                 decodesAsPin: decodesAsPin,
-                pinEnvelopeLen: Self.pinEnvelopeLen
+                pinEnvelopeLen: Self.pinEnvelopeLen,
+                decodesAsRegistrarSeed: decodesAsRegistrarSeed,
+                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
             ))
     }
 
@@ -568,7 +665,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsProfileRequest: decodesAsProfileRequest,
                 profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                 decodesAsPin: decodesAsPin,
-                pinEnvelopeLen: Self.pinEnvelopeLen
+                pinEnvelopeLen: Self.pinEnvelopeLen,
+                decodesAsRegistrarSeed: decodesAsRegistrarSeed,
+                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
             ),
             "a v2 push-routing-secret envelope must never be rendered"
         )
@@ -614,7 +713,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsProfileRequest: decodesAsProfileRequest,
                 profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                 decodesAsPin: decodesAsPin,
-                pinEnvelopeLen: Self.pinEnvelopeLen
+                pinEnvelopeLen: Self.pinEnvelopeLen,
+                decodesAsRegistrarSeed: decodesAsRegistrarSeed,
+                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
             ),
             "the codec, not the peek, is the authority"
         )
@@ -641,7 +742,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsProfileRequest: decodesAsProfileRequest,
                 profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                 decodesAsPin: decodesAsPin,
-                pinEnvelopeLen: Self.pinEnvelopeLen
+                pinEnvelopeLen: Self.pinEnvelopeLen,
+                decodesAsRegistrarSeed: decodesAsRegistrarSeed,
+                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
             )
         )
     }
@@ -671,7 +774,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     decodesAsProfileRequest: decodesAsProfileRequest,
                     profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                     decodesAsPin: decodesAsPin,
-                    pinEnvelopeLen: Self.pinEnvelopeLen
+                    pinEnvelopeLen: Self.pinEnvelopeLen,
+                    decodesAsRegistrarSeed: decodesAsRegistrarSeed,
+                    registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
                 ),
                 "call signaling must never be rendered"
             )
@@ -702,7 +807,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsProfileRequest: decodesAsProfileRequest,
                 profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                 decodesAsPin: decodesAsPin,
-                pinEnvelopeLen: Self.pinEnvelopeLen
+                pinEnvelopeLen: Self.pinEnvelopeLen,
+                decodesAsRegistrarSeed: decodesAsRegistrarSeed,
+                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
             ),
             "a committer beacon must never be rendered"
         )
@@ -805,7 +912,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsProfileRequest: decodesAsProfileRequest,
                 profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                 decodesAsPin: decodesAsPin,
-                pinEnvelopeLen: Self.pinEnvelopeLen
+                pinEnvelopeLen: Self.pinEnvelopeLen,
+                decodesAsRegistrarSeed: decodesAsRegistrarSeed,
+                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
             ),
             "the codec, not the peek, is the authority"
         )
@@ -827,7 +936,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsProfileRequest: decodesAsProfileRequest,
                 profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                 decodesAsPin: decodesAsPin,
-                pinEnvelopeLen: Self.pinEnvelopeLen
+                pinEnvelopeLen: Self.pinEnvelopeLen,
+                decodesAsRegistrarSeed: decodesAsRegistrarSeed,
+                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
             )
         )
     }
@@ -863,7 +974,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                     decodesAsProfileRequest: decodesAsProfileRequest,
                     profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                     decodesAsPin: decodesAsPin,
-                    pinEnvelopeLen: Self.pinEnvelopeLen
+                    pinEnvelopeLen: Self.pinEnvelopeLen,
+                    decodesAsRegistrarSeed: decodesAsRegistrarSeed,
+                    registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
                 ),
                 "a \(envelope.count)-byte profile must never be rendered"
             )
@@ -914,7 +1027,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsProfileRequest: decodesAsProfileRequest,
                 profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                 decodesAsPin: decodesAsPin,
-                pinEnvelopeLen: Self.pinEnvelopeLen
+                pinEnvelopeLen: Self.pinEnvelopeLen,
+                decodesAsRegistrarSeed: decodesAsRegistrarSeed,
+                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
             ),
             "the codec, not the peek, is the authority"
         )
@@ -957,7 +1072,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsProfileRequest: decodesAsProfileRequest,
                 profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                 decodesAsPin: decodesAsPin,
-                pinEnvelopeLen: Self.pinEnvelopeLen
+                pinEnvelopeLen: Self.pinEnvelopeLen,
+                decodesAsRegistrarSeed: decodesAsRegistrarSeed,
+                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
             ),
             "a chat envelope must still render"
         )
@@ -974,7 +1091,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsProfileRequest: decodesAsProfileRequest,
                 profileRequestEnvelopeLen: Self.profileRequestEnvelopeLen,
                 decodesAsPin: decodesAsPin,
-                pinEnvelopeLen: Self.pinEnvelopeLen
+                pinEnvelopeLen: Self.pinEnvelopeLen,
+                decodesAsRegistrarSeed: decodesAsRegistrarSeed,
+                registrarSeedEnvelopeLen: Self.registrarSeedEnvelopeLen
             ),
             "empty bytes are not a service envelope"
         )
@@ -1027,7 +1146,9 @@ final class NseServiceEnvelopeTests: XCTestCase {
                 decodesAsProfileRequest: decodesAsProfileRequest,
                 profileRequestEnvelopeLen: NseServiceEnvelopeTests.profileRequestEnvelopeLen,
                 decodesAsPin: decodesAsPin,
-                pinEnvelopeLen: NseServiceEnvelopeTests.pinEnvelopeLen
+                pinEnvelopeLen: NseServiceEnvelopeTests.pinEnvelopeLen,
+                decodesAsRegistrarSeed: NseServiceEnvelopeTests.decodesAsRegistrarSeedDouble,
+                registrarSeedEnvelopeLen: NseServiceEnvelopeTests.registrarSeedEnvelopeLen
             ) {
                 suppressed += 1
                 return nil

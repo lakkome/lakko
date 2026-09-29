@@ -398,8 +398,34 @@ const NewChannel: Component = () => {
     setError(null);
     const id = freshChannelIdHex();
     try {
-      // G4-5: claim the optional `@handle` FIRST (before the channel exists
-      // on the channels service) so a first-come-first-served collision
+      // ADR-0057, the second security pass (finding 3) - found the channel's
+      // PublisherGroup and claim its journal FIRST: the claim must land before
+      // the channel is announced (the handle registered, the channel created
+      // on the service), else whoever claimed the id first would be its root.
+      // A failed claim aborts here with nothing announced; the next attempt
+      // uses a fresh channel id.
+      //
+      // Mint local publisher keys — the content-key seed comes from an MLS
+      // PublisherGroup exporter (ADR-0010 Tier 1), the signing-key seed is a
+      // fresh Ed25519 keypair seed. The group is created in the SESSION-LONG
+      // account identity's provider (ADR-0017 canonical identity), which the
+      // channel log snapshots — a throwaway `Identity.fromSeed` would take
+      // the group, and the seed every subscriber holds, with it.
+      const identity = chats.accountIdentity();
+      if (identity === null) {
+        setError("Sign in again to create a channel.");
+        setBusy(false);
+        return;
+      }
+      await awaitChannelsHydration();
+      const keys = await freshPublisherKeys(
+        identity,
+        id,
+        channelsState.keysByChannel().get(id)?.signingKeySeed,
+      );
+
+      // G4-5: claim the optional `@handle` before the channel exists
+      // on the channels service so a first-come-first-served collision
       // (409) aborts cleanly without leaving a half-created channel. An
       // empty handle skips discovery entirely. The mapping is `@handle ->
       // channel_id`; the OPRF hash is all the server ever sees.
@@ -426,23 +452,6 @@ const NewChannel: Component = () => {
       }
 
       await createChannel(id);
-      // Mint local publisher keys — the content-key seed comes from an MLS
-      // PublisherGroup exporter (ADR-0010 Tier 1), the signing-key seed is a
-      // fresh Ed25519 keypair seed. The group is created in the SESSION-LONG
-      // account identity's provider (ADR-0017 canonical identity), which the
-      // channel log snapshots — a throwaway `Identity.fromSeed` would take
-      // the group, and the seed every subscriber holds, with it.
-      const identity = chats.accountIdentity();
-      if (identity === null) {
-        setError("Sign in again to create a channel.");
-        return;
-      }
-      await awaitChannelsHydration();
-      const keys = await freshPublisherKeys(
-        identity,
-        id,
-        channelsState.keysByChannel().get(id)?.signingKeySeed,
-      );
       channelsActions.addChannel({
         id,
         localName: name().trim(),

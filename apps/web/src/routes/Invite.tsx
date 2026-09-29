@@ -50,21 +50,24 @@ import {
   Show,
   type JSX,
 } from "solid-js";
-import { A, useNavigate, useParams } from "@solidjs/router";
+import { A, useLocation, useNavigate, useParams } from "@solidjs/router";
 import type { InviteCapability as WasmInviteCapability } from "../../wasm/lakko_ffi_wasm";
 import { useAuth } from "../auth/AuthContext";
 import { buildAuthUrlWithReturn } from "../auth/return-url";
 import { ContactsClient, ContactsError } from "../contacts/client";
 import {
+  INVITE_INLINE_MIN_LEN,
   describeExpiry,
   describeMaxUses,
-  parseInviteSlug,
 } from "../contacts/invite";
 import { DiscoveryClient, isDiscoveryRateLimited } from "../discovery/client";
 import {
+  INVITE_LINK_DAMAGED,
   INVITE_LINK_RATE_LIMITED,
   INVITE_LINK_TRY_AGAIN,
   inviteLinkWidths,
+  isInviteLinkDamaged,
+  openInviteLinkFromUrl,
 } from "../contacts/invite-link";
 import { useChats } from "../chat/ChatContext";
 import { useProfiles } from "../profile/ProfileContext";
@@ -82,9 +85,8 @@ interface DecodedInvite {
    *  compromise documented in the ROADMAP. The Accept path
    *  branches on this. */
   blobId: Uint8Array | null;
-  /** Raw capability wire bytes (post `fetchInvite` decode for
-   *  the pointer path; the URL slug bytes for the inline
-   *  back-compat path). 1.18d3c needs these for the per-joiner
+  /** The PLAINTEXT capability wire the sealed link opened to
+   *  (`cap.wire`). 1.18d3c needs these for the per-joiner
    *  dedup-tag derivation: tag = HMAC(SHA-256(domain ‖
    *  capability_bytes), joiner_account_id). */
   capabilityBytes: Uint8Array;
@@ -92,6 +94,9 @@ interface DecodedInvite {
 
 /** The resource's answer when the ledger rate-limited this address. */
 const RATE_LIMITED = "rate-limited" as const;
+/** The resource's answer for a link that does not open under its fragment
+ *  (sealed-link amendment of ADR-0028, 2026-09-28). */
+const DAMAGED = "damaged" as const;
 
 export default function Invite(): JSX.Element {
   const params = useParams<{ slug: string }>();
@@ -106,7 +111,9 @@ export default function Invite(): JSX.Element {
   // imperative juggling. Source signal is the raw slug —
   // re-runs on navigation, no stale capability across
   // /i/<a> → /i/<b> transitions.
-  const slugSignal = createMemo(() => params.slug);
+  const location = useLocation();
+  // The fragment is the link secret (sealed-link amendment): re-run on it too.
+  const slugSignal = createMemo(() => ({ slug: params.slug, hash: location.hash }));
   // Used for the pointer-form path. Created once per route
   // mount; reuses the existing fetch defaults (Vite proxy in
   // dev, same-origin nginx in prod).
@@ -120,40 +127,38 @@ export default function Invite(): JSX.Element {
   discovery.setSessionToken(auth.identitySecrets()?.sessionToken ?? null);
   const [decoded, { refetch }] = createResource(
     slugSignal,
-    async (slug): Promise<DecodedInvite | typeof RATE_LIMITED | null> => {
+    async ({ slug, hash }): Promise<
+      DecodedInvite | typeof RATE_LIMITED | typeof DAMAGED | null
+    > => {
     try {
       const wasm = await loadWasm();
-      const parsed = parseInviteSlug(slug, inviteLinkWidths(wasm));
-      let bytes: Uint8Array;
-      let blobId: Uint8Array | null;
-      if (parsed.kind === "pointer") {
-        // 1.18d1b — fetch the bytes from /discovery/invite/{blob_id}.
-        // 404 surfaces as `null` — same as the inline-form
-        // decode failure below; the user-visible "invalid /
-        // not found" panel is identical, by design (an
-        // attacker cannot probe blob_ids by status code).
-        const fetched = await discovery.fetchInvite(parsed.blobId);
-        if (fetched === null) return null;
-        bytes = fetched;
-        blobId = parsed.blobId;
-      } else {
-        // 1.18c back-compat: capability bytes inline in the
-        // URL itself, no server round-trip. No blob_id — the
-        // /consume path (1.18d2a) is skipped on Accept.
-        bytes = parsed.capabilityBytes;
-        blobId = null;
-      }
-      const cap = wasm.InviteCapability.decodeAndVerify(bytes);
+      // Sealed-link amendment of ADR-0028 (2026-09-28): a missing or
+      // malformed fragment is refused before any request; the pointer's blob
+      // (or the inline one) opens only under the fragment's secret, which
+      // also verifies the capability inside. A 404 surfaces as `null`, the
+      // same invalid panel as a malformed slug, by design.
+      const opened = await openInviteLinkFromUrl({
+        slug,
+        hash,
+        widths: inviteLinkWidths(wasm),
+        inlineMinLen: INVITE_INLINE_MIN_LEN,
+        what: "invite",
+        fetchPointer: (blobId) => discovery.fetchInvite(blobId),
+        open: (sealed, secret) => wasm.InviteCapability.openLink(sealed, secret),
+      });
+      if (opened.kind === "not-found") return null;
+      const cap = opened.capability;
       return {
         cap,
         fingerprintShort: shortFingerprintFor(cap.ownerSignaturePubkey),
-        blobId,
-        capabilityBytes: bytes,
+        blobId: opened.blobId,
+        capabilityBytes: cap.wire,
       };
     } catch (err) {
       // A 429 says nothing about the link: say "try again later", never
       // "invalid" (ADR-0028 short-link amendment).
       if (isDiscoveryRateLimited(err)) return RATE_LIMITED;
+      if (isInviteLinkDamaged(err)) return DAMAGED;
       // eslint-disable-next-line no-console
       console.warn("invite: decode/verify failed", err);
       return null;
@@ -162,7 +167,7 @@ export default function Invite(): JSX.Element {
   );
   const invite = (): DecodedInvite | null => {
     const d = decoded();
-    return d === undefined || d === null || d === RATE_LIMITED ? null : d;
+    return d === undefined || d === null || d === RATE_LIMITED || d === DAMAGED ? null : d;
   };
 
   // 1.18c-V1 wires only the canonical accessor (no persist hook
@@ -182,13 +187,18 @@ export default function Invite(): JSX.Element {
       <Show when={!decoded.loading && decoded() === null}>
         <InvalidInvitePanel />
       </Show>
+      <Show when={!decoded.loading && decoded() === DAMAGED}>
+        <section class="lk-stack" style={{ gap: "12px" }}>
+          <p>{INVITE_LINK_DAMAGED}</p>
+        </section>
+      </Show>
       <Show when={!decoded.loading && decoded() === RATE_LIMITED}>
         <RateLimitedInvitePanel onRetry={() => void refetch()} />
       </Show>
       <Show when={!decoded.loading && invite() !== null}>
         <Show
           when={auth.state().kind === "session" && auth.identitySecrets() !== null}
-          fallback={<NeedsAuthPanel slug={params.slug} />}
+          fallback={<NeedsAuthPanel slug={params.slug} hash={location.hash} />}
         >
           <ConnectPanel
             invite={invite() as DecodedInvite}
@@ -237,14 +247,18 @@ function InvalidInvitePanel(): JSX.Element {
   );
 }
 
-function NeedsAuthPanel(props: { slug: string }): JSX.Element {
+function NeedsAuthPanel(props: { slug: string; hash: string }): JSX.Element {
   // 1.18e — preserve the current `/i/:slug` URL across the
   // auth round-trip. `buildAuthUrlWithReturn` encodes the
   // current path as a `?return=` query that Signup.tsx /
   // Login.tsx read on success to bounce back here. Pre-1.18e
   // the joiner had to re-paste / re-click the invite URL after
   // signup — easy to lose when copy-pasting from email.
-  const returnTo = paths.invite(props.slug);
+  // The fragment is the link secret; without it the link opens nothing
+  // (sealed-link amendment), so the return path keeps it.
+  const fragment =
+    props.hash.length === 0 || props.hash.startsWith("#") ? props.hash : `#${props.hash}`;
+  const returnTo = `${paths.invite(props.slug)}${fragment}`;
   return (
     <section class="lk-stack" style={{ gap: "12px" }}>
       <h1>Someone wants to connect on Lakko</h1>

@@ -83,6 +83,11 @@ struct LakkoApp: App {
     /// rather than a `@StateObject`.
     private let callKitBridge: CallKitBridge
 
+    /// ADR-0049 section 2 (amended 2026-09-28) — the OLD device's side of
+    /// "confirm on another device": looks for an open sign-in request when the
+    /// app becomes active and shows the code modal.
+    @StateObject private var deviceLinkResponder: DeviceLinkResponderFlow
+
     /// The same objects as plain references, for the shell views that hand
     /// them down without observing them (see ``AppServices``). Built once in
     /// `init` from the very instances the `@StateObject`s above own.
@@ -201,6 +206,42 @@ struct LakkoApp: App {
                 return (personKey: contact.request.fromPubkey, accountId: accountId)
             }
         }
+        self._deviceLinkResponder = StateObject(wrappedValue: DeviceLinkResponderFlow(
+            ports: .init(
+                relay: DeviceLinkClient(),
+                sessionToken: { [weak auth] in auth?.identitySecrets?.sessionToken },
+                ownHandle: { [weak auth] in auth.flatMap { DeviceSession.current($0)?.loginHandle } },
+                checkPayload: { payload, handle in
+                    _ = try PairingCodec.parsePairingQrPayload(
+                        wireBytes: payload, expectedLoginHandle: handle)
+                },
+                runPairing: { [weak auth, weak chat] payload in
+                    guard let auth, let session = DeviceSession.current(auth),
+                          let handle = session.loginHandle else {
+                        throw AuthClientError.argument("no session")
+                    }
+                    let token = session.sessionToken
+                    let recovery = PairingOrchestrator.ScanRecovery(
+                        accountIdentitySeed: session.accountIdentitySeed,
+                        deviceAuthorizeStart: {
+                            try await AuthClient().deviceAuthorizeStart(sessionToken: token)
+                        }
+                    )
+                    let scanned = try await PairingOrchestrator.runScanFlow(
+                        scannedBytes: payload,
+                        ownLoginHandle: handle,
+                        accountIdBytes: session.accountIdBytes,
+                        accountIdB64: session.accountIdB64,
+                        recovery: recovery
+                    )
+                    // ADR-0050 section 2.8 — admit the new device to every chat.
+                    let deviceKey = scanned.newDeviceKey
+                    Task { @MainActor [weak chat] in
+                        _ = try? await chat?.admitDevice(deviceKey: deviceKey)
+                    }
+                }
+            )
+        ))
         self.services = AppServices(
             authRepository: auth,
             contactsRepository: contacts,
@@ -306,6 +347,9 @@ struct LakkoApp: App {
                 // arrived while backgrounded rings if it is still fresh.
                 foregroundReceive.scheduler.setForeground(phase == .active)
                 if phase == .active {
+                    // ADR-0049 section 2 — a sign-in request waiting for this
+                    // device's code.
+                    Task { await deviceLinkResponder.check() }
                     // `docs/ux/calls.md` section 2.1 — refresh the names the
                     // notification extension may have to put on a ringing
                     // lock screen while this app is not running.
@@ -315,6 +359,16 @@ struct LakkoApp: App {
             .task {
                 foregroundReceive.scheduler.start()
                 foregroundReceive.scheduler.setForeground(scenePhase == .active)
+            }
+            .task {
+                if scenePhase == .active { await deviceLinkResponder.check() }
+            }
+            .sheet(isPresented: Binding(
+                get: { deviceLinkResponder.modal != nil },
+                set: { if !$0 { deviceLinkResponder.dismiss() } }
+            )) {
+                DeviceLinkRequestModal(flow: deviceLinkResponder)
+                    .presentationDetents([.medium])
             }
     }
 }

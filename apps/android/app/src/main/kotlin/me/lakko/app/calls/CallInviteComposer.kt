@@ -4,6 +4,10 @@
 package me.lakko.app.calls
 
 import me.lakko.app.discovery.DiscoveryClient
+import me.lakko.app.discovery.InviteLinkLengths
+import me.lakko.app.discovery.SealedInviteUpload
+import me.lakko.app.discovery.composeSealedInviteUrl
+import me.lakko.app.discovery.isInviteUploadTransportFailure
 import uniffi.lakko_ffi_uniffi.FfiCallInviteMedia
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.composeCallInviteCapability
@@ -27,6 +31,7 @@ import uniffi.lakko_ffi_uniffi.composeCallInviteCapability
  */
 public class CallInviteComposer(
     private val discoveryClient: DiscoveryClient,
+    private val lengths: InviteLinkLengths = InviteLinkLengths.core,
 ) {
 
     public sealed class ComposeException(message: String) : Exception(message) {
@@ -48,11 +53,13 @@ public class CallInviteComposer(
      * [url] to the share sheet, and [blobId] is what a future revoke would name.
      */
     public data class Composed(
-        /** Raw 6-byte server-assigned `blob_id`. */
-        val blobId: ByteArray,
-        /** The full `<origin>/c/<slug>` URL the owner shares. */
+        /** Raw 6-byte server-assigned `blob_id`, or `null` for an inline link
+         *  (the upload failed in transport). */
+        val blobId: ByteArray?,
+        /** The full `<origin>/c/<slug>#<secret>` URL the owner shares. */
         val url: String,
-        /** Wire-format capability bytes the server now holds. */
+        /** The sealed link bytes (what the ledger holds, or what the inline
+         *  slug carries); the plaintext capability never leaves the device. */
         val capabilityBytes: ByteArray,
     ) {
         override fun equals(other: Any?): Boolean {
@@ -80,8 +87,9 @@ public class CallInviteComposer(
      *      field, and a well-formed capability is what the joiner verifies.
      *   2. `composeCallInviteCapability(...)` via UniFFI — wire bytes signed
      *      under the owner's Ed25519 key, with the section-4 values.
-     *   3. [DiscoveryClient.uploadCallInvite] — pushes the bytes to the ledger.
-     *   4. [composePointerCallInviteUrl] — builds the `<origin>/c/<slug>` URL.
+     *   3. [DiscoveryClient.uploadCallInvite] — pushes the SEALED bytes to the
+     *      ledger; only a transport failure falls back to the inline form.
+     *   4. The `<origin>/c/<slug>#<secret>` URL (sealed links, 2026-09-28).
      *
      * Must be driven from a background coroutine: the upload is a network
      * round trip.
@@ -112,25 +120,47 @@ public class CallInviteComposer(
         }
 
         // ---- 2. composeCallInviteCapability via UniFFI ---------
-        val capabilityBytes = composeCallInviteCapability(
+        val expiryMs = callInviteLinkExpiryMs(nowMs)
+        val maxUses = callInviteLinkMaxUses()
+        val mint = composeCallInviteCapability(
             ownerSigningSeed = ownerSigningSeed,
             ownerAccountId = ownerAccountId,
             callId = callId,
-            expiryMs = callInviteLinkExpiryMs(nowMs).toULong(),
-            maxUses = callInviteLinkMaxUses(),
+            expiryMs = expiryMs.toULong(),
+            maxUses = maxUses,
             media = FfiCallInviteMedia(audio = true, video = CALL_INVITE_LINK_MEDIA_VIDEO),
             oneTimeKeyPackage = oneTimeKeyPackage,
             label = CALL_INVITE_LINK_LABEL,
         )
 
         // ---- 3. uploadCallInvite via HTTP ----------------------
-        val blobId = discoveryClient.uploadCallInvite(capabilityBytes)
+        val blobId: ByteArray? = try {
+            discoveryClient.uploadCallInvite(
+                SealedInviteUpload(
+                    sealed = mint.sealed,
+                    issuerPubkey = mint.issuerPubkey,
+                    expiryMs = expiryMs,
+                    maxUses = maxUses.toLong(),
+                ),
+            )
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            if (!isInviteUploadTransportFailure(e)) throw e
+            null
+        }
 
         // ---- 4. URL build --------------------------------------
         return Composed(
             blobId = blobId,
-            url = composePointerCallInviteUrl(blobId, origin),
-            capabilityBytes = capabilityBytes,
+            url = composeSealedInviteUrl(
+                origin = origin,
+                prefix = CALL_INVITE_URL_PREFIX,
+                blobId = blobId,
+                sealed = mint.sealed,
+                linkSecret = mint.linkSecret,
+                lengths = lengths,
+            ),
+            capabilityBytes = mint.sealed,
         )
     }
 }

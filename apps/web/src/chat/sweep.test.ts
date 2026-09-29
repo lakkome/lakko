@@ -227,6 +227,9 @@ function model(opts: {
    *  is what the owner (rank 0) always gets from the real fold, so every S4a
    *  test below keeps meaning exactly what it meant. */
   acting?: (ownRank: number) => Promise<ActingCommitter>;
+  /** ADR-0057 — does this device hold the root or a registrar seed?
+   *  Undefined = the port is absent (a test not about ADR-0057). */
+  mayRegister?: boolean;
 }): Model {
   const order: string[] = [];
   const published: string[] = [];
@@ -380,6 +383,14 @@ function model(opts: {
     },
     welcomeMailbox: (k) => new Uint8Array([0xbb, k[0] ?? 0]),
     wrapWelcome: (w) => new Uint8Array([0xee, ...w]),
+    ...(opts.mayRegister === undefined
+      ? {}
+      : {
+          mayRegister: () => {
+            order.push(`may-register?${opts.mayRegister}`);
+            return opts.mayRegister === true;
+          },
+        }),
     // ADR-0053 contract point 3, the staged half.
     registerStagedEpoch: async () => {
       if (registerFails) throw new Error("ds access: 401 proof required");
@@ -1211,7 +1222,7 @@ describe("ADR-0053 contract point 3 — the staged epoch is registered before th
     expect(m.pending()).toBe(1);
   });
 
-  it("the restart path re-sends the registration and still re-publishes when it is refused", async () => {
+  it("the restart path does NOT re-send the registration (ADR-0057: a root re-registering N+1 would drop a winner's later epochs) and still re-publishes", async () => {
     const OWED: SweepDurableEntry = {
       id: "entry-owed",
       commitB64: Buffer.from(frame(COMMIT, 6, 0x5e)).toString("base64"),
@@ -1223,10 +1234,42 @@ describe("ADR-0053 contract point 3 — the staged epoch is registered before th
 
     const out = await resolveOwedVerdict(m.ports);
 
-    // The commit may already be on the wire from the first run: the verdict,
-    // not a refused re-registration, decides what happens to it.
+    // The registration landed before the entry was written on the first run;
+    // the verdict decides what happens to the commit.
     expect(out.kind).toBe("committed");
+    expect(m.order).not.toContain("register");
     expect(m.published).toEqual(["group:commit"]);
+  });
+});
+
+describe("ADR-0057 obligation 5 — a committer with no journal authority does not stage", () => {
+  it("no root and no registrar seed: nothing staged, fetched or published", async () => {
+    const m = model({ rank: 1, pending: 2, mayRegister: false });
+    const out = await runCommitterSweep(m.ports);
+    expect(out).toEqual({ kind: "no-journal-authority", rank: 1 });
+    expect(m.order).toEqual(["may-register?false"]);
+    expect(m.staged()).toBe(false);
+    expect(m.published).toEqual([]);
+    expect(m.pending()).toBe(2);
+  });
+
+  it("a device that holds one sweeps as before", async () => {
+    const m = model({ rank: 1, pending: 2, mayRegister: true });
+    const out = await runCommitterSweep(m.ports);
+    expect(out.kind).toBe("committed");
+    expect(m.order.indexOf("may-register?true")).toBeLessThan(m.order.indexOf("stage"));
+  });
+
+  it("an owed verdict is still resolved without authority (it is never re-registered)", async () => {
+    const OWED: SweepDurableEntry = {
+      id: "entry-owed",
+      commitB64: Buffer.from(frame(COMMIT, 6, 0x5e)).toString("base64"),
+      welcomeEnvelopeB64: undefined,
+      welcomeMailboxesB64: [],
+    };
+    const m = model({ rank: 1, pending: 1, epoch: 6, owed: { entry: OWED }, mayRegister: false });
+    const out = await runCommitterSweep(m.ports);
+    expect(out.kind).toBe("committed");
   });
 });
 

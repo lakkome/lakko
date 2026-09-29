@@ -29,10 +29,18 @@
  * identity key for a mailbox read. The signer comes from the registry in
  * `./access` (or is passed explicitly); the path signed is the service path,
  * never the `/api/ds` prefix, and the query is signed exactly as sent. A
- * refused group request is retried under the previous epoch's key, then once
- * after a claim (contract point 5). Mailbox writes and the knock stay
- * unsigned; the knock spends one anonymous `ds-knock` token instead
- * (ADR-0054 S3) and carries no credentials.
+ * refused group request is retried under the previous epoch's key (contract
+ * point 5); then, ONLY when this account owns the journal (ADR-0057
+ * obligation 2), the owner claims it with its root (the claim registers the
+ * current epoch) and retries once; an already-claimed journal is left alone. A plain member
+ * never claims and never registers: it waits for the committer's
+ * registration. Mailbox writes and the knock stay unsigned; the knock spends
+ * one anonymous `ds-knock` token instead (ADR-0054 S3) and carries no
+ * credentials.
+ *
+ * ADR-0057 statements (claim, reset, register, registrars, push binding) are
+ * `PUT /ds/group/<hex>/<segment>` with the signer's JSON body and NO proof
+ * header ({@link DsClient.putStatement}).
  *
  * ADR-0054 - a group publish that should wake the recipients carries an
  * `x-lakko-wake` header (built by `./wake`); the DS forwards the wake to
@@ -49,6 +57,14 @@ import {
   type ProofSigner,
 } from "./access";
 import { DS_WAKE_HEADER, dsWakeHeaderValue, type DsWake } from "./wake";
+import {
+  claimAsOwner,
+  isStatus,
+  registerEpochWith,
+  releaseAuthority,
+  type StatementSender,
+} from "./ownership";
+import { journalRepair, type JournalRepair } from "./journal-repair";
 import {
   anonTokens,
   anonymousFetchInit,
@@ -194,10 +210,13 @@ export interface DsClientOptions {
   readonly now?: () => number;
   /** The anonymous-token pool the knock spends from. Defaults to the app's. */
   readonly tokens?: AnonTokenPool;
+  /** The journal repair scheduler a refusal notes. Defaults to the app's. */
+  readonly repair?: Pick<JournalRepair, "note">;
 }
 
-export class DsClient {
+export class DsClient implements StatementSender {
   private readonly access: DsAccessRegistry;
+  private readonly repair: Pick<JournalRepair, "note">;
   private readonly fetchImpl: typeof fetch;
   private readonly now: () => number;
   private readonly tokens: AnonTokenPool;
@@ -211,6 +230,7 @@ export class DsClient {
       options.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
     this.now = options.now ?? (() => Date.now());
     this.tokens = options.tokens ?? anonTokens;
+    this.repair = options.repair ?? journalRepair;
   }
 
   // -----------------------------------------------------------------
@@ -251,33 +271,53 @@ export class DsClient {
       }
       case "group": {
         const { current, previous } = this.access.groupSigners(plan.groupId);
-        if (current !== null && this.access.markClaimAttempt(plan.groupId)) {
-          // Contract point 2 - claim on open, once per group per session.
-          // Fired, not awaited: an unclaimed journal answers the request below
-          // either way, and a claimed one ignores a claim it already holds.
-          void this.claimGroupWith(plan.groupId, current, previous).catch((err: unknown) => {
-            // eslint-disable-next-line no-console
-            console.warn("ds: claim on open failed; retried on the next refusal", err);
-          });
-        }
         const first = await this.attempt(req, current);
         if (first.status !== 401) return this.finish(req, first);
         // Contract point 5 - once under the previous epoch's key (a read
-        // before a lagging registration landed), then once after a claim.
+        // before a lagging registration landed).
         let latest = first;
         if (previous !== null) {
           latest = await this.attempt(req, previous);
           if (latest.status !== 401) return this.finish(req, latest);
         }
+        // ADR-0057 obligation 2 - the lazy claim, by the OWNER only. A plain
+        // member (or an admin) never claims and never registers here: it waits
+        // for the committer's registration and retries on the next poll.
         const again = this.access.groupSigners(plan.groupId);
-        if (again.current !== null) {
-          await this.claimGroupWith(plan.groupId, again.current, again.previous).catch(
-            () => undefined,
-          );
-          latest = await this.attempt(req, again.current);
+        if (again.current !== null && this.access.ownsJournal(plan.groupId)) {
+          const claimed = await this.ownerClaim(plan.groupId, again.current).catch((err: unknown) => {
+            // eslint-disable-next-line no-console
+            console.warn("ds: the owner's lazy claim failed", err);
+            return false;
+          });
+          if (claimed) latest = await this.attempt(req, again.current);
+        }
+        // Second security pass, finding 1 - refused at this device's own epoch
+        // after everything else was tried: an owner or admin schedules the
+        // repair check (a member's note is dropped there).
+        if (latest.status === 401 && again.current !== null) {
+          const skewed = isClockSkewed(parseHttpDate(latest.headers.get("date")), this.now());
+          if (!skewed) this.repair.note(plan.groupId, again.current.epoch, "refused-at-head");
         }
         return this.finish(req, latest);
       }
+    }
+  }
+
+  /** ADR-0057 obligation 2: claim the journal with this account's root at the
+   *  epoch `current` proves. `true` only when the claim landed (the journal
+   *  was unclaimed), which is the one case a retry can now succeed; an
+   *  already-claimed journal (409) means this device waits for the
+   *  committer's registration like everyone else. */
+  private async ownerClaim(groupId: Uint8Array, current: ProofSigner): Promise<boolean> {
+    const authority = this.access.journalAuthority(groupId);
+    try {
+      if (authority.kind !== "root") return false;
+      const outcome = await claimAsOwner(this, groupId, authority.signer, current.epoch, current.verifyingKey());
+      if (outcome === "claimed") this.access.markRootHeld(groupId);
+      return outcome === "claimed";
+    } finally {
+      releaseAuthority(authority);
     }
   }
 
@@ -346,39 +386,53 @@ export class DsClient {
   }
 
   // -----------------------------------------------------------------
-  // Claims (ADR-0053 contract point 2)
+  // ADR-0057 statements
   // -----------------------------------------------------------------
 
   /**
-   * `PUT /ds/group/{hex}/access` registering `next`'s key at its epoch,
-   * proven under `signedBy` (unsigned when `null`: the first claim of an
-   * unclaimed journal, or re-sending a key the journal already holds). Throws
-   * on a refusal - the register-before-publish caller aborts on it.
+   * `PUT <path>` with a statement body the wasm signer built (`path` is the
+   * service path `/ds/group/<hex>/<segment>`). No proof header: the
+   * statement carries its own signature. Throws `DsHttpError` on a refusal.
    */
-  async claimGroupWith(
-    groupId: Uint8Array,
-    next: ProofSigner,
-    signedBy: ProofSigner | null,
-  ): Promise<void> {
-    if (groupId.length === 0) throw new DsClientArgError("groupId must be non-empty");
-    const body = new TextEncoder().encode(next.groupClaimBodyJson());
+  async putStatement(path: string, bodyJson: string): Promise<void> {
+    if (!path.startsWith("/ds/group/")) {
+      throw new DsClientArgError("a statement path must name a group journal");
+    }
     await this.send({
       method: "PUT",
-      path: `/ds/group/${pseudonymHex(groupId)}/access`,
+      path,
       query: "",
-      body,
+      body: new TextEncoder().encode(bodyJson),
       contentType: "application/json",
-      plan: { kind: "explicit", signer: signedBy },
+      plan: { kind: "none" },
     });
   }
 
-  /** {@link EpochRegistrar} over this client. */
+  /** {@link EpochRegistrar} over this client: register `epochKey` at `epoch`
+   *  signed with this device's authority over the journal (root or
+   *  registrar), revoking `revokeKeys`. Throws `NoJournalAuthorityError`
+   *  when this device holds neither. */
   async registerGroupEpoch(
     groupId: Uint8Array,
-    next: ProofSigner,
-    signedBy: ProofSigner | null,
+    epoch: bigint,
+    epochKey: Uint8Array,
+    revokeKeys: readonly Uint8Array[] = [],
   ): Promise<void> {
-    await this.claimGroupWith(groupId, next, signedBy);
+    if (groupId.length === 0) throw new DsClientArgError("groupId must be non-empty");
+    const authority = this.access.journalAuthority(groupId);
+    try {
+      await registerEpochWith(this, groupId, authority, epoch, epochKey, revokeKeys);
+    } catch (err) {
+      // Append 409: another committer registered `epoch` first. The caller
+      // abandons (never a Replace in a commit path); an owner or admin
+      // schedules the repair check at the epoch it is at.
+      if (isStatus(err, 409) && epoch > 0n) {
+        this.repair.note(groupId, epoch - 1n, "append-conflict");
+      }
+      throw err;
+    } finally {
+      releaseAuthority(authority);
+    }
   }
 
   /** `PUT /ds/mailbox/{hex}/access` - claim the mailbox `signer`'s identity

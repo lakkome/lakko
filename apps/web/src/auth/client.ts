@@ -86,6 +86,10 @@ import type {
   DeviceRequestStatusRequest,
   DeviceRequestStatusResponse,
   DeviceRequestsListResponse,
+  DeviceRequestAnswerRequest,
+  DeviceRequestOutcome,
+  DeviceRequestPayloadRequest,
+  DeviceRequestResultRequest,
 } from "./wire";
 
 /** Default base URL for the dev environment. Vite's proxy maps
@@ -1051,59 +1055,118 @@ export class AuthClient {
   }
 
   // -----------------------------------------------------------------
-  // Device requests — ADR-0049 section 2, the camera-less add-device
-  // confirmation
+  // Device requests — ADR-0049 section 2 as amended 2026-09-28: the
+  // device link. The old device chooses a six-digit code and the new
+  // device types it; the two run SPAKE2 over this relay, which sees no
+  // code and cannot open anything it carries.
   // -----------------------------------------------------------------
 
-  /** `POST /device/request` — the fresh device posts its pairing payload,
+  /** `POST /device/request` — the fresh device asks to be confirmed,
    *  addressed by the login handle of the typed username (ADR-0056), never
    *  by an account id. Anonymous, limited server-side (ADR-0054 S4). A 200
-   *  says nothing about whether the name exists. */
+   *  says nothing about whether the name exists. Nothing else rides on it:
+   *  the pairing payload travels sealed, later, inside the exchange. */
   async deviceRequestCreate(
     loginHandle: Uint8Array,
-    pairingPayload: Uint8Array,
   ): Promise<{ requestId: string; expiresInSecs: number }> {
     if (loginHandle.length !== 32) {
       throw new AuthClientArgError("loginHandle must be 32 bytes");
     }
     const resp = await this.post<DeviceRequestCreateRequest, DeviceRequestCreateResponse>(
       "/device/request",
-      {
-        handle: base64UrlEncodeNoPad(loginHandle),
-        pairing_payload_b64: base64Encode(pairingPayload),
-      },
+      { handle: base64UrlEncodeNoPad(loginHandle) },
     );
     return { requestId: resp.request_id_b64, expiresInSecs: resp.expires_in_secs };
   }
 
-  /** `POST /device/request/status` — is the request still open? */
-  async deviceRequestPending(requestId: string): Promise<boolean> {
+  /** `POST /device/request/status` — where the fresh device's request
+   *  stands. The request id rides in the body, never in a path. */
+  async deviceRequestStatus(requestId: string): Promise<DeviceRequestStatus> {
     const resp = await this.post<DeviceRequestStatusRequest, DeviceRequestStatusResponse>(
       "/device/request/status",
       { request_id_b64: requestId },
     );
-    return resp.pending;
+    return {
+      pending: resp.pending,
+      pakeB: optionalBytes(resp.pake_b_b64),
+      outcome: resp.outcome ?? null,
+      confirmB: optionalBytes(resp.confirm_b_b64),
+    };
   }
 
-  /** `GET /device/requests` — the pending request for the signed-in
-   *  account, or `null`. Bearer-authenticated. */
-  async deviceRequestsList(
-    sessionToken: string,
-  ): Promise<{ requestId: string; pairingPayload: Uint8Array; createdAtMs: number } | null> {
+  /** `POST /device/request/payload` — the fresh device's half of the
+   *  exchange, once. `409 device-request-not-ready` before the old device
+   *  answered, `409 device-request-already-used` after a first post. */
+  async deviceRequestPayload(
+    requestId: string,
+    sealed: { pakeA: Uint8Array; sealedPayload: Uint8Array; confirmA: Uint8Array },
+  ): Promise<void> {
+    await this.post<DeviceRequestPayloadRequest, unknown>("/device/request/payload", {
+      request_id_b64: requestId,
+      pake_a_b64: base64Encode(sealed.pakeA),
+      sealed_payload_b64: base64Encode(sealed.sealedPayload),
+      confirm_a_b64: base64Encode(sealed.confirmA),
+    });
+  }
+
+  /** `GET /device/requests` — the open request for the signed-in account
+   *  with every value posted so far, or `null`. Bearer-authenticated. */
+  async deviceRequestsList(sessionToken: string): Promise<PendingDeviceRequest | null> {
     if (sessionToken.length === 0) {
       throw new AuthClientArgError("sessionToken must be non-empty");
     }
     const resp = await this.get<DeviceRequestsListResponse>("/device/requests", sessionToken);
     if (resp.request === null) return null;
+    const r = resp.request;
     return {
-      requestId: resp.request.request_id_b64,
-      pairingPayload: base64Decode(resp.request.pairing_payload_b64),
-      createdAtMs: resp.request.created_at_ms,
+      requestId: r.request_id_b64,
+      createdAtMs: r.created_at_ms,
+      pakeB: optionalBytes(r.pake_b_b64),
+      pakeA: optionalBytes(r.pake_a_b64),
+      sealedPayload: optionalBytes(r.sealed_payload_b64),
+      confirmA: optionalBytes(r.confirm_a_b64),
+      outcome: r.outcome ?? null,
     };
   }
 
-  /** `DELETE /device/requests/{id}` — decline, or consume after a confirmed
-   *  pairing. Bearer-authenticated. */
+  /** `POST /device/requests/{id}/pake` — the old device answers, once.
+   *  `409 device-request-already-answered` when another device of the
+   *  account answered first. Bearer-authenticated. */
+  async deviceRequestAnswer(sessionToken: string, requestId: string, pakeB: Uint8Array): Promise<void> {
+    if (sessionToken.length === 0) {
+      throw new AuthClientArgError("sessionToken must be non-empty");
+    }
+    await this.post<DeviceRequestAnswerRequest, unknown>(
+      `/device/requests/${encodeURIComponent(requestId)}/pake`,
+      { pake_b_b64: base64Encode(pakeB) },
+      sessionToken,
+    );
+  }
+
+  /** `POST /device/requests/{id}/result` — the old device records the
+   *  outcome, once: `accepted` with its key confirmation, or `wrong_code`.
+   *  Bearer-authenticated. */
+  async deviceRequestResult(
+    sessionToken: string,
+    requestId: string,
+    result: { outcome: "accepted"; confirmB: Uint8Array } | { outcome: "wrong_code" },
+  ): Promise<void> {
+    if (sessionToken.length === 0) {
+      throw new AuthClientArgError("sessionToken must be non-empty");
+    }
+    const body: DeviceRequestResultRequest =
+      result.outcome === "accepted"
+        ? { outcome: "accepted", confirm_b_b64: base64Encode(result.confirmB) }
+        : { outcome: "wrong_code" };
+    await this.post<DeviceRequestResultRequest, unknown>(
+      `/device/requests/${encodeURIComponent(requestId)}/result`,
+      body,
+      sessionToken,
+    );
+  }
+
+  /** `DELETE /device/requests/{id}` — decline ("It is not me").
+   *  Bearer-authenticated. */
   async deviceRequestDelete(sessionToken: string, requestId: string): Promise<void> {
     if (sessionToken.length === 0) {
       throw new AuthClientArgError("sessionToken must be non-empty");
@@ -1231,6 +1294,33 @@ export class AuthClient {
     // Both are JSON; force the parse so a non-JSON 200 is loud.
     return (await response.json()) as Res;
   }
+}
+
+/** Where a fresh device's request stands (`POST /device/request/status`). */
+export interface DeviceRequestStatus {
+  /** `false` after a decline or expiry (indistinguishable by design). */
+  readonly pending: boolean;
+  /** The old device's SPAKE2 message, once it answered. */
+  readonly pakeB: Uint8Array | null;
+  /** The old device's decision, once taken. */
+  readonly outcome: DeviceRequestOutcome | null;
+  /** The old device's key confirmation, with `accepted`. */
+  readonly confirmB: Uint8Array | null;
+}
+
+/** The open request as the old device sees it (`GET /device/requests`). */
+export interface PendingDeviceRequest {
+  readonly requestId: string;
+  readonly createdAtMs: number;
+  readonly pakeB: Uint8Array | null;
+  readonly pakeA: Uint8Array | null;
+  readonly sealedPayload: Uint8Array | null;
+  readonly confirmA: Uint8Array | null;
+  readonly outcome: DeviceRequestOutcome | null;
+}
+
+function optionalBytes(b64: string | null | undefined): Uint8Array | null {
+  return b64 === null || b64 === undefined ? null : base64Decode(b64);
 }
 
 /** A login handle on the wire: base64url without padding of 32 bytes. */

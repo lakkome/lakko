@@ -75,9 +75,9 @@
  */
 import { DsClient } from "../ds/client";
 import type { FetchResult } from "../ds/client";
-import { base64Encode } from "../auth/account-id";
+import { base64Decode, base64Encode } from "../auth/account-id";
 import { withGroupMlsLock } from "../mls/group-lock";
-import { healAfterApply, takeSigner } from "../ds/access";
+
 import { readKnockCursor, takeKnockReadSlot, writeKnockCursor } from "./knock-cursor";
 import { PUSH_GID_LEN, type DsWake } from "../ds/wake";
 import { loadWasm } from "../wasm";
@@ -105,6 +105,9 @@ import { sniffProfileRequest } from "../profile/profile-request";
 import { sniffGroupName } from "./group-name-envelope";
 import type { StoredGroupName } from "./group-name-store";
 import { sniffPin } from "./pin-envelope";
+import { isRegistrarSeedEnvelope } from "./registrar-seed-envelope";
+import { deliverRegistrarSeed } from "../ds/registrar-seeds";
+import { noteOwnerTransition, readRoleTableOwner } from "../ds/root-handover";
 import type { IncomingPin } from "./pin-store";
 import {
   resolveLeafSignatureKey,
@@ -455,6 +458,21 @@ export type IncomingChatEvent =
       /** The sender's ACCOUNT key resolved at receipt (C-68), the key the
        *  ADR-0022 role table names. `undefined` ⇒ unverifiable in a group
        *  with a role table, dropped. */
+      senderKey: MemberIdentity | undefined;
+      createdAt: string;
+    }
+  | {
+      /** ADR-0057 — a registrar-seed envelope the group's owner sent one
+       *  member. Never a timeline bubble and never handed to a view: the
+       *  receive path runs it through the gate in `ds/registrar-seeds.ts`
+       *  AT RECEIPT (the live role table's owner is read there) and drops it
+       *  from the batch. Listed in the union only so a caller that forgets
+       *  to consume it cannot render it. */
+      kind: "registrarSeed";
+      messageId: number;
+      /** The whole envelope, for decode and open. */
+      plaintext: Uint8Array;
+      /** The sender's ACCOUNT key resolved at receipt (C-68). */
       senderKey: MemberIdentity | undefined;
       createdAt: string;
     };
@@ -1142,27 +1160,16 @@ export class ChatClient {
       cursorRef.beforeApply?.();
     }
 
-    // ADR-0053 contract point 4 — the access key of the epoch the group is at
-    // BEFORE this batch, so a commit in it can be followed by registering the
-    // new epoch's key proven under this one.
-    const signerBefore = takeSigner(() => group.dsAccessSigner(myIdentity));
-    try {
-      return await this.applyPolledRows(myIdentity, group, after, raw, cursorRef, signerBefore);
-    } catch (err) {
-      signerBefore?.free();
-      throw err;
-    }
+    return this.applyPolledRows(myIdentity, group, after, raw, cursorRef);
   }
 
-  /** The row loop and the cursor gate of {@link applyPolledBatch}; owns
-   *  `signerBefore` from here on (freed once the heal settles). */
+  /** The row loop and the cursor gate of {@link applyPolledBatch}. */
   private async applyPolledRows(
     myIdentity: WasmIdentity,
     group: WasmGroup,
     after: number,
     raw: FetchResult,
     cursorRef: PollCursorRef | undefined,
-    signerBefore: ReturnType<typeof takeSigner>,
   ): Promise<PollMessagesResult> {
     const events: IncomingChatEvent[] = [];
     let cursor = after;
@@ -1172,6 +1179,10 @@ export class ChatClient {
     // and every subsequent poll would log a `CannotDecryptOwnMessage` for it.
     const matchedEchoes: number[] = [];
     const groupIdB64 = base64Encode(group.groupId);
+    // ADR-0057 root handover - the role table's owner before each applied
+    // row, so a commit that moves ownership away from this account is seen
+    // at the apply that carried it.
+    let ownerSeen = readRoleTableOwner(group);
     for (const message of raw.messages) {
       cursor = message.id;
       // Drop our own echoes — the DS doesn't dedupe and
@@ -1209,19 +1220,28 @@ export class ChatClient {
         console.warn("processIncomingVerifyingRoles failed", message.id, err);
         continue;
       }
+      {
+        const ownerNow = readRoleTableOwner(group);
+        noteOwnerTransition(group.groupId, ownerSeen, ownerNow);
+        ownerSeen = ownerNow;
+      }
       // 1.19c2: application messages run through the wasm
       // envelope parser (which is async because it has to
       // resolve the cached wasm module promise on first call,
       // then synchronous thereafter). System rows skip it.
-      events.push(
-        await toEvent(
-          message.id,
-          message.createdAt,
-          processed,
-          (leaf) => resolveMemberIdentity(rosterOf(group), leaf),
-          (leaf) => resolveLeafSignatureKey(rosterOf(group), leaf),
-        ),
+      const event = await toEvent(
+        message.id,
+        message.createdAt,
+        processed,
+        (leaf) => resolveMemberIdentity(rosterOf(group), leaf),
+        (leaf) => resolveLeafSignatureKey(rosterOf(group), leaf),
       );
+      // ADR-0057 — consumed here, at receipt, and never handed on.
+      if (event.kind === "registrarSeed") {
+        await consumeRegistrarSeed(group, event);
+        continue;
+      }
+      events.push(event);
     }
 
     // Still inside the lock: the ratchet and the journal position move
@@ -1239,14 +1259,11 @@ export class ChatClient {
         for (const id of matchedEchoes) consumeOwnPublished(groupIdB64, id);
       },
     );
-    // ADR-0053 contract point 4 — heal on apply. Fired, not awaited: it is a
-    // network call and this region holds the group lock. The helper signs
-    // synchronously when called, so the signers can be freed once it settles.
-    const signerAfter = takeSigner(() => group.dsAccessSigner(myIdentity));
-    void healAfterApply(this.ds, group.groupId, signerBefore, signerAfter).finally(() => {
-      signerBefore?.free();
-      signerAfter?.free();
-    });
+    // ADR-0057 obligation 6 — no heal on apply. An epoch this batch reached
+    // is registered by its committer before the commit was published; a
+    // device that is neither root nor a registrar never registers one, and a
+    // write refused for a missing key waits for that registration and retries
+    // on the next poll.
     if (verdict === "held") {
       // Report `after`, never the un-committed `cursor`: a caller that ignores
       // `outcome` and writes `result.cursor` back must still not lead.
@@ -1284,6 +1301,39 @@ export function rosterOf(group: WasmGroup): RosterMember[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * ADR-0057 obligation 4 — hand one registrar-seed envelope to the gate, with
+ * the owner read off the LIVE role table now, at receipt (C-68). Never
+ * throws: every refusal is a silent drop. INTERNAL, shared with the ADR-0045
+ * sweep's verdict apply, which consumes journal rows the poll never sees.
+ */
+export async function consumeRegistrarSeed(
+  group: WasmGroup,
+  event: { readonly plaintext: Uint8Array; readonly senderKey: MemberIdentity | undefined },
+): Promise<void> {
+  let ownerAccountKey: Uint8Array | undefined;
+  let groupId: Uint8Array;
+  try {
+    ownerAccountKey = group.roleTableOwner();
+    groupId = group.groupId;
+  } catch {
+    return;
+  }
+  let senderAccountKey: Uint8Array | undefined;
+  try {
+    senderAccountKey = event.senderKey === undefined ? undefined : base64Decode(event.senderKey);
+  } catch {
+    senderAccountKey = undefined;
+  }
+  await deliverRegistrarSeed({
+    groupId,
+    groupIdB64: base64Encode(groupId),
+    plaintext: event.plaintext,
+    senderAccountKey,
+    ownerAccountKey,
+  });
 }
 
 /**
@@ -1361,6 +1411,13 @@ export async function toEvent(
         senderKey,
         createdAt,
       };
+    }
+    // ADR-0057 — a registrar-seed envelope, before the chat parser for the
+    // same reason as every service envelope below. Classified by the core
+    // (`dispatchIncomingEnvelope`, kind `RegistrarSeed`), gated by its one
+    // fixed length so a chat message never pays for the call.
+    if (isRegistrarSeedEnvelope(await loadWasm(), bytes)) {
+      return { kind: "registrarSeed", messageId, plaintext: bytes, senderKey, createdAt };
     }
     // ADR-0042 — sniff for a push-routing-secret distribution envelope
     // before the chat parser. The wasm codec is fail-closed (domain +

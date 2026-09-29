@@ -5,12 +5,13 @@ import XCTest
 @testable import Lakko
 import LakkoCore
 
-/// Short invite links (ADR-0028 amendment of 2026-09-27, flag day):
-/// `/i/<8>`, `/c/<8>`, `/g/<8>#<16>`. The 8 characters are a 6-byte ledger id
-/// the server mints, the 16 the 12-byte group-invite link secret. The old
-/// 43-character id and fragment are refused fail-closed, a `/g/` link whose
-/// fragment does not open the preview is refused as damaged, and a `429` from
-/// the ledger reads as "try again later", never as "link invalid".
+/// Short sealed invite links (ADR-0028 amendments of 2026-09-27 and
+/// 2026-09-28, flag days): `/i/<8>#<16>`, `/c/<8>#<16>`, `/g/<8>#<16>`. The 8
+/// characters are a 6-byte ledger id the server mints, the 16 the 12-byte link
+/// secret the capability is sealed under. The old 43-character id is refused
+/// fail-closed, a link whose fragment is missing or does not open the blob is
+/// refused as damaged, and a `429` from the ledger reads as "try again later",
+/// never as "link invalid".
 @MainActor
 final class InviteLinkShapeTests: XCTestCase {
 
@@ -29,6 +30,10 @@ final class InviteLinkShapeTests: XCTestCase {
         XCTAssertEqual(DiscoveryClient.blobIdLength, 6)
         XCTAssertEqual(GroupInviteLink.linkSecretLen, 12)
         XCTAssertEqual(GroupInviteLink.linkSecretUrlLen, 16)
+        XCTAssertEqual(inviteLinkSecretLen(), 12)
+        XCTAssertEqual(inviteLinkSecretUrlLen(), 16)
+        XCTAssertEqual(InviteLinkSecret.secretLen, 12)
+        XCTAssertEqual(InviteLinkSecret.urlLen, 16)
     }
 
     // MARK: - /g/
@@ -44,15 +49,15 @@ final class InviteLinkShapeTests: XCTestCase {
 
     func testAWholePointerLinkWithItsSecretIsAboutFortyFiveCharacters() throws {
         let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
-        XCTAssertEqual(mint.linkKey.count, 12)
+        XCTAssertEqual(mint.linkSecret.count, 12)
         let base = try GroupInviteUrl.composePointerGroupInviteUrl(
             blobId: Data(count: 6), origin: "https://lakko.me")
-        let link = GroupInviteLink.withLinkKey(base, linkKey: mint.linkKey)
+        let link = InviteLinkSecret.link(base: base, secret: mint.linkSecret)
         XCTAssertEqual(link.count, "https://lakko.me/g/".count + 8 + 1 + 16)
     }
 
-    func testAGroupInlineLinkParsesBackToTheCapability() throws {
-        let wire = try mintWithPreview(groupId: Data(repeating: 7, count: 32)).wire
+    func testAGroupInlineLinkParsesBackToTheSealedBlob() throws {
+        let wire = try mintWithPreview(groupId: Data(repeating: 7, count: 32)).sealed
         let url = try GroupInviteUrl.composeInlineGroupInviteUrl(
             capabilityBytes: wire, origin: "https://lakko.me")
         let slug = String(url.dropFirst("https://lakko.me/g/".count))
@@ -126,57 +131,66 @@ final class InviteLinkShapeTests: XCTestCase {
             issuerSigningSeed: issuerSeed, blobId: retiredId, signedAtMs: 1))
     }
 
-    // MARK: - The preview decides whether a /g/ link stands
+    // MARK: - The link secret decides whether a /g/ link stands
 
-    func testTheRightSecretOpensThePreview() throws {
+    private let anySecretShape = String(repeating: "A", count: 16)
+
+    func testTheRightSecretOpensTheCapabilityAndThePreview() throws {
         let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
-        let cap = try GroupInviteCapability.decodeAndVerify(wire: mint.wire)
-        let outcome = JoinGroupLandingViewModel.previewOutcome(
-            of: cap, fragment: base64UrlEncodeNoPad(mint.linkKey))
-        XCTAssertEqual(outcome, .opened(GroupInviteFacts(
-            groupName: "Hiking club", inviterName: "Anna", memberCount: 5)))
+        let cap = try GroupInviteCapability.openLink(sealed: mint.sealed, linkSecret: mint.linkSecret)
+        XCTAssertEqual(cap.groupId(), Data(repeating: 7, count: 32))
+        XCTAssertEqual(
+            JoinGroupLandingViewModel.previewOutcome(of: cap, secret: mint.linkSecret),
+            .opened(GroupInviteFacts(groupName: "Hiking club", inviterName: "Anna", memberCount: 5)))
+        // The plaintext is what the joiner tag and the attribution use.
+        XCTAssertEqual(try GroupInviteCapability.decodeAndVerify(wire: cap.wire()).groupId(), cap.groupId())
     }
 
-    func testNoFragmentIsACardWithoutAPreview() throws {
+    func testAWrongSecretDoesNotOpenAndIsDamaged() throws {
         let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
-        let cap = try GroupInviteCapability.decodeAndVerify(wire: mint.wire)
-        XCTAssertEqual(JoinGroupLandingViewModel.previewOutcome(of: cap, fragment: nil), .none)
-    }
-
-    func testAWrongSecretRefusesTheLinkAsDamaged() throws {
-        let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
-        let cap = try GroupInviteCapability.decodeAndVerify(wire: mint.wire)
-        var wrong = mint.linkKey
+        var wrong = mint.linkSecret
         wrong[0] ^= 0x01
-        XCTAssertEqual(JoinGroupLandingViewModel.previewOutcome(
-            of: cap, fragment: base64UrlEncodeNoPad(wrong)), .damaged)
+        XCTAssertThrowsError(try GroupInviteCapability.openLink(sealed: mint.sealed, linkSecret: wrong)) {
+            XCTAssertTrue(InviteLinkSecret.isDamaged($0), "\($0)")
+        }
     }
 
-    func testTheRetiredFortyThreeCharacterFragmentIsDamaged() throws {
-        let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
-        let cap = try GroupInviteCapability.decodeAndVerify(wire: mint.wire)
-        XCTAssertEqual(JoinGroupLandingViewModel.previewOutcome(
-            of: cap, fragment: base64UrlEncodeNoPad(Data(count: 32))), .damaged)
+    func testAMissingOrMalformedFragmentIsDamaged() {
+        XCTAssertNil(InviteLinkSecret.read(nil))
+        XCTAssertNil(InviteLinkSecret.read(""))
+        XCTAssertNil(InviteLinkSecret.read(base64UrlEncodeNoPad(Data(count: 32))), "the retired width")
+        XCTAssertNil(InviteLinkSecret.read("AbCd+/12AbCd+/12"), "not base64url")
+        XCTAssertEqual(InviteLinkSecret.read(anySecretShape)?.count, 12)
     }
 
-    /// A malicious ledger serving another validly signed capability under a
-    /// live id: the preview key binds the group id and issuer, so the link's
-    /// secret opens nothing on the substitute.
-    func testASubstitutedCapabilityDoesNotOpenUnderTheLinksSecret() throws {
+    /// A malicious ledger serving another link's sealed blob under a live id:
+    /// the link's secret opens nothing on the substitute.
+    func testASubstitutedBlobDoesNotOpenUnderTheLinksSecret() throws {
         let original = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
         let substitute = try mintWithPreview(groupId: Data(repeating: 8, count: 32))
-        let cap = try GroupInviteCapability.decodeAndVerify(wire: substitute.wire)
-        XCTAssertEqual(JoinGroupLandingViewModel.previewOutcome(
-            of: cap, fragment: base64UrlEncodeNoPad(original.linkKey)), .damaged)
+        XCTAssertThrowsError(try GroupInviteCapability.openLink(
+            sealed: substitute.sealed, linkSecret: original.linkSecret))
     }
 
-    func testACapabilityWithoutAPreviewUnderAFragmentIsDamaged() throws {
-        let wire = try composeGroupInviteCapability(
+    /// A blob of another kind behind `/g/` does not open either.
+    func testACallBlobDoesNotOpenAsAGroupLink() throws {
+        let call = try composeCallInviteCapability(
+            ownerSigningSeed: issuerSeed, ownerAccountId: Data(repeating: 1, count: 16),
+            callId: Data(repeating: 2, count: 16), expiryMs: 0, maxUses: 0,
+            media: FfiCallInviteMedia(audio: true, video: false),
+            oneTimeKeyPackage: try Identity.fromSeed(seed: Data(repeating: 9, count: 32)).createKeyPackage(),
+            label: "")
+        XCTAssertThrowsError(try GroupInviteCapability.openLink(sealed: call.sealed, linkSecret: call.linkSecret))
+        XCTAssertNoThrow(try CallInviteCapability.openLink(sealed: call.sealed, linkSecret: call.linkSecret))
+    }
+
+    /// A capability minted without a preview (a co-publisher link) is a card
+    /// without one; the secret already opened the blob.
+    func testACapabilityWithoutAPreviewShowsNone() throws {
+        let mint = try composeGroupInviteCapability(
             issuerSigningSeed: issuerSeed, groupId: Data(repeating: 7, count: 32), expiryMs: 0)
-        let cap = try GroupInviteCapability.decodeAndVerify(wire: wire)
-        XCTAssertEqual(JoinGroupLandingViewModel.previewOutcome(
-            of: cap, fragment: String(repeating: "A", count: 16)), .damaged)
-        XCTAssertEqual(JoinGroupLandingViewModel.previewOutcome(of: cap, fragment: nil), .none)
+        let cap = try GroupInviteCapability.openLink(sealed: mint.sealed, linkSecret: mint.linkSecret)
+        XCTAssertEqual(JoinGroupLandingViewModel.previewOutcome(of: cap, secret: mint.linkSecret), .none)
     }
 
     // MARK: - The landing, end to end
@@ -184,8 +198,8 @@ final class InviteLinkShapeTests: XCTestCase {
     func testTheLandingRefusesAWrongSecretOnAnInlineLink() async throws {
         let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
         let vm = try landing(
-            slug: base64UrlEncodeNoPad(mint.wire),
-            fragment: String(repeating: "A", count: 16),
+            slug: base64UrlEncodeNoPad(mint.sealed),
+            fragment: anySecretShape,
             scope: GroupInviteDiscoveryURLProtocol.freshScope(.ok))
         await vm.run()
         XCTAssertEqual(vm.state, .damaged)
@@ -195,21 +209,31 @@ final class InviteLinkShapeTests: XCTestCase {
     func testTheLandingShowsThePreviewUnderTheRightSecret() async throws {
         let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
         let vm = try landing(
-            slug: base64UrlEncodeNoPad(mint.wire),
-            fragment: base64UrlEncodeNoPad(mint.linkKey),
+            slug: base64UrlEncodeNoPad(mint.sealed),
+            fragment: base64UrlEncodeNoPad(mint.linkSecret),
             scope: GroupInviteDiscoveryURLProtocol.freshScope(.ok))
         await vm.run()
         XCTAssertEqual(vm.state, .ready)
         XCTAssertEqual(vm.preview?.groupName, "Hiking club")
     }
 
+    func testTheLandingRefusesALinkWithNoFragmentWithoutARequest() async throws {
+        let scope = GroupInviteDiscoveryURLProtocol.freshScope(.ok)
+        let vm = try landing(
+            slug: GroupInviteDiscoveryURLProtocol.mintedBlobIdSlug, fragment: nil, scope: scope)
+        await vm.run()
+        XCTAssertEqual(vm.state, .damaged)
+        XCTAssertTrue(GroupInviteDiscoveryURLProtocol.requests(scope)
+            .filter { $0.path.hasPrefix("/discovery/") }.isEmpty)
+    }
+
     func testTheLandingFetchesAPointerAndRefusesASubstitute() async throws {
         let original = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
         let substitute = try mintWithPreview(groupId: Data(repeating: 8, count: 32))
-        let scope = GroupInviteDiscoveryURLProtocol.freshScope(.capability(substitute.wire))
+        let scope = GroupInviteDiscoveryURLProtocol.freshScope(.capability(substitute.sealed))
         let vm = try landing(
             slug: GroupInviteDiscoveryURLProtocol.mintedBlobIdSlug,
-            fragment: base64UrlEncodeNoPad(original.linkKey),
+            fragment: base64UrlEncodeNoPad(original.linkSecret),
             scope: scope)
         await vm.run()
         XCTAssertEqual(vm.state, .damaged)
@@ -222,8 +246,8 @@ final class InviteLinkShapeTests: XCTestCase {
         let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
         let vm = try landing(
             slug: GroupInviteDiscoveryURLProtocol.mintedBlobIdSlug,
-            fragment: base64UrlEncodeNoPad(mint.linkKey),
-            scope: GroupInviteDiscoveryURLProtocol.freshScope(.capability(mint.wire)))
+            fragment: base64UrlEncodeNoPad(mint.linkSecret),
+            scope: GroupInviteDiscoveryURLProtocol.freshScope(.capability(mint.sealed)))
         await vm.run()
         XCTAssertEqual(vm.state, .ready)
         XCTAssertEqual(vm.preview?.inviterName, "Anna")
@@ -243,7 +267,7 @@ final class InviteLinkShapeTests: XCTestCase {
 
     func testTheLandingRefusesTheOldSlugAsInvalidWithoutARequest() async throws {
         let scope = GroupInviteDiscoveryURLProtocol.freshScope(.ok)
-        let vm = try landing(slug: base64UrlEncodeNoPad(retiredId), fragment: nil, scope: scope)
+        let vm = try landing(slug: base64UrlEncodeNoPad(retiredId), fragment: anySecretShape, scope: scope)
         await vm.run()
         XCTAssertEqual(vm.state, .invalid)
         XCTAssertTrue(GroupInviteDiscoveryURLProtocol.requests(scope)
@@ -252,7 +276,7 @@ final class InviteLinkShapeTests: XCTestCase {
 
     func testTheLandingReadsANotFoundPointerAsInvalid() async throws {
         let vm = try landing(
-            slug: GroupInviteDiscoveryURLProtocol.mintedBlobIdSlug, fragment: nil,
+            slug: GroupInviteDiscoveryURLProtocol.mintedBlobIdSlug, fragment: anySecretShape,
             scope: GroupInviteDiscoveryURLProtocol.freshScope(.status(404)))
         await vm.run()
         XCTAssertEqual(vm.state, .invalid)
@@ -262,7 +286,7 @@ final class InviteLinkShapeTests: XCTestCase {
 
     func testTheLandingReadsA429AsTryLater() async throws {
         let vm = try landing(
-            slug: GroupInviteDiscoveryURLProtocol.mintedBlobIdSlug, fragment: nil,
+            slug: GroupInviteDiscoveryURLProtocol.mintedBlobIdSlug, fragment: anySecretShape,
             scope: GroupInviteDiscoveryURLProtocol.freshScope(.status(429)))
         await vm.run()
         XCTAssertEqual(vm.state, .failed(.tryLater))
@@ -275,7 +299,8 @@ final class InviteLinkShapeTests: XCTestCase {
         let scope = GroupInviteDiscoveryURLProtocol.freshScope(.status(429))
         let client = GroupInviteDiscoveryURLProtocol.client(scope)
         let id = Data(count: 6)
-        let wire = try mintWithPreview(groupId: Data(repeating: 7, count: 32)).wire
+        let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
+        let wire = try GroupInviteCapability.openLink(sealed: mint.sealed, linkSecret: mint.linkSecret).wire()
         let joiner = Data(repeating: 3, count: 16)
 
         await assertRateLimited { _ = try await client.fetchInvite(blobId: id) }
@@ -315,7 +340,8 @@ final class InviteLinkShapeTests: XCTestCase {
         let scope = GroupInviteDiscoveryURLProtocol.freshScope(.status(429))
         let f = try makeGroupInviteRepo(discoveryScope: scope, token: "t")
         defer { try? FileManager.default.removeItem(at: f.outboxDir) }
-        let wire = try mintWithPreview(groupId: Data(repeating: 7, count: 32)).wire
+        let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
+        let wire = try GroupInviteCapability.openLink(sealed: mint.sealed, linkSecret: mint.linkSecret).wire()
         do {
             _ = try await f.repo.requestToJoinFromLink(
                 capabilityWire: wire,
@@ -333,9 +359,9 @@ final class InviteLinkShapeTests: XCTestCase {
         let client = GroupInviteDiscoveryURLProtocol.client(
             GroupInviteDiscoveryURLProtocol.freshScope(.uploadAnswers(base64UrlEncodeNoPad(retiredId))))
             .withSessionToken("t")
-        let wire = try mintWithPreview(groupId: Data(repeating: 7, count: 32)).wire
+        let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
         do {
-            let id = try await client.uploadGroupInvite(capabilityBytes: wire, maxUses: .max)
+            let id = try await client.uploadGroupInvite(mint: mint, expiryMs: 0, maxUses: .max)
             XCTFail("a 32-byte id must be refused, got \(id.count) bytes")
         } catch {}
     }
@@ -343,15 +369,78 @@ final class InviteLinkShapeTests: XCTestCase {
     func testAnUploadReturnsTheSixByteId() async throws {
         let client = GroupInviteDiscoveryURLProtocol.client(
             GroupInviteDiscoveryURLProtocol.freshScope(.ok)).withSessionToken("t")
-        let wire = try mintWithPreview(groupId: Data(repeating: 7, count: 32)).wire
-        let id = try await client.uploadGroupInvite(capabilityBytes: wire, maxUses: .max)
+        let mint = try mintWithPreview(groupId: Data(repeating: 7, count: 32))
+        let id = try await client.uploadGroupInvite(mint: mint, expiryMs: 0, maxUses: .max)
         XCTAssertEqual(id.count, 6)
         XCTAssertEqual(base64UrlEncodeNoPad(id), GroupInviteDiscoveryURLProtocol.mintedBlobIdSlug)
     }
 
+    // MARK: - Sealed uploads and opens for /i/ and /c/
+
+    /// The ledger gets the SEALED blob and clear fields only; `/i/` adds its
+    /// label and referral flag, `/c/` and `/g/` do not.
+    func testTheUploadBodiesCarryTheSealedBlobAndTheClearFields() throws {
+        let contact = try JSONSerialization.jsonObject(with: JSONEncoder().encode(InviteUploadRequest(
+            sealed: "U0VBTEVE", issuerPubkey: "S0VZ", expiryMs: 7, maxUses: 0,
+            label: "Team", bootstrapReferral: true))) as? [String: Any]
+        XCTAssertEqual(Set(contact?.keys.map { $0 } ?? []),
+                       ["sealed", "issuer_pubkey", "expiry_ms", "max_uses", "label", "bootstrap_referral"])
+        let group = try JSONSerialization.jsonObject(with: JSONEncoder().encode(InviteUploadRequest(
+            sealed: "U0VBTEVE", issuerPubkey: "S0VZ", expiryMs: 0, maxUses: .max))) as? [String: Any]
+        XCTAssertEqual(Set(group?.keys.map { $0 } ?? []), ["sealed", "issuer_pubkey", "expiry_ms", "max_uses"])
+        XCTAssertNil(group?["capability"], "the plaintext capability never reaches the ledger")
+    }
+
+    func testAContactLinkOpensUnderItsSecretOnly() throws {
+        let owner = try Identity.fromSeed(seed: issuerSeed)
+        let mint = try composeInviteCapability(
+            ownerSigningSeed: owner.ed25519Seed(), ownerAccountId: Data(repeating: 4, count: 16),
+            ownerX25519Pubkey: owner.x25519PublicKey(), expiryMs: 0, maxUses: 0,
+            bootstrapReferral: false, label: "")
+        XCTAssertEqual(mint.issuerPubkey, owner.signaturePublicKey())
+        let cap = try InviteCapability.openLink(sealed: mint.sealed, linkSecret: mint.linkSecret)
+        XCTAssertEqual(cap.ownerAccountId(), Data(repeating: 4, count: 16))
+        var wrong = mint.linkSecret
+        wrong[3] ^= 0x10
+        XCTAssertThrowsError(try InviteCapability.openLink(sealed: mint.sealed, linkSecret: wrong)) {
+            XCTAssertTrue(InviteLinkSecret.isDamaged($0))
+        }
+    }
+
+    /// A tapped `/i/` or `/c/` link parks its fragment with the slug; the
+    /// secret never becomes part of what the ledger is asked for.
+    func testTheIntakeKeepsTheFragmentOfContactAndCallLinks() throws {
+        let intake = InviteIntake()
+        intake.handle(try XCTUnwrap(URL(string: "https://lakko.me/i/AbCd-_12#AAAAAAAAAAAAAAAA")))
+        XCTAssertEqual(intake.pendingSlug, "AbCd-_12#AAAAAAAAAAAAAAAA")
+        let parts = InviteLinkSecret.split(try XCTUnwrap(intake.pendingSlug))
+        XCTAssertEqual(ContactsRepository.parseInviteSlug(parts.base)?.count, 6)
+        XCTAssertEqual(InviteLinkSecret.read(parts.fragment)?.count, 12)
+        intake.handle(try XCTUnwrap(URL(string: "https://lakko.me/c/AbCd-_12")))
+        XCTAssertEqual(intake.pendingCallJoinSlug, "AbCd-_12", "no fragment: parked as is, damaged on open")
+    }
+
+    /// A `/c/` link with no secret is damaged before anything is fetched.
+    func testACallLinkWithoutItsSecretIsDamaged() async throws {
+        let scope = GroupInviteDiscoveryURLProtocol.freshScope(.ok)
+        let result = await CallInviteAcceptor.acceptFromSlug(
+            slug: GroupInviteDiscoveryURLProtocol.mintedBlobIdSlug,
+            joinerAccountId: Data(repeating: 1, count: 16),
+            joinerIdentity: try Identity.fromSeed(seed: Data(repeating: 2, count: 32)),
+            discoveryClient: GroupInviteDiscoveryURLProtocol.client(scope))
+        XCTAssertEqual(result, .damaged)
+        XCTAssertTrue(GroupInviteDiscoveryURLProtocol.requests(scope).isEmpty)
+        XCTAssertEqual(inviteLinkDamagedMessage, "This invite link is damaged. Ask for a new link.")
+    }
+
+    /// A contact link with no secret is damaged before anything is fetched.
+    func testTheSharedDamagedCopyIsTheGroupPagesCopy() {
+        XCTAssertEqual(inviteLinkDamagedMessage, groupInviteDamagedMessage)
+    }
+
     // MARK: - Helpers
 
-    private func mintWithPreview(groupId: Data) throws -> GroupInviteMint {
+    private func mintWithPreview(groupId: Data) throws -> InviteLinkMint {
         try composeGroupInviteCapabilityWithPreview(
             issuerSigningSeed: issuerSeed,
             groupId: groupId,

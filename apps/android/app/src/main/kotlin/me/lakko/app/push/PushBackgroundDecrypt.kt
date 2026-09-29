@@ -279,6 +279,8 @@ private class RealThrowawayGroup(
                 ::decodesAsRoutingSecret,
                 ::decodesAsCommitterBeacon,
                 committerBeaconEnvelopeLenCached,
+                { bytes -> me.lakko.app.chat.decodesAsRegistrarSeed(bytes) },
+                registrarSeedEnvelopeLenCached,
             )
         ) {
             BackgroundPayloadKind.SERVICE_ENVELOPE -> return null
@@ -435,6 +437,17 @@ private fun decodesAsCommitterBeacon(bytes: ByteArray): Boolean =
  * which no payload can match, so the beacon arm goes inert and beacons
  * merely render as before — never a swallowed real message.
  */
+/** ADR-0057 — the registrar-seed envelope length, read ONCE from the FFI
+ *  constant (never hand-copied); `-1` when the read fails, which matches
+ *  nothing, so the payload falls through to the chat parse (fail-closed). */
+private val registrarSeedEnvelopeLenCached: Int by lazy {
+    try {
+        uniffi.lakko_ffi_uniffi.registrarSeedEnvelopeLen().toInt()
+    } catch (_: Throwable) {
+        -1
+    }
+}
+
 private val committerBeaconEnvelopeLenCached: Int by lazy {
     try {
         committerBeaconEnvelopeLen().toInt()

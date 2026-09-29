@@ -99,13 +99,28 @@ It will show a six-digit code. Enter it here.
 ### On the old device
 
 A modal over whatever screen is open; on native, a notification that opens
-it.
+it. **Amended 2026-09-28 (second security pass):** the modal asks first and
+shows a code only after the person says it is them. Before that, this device
+has not answered the request at all, so a request nobody expected costs the
+requester nothing to send and gives it no chance to guess.
+
+Step 1, on arrival:
 
 ```
 New sign-in request
 
 Someone is signing in to your account on a new device.
-If it is you, enter this code on the new device:
+Is this you?
+
+[ Yes, it's me ]        [ It is not me ]
+```
+
+Step 2, after **Yes, it's me**:
+
+```
+New sign-in request
+
+Enter this code on the new device:
 
    47 19 03
 
@@ -114,7 +129,15 @@ Never read this code to anyone. Lakko will never ask for it.
 [ It is not me ]
 ```
 
+- Until **Yes, it's me** is tapped, the new device keeps "Waiting for your
+  other device..."; nothing is sent for the request. Dismissing the modal
+  without choosing leaves the request unanswered; it expires after 10
+  minutes.
 - The code is chosen by this device and shown large, three pairs.
+- If the server has paused requests for this account after repeated wrong
+  codes, no request is shown here at all; the new device waits and then
+  expires as if no device answered. Nothing in either screen names the pause
+  (it would tell a stranger that the account exists).
 - When the new device enters the right code, the modal changes to "Adding the
   device..." and then "Adding it to your chats... (12 of 30)" as the group
   adds land; it can be dismissed, the work continues in the background and a

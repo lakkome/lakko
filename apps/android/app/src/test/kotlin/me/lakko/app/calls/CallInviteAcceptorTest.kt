@@ -43,6 +43,26 @@ import uniffi.lakko_ffi_uniffi.NoHandle
  */
 class CallInviteAcceptorTest {
 
+    /** A well-formed 16-character link secret (12 zero bytes). */
+    private val SECRET = base64UrlEncodeNoPad(ByteArray(12))
+
+    @Test
+    fun `a link without its fragment is damaged before any request`() = runTest {
+        val engine = MockEngine { error("discovery must never be reached for a damaged link") }
+        val slug = base64UrlEncodeNoPad(ByteArray(TEST_INVITE_LINK_LENGTHS.blobIdLen) { 3 })
+        for (argument in listOf(slug, "$slug#", "$slug#short")) {
+            val result = DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS })
+                .use { discovery ->
+                    CallInviteAcceptor(discovery, TEST_INVITE_LINK_LENGTHS).acceptFromSlug(
+                        slug = argument,
+                        joinerAccountId = joinerAccountId(),
+                        joinerIdentity = Identity(NoHandle),
+                    )
+                }
+            assertTrue("expected Damaged for '$argument', got $result", result is CallInviteAcceptor.Result.Damaged)
+        }
+    }
+
     /** A 16-byte UUIDv7-shaped account id; never reaches the wire
      *  in either test, both of which return before consume. */
     private fun joinerAccountId(): ByteArray = ByteArray(16) { it.toByte() }
@@ -60,7 +80,7 @@ class CallInviteAcceptorTest {
             val result = DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS })
                 .use { discovery ->
                     CallInviteAcceptor(discovery, TEST_INVITE_LINK_LENGTHS).acceptFromSlug(
-                        slug = "not*valid*base64*url",
+                        slug = "not*valid*base64*url#$SECRET",
                         joinerAccountId = joinerAccountId(),
                         joinerIdentity = Identity(NoHandle),
                     )
@@ -91,7 +111,7 @@ class CallInviteAcceptorTest {
         val result = DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS })
             .use { discovery ->
                 CallInviteAcceptor(discovery, TEST_INVITE_LINK_LENGTHS).acceptFromSlug(
-                    slug = slug,
+                    slug = "$slug#$SECRET",
                     joinerAccountId = joinerAccountId(),
                     joinerIdentity = Identity(NoHandle),
                 )
@@ -116,7 +136,7 @@ class CallInviteAcceptorTest {
         val result = DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS })
             .use { discovery ->
                 CallInviteAcceptor(discovery, TEST_INVITE_LINK_LENGTHS).acceptFromSlug(
-                    slug = slug,
+                    slug = "$slug#$SECRET",
                     joinerAccountId = joinerAccountId(),
                     joinerIdentity = Identity(NoHandle),
                 )
@@ -136,7 +156,7 @@ class CallInviteAcceptorTest {
         val result = DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS })
             .use { discovery ->
                 CallInviteAcceptor(discovery, TEST_INVITE_LINK_LENGTHS).acceptFromSlug(
-                    slug = slug,
+                    slug = "$slug#$SECRET",
                     joinerAccountId = joinerAccountId(),
                     joinerIdentity = Identity(NoHandle),
                 )

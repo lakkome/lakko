@@ -48,8 +48,9 @@
 //!
 //! Who may register a journal's epoch keys is a second, separate surface:
 //! the [`statement`] module - the root and registrar seed derivations and
-//! the signed statements (claim, root reset, register epoch, registrar
-//! management, root transfer, push binding) the DS routes take as bodies.
+//! the signed statements (claim, root reset, register epoch in append or
+//! replace mode, registrar management, the whole registrar set, root
+//! transfer, push binding) the DS routes take as bodies.
 //!
 //! [ADR-0057]: ../../../docs/adr/0057-journal-ownership.md
 //!
@@ -61,9 +62,9 @@ pub mod statement;
 
 pub use statement::{
     journal_registrar_seed, journal_root_seed, push_binding_key, sign_statement,
-    statement_signing_key, Rank, RegistrarChange, RegistrarEntry, SignedStatement, StatementBody,
-    StatementError, StatementKind, StatementSigner, JOURNAL_ID_LEN, MAX_LIST_ENTRIES,
-    MAX_STATEMENT_LEN, ROOT_RANK_BYTE, STATEMENT_DOMAIN,
+    statement_signing_key, Rank, RegisterMode, RegistrarChange, RegistrarEntry, SignedStatement,
+    StatementBody, StatementError, StatementKind, StatementSigner, JOURNAL_ID_LEN,
+    MAX_LIST_ENTRIES, MAX_REGISTRARS, MAX_STATEMENT_LEN, ROOT_RANK_BYTE, STATEMENT_DOMAIN,
 };
 
 use base64::engine::general_purpose::{STANDARD as B64_STD, URL_SAFE_NO_PAD};
@@ -371,6 +372,11 @@ impl DsProofSigner {
     /// The JSON body of `PUT /ds/group/{hex}/access` registering this signer's
     /// key: `{"epoch":<n>,"access_pk_b64":"<standard base64>"}`. Defined here
     /// so no client spells the field names itself.
+    ///
+    /// **Superseded by ADR-0057; the Delivery Service no longer accepts this
+    /// body** (`PUT .../access` now takes a signed statement, and an epoch
+    /// key registers nothing). Kept only until the clients move to the
+    /// statement signers; do not add a caller.
     #[must_use]
     pub fn group_claim_body_json(&self) -> String {
         format!(

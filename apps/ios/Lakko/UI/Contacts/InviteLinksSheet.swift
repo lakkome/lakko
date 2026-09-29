@@ -20,7 +20,8 @@ struct InviteLinksSheet: View {
         InviteLinkRows.merge(
             active: viewModel.activeInvites,
             sessionGenerated: viewModel.repositoryState.outstandingInvites,
-            now: now)
+            now: now,
+            accountIdB64: viewModel.inviteAccountIdB64)
     }
 
     var body: some View {
@@ -134,7 +135,9 @@ struct InviteLinksSheet: View {
 struct LinkActionsRow: View {
     let title: String
     var details: [String] = []
-    let url: String
+    /// `nil` when the link's secret is not on this device (a link another
+    /// device minted, ADR-0028 amendment 2026-09-28): Revoke only.
+    let url: String?
     var highlighted: Bool = false
     var revoking: Bool = false
     var revoke: (() -> Void)? = nil
@@ -163,24 +166,30 @@ struct LinkActionsRow: View {
                     .foregroundStyle(Color.lakkoTextMuted)
             }
             HStack(spacing: 8) {
-                Button {
-                    UIPasteboard.general.string = url
-                    copied = true
-                    Task { @MainActor in
-                        try? await Task.sleep(nanoseconds: 1_500_000_000)
-                        copied = false
+                if let url {
+                    Button {
+                        UIPasteboard.general.string = url
+                        copied = true
+                        Task { @MainActor in
+                            try? await Task.sleep(nanoseconds: 1_500_000_000)
+                            copied = false
+                        }
+                    } label: {
+                        Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
                     }
-                } label: {
-                    Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
 
-                ShareLink(item: url) {
-                    Label("Share", systemImage: "square.and.arrow.up")
+                    ShareLink(item: url) {
+                        Label("Share", systemImage: "square.and.arrow.up")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                } else {
+                    Text(InviteLinkRows.createdElsewhereCopy)
+                        .font(.footnote)
+                        .foregroundStyle(Color.lakkoTextMuted)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
 
                 if let revoke {
                     Spacer()

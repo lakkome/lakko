@@ -42,7 +42,9 @@ import LakkoCore
 /// for a group journal, the identity key for a mailbox read. The caller
 /// passes a ``DsAuth``; the client signs the service path, the raw query
 /// and the exact body, and retries a `401` once under the previous epoch
-/// and once after a claim-on-open. Writing to another account's mailbox
+/// and once after the owner's lazy claim (ADR-0057; a member has none).
+/// Epoch keys are registered by ownership statements
+/// (``putStatement(_:)``), which carry their own signature. Writing to another account's mailbox
 /// and every rendezvous mailbox stay unsigned. No session token is ever
 /// sent here (invariant #5).
 ///
@@ -273,29 +275,31 @@ public final class DsClient {
 
     // MARK: - ADR-0053 claim and knock
 
-    /// `PUT /ds/group/{group_id_hex}/access` — register the access key of one
-    /// epoch. `bodyJson` is the signer's `groupClaimBodyJson()` verbatim.
-    ///
-    /// `provenBy` signs the registration under an already-registered epoch
-    /// (register-before-publish, heal-on-apply, a claim with an older signer
-    /// in hand). `nil` sends it unsigned, which the server accepts for the
-    /// first registration of an unclaimed journal and for re-sending a key
-    /// already registered at that epoch.
-    public func claimGroup(
-        groupId: Data,
-        bodyJson: String,
-        provenBy: DsRequestSigner?
-    ) async throws {
-        guard !groupId.isEmpty else {
-            throw DsClientError.argument("groupId must be non-empty")
+    /// ADR-0057 — send one ownership statement: `PUT <request.path>` with the
+    /// statement body the FFI signer produced, no proof header (the statement
+    /// carries its own signature). A `409` is retried once: the DS answers a
+    /// lost race for the group's lock row with the same status as a real
+    /// conflict, and a second attempt tells the two apart. Every refusal
+    /// surfaces as ``DsStatementError``.
+    public func putStatement(_ request: DsStatementRequest) async throws {
+        let body = Data(request.bodyJson.utf8)
+        var attempt = 0
+        while true {
+            attempt += 1
+            let (data, http) = try await send(
+                method: "PUT",
+                endpoint: request.path,
+                body: body,
+                contentType: "application/json",
+                auth: nil,
+                acceptAnyStatus: true
+            )
+            if (200..<300).contains(http.statusCode) { return }
+            if http.statusCode == 409, attempt == 1 { continue }
+            throw DsStatementError.from(
+                status: http.statusCode,
+                body: Self.truncate(String(data: data, encoding: .utf8) ?? "<binary>"))
         }
-        _ = try await send(
-            method: "PUT",
-            endpoint: "/ds/group/\(Self.pseudonymHex(groupId))/access",
-            body: Data(bodyJson.utf8),
-            contentType: "application/json",
-            auth: provenBy.map { DsAuth(signer: $0) }
-        )
     }
 
     /// `PUT /ds/mailbox/{pseudonym_hex}/access` — claim a mailbox under the
@@ -471,11 +475,14 @@ public final class DsClient {
         }
 
         let (data, http) = result
+        let skewed = http.statusCode == 401 && DsClockSkew.isSkewed(
+            serverDateHeader: http.value(forHTTPHeaderField: "Date"), now: Date())
+        if http.statusCode == 401, let auth, !skewed {
+            auth.onRefusedAtHead?()
+        }
         if acceptAnyStatus { return (data, http) }
         guard (200..<300).contains(http.statusCode) else {
-            if http.statusCode == 401, auth != nil,
-               DsClockSkew.isSkewed(
-                   serverDateHeader: http.value(forHTTPHeaderField: "Date"), now: Date()) {
+            if http.statusCode == 401, auth != nil, skewed {
                 throw DsClientError.clockSkew(endpoint: endpoint)
             }
             let bodyText = Self.truncate(
@@ -696,3 +703,5 @@ extension DsClientError: LocalizedError {
         }
     }
 }
+
+extension DsClient: DsStatementSending {}

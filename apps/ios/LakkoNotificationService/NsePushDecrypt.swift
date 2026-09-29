@@ -1002,6 +1002,12 @@ public func nseLooksLikePin(_ bytes: Data, envelopeLen: Int) -> Bool {
 /// suppressed, never stored (the NSE has no role table or people count to
 /// gate it with, and no durable store to write). Fixed-length like the
 /// beacon; the length arrives from the slim FFI (`pinEnvelopeLen()`).
+///
+/// ADR-0057 adds an eighth, the registrar-seed envelope a journal root sends
+/// a member (173 bytes, sealed to the member's account key). Recognised and
+/// suppressed, never opened or stored: the NSE writes no durable state
+/// (C-59). Fixed-length; the length arrives from the slim FFI
+/// (`registrarSeedEnvelopeLen()`).
 public func nseIsServiceEnvelope(
     _ bytes: Data,
     decodesAsPushRoutingSecret: (Data) -> Bool,
@@ -1014,7 +1020,9 @@ public func nseIsServiceEnvelope(
     decodesAsProfileRequest: (Data) -> Bool,
     profileRequestEnvelopeLen: Int,
     decodesAsPin: (Data) -> Bool,
-    pinEnvelopeLen: Int
+    pinEnvelopeLen: Int,
+    decodesAsRegistrarSeed: (Data) -> Bool,
+    registrarSeedEnvelopeLen: Int
 ) -> Bool {
     if nseLooksLikeCallSignaling(bytes) { return true }
     if nseLooksLikePushRoutingSecret(bytes), decodesAsPushRoutingSecret(bytes) { return true }
@@ -1035,7 +1043,24 @@ public func nseIsServiceEnvelope(
     if nseLooksLikePin(bytes, envelopeLen: pinEnvelopeLen), decodesAsPin(bytes) {
         return true
     }
+    if nseLooksLikeRegistrarSeed(bytes, envelopeLen: registrarSeedEnvelopeLen),
+       decodesAsRegistrarSeed(bytes) {
+        return true
+    }
     return false
+}
+
+/// First byte of the ADR-0057 registrar-seed domain separator — the same ASCII
+/// `l` as every other in-group envelope domain, its own constant for the same
+/// reason as the others.
+private let registrarSeedEnvelopeFirstByte: UInt8 = 0x6C
+
+/// Cheap PRE-FILTER for an ADR-0057 registrar-seed envelope: the exact length
+/// (injected from the slim FFI's `registrarSeedEnvelopeLen()`, 173, never a
+/// hand-copied literal) plus the first domain byte. The peek decides nothing;
+/// `decodeRegistrarSeedEnvelope` is the verdict.
+public func nseLooksLikeRegistrarSeed(_ bytes: Data, envelopeLen: Int) -> Bool {
+    bytes.count == envelopeLen && bytes.first == registrarSeedEnvelopeFirstByte
 }
 
 /// First byte of the frozen 25-byte ADR-0048 profile-request domain separator

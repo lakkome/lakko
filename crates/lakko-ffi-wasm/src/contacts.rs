@@ -1810,6 +1810,12 @@ pub enum WasmIncomingEnvelopeKind {
     /// authority is the receiver's role-table check, then `pinIsNewer` for
     /// that message.
     Pin = 9,
+    /// A journal root hands one member its Delivery Service registrar seed
+    /// (ADR-0057). `payload` is the whole envelope, for
+    /// `decodeRegistrarSeedEnvelope` / `openRegistrarSeedEnvelope`. Never
+    /// render it; keep it only when addressed to the own account key and
+    /// the sender resolves (C-68) to the group's owner.
+    RegistrarSeed = 10,
 }
 
 /// FFI-portable result of [`dispatchIncomingEnvelope`]. The
@@ -1906,6 +1912,7 @@ impl WasmIncomingEnvelope {
 /// is malformed (below the Welcome / KP-forward minimum floor,
 /// or an invalid media-state payload).
 #[wasm_bindgen(js_name = dispatchIncomingEnvelope)]
+#[allow(clippy::too_many_lines)] // one arm per envelope kind, each spelled out
 pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelope, JsError> {
     let parsed =
         rust_dispatch_incoming_envelope(plaintext).map_err(|err| JsError::new(&err.to_string()))?;
@@ -1990,6 +1997,15 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             profile: None,
             group_name: None,
             pin: Some(op.into()),
+        },
+        IncomingEnvelope::RegistrarSeed(_) => WasmIncomingEnvelope {
+            kind: WasmIncomingEnvelopeKind::RegistrarSeed,
+            payload: plaintext.to_vec(),
+            camera_on: None,
+            mint_epoch: None,
+            profile: None,
+            group_name: None,
+            pin: None,
         },
         IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
             kind: WasmIncomingEnvelopeKind::IntroMessage,

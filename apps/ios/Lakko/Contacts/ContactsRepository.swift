@@ -727,9 +727,9 @@ public final class ContactsRepository: ObservableObject {
         let expiryMs = nowMs + expiryMillisFromNow
 
         let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
-        let capabilityBytes: Data
+        let mint: InviteLinkMint
         do {
-            capabilityBytes = try composeInviteCapability(
+            mint = try composeInviteCapability(
                 ownerSigningSeed: identity.ed25519Seed(),
                 ownerAccountId: secrets.accountId,
                 ownerX25519Pubkey: identity.x25519PublicKey(),
@@ -742,18 +742,30 @@ public final class ContactsRepository: ObservableObject {
             throw ContactsError.wrap(error)
         }
 
+        // ADR-0028 amendment 2026-09-28 — the ledger gets the SEALED blob and
+        // the clear fields; the link carries the secret in its fragment. A
+        // contact invite has no inline form, so an upload failure is an error.
         let discovery = authenticatedDiscoveryClient()
         let blobId: Data
         do {
             blobId = try await discovery.uploadInvite(
-                capabilityBytes: capabilityBytes
+                mint: mint,
+                expiryMs: UInt64(expiryMs),
+                maxUses: maxUses,
+                label: label,
+                bootstrapReferral: bootstrapReferral
             )
         } catch {
             throw ContactsError.wrap(error)
         }
 
         let blobIdSlug = base64UrlEncodeNoPad(blobId)
-        let url = "\(Self.inviteUrlPrefix)\(blobIdSlug)"
+        let url = InviteLinkSecret.link(
+            base: "\(Self.inviteUrlPrefix)\(blobIdSlug)", secret: mint.linkSecret)
+        // The secret never leaves this device, so a link listed by the server
+        // later can be copied again only from here.
+        InviteLinkSecretStore.shared.put(
+            accountIdB64: base64Encode(secrets.accountId), slug: blobIdSlug, secret: mint.linkSecret)
         let invite = GeneratedInvite(
             blobId: blobId,
             blobIdSlug: blobIdSlug,
@@ -797,7 +809,17 @@ public final class ContactsRepository: ObservableObject {
                     .filter { $0.blobId != blobId }
             )
         }
+        // `docs/ux/client-redesign.md` section 5.3 — the link is gone (revoked
+        // now, or already gone on the server), so is this device's secret.
+        InviteLinkSecretStore.shared.remove(
+            accountIdB64: base64Encode(secrets.accountId), slug: base64UrlEncodeNoPad(blobId))
         return result
+    }
+
+    /// The signed-in account's id (base64), the key the per-account invite
+    /// link secrets are stored under; `nil` when signed out.
+    public var inviteAccountIdB64: String? {
+        authRepository.identitySecrets.map { base64Encode($0.accountId) }
     }
 
     /// Owner-signed list of every live invite this account owns
@@ -884,35 +906,44 @@ public final class ContactsRepository: ObservableObject {
     ///      bridge is wired, returning `groupIdHex`; falls back to
     ///      `nil` (best-effort) if the bridge is absent or the
     ///      call fails.
-    public func acceptInviteLink(slug: String) async -> AcceptInviteResult {
+    public func acceptInviteLink(slug token: String) async -> AcceptInviteResult {
         guard let secrets = authRepository.identitySecrets else {
             return .requiresReauth
         }
-        guard let blobId = Self.parseInviteSlug(slug) else {
+        // ADR-0028 amendment 2026-09-28 — `token` is `slug#fragment`; a
+        // missing or malformed fragment is a damaged link, refused before any
+        // request.
+        let parts = InviteLinkSecret.split(token)
+        guard let blobId = Self.parseInviteSlug(parts.base) else {
             return .malformedSlug
+        }
+        guard let linkSecret = InviteLinkSecret.read(parts.fragment) else {
+            return .damaged
         }
 
         let discovery = authenticatedDiscoveryClient()
-        let capabilityBytes: Data?
+        let sealed: Data?
         do {
-            capabilityBytes = try await discovery.fetchInvite(blobId: blobId)
+            sealed = try await discovery.fetchInvite(blobId: blobId)
         } catch {
             if DiscoveryClientError.isRateLimited(error) { return .rateLimited }
             return .failed(message: (error as? LocalizedError)?.errorDescription
                 ?? "fetch failed")
         }
-        guard let capabilityBytes = capabilityBytes else {
+        guard let sealed = sealed else {
             return .notFound
         }
 
         let capability: InviteCapability
         do {
-            capability = try InviteCapability.decodeAndVerify(wire: capabilityBytes)
+            capability = try InviteCapability.openLink(sealed: sealed, linkSecret: linkSecret)
         } catch {
-            // Signature / wire-format failure → treat as
-            // not-found from the user's perspective.
-            return .notFound
+            // Wrong secret, another kind, tampered, substituted, or a
+            // capability that does not verify: the one damaged refusal.
+            return .damaged
         }
+        // The joiner tag is computed over the PLAINTEXT capability.
+        let capabilityBytes = capability.wire()
 
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
         if !capability.isValidNow(nowMs: nowMs) {
@@ -1057,6 +1088,9 @@ public enum AcceptInviteResult: Equatable {
     case exhausted
     case notFound
     case malformedSlug
+    /// ADR-0028 amendment 2026-09-28 — the link's fragment secret is missing
+    /// or malformed, or the ledger's blob does not open under it.
+    case damaged
     /// `429` from the discovery ledger on the fetch or the consume: the link
     /// may be fine, the server asked this network address to slow down. The
     /// screen says "try again later", never "invalid".

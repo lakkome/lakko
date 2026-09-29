@@ -30,17 +30,22 @@ package me.lakko.app.calls
 public fun callInviteSlugFromInput(input: String): String? {
     var text = input.trim()
     if (text.isEmpty()) return null
-    // Drop a query or fragment a sharing app appended; neither is part of the
-    // slug and both would make it decode as garbage.
-    text = text.substringBefore('?').substringBefore('#').trimEnd('/')
+    // Sealed links (2026-09-28): the fragment is the link secret and opens the
+    // capability, so it is KEPT and travels with the slug as `<slug>#<secret>`;
+    // the landing refuses a missing or malformed one as damaged. A query a
+    // sharing app appended is dropped.
+    val fragment = text.substringAfter('#', missingDelimiterValue = "").trim().ifEmpty { null }
+    text = text.substringBefore('#').substringBefore('?').trimEnd('/')
     if (text.isEmpty()) return null
     val marker = CALL_INVITE_URL_PREFIX
     val at = text.lastIndexOf(marker)
-    if (at >= 0) {
-        return text.substring(at + marker.length).takeIf { it.isNotEmpty() }
+    val slug = if (at >= 0) {
+        text.substring(at + marker.length).takeIf { it.isNotEmpty() } ?: return null
+    } else {
+        // No `/c/` anywhere. A bare slug has no path separator at all; anything
+        // that looks like a URL or another path is refused rather than guessed at.
+        if (text.contains('/') || text.contains(':')) return null
+        text
     }
-    // No `/c/` anywhere. A bare slug has no path separator at all; anything
-    // that looks like a URL or another path is refused rather than guessed at.
-    if (text.contains('/') || text.contains(':')) return null
-    return text
+    return me.lakko.app.discovery.InviteLinkArgument(slug, fragment).encode()
 }

@@ -133,7 +133,8 @@ public enum DeviceRemoval {
 
         let groupId = try ensured.group.groupId()
         let ds = DsClient()
-        await DeviceGroupDsAccess.claim(group: ensured.group, identity: ensured.identity, ds: ds)
+        await DeviceGroupDsAccess.claim(
+            group: ensured.group, identity: ensured.identity, accountIdB64: accountIdB64, ds: ds)
 
         // ADR-0053 point 3 — register N+1 proven under N before the publish.
         // Broadcast to the DeviceGroup journal. The DS treats the
@@ -143,6 +144,7 @@ public enum DeviceRemoval {
         _ = try await DeviceGroupDsAccess.directCommit(
             group: ensured.group,
             identity: ensured.identity,
+            accountIdB64: accountIdB64,
             ds: ds,
             create: {
                 try ensured.group.removeDeviceAt(
@@ -188,11 +190,13 @@ public enum DeviceRemoval {
         }
         let groupId = try ensured.group.groupId()
         let ds = DsClient()
-        await DeviceGroupDsAccess.claim(group: ensured.group, identity: ensured.identity, ds: ds)
+        await DeviceGroupDsAccess.claim(
+            group: ensured.group, identity: ensured.identity, accountIdB64: accountIdB64, ds: ds)
         // ADR-0053 point 3 — register N+1 proven under N before the publish.
         _ = try await DeviceGroupDsAccess.directCommit(
             group: ensured.group,
             identity: ensured.identity,
+            accountIdB64: accountIdB64,
             ds: ds,
             create: { try ensured.group.setRequireAttestedRemovals(identity: ensured.identity) },
             prepare: { commit in commit },

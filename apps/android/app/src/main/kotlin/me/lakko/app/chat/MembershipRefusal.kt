@@ -444,6 +444,12 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 is FfiException.AnonToken,
                 is FfiException.AnonTokenAlreadyFinalized,
                 -> null
+                // ADR-0049 section 2 (device-link PAKE) and the sealed invite
+                // links: not membership refusals.
+                is FfiException.DeviceLink,
+                is FfiException.DeviceLinkWrongCode,
+                is FfiException.InviteLinkDamaged,
+                -> null
 
                 // Everything that is NOT a membership refusal. Enumerated
                 // rather than defaulted, so a new `FfiException` subclass has

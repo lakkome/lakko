@@ -142,6 +142,10 @@ import { wipeChannelsForAccount } from "../state/channels-state";
 import { clearConversationKinds } from "../chat/conversation-kind-store";
 import { deleteProfileRow } from "../profile/profile-idb";
 import { deleteGroupNameRow } from "../chat/group-name-idb";
+import { deletePendingRootSeedRow, deleteRegistrarSeedRow } from "../ds/registrar-seed-idb";
+import { clearRootHeldAll } from "../ds/root-held";
+import { clearAppointmentRecords } from "../ds/appointments";
+import { clearOwedHandovers } from "../ds/root-handover";
 import { deletePinRow } from "../chat/pin-idb";
 import { deleteReadWatermarkRow } from "../chat/read-watermark-idb";
 import { deleteCallLogRow } from "../calls/call-log-idb";
@@ -3313,6 +3317,21 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         } catch {
           // best-effort
         }
+        // ADR-0057 — the encrypted registrar-seed row and the owner's
+        // appointment records, same contract.
+        try {
+          await deleteRegistrarSeedRow(cached.accountIdB64);
+        } catch {
+          // best-effort
+        }
+        try {
+          await deletePendingRootSeedRow(cached.accountIdB64);
+        } catch {
+          // best-effort
+        }
+        clearAppointmentRecords(cached.accountIdB64);
+        clearOwedHandovers(cached.accountIdB64);
+        clearRootHeldAll(cached.accountIdB64);
         // ADR-0052 decision 3 — the encrypted pin row, same contract.
         try {
           await deletePinRow(cached.accountIdB64);
