@@ -396,6 +396,9 @@ public struct ChatListScreen: View {
         let cursorId = Self.decodeBeI64(cursor.upToMessageId)
         return thread.messages.reduce(0) { acc, msg in
             if msg.direction == .outgoing { return acc }
+            // ADR-0058 section 5 — a message the feed showed is seen, even
+            // when it sits above messages that are not.
+            if thread.feedSeen.contains(msg.messageId) { return acc }
             if msg.messageId > cursorId { return acc + 1 }
             return acc
         }

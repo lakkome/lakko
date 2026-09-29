@@ -277,6 +277,16 @@ public data class MessageLogPayload(
 public data class PersistedGroup(
     val cursor: Long,
     val messages: List<PersistedMessage>,
+    /**
+     * ADR-0058 section 5 — incoming message ids the feed kept fully on screen
+     * above [feedSeenThrough]. Defaults to empty, so a log written before the
+     * feed existed decodes unchanged. Every writer of the log must carry it
+     * through (the history-bundle merge copies the slot for that reason).
+     */
+    val feedSeen: List<Long> = emptyList(),
+    /** ADR-0058 section 5 — the feed's contiguous-seen watermark, `null`
+     *  when the feed has marked nothing contiguous yet. */
+    val feedSeenThrough: Long? = null,
 )
 
 /**

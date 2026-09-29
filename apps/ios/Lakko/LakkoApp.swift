@@ -582,6 +582,9 @@ struct AppRoot: View, Equatable {
 /// stack. Calls is back, with the recent-call history it never had.
 enum SessionTab: Hashable {
     case chats
+    /// ADR-0058 — the on-device feed, second so it is one tap from the home
+    /// without displacing it (`docs/ux/feed.md` section 2).
+    case feed
     case contacts
     case calls
     case settings
@@ -667,9 +670,13 @@ private final class SessionModels: ObservableObject {
     /// the merged conversation list and the pushed channel screens have to read
     /// ONE store, and a `@StateObject` on a screen belongs to that screen.
     let channelsState: ChannelsUiState
+    /// ADR-0058 — the foreground channel-post sync and the Feed's model.
+    let channelPostSync: ChannelPostSync
+    let feedVM: FeedViewModel
     private var chatModels: [String: ChatViewModel] = [:]
 
-    init(services: AppServices, accountIdB64: String) {
+    init(services: AppServices, account: SessionAccount) {
+        let accountIdB64 = account.accountIdB64
         contactsVM = ContactsViewModel(
             repository: services.contactsRepository,
             chatRepository: services.chatRepository
@@ -678,6 +685,15 @@ private final class SessionModels: ObservableObject {
         // Bound at construction, so the persisted channel list and publisher
         // keys are loaded before the first body evaluation.
         channelsState = ChannelsUiState(accountIdB64: accountIdB64)
+        channelPostSync = ChannelPostSync(accountIdB64: accountIdB64, channels: channelsState)
+        feedVM = FeedViewModel(
+            account: account,
+            chatRepository: services.chatRepository,
+            chatList: chatListVM,
+            channels: channelsState,
+            postSync: channelPostSync,
+            deviceGroupSync: services.deviceGroupSync,
+            contacts: services.contactsRepository)
     }
 
     func chatViewModel(for groupIdHex: String, make: () -> ChatViewModel) -> ChatViewModel {
@@ -725,6 +741,7 @@ private struct SessionRoot: View, Equatable {
 
     @State private var selectedTab: SessionTab = .chats
     @State private var chatsPath: [TabRoute] = []
+    @State private var feedPath: [TabRoute] = []
     @State private var contactsPath: [TabRoute] = []
     @State private var callsPath: [TabRoute] = []
     @State private var settingsPath: [TabRoute] = []
@@ -734,8 +751,7 @@ private struct SessionRoot: View, Equatable {
         self.services = services
         self._inviteIntake = ObservedObject(wrappedValue: services.inviteIntake)
         self._models = StateObject(
-            wrappedValue: SessionModels(
-                services: services, accountIdB64: account.accountIdB64))
+            wrappedValue: SessionModels(services: services, account: account))
     }
 
     nonisolated static func == (lhs: SessionRoot, rhs: SessionRoot) -> Bool {
@@ -762,6 +778,21 @@ private struct SessionRoot: View, Equatable {
             }
             .tabItem { Label("Chats", systemImage: "bubble.left") }
             .tag(SessionTab.chats)
+
+            NavigationStack(path: $feedPath) {
+                FeedScreen(
+                    model: models.feedVM,
+                    onOpenGroup: { groupIdHex, messageId in
+                        chatViewModel(for: groupIdHex).requestJump(to: messageId)
+                        push(.chat(groupIdHex: groupIdHex), on: .feed)
+                    },
+                    onOpenChannel: { push(.channel(channelId: $0), on: .feed) },
+                    onGoToChats: { selectedTab = .chats }
+                )
+                .navigationDestination(for: TabRoute.self) { routeView($0, tab: .feed) }
+            }
+            .tabItem { Label("Feed", systemImage: "newspaper") }
+            .tag(SessionTab.feed)
 
             NavigationStack(path: $contactsPath) {
                 ContactsScreen(viewModel: contactsVM)
@@ -831,6 +862,14 @@ private struct SessionRoot: View, Equatable {
         .onChange(of: inviteIntake.pendingSlug) { _, _ in pushPendingDeepLinks() }
         .onChange(of: inviteIntake.pendingGroupJoinSlug) { _, _ in pushPendingDeepLinks() }
         .onChange(of: inviteIntake.pendingCallJoinSlug) { _, _ in pushPendingDeepLinks() }
+        // ADR-0058 — a shared feed link opens the import on the Feed tab.
+        .onChange(of: inviteIntake.pendingFeedImport) { _, _ in openPendingFeedImport() }
+        // ADR-0058 section 4 — channel posts join the foreground poll for the
+        // whole session, so the feed has them without opening each channel.
+        .task(id: account.accountIdB64) {
+            models.channelPostSync.start()
+            openPendingFeedImport()
+        }
         // A landing popped with the back gesture (not its own Done) drops the
         // parked slug, so the next tap of the same link opens it again; and a
         // chat popped from every stack releases its view model.
@@ -1230,12 +1269,20 @@ private struct SessionRoot: View, Equatable {
     // MARK: - Path plumbing
 
     private var allPaths: [[TabRoute]] {
-        [chatsPath, contactsPath, callsPath, settingsPath]
+        [chatsPath, feedPath, contactsPath, callsPath, settingsPath]
+    }
+
+    /// Hand a parked `/feed/import#...` link to the Feed tab's import sheet.
+    private func openPendingFeedImport() {
+        guard let request = inviteIntake.takeFeedImport() else { return }
+        selectedTab = .feed
+        models.feedVM.importing = request
     }
 
     private func path(for tab: SessionTab) -> Binding<[TabRoute]> {
         switch tab {
         case .chats: return $chatsPath
+        case .feed: return $feedPath
         case .contacts: return $contactsPath
         case .calls: return $callsPath
         case .settings: return $settingsPath

@@ -1,0 +1,160 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+package me.lakko.app.feed
+
+import android.content.Context
+import android.util.Log
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import me.lakko.app.channels.ChannelsClient
+import me.lakko.app.channels.ChannelsComposer
+import me.lakko.app.channels.ChannelsUiState
+import me.lakko.app.channels.ClassifiedPost
+import me.lakko.app.channels.classifyChannelPlaintext
+
+/**
+ * Channels join the foreground poll (ADR-0058 section 4): while the app is in
+ * front, the posts of every channel this device can read are fetched,
+ * decrypted and filed into the channel-post log the feed ranks. Mirror of
+ * `apps/web/src/feed/ChannelPostSync.tsx`.
+ *
+ * Driven from the session shell: a sync runs once the channel state is bound,
+ * every [CHANNEL_POST_SYNC_INTERVAL_MS] while the app is started, and again
+ * on every return to the foreground. Only one sync runs at a time and it is
+ * the only writer of the log, so there is no merge between writers.
+ *
+ * A post is opened under the seed of its own epoch, never another (ADR-0031,
+ * invariant #4). A post whose epoch is newer than every seed this device holds
+ * stops the cursor, so it is tried again once the seed arrives; an older one
+ * without a seed is past the retained window and is passed over.
+ */
+public const val CHANNEL_POST_SYNC_INTERVAL_MS: Long = 60_000L
+
+public class ChannelPostSync(
+    private val context: Context,
+    private val channels: ChannelsUiState,
+    private val client: ChannelsClient,
+) {
+    private val running = Mutex()
+
+    /** A channel this device can open posts of, and how. */
+    private class Readable(
+        val idHex: String,
+        val seedByEpoch: Map<UInt, ByteArray>?,
+        /** The publisher's current content seed (the channel view's posture). */
+        val publisherSeed: ByteArray?,
+        val newestSeedEpoch: Long,
+    )
+
+    private fun readableChannels(): List<Readable> {
+        val out = ArrayList<Readable>()
+        val own = channels.keysByChannel.value
+        val seeds = channels.subscribedSeedsByChannel.value
+        for (c in channels.channels.value) {
+            val keys = own[c.id]
+            if (keys != null) {
+                out += Readable(c.id, null, keys.seed, Long.MAX_VALUE)
+                continue
+            }
+            val map = seeds[c.id]
+            if (map.isNullOrEmpty()) continue
+            out += Readable(c.id, map, null, map.keys.maxOf { it.toLong() })
+        }
+        return out
+    }
+
+    /** One sync pass. Skipped (not queued) when one is already running: the
+     *  timer or the next resume brings the rest. */
+    public suspend fun syncOnce() {
+        val account = channels.boundAccount ?: return
+        if (!running.tryLock()) return
+        try {
+            withContext(Dispatchers.IO) { syncAll(account) }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (e: Throwable) {
+            Log.w(TAG, "channel post sync error", e)
+        } finally {
+            running.unlock()
+        }
+    }
+
+    private suspend fun syncAll(account: String) {
+        val readable = readableChannels()
+        val before = FeedSealedStore.loadChannelPostLog(context, account)
+        var log = retainChannels(before, channels.channels.value.map { it.id }.toSet())
+        var changed = log.channels.size != before.channels.size
+
+        for (channel in readable) {
+            val deps = object : ChannelSyncDeps {
+                override suspend fun fetchPage(channelIdHex: String, after: Long, limit: Int): ChannelPostPage {
+                    val res = client.fetchPosts(channelIdHex, after.coerceAtLeast(0L).toULong(), limit)
+                    return ChannelPostPage(
+                        res.posts.map { ChannelPostWire(it.cursor.toLong(), it.serverTsMs.toLong(), it.payloadB64) },
+                    )
+                }
+
+                override suspend fun decode(channelIdHex: String, payloadB64: String): PostOutcome =
+                    decodePost(channel, payloadB64)
+            }
+            val slot = log.channels[channel.idHex]
+            try {
+                val next = syncChannelSlot(channel.idHex, slot, deps, System.currentTimeMillis())
+                if (next.cursor != slot?.cursor || next.posts.size != slot.posts.size) {
+                    log = log.copy(channels = log.channels + (channel.idHex to next))
+                    changed = true
+                }
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (e: Throwable) {
+                // A channel the server does not answer for this time; the next
+                // sync tries again from the same cursor.
+                Log.w(TAG, "channel post sync failed", e)
+            }
+        }
+
+        if (changed) FeedSealedStore.saveChannelPostLog(context, account, log)
+    }
+
+    private fun decodePost(channel: Readable, payloadB64: String): PostOutcome {
+        val plaintext: ByteArray = if (channel.publisherSeed != null) {
+            // A publisher holds the current content seed only, as the channel
+            // view does; a post it cannot open under it is passed over.
+            try {
+                ChannelsComposer.verifyAndDecrypt(channel.publisherSeed, channel.idHex, payloadB64)
+            } catch (_: Throwable) {
+                return PostOutcome.Skip
+            }
+        } else {
+            val result = try {
+                ChannelsComposer.verifyAndDecryptForEpochs(channel.seedByEpoch.orEmpty(), channel.idHex, payloadB64)
+            } catch (_: Throwable) {
+                return PostOutcome.Skip
+            }
+            when (result) {
+                is ChannelsComposer.SubscriberPostResult.Decoded -> result.plaintext
+                is ChannelsComposer.SubscriberPostResult.MissingEpochSeed ->
+                    return if (result.epochId.toLong() > channel.newestSeedEpoch) PostOutcome.Wait else PostOutcome.Skip
+                ChannelsComposer.SubscriberPostResult.Unreadable -> return PostOutcome.Skip
+            }
+        }
+        return when (val c = classifyChannelPlaintext(plaintext)) {
+            is ClassifiedPost.Text -> PostOutcome.Text(c.text)
+            is ClassifiedPost.Meta -> {
+                // A metadata record read here names the channel in the feed
+                // and the list without opening it (ADR-0051).
+                channels.adoptSharedMeta(channel.idHex, c.meta)
+                PostOutcome.Skip
+            }
+            ClassifiedPost.Malformed -> PostOutcome.Skip
+        }
+    }
+
+    private companion object {
+        const val TAG = "ChannelPostSync"
+    }
+}

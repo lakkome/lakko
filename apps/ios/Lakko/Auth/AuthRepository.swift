@@ -1274,6 +1274,9 @@ public final class AuthRepository: ObservableObject {
             // subscriber keypairs — are not per-account and are left as they
             // were before this store existed.)
             ChannelLogStore().delete(accountIdB64: cached.accountIdB64)
+            // ADR-0058 — the decrypted channel posts and the saved feeds.
+            ChannelPostLogStore().delete(accountIdB64: cached.accountIdB64)
+            FeedStore().delete(accountIdB64: cached.accountIdB64)
         }
         sessionStore.clear()
         // ADR-0054 S3 — the push unregister below spends a token; take it

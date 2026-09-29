@@ -163,6 +163,8 @@
                 <data android:pathPrefix="/g/" />
                 <!-- ADR-0032 (G-21/G-22) — multi-joiner call-invite links. -->
                 <data android:pathPrefix="/c/" />
+                <!-- ADR-0058 — a shared feed; the rule rides in the fragment. -->
+                <data android:pathPrefix="/feed/import" />
             </intent-filter>
         </activity>
 

@@ -23,10 +23,12 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.ChatBubble
+import androidx.compose.material.icons.filled.DynamicFeed
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.Call
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material.icons.outlined.DynamicFeed
 import androidx.compose.material.icons.outlined.People
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
@@ -241,6 +243,7 @@ class MainActivity : ComponentActivity() {
         handleInviteIntent(intent)
         handleGroupJoinIntent(intent)
         handleCallJoinIntent(intent)
+        handleFeedImportIntent(intent)
         handleWakeIntent(intent)
         handleCallRingIntent(intent)
 
@@ -313,6 +316,7 @@ class MainActivity : ComponentActivity() {
         handleInviteIntent(intent)
         handleGroupJoinIntent(intent)
         handleCallJoinIntent(intent)
+        handleFeedImportIntent(intent)
         handleWakeIntent(intent)
         handleCallRingIntent(intent)
     }
@@ -369,6 +373,19 @@ class MainActivity : ComponentActivity() {
         // preview. Its width is checked on the landing (a wrong one refuses
         // the link), not here.
         inviteIntake.publishGroupJoin(slug, uri.fragment?.takeIf { it.isNotBlank() })
+    }
+
+    /**
+     * ADR-0058 / `docs/ux/feed.md` section 4.1 — a shared feed link
+     * `https?://lakko.me/feed/import#<rule>`. The rule rides in the fragment,
+     * which is read here on the device and never sent anywhere.
+     */
+    private fun handleFeedImportIntent(intent: Intent) {
+        if (intent.action != Intent.ACTION_VIEW) return
+        val uri = intent.data ?: return
+        val path = uri.path ?: return
+        if (path.trimEnd('/') != "/feed/import") return
+        me.lakko.app.ui.feed.FeedImportIntake.publish(uri.encodedFragment)
     }
 
     /**
@@ -1104,6 +1121,31 @@ private fun SessionRoot(
         inviteIntake.consume()
     }
 
+    // ADR-0058 section 4 — channels join the foreground poll: while the app is
+    // started, the posts of every readable channel are filed into the
+    // channel-post log the feed ranks. At once on start (and on every return
+    // to the foreground), then every minute.
+    val channelPostSync = remember(channelsState, channelsClient) {
+        me.lakko.app.feed.ChannelPostSync(backupContext, channelsState, channelsClient)
+    }
+    val channelsBound by channelsState.channels.collectAsStateWithLifecycle()
+    LaunchedEffect(lifecycleOwner, channelPostSync, identitySecrets, channelsBound.isNotEmpty()) {
+        if (identitySecrets == null) return@LaunchedEffect
+        lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+            while (true) {
+                channelPostSync.syncOnce()
+                kotlinx.coroutines.delay(me.lakko.app.feed.CHANNEL_POST_SYNC_INTERVAL_MS)
+            }
+        }
+    }
+
+    // A tapped shared-feed link pushes the import screen.
+    val pendingFeedImport by me.lakko.app.ui.feed.FeedImportIntake.pending.collectAsStateWithLifecycle()
+    LaunchedEffect(pendingFeedImport) {
+        if (pendingFeedImport == null) return@LaunchedEffect
+        navController.navigate(Routes.FEED_IMPORT) { launchSingleTop = true }
+    }
+
     // ADR-0028 (G-3) — a tapped `/g/<slug>` group join-ticket link pushes the
     // group-join landing the same way.
     val pendingGroupJoin by inviteIntake.pendingGroupJoin.collectAsStateWithLifecycle()
@@ -1154,6 +1196,12 @@ private fun SessionRoot(
         // The account's channel log + publisher provider snapshot go with the
         // device, like the chat snapshot below.
         channelsState.forgetAccount()
+        // ADR-0058 — the channel-post log and the saved feeds go with the
+        // device too.
+        chatRepository.currentAccountIdB64()?.let {
+            me.lakko.app.feed.FeedSealedStore.deleteAccount(appContext, it)
+        }
+        me.lakko.app.feed.FeedPrefs.clear(appContext)
         // chat.forgetDevice() BEFORE auth.forgetDevice() — see the file-level
         // docstring for the ordering rationale.
         chatRepository.forgetDevice()
@@ -1240,6 +1288,43 @@ private fun SessionRoot(
                         // conversation's call never takes the screen over, so
                         // the list offers it on that chat's own row instead.
                         callHost = me.lakko.app.calls.AppCallHost.instance,
+                    )
+                }
+                // `docs/ux/feed.md` — the ranked feed of group messages and
+                // channel posts (ADR-0058).
+                composable(Routes.FEED) {
+                    me.lakko.app.ui.feed.FeedScreen(
+                        chatRepository = chatRepository,
+                        channels = channelsState,
+                        deviceGroupSync = deviceGroupSync,
+                        contactsRepository = contactsRepository,
+                        ownUsername = account.username
+                            .takeIf { it.isNotBlank() }
+                            ?.let { typed ->
+                                (me.lakko.app.profile.checkUsername(typed) as?
+                                    me.lakko.app.profile.UsernameCheck.Valid)?.normalized
+                            },
+                        onOpenGroupMessage = { hex, messageId ->
+                            me.lakko.app.chat.PendingMessageJump.publish(hex, messageId)
+                            navController.navigate(Routes.chat(hex))
+                        },
+                        onOpenChannel = { id -> navController.navigate(Routes.channel(id)) },
+                        onGoToChats = { navController.navigateToTab(Routes.CHATS) },
+                    )
+                }
+                composable(Routes.FEED_IMPORT) {
+                    val fragment = remember {
+                        me.lakko.app.ui.feed.FeedImportIntake.pending.value.also {
+                            me.lakko.app.ui.feed.FeedImportIntake.consume()
+                        }
+                    }
+                    me.lakko.app.ui.feed.FeedImportScreen(
+                        accountIdB64 = chatRepository.currentAccountIdB64(),
+                        fragment = fragment,
+                        onDone = {
+                            navController.popBackStack()
+                            navController.navigateToTab(Routes.FEED)
+                        },
                     )
                 }
                 // Channels (ADR-0010) — docs/ux/client-redesign.md section 5.4.
@@ -1748,10 +1833,15 @@ private const val APP_POLL_MIN_ITERATION_MS: Long = 1_000L
 /** Navigation routes of the session shell. */
 private object Routes {
     const val CHATS = "chats"
+    const val FEED = "feed"
     const val CONTACTS = "contacts"
     const val CALLS = "calls"
     const val SETTINGS = "settings"
-    val TOP_LEVEL: Set<String> = setOf(CHATS, CONTACTS, CALLS, SETTINGS)
+    val TOP_LEVEL: Set<String> = setOf(CHATS, FEED, CONTACTS, CALLS, SETTINGS)
+
+    /** `docs/ux/feed.md` section 4.1 — a shared feed; the rule rides the
+     *  [me.lakko.app.ui.feed.FeedImportIntake] slot, not the route. */
+    const val FEED_IMPORT = "feed_import"
 
     const val CHAT = "chat/{groupIdHex}"
     fun chat(groupIdHex: String): String = "chat/$groupIdHex"
@@ -1796,8 +1886,8 @@ private data class TabSpec(
 )
 
 /**
- * The four primary destinations, in the order every client shows them
- * (`docs/ux/navigation.md` section 1).
+ * The five primary destinations, in the order every client shows them
+ * (`docs/ux/navigation.md` section 1; Feed added by ADR-0058).
  *
  * Groups and Channels are gone as destinations: both are KINDS of conversation
  * inside Chats now, because a person does not think "I will go to the Groups
@@ -1811,6 +1901,8 @@ private data class TabSpec(
  */
 private val Tabs: List<TabSpec> = listOf(
     TabSpec(Routes.CHATS, "Chats", Icons.Outlined.ChatBubbleOutline, Icons.Filled.ChatBubble),
+    // `docs/ux/feed.md` section 2 — second, one tap from the home.
+    TabSpec(Routes.FEED, "Feed", Icons.Outlined.DynamicFeed, Icons.Filled.DynamicFeed),
     TabSpec(Routes.CONTACTS, "Contacts", Icons.Outlined.People, Icons.Filled.People),
     TabSpec(Routes.CALLS, "Calls", Icons.Outlined.Call, Icons.Filled.Call),
     TabSpec(Routes.SETTINGS, "Settings", Icons.Outlined.Settings, Icons.Filled.Settings),

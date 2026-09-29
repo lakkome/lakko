@@ -60,6 +60,16 @@ public final class InviteIntake: ObservableObject {
     /// call-join is pending. Drives ``JoinCallLandingScreen``.
     @Published public private(set) var pendingCallJoinSlug: String?
 
+    /// ADR-0058 — a `/feed/import#<rule>` link waiting for the Feed tab.
+    @Published private(set) var pendingFeedImport: FeedImportRequest?
+
+    /// Take the parked feed import, if any.
+    func takeFeedImport() -> FeedImportRequest? {
+        let request = pendingFeedImport
+        pendingFeedImport = nil
+        return request
+    }
+
     /// ADR-0032 — set when a guest signup is kicked off from the `/c/` landing,
     /// so that once the session lands and the landing re-mounts, the join
     /// resumes automatically (mirror of the web `pendingJoin` + resume effect).
@@ -91,6 +101,12 @@ public final class InviteIntake: ObservableObject {
             pendingGroupJoinSlug = slug
         } else if let slug = Self.slug(from: path, prefix: "/c/") {
             pendingCallJoinSlug = slug
+        } else if path == "/feed/import" || path == "/feed/import/" {
+            // ADR-0058 — a shared feed rides in the fragment, never the path.
+            let fragment = Self.fragment(of: url)
+            let bytes = FeedDraft.bytes(fromFragment: fragment)
+            pendingFeedImport = FeedImportRequest(
+                bytes: bytes, refused: bytes == nil && fragment != nil)
         }
     }
 

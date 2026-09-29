@@ -612,7 +612,11 @@ public final class ChatRepository: ObservableObject {
             for (groupIdHex, persisted) in log.groups {
                 guard let record = groups[groupIdHex] else { continue }
                 let messages = persisted.messages.compactMap { $0.toChatMessage() }
-                record.seed(messages: messages, cursor: persisted.cursor)
+                record.seed(
+                    messages: messages,
+                    cursor: persisted.cursor,
+                    lastViewedMessageId: persisted.lastViewedMessageId,
+                    feedSeen: Set(persisted.feedSeen ?? []))
             }
         }
 
@@ -4299,13 +4303,21 @@ public final class ChatRepository: ObservableObject {
     /// the group's unread count.
     func chatScreenOpened(groupIdHex: String) {
         openChats[groupIdHex, default: 0] += 1
-        if unreadCounts.removeValue(forKey: groupIdHex) != nil {
+        let viewed = groups[groupIdHex]?.markAllViewed() ?? false
+        if viewed { persistMessageLogBestEffort() }
+        if unreadCounts.removeValue(forKey: groupIdHex) != nil || viewed {
             state = state.with(threads: buildThreadList())
         }
     }
 
     /// The matching close for ``chatScreenOpened(groupIdHex:)``.
     func chatScreenClosed(groupIdHex: String) {
+        // What arrived while the chat was open was read there (ADR-0058
+        // section 5: the chat marks everything it holds).
+        if groups[groupIdHex]?.markAllViewed() == true {
+            persistMessageLogBestEffort()
+            state = state.with(threads: buildThreadList())
+        }
         guard let count = openChats[groupIdHex] else { return }
         if count <= 1 {
             openChats.removeValue(forKey: groupIdHex)
@@ -4316,6 +4328,41 @@ public final class ChatRepository: ObservableObject {
 
     func isChatOpen(groupIdHex: String) -> Bool {
         openChats[groupIdHex] != nil
+    }
+
+    /// ADR-0058 section 5 — file `ids` the feed kept on screen as seen in
+    /// `groupIdHex`, and move the group's watermark as far as the seen set is
+    /// contiguous. `cursorThrough` is the account's cross-device read cursor
+    /// for the group, which counts as seen too.
+    ///
+    /// Returns the new watermark when it moved, else `nil`; the caller sends
+    /// the read receipt and the read cursor at it. Never past a message the
+    /// person did not see.
+    func recordFeedSeen(groupIdHex: String, ids: [Int64], cursorThrough: Int64?) -> Int64? {
+        guard let record = groups[groupIdHex] else { return nil }
+        let through = [record.lastViewedMessageId, cursorThrough].compactMap { $0 }.max()
+        let before = record.feedSeen
+        let result = FeedSeen.markSeen(
+            rows: record.seenRows,
+            through: through,
+            feedSeen: record.feedSeen,
+            ids: ids,
+            contiguous: { contiguousSeen(ids: $0, seen: $1) })
+        record.lastViewedMessageId = result.lastViewedMessageId
+        record.feedSeen = result.feedSeen
+        // The local unread count (used before any read cursor exists) drops
+        // by the incoming messages newly seen.
+        let newlySeen = Set(ids).subtracting(before).filter { id in
+            record.messages.contains { $0.messageId == id && $0.direction == .incoming }
+                && through.map { id > $0 } ?? true
+        }.count
+        if let count = unreadCounts[groupIdHex], newlySeen > 0 {
+            let next = max(0, count - newlySeen)
+            if next == 0 { unreadCounts.removeValue(forKey: groupIdHex) } else { unreadCounts[groupIdHex] = next }
+        }
+        persistMessageLogBestEffort()
+        state = state.with(threads: buildThreadList())
+        return result.advancedTo
     }
 
     /// Every group the foreground receive may poll: loaded, and still a member
@@ -5933,7 +5980,11 @@ public final class ChatRepository: ObservableObject {
             let fresh = GroupRecord(group: reloaded, groupId: record.groupId)
             // Preserve the plaintext timeline (MLS state is independent of the
             // message log; a membership commit appends no row).
-            fresh.seed(messages: record.messages, cursor: record.cursor)
+            fresh.seed(
+                messages: record.messages,
+                cursor: record.cursor,
+                lastViewedMessageId: record.lastViewedMessageId,
+                feedSeen: record.feedSeen)
             groups[groupIdHex] = fresh
             state = state.with(threads: buildThreadList())
         } catch {
@@ -6190,7 +6241,9 @@ public final class ChatRepository: ObservableObject {
                 // send stops being retryable at a relaunch: keeping it would
                 // be a durable outbox, which is a different thing and is
                 // unbuilt.
-                messages: PersistedMessage.persistable(record.messages)
+                messages: PersistedMessage.persistable(record.messages),
+                lastViewedMessageId: record.lastViewedMessageId,
+                feedSeen: record.feedSeen.isEmpty ? nil : record.feedSeen.sorted()
             )
         }
         let payload = MessageLogPayload(groups: slots)
@@ -6282,18 +6335,27 @@ public struct ChatThread: Equatable {
     /// Incoming messages this device applied while the chat was not open, since
     /// it was last opened here. In memory only; see ``UnreadCounting``.
     public let unread: Int
+    /// ADR-0058 section 5 — ids the feed showed long enough to count as seen;
+    /// the unread badge skips them.
+    public let feedSeen: Set<Int64>
+    /// ADR-0058 section 5 — this device's read watermark for the group.
+    public let lastViewedMessageId: Int64?
 
     public init(
         groupIdHex: String,
         messages: [ChatMessage],
         cursor: Int64,
         unread: Int = 0,
+        feedSeen: Set<Int64> = [],
+        lastViewedMessageId: Int64? = nil,
         membershipEnded: Bool = false
     ) {
         self.groupIdHex = groupIdHex
         self.messages = messages
         self.cursor = cursor
         self.unread = unread
+        self.feedSeen = feedSeen
+        self.lastViewedMessageId = lastViewedMessageId
         self.membershipEnded = membershipEnded
     }
 }
@@ -6593,9 +6655,36 @@ private final class GroupRecord {
     /// disk and the order they get reattached doesn't matter.
     /// Idempotent on the message ids — duplicate seeds replace
     /// rather than append.
-    func seed(messages: [ChatMessage], cursor: Int64) {
+    func seed(
+        messages: [ChatMessage],
+        cursor: Int64,
+        lastViewedMessageId: Int64? = nil,
+        feedSeen: Set<Int64> = []
+    ) {
         self.messages = messages
         self.cursor = cursor
+        self.lastViewedMessageId = lastViewedMessageId
+        self.feedSeen = feedSeen
+    }
+
+    /// ADR-0058 section 5 — this device's read watermark for the group and
+    /// the feed-seen ids above it. Persisted with the message log.
+    var lastViewedMessageId: Int64?
+    var feedSeen: Set<Int64> = []
+
+    /// The rows as the seen rule reads them.
+    var seenRows: [FeedSeen.Row] {
+        messages.map { FeedSeen.Row(messageId: $0.messageId, incoming: $0.direction == .incoming) }
+    }
+
+    /// The chat screen shows everything it holds: move the watermark to the
+    /// highest server id and drop the feed ids below it.
+    func markAllViewed() -> Bool {
+        let highest = messages.lazy.map(\.messageId).filter { $0 > 0 }.max()
+        guard let highest, highest > (lastViewedMessageId ?? Int64.min) else { return false }
+        lastViewedMessageId = highest
+        feedSeen = feedSeen.filter { $0 > highest }
+        return true
     }
 
     /// ADR-0045 — the sweep's verdict APPLIES the journal rows below its own
@@ -7009,6 +7098,8 @@ private final class GroupRecord {
             messages: messages,
             cursor: cursor,
             unread: unread,
+            feedSeen: feedSeen,
+            lastViewedMessageId: lastViewedMessageId,
             // ADR-0045 UX §6.2.4 — `nil` (a torn handle) reports `false`: an
             // unreadable group is not evidence of an eviction, and this line
             // is a claim about fact rather than about capability.

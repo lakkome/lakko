@@ -686,6 +686,8 @@ public class ChatRepository(
                     val record = groups[groupIdHex] ?: continue
                     val seeded = persisted.messages.mapNotNull { it.toChatMessage() }
                     record.seed(messages = seeded, cursor = persisted.cursor)
+                    // ADR-0058 section 5 — what the feed showed of this group.
+                    record.seedFeedSeen(persisted.feedSeen.toSet(), persisted.feedSeenThrough)
                 }
                 publishThreadList()
             }
@@ -7508,6 +7510,8 @@ public class ChatRepository(
                 slots[hex] = PersistedGroup(
                     cursor = record.cursor,
                     messages = persistableMessages(record.snapshot()),
+                    feedSeen = record.feedSeen.sorted(),
+                    feedSeenThrough = record.feedSeenThrough,
                 )
             }
         }
@@ -7544,6 +7548,61 @@ public class ChatRepository(
     public fun setThreadOnScreen(groupIdHex: String, onScreen: Boolean) {
         localUnread.setOnScreen(groupIdHex, onScreen)
         publishThreadList()
+    }
+
+    /**
+     * ADR-0058 section 5 — file what the feed kept on screen: [seen] maps a
+     * group id hex to the message ids shown. Each group's seen set grows, its
+     * watermark moves as far as the set is contiguous
+     * ([me.lakko.app.feed.markSeen], the core's `contiguousSeen`), and the log
+     * is persisted. Returns, per group whose watermark moved, the new
+     * watermark — the caller sends the read receipt and the read cursor there.
+     *
+     * [readCursorThrough] is the cross-device read cursor of a group, which
+     * counts as seen too; the larger of it and the feed's own watermark wins.
+     * Runs under each group's lock so a poll applying the same group cannot
+     * interleave with the read-modify-write.
+     */
+    public suspend fun recordFeedSeen(
+        seen: Map<String, Collection<Long>>,
+        readCursorThrough: (String) -> Long?,
+        contiguous: (List<Long>, List<Long>) -> Long?,
+    ): Map<String, Long> {
+        val advanced = HashMap<String, Long>()
+        var changed = false
+        for ((hex, ids) in seen) {
+            val record = groups[hex] ?: continue
+            groupLock(hex).withLock {
+                val rows = record.snapshot().map {
+                    me.lakko.app.feed.SeenRow(
+                        messageId = it.messageId,
+                        direction = when (it.direction) {
+                            Direction.Incoming -> "incoming"
+                            Direction.Outgoing -> "outgoing"
+                            Direction.System -> "system"
+                        },
+                    )
+                }
+                val cursor = readCursorThrough(hex)
+                val own = record.feedSeenThrough
+                val through = listOfNotNull(cursor, own).maxOrNull()
+                val result = me.lakko.app.feed.markSeen(
+                    rows = rows,
+                    state = me.lakko.app.feed.GroupSeenState(through, record.feedSeen),
+                    ids = ids,
+                    contiguous = contiguous,
+                )
+                record.seedFeedSeen(result.state.feedSeen, result.state.through)
+                if (result.newlySeen > 0) localUnread.onSeenElsewhere(hex, result.newlySeen)
+                result.advancedTo?.let { advanced[hex] = it }
+                changed = true
+            }
+        }
+        if (changed) {
+            persistMessageLogBestEffort()
+            publishThreadList()
+        }
+        return advanced
     }
 
     private val screenPollLock = Any()
@@ -7637,6 +7696,11 @@ public data class ChatThread(
     /** The chat was on screen at some point in this process, so [localUnread]
      *  is an exact count rather than a lower bound. */
     val unreadViewedThisSession: Boolean = false,
+    /** ADR-0058 section 5 — incoming ids the feed showed above the watermark;
+     *  the unread count skips them. */
+    val feedSeen: Set<Long> = emptySet(),
+    /** ADR-0058 section 5 — the feed's own contiguous-seen watermark. */
+    val feedSeenThrough: Long? = null,
 )
 
 /** One message in a [ChatThread].
@@ -8399,6 +8463,8 @@ private class GroupRecord(
         groupIdHex = DsClient.pseudonymHex(groupId),
         messages = messages.toList(),
         cursor = cursor,
+        feedSeen = feedSeen,
+        feedSeenThrough = feedSeenThrough,
         typingMembers = activeTypingMembers(),
         readUpToByMember = readUpToSnapshot(),
         // ADR-0045 UX §6.2 — safe to read here, unlike `members()`: OpenMLS
@@ -8411,6 +8477,22 @@ private class GroupRecord(
 
     /** Read-only snapshot for the persistence layer. */
     fun snapshot(): List<ChatMessage> = messages.toList()
+
+    /** ADR-0058 section 5 — ids the feed kept on screen above the watermark. */
+    @Volatile
+    var feedSeen: Set<Long> = emptySet()
+        private set
+
+    /** ADR-0058 section 5 — the feed's own contiguous-seen watermark, beside
+     *  the cross-device read cursor (which only exists with a DeviceGroup). */
+    @Volatile
+    var feedSeenThrough: Long? = null
+        private set
+
+    fun seedFeedSeen(ids: Set<Long>, through: Long?) {
+        feedSeen = ids
+        feedSeenThrough = through
+    }
 
     /**
      * `docs/ux/calls.md` section 6 — append this device's own record of a

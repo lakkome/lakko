@@ -657,9 +657,17 @@ internal fun rowPreview(
  *     the chat was not on screen ([ChatThread.localUnread]). Without it a chat
  *     with no cursor never showed a badge, whatever arrived. */
 internal fun unreadCount(thread: ChatThread, cursor: ReadCursorState?): Int {
+    // ADR-0058 section 5 — a message the feed showed is read, whether or not
+    // the chat was opened: its id sits in `feedSeen` or under the feed's own
+    // watermark.
+    val feedThrough = thread.feedSeenThrough
     val cursorCount = cursor?.let { c ->
         val cursorId = decodeBeI64(c.upToMessageId)
-        thread.messages.count { m -> m.direction != Direction.Outgoing && m.messageId > cursorId }
+        thread.messages.count { m ->
+            m.direction != Direction.Outgoing && m.messageId > cursorId &&
+                m.messageId !in thread.feedSeen &&
+                (feedThrough == null || m.messageId > feedThrough)
+        }
     }
     return me.lakko.app.chat.combinedUnread(
         cursorCount = cursorCount,
