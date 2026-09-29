@@ -55,6 +55,16 @@ the create menu in section 3.
 
 The app opens on Chats. There is no home screen.
 
+**Web: the address bar shows the origin only** (`https://lakko.me/`, on the
+test stack `https://test.lakko.me/`), whatever screen is open. A chat or group
+id, an invite secret or a notification parameter never appears in the address
+bar, the browser's history list, a bookmark or a screenshot. The screen the
+user is on lives in the browser's session history instead, so back and
+forward move between screens and a reload keeps the screen. A link opened
+from outside (`/i/`, `/c/`, `/g/`, a notification) is read once on entry and
+cleared from the address bar before anything renders
+(`apps/web/src/routes/origin-history.ts`).
+
 ## 2. The conversation list
 
 ### 2.1 Row model
