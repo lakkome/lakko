@@ -8,7 +8,8 @@
  * 1.16b moves to a real shell:
  *
  *   - `<AuthProvider>` exposes the session state to every route.
- *   - `<Router>` from @solidjs/router serves the routes defined in
+ *   - `<MemoryRouter>` from @solidjs/router over `originHistory` serves the
+ *     routes defined in
  *     `routes/routes.tsx`. Public pages (`/login`, `/signup`) and
  *     protected pages (`/`, `/contacts`, `/chat/:id`, `/dev`) are
  *     gated by `<RequireAnonymous>` / `<RequireSession>` guards,
@@ -29,7 +30,8 @@
  */
 import { FolderEditorHost } from "./chat/folders/FolderEditor";
 import type { Component } from "solid-js";
-import { Router, type RouteSectionProps } from "@solidjs/router";
+import { MemoryRouter, type RouteSectionProps } from "@solidjs/router";
+import { originHistory } from "./routes/origin-history";
 import { AuthProvider } from "./auth/AuthContext";
 import { ChatProvider } from "./chat/ChatContext";
 import { BackgroundReceiveProvider } from "./chat/BackgroundReceiveContext";
@@ -158,7 +160,11 @@ const App: Component = () => (
         <MailboxProvider>
         <CallHostProvider>
         <BackgroundReceiveProvider>
-          <Router root={RootLayout}>{routes}</Router>
+          {/*
+           * The address bar shows the origin only: the router's paths live in
+           * `history.state` (`routes/origin-history.ts`), never in the URL.
+           */}
+          <MemoryRouter root={RootLayout} history={originHistory}>{routes}</MemoryRouter>
           {/*
            * Per-session hydration of the channel list / subscriber seeds /
            * publisher keys from the encrypted channel log, and the restore of
