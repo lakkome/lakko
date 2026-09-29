@@ -1,0 +1,285 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+/**
+ * The network search's decisions, with every network answer faked: which
+ * questions are asked, how their answers merge into one list, what is
+ * dropped silently (a failed reach check, a record pairing a key with
+ * someone else's account), and when "not found" may be said.
+ */
+import { describe, expect, it, vi } from "vitest";
+
+import { base64Encode } from "../auth/account-id";
+import { AnonTokenQuotaExhaustedError } from "../tokens/anon-token-pool";
+import type { OpenedIntroduction } from "./introductions";
+import { toHex } from "./people";
+import { searchPeople, type KnownPerson, type PeopleSearchDeps } from "./people-search";
+
+const ANNA_KEY = new Uint8Array(32).fill(0xa1);
+const ANNA_ACC = new Uint8Array(16).fill(0xa2);
+const BO_KEY = new Uint8Array(32).fill(0xb1);
+const BO_ACC = new Uint8Array(16).fill(0xb2);
+const OTHER_KEY = new Uint8Array(32).fill(0xc1);
+const FOF_WIRE = new Uint8Array(37).fill(0x0f);
+
+const NOBODY: KnownPerson = { name: null, verifiedUsername: null, isContact: false, keptGrantWireB64: null };
+
+function deps(over: Partial<PeopleSearchDeps> = {}, known: Record<string, KnownPerson> = {}): PeopleSearchDeps {
+  const bundles = new Map<string, Uint8Array>([
+    [toHex(ANNA_ACC), ANNA_KEY],
+    [toHex(BO_ACC), BO_KEY],
+  ]);
+  return {
+    canonicalUsername: (typed) => {
+      const bare = typed.trim().replace(/^@+/, "").toLowerCase();
+      return /^[a-z0-9_]{3,32}$/.test(bare) ? bare : null;
+    },
+    queryTerm: (q) => {
+      const words = q.trim().toLowerCase().split(/\s+/).filter((w) => w.length > 0);
+      if (words.join("").length < 2) return null;
+      return words.reduce((a, b) => (b.length > a.length ? b : a)).slice(0, 16);
+    },
+    nameMatches: (name, q) => {
+      const words = name.toLowerCase().split(/\s+/);
+      return q
+        .toLowerCase()
+        .split(/\s+/)
+        .filter((w) => w.length > 0)
+        .every((part) => words.some((w) => w.startsWith(part)));
+    },
+    lookupChannel: async () => null,
+    usernameHash: async (u) => new TextEncoder().encode(`u:${u}`),
+    accountOfUsernameHash: async () => null,
+    nameTermHash: async (t) => new TextEncoder().encode(`t:${t}`),
+    accountsOfNameTermHash: async () => [],
+    identityKeyOf: async (acc) => bundles.get(toHex(acc)) ?? null,
+    known: (keyB64) => known[keyB64] ?? NOBODY,
+    openIntroductions: async () => [],
+    verifyUsername: async () => false,
+    reachCheck: async () => true,
+    encodeGrant: (wire) => `W:${toHex(wire)}`,
+    ownKeyHex: null,
+    ...over,
+  };
+}
+
+const intro = (over: Partial<OpenedIntroduction> = {}): OpenedIntroduction => ({
+  identityPk: BO_KEY,
+  accountId: BO_ACC,
+  displayName: "Bo Lind",
+  username: null,
+  usernameCertificate: null,
+  fofWire: FOF_WIRE,
+  via: "term",
+  ...over,
+});
+
+describe("searchPeople: the username", () => {
+  it("finds a person in Everyone and shows the username discovery resolved", async () => {
+    const out = await searchPeople(
+      "anna",
+      deps(
+        { accountOfUsernameHash: async () => ANNA_ACC },
+        { [base64Encode(ANNA_KEY)]: { ...NOBODY, name: "Anna Weber" } },
+      ),
+    );
+    expect(out.state).toEqual({ kind: "found" });
+    expect(out.people).toHaveLength(1);
+    expect(out.people[0]).toMatchObject({
+      name: "Anna Weber",
+      username: "anna",
+      reach: "open",
+      accountIdHex: toHex(ANNA_ACC),
+      keyHex: toHex(ANNA_KEY),
+    });
+  });
+
+  it("names someone it holds no profile for by the username itself", async () => {
+    const out = await searchPeople("anna", deps({ accountOfUsernameHash: async () => ANNA_ACC }));
+    expect(out.people[0]).toMatchObject({ name: "@anna", username: "anna" });
+  });
+
+  it("asks no username or channel question for text that cannot be a username", async () => {
+    const usernameHash = vi.fn(async () => new Uint8Array(64));
+    const lookupChannel = vi.fn(async () => null);
+    await searchPeople("Anna Weber", deps({ usernameHash, lookupChannel }));
+    expect(usernameHash).not.toHaveBeenCalled();
+    expect(lookupChannel).not.toHaveBeenCalled();
+  });
+});
+
+describe("searchPeople: the states", () => {
+  it("says not found when every question was answered and nothing matched", async () => {
+    const out = await searchPeople("ghost", deps());
+    expect(out).toMatchObject({ people: [], channel: null, state: { kind: "not-found" } });
+  });
+
+  it("never says not found when a question failed", async () => {
+    const out = await searchPeople(
+      "anna",
+      deps({
+        accountOfUsernameHash: async () => {
+          throw new Error("offline");
+        },
+      }),
+    );
+    expect(out.state).toEqual({ kind: "failed" });
+  });
+
+  it("says the allowance is used when the daily tokens are", async () => {
+    const out = await searchPeople(
+      "anna",
+      deps({
+        usernameHash: async () => {
+          throw new AnonTokenQuotaExhaustedError("discovery-lookup", null);
+        },
+      }),
+    );
+    expect(out.state).toEqual({ kind: "allowance-used" });
+  });
+
+  it("still finds a channel by handle", async () => {
+    const out = await searchPeople("news", deps({ lookupChannel: async () => "ab12" }));
+    expect(out.channel).toEqual({ idHex: "ab12", handle: "news" });
+    expect(out.state).toEqual({ kind: "found" });
+  });
+});
+
+describe("searchPeople: names in Everyone", () => {
+  it("shows a person the name lookup returns only when this device can name them", async () => {
+    const out = await searchPeople(
+      "anna w",
+      deps(
+        { accountsOfNameTermHash: async () => [ANNA_ACC, BO_ACC] },
+        { [base64Encode(ANNA_KEY)]: { ...NOBODY, name: "Anna Weber" } },
+      ),
+    );
+    expect(out.people.map((p) => p.name)).toEqual(["Anna Weber"]);
+    expect(out.people[0]!.reach).toBe("open");
+  });
+
+  it("filters by the whole query, not the one term the network matched", async () => {
+    const out = await searchPeople(
+      "anna x",
+      deps(
+        { accountsOfNameTermHash: async () => [ANNA_ACC] },
+        { [base64Encode(ANNA_KEY)]: { ...NOBODY, name: "Anna Weber" } },
+      ),
+    );
+    expect(out.people).toEqual([]);
+    expect(out.state).toEqual({ kind: "not-found" });
+  });
+});
+
+describe("searchPeople: contacts of contacts", () => {
+  it("shows an introduced person after the reach check says their key still opens the mailbox", async () => {
+    const reachCheck = vi.fn(async () => true);
+    const out = await searchPeople("bo", deps({ openIntroductions: async () => [intro()], reachCheck }));
+    expect(out.people).toHaveLength(1);
+    expect(out.people[0]).toMatchObject({
+      name: "Bo Lind",
+      reach: "grant",
+      grantWireB64: `W:${toHex(FOF_WIRE)}`,
+      username: null,
+    });
+    expect(reachCheck).toHaveBeenCalledWith(BO_KEY, `W:${toHex(FOF_WIRE)}`);
+  });
+
+  it("drops the person silently when the reach check says no - as if not found", async () => {
+    const out = await searchPeople(
+      "bo",
+      deps({ openIntroductions: async () => [intro()], reachCheck: async () => false }),
+    );
+    expect(out.people).toEqual([]);
+    expect(out.state).toEqual({ kind: "not-found" });
+  });
+
+  it("does not say not found when the reach check could not be asked", async () => {
+    const out = await searchPeople(
+      "bo",
+      deps({
+        openIntroductions: async () => [intro()],
+        reachCheck: async () => {
+          throw new Error("offline");
+        },
+      }),
+    );
+    expect(out.state).toEqual({ kind: "failed" });
+  });
+
+  it("drops a record pairing its key with someone else's account id", async () => {
+    const out = await searchPeople(
+      "bo",
+      deps({ openIntroductions: async () => [intro({ identityPk: OTHER_KEY })] }),
+    );
+    expect(out.people).toEqual([]);
+  });
+
+  it("drops a record whose name does not match the whole query", async () => {
+    const out = await searchPeople("bo x", deps({ openIntroductions: async () => [intro()] }));
+    expect(out.people).toEqual([]);
+  });
+
+  it("shows the username only after its certificate verifies, reusing the typed username's hash", async () => {
+    const usernameHash = vi.fn(async (u: string) => new TextEncoder().encode(`u:${u}`));
+    const verifyUsername = vi.fn(async () => true);
+    const opened = intro({ via: "username", username: "bolind", usernameCertificate: new Uint8Array([1]) });
+    const out = await searchPeople(
+      "bolind",
+      deps({ openIntroductions: async () => [opened], usernameHash, verifyUsername }),
+    );
+    expect(out.people[0]).toMatchObject({ username: "bolind", name: "Bo Lind" });
+    expect(usernameHash).toHaveBeenCalledTimes(1);
+    expect(verifyUsername).toHaveBeenCalledWith(new Uint8Array([1]), new TextEncoder().encode("u:bolind"), BO_ACC);
+  });
+
+  it("shows no username when the certificate does not verify", async () => {
+    const opened = intro({ via: "username", username: "bolind", usernameCertificate: new Uint8Array([1]) });
+    const out = await searchPeople("bolind", deps({ openIntroductions: async () => [opened] }));
+    expect(out.people[0]!.username).toBeNull();
+  });
+
+  it("matches a record opened by the username only for that exact username", async () => {
+    const opened = intro({ via: "username", username: "someone_else" });
+    const out = await searchPeople("bolind", deps({ openIntroductions: async () => [opened] }));
+    expect(out.people).toEqual([]);
+  });
+});
+
+describe("searchPeople: one list", () => {
+  it("keeps one row for a person found twice, and needs no check when their mailbox is open", async () => {
+    const reachCheck = vi.fn(async () => true);
+    const out = await searchPeople(
+      "bolind",
+      deps({
+        accountOfUsernameHash: async () => BO_ACC,
+        openIntroductions: async () => [intro({ via: "username", username: "bolind" })],
+        reachCheck,
+      }),
+    );
+    expect(out.people).toHaveLength(1);
+    expect(out.people[0]!.reach).toBe("open");
+    expect(reachCheck).not.toHaveBeenCalled();
+  });
+
+  it("keeps a contact a contact, unchecked", async () => {
+    const reachCheck = vi.fn(async () => true);
+    const out = await searchPeople(
+      "bo",
+      deps(
+        { openIntroductions: async () => [intro()], reachCheck },
+        { [base64Encode(BO_KEY)]: { ...NOBODY, name: "Bo", isContact: true } },
+      ),
+    );
+    expect(out.people[0]).toMatchObject({ reach: "contact", name: "Bo", grantWireB64: null });
+    expect(reachCheck).not.toHaveBeenCalled();
+  });
+
+  it("never lists the viewer", async () => {
+    const out = await searchPeople(
+      "anna",
+      deps({ accountOfUsernameHash: async () => ANNA_ACC, ownKeyHex: toHex(ANNA_KEY) }),
+    );
+    expect(out.people).toEqual([]);
+  });
+});

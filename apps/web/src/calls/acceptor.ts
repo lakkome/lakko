@@ -10,16 +10,19 @@
  * result so the `/c/<slug>` landing page can render the
  * right outcome copy without re-implementing the dispatch:
  *
- *   1. `parseCallInviteSlug(slug)` → pointer | inline | error
+ *   1. `parseCallInviteSlug(slug)` → pointer | inline | error, and
+ *      the link secret from the fragment (missing or damaged →
+ *      `damaged`, 2026-09-28 security pass)
  *   2. (pointer branch) `DiscoveryClient.fetchCallInvite(blobId)`
- *      → bytes | null (404 → `notFound`)
- *   3. `CallInviteCapability.decodeAndVerify(bytes)` — local
- *      Ed25519 signature check (catches a malicious server
- *      serving substituted bytes)
+ *      → sealed bytes | null (404 → `notFound`)
+ *   3. `CallInviteCapability.openLink(sealed, secret)` — opens
+ *      the seal and checks the Ed25519 signature locally (a
+ *      malicious server serving substituted bytes cannot open)
  *   4. `capability.isValidNow(nowMs)` — expiry filter
  *   5. (pointer branch) `DiscoveryClient.consumeCallInvite(
- *      blobId, capabilityBytes, joinerAccountId)` — atomic
- *      counter bump + per-joiner dedup tag
+ *      blobId, capability.wire, joinerAccountId)` — atomic
+ *      counter bump + per-joiner dedup tag over the plaintext
+ *      capability
  *   6. `acceptCallInvite(capability, joinerIdentity)` —
  *      bootstrap a fresh MLS group with joiner as founder +
  *      owner added via the embedded KeyPackage
@@ -41,7 +44,11 @@ import {
   DiscoveryHttpError,
   isDiscoveryRateLimited,
 } from "../discovery/client";
-import { inviteLinkWidths } from "../contacts/invite-link";
+import {
+  inviteLinkWidths,
+  isInviteLinkDamaged,
+  linkSecretFromFragment,
+} from "../contacts/invite-link";
 import { parseCallInviteSlug } from "./invite";
 
 // Re-exported by `loadWasm()` — the wasm module surfaces
@@ -66,6 +73,10 @@ export interface AcceptCallInviteOptions {
    *  ≥ 400 bytes of inline capability (censored-region
    *  fallback). */
   readonly slug: string;
+  /** The URL fragment (`location.hash`, with or without its `#`): the link
+   *  secret the whole capability is sealed under. Missing or damaged →
+   *  `damaged`. */
+  readonly fragment: string | null | undefined;
   /** Joiner's 16-byte UUIDv7 account_id — folded into the
    *  per-joiner dedup tag locally before posting to consume.
    *  Never crosses the wire in plaintext. */
@@ -92,8 +103,8 @@ export interface AcceptCallInviteOptions {
 export type AcceptCallInviteResult =
   | {
       readonly kind: "accepted";
-      /** Wire-format bytes the joiner just consumed. UI can
-       *  re-render details (label, expiry) from these. */
+      /** The plaintext capability wire the sealed link opened
+       *  to. UI can re-render details (label, expiry) from it. */
       readonly capabilityBytes: Uint8Array;
       /** Owner's 16-byte UUIDv7 `account_id` — the Welcome
        *  ferry target. */
@@ -141,6 +152,8 @@ export type AcceptCallInviteResult =
    *  again later. Never folded into `notFound`. */
   | { readonly kind: "rateLimited" }
   | { readonly kind: "malformedSlug"; readonly reason: string }
+  /** The fragment is missing, or does not open the link. */
+  | { readonly kind: "damaged" }
   | { readonly kind: "signatureFailure"; readonly reason: string }
   | { readonly kind: "failed"; readonly message: string };
 
@@ -168,18 +181,21 @@ export async function acceptCallInviteFromSlug(
 ): Promise<AcceptCallInviteResult> {
   // ---- 1. Parse the slug -----------------------------------
   const wasm = await loadWasm();
+  const widths = inviteLinkWidths(wasm);
   let parsed: ReturnType<typeof parseCallInviteSlug>;
   try {
-    parsed = parseCallInviteSlug(opts.slug, inviteLinkWidths(wasm));
+    parsed = parseCallInviteSlug(opts.slug, widths);
   } catch (err) {
     return {
       kind: "malformedSlug",
       reason: err instanceof Error ? err.message : String(err),
     };
   }
+  const linkSecret = linkSecretFromFragment(opts.fragment, widths);
+  if (linkSecret === null) return { kind: "damaged" };
 
-  // ---- 2. Pointer branch: fetch bytes from server ----------
-  let capabilityBytes: Uint8Array;
+  // ---- 2. Pointer branch: fetch the sealed blob ------------
+  let sealed: Uint8Array;
   let blobId: Uint8Array | null = null;
   if (parsed.kind === "pointer") {
     blobId = parsed.blobId;
@@ -188,7 +204,7 @@ export async function acceptCallInviteFromSlug(
       if (fetched === null) {
         return { kind: "notFound" };
       }
-      capabilityBytes = fetched;
+      sealed = fetched;
     } catch (err) {
       if (err instanceof DiscoveryHttpError && err.status === 404) {
         return { kind: "notFound" };
@@ -197,29 +213,23 @@ export async function acceptCallInviteFromSlug(
       throw err; // bubble up network / non-404 HTTP errors
     }
   } else {
-    capabilityBytes = parsed.capabilityBytes;
+    sealed = parsed.sealed;
   }
 
-  // ---- 3. decodeAndVerify --- catches malicious-server
-  //          substitution + signature tamper ----------------
-  let capability: {
-    readonly callId: Uint8Array;
-    readonly ownerAccountId: Uint8Array;
-    readonly expiryMs: bigint;
-    readonly ownerFingerprint: string;
-    isValidNow(nowMs: bigint): boolean;
-  };
+  // ---- 3. openLink --- opens the seal and verifies the
+  //          signature (catches substitution + tamper) -------
+  let capability: import("../../wasm/lakko_ffi_wasm").CallInviteCapability;
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    capability = (wasm as any).CallInviteCapability.decodeAndVerify(
-      capabilityBytes,
-    );
+    capability = wasm.CallInviteCapability.openLink(sealed, linkSecret);
   } catch (err) {
+    if (isInviteLinkDamaged(err)) return { kind: "damaged" };
     return {
       kind: "signatureFailure",
       reason: err instanceof Error ? err.message : String(err),
     };
   }
+  // The plaintext wire: what the per-joiner consume tag is computed over.
+  const capabilityBytes = capability.wire;
 
   // ---- 4. Expiry check ------------------------------------
   const nowMs = opts.nowMs ?? Date.now();

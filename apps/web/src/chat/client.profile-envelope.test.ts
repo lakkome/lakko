@@ -102,6 +102,9 @@ describe("ADR-0048 — a profile is filtered in the foreground loop", () => {
       username: "alice",
       updatedAtMs: 1_700n,
       accountId: null,
+      // ADR-0058 profile v3 — no certificate and no grants in this envelope.
+      usernameCertificate: null,
+      grants: [],
     });
   });
 

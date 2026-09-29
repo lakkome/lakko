@@ -22,7 +22,7 @@
  *   * `channels` — the local list (ids, local names, the `@handle`
  *     the channel was found under; handle -> id is a one-way OPRF,
  *     so the handle cannot be recovered from the id later).
- *   * `subscriberKeys` — the per-channel X25519 keypair a reader
+ *   * `subscriberKeys` — the per-channel Ed25519 keypair a reader
  *     registered with; losing the secret half loses every future
  *     seed envelope.
  *   * `subscribedSeeds` — the recovered `epoch -> seed` map, so a
@@ -73,9 +73,9 @@ export interface PersistedChannel {
 
 export interface PersistedSubscriberKey {
   readonly channelId: string;
-  /** Hex-encoded 32-byte X25519 secret. */
+  /** Hex-encoded 32-byte Ed25519 seed. */
   readonly secretHex: string;
-  /** Hex-encoded 32-byte X25519 public. */
+  /** Hex-encoded 32-byte Ed25519 public key. */
   readonly publicHex: string;
 }
 

@@ -220,8 +220,14 @@ class JoinCallViewModel(
 
     private suspend fun decode(slug: String): DecodedCall? {
         return try {
-            val parsed = parseCallInviteSlug(slug)
-            val capabilityBytes: ByteArray = when (parsed) {
+            // The 2026-09-28 security pass — `<slug>#<link secret>`: the
+            // capability is sealed under the secret, and a link without one
+            // cannot be opened.
+            val (slugPart, fragment) = me.lakko.app.discovery.splitLinkToken(slug)
+            val secret = (me.lakko.app.chat.parseGroupInviteFragment(fragment)
+                as? me.lakko.app.chat.GroupInviteFragment.Secret)?.bytes ?: return null
+            val parsed = parseCallInviteSlug(slugPart)
+            val sealed: ByteArray = when (parsed) {
                 is ParsedCallInvite.Pointer -> {
                     val discovery = DiscoveryClient()
                     try {
@@ -232,7 +238,7 @@ class JoinCallViewModel(
                 }
                 is ParsedCallInvite.Inline -> parsed.capabilityBytes
             }
-            CallInviteCapability.decodeAndVerify(capabilityBytes).use { cap ->
+            CallInviteCapability.openLink(sealed, secret).use { cap ->
                 val secrets = authRepository.identitySecrets.value
                 val isOwner = secrets != null &&
                     Identity.fromSeed(secrets.accountIdentitySeed).use {

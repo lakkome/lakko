@@ -354,7 +354,7 @@ public object StateBundle {
         if (isStateRow(row)) row.copyOfRange(ROW_MAGIC.size, row.size) else null
 
     public suspend fun publish(rendezvousPseudonym: ByteArray, sealed: ByteArray) {
-        DsClient().use { it.publishMailbox(rendezvousPseudonym, wrapRow(sealed)) }
+        DsClient().use { it.publishRendezvous(rendezvousPseudonym, wrapRow(sealed)) }
     }
 
     /** Joiner side: the state row past the Welcome cursor, skipping the
@@ -372,7 +372,7 @@ public object StateBundle {
                     (remaining / 1_000_000_000L).toInt().coerceAtLeast(1),
                 )
                 val result = try {
-                    client.fetchMailbox(rendezvousPseudonym, after = cursor, limit = 1, waitSecs = waitSecs)
+                    client.fetchRendezvous(rendezvousPseudonym, after = cursor, limit = 1, waitSecs = waitSecs)
                 } catch (c: CancellationException) {
                     throw c
                 } catch (http: DsHttpError) {

@@ -538,6 +538,7 @@ public class ContactsViewModel(
                 "That account has no identity bundle yet — ask them to open the app once."
             is ContactsError.Variant.Wrapped ->
                 v.cause.message ?: "Send failed."
+            is ContactsError.Variant.ReachRefused -> ContactsError.REACH_REFUSED_COPY
         }
 
     /** VM-internal slice carrying ephemeral form + send +

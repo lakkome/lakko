@@ -58,11 +58,22 @@ public enum class VerifyOutcome { VERIFIED, FAILED, UNAVAILABLE }
 /** Single-flight, cached verifier. Thread-safe. */
 public class UsernameVerifier(
     private val store: UsernameVerificationStore,
-    private val resolve: suspend (username: String) -> UsernameResolution,
+    /** ADR-0058 — resolves a claim knowing WHOSE it is (the certificate
+     *  path needs the sender's stored profile). */
+    private val resolveFor: suspend (username: String, signatureKeyB64: String) -> UsernameResolution,
     private val passesRule: (username: String) -> Boolean = { name ->
         checkUsername(name) == UsernameCheck.Valid(name)
     },
 ) {
+    /** The lookup-only shape (ADR-0048): the claim's owner is not needed. */
+    public constructor(
+        store: UsernameVerificationStore,
+        resolve: suspend (username: String) -> UsernameResolution,
+        passesRule: (username: String) -> Boolean = { name ->
+            checkUsername(name) == UsernameCheck.Valid(name)
+        },
+    ) : this(store, { name, _ -> resolve(name) }, passesRule)
+
     private val lock = Any()
     private val inFlight = HashMap<String, CompletableDeferred<VerifyOutcome>>()
 
@@ -101,7 +112,7 @@ public class UsernameVerifier(
     }
 
     private suspend fun decide(signatureKeyB64: String, username: String): VerifyOutcome {
-        val result = when (val resolution = resolve(username)) {
+        val result = when (val resolution = resolveFor(username, signatureKeyB64)) {
             is UsernameResolution.Found ->
                 if (resolution.signatureKeyB64 == signatureKeyB64) {
                     UsernameVerification.VERIFIED

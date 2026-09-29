@@ -80,3 +80,21 @@ public const val INVITE_RATE_LIMITED_COPY: String =
     "Too many requests from this network right now. Try again in a minute."
 
 private const val HTTP_TOO_MANY_REQUESTS: Int = 429
+
+/**
+ * Split a link token — the text after `/i/`, `/c/` or `/g/`, which since the
+ * 2026-09-28 security pass carries the link secret as its fragment,
+ * `<slug>#<secret>` — into the slug and the fragment (`null` when there is
+ * none). The router passes the two as one string so every landing gets both.
+ */
+public fun splitLinkToken(token: String): Pair<String, String?> {
+    val at = token.indexOf('#')
+    if (at < 0) return token.trim().removeSuffix("/") to null
+    val slug = token.substring(0, at).trim().removeSuffix("/")
+    val fragment = token.substring(at + 1).trim().takeIf { it.isNotEmpty() }
+    return slug to fragment
+}
+
+/** Join a slug and a fragment back into one link token. */
+public fun joinLinkToken(slug: String, fragment: String?): String =
+    if (fragment.isNullOrBlank()) slug else "$slug#$fragment"

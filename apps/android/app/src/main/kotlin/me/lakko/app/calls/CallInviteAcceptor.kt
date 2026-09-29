@@ -153,8 +153,10 @@ public class CallInviteAcceptor(
         nowMs: Long = System.currentTimeMillis(),
     ): Result {
         // ---- 1. Parse slug -----------------------------------
+        // `<slug>#<link secret>` (the 2026-09-28 security pass).
+        val (slugPart, fragment) = me.lakko.app.discovery.splitLinkToken(slug)
         val parsed = try {
-            parseCallInviteSlug(slug, lengths)
+            parseCallInviteSlug(slugPart, lengths)
         } catch (e: CallInviteUrlException) {
             return Result.MalformedSlug(reason = e.message ?: e::class.simpleName ?: "parse error")
         }
@@ -182,9 +184,12 @@ public class CallInviteAcceptor(
             }
         }
 
-        // ---- 3. decodeAndVerify -----------------------------
+        // ---- 3. open the sealed link (verifies) ---------------
+        val secret = (me.lakko.app.chat.parseGroupInviteFragment(fragment, lengths)
+            as? me.lakko.app.chat.GroupInviteFragment.Secret)?.bytes
+            ?: return Result.MalformedSlug(reason = "the link has no link secret")
         val capability: CallInviteCapability = try {
-            CallInviteCapability.decodeAndVerify(capabilityBytes)
+            CallInviteCapability.openLink(capabilityBytes, secret)
         } catch (e: Exception) {
             return Result.SignatureFailure(reason = e.message ?: e.toString())
         }
@@ -200,7 +205,8 @@ public class CallInviteAcceptor(
             val consumeResult = try {
                 discoveryClient.consumeCallInvite(
                     blobId = effectiveBlobId,
-                    capabilityBytes = capabilityBytes,
+                    // The joiner tag is over the PLAINTEXT capability.
+                    capabilityBytes = capability.wire(),
                     joinerAccountId = joinerAccountId,
                 )
             } catch (e: Exception) {

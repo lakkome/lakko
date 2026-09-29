@@ -52,18 +52,74 @@ public enum CoPublisher {
     /// Mint a co-publisher invite link over the PublisherGroup's MLS `group_id`.
     /// A non-member opens it, requests to join, and the owner approves (reusing
     /// the ADR-0027/0028 external-join machinery). `0` = never expires.
+    ///
+    /// Sealed links (ADR-0028 amendment of 2026-09-28): the capability is
+    /// sealed under a fresh 12-byte secret that rides the fragment only; the
+    /// sealed blob goes to the `/g/` ledger on `discovery` (a session-bearing
+    /// client, the upload is `require_session`) and the short pointer link is
+    /// returned. Only a TRANSPORT failure falls back to the inline link; a
+    /// server refusal surfaces.
     public static func createCoPublisherLink(
         identity: Identity,
         publisherGroup: PublisherGroup,
+        discovery: DiscoveryClient,
         origin: String = defaultOrigin
-    ) throws -> String {
+    ) async throws -> String {
         let groupId = try publisherGroup.groupId()
-        let wire = try composeGroupInviteCapability(
+        let mint = try composeGroupInviteCapability(
             issuerSigningSeed: identity.ed25519Seed(),
             groupId: groupId,
             expiryMs: 0
         )
-        return "\(origin)\(urlPrefix)\(Self.base64UrlEncode(wire))"
+        do {
+            let blobId = try await discovery.uploadGroupInvite(
+                mint: mint, expiryMs: 0, maxUses: UInt32.max)
+            return InviteLink.pointer(
+                origin: origin, prefix: urlPrefix, blobId: blobId, secret: mint.linkSecret)
+        } catch let error where InviteLink.uploadFallsBackInline(error) {
+            NSLog("co-publisher link upload failed (network); sharing the inline link")
+            return InviteLink.inline(
+                origin: origin, prefix: urlPrefix, sealed: mint.sealed, secret: mint.linkSecret)
+        }
+    }
+
+    /// Open a pasted `/g/` co-publisher link: read the secret from the
+    /// fragment (none or malformed → ``CoPublisherError/damagedLink``, before
+    /// any request), take the sealed blob inline or fetch it by id, and open
+    /// + verify it. Returns the opened capability.
+    static func openCoPublisherLink(
+        _ link: String,
+        discovery: DiscoveryClient
+    ) async throws -> GroupInviteCapability {
+        let (base, fragment) = InviteLink.split(link.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard let idx = base.range(of: urlPrefix, options: .backwards) else {
+            throw CoPublisherError.notACoPublisherLink(link)
+        }
+        let slug = String(base[idx.upperBound...])
+        let parsed: GroupInviteUrl.ParsedGroupInvite
+        do {
+            parsed = try GroupInviteUrl.parseGroupInviteSlug(slug)
+        } catch {
+            throw CoPublisherError.notACoPublisherLink(link)
+        }
+        guard let secret = InviteLink.secret(fromFragment: fragment) else {
+            throw CoPublisherError.damagedLink
+        }
+        let sealed: Data
+        switch parsed {
+        case .inline(let bytes):
+            sealed = bytes
+        case .pointer(let blobId):
+            guard let fetched = try await discovery.fetchGroupInvite(blobId: blobId) else {
+                throw CoPublisherError.notACoPublisherLink(link)
+            }
+            sealed = fetched
+        }
+        do {
+            return try GroupInviteCapability.openLink(sealed: sealed, linkSecret: secret)
+        } catch {
+            throw CoPublisherError.damagedLink
+        }
     }
 
     // MARK: - ADR-0053 journal access
@@ -154,6 +210,19 @@ public enum CoPublisher {
                 knockCursor = max(knockCursor, row.id)
                 _ = try? publisherGroup.processKnock(identity: identity, bytes: row.payload)
             }
+            // ADR-0058 section 6 — a co-publisher's attribution carries its
+            // `reply` grant, the only key its closed mailbox takes the Welcome
+            // under. A co-publisher knocks with its account identity, so the
+            // joiner key IS its account key.
+            for row in knocks.messages {
+                guard let attr = try? parseGroupJoinAttribution(bytes: row.payload),
+                      attr.groupId == groupId else { continue }
+                await MainActor.run {
+                    _ = ReachCenter.shared.keep(
+                        attr.replyGrant, carrier: .request,
+                        fromAccountKeyB64: base64Encode(attr.joinerSignatureKey), scopeHex: nil)
+                }
+            }
         }
         await dsHealRegistration(
             ds: ds, groupId: groupId, before: signerBefore,
@@ -205,12 +274,18 @@ public enum CoPublisher {
                 _ = try await ds.publishGroup(
                     groupId: groupId, payload: added.commit, auth: DsAuth(signer: signerN))
                 // The joiner's external-join proposal carried a KeyPackage under
-                // `proposalRef` (its leaf signature key), so its mailbox is the
-                // pseudonym of that key. Unsigned: a mailbox is open for writes.
+                // `proposalRef` (its account signature key — a co-publisher joins
+                // as its account), so its mailbox is the pseudonym of that key.
+                // ADR-0058 — written with the `reply` grant its attribution
+                // carried; the mailbox is closed to anything else.
                 let mailbox = try IdentityPseudonym.fromIdentity(pubkey: proposalRef).asBytes()
+                let auth = await MainActor.run {
+                    ReachCenter.shared.writeAuth(toAccountKey: proposalRef)
+                }
                 _ = try await ds.publishMailbox(
                     pseudonym: mailbox,
-                    payload: wrapEnvelope(kind: .welcome, body: added.welcome))
+                    payload: wrapEnvelope(kind: .welcome, body: added.welcome),
+                    writeAuth: auth)
             }
         ).run()
         try await resealSubscribers(
@@ -257,16 +332,14 @@ public enum CoPublisher {
     public static func requestToCoPublish(
         ds: DsClient,
         identity: Identity,
-        link: String
+        link: String,
+        discovery: DiscoveryClient = DiscoveryClient()
     ) async throws -> CoPublishRequest {
-        guard let idx = link.range(of: urlPrefix, options: .backwards) else {
-            throw CoPublisherError.notACoPublisherLink(link)
-        }
-        let slug = String(link[idx.upperBound...])
-        guard let wire = Self.base64UrlDecode(slug) else {
-            throw CoPublisherError.notACoPublisherLink(link)
-        }
-        let cap = try GroupInviteCapability.decodeAndVerify(wire: wire)
+        let cap = try await openCoPublisherLink(link, discovery: discovery)
+        // The PLAINTEXT capability the link opened to: what the attribution
+        // carries (the ledger consume is not driven here; the co-publisher
+        // link is minted with an unlimited ceiling).
+        let wire = cap.wire()
         let groupId = cap.groupId()
         guard let channelIdBytes = channelIdFromPublisherGroupId(groupId: groupId) else {
             // Two distinct reasons the id does not resolve, needing different
@@ -281,6 +354,10 @@ public enum CoPublisher {
         // ADR-0053 point 6 — the knock: a probe learns the registered epoch,
         // the proposal is built for it, a second knock carries the self-signed
         // attribution (OQ2, advisory) and the proposal. No journal read.
+        // ADR-0058 section 6 — the `reply` grant the owner writes the Welcome
+        // with, registered before the knock.
+        let replyGrant = try await ReachCenter.shared.newReplyGrant(
+            purpose: ReplyPurpose.groupJoin(groupId))
         try await DsKnockJoin(
             knock: { payloads in
                 try await ds.knock(groupId: groupId, payloads: payloads).epoch
@@ -291,7 +368,8 @@ public enum CoPublisher {
             attribution: {
                 try? composeGroupJoinAttribution(
                     joinerSigningSeed: identity.ed25519Seed(),
-                    capabilityBytes: wire)
+                    capabilityBytes: wire,
+                    replyGrant: replyGrant)
             }
         ).run()
         return CoPublishRequest(
@@ -444,6 +522,11 @@ public enum CoPublisherError: Error, LocalizedError {
     case malformedSubscriberHex(String)
     case notACoPublisherLink(String)
     case notAChannelGroup
+    /// The link has no fragment, a fragment that is not a link secret, or a
+    /// sealed capability that does not open under it.
+    case damagedLink
+    /// No session token, so the ledger upload cannot be made.
+    case notSignedIn
 
     public var errorDescription: String? {
         switch self {
@@ -457,6 +540,10 @@ public enum CoPublisherError: Error, LocalizedError {
             return "not a /g/ co-publisher link: \(link)"
         case .notAChannelGroup:
             return "co-publisher link does not target a channel PublisherGroup"
+        case .damagedLink:
+            return "co-publisher link is damaged"
+        case .notSignedIn:
+            return "not signed in: no session token for discovery"
         }
     }
 }

@@ -23,7 +23,7 @@ import {
 } from "./client";
 import { ContactsClient, ContactsError } from "../contacts/client";
 import { joinFailureNotice } from "../routes/join-group-failure";
-import { INVITE_LINK_RATE_LIMITED } from "../contacts/invite-link";
+import { INVITE_LINK_RATE_LIMITED, isInviteLinkDamaged } from "../contacts/invite-link";
 import { acceptCallInviteFromSlug } from "../calls/acceptor";
 import { base64UrlEncodeNoPad } from "../auth/account-id";
 import { fakeTokenPool } from "../tokens/anon-token-test-doubles";
@@ -41,6 +41,15 @@ afterEach(() => {
 const ID = new Uint8Array(6).fill(0x2a);
 const ACCOUNT = new Uint8Array(16).fill(0x01);
 const CAP = new Uint8Array(160).fill(0x41);
+/** A well-formed link fragment (a 12-byte link secret, 16 characters). */
+const FRAGMENT = `#${base64UrlEncodeNoPad(new Uint8Array(12).fill(0x09))}`;
+/** A sealed upload of the shape a mint produces (the ledger never reads it). */
+const UPLOAD = {
+  sealed: new Uint8Array(190).fill(0x42),
+  issuerPubkey: new Uint8Array(32).fill(0x07),
+  expiryMs: 0n,
+  maxUses: 5,
+};
 
 /** Stub `fetch`: every request answers the given status (with an optional
  *  JSON body). No route asks for a proof of work any more (ADR-0054 S3). */
@@ -113,12 +122,29 @@ describe("upload returns an 8-character id", () => {
 
   it("decodes the fresh 8-character id to 6 bytes", async () => {
     stubFetch(200, { blob_id: base64UrlEncodeNoPad(ID) });
-    await expect(client.uploadGroupInvite(CAP, 5)).resolves.toEqual(ID);
+    await expect(client.uploadGroupInvite(UPLOAD)).resolves.toEqual(ID);
+  });
+
+  it("uploads the sealed blob and the clear fields, never a capability", async () => {
+    const bodies: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return new Response(JSON.stringify({ blob_id: base64UrlEncodeNoPad(ID) }), { status: 200 });
+      }),
+    );
+    await client.uploadGroupInvite(UPLOAD);
+    expect(bodies).toHaveLength(1);
+    const body = bodies[0] as Record<string, unknown>;
+    expect(Object.keys(body).sort()).toEqual(["expiry_ms", "issuer_pubkey", "max_uses", "sealed"]);
+    expect(body.max_uses).toBe(5);
+    expect(body.expiry_ms).toBe(0);
   });
 
   it("refuses the old 43-character id from a server", async () => {
     stubFetch(200, { blob_id: base64UrlEncodeNoPad(new Uint8Array(32)) });
-    await expect(client.uploadGroupInvite(CAP, 5)).rejects.toBeInstanceOf(DiscoveryHttpError);
+    await expect(client.uploadGroupInvite(UPLOAD)).rejects.toBeInstanceOf(DiscoveryHttpError);
   });
 });
 
@@ -135,7 +161,7 @@ describe("the surfaces say 'try again later'", () => {
     stubFetch(429);
     const contacts = new ContactsClient(new DiscoveryClient("https://d.test"));
     const err = await contacts
-      .resolveGroupInviteSlug(base64UrlEncodeNoPad(ID))
+      .resolveGroupInviteSlug(base64UrlEncodeNoPad(ID), FRAGMENT)
       .catch((e: unknown) => e);
     expect(isDiscoveryRateLimited(err)).toBe(true);
   });
@@ -144,8 +170,16 @@ describe("the surfaces say 'try again later'", () => {
     const calls = stubFetch(200);
     const contacts = new ContactsClient(new DiscoveryClient("https://d.test"));
     await expect(
-      contacts.resolveGroupInviteSlug(base64UrlEncodeNoPad(new Uint8Array(32))),
+      contacts.resolveGroupInviteSlug(base64UrlEncodeNoPad(new Uint8Array(32)), FRAGMENT),
     ).rejects.toThrow();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("resolveGroupInviteSlug refuses a link without its fragment without a request", async () => {
+    const calls = stubFetch(200);
+    const contacts = new ContactsClient(new DiscoveryClient("https://d.test"));
+    const err = await contacts.resolveGroupInviteSlug(base64UrlEncodeNoPad(ID), "").catch((e: unknown) => e);
+    expect(isInviteLinkDamaged(err)).toBe(true);
     expect(calls).toHaveLength(0);
   });
 
@@ -153,11 +187,25 @@ describe("the surfaces say 'try again later'", () => {
     stubFetch(429);
     const result = await acceptCallInviteFromSlug({
       slug: base64UrlEncodeNoPad(ID),
+      fragment: FRAGMENT,
       discoveryClient: new DiscoveryClient("https://d.test", { tokens: fakeTokenPool().pool }),
       joinerAccountId: ACCOUNT,
       // The fetch refuses before the identity is touched.
       joinerIdentity: {} as never,
     });
     expect(result).toEqual({ kind: "rateLimited" });
+  });
+
+  it("the call-link acceptor refuses a link without its fragment before any request", async () => {
+    const calls = stubFetch(429);
+    const result = await acceptCallInviteFromSlug({
+      slug: base64UrlEncodeNoPad(ID),
+      fragment: "",
+      discoveryClient: new DiscoveryClient("https://d.test", { tokens: fakeTokenPool().pool }),
+      joinerAccountId: ACCOUNT,
+      joinerIdentity: {} as never,
+    });
+    expect(result).toEqual({ kind: "damaged" });
+    expect(calls).toHaveLength(0);
   });
 });

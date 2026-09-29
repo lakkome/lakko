@@ -14,7 +14,7 @@ import Foundation
 /// soft timeout elapses.
 ///
 /// No new server endpoints — the existing anonymous
-/// `POST/GET /ds/mailbox/{pseudonym_hex}/messages` route is
+/// `POST/GET /ds/rendezvous/{id_hex}/messages` route (ADR-0058) is
 /// exactly the rendezvous-mailbox contract.
 public enum WelcomeCourier {
 
@@ -58,8 +58,7 @@ public enum WelcomeCourier {
         welcomeBytes: Data,
         ds: DsClient = DsClient()
     ) async throws {
-        _ = try await ds.publishMailbox(
-            pseudonym: rendezvousPseudonym,
+        _ = try await ds.publishRendezvous(id: rendezvousPseudonym,
             payload: welcomeBytes
         )
     }
@@ -102,8 +101,7 @@ public enum WelcomeCourier {
             )
             let result: FetchResult
             do {
-                result = try await ds.fetchMailbox(
-                    pseudonym: rendezvousPseudonym,
+                result = try await ds.fetchRendezvous(id: rendezvousPseudonym,
                     after: cursor,
                     limit: 1,
                     waitSecs: waitSecs
@@ -140,8 +138,7 @@ public enum WelcomeCourier {
         sealedBytes: Data,
         ds: DsClient = DsClient()
     ) async throws {
-        _ = try await ds.publishMailbox(
-            pseudonym: rendezvousPseudonym,
+        _ = try await ds.publishRendezvous(id: rendezvousPseudonym,
             payload: sealedBytes
         )
     }
@@ -171,8 +168,7 @@ public enum WelcomeCourier {
             )
             let result: FetchResult
             do {
-                result = try await ds.fetchMailbox(
-                    pseudonym: rendezvousPseudonym,
+                result = try await ds.fetchRendezvous(id: rendezvousPseudonym,
                     after: cursor,
                     limit: 1,
                     waitSecs: waitSecs

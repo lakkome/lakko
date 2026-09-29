@@ -68,13 +68,16 @@ const VERIFICATION_STATES: ReadonlySet<string> = new Set(["verified", "mismatch"
 
 /** Encode a row (plus the rename mirror) to the payload JSON. */
 export function encodeProfileRow(row: ProfileRow, renames: ReadonlyMap<string, string>): string {
-  const p: Record<string, { d: string | null; u: string | null; t: string; a?: string }> = {};
+  const p: Record<string, { d: string | null; u: string | null; t: string; a?: string; c?: string }> = {};
   for (const [key, prof] of row.profiles) {
     p[key] = {
       d: prof.displayName,
       u: prof.username,
       t: prof.updatedAtMs.toString(),
       ...(prof.accountIdHex === null ? {} : { a: prof.accountIdHex }),
+      ...(prof.usernameCertificateB64 === undefined || prof.usernameCertificateB64 === null
+        ? {}
+        : { c: prof.usernameCertificateB64 }),
     };
   }
   const vf: Record<string, { s: string; c: number }> = {};
@@ -115,7 +118,16 @@ export function decodeProfileRow(json: string): ProfileRow | null {
       // good, only the tag derivation has nothing to work from.
       const a = (raw as { a?: unknown }).a;
       const accountIdHex = typeof a === "string" && ACCOUNT_ID_HEX_RE.test(a) ? a : null;
-      profiles.set(key, { displayName: d, username: u, updatedAtMs: BigInt(t), accountIdHex });
+      // ADR-0058 — the username certificate; a malformed one drops the field.
+      const c = (raw as { c?: unknown }).c;
+      const usernameCertificateB64 = typeof c === "string" && /^[A-Za-z0-9+/=]+$/.test(c) ? c : null;
+      profiles.set(key, {
+        displayName: d,
+        username: u,
+        updatedAtMs: BigInt(t),
+        accountIdHex,
+        usernameCertificateB64,
+      });
     }
   }
   const verifications = new Map<string, StoredVerification>();

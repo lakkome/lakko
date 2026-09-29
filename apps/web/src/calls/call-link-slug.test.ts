@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import { describe, expect, it } from "vitest";
-import { callLinkSlug } from "./call-link-slug";
+import { callLinkPath, callLinkSlug } from "./call-link-slug";
 
 describe("callLinkSlug", () => {
   it("accepts a full link, a bare path and surrounding whitespace", () => {
@@ -17,5 +17,15 @@ describe("callLinkSlug", () => {
     expect(callLinkSlug("https://lakko.me/c/")).toBeNull();
     expect(callLinkSlug("https://lakko.me/c/a b")).toBeNull();
     expect(callLinkSlug("not a url at all")).toBeNull();
+  });
+});
+
+describe("callLinkPath", () => {
+  it("keeps the fragment, which carries the link secret", () => {
+    expect(callLinkPath(" https://lakko.me/c/abcdefgh#AAAAAAAAAAAAAAAA ")).toBe(
+      "/c/abcdefgh#AAAAAAAAAAAAAAAA",
+    );
+    expect(callLinkPath("/c/abcdefgh")).toBe("/c/abcdefgh");
+    expect(callLinkPath("https://lakko.me/i/abc#x")).toBeNull();
   });
 });

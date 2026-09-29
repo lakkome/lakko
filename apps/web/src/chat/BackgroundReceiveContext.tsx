@@ -56,8 +56,9 @@ import {
   runLongPollLoop,
   sleepCancellable,
 } from "../ds/long-poll-loop";
-import { useProfiles } from "../profile/ProfileContext";
-import { observeMembers } from "../profile/membership-baseline";
+import { isOneToOne, useProfiles } from "../profile/ProfileContext";
+import { intakeScopedEnvelope } from "../reach/scoped-intake";
+import { observeMembership } from "../profile/membership-baseline";
 import { isOwnKeyB64 } from "../profile/own-key";
 import {
   memberSignatureKeys,
@@ -688,7 +689,18 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     for (const row of plan.signaling) callHost.ingestSignaling(groupIdB64, row);
 
     for (const p of plan.profiles) {
-      if (p.profile !== undefined && p.senderKey !== undefined) profiles.ingest(p.senderKey, p.profile);
+      if (p.profile !== undefined && p.senderKey !== undefined) {
+        profiles.ingest(p.senderKey, p.profile, { groupIdB64 });
+      }
+    }
+    // ADR-0058 — scoped-discovery service envelopes, to their handler.
+    for (const e of plan.scoped) {
+      void intakeScopedEnvelope({
+        kind: e.envelope,
+        payload: e.payload,
+        senderKeyB64: e.senderKey,
+        oneToOne: isOneToOne(entry.group),
+      });
     }
     // ADR-0048 §2 trigger 4 — another member asked this group to introduce
     // itself; answer with the own profile through the throttled growth path.
@@ -776,11 +788,15 @@ export function BackgroundReceiveProvider(props: { children: JSX.Element }): JSX
     // a chat nobody has open still re-sends its name (with the ADR-0051 group
     // name, same throttle). Every batch, not only one carrying a commit row:
     // an Add this device swept itself lands with no commit event of its own.
-    if (observeMembers(account, groupIdB64, new Set(personKeysOf(entry.group)))) {
+    const membership = observeMembership(account, groupIdB64, new Set(personKeysOf(entry.group)));
+    if (membership.grew) {
       profiles.groupGrew(groupIdB64);
       groupNames.groupGrew(groupIdB64);
       pins.groupGrew(groupIdB64);
     }
+    // ADR-0058 section 3 — a person left: this account's reach keys for the
+    // group rotate and the profile carrying the new ones is republished.
+    if (membership.shrank) void profiles.groupShrank(groupIdB64);
 
     // The chat view gets the rest, now or when it next mounts.
     coordinator.deliver(groupIdB64, plan.toView);

@@ -537,6 +537,9 @@ public final class ContactsViewModel: ObservableObject {
             if let search = AnonTokenCopy.searchMessage(for: cause) { return search }
             return (cause as? LocalizedError)?.errorDescription
                 ?? String(describing: cause)
+        case .requestRefused:
+            // `docs/ux/who-can-find-me.md` section 6.1, "Request refused".
+            return "Couldn't send the request. They may have changed who can find them."
         }
     }
 

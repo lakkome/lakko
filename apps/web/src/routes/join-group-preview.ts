@@ -84,11 +84,13 @@ export interface PreviewSource {
 /** What the page does with a link's preview:
  *
  *   * `preview` — the fragment's secret opened it; show the names.
- *   * `none` — the link has no fragment; show the page without a preview.
- *   * `damaged` — the link has a fragment and the preview does not open (a
- *     malformed fragment, a wrong or truncated secret, a tampered preview, a
- *     capability without a preview under a secret, or a capability swapped in
- *     under a live id). The page refuses the link. */
+ *   * `none` — the capability carries no preview (a link minted without
+ *     names); show the page without one. A link with no fragment at all is
+ *     refused before this runs: since the 2026-09-28 security pass nothing
+ *     opens without the link secret.
+ *   * `damaged` — the fragment is malformed, or the preview does not open
+ *     under it (a wrong or truncated secret, a tampered preview). The page
+ *     refuses the link. */
 export type InvitePreviewOutcome =
   | { readonly kind: "preview"; readonly preview: GroupInvitePreviewData }
   | { readonly kind: "none" }
@@ -101,7 +103,10 @@ export function resolveInvitePreview(
 ): InvitePreviewOutcome {
   if (fragment.kind === "none") return { kind: "none" };
   if (fragment.kind === "damaged") return { kind: "damaged" };
-  if (!cap.hasPreview) return { kind: "damaged" };
+  // The capability was opened with this very secret (`openLink`), so one
+  // minted without a preview (a co-publisher link) is a link without names,
+  // not a swapped capability.
+  if (!cap.hasPreview) return { kind: "none" };
   let opened: GroupInvitePreviewData | undefined;
   try {
     opened = cap.openPreview(fragment.secret);

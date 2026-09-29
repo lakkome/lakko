@@ -67,6 +67,42 @@ data class RegisterRequest(
 @Serializable
 data class RegisterResponse(
     val ok: Boolean,
+    /** ADR-0058 §5 — standard base64 of the 153-byte username certificate
+     *  binding the OPRF hash to the account. */
+    val username_certificate_b64: String? = null,
+)
+
+/** Response of `GET /discovery/username-certificate` (ADR-0058 §5). */
+@Serializable
+data class UsernameCertificateResponse(
+    val username_certificate_b64: String,
+)
+
+/** Response of `GET /.well-known/lakko-username-cert-key` (ADR-0058 §5). */
+@Serializable
+data class UsernameCertKeyResponse(
+    val alg: String,
+    val key_b64url: String,
+)
+
+/** Body of `PUT /discovery/visibility` (ADR-0058 §5): enter or leave
+ *  Everyone. */
+@Serializable
+data class VisibilityRequest(
+    val public: Boolean,
+    val name_terms_b64: List<String> = emptyList(),
+)
+
+/** Body of `POST /discovery/name/lookup` (ADR-0058 §5). */
+@Serializable
+data class NameLookupRequest(
+    val oprf_hash_b64: String,
+)
+
+/** Response of `POST /discovery/name/lookup`. */
+@Serializable
+data class NameLookupResponse(
+    val account_ids_b64: List<String> = emptyList(),
 )
 
 // ----------------------------------------------------------------------------
@@ -231,15 +267,33 @@ data class KeyPackageFetchResponse(
 // /discovery/invite   (services/discovery/src/invite.rs — Phase 1.18d1)
 // ----------------------------------------------------------------------------
 
-/** Body of `POST /discovery/invite`. */
+/** Body of `POST /discovery/invite` (sealed since the 2026-09-28 security
+ *  pass): the server stores the sealed link blob opaque and reads what it
+ *  needs from the clear fields. */
 @Serializable
 data class InviteUploadRequest(
-    /** Standard-alphabet base64 of the
-     *  `composeInviteCapability(...)` output. Server caps
-     *  decoded size at 2048 bytes (mirrored client-side in
-     *  [DiscoveryClient.uploadInvite] so a misbehaving caller
-     *  fails fast). */
-    val capability: String,
+    /** Standard-alphabet base64 of `InviteLinkMint.sealed`. */
+    val sealed: String,
+    /** Standard-alphabet base64 of the 32-byte key that signed the capability
+     *  (`InviteLinkMint.issuerPubkey`), what an owner-signed revoke verifies. */
+    val issuer_pubkey: String,
+    /** The capability's expiry (`0` = never), for the fetch filter. */
+    val expiry_ms: Long,
+    /** The capability's `max_uses` sentinel, for the consume ceiling. */
+    val max_uses: Long,
+    /** The label, for the owner's own list. */
+    val label: String = "",
+    /** The bootstrap-referral flag, for the owner's own list. */
+    val bootstrap_referral: Boolean = false,
+)
+
+/** Body of `POST /discovery/call-invite` (sealed). */
+@Serializable
+data class CallInviteUploadRequest(
+    val sealed: String,
+    val issuer_pubkey: String,
+    val expiry_ms: Long,
+    val max_uses: Long,
 )
 
 /** Response body of `POST /discovery/invite`. */
@@ -259,7 +313,9 @@ data class InviteUploadResponse(
  *  status). */
 @Serializable
 data class InviteFetchResponse(
-    val capability: String,
+    /** Standard-alphabet base64 of the sealed link blob; opened locally with
+     *  the link secret from the URL fragment. */
+    val sealed: String,
 )
 
 /** Body of `POST /discovery/invite/{blob_id_b64url}/consume`
@@ -304,10 +360,12 @@ data class InviteConsumeResponse(
  *  security boundary — the admin approval gate (ADR-0027) is the boundary. */
 @Serializable
 data class GroupInviteUploadRequest(
-    /** Standard-alphabet base64 of the
-     *  `composeGroupInviteCapability(...)` output. The server decodes + verifies
-     *  the Ed25519 wire signature before storing. */
-    val capability: String,
+    /** Standard-alphabet base64 of the sealed link blob. Opaque to the server. */
+    val sealed: String,
+    /** Standard-alphabet base64 of the issuer's 32-byte signing key. */
+    val issuer_pubkey: String,
+    /** The capability's expiry (`0` = never). */
+    val expiry_ms: Long,
     /** Soft consume ceiling. Serialised as a JSON number the server reads as a
      *  `u32`; `0xFFFFFFFF` (= 4294967295) means unlimited. */
     val max_uses: Long,

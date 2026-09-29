@@ -78,6 +78,7 @@ import {
 import { groupIdHex as syncGroupIdHex } from "../devices/sync/state";
 import { memberNameOf } from "../profile/member-label";
 import { useProfiles } from "../profile/ProfileContext";
+import { onContactRemoved } from "../reach/reach-service";
 import { mayLookUp, usernameReason, type UsernameCheck } from "../profile/rules";
 import { createUsernameCheck } from "../profile/username-field";
 import { requestConfirm } from "../ui/confirm-dialog";
@@ -235,8 +236,14 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
     contact: AcceptedContact,
     peerAccountId: Uint8Array,
     peerPubkey: Uint8Array,
+    replyGrantB64: string | null = null,
   ): Promise<string> {
-    const result = await props.client.startGroupWith(requireIdentity(), peerAccountId, peerPubkey);
+    // ADR-0058 — accepting a request writes the 1:1 Welcome with the
+    // requester's `reply` grant; a contact we message later is reached with
+    // the grants we keep for them.
+    const result = await props.client.startGroupWith(requireIdentity(), peerAccountId, peerPubkey, {
+      replyGrantB64,
+    });
     // ADR-0048 — a 1x1 chat is labelled by the resolver (the peer's name);
     // this label is only the fallback.
     const active = chats.add({ label: "Direct chat", group: result.group });
@@ -288,7 +295,7 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
       return;
     }
     try {
-      await foundChatWith(contact, req.fromAccountId, req.fromPubkey);
+      await foundChatWith(contact, req.fromAccountId, req.fromPubkey, req.replyGrantB64);
     } catch (err) {
       // Don't unwind the acceptance; just surface the error.
       setAcceptError(formatContactsError(err, memberNameOf(profiles.resolve(req.fromPubkey))));
@@ -302,6 +309,9 @@ function ConnectedContacts(props: { readonly client: ContactsClient }): JSX.Elem
   // ---- rename / remove ------------------------------------------
   function onRemoveAccepted(contact: AcceptedContact): void {
     setAccepted(removeAccepted(contact.signaturePubkeyB64));
+    // ADR-0058 section 1 — a removed contact keeps the `contact` key we handed
+    // them; rotating it (and the `fof` key) makes it stop working at once.
+    void onContactRemoved(base64Decode(contact.signaturePubkeyB64));
   }
   /** ADR-0048 §5 — the viewer's LOCAL RENAME of a contact. A blank value
    *  clears it, so the contact's own name shows again. Re-upserts by the

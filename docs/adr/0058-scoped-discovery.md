@@ -394,6 +394,110 @@ The UI transition rules of UX section 11 live in `lakko_ui_rules`.
 - **S6** `lakko-security` pass (invariants #1/#5, auth-adjacent DS change)
   and the docs reconcile.
 
+## Client contract (S4 / S5)
+
+What every client (web, iOS, Android) builds on top of S1-S3b, written once so
+the three do not diverge. UX is `docs/ux/who-can-find-me.md`; FFI names are the
+UniFFI spelling, wasm uses the same names.
+
+**Mailboxes and transport**
+- One inbound mailbox per person: the account mailbox. Reach keys are
+  registered there; Welcomes are addressed to the added leaf's **account**
+  mailbox (resolve the leaf through its device binding). A device claims its
+  device mailbox and stops polling it.
+- Every `GET /ds/mailbox/{hex}/messages` carries the identity proof
+  (`dsMailboxSigner`); an unclaimed or unproven read is `401`. A device claims
+  the account mailbox before it reads it.
+- Pairing, recovery, the welcome courier and the state bundle use
+  `/ds/rendezvous/{hex}/messages`, with no proof, delegation or wake header
+  (any of those is `400`).
+- A write to someone else's mailbox is signed `DsProofSigner.forReach(seed)`
+  with the reach grant that authorises it (the sixth proof-header field is
+  added by the signer). A request that needs no grant (the person is in
+  Everyone and their mailbox is open) is unsigned.
+
+**Reach keys the owner holds** (all derived with `reachSeed` /
+`deriveReachGrant` from the account seed; register with
+`PUT /ds/mailbox/{hex}/reach {add:[{reach_pk_b64, expires_at_ms?}], remove:[...], open?}`
+signed by the identity proof; keep the version counters in the ReachState
+envelope on the DeviceGroup)
+- `contact` (no scope, no expiry, rotated by version when a contact is
+  removed): sent in the 1:1 profile beside `member`.
+- `member` per group, `group` per group, `channel` per channel (versioned by
+  epoch): sent in the profile in that scope when the setting allows it; the
+  channel grant goes in the member card.
+- `link` per `/i/` or `/c/` link: `linkId = generateLinkId()`, register before
+  sharing, remove on revoke or expiry, persist `linkId` + version with the
+  link list.
+- `reply` per outgoing request (contact request, `/c/` cold start, `/g/` join
+  attribution): random 16-byte scope, registered with a 7-day expiry before
+  sending, removed once answered, joined or expired; persisted so every device
+  can remove it.
+- `fof`: in the introduction record (section 4), registered while 2.1 is on.
+- `open = true` only in Everyone.
+
+**Write paths**
+- Contact request, sender: `composeContactRequest(..., profile, replyGrant, intro)`.
+  Recipient: keep `OpenedContactRequest.replyGrant`; write the accept (1:1
+  Welcome) and the ContactAck with `forReach(replyGrant.seed)`.
+- `/i/` and `/c/` mint: `composeInviteCapability` /
+  `composeCallInviteCapability` with `linkId` + `linkGrant`. Joiner: write the
+  request (or the `/c/` cold-start intro) with `forReach(cap.linkGrant.seed)`,
+  never keep that grant, and include its own `reply` grant.
+- `/g/` joiner: `composeGroupJoinAttribution(seed, cap, replyGrant)`.
+  Committer: the sweep's Welcome to the joiner is written with
+  `forReach(attribution.replyGrant.seed)`.
+- An Add proposed by a contact of the added person: the proposer signs one
+  `signDelegationBlob(contactGrant.seed, addedAccountMailbox, candidateAccountKey, now+<=24h, random16)`
+  per committer candidate (owner, then admins by rank, up to 16), wraps them in
+  `composeCommitterDelegationEnvelope` and sends it in the group; re-sends while
+  the proposal is pending and when the candidate set changes. A committer that
+  sweeps that Add sends `x-lakko-ds-delegation: committerDelegationFor(env, ownAccountKey)`
+  with the Welcome write, signed `forReach(ownAccountSeed)`. Keep the newest
+  envelope per (sender signature key resolved at receipt, added account key).
+- A received `contact` grant is kept only from the other participant of a 1:1
+  conversation; `group` / `member` only from members of that group; `channel`
+  only from that channel's member cards; always keyed on the signature key
+  resolved at receipt (C-68).
+
+**The setting, search and discovery**
+- The Settings screen drives `chooseVisibilityMode` / `setContactsOfContacts` /
+  `setGroupsVisible` / `setGroupsForm` / `excludeScopeUnderAll` /
+  `setScopeChosen`; the result is stamped, sent as the Visibility envelope on
+  the DeviceGroup, and applied: grants added or withheld in profiles and member
+  cards, keys registered or removed, `open` set, introduction offers sent or
+  withdrawn, Everyone published or unpublished. Default for a new account:
+  `defaultVisibilitySetting()`.
+- Everyone: `PUT /discovery/visibility {public, name_terms_b64}` with the OPRF
+  hash of every `nameSearchTerms(displayName)` term (`blindNameTerm`), on
+  entering Everyone and on every name change; `public: false` on leaving.
+- Username certificate: kept from `POST /discovery/register` or fetched with
+  `GET /discovery/username-certificate`, carried in profile v3; a viewer shows
+  a username only after `verifyUsernameBinding` against the key from
+  `GET /.well-known/lakko-username-cert-key` (pinned at build time where the
+  client pins keys). This replaces the ADR-0048 lookup verification.
+- Search: local first (contacts, profiles holding a grant, any part of any
+  word, `nameMatchesQuery`); the network search takes the username
+  (`/discovery/lookup`, public accounts only) and one name term
+  (`nameQueryTerm` -> `/discovery/name/lookup`), then the introduction bundles
+  (`introductionTags` / `openIntroduction` against the OPRF of the username and
+  of the query term), filters by the whole query, and runs
+  `POST /ds/mailbox/{hex}/reach/check` with the grant before showing a result.
+- Contacts of contacts: when 2.1 is on, compose one introduction record per
+  version over `nameSearchTerms` + the username and send it to each contact as
+  an IntroductionOffer; each client relays its contacts' offers as a padded
+  Introductions bundle to its own contacts, and keeps the newest bundle per
+  contact (`bundleIsNewer`).
+- Channels: a subscriber key is Ed25519 (`ChannelSubscriberKeypair`, regenerate
+  any stored X25519 key); upload the member card (`sealMemberCard`) signed with
+  `memberCardRequestSignature` in `x-lakko-member-card-sig`, re-upload after
+  each epoch rotation, delete on unsubscribe; members list via
+  `GET /v1/channels/{id}/members`.
+- Every new envelope kind (IntroductionOffer, Introductions, Visibility,
+  ReachState, CommitterDelegation) is dispatched, never rendered, on the
+  foreground path and in the background filters (web service worker, Android
+  background decrypt; the iOS NSE uses `decodeScopedDiscoveryEnvelope`).
+
 ## References
 
 - UX: [`docs/ux/who-can-find-me.md`](../ux/who-can-find-me.md)

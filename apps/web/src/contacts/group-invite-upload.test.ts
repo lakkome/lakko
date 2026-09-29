@@ -15,15 +15,19 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../wasm", () => ({
   loadWasm: async () => ({
+    // An `InviteLinkMint` (2026-09-28 security pass): the sealed blob, the
+    // link secret for the fragment, the issuer key for the upload.
     composeGroupInviteCapabilityWithPreview: () => ({
-      wire: new Uint8Array(160).fill(0x41),
-      linkKey: new Uint8Array(12).fill(0x07),
+      sealed: new Uint8Array(190).fill(0x41),
+      linkSecret: new Uint8Array(12).fill(0x07),
+      issuerPubkey: new Uint8Array(32).fill(0x05),
+      free: () => {},
     }),
     // The widths the real core exports (ADR-0028 short-link amendment).
     inviteBlobIdLen: () => 6,
     inviteBlobIdUrlLen: () => 8,
-    groupInviteLinkSecretLen: () => 12,
-    groupInviteLinkSecretUrlLen: () => 16,
+    inviteLinkSecretLen: () => 12,
+    inviteLinkSecretUrlLen: () => 16,
   }),
 }));
 
@@ -55,6 +59,19 @@ describe("createGroupInviteLink — pointer, inline, or an error", () => {
     expect(link).toBe("https://x.test/g/________#BwcHBwcHBwcHBwcH");
   });
 
+  it("uploads the sealed blob and the issuer key, never a plaintext capability", async () => {
+    const upload = vi.fn(async () => new Uint8Array(6).fill(0xff));
+    const discovery = { uploadGroupInvite: upload } as unknown as DiscoveryClient;
+    const client = new ContactsClient(discovery, undefined, { accountIdentityProvider: () => ACCOUNT });
+    await client.createGroupInviteLink(null, GROUP, 0n, "https://x.test", PREVIEW, 7);
+    expect(upload).toHaveBeenCalledWith({
+      sealed: new Uint8Array(190).fill(0x41),
+      issuerPubkey: new Uint8Array(32).fill(0x05),
+      expiryMs: 0n,
+      maxUses: 7,
+    });
+  });
+
   it("falls back to the inline link on a transport failure", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const client = clientWith(async () => {
@@ -75,7 +92,7 @@ describe("createGroupInviteLink — pointer, inline, or an error", () => {
     ).rejects.toThrow();
     const logged = warn.mock.calls.map((c) => c.map(String).join(" ")).join("\n");
     expect(logged).toContain("HTTP 401");
-    // 160 bytes of 0x41 would base64 to a run of "QUFB".
+    // 190 bytes of 0x41 would base64 to a run of "QUFB".
     expect(logged).not.toContain("QUFB");
   });
 });

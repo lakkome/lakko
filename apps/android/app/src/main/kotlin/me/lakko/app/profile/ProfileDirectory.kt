@@ -65,8 +65,41 @@ public class ProfileDirectory internal constructor(
     /** Bumped on every change that can alter a resolved name. */
     public val version: StateFlow<Long> = mutableVersion.asStateFlow()
 
-    private suspend fun resolveViaAttached(username: String): UsernameResolution =
-        resolver?.invoke(username) ?: UsernameResolution.Unavailable(null)
+    private suspend fun resolveViaAttached(username: String, signatureKeyB64: String): UsernameResolution {
+        val certify = certificateVerifier
+        if (certify != null) {
+            // ADR-0058 §5 — the username is shown only on its certificate. A
+            // profile without one (or without the account id it binds) is not
+            // a refusal: it is "not yet", so nothing is cached as failed and
+            // a later profile carrying the certificate verifies.
+            val profile = profiles.get(signatureKeyB64)
+                ?.takeIf { it.username == username } ?: return UsernameResolution.Unavailable(null)
+            val cert = profile.usernameCertificateHex ?: return UsernameResolution.Unavailable(null)
+            val account = profile.accountIdHex ?: return UsernameResolution.Unavailable(null)
+            return certify(username, cert, account, signatureKeyB64)
+        }
+        return resolver?.invoke(username) ?: UsernameResolution.Unavailable(null)
+    }
+
+    @Volatile
+    private var certificateVerifier: (
+        suspend (username: String, certificateHex: String, accountIdHex: String, signatureKeyB64: String) ->
+        UsernameResolution
+    )? = null
+
+    /**
+     * ADR-0058 §5 — verify a claimed username by its certificate (one OPRF
+     * evaluation plus the certificate check, and the account's published key
+     * compared with the sender's) instead of a public lookup, which a person
+     * who is not in Everyone no longer answers. Replaces the lookup resolver.
+     */
+    public fun attachCertificateVerifier(
+        verify: suspend (username: String, certificateHex: String, accountIdHex: String, signatureKeyB64: String) ->
+        UsernameResolution,
+    ) {
+        certificateVerifier = verify
+        verifyPending()
+    }
 
     /**
      * Wire the discovery resolve path (the contacts repository's plain
@@ -250,6 +283,8 @@ internal class SharedPrefsProfilePersistence(private val context: Context) : Pro
         val updatedAtMs: Long = 0L,
         /** Absent on a row written before ADR-0048 v2; reads as `null`. */
         val accountIdHex: String? = null,
+        /** ADR-0058 — the username certificate, hex; absent before v3. */
+        val usernameCertificateHex: String? = null,
     )
 
     private fun prefs() = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -258,7 +293,13 @@ internal class SharedPrefsProfilePersistence(private val context: Context) : Pro
         val raw = prefs().getString(KEY_PROFILES, null) ?: return emptyMap()
         return try {
             json.decodeFromString<Map<String, StoredProfile>>(raw).mapValues { (_, s) ->
-                PeerProfile(s.displayName, s.username, s.updatedAtMs.toULong(), s.accountIdHex)
+                PeerProfile(
+                    s.displayName,
+                    s.username,
+                    s.updatedAtMs.toULong(),
+                    s.accountIdHex,
+                    s.usernameCertificateHex,
+                )
             }
         } catch (_: Exception) {
             emptyMap()
@@ -267,7 +308,7 @@ internal class SharedPrefsProfilePersistence(private val context: Context) : Pro
 
     override fun saveProfiles(profiles: Map<String, PeerProfile>) {
         val stored = profiles.mapValues { (_, p) ->
-            StoredProfile(p.displayName, p.username, p.updatedAtMs.toLong(), p.accountIdHex)
+            StoredProfile(p.displayName, p.username, p.updatedAtMs.toLong(), p.accountIdHex, p.usernameCertificateHex)
         }
         prefs().edit().putString(KEY_PROFILES, json.encodeToString(stored)).apply()
     }

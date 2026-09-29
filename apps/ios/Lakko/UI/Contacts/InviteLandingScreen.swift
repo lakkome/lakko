@@ -139,6 +139,7 @@ public struct InviteLandingScreen: View {
         case .exhausted: return "Invite exhausted"
         case .notFound: return "Invite not found"
         case .malformedSlug: return "Invalid invite link"
+        case .damaged: return "Damaged invite link"
         case .rateLimited: return "Try again in a minute"
         case .requiresReauth: return "Please log in first"
         case .failed: return "Couldn't accept invite"
@@ -170,6 +171,8 @@ public struct InviteLandingScreen: View {
         case .malformedSlug:
             return
                 "This link is incomplete. Ask for it to be sent again."
+        case .damaged:
+            return groupInviteDamagedMessage
         case .rateLimited:
             return inviteRateLimitedMessage
         case .requiresReauth:
@@ -201,16 +204,20 @@ public final class InviteLandingViewModel: ObservableObject {
     @Published public private(set) var state: State = .running
 
     private let slug: String
+    /// The link's fragment (the link secret), `nil` when it had none.
+    private let fragment: String?
     private let repository: ContactsRepository
     private let intake: InviteIntake
     private var didRun: Bool = false
 
     public init(
         slug: String,
+        fragment: String?,
         repository: ContactsRepository,
         intake: InviteIntake
     ) {
         self.slug = slug
+        self.fragment = fragment
         self.repository = repository
         self.intake = intake
     }
@@ -223,7 +230,7 @@ public final class InviteLandingViewModel: ObservableObject {
     public func run() async {
         guard !didRun else { return }
         didRun = true
-        let result = await repository.acceptInviteLink(slug: slug)
+        let result = await repository.acceptInviteLink(slug: slug, fragment: fragment)
         state = .done(result)
     }
 
@@ -233,7 +240,7 @@ public final class InviteLandingViewModel: ObservableObject {
     public func retry() async {
         guard case .done(.rateLimited) = state else { return }
         state = .running
-        let result = await repository.acceptInviteLink(slug: slug)
+        let result = await repository.acceptInviteLink(slug: slug, fragment: fragment)
         state = .done(result)
     }
 

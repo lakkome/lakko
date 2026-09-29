@@ -74,21 +74,42 @@ public fun ownProfilePreview(nameCheck: DisplayNameCheck, username: String?): St
 public const val PROFILE_SAVED_COPY: String = "Your name will update for your contacts."
 
 /**
- * The wire form of this profile for the core's composer.
+ * The wire form of this profile for the core's composer (profile v3,
+ * ADR-0058 §3).
  *
  * @param accountId this account's raw 16-byte auth account id (ADR-0048 v2):
  *   what a receiver derives the ADR-0021 call peer tag from, so a group member
  *   who is not a contact still gets a name on their call tile. Sent only when
  *   it is exactly 16 bytes — the composer refuses any other length, and a
  *   profile with no id is better than no profile at all.
+ * @param grants the reach grants handed to the receivers (at most two, one
+ *   per class). SECRET.
+ * @param usernameCertificate the discovery-signed certificate of the username
+ *   (153 bytes), which lets a receiver show the username without a lookup.
+ * @param shareUsername whether the username goes out at all: only where the
+ *   receivers may find this person (a one-to-one, a group the setting allows).
+ *   Everywhere else the profile carries the name alone.
  */
-public fun OwnProfile.toFfi(accountId: ByteArray?): uniffi.lakko_ffi_uniffi.FfiProfile =
-    uniffi.lakko_ffi_uniffi.FfiProfile(
+public fun OwnProfile.toFfi(
+    accountId: ByteArray?,
+    grants: List<uniffi.lakko_ffi_uniffi.FfiReachGrant> = emptyList(),
+    usernameCertificate: ByteArray? = null,
+    shareUsername: Boolean = true,
+): uniffi.lakko_ffi_uniffi.FfiProfile {
+    val stated = username?.takeIf { it.isNotEmpty() && shareUsername }
+    return uniffi.lakko_ffi_uniffi.FfiProfile(
         displayName = displayName,
-        username = username?.takeIf { it.isNotEmpty() },
+        username = stated,
         updatedAtMs = updatedAtMs.coerceAtLeast(0L).toULong(),
         accountId = accountId?.takeIf { it.size == ACCOUNT_ID_BYTES },
+        usernameCertificate = usernameCertificate?.takeIf { stated != null && it.size == USERNAME_CERTIFICATE_BYTES },
+        grants = grants,
     )
+}
+
+/** Length of a username certificate (`usernameCertificateLen()`), spelled for
+ *  the host tests. */
+public const val USERNAME_CERTIFICATE_BYTES: Int = 153
 
 /** Per-account persistence for [OwnProfile], keyed by the raw account id. */
 public object OwnProfileStore {

@@ -165,7 +165,7 @@ public class JoinGroupLandingViewModel(
                 // ADR-0028 OQ1 — resolve the slug (a 6-byte ledger-id
                 // pointer => fetch the capability from the ledger; an inline
                 // capability => pass through).
-                val wireAndBlob = repository.resolveGroupInviteSlug(slug)
+                val wireAndBlob = repository.resolveGroupInviteSlug(slug, fragment)
                 val card = repository.inspectGroupInvite(wireAndBlob.first, fragment, nowMs)
                 if (!card.valid) {
                     mutableState.value = State.Invalid

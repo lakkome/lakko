@@ -52,6 +52,10 @@ public struct ChatListScreen: View {
     /// introduction this field has no room for, so the name travels to
     /// Contacts rather than being half-answered here.
     public var onFoundPerson: (_ username: String) -> Void
+    /// ADR-0058 — "Search people" (`docs/ux/who-can-find-me.md` section 6.1):
+    /// the network search for a username or a name, and the request to one of
+    /// its results. `nil` hides the row.
+    public var peopleSearch: PeopleSearchActions?
 
     /// Phase 2a3e2c-iOS — cross-device per-thread flags (pinned / muted /
     /// archived). The Combine subscription inside ``DeviceGroupSyncRepository``
@@ -71,7 +75,8 @@ public struct ChatListScreen: View {
         onOpen: @escaping (ConversationListRow) -> Void,
         onCreate: @escaping (CreateChoice) -> Void,
         onFoundChannel: @escaping (String, String) -> Void,
-        onFoundPerson: @escaping (String) -> Void
+        onFoundPerson: @escaping (String) -> Void,
+        peopleSearch: PeopleSearchActions? = nil
     ) {
         self.viewModel = viewModel
         self.channels = channels
@@ -79,6 +84,7 @@ public struct ChatListScreen: View {
         self.onCreate = onCreate
         self.onFoundChannel = onFoundChannel
         self.onFoundPerson = onFoundPerson
+        self.peopleSearch = peopleSearch
     }
 
     /// Spec section 4 — the field covers users, groups and channels. The local
@@ -243,6 +249,9 @@ public struct ChatListScreen: View {
                         Text("No results")
                             .foregroundStyle(Color.lakkoTextMuted)
                         lookupSection
+                        if let peopleSearch {
+                            PeopleSearchSection(query: query, actions: peopleSearch)
+                        }
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.horizontal, 16)
@@ -284,6 +293,12 @@ public struct ChatListScreen: View {
                     // long press on both natives. Same three actions as the
                     // swipe, because they are the same menu reached two ways.
                     .contextMenu { rowActions(row: row) }
+                }
+                // ADR-0058 — the network search stays offered under the local
+                // results (UX section 6.1).
+                if !query.isEmpty, let peopleSearch {
+                    PeopleSearchSection(query: query, actions: peopleSearch)
+                        .listRowSeparator(.hidden)
                 }
             }
             .listStyle(.plain)

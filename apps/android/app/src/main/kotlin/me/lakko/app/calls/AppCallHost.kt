@@ -631,6 +631,13 @@ internal class MultiJoinerLinkCallPort(
                     ownerAccountId = identity.accountId,
                     identity = own,
                     callId = callId,
+                    // ADR-0058 §6 — a cold-start joiner writes into this
+                    // account's closed mailbox with the link's key.
+                    linkGrantFor = { linkId, expiryMs ->
+                        val reach = me.lakko.app.reach.ReachManager.peek()
+                            ?: throw IllegalStateException("no session")
+                        reach.mintLink(linkId, expiryMs.takeIf { it != 0L })
+                    },
                 ).url
             }
         }

@@ -79,11 +79,20 @@ public final class DsClient {
 
     // MARK: - Publish
 
-    /// `POST /ds/mailbox/{pseudonym_hex}/messages`. Unsigned: a mailbox is
-    /// open for writes (the cold inbox of ADR-0005), claimed or not.
+    /// `POST /ds/mailbox/{pseudonym_hex}/messages` — a write to someone's
+    /// personal mailbox.
+    ///
+    /// ADR-0058 section 2 — a claimed mailbox is CLOSED unless its owner chose
+    /// Everyone, and a closed mailbox stores a write only when it is signed
+    /// with a reach key the owner registered (`writeAuth`), or with a
+    /// delegate key next to a delegation one of them signed. A write with no
+    /// proof to a closed mailbox is answered `201` and DROPPED, exactly as an
+    /// unclaimed mailbox answers, so this call cannot tell a delivered write
+    /// from a dropped one; a proof that does not verify is `401`.
     public func publishMailbox(
         pseudonym: Data,
-        payload: Data
+        payload: Data,
+        writeAuth: DsMailboxWriteAuth? = nil
     ) async throws -> PublishResult {
         guard pseudonym.count == Self.pseudonymLength else {
             throw DsClientError.argument(
@@ -93,12 +102,136 @@ public final class DsClient {
         guard !payload.isEmpty else {
             throw DsClientError.argument("payload must be non-empty")
         }
-        return try await doPublish(
+        var headers: [String: String] = [:]
+        var auth: DsAuth?
+        if let writeAuth {
+            let signer: DsProofSigner
+            do {
+                signer = try DsProofSigner.forReach(reachSeed: writeAuth.reachSeed)
+            } catch {
+                throw DsClientError.argument("reach seed must be 32 bytes")
+            }
+            auth = DsAuth(signer: signer)
+            if let delegation = writeAuth.delegationHeader {
+                headers[Self.delegationHeaderName] = delegation
+            }
+        }
+        let parsed: PublishWireResponse = try await sendDecoding(
+            method: "POST",
             endpoint: "/ds/mailbox/\(Self.pseudonymHex(pseudonym))/messages",
+            body: payload,
+            contentType: "application/octet-stream",
+            extraHeaders: headers,
+            auth: auth
+        )
+        return PublishResult(id: parsed.id, createdAt: parsed.createdAt)
+    }
+
+    // MARK: - ADR-0058 rendezvous
+
+    /// `POST /ds/rendezvous/{id_hex}/messages` — pairing, recovery, the welcome
+    /// courier and the state bundle. Open, never claimable, and refusing any
+    /// proof, delegation or wake header, so nothing but the payload is sent.
+    public func publishRendezvous(id: Data, payload: Data) async throws -> PublishResult {
+        guard id.count == Self.pseudonymLength else {
+            throw DsClientError.argument("rendezvous id must be \(Self.pseudonymLength) bytes")
+        }
+        guard !payload.isEmpty else {
+            throw DsClientError.argument("payload must be non-empty")
+        }
+        return try await doPublish(
+            endpoint: "/ds/rendezvous/\(Self.pseudonymHex(id))/messages",
             payload: payload,
             auth: nil
         )
     }
+
+    /// `GET /ds/rendezvous/{id_hex}/messages?...` — unsigned, see
+    /// ``publishRendezvous(id:payload:)``.
+    public func fetchRendezvous(
+        id: Data,
+        after: Int64? = nil,
+        limit: Int? = nil,
+        waitSecs: Int? = nil
+    ) async throws -> FetchResult {
+        guard id.count == Self.pseudonymLength else {
+            throw DsClientError.argument("rendezvous id must be \(Self.pseudonymLength) bytes")
+        }
+        return try await doFetch(
+            endpoint: "/ds/rendezvous/\(Self.pseudonymHex(id))/messages",
+            after: after,
+            limit: limit,
+            waitSecs: waitSecs,
+            auth: nil
+        )
+    }
+
+    // MARK: - ADR-0058 reach keys
+
+    /// `PUT /ds/mailbox/{hex}/reach` — register and unregister reach public
+    /// keys on this account's own mailbox, and set the Everyone flag. Signed
+    /// by the identity key the mailbox is named after (`dsMailboxSigner`).
+    /// Idempotent: re-adding a key replaces its expiry, removing an absent key
+    /// changes nothing.
+    public func updateReach(
+        pseudonym: Data,
+        add: [DsReachKeyAdd],
+        remove: [Data],
+        open: Bool?,
+        signer: DsRequestSigner
+    ) async throws {
+        guard pseudonym.count == Self.pseudonymLength else {
+            throw DsClientError.argument("pseudonym must be \(Self.pseudonymLength) bytes")
+        }
+        let body = try encoder.encode(ReachWireRequest(
+            add: add.map { ReachWireAdd(reachPkB64: base64Encode($0.publicKey), expiresAtMs: $0.expiresAtMs) },
+            remove: remove.map { base64Encode($0) },
+            open: open
+        ))
+        _ = try await send(
+            method: "PUT",
+            endpoint: "/ds/mailbox/\(Self.pseudonymHex(pseudonym))/reach",
+            body: body,
+            contentType: "application/json",
+            auth: DsAuth(signer: signer)
+        )
+    }
+
+    /// `POST /ds/mailbox/{hex}/reach/check` — is the key of `reachSeed` still
+    /// registered, unexpired, on that mailbox? `true` on `204`, `false` on
+    /// `401`; anything else throws (never read a network failure as "not
+    /// found"). A searcher asks this before showing a result, so a narrowed
+    /// setting takes effect on the next search.
+    public func reachCheck(pseudonym: Data, reachSeed: Data) async throws -> Bool {
+        guard pseudonym.count == Self.pseudonymLength else {
+            throw DsClientError.argument("pseudonym must be \(Self.pseudonymLength) bytes")
+        }
+        let signer: DsProofSigner
+        do {
+            signer = try DsProofSigner.forReach(reachSeed: reachSeed)
+        } catch {
+            throw DsClientError.argument("reach seed must be 32 bytes")
+        }
+        let endpoint = "/ds/mailbox/\(Self.pseudonymHex(pseudonym))/reach/check"
+        let (data, http) = try await send(
+            method: "POST",
+            endpoint: endpoint,
+            body: Data(),
+            auth: DsAuth(signer: signer),
+            acceptAnyStatus: true
+        )
+        switch http.statusCode {
+        case 200..<300: return true
+        case 401: return false
+        default:
+            throw DsClientError.http(
+                status: http.statusCode, endpoint: endpoint,
+                body: Self.truncate(String(data: data, encoding: .utf8) ?? "<binary>"))
+        }
+    }
+
+    /// The delegation header's name, from the core (`x-lakko-ds-delegation`).
+    static let delegationHeaderName: String = LakkoCore.delegationHeaderName()
 
     /// `POST /ds/group/{group_id_hex}/messages`. `groupId` is not
     /// constrained to 32 bytes (MLS group ids can be longer).
@@ -604,6 +737,66 @@ private struct KnockWireRequest: Encodable {
 private struct KnockWireResponse: Decodable {
     let ids: [Int64]
     let epoch: UInt64?
+}
+
+private struct ReachWireAdd: Encodable {
+    let reachPkB64: String
+    let expiresAtMs: UInt64?
+
+    enum CodingKeys: String, CodingKey {
+        case reachPkB64 = "reach_pk_b64"
+        case expiresAtMs = "expires_at_ms"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(reachPkB64, forKey: .reachPkB64)
+        try c.encodeIfPresent(expiresAtMs, forKey: .expiresAtMs)
+    }
+}
+
+private struct ReachWireRequest: Encodable {
+    let add: [ReachWireAdd]
+    let remove: [String]
+    let open: Bool?
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(add, forKey: .add)
+        try c.encode(remove, forKey: .remove)
+        try c.encodeIfPresent(open, forKey: .open)
+    }
+
+    enum CodingKeys: String, CodingKey { case add, remove, open }
+}
+
+// MARK: - ADR-0058 public types
+
+/// How a write to someone else's closed mailbox is authorised (ADR-0058
+/// section 2): the 32-byte reach seed the proof is signed with — a grant the
+/// owner handed out, or a delegate's own seed — and, for a delegated write,
+/// the `x-lakko-ds-delegation` header value the grant holder issued.
+public struct DsMailboxWriteAuth: Equatable {
+    public let reachSeed: Data
+    public let delegationHeader: String?
+
+    public init(reachSeed: Data, delegationHeader: String? = nil) {
+        self.reachSeed = reachSeed
+        self.delegationHeader = delegationHeader
+    }
+}
+
+/// One key to register in ``DsClient/updateReach(pseudonym:add:remove:open:signer:)``.
+public struct DsReachKeyAdd: Equatable, Hashable {
+    public let publicKey: Data
+    /// Unix ms after which the DS stops honouring the key; `nil` for a key
+    /// that lives until removed.
+    public let expiresAtMs: UInt64?
+
+    public init(publicKey: Data, expiresAtMs: UInt64?) {
+        self.publicKey = publicKey
+        self.expiresAtMs = expiresAtMs
+    }
 }
 
 // MARK: - Public result types

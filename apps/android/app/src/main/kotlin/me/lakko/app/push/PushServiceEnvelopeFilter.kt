@@ -236,6 +236,14 @@ private fun isServiceEnvelopeOtherThanCall(
     // reads the journal.
     if (looksLikePinEnvelope(payload)) return true
 
+    // Kind 8 — ADR-0058 scoped discovery (introduction offer / bundle,
+    // visibility, reach state, committer delegation) and the ADR-0057
+    // registrar seed. The same NUL-terminated-prefix classification the
+    // foreground `ChatClient` uses ([me.lakko.app.reach.scopedEnvelopeKindOf]),
+    // so the two paths cannot drift. Suppressed only: keeping any of them is
+    // a WRITE, and this path is read-only (C-59).
+    if (me.lakko.app.reach.scopedEnvelopeKindOf(payload) != null) return true
+
     return false
 }
 

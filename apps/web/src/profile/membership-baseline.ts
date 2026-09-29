@@ -82,13 +82,35 @@ export function observeMembers(
   current: ReadonlySet<string>,
   storage: KeyValueStorage | undefined = defaultStorage(),
 ): boolean {
-  if (current.size === 0) return false;
+  return observeMembership(accountIdB64, groupIdB64, current, storage).grew;
+}
+
+/** What one roster observation found against the persisted baseline. */
+export interface MembershipChange {
+  /** A person is present who was not (ADR-0048 trigger 3). */
+  readonly grew: boolean;
+  /** A person who was present is gone (ADR-0058 section 3: this account's
+   *  `group` and `member` keys for the group rotate). Never on the first-ever
+   *  observation, and never on an empty (torn) roster. */
+  readonly shrank: boolean;
+}
+
+/** {@link observeMembers}, also reporting a shrink. Same baseline, same
+ *  write: the two answers can never disagree on what was seen before. */
+export function observeMembership(
+  accountIdB64: string,
+  groupIdB64: string,
+  current: ReadonlySet<string>,
+  storage: KeyValueStorage | undefined = defaultStorage(),
+): MembershipChange {
+  if (current.size === 0) return { grew: false, shrank: false };
   const previous = loadMemberBaseline(accountIdB64, groupIdB64, storage);
   const grew = membersGrew(previous, current);
+  const shrank = previous !== null && [...previous].some((k) => !current.has(k));
   if (previous === null || !sameSet(previous, current)) {
     saveMemberBaseline(accountIdB64, groupIdB64, current, storage);
   }
-  return grew;
+  return { grew, shrank };
 }
 
 function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {

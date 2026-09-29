@@ -20,15 +20,20 @@
  *   2. Mint a one-time MLS `KeyPackage` via
  *      `identity.createKeyPackage()` — the joiner consumes
  *      it to bootstrap the call MLS group.
- *   3. `composeCallInviteCapability(...)` via wasm — produces
- *      wire bytes signed under the owner's Ed25519 identity.
- *   4. `DiscoveryClient.uploadCallInvite(capabilityBytes)` —
- *      pushes the bytes to the server-side ledger; the
- *      server verifies the signature + content-addresses by
- *      SHA-256.
- *   5. `composePointerCallInviteUrl(blobId, origin?)` —
- *      builds the `https://<origin>/c/<slug>` shape the
- *      owner shares.
+ *   3. A fresh `linkId` and the link's `link` reach grant
+ *      (ADR-0058 section 6), whose key is registered on the
+ *      owner's mailbox BEFORE the link exists — a link shared
+ *      before its key is registered is a link that does not work.
+ *   4. `composeCallInviteCapability(...)` via wasm — signs the
+ *      capability under the owner's Ed25519 identity and seals it
+ *      under a fresh link secret (2026-09-28 security pass),
+ *      returning an `InviteLinkMint`.
+ *   5. `DiscoveryClient.uploadCallInvite(...)` — pushes the
+ *      sealed blob to the ledger, which stores it opaquely under a
+ *      random id.
+ *   6. `composePointerCallInviteUrl(blobId, secret)` — builds
+ *      the `https://<origin>/c/<id>#<secret>` shape the owner
+ *      shares.
  *
  * Sibling of `apps/web/src/contacts/composer.ts` (the
  * contact-invite composer); kept separate because the call-
@@ -45,6 +50,7 @@ import { loadWasm } from "../wasm";
 import { DiscoveryClient } from "../discovery/client";
 import { composePointerCallInviteUrl, CALL_ID_LEN, CALL_INVITE_LABEL_MAX_LEN } from "./invite";
 import { inviteLinkWidths } from "../contacts/invite-link";
+import { reachSession } from "../reach/reach-service";
 
 /** Options bag the UI hands to [`composeAndUploadCallInvite`]. */
 export interface ComposeCallInviteOptions {
@@ -96,29 +102,24 @@ export interface ComposeCallInviteOptions {
   readonly origin?: string;
 }
 
-/** Output of [`composeAndUploadCallInvite`]. The three
- *  fields are independent — the UI typically surfaces `url`
- *  in the share sheet, persists `blobId` for the future
- *  revoke flow, and keeps `callId` around for the in-call
- *  signaling layer. */
+/** Output of [`composeAndUploadCallInvite`]. The UI surfaces
+ *  `url` in the share sheet, keeps `blobId` + `linkId` for a
+ *  revoke (see [`revokeCallInviteLink`]), and keeps `callId`
+ *  around for the in-call signaling layer. */
 export interface ComposedCallInvite {
-  /** Raw 32-byte content-addressed `blob_id`. Pass to
-   *  `DiscoveryClient.revokeCallInvite(blobId, signingSeed)`
+  /** Raw 6-byte ledger id. Pass to [`revokeCallInviteLink`]
    *  when the owner cancels the link. */
   readonly blobId: Uint8Array;
-  /** The full `https://<origin>/c/<slug>` URL the owner
-   *  shares — base64url-no-pad of `blobId`. */
+  /** The link's 16-byte reach scope id: revoking the link
+   *  removes exactly this key from the owner's mailbox. */
+  readonly linkId: Uint8Array;
+  /** The full `https://<origin>/c/<id>#<secret>` URL the
+   *  owner shares. */
   readonly url: string;
   /** The 16-byte `call_id` embedded in the capability — the
    *  caller's live call. Returned so a caller that did not keep
    *  it can bind a call-admission JWT to the same id. */
   readonly callId: Uint8Array;
-  /** The wire-format capability bytes the server now holds.
-   *  Returned for the rare case where the UI wants to drive
-   *  `CallInviteCapability.decodeAndVerify(...)` against the
-   *  same bytes (e.g. to read back `expiryMs` for the
-   *  landing-page rendering). */
-  readonly capabilityBytes: Uint8Array;
 }
 
 /** Programmer-error path: input validation caught before any
@@ -189,30 +190,89 @@ export async function composeAndUploadCallInvite(
   // ---- 3. Wire-level values --------------------------------
   const mediaAudio = true; // every call carries audio
 
-  // ---- 4. composeCallInviteCapability via wasm -------------
+  // ---- 4. The link's reach key, registered first ----------
+  // ADR-0058 section 6: the joiner's first write to the owner's
+  // closed mailbox is signed with this link's key, so it must be
+  // registered before the link can be shared. No session, or a
+  // registration that failed, fails the mint.
+  const session = reachSession();
+  if (session === null) {
+    throw new CallInviteComposerArgError("no reach session: sign in to create a call link");
+  }
   const wasm = await loadWasm();
-  const capabilityBytes = wasm.composeCallInviteCapability(
-    opts.ownerSigningSeed,
-    opts.ownerAccountId,
-    callId,
-    opts.expiryMs,
-    opts.maxUses,
-    mediaAudio,
-    opts.mediaVideo,
-    oneTimeKeyPackage,
-    opts.label,
-  );
+  const linkId = wasm.generateLinkId();
+  const expiry = Number(opts.expiryMs);
+  const linkGrant = await session.newLink(linkId, expiry === 0 ? null : expiry);
 
-  // ---- 5. uploadCallInvite via HTTP ------------------------
-  const blobId = await opts.discoveryClient.uploadCallInvite(capabilityBytes);
+  // ---- 5. compose + seal via wasm --------------------------
+  let mint: import("../../wasm/lakko_ffi_wasm").InviteLinkMint;
+  try {
+    mint = wasm.composeCallInviteCapability(
+      opts.ownerSigningSeed,
+      opts.ownerAccountId,
+      callId,
+      opts.expiryMs,
+      opts.maxUses,
+      mediaAudio,
+      opts.mediaVideo,
+      oneTimeKeyPackage,
+      opts.label,
+      linkId,
+      linkGrant,
+    );
+  } catch (err) {
+    await session.revokeLink(linkId).catch(() => undefined);
+    throw err;
+  } finally {
+    linkGrant.free();
+  }
 
-  // ---- 6. URL build ----------------------------------------
-  const url = composePointerCallInviteUrl(blobId, inviteLinkWidths(wasm), opts.origin);
+  // ---- 6. upload the sealed blob + build the URL -----------
+  let blobId: Uint8Array;
+  let url: string;
+  try {
+    const sealed = mint.sealed;
+    const secret = mint.linkSecret;
+    blobId = await opts.discoveryClient.uploadCallInvite({
+      sealed,
+      issuerPubkey: mint.issuerPubkey,
+      expiryMs: opts.expiryMs,
+      maxUses: opts.maxUses,
+    });
+    url = composePointerCallInviteUrl(blobId, secret, inviteLinkWidths(wasm), opts.origin);
+    secret.fill(0);
+  } catch (err) {
+    // A link that was never handed out keeps no key open.
+    await session.revokeLink(linkId).catch(() => undefined);
+    throw err;
+  } finally {
+    mint.free();
+  }
 
   return {
     blobId,
+    linkId,
     url,
     callId,
-    capabilityBytes,
   };
+}
+
+/**
+ * Revoke a call link the owner minted: the ledger row (owner-signed
+ * delete) and the link's reach key (ADR-0058 section 6), so a joiner
+ * who already holds the link can neither fetch it nor write to the
+ * owner's mailbox under it. The key goes even when the ledger answers
+ * "not found" (the row may already be gone).
+ */
+export async function revokeCallInviteLink(opts: {
+  readonly discoveryClient: DiscoveryClient;
+  readonly blobId: Uint8Array;
+  readonly linkId: Uint8Array;
+  readonly ownerSigningSeed: Uint8Array;
+}): Promise<void> {
+  try {
+    await opts.discoveryClient.revokeCallInvite(opts.blobId, opts.ownerSigningSeed);
+  } finally {
+    await reachSession()?.revokeLink(opts.linkId);
+  }
 }

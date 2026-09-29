@@ -968,6 +968,15 @@ private fun ChannelInfoSheet(
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("Manage channel") }
             }
+            // docs/ux/who-can-find-me.md section 5 — this channel's
+            // `Members can find me` switch (absent unless the setting includes
+            // groups and channels).
+            me.lakko.app.ui.settings.MembersCanFindMeRow(
+                reach = me.lakko.app.reach.ReachManager.get(androidx.compose.ui.platform.LocalContext.current),
+                kind = me.lakko.app.ui.settings.FindMeScopeKind.CHANNEL,
+                idHex = channel.id,
+                modifier = Modifier.fillMaxWidth(),
+            )
             if (InfoSection.CHANNEL_DESCRIPTION in sections) {
                 header.description?.let {
                     Spacer(Modifier.height(16.dp))

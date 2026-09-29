@@ -523,7 +523,7 @@ class DiscoveryClientTest {
     // ===================================================================
 
     @Test
-    fun `inviteUpload sends capability + parses blob_id`() = runTest {
+    fun `inviteUpload sends the sealed blob + parses blob_id`() = runTest {
         val captured = mutableListOf<CapturedRequest>()
         client(
             responses = listOf(HttpStatusCode.OK to """{"blob_id":"BLOB_B64URL"}"""),
@@ -531,13 +531,17 @@ class DiscoveryClientTest {
         ).use { client ->
             val resp = client.inviteUpload(
                 InviteUploadRequest(
-                    capability = "CAP_B64",
+                    sealed = "CAP_B64",
+                    issuer_pubkey = "PK_B64",
+                    expiry_ms = 5L,
+                    max_uses = 0L,
                 ),
             )
             assertEquals("BLOB_B64URL", resp.blob_id)
         }
         val body = captured[0].body!!
-        assertEquals("CAP_B64", body["capability"]!!.jsonPrimitive.content)
+        assertEquals("CAP_B64", body["sealed"]!!.jsonPrimitive.content)
+        assertEquals("PK_B64", body["issuer_pubkey"]!!.jsonPrimitive.content)
         assertTrue(captured[0].url.endsWith("/discovery/invite"))
     }
 
@@ -546,14 +550,14 @@ class DiscoveryClientTest {
         val captured = mutableListOf<CapturedRequest>()
         client(
             responses = listOf(
-                HttpStatusCode.OK to """{"capability":"CAP_B64"}""",
+                HttpStatusCode.OK to """{"sealed":"CAP_B64"}""",
                 HttpStatusCode.NotFound to "",
             ),
             captured = captured,
         ).use { client ->
             val ok = client.inviteFetch(ByteArray(6))
             assertNotNull(ok)
-            assertEquals("CAP_B64", ok!!.capability)
+            assertEquals("CAP_B64", ok!!.sealed)
 
             val gone = client.inviteFetch(ByteArray(6))
             assertNull(gone)
@@ -655,7 +659,7 @@ class DiscoveryClientTest {
         assertThrows(DiscoveryClientArgError::class.java) {
             runTest {
                 DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
-                    client.uploadInvite(ByteArray(0))
+                    client.uploadInvite(ByteArray(0), ByteArray(32), 0L, 0L)
                 }
             }
         }
@@ -667,7 +671,7 @@ class DiscoveryClientTest {
         val err = assertThrows(DiscoveryClientArgError::class.java) {
             runTest {
                 DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
-                    client.uploadInvite(ByteArray(2049))
+                    client.uploadInvite(ByteArray(2049), ByteArray(32), 0L, 0L)
                 }
             }
         }
@@ -757,7 +761,7 @@ class DiscoveryClientTest {
         val captured = mutableListOf<CapturedRequest>()
         val id = ByteArray(6) { (it + 1).toByte() }
         client(
-            responses = listOf(HttpStatusCode.OK to """{"capability":"CAP_B64"}"""),
+            responses = listOf(HttpStatusCode.OK to """{"sealed":"CAP_B64"}"""),
             captured = captured,
         ).use { client -> client.inviteFetch(id) }
         val slug = captured[0].url.substringAfter("/discovery/invite/")

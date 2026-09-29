@@ -244,17 +244,86 @@ describe("mailboxes", () => {
     expect(new TextDecoder().decode(sent[1]?.body)).toBe('{"identity_pk_b64":"m"}');
   });
 
-  it("someone else's mailbox and a rendezvous mailbox are read and written unsigned", async () => {
+  it("a rendezvous id is read and written unsigned on its own route (ADR-0058)", async () => {
     const reg = new DsAccessRegistry();
     reg.setMailboxSigner(fakeSigner(0n, "m"));
-    const { fetchImpl, sent } = fakeFetch([EMPTY, { status: 201, json: { id: 1, created_at: "t" } }, { status: 201, json: { id: 2, created_at: "t" } }]);
+    const { fetchImpl, sent } = fakeFetch([EMPTY, { status: 201, json: { id: 2, created_at: "t" } }]);
     const ds = new DsClient("/api/ds", { access: reg, fetchImpl });
-    await ds.fetchMailbox(OTHER, {});
-    await ds.publishMailbox(OTHER, new Uint8Array([1]));
-    // Even the device's OWN mailbox is written unsigned: a mailbox write is
-    // the open cold inbox.
-    await ds.publishMailbox(OWN, new Uint8Array([1]));
-    expect(sent.map((s) => s.proof)).toEqual([undefined, undefined, undefined]);
+    await ds.fetchRendezvous(OTHER, { after: 1 });
+    await ds.publishRendezvous(OTHER, new Uint8Array([1]));
+    const hex = "01".repeat(32);
+    expect(sent.map((s) => s.url)).toEqual([
+      `/api/ds/ds/rendezvous/${hex}/messages?after=1`,
+      `/api/ds/ds/rendezvous/${hex}/messages`,
+    ]);
+    expect(sent.map((s) => s.proof)).toEqual([undefined, undefined]);
+  });
+
+  it("a mailbox write carries the reach proof, and the delegation beside it (ADR-0058)", async () => {
+    const reg = new DsAccessRegistry();
+    const created = { status: 201, json: { id: 1, created_at: "t" } };
+    const { fetchImpl, sent } = fakeFetch([created, created, created]);
+    const ds = new DsClient("/api/ds", { access: reg, fetchImpl });
+    const hex = "01".repeat(32);
+    await ds.publishMailbox(OTHER, new Uint8Array([7]), { signer: fakeSigner(0n, "reach") });
+    await ds.publishMailbox(OTHER, new Uint8Array([7]), {
+      signer: fakeSigner(0n, "delegate"),
+      delegation: "DELEG",
+    });
+    await ds.publishMailbox(OTHER, new Uint8Array([7]));
+    expect(sent[0]?.proof).toBe(`proof:reach@0:POST:/ds/mailbox/${hex}/messages::1`);
+    expect(sent[1]?.proof).toBe(`proof:delegate@0:POST:/ds/mailbox/${hex}/messages::1`);
+    const headers = (fetchImpl as unknown as { mock: { calls: [unknown, RequestInit][] } }).mock.calls.map(
+      (c) => (c[1].headers ?? {}) as Record<string, string>,
+    );
+    expect(headers[1]?.["x-lakko-ds-delegation"]).toBe("DELEG");
+    expect(headers[0]?.["x-lakko-ds-delegation"]).toBeUndefined();
+    // No grant: unsigned, which an open (Everyone) mailbox stores.
+    expect(sent[2]?.proof).toBeUndefined();
+  });
+
+  it("refuses a delegation without the delegate's signer, before any request", async () => {
+    const { fetchImpl, sent } = fakeFetch([]);
+    const ds = new DsClient("/api/ds", { access: new DsAccessRegistry(), fetchImpl });
+    await expect(ds.publishMailbox(OTHER, new Uint8Array([1]), { delegation: "D" })).rejects.toBeInstanceOf(
+      DsClientArgError,
+    );
+    expect(sent).toEqual([]);
+  });
+
+  it("registers reach keys under the identity proof with the documented body", async () => {
+    const reg = new DsAccessRegistry();
+    reg.setMailboxSigner(fakeSigner(0n, "m"));
+    const { fetchImpl, sent } = fakeFetch([{ status: 204 }]);
+    await new DsClient("/api/ds", { access: reg, fetchImpl }).putMailboxReach(OWN, {
+      add: [
+        { publicKey: new Uint8Array(32).fill(1), expiresAtMs: 99 },
+        { publicKey: new Uint8Array(32).fill(2) },
+      ],
+      remove: [new Uint8Array(32).fill(3)],
+      open: false,
+    });
+    const hex = "6d".repeat(32);
+    expect(sent[0]?.method).toBe("PUT");
+    expect(sent[0]?.url).toBe(`/api/ds/ds/mailbox/${hex}/reach`);
+    expect(sent[0]?.proof?.startsWith(`proof:m@0:PUT:/ds/mailbox/${hex}/reach`)).toBe(true);
+    const body = JSON.parse(new TextDecoder().decode(sent[0]?.body)) as {
+      add: { reach_pk_b64: string; expires_at_ms?: number }[];
+      remove: string[];
+      open: boolean;
+    };
+    expect(body.add[0]?.expires_at_ms).toBe(99);
+    expect("expires_at_ms" in (body.add[1] ?? {})).toBe(false);
+    expect(body.remove).toHaveLength(1);
+    expect(body.open).toBe(false);
+  });
+
+  it("the reach check reads 204 as registered and 401 as not, and throws on anything else", async () => {
+    const { fetchImpl } = fakeFetch([{ status: 204 }, { status: 401 }, { status: 500 }]);
+    const ds = new DsClient("/api/ds", { access: new DsAccessRegistry(), fetchImpl });
+    expect(await ds.reachCheck(OTHER, fakeSigner(0n, "r"))).toBe(true);
+    expect(await ds.reachCheck(OTHER, fakeSigner(0n, "r"))).toBe(false);
+    await expect(ds.reachCheck(OTHER, fakeSigner(0n, "r"))).rejects.toBeInstanceOf(DsHttpError);
   });
 });
 

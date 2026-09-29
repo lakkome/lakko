@@ -217,6 +217,11 @@ export function TimelineBubble(
       // `rows()`. Defensive.
       return null;
     }
+    if (ev.kind === "scopedDiscovery") {
+      // ADR-0058 — dispatched to its handler by the receive loop, never
+      // pushed into `rows()`. Defensive.
+      return null;
+    }
     if (ev.kind === "membershipProposal") {
       // ADR-0045 UX section 10 — a request is not something that HAPPENED to
       // the group; only outcomes belong in the timeline. The receive loop

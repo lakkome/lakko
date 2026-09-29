@@ -2,11 +2,13 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Short invite links (ADR-0028 amendment of 2026-09-27, flag day): the three
- * link kinds' compose / parse rules, the refusal of every pre-amendment form,
- * and the `/g/` rule that a fragment which does not open the preview refuses
- * the link. Runs against the real wasm core, so the widths are the ones the
- * Rust codec exports, not a copy.
+ * Short invite links (ADR-0028 amendment of 2026-09-27, flag day) and sealed
+ * links (the 2026-09-28 security pass): the three link kinds' compose / parse
+ * rules, the refusal of every pre-amendment form, the link secret every kind
+ * carries in the fragment, `openLink` refusing any other secret or a swapped
+ * blob, and the `/g/` rule that a fragment which does not open the preview
+ * refuses the link. Runs against the real wasm core, so the widths are the
+ * ones the Rust codec exports, not a copy.
  */
 import { beforeAll, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
@@ -23,13 +25,24 @@ import {
   parseGroupInviteSlug,
   splitGroupInviteLink,
 } from "./group-invite";
-import { INVITE_INLINE_MIN_LEN, composePointerInviteUrl, parseInviteSlug } from "./invite";
+import {
+  INVITE_INLINE_MIN_LEN,
+  composeInlineInviteUrl,
+  composePointerInviteUrl,
+  parseInviteSlug,
+} from "./invite";
 import {
   CALL_INVITE_INLINE_MIN_LEN,
   composePointerCallInviteUrl,
   parseCallInviteSlug,
 } from "../calls/invite";
-import { inviteLinkWidths, type InviteLinkWidths } from "./invite-link";
+import {
+  inviteLinkWidths,
+  isInviteLinkDamaged,
+  linkSecretFromFragment,
+  splitInviteLink,
+  type InviteLinkWidths,
+} from "./invite-link";
 import { resolveInvitePreview } from "../routes/join-group-preview";
 
 const ORIGIN = "https://lakko.me";
@@ -63,25 +76,36 @@ describe("pointer links are 8 characters, for all three kinds", () => {
 
   it("/i/ pointer round-trips", () => {
     const blobId = bytes(W.blobIdLen, 0x22);
-    const url = composePointerInviteUrl(blobId, W, ORIGIN);
-    const slug = url.slice(`${ORIGIN}/i/`.length);
-    expect(slug).toHaveLength(8);
-    expect(parseInviteSlug(slug, W)).toEqual({ kind: "pointer", blobId });
+    const secret = bytes(W.linkSecretLen, 0x5a);
+    const url = composePointerInviteUrl(blobId, secret, W, ORIGIN);
+    const split = splitInviteLink(url, "i");
+    expect(split?.slug).toHaveLength(8);
+    expect(parseInviteSlug(split!.slug, W)).toEqual({ kind: "pointer", blobId });
+    expect(linkSecretFromFragment(split!.fragment, W)).toEqual(secret);
   });
 
   it("/c/ pointer round-trips", () => {
     const blobId = bytes(W.blobIdLen, 0x33);
-    const url = composePointerCallInviteUrl(blobId, W, ORIGIN);
-    const slug = url.slice(`${ORIGIN}/c/`.length);
-    expect(slug).toHaveLength(8);
-    expect(parseCallInviteSlug(slug, W)).toEqual({ kind: "pointer", blobId });
+    const secret = bytes(W.linkSecretLen, 0x5b);
+    const url = composePointerCallInviteUrl(blobId, secret, W, ORIGIN);
+    const split = splitInviteLink(url, "c");
+    expect(split?.slug).toHaveLength(8);
+    expect(parseCallInviteSlug(split!.slug, W)).toEqual({ kind: "pointer", blobId });
+    expect(linkSecretFromFragment(split!.fragment, W)).toEqual(secret);
+  });
+
+  it("composers refuse a link secret of any other width", () => {
+    for (const len of [11, 13, 32]) {
+      expect(() => composePointerInviteUrl(bytes(W.blobIdLen), bytes(len), W, ORIGIN)).toThrow();
+      expect(() => composePointerCallInviteUrl(bytes(W.blobIdLen), bytes(len), W, ORIGIN)).toThrow();
+    }
   });
 
   it("composers refuse an id of any other width, the old 32 bytes included", () => {
     for (const len of [5, 7, 32]) {
       expect(() => composePointerGroupInviteUrl(bytes(len), W, ORIGIN)).toThrow();
-      expect(() => composePointerInviteUrl(bytes(len), W, ORIGIN)).toThrow();
-      expect(() => composePointerCallInviteUrl(bytes(len), W, ORIGIN)).toThrow();
+      expect(() => composePointerInviteUrl(bytes(len), bytes(W.linkSecretLen), W, ORIGIN)).toThrow();
+      expect(() => composePointerCallInviteUrl(bytes(len), bytes(W.linkSecretLen), W, ORIGIN)).toThrow();
     }
   });
 });
@@ -90,7 +114,15 @@ describe("inline links keep their shape", () => {
   it("/g/ inline round-trips", () => {
     const cap = bytes(150, 0x22);
     const slug = composeInlineGroupInviteUrl(cap, ORIGIN).slice(`${ORIGIN}/g/`.length);
-    expect(parseGroupInviteSlug(slug, W)).toEqual({ kind: "inline", capabilityBytes: cap });
+    expect(parseGroupInviteSlug(slug, W)).toEqual({ kind: "inline", sealed: cap });
+  });
+
+  it("/i/ inline carries the sealed blob in the path and the secret in the fragment", () => {
+    const sealed = bytes(INVITE_INLINE_MIN_LEN + 30, 0x23);
+    const secret = bytes(W.linkSecretLen, 0x24);
+    const split = splitInviteLink(composeInlineInviteUrl(sealed, secret, W, ORIGIN), "i");
+    expect(parseInviteSlug(split!.slug, W)).toEqual({ kind: "inline", sealed });
+    expect(linkSecretFromFragment(split!.fragment, W)).toEqual(secret);
   });
 
   it("each kind's floor is inline, one byte less is refused", () => {
@@ -201,9 +233,13 @@ describe("a fragment that does not open the preview refuses the link", () => {
 
   function mint(seed: Uint8Array, group: Uint8Array) {
     const m = wasm.composeGroupInviteCapabilityWithPreview(seed, group, 0n, "Team", "Anna", 4);
-    const out = { wire: m.wire, secret: m.linkKey };
+    const sealed = m.sealed;
+    const secret = m.linkSecret;
     m.free();
-    return out;
+    const cap = wasm.GroupInviteCapability.openLink(sealed, secret);
+    const wire = cap.wire;
+    cap.free();
+    return { sealed, wire, secret };
   }
 
   function decode(wire: Uint8Array) {
@@ -243,14 +279,13 @@ describe("a fragment that does not open the preview refuses the link", () => {
     }
   });
 
-  it("a capability without a preview under a secret is damaged, never a preview-less join", () => {
-    const wire = wasm.composeGroupInviteCapability(seedA, groupA, 0n);
-    const cap = decode(wire);
+  it("a capability minted without a preview, opened by its own secret, shows no preview", () => {
+    const m = wasm.composeGroupInviteCapability(seedA, groupA, 0n);
+    const secret = m.linkSecret;
+    const cap = wasm.GroupInviteCapability.openLink(m.sealed, secret);
+    m.free();
     expect(cap.hasPreview).toBe(false);
-    expect(resolveInvitePreview(cap, { kind: "secret", secret: bytes(12) })).toEqual({
-      kind: "damaged",
-    });
-    expect(resolveInvitePreview(cap, { kind: "none" })).toEqual({ kind: "none" });
+    expect(resolveInvitePreview(cap, { kind: "secret", secret })).toEqual({ kind: "none" });
   });
 
   it("a malformed fragment is damaged before the capability is consulted", () => {
@@ -261,5 +296,75 @@ describe("a fragment that does not open the preview refuses the link", () => {
   it("openPreview itself refuses the pre-amendment 32-byte key", () => {
     const { wire } = mint(seedA, groupA);
     expect(() => decode(wire).openPreview(bytes(32))).toThrow();
+  });
+});
+
+describe("the sealed link opens only under its own secret", () => {
+  const seed = bytes(32, 0x03);
+  const group = bytes(32, 0xc3);
+
+  it("/g/ opens to a capability whose wire verifies on its own", () => {
+    const m = wasm.composeGroupInviteCapabilityWithPreview(seed, group, 0n, "Team", "Anna", 4);
+    const cap = wasm.GroupInviteCapability.openLink(m.sealed, m.linkSecret);
+    expect(cap.groupId).toEqual(group);
+    expect(wasm.GroupInviteCapability.decodeAndVerify(cap.wire).groupId).toEqual(group);
+    expect(m.issuerPubkey).toEqual(cap.issuerSignaturePubkey);
+    expect(m.linkSecret).toHaveLength(W.linkSecretLen);
+    m.free();
+    cap.free();
+  });
+
+  it("a wrong secret and a swapped blob are refused as damaged", () => {
+    const a = wasm.composeGroupInviteCapability(seed, group, 0n);
+    const b = wasm.composeGroupInviteCapability(seed, bytes(32, 0xc4), 0n);
+    const wrongSecret = (() => {
+      try {
+        wasm.GroupInviteCapability.openLink(a.sealed, bytes(12, 0x77));
+        return null;
+      } catch (err) {
+        return err;
+      }
+    })();
+    expect(isInviteLinkDamaged(wrongSecret)).toBe(true);
+    // The blob of another link under this link's secret.
+    const swapped = (() => {
+      try {
+        wasm.GroupInviteCapability.openLink(b.sealed, a.linkSecret);
+        return null;
+      } catch (err) {
+        return err;
+      }
+    })();
+    expect(isInviteLinkDamaged(swapped)).toBe(true);
+    a.free();
+    b.free();
+  });
+
+  it("the plaintext wire is not a link: openLink refuses it", () => {
+    const m = wasm.composeGroupInviteCapability(seed, group, 0n);
+    const cap = wasm.GroupInviteCapability.openLink(m.sealed, m.linkSecret);
+    expect(() => wasm.GroupInviteCapability.openLink(cap.wire, m.linkSecret)).toThrow();
+    m.free();
+    cap.free();
+  });
+});
+
+describe("every kind's fragment", () => {
+  it("a missing or damaged fragment yields no secret", () => {
+    for (const f of [null, undefined, "", "#", "#abc", `#${"A".repeat(43)}`]) {
+      expect(linkSecretFromFragment(f, W)).toBeNull();
+    }
+  });
+
+  it("splits a pasted link, or a bare slug with its fragment", () => {
+    expect(splitInviteLink("https://lakko.me/c/abcdefgh#AAAAAAAAAAAAAAAA", "c")).toEqual({
+      slug: "abcdefgh",
+      fragment: "#AAAAAAAAAAAAAAAA",
+    });
+    expect(splitInviteLink("abcdefgh#AAAAAAAAAAAAAAAA", "i")).toEqual({
+      slug: "abcdefgh",
+      fragment: "#AAAAAAAAAAAAAAAA",
+    });
+    expect(splitInviteLink("   ", "g")).toBeNull();
   });
 });

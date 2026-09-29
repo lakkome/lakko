@@ -42,7 +42,7 @@ const KEY_A = "a".repeat(43) + "=";
 const KEY_B = "b".repeat(43) + "=";
 
 function profile(name: string | null, username: string | null, at: bigint): StoredProfile {
-  return { displayName: name, username, updatedAtMs: at, accountIdHex: null };
+  return { displayName: name, username, updatedAtMs: at, accountIdHex: null, usernameCertificateB64: null };
 }
 
 describe("decideIngest", () => {

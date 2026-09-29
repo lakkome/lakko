@@ -179,11 +179,12 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
             joinedGroupIds.push(active.groupIdB64);
             joined = true;
           } catch (err) {
-            // ADR-0053 — an account-mailbox Welcome is a channel co-publisher's,
-            // opened by the co-publisher flow under the account identity; this
-            // handler's device-identity join cannot open it, and that is not a
-            // failed join the user needs to hear about.
-            if (ev.welcome.fromAccountMailbox !== true) failed = true;
+            // ADR-0058 — every device of the account reads the one account
+            // mailbox, so a Welcome here may add ANOTHER device of ours, or be
+            // a channel co-publisher's (opened by that flow under the account
+            // identity). Neither holds a KeyPackage of this device, and that
+            // is not a failed join the user needs to hear about.
+            if (!isWelcomeForAnotherLeaf(err)) failed = true;
             // eslint-disable-next-line no-console
             console.warn("joinGroupFromWelcome failed", ev.welcome.messageId, err);
           }
@@ -244,33 +245,10 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
     dispatch,
   });
 
-  // ADR-0050 — the DEVICE mailbox, where Welcomes sealed to this device's
-  // KeyPackages arrive. Its own cursor: a different DS queue.
-  const DEVICE_CURSOR_KEY = "lakko.contacts.device-mailbox.v1";
-  let deviceCursor = loadDeviceCursor();
-  function loadDeviceCursor(): number {
-    try {
-      const raw = globalThis.localStorage?.getItem(DEVICE_CURSOR_KEY);
-      const n = raw === null || raw === undefined ? 0 : Number(raw);
-      return Number.isFinite(n) && n >= 0 ? n : 0;
-    } catch {
-      return 0;
-    }
-  }
-  const devicePoller: MailboxPoller = createMailboxPoller<IncomingMailboxEvent>({
-    readCursor: () => deviceCursor,
-    writeCursor: (next) => {
-      deviceCursor = next;
-      try {
-        globalThis.localStorage?.setItem(DEVICE_CURSOR_KEY, String(next));
-      } catch {
-        /* storage unavailable: re-fetch after reload is harmless */
-      }
-    },
-    fetch: async (after, waitSecs, signal) =>
-      client.pollDeviceMailbox(auth.identitySecrets(), after, waitSecs, signal),
-    dispatch,
-  });
+  // ADR-0058 section 6 — one inbound mailbox per person: every Welcome is
+  // addressed to the ACCOUNT mailbox (the device mailbox is claimed and
+  // closed, and no longer polled; its cursor key `lakko.contacts.device-
+  // mailbox.v1` is left unread).
 
   function isHidden(): boolean {
     return globalThis.document?.visibilityState === "hidden";
@@ -288,12 +266,8 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       isPaused: isHidden,
       waitUntilResumed: (signal) => resume.wait(signal),
       tick: async (signal) => {
-        // Long-poll the account mailbox and the device mailbox together; the
-        // tick ends when both return (each returns early on a new row).
-        await Promise.all([
-          poller.poll(LONG_POLL_WAIT_SECS, signal),
-          devicePoller.poll(LONG_POLL_WAIT_SECS, signal),
-        ]);
+        // Long-poll the account mailbox (ADR-0058: the one inbound mailbox).
+        await poller.poll(LONG_POLL_WAIT_SECS, signal);
         return 0;
       },
       classifyFailure: (err) => (isDsNetworkFailure(err) ? "network" : "other"),
@@ -356,7 +330,7 @@ export function MailboxProvider(props: { children: JSX.Element }): JSX.Element {
       }
       setBusy(true);
       try {
-        await Promise.all([poller.poll(0), devicePoller.poll(0)]);
+        await poller.poll(0);
       } catch (err) {
         setError(formatMailboxError(err));
       } finally {
@@ -429,4 +403,18 @@ export function MailboxJoinFailureBanner(): JSX.Element {
       )}
     </Show>
   );
+}
+
+/**
+ * ADR-0058 — whether a Welcome refused by `joinFromWelcome` was simply not
+ * sealed to any KeyPackage of this device (OpenMLS `NoMatchingKeyPackage`):
+ * another device's Welcome, or a co-publisher's, read from the shared account
+ * mailbox. Every other refusal is a real failed join.
+ */
+export function isWelcomeForAnotherLeaf(err: unknown): boolean {
+  const text =
+    err instanceof Error
+      ? `${err.message} ${String((err as { cause?: unknown }).cause ?? "")}`
+      : String(err);
+  return /NoMatchingKeyPackage|no matching key ?package/i.test(text);
 }

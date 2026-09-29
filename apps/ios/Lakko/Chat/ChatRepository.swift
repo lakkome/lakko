@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import CryptoKit
 import Foundation
 import LakkoCore
 
@@ -374,7 +375,15 @@ public final class ChatRepository: ObservableObject {
                 try await self.publishApplicationMessage(
                     groupIdHex: groupIdHex, plaintextBytes: bytes)
             },
-            envelope: { ProfileDirectory.shared.ownProfileEnvelope() },
+            envelope: { [weak self] groupIdHex in
+                // ADR-0058 section 3 — the grants of THIS conversation.
+                guard let self, let record = self.groups[groupIdHex] else {
+                    return ProfileDirectory.shared.ownProfileEnvelope()
+                }
+                return ProfileDirectory.shared.ownProfileEnvelope(
+                    groupId: record.groupId,
+                    oneToOne: self.conversationKind(groupIdHex: groupIdHex) == .chat)
+            },
             canSend: { [weak self] groupIdHex in
                 guard let self, self.groups[groupIdHex] != nil else { return false }
                 return !membershipEnded(self.membershipStateNow(groupIdHex: groupIdHex))
@@ -677,6 +686,7 @@ public final class ChatRepository: ObservableObject {
             // ADR-0048 — the names of the people this account talked to, the
             // username verdicts, and its own profile.
             ProfileDirectory.shared.forget(accountIdB64: accountIdB64)
+            ReachCenter.shared.forget(accountIdB64: accountIdB64)
             // Phase 2a3f1 — drop the plaintext message log too.
             // The Keychain wrap key is shared across accounts
             // (per-installation, not per-account) so we leave
@@ -788,7 +798,8 @@ public final class ChatRepository: ObservableObject {
     /// straight to the Chat UI route.
     public func startGroupWith(
         recipientAccountId: Data,
-        recipientSignaturePubkey: Data
+        recipientSignaturePubkey: Data,
+        recipientWriteAuth: DsMailboxWriteAuth? = nil
     ) async throws -> String {
         guard let identity = canonicalIdentity else {
             throw ChatError.argument(
@@ -852,23 +863,27 @@ public final class ChatRepository: ObservableObject {
             throw ChatError.wrapped("DS journal claim failed", underlying: error)
         }
 
+        // ADR-0058 section 6 — one inbound mailbox per person: the ONE
+        // Welcome goes to each added ACCOUNT's mailbox (the recipient's, and
+        // this account's own when it has other devices), one write per
+        // account, signed with the grant that reaches it.
         let welcomeEnvelope = wrapEnvelope(kind: .welcome, body: addResult.welcome)
-        for device in devices {
-            let devicePseudonym: Data
+        var targets: [(accountKey: Data, auth: DsMailboxWriteAuth?)] = [
+            (recipientSignaturePubkey,
+             recipientWriteAuth ?? ReachCenter.shared.writeAuth(toAccountKey: recipientSignaturePubkey))
+        ]
+        if devices.count > recipientDevices.count,
+           let own = ReachCenter.shared.ownAccountKey, own != recipientSignaturePubkey {
+            targets.append((own, ReachCenter.shared.writeAuth(toAccountKey: own)))
+        }
+        for target in targets {
             do {
-                devicePseudonym = try IdentityPseudonym
-                    .fromIdentity(pubkey: keyPackageSignatureKey(keyPackage: device.keyPackage))
-                    .asBytes()
-            } catch {
-                throw ChatError.wrapped(
-                    "IdentityPseudonym derivation failed",
-                    underlying: error
-                )
-            }
-            do {
+                let pseudonym = try IdentityPseudonym
+                    .fromIdentity(pubkey: target.accountKey).asBytes()
                 _ = try await dsClient.publishMailbox(
-                    pseudonym: devicePseudonym,
-                    payload: welcomeEnvelope
+                    pseudonym: pseudonym,
+                    payload: welcomeEnvelope,
+                    writeAuth: target.auth
                 )
             } catch {
                 throw ChatError.wrapped(
@@ -941,6 +956,9 @@ public final class ChatRepository: ObservableObject {
         let groupIdHex = DsClient.pseudonymHex(groupId)
         groups[groupIdHex] = GroupRecord(group: group, groupId: groupId)
         persistKnownGroupBestEffort(groupIdHex: groupIdHex)
+        // ADR-0058 section 6 — a `/g/` request of ours was answered: its
+        // single-use `reply` key goes.
+        ReachCenter.shared.retireReplies(purpose: ReplyPurpose.groupJoin(groupId))
         persistSnapshotBestEffort()
         state = state.with(threads: buildThreadList())
         // ADR-0053 point 2 — claim-on-open. The committer registered the epoch
@@ -1567,6 +1585,16 @@ public final class ChatRepository: ObservableObject {
             }
         }
         let groupId = cap.groupId()
+        // ADR-0058 section 6 — the joiner's `reply` grant, registered before
+        // the knock: the committer that admits it writes the Welcome to this
+        // account's closed mailbox with it. Without it nobody could.
+        let replyGrant: FfiReachGrant
+        do {
+            replyGrant = try await ReachCenter.shared.newReplyGrant(
+                purpose: ReplyPurpose.groupJoin(groupId))
+        } catch {
+            throw ChatError.wrapped("reply key registration failed", underlying: error)
+        }
         // ADR-0053 point 6 — the knock. A probe learns the epoch the group's
         // access key is registered at (no journal read: a non-member cannot
         // read a claimed journal, and paging one it is not in was the old
@@ -1588,7 +1616,8 @@ public final class ChatRepository: ObservableObject {
                 attribution: {
                     try? composeGroupJoinAttribution(
                         joinerSigningSeed: identity.ed25519Seed(),
-                        capabilityBytes: capabilityWire)
+                        capabilityBytes: capabilityWire,
+                        replyGrant: replyGrant)
                 }
             ).run()
         } catch let error as DsKnockJoinError {
@@ -2133,7 +2162,9 @@ public final class ChatRepository: ObservableObject {
         ), !devices.isEmpty else {
             throw ChatError.argument("recipient has no KeyPackage uploaded yet")
         }
-        _ = recipientSignaturePubkey
+        // ADR-0058 — remember whose leaves these are, so the Welcome of the
+        // commit that adds them goes to the person's account mailbox.
+        noteAddedLeafAccounts(keyPackages: devices.map(\.keyPackage))
 
         // ADR-0050 — one proposal / one commit per device of the person. The
         // outcome reported is the last device's; every earlier one either
@@ -2145,6 +2176,14 @@ public final class ChatRepository: ObservableObject {
         }
         guard let outcome else {
             throw ChatError.argument("recipient has no KeyPackage uploaded yet")
+        }
+        // ADR-0058 section 6 — under ADR-0045 another device may commit this
+        // Add, and the added person's mailbox is closed to it unless it holds
+        // a grant. Hand each committer candidate a delegation signed with this
+        // device's grant for the person, in the group beside the proposal.
+        if case .proposed = outcome {
+            await sendCommitterDelegations(
+                groupIdHex: groupIdHex, addedAccountKey: recipientSignaturePubkey)
         }
         return outcome
     }
@@ -2252,10 +2291,13 @@ public final class ChatRepository: ObservableObject {
                 let welcomeEnvelope = wrapEnvelope(kind: .welcome, body: addResult.welcome)
                 let recipientPseudonym: Data
                 do {
-                    // ADR-0050 — the Welcome is sealed to THIS leaf's KeyPackage,
-                    // so it is addressed to the leaf's own mailbox.
+                    // ADR-0058 section 6 (amending ADR-0050 2.7) — the Welcome
+                    // is addressed to the ACCOUNT mailbox of the leaf's owner,
+                    // resolved through the leaf's device binding.
+                    let accountKey = try keyPackageAccountKey(keyPackage: keyPackageBytes)
+                        ?? keyPackageSignatureKey(keyPackage: keyPackageBytes)
                     recipientPseudonym = try IdentityPseudonym
-                        .fromIdentity(pubkey: keyPackageSignatureKey(keyPackage: keyPackageBytes))
+                        .fromIdentity(pubkey: accountKey)
                         .asBytes()
                 } catch {
                     throw ChatError.wrapped("IdentityPseudonym derivation failed", underlying: error)
@@ -2304,13 +2346,15 @@ public final class ChatRepository: ObservableObject {
                 chatClient.markOwnPublishedCommit(groupIdHex: groupIdHex, messageId: commitPublish.id)
 
                 // Publish artifact 2 — the Welcome to the new member's mailbox
-                // (the SAME bytes stored in the outbox entry). A mailbox is open
-                // for writes: unsigned.
+                // (the SAME bytes stored in the outbox entry), signed with the
+                // grant that reaches them (ADR-0058).
                 let welcomePublish: PublishResult
                 do {
                     welcomePublish = try await dsClient.publishMailbox(
                         pseudonym: prepared.recipientPseudonym,
-                        payload: prepared.welcomeEnvelope
+                        payload: prepared.welcomeEnvelope,
+                        writeAuth: ReachCenter.shared.writeAuth(
+                            toMailbox: prepared.recipientPseudonym, groupIdHex: groupIdHex)
                     )
                 } catch {
                     throw ChatError.wrapped("DS publishMailbox (Welcome) failed", underlying: error)
@@ -2604,6 +2648,7 @@ public final class ChatRepository: ObservableObject {
         for m in raw.messages {
             guard let attr = try? parseGroupJoinAttribution(bytes: m.payload) else { continue }
             if attr.groupId != groupId { continue }
+            keepJoinAttributionGrant(record: record, payload: m.payload)
             out.append(
                 (attr.joinerSignatureKey, attr.issuerFingerprint,
                  rosterKeys.contains(attr.issuerSignaturePubkey)))
@@ -2772,7 +2817,7 @@ public final class ChatRepository: ObservableObject {
         guard let record = groups[groupIdHex] else {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
         }
-        let mint: GroupInviteMint
+        let mint: InviteLinkMint
         do {
             mint = try composeGroupInviteCapabilityWithPreview(
                 issuerSigningSeed: identity.ed25519Seed(),
@@ -2786,12 +2831,11 @@ public final class ChatRepository: ObservableObject {
             throw ChatError.wrapped(
                 "composeGroupInviteCapabilityWithPreview failed", underlying: error)
         }
-        let wire = mint.wire
-        // Production default (ADR-0028 OQ1): upload to the discovery ledger —
-        // the server-side anti-abuse surface (per-joiner consume dedup + soft
-        // max_uses) — and share the short pointer URL. `max_uses` is a soft
-        // throttle, not an access control: the admin approval gate stays the
-        // boundary.
+        // Production default (ADR-0028 OQ1): upload the SEALED blob to the
+        // discovery ledger (sealed-links amendment of 2026-09-28) with its
+        // clear fields — the issuer key for the revoke, the expiry, the soft
+        // max_uses — and share the short pointer URL. One secret opens both
+        // the capability and its preview; it rides the fragment only.
         //
         // The upload is session-gated (`require_session` on discovery), so it
         // goes out on a bearer copy of the client; with no session at all the
@@ -2799,21 +2843,22 @@ public final class ChatRepository: ObservableObject {
         // Only a TRANSPORT failure (a censored / offline network) falls back to
         // the inline form; a refusal from the server (401, 400, 5xx) surfaces.
         let bearer = try bearerDiscovery()
-        let base: String
         do {
             let blobId = try await bearer.uploadGroupInvite(
-                capabilityBytes: wire, maxUses: UInt32.max)
-            base = try GroupInviteUrl.composePointerGroupInviteUrl(blobId: blobId)
+                mint: mint, expiryMs: 0, maxUses: UInt32.max)
+            return InviteLink.pointer(
+                origin: GroupInviteUrl.defaultOrigin, prefix: GroupInviteUrl.urlPrefix,
+                blobId: blobId, secret: mint.linkSecret)
         } catch let error where Self.groupInviteUploadFallsBackInline(error) {
             NSLog("group invite upload failed (\(Self.discoveryFailureSummary(error))); "
                 + "sharing the inline link")
-            base = (try? GroupInviteUrl.composeInlineGroupInviteUrl(capabilityBytes: wire))
-                ?? ("https://lakko.me/g/" + base64UrlEncodeNoPad(wire))
+            return InviteLink.inline(
+                origin: GroupInviteUrl.defaultOrigin, prefix: GroupInviteUrl.urlPrefix,
+                sealed: mint.sealed, secret: mint.linkSecret)
         } catch {
             NSLog("group invite upload failed (\(Self.discoveryFailureSummary(error)))")
             throw ChatError.wrapped("group invite upload failed", underlying: error)
         }
-        return GroupInviteLink.withLinkKey(base, linkKey: mint.linkKey)
     }
 
     /// The signed-in session's bearer token, read at call time. Defaults to
@@ -2839,10 +2884,7 @@ public final class ChatRepository: ObservableObject {
     /// only when the request never got an answer (DNS, TLS, no route, a
     /// censored network). Any HTTP status is the server's answer and surfaces.
     static func groupInviteUploadFallsBackInline(_ error: Error) -> Bool {
-        if let discovery = error as? DiscoveryClientError, case .network = discovery {
-            return true
-        }
-        return false
+        InviteLink.uploadFallsBackInline(error)
     }
 
     /// A log-safe summary of a discovery failure: the kind and the HTTP
@@ -2897,10 +2939,12 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
-    /// ADR-0028 (G-3) — resolve a `/g/<slug>` slug to the capability wire bytes,
-    /// fetching from the discovery ledger when the slug is a 6-byte pointer (the
-    /// production form) or passing the bytes straight through when it is an
-    /// inline capability (the transport-failure fallback). Returns the `blobId`
+    /// ADR-0028 (G-3) — resolve a `/g/<slug>` slug to the SEALED capability
+    /// blob (sealed-links amendment of 2026-09-28), fetching from the discovery
+    /// ledger when the slug is a 6-byte pointer (the production form) or
+    /// passing the bytes straight through when it is an inline blob (the
+    /// transport-failure fallback). The caller opens it with
+    /// `GroupInviteCapability.openLink(sealed:linkSecret:)`. Returns the `blobId`
     /// (non-nil only for the pointer form) so the caller can drive the consume
     /// gate before requesting to join.
     ///
@@ -2912,7 +2956,7 @@ public final class ChatRepository: ObservableObject {
     /// "invalid".
     public func resolveGroupInviteSlug(
         slug: String
-    ) async throws -> (capabilityWire: Data, blobId: Data?) {
+    ) async throws -> (sealed: Data, blobId: Data?) {
         let parsed: GroupInviteUrl.ParsedGroupInvite
         do {
             parsed = try GroupInviteUrl.parseGroupInviteSlug(slug)
@@ -2929,10 +2973,10 @@ public final class ChatRepository: ObservableObject {
             } catch {
                 throw ChatError.wrapped("group invite fetch failed", underlying: error)
             }
-            guard let capabilityWire = fetched else {
+            guard let sealed = fetched else {
                 throw GroupInviteLinkError.notFound
             }
-            return (capabilityWire, blobId)
+            return (sealed, blobId)
         }
     }
 
@@ -3616,6 +3660,12 @@ public final class ChatRepository: ObservableObject {
         groupIdHex: String
     ) -> (@MainActor () async -> PushGroupRouting.PushRotationOutcome)? {
         guard let accountIdB64 = currentAccountIdB64 else { return nil }
+        // ADR-0058 section 3 — the removed member held this account's `group`
+        // and `member` keys for this group; this runs after the Remove was
+        // published, so the rotated grants go out at the post-removal epoch.
+        if let groupId = groups[groupIdHex]?.groupId {
+            ReachCenter.shared.rotateGroup(groupId)
+        }
         // The role is read here, on the removing device, at removal time.
         let role = ownRole(groupIdHex: groupIdHex)
         return rotatePushRoutingSecretBody(
@@ -3659,6 +3709,14 @@ public final class ChatRepository: ObservableObject {
         // subscribes to a `push_gid` nobody will ever notify, retires the old
         // one, and then throws at the broadcast — retrying on every chat-open.
         let selfEvicted = readIsActive { try record.group.isActive() } == false
+        // ADR-0058 section 3 — a departed member held this account's `group`
+        // and `member` keys for this group: rotate both (whatever this
+        // device's role — every member owns its own keys), after the removal
+        // was applied so the new grants are sealed at the post-removal epoch.
+        if !selfEvicted,
+           ReachRules.membershipShrank(previous: previousMemberKeys, current: current) {
+            ReachCenter.shared.rotateGroup(record.groupId)
+        }
         Task { @MainActor [weak self] in
             guard let self else { return }
             await self.pushRouting.rotateIfMembershipShrank(
@@ -4004,6 +4062,7 @@ public final class ChatRepository: ObservableObject {
             },
             profileSink: { [weak self] claim, senderKey in
                 self?.receivedProfileSink(claim, senderKey)
+                self?.keepProfileGrants(claim, senderKey: senderKey, groupIdHex: groupIdHex)
             },
             // ADR-0051 — role-gate against the live group, order, store,
             // re-title. Fire-and-forget (it only spawns a `Task`), so the name
@@ -4024,6 +4083,10 @@ public final class ChatRepository: ObservableObject {
             // commit chain is held.
             pinSink: { [weak self] op, senderLeaf in
                 self?.receivePin(groupIdHex: groupIdHex, op: op, senderLeaf: senderLeaf)
+            },
+            scopedDiscoverySink: { [weak self] envelope, senderKey in
+                self?.receiveScopedDiscovery(
+                    groupIdHex: groupIdHex, envelope: envelope, senderKey: senderKey)
             }
         )
         // THE ORDERING RULE — persist first, advance the cursor second, and hold
@@ -4646,6 +4709,9 @@ public final class ChatRepository: ObservableObject {
     private func persistKnownGroupBestEffort(groupIdHex: String) {
         guard let accountIdB64 = currentAccountIdB64 else { return }
         knownGroupsStore.add(accountIdB64: accountIdB64, groupIdHex: groupIdHex)
+        // ADR-0058 — a new group needs its `member` (and, where the setting
+        // allows, `group`) reach key registered before a co-member writes.
+        ReachCenter.shared.sync()
     }
 
     /// Durably persist the canonical Identity's MLS provider snapshot and
@@ -5069,6 +5135,8 @@ public final class ChatRepository: ObservableObject {
                         },
                         profileSink: { [weak self] claim, senderKey in
                             self?.receivedProfileSink(claim, senderKey)
+                            self?.keepProfileGrants(
+                                claim, senderKey: senderKey, groupIdHex: groupIdHex)
                         },
                         groupNameSink: { [weak self] name, updatedAtMs, senderLeaf in
                             self?.receiveGroupName(
@@ -5081,6 +5149,10 @@ public final class ChatRepository: ObservableObject {
                         pinSink: { [weak self] op, senderLeaf in
                             self?.receivePin(
                                 groupIdHex: groupIdHex, op: op, senderLeaf: senderLeaf)
+                        },
+                        scopedDiscoverySink: { [weak self] envelope, senderKey in
+                            self?.receiveScopedDiscovery(
+                                groupIdHex: groupIdHex, envelope: envelope, senderKey: senderKey)
                         }
                     )
                     // Per row, and deliberately not deferred to the end of the
@@ -5128,10 +5200,10 @@ public final class ChatRepository: ObservableObject {
                         groupId: record.groupId, payload: bytes,
                         auth: self.dsAuth(groupIdHex: groupIdHex)).id
                 },
-                publishMailbox: { [weak self] pseudonym, bytes in
+                publishMailbox: { [weak self] target, bytes in
                     guard let self else { throw ChatError.argument("ChatRepository deallocated") }
-                    return try await self.dsClient.publishMailbox(
-                        pseudonym: pseudonym, payload: bytes).id
+                    return try await self.publishSweepWelcome(
+                        target: target, bytes: bytes, record: record, groupIdHex: groupIdHex)
                 },
                 // ADR-0053 point 3, staged shape — register the epoch the staged
                 // sweep moves to (`dsStagedAccessSigner`), proven under the
@@ -5235,8 +5307,17 @@ public final class ChatRepository: ObservableObject {
                 read: { record.cursor },
                 advance: { record.advanceCursor(to: $0) }
             ),
-            welcomeMailbox: { key in
-                try IdentityPseudonym.fromIdentity(pubkey: key).asBytes()
+            // ADR-0058 section 6 — each added leaf's Welcome goes to its
+            // owner's ACCOUNT mailbox. Resolved here when this device can
+            // (a `/g/` joiner's retained KeyPackage, a KeyPackage this device
+            // fetched to propose the add); otherwise the leaf key itself is
+            // recorded and resolved through the roster once the sweep merged
+            // (``publishSweepWelcome``).
+            welcomeMailbox: { [weak self] key in
+                if let accountKey = self?.resolveAddedAccountKey(record: record, leafKey: key) {
+                    return try IdentityPseudonym.fromIdentity(pubkey: accountKey).asBytes()
+                }
+                return key
             },
             // ADR-0053 point 8 — every added leaf, a `/g/` joiner included, gets
             // its Welcome in its own mailbox; no `WelcomeRendezvous` is written
@@ -5722,6 +5803,145 @@ public final class ChatRepository: ObservableObject {
         Task { await dsHealRegistration(ds: client, groupId: groupId, before: before, after: after) }
     }
 
+    // MARK: - ADR-0058 Welcome delivery
+
+    /// The account keys of leaves this device fetched to propose or add, by
+    /// leaf signature key (b64): what resolves an added leaf to its owner's
+    /// mailbox before the add is merged.
+    private var addedLeafAccounts: [String: Data] = [:]
+
+    /// Remember the owner of every leaf in `keyPackages` (ADR-0050 binding).
+    func noteAddedLeafAccounts(keyPackages: [Data]) {
+        for kp in keyPackages {
+            guard let leaf = try? keyPackageSignatureKey(keyPackage: kp),
+                  let account = try? keyPackageAccountKey(keyPackage: kp) else { continue }
+            addedLeafAccounts[base64Encode(leaf)] = account
+        }
+    }
+
+    /// ADR-0058 section 6 — post a committer-delegation envelope for the
+    /// person `addedAccountKey` in `groupIdHex`: one delegation per committer
+    /// candidate (the owner, then the admins), signed with the grant this
+    /// device holds for them. Best effort; with no grant held there is nothing
+    /// to delegate and the committer must hold its own.
+    func sendCommitterDelegations(groupIdHex: String, addedAccountKey: Data) async {
+        guard let record = groups[groupIdHex],
+              let table = try? record.group.groupRoles() else { return }
+        let candidates = [table.owner] + table.admins
+        guard let envelope = ReachCenter.shared.composeDelegations(
+            addedAccountKey: addedAccountKey, candidateAccountKeys: candidates,
+            groupIdHex: groupIdHex) else { return }
+        do {
+            try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: envelope)
+        } catch {
+            NSLog("ADR-0058: committer delegations not sent: \(error)")
+        }
+    }
+
+    /// Keep the `reply` grant of a `/g/` join attribution for this group,
+    /// filed under the joiner's account key (its pending KeyPackage's binding).
+    private func keepJoinAttributionGrant(record: GroupRecord, payload: Data) {
+        guard let attr = try? parseGroupJoinAttribution(bytes: payload),
+              attr.groupId == record.groupId,
+              let account = try? record.group.pendingExternalJoinAccountKey(
+                  joinerSignatureKey: attr.joinerSignatureKey) else { return }
+        ReachCenter.shared.keep(
+            attr.replyGrant, carrier: .request,
+            fromAccountKeyB64: base64Encode(account), scopeHex: nil)
+    }
+
+    /// ADR-0058 sections 3 and 6 — keep the reach grants a profile carried,
+    /// filed under the sender resolved at receipt (C-68) and scoped to this
+    /// conversation. A `contact` grant is kept only from the other participant
+    /// of a one-to-one conversation.
+    func keepProfileGrants(_ claim: ProfileClaim, senderKey: MemberIdentity?, groupIdHex: String) {
+        guard !claim.grants.isEmpty, let senderKey,
+              senderKey != groups[groupIdHex].flatMap({ AuthorIdentity.own(group: $0.group) })
+        else { return }
+        let oneToOne = conversationKind(groupIdHex: groupIdHex) == .chat
+            && (memberCount(groupIdHex: groupIdHex) ?? 0) <= 2
+        let carrier: ReachRules.Carrier = oneToOne
+            ? .oneToOneProfile(fromOtherParticipant: true)
+            : .groupProfile
+        for grant in claim.grants {
+            ReachCenter.shared.keep(
+                grant, carrier: carrier, fromAccountKeyB64: senderKey, scopeHex: groupIdHex)
+        }
+    }
+
+    /// ADR-0058 — a "who can find me" service envelope received in a
+    /// conversation. A committer delegation is kept for the sweep; an
+    /// introduction offer / bundle is kept only from the other participant of
+    /// a one-to-one conversation (``IntroductionBook``); a setting or a reach
+    /// state belongs on the owner's DeviceGroup and is dropped here.
+    func receiveScopedDiscovery(
+        groupIdHex: String, envelope: ScopedDiscoveryEnvelope, senderKey: MemberIdentity?
+    ) {
+        guard let senderKey else { return }
+        switch envelope {
+        case .committerDelegation(let delegation):
+            ReachCenter.shared.keepDelegation(delegation, fromAccountKeyB64: senderKey)
+        case .introductionOffer(let record):
+            guard isOneToOneWithOther(groupIdHex: groupIdHex, senderKey: senderKey) else { return }
+            IntroductionBook.shared.keepOffer(record, fromAccountKeyB64: senderKey)
+        case .introductions(let bundle):
+            guard isOneToOneWithOther(groupIdHex: groupIdHex, senderKey: senderKey) else { return }
+            IntroductionBook.shared.keepBundle(bundle, fromAccountKeyB64: senderKey)
+        case .visibility, .reachState:
+            return
+        }
+    }
+
+    /// Whether `groupIdHex` is a one-to-one conversation and `senderKey` its
+    /// other participant.
+    private func isOneToOneWithOther(groupIdHex: String, senderKey: MemberIdentity) -> Bool {
+        guard conversationKind(groupIdHex: groupIdHex) == .chat,
+              (memberCount(groupIdHex: groupIdHex) ?? 0) <= 2,
+              let record = groups[groupIdHex] else { return false }
+        return senderKey != AuthorIdentity.own(group: record.group)
+    }
+
+    /// An added leaf's account key, when this device can tell before the
+    /// merge: a pending `/g/` joiner's retained KeyPackage, or a KeyPackage it
+    /// fetched itself.
+    private func resolveAddedAccountKey(record: GroupRecord, leafKey: Data) -> Data? {
+        if let account = try? record.group.pendingExternalJoinAccountKey(joinerSignatureKey: leafKey) {
+            return account
+        }
+        return addedLeafAccounts[base64Encode(leafKey)]
+    }
+
+    /// Welcome writes already made, by `SHA-256(bytes) | mailbox`: two leaves
+    /// of one person that resolved only after the merge map to one mailbox,
+    /// and the person gets the Welcome once.
+    private var sweepWelcomeWrites: Set<String> = []
+
+    /// Publish one sweep Welcome. `target` is an account-mailbox pseudonym, or
+    /// an added leaf's signature key that could not be resolved before the
+    /// merge — now a member, resolved through the roster to its owner's
+    /// account. Signed with the grant (or committer delegation) that reaches
+    /// that mailbox.
+    private func publishSweepWelcome(
+        target: Data, bytes: Data, record: GroupRecord, groupIdHex: String
+    ) async throws -> Int64 {
+        var pseudonym = target
+        if let members = try? record.group.members(),
+           let hit = members.first(where: { $0.signaturePublicKey == target }) {
+            pseudonym = try IdentityPseudonym.fromIdentity(pubkey: hit.accountKey).asBytes()
+        }
+        let dedupe = base64Encode(Data(SHA256.hash(data: bytes))) + "|" + base64Encode(pseudonym)
+        guard sweepWelcomeWrites.insert(dedupe).inserted else { return 0 }
+        do {
+            return try await dsClient.publishMailbox(
+                pseudonym: pseudonym, payload: bytes,
+                writeAuth: ReachCenter.shared.writeAuth(toMailbox: pseudonym, groupIdHex: groupIdHex)
+            ).id
+        } catch {
+            sweepWelcomeWrites.remove(dedupe)
+            throw error
+        }
+    }
+
     /// ADR-0053 point 2 — claim this device's two mailboxes: the account
     /// mailbox (contact requests and acks) and the device mailbox (Welcomes
     /// sealed to this device's KeyPackages). Unsigned: the identity key is
@@ -5734,6 +5954,19 @@ public final class ChatRepository: ObservableObject {
             signers.append(dsMailboxSigner(identity: device))
         }
         let client = dsClient
+        // ADR-0058 — the hooks the reach registration reads, wired before the
+        // claim so the sync below sees this account's groups.
+        ReachCenter.shared.groupIdsProvider = { [weak self] in
+            self?.allGroupIds() ?? []
+        }
+        // A rotation or a setting change changed the grants the profiles
+        // carry: republish them.
+        ReachCenter.shared.onGrantsChanged = { [weak self] in
+            Task { @MainActor in
+                await self?.publishOwnProfileToAllGroups()
+                await self?.sendIntroductions()
+            }
+        }
         Task {
             for signer in signers {
                 do {
@@ -5744,7 +5977,51 @@ public final class ChatRepository: ObservableObject {
                     NSLog("ADR-0053: mailbox claim failed, retried on the next session: \(error)")
                 }
             }
+            // ADR-0058 section 2 — a claimed mailbox starts CLOSED. Register
+            // this account's reach keys on it right after the claim, so the
+            // people it handed keys to can write to it.
+            await MainActor.run { ReachCenter.shared.sync() }
+            await self.sendIntroductions()
         }
+    }
+
+    /// ADR-0058 section 4 — contacts of contacts. In each one-to-one
+    /// conversation: this account's own introduction record as an
+    /// IntroductionOffer (while 2.1 is on), and the records this account's
+    /// contacts offered, as a padded Introductions bundle. Sent only when what
+    /// would be sent changed; best effort.
+    public func sendIntroductions() async {
+        guard ReachCenter.shared.isActive else { return }
+        let offer = await ReachCenter.shared.ownIntroductionRecord()
+        let relayed = IntroductionBook.shared.offeredRecords()
+        let digest = Data(SHA256.hash(data: (offer ?? Data()) + relayed.sorted {
+            $0.lexicographicallyPrecedes($1) }.reduce(Data(), +))).base64EncodedString()
+        for groupIdHex in groups.keys.sorted() {
+            guard conversationKind(groupIdHex: groupIdHex) == .chat,
+                  (memberCount(groupIdHex: groupIdHex) ?? 0) == 2,
+                  !membershipEnded(membershipStateNow(groupIdHex: groupIdHex)),
+                  ReachCenter.shared.introductionsChanged(groupIdHex: groupIdHex, digest: digest)
+            else { continue }
+            do {
+                if let offer {
+                    try await publishApplicationMessage(
+                        groupIdHex: groupIdHex, plaintextBytes: try composeIntroductionOffer(record: offer))
+                }
+                if !relayed.isEmpty {
+                    let bundle = try composeIntroductionsBundle(
+                        records: relayed, updatedAtMs: UInt64(Self.nowMs()))
+                    try await publishApplicationMessage(groupIdHex: groupIdHex, plaintextBytes: bundle)
+                }
+            } catch {
+                NSLog("ADR-0058: introductions not sent: \(error)")
+            }
+        }
+    }
+
+    /// Every conversation group this device is in (ADR-0058: the `member` and
+    /// `group` reach scopes).
+    public func allGroupIds() -> [Data] {
+        groups.values.map(\.groupId)
     }
 
     /// ADR-0053 point 1 — the signer of this device's DEVICE mailbox (named by
@@ -5797,6 +6074,14 @@ public final class ChatRepository: ObservableObject {
                    case .informational = externalJoinAffordance(retained: retained) {
                     record.sawUnkeptExternalJoin = true
                 }
+            }
+            // ADR-0058 section 6 — a joiner's attribution carries its `reply`
+            // grant: the Welcome of the sweep that admits it is written with
+            // it. Filed under the joiner's ACCOUNT key, resolved through its
+            // retained KeyPackage's device binding, so only after the
+            // proposals of this batch were retained.
+            for row in raw.messages {
+                keepJoinAttributionGrant(record: record, payload: row.payload)
             }
             // An accepted proposal enters the retained request set, which lives
             // in the MLS storage snapshot, so the cursor may move past these rows
@@ -6131,7 +6416,9 @@ public final class ChatRepository: ObservableObject {
                 // it.
                 secondId = try await dsClient.publishMailbox(
                     pseudonym: pseudonym,
-                    payload: secondBytes
+                    payload: secondBytes,
+                    writeAuth: ReachCenter.shared.writeAuth(
+                        toMailbox: pseudonym, groupIdHex: groupIdHex)
                 ).id
             }
             ackCommitBestEffort(
@@ -6772,7 +7059,8 @@ private final class GroupRecord {
         profileSink: ((ProfileClaim, MemberIdentity?) -> Void)? = nil,
         groupNameSink: ((String, UInt64, UInt32?) -> Void)? = nil,
         profileRequestSink: (() -> Void)? = nil,
-        pinSink: ((FfiPinOp, UInt32?) -> Void)? = nil
+        pinSink: ((FfiPinOp, UInt32?) -> Void)? = nil,
+        scopedDiscoverySink: ((ScopedDiscoveryEnvelope, MemberIdentity?) -> Void)? = nil
     ) {
         for event in events {
             switch event {
@@ -6902,6 +7190,10 @@ private final class GroupRecord {
                 // with the signature key resolved at receipt (C-68), which is
                 // the only identity it may ever be stored under.
                 profileSink?(profile, senderKey)
+            case .scopedDiscovery(_, let envelope, let senderKey, _):
+                // ADR-0058 — a "who can find me" service envelope. Not a
+                // timeline row: routed out with the sender resolved at receipt.
+                scopedDiscoverySink?(envelope, senderKey)
             case .groupName(_, let name, let updatedAtMs, let senderLeaf, _):
                 // ADR-0051 — the group's shared name. Not a timeline row:
                 // routed out to the repository, which owns the name store AND

@@ -17,9 +17,9 @@ import LakkoCore
 ///   2. (pointer branch)
 ///      ``DiscoveryClient/fetchCallInvite(blobId:)`` — bytes
 ///      or 404.
-///   3. `CallInviteCapability.decodeAndVerify(wire:)` — local
-///      Ed25519 signature check (catches a malicious server
-///      serving substituted bytes).
+///   3. `CallInviteCapability.openLink(sealed:linkSecret:)` —
+///      AEAD open under the fragment's secret + Ed25519 verify
+///      (a substituted blob is `.damaged`).
 ///   4. `capability.isValidNow(nowMs:)` — expiry filter.
 ///   5. (pointer branch)
 ///      ``DiscoveryClient/consumeCallInvite(blobId:capabilityBytes:joinerAccountId:)``
@@ -68,6 +68,10 @@ public enum CallInviteAcceptor {
         /// down. "Try again later", never "invalid".
         case rateLimited
         case malformedSlug(reason: String)
+        /// The fragment is missing or not a link secret, or the sealed
+        /// capability does not open under it (sealed-links amendment of
+        /// 2026-09-28).
+        case damaged
         case signatureFailure(reason: String)
         case failed(message: String)
     }
@@ -87,6 +91,8 @@ public enum CallInviteAcceptor {
     /// - Parameters:
     ///   - slug:            The `<slug>` segment from a
     ///                      `/c/<slug>` URL.
+    ///   - fragment:        The URL fragment (the link secret);
+    ///                      without it the link is `.damaged`.
     ///   - joinerAccountId: Joiner's 16-byte UUIDv7
     ///                      account_id — folded into the
     ///                      per-joiner dedup tag locally
@@ -107,6 +113,7 @@ public enum CallInviteAcceptor {
     ///                      check. Defaults to "now".
     public static func acceptFromSlug(
         slug: String,
+        fragment: String?,
         joinerAccountId: Data,
         joinerIdentity: Identity,
         discoveryClient: DiscoveryClient,
@@ -121,8 +128,12 @@ public enum CallInviteAcceptor {
                 ?? String(describing: error))
         }
 
-        // ---- 2. Pointer branch: fetch bytes -----------------
-        let capabilityBytes: Data
+        guard let linkSecret = InviteLink.secret(fromFragment: fragment) else {
+            return .damaged
+        }
+
+        // ---- 2. Pointer branch: fetch the sealed blob -------
+        let sealed: Data
         var blobId: Data? = nil
         switch parsed {
         case .pointer(let id):
@@ -133,7 +144,7 @@ public enum CallInviteAcceptor {
                 ) else {
                     return .notFound
                 }
-                capabilityBytes = fetched
+                sealed = fetched
             } catch let error as DiscoveryClientError {
                 if case let .http(status, _, _) = error, status == 404 {
                     return .notFound
@@ -147,17 +158,18 @@ public enum CallInviteAcceptor {
                     ?? String(describing: error))
             }
         case .inline(let bytes):
-            capabilityBytes = bytes
+            sealed = bytes
         }
 
-        // ---- 3. decodeAndVerify -----------------------------
+        // ---- 3. openLink (AEAD open + signature verify) -----
         let capability: CallInviteCapability
         do {
-            capability = try CallInviteCapability.decodeAndVerify(wire: capabilityBytes)
+            capability = try CallInviteCapability.openLink(sealed: sealed, linkSecret: linkSecret)
         } catch {
-            return .signatureFailure(reason: (error as? LocalizedError)?.errorDescription
-                ?? String(describing: error))
+            return .damaged
         }
+        // The joiner tag is computed over the PLAINTEXT wire.
+        let capabilityBytes = capability.wire()
 
         // ---- 4. Expiry filter --------------------------------
         if !capability.isValidNow(nowMs: nowMs) {

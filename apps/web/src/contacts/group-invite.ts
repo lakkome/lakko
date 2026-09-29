@@ -11,17 +11,17 @@
  *
  *   * **pointer** — the 6-byte ledger id (8 base64url characters) the
  *     discovery service assigned at `DiscoveryClient.uploadGroupInvite(...)`.
- *     The production default; the joiner fetches the capability from
+ *     The production default; the joiner fetches the sealed blob from
  *     `/discovery/group-invite/<id>`. This is the OQ1 indirection that adds the
  *     server-side anti-abuse ledger (consume dedup + soft max_uses).
- *   * **inline** — the full `GroupInviteCapability` wire bytes (>= 110 bytes).
- *     The fallback for a transport failure at upload: the capability rides
- *     inside the URL itself.
+ *   * **inline** — the sealed blob itself. The fallback for a transport
+ *     failure at upload: the link rides inside the URL.
  *
- * Either form may carry the 12-byte **link secret** as the URL fragment
- * (`#<16 characters>`); the preview key is derived from it bound to the
- * capability's group id and issuer. See `appendGroupInviteLinkSecret` /
- * `splitGroupInviteLink` below.
+ * Both forms carry the 12-byte **link secret** as the URL fragment
+ * (`#<16 characters>`): the whole capability is sealed under it (2026-09-28
+ * security pass), and the preview key is derived from it bound to the
+ * capability's group id and issuer. A link without it opens nothing. See
+ * `appendGroupInviteLinkSecret` / `splitGroupInviteLink` below.
  */
 import { base64UrlEncodeNoPad } from "../auth/account-id";
 import {
@@ -58,29 +58,31 @@ export function composePointerGroupInviteUrl(
   return `${origin}${GROUP_INVITE_URL_PREFIX}${base64UrlEncodeNoPad(blobId)}`;
 }
 
-/** Build the **inline-bytes** URL form — the long shape that carries the
- *  capability inside the URL itself, no server round-trip on open. Used only
- *  when the upload failed on a transport error. */
+/** Build the **inline** URL form — the long shape that carries the sealed
+ *  blob inside the URL itself, no server round-trip on open. Used only when
+ *  the upload failed on a transport error. The link secret is appended with
+ *  `appendGroupInviteLinkSecret`. */
 export function composeInlineGroupInviteUrl(
-  capabilityBytes: Uint8Array,
+  sealed: Uint8Array,
   origin: string = defaultOrigin(),
 ): string {
-  if (capabilityBytes.length < GROUP_INVITE_INLINE_MIN_LEN) {
+  if (sealed.length < GROUP_INVITE_INLINE_MIN_LEN) {
     throw new Error(
-      `capabilityBytes must be >= ${GROUP_INVITE_INLINE_MIN_LEN} bytes, ` +
-        `got ${capabilityBytes.length}`,
+      `sealed link must be >= ${GROUP_INVITE_INLINE_MIN_LEN} bytes, ` +
+        `got ${sealed.length}`,
     );
   }
-  return `${origin}${GROUP_INVITE_URL_PREFIX}${base64UrlEncodeNoPad(capabilityBytes)}`;
+  return `${origin}${GROUP_INVITE_URL_PREFIX}${base64UrlEncodeNoPad(sealed)}`;
 }
 
 /** Discriminated parse of a `/g/<slug>` slug:
  *
- *    * `kind: "pointer"` — fetch from
- *      `DiscoveryClient.fetchGroupInvite(blobId)` -> run
- *      `wasm.GroupInviteCapability.decodeAndVerify` on the returned bytes.
- *    * `kind: "inline"` — run `decodeAndVerify` directly on the bytes, no
- *      server round-trip.
+ *    * `kind: "pointer"` — fetch the sealed blob with
+ *      `DiscoveryClient.fetchGroupInvite(blobId)`;
+ *    * `kind: "inline"` — the sealed blob is the slug itself.
+ *
+ *  Either way it opens with `wasm.GroupInviteCapability.openLink(sealed,
+ *  linkSecret)` under the fragment's secret.
  *
  *  Throws on anything else, the pre-amendment 43-character id included. */
 export type ParsedGroupInvite = ClassifiedInviteSlug;
@@ -96,8 +98,8 @@ export function parseGroupInviteSlug(slug: string, widths: InviteLinkWidths): Pa
 /** Append the link secret to a `/g/` URL as its **fragment**:
  *  `<origin>/g/<slug>#<secret, 16 base64url characters>`. The fragment is the
  *  one part of a URL a browser never sends, so the discovery ledger and every
- *  access log see only the sealed preview. Both the pointer and the inline
- *  form take the same fragment. */
+ *  access log see only the sealed blob. Both the pointer and the inline form
+ *  take the same fragment. */
 export function appendGroupInviteLinkSecret(
   url: string,
   secret: Uint8Array,

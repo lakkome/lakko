@@ -371,7 +371,8 @@ final class ProfileNamesTests: XCTestCase {
         let accountId = Data(repeating: 0xAC, count: 16)
         let bytes = try composeProfileEnvelope(
             profile: FfiProfile(
-                displayName: "Alice Petrova", username: "alice", updatedAtMs: 42, accountId: accountId))
+                displayName: "Alice Petrova", username: "alice", updatedAtMs: 42, accountId: accountId,
+                usernameCertificate: nil, grants: []))
         let event = classify(bytes)
         guard case .profile(let messageId, let profile, let senderKey, _) = event else {
             return XCTFail("a profile envelope must classify as .profile, got \(event)")
@@ -389,7 +390,9 @@ final class ProfileNamesTests: XCTestCase {
 
     func testWithoutTheArmTheProfileWouldRenderAsText() throws {
         let bytes = try composeProfileEnvelope(
-            profile: FfiProfile(displayName: "Alice", username: nil, updatedAtMs: 1, accountId: nil))
+            profile: FfiProfile(
+                displayName: "Alice", username: nil, updatedAtMs: 1, accountId: nil,
+                usernameCertificate: nil, grants: []))
         let parsed = parseBodyEnvelope(bytes: bytes)
         XCTAssertEqual(parsed.kind, .chat, "the legacy fallback degrades it to a chat body")
         XCTAssertTrue(parsed.text.contains("lakko/profile/v1"))
@@ -451,7 +454,7 @@ final class ProfilePublisherTests: XCTestCase {
                     if self.failSends { throw URLError(.notConnectedToInternet) }
                     self.sent.append((group, bytes))
                 },
-                envelope: { [unowned self] in self.envelope },
+                envelope: { [unowned self] _ in self.envelope },
                 canSend: { [unowned self] in !self.blocked.contains($0) },
                 nowMs: { [unowned self] in self.now },
                 jitterMs: { [unowned self] in self.jitter },
@@ -662,7 +665,10 @@ final class ProfileDirectoryTests: XCTestCase {
         let envelope = try XCTUnwrap(directory.ownProfileEnvelope())
         let decoded = try decodeProfileEnvelope(plaintext: envelope)
         XCTAssertEqual(decoded.displayName, "Valentin")
-        XCTAssertEqual(decoded.username, "valentin")
+        // ADR-0058 section 5 — a username travels only with its certificate;
+        // this directory holds none, so the envelope names no username (a v3
+        // receiver would never show one it cannot verify).
+        XCTAssertNil(decoded.username)
         XCTAssertEqual(decoded.updatedAtMs, directory.ownProfile?.updatedAtMs)
 
         directory.activate(accountIdB64: "guest", username: "")

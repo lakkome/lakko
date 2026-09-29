@@ -210,8 +210,7 @@ public enum RecoveryPayload {
         sealedBlob: Data,
         ds: DsClient = DsClient()
     ) async throws {
-        _ = try await ds.publishMailbox(
-            pseudonym: rendezvousPseudonym,
+        _ = try await ds.publishRendezvous(id: rendezvousPseudonym,
             payload: wrapRecoveryRow(sealedBlob: sealedBlob)
         )
     }
@@ -258,8 +257,7 @@ public enum RecoveryPayload {
             )
             let result: FetchResult
             do {
-                result = try await ds.fetchMailbox(
-                    pseudonym: rendezvousPseudonym,
+                result = try await ds.fetchRendezvous(id: rendezvousPseudonym,
                     after: cursor,
                     limit: 1,
                     waitSecs: waitSecs

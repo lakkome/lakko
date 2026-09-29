@@ -548,6 +548,26 @@ public final class ContactsClient {
         return (recipientAccountId, recipientSignaturePub)
     }
 
+    /// ADR-0058 — the identity bundle of an account a search found, through
+    /// the same G-4 pin gate every other identity fetch takes.
+    public func resolveVerifiedBundle(
+        accountId: Data
+    ) async throws -> (signaturePubkey: Data, x25519Pubkey: Data) {
+        let bundle: IdentityFetchResponse?
+        do {
+            bundle = try await discovery.identityFetch(accountId: accountId)
+        } catch {
+            throw ContactsError.wrap(error)
+        }
+        guard let bundle else { throw ContactsError.noIdentityBundle(accountId) }
+        try await verifyBundleAccountKey(accountId: accountId, bundle: bundle)
+        guard let sig = base64Decode(bundle.signaturePubkey),
+              let x = base64Decode(bundle.x25519Pubkey) else {
+            throw ContactsError.wrap(ContactsError.simple("malformed identity bundle on the wire"))
+        }
+        return (sig, x)
+    }
+
     // MARK: - Send
 
     /// Send a `ContactRequest` envelope to `@recipientUsername`,
@@ -558,7 +578,8 @@ public final class ContactsClient {
         senderSignaturePubkey: Data,
         recipientUsername: String,
         profile: FfiProfile? = nil,
-        introMessage: Data
+        introMessage: Data,
+        reach: ContactRequestReach = .none
     ) async throws -> SendResult {
         let lookup: LookupResult
         do {
@@ -604,7 +625,9 @@ public final class ContactsClient {
             recipientSignaturePubkey: recipientSignaturePub,
             recipientX25519Pubkey: recipientX25519Pub,
             profile: profile,
-            introMessage: introMessage
+            introMessage: introMessage,
+            replyGrant: try await reach.replyGrant(recipientAccountId),
+            writeAuth: reach.writeAuth(recipientSignaturePub)
         )
 
         return SendResult(
@@ -632,7 +655,8 @@ public final class ContactsClient {
         recipientSignaturePubkey: Data,
         recipientX25519Pubkey: Data,
         profile: FfiProfile? = nil,
-        introMessage: Data
+        introMessage: Data,
+        reach: ContactRequestReach = .none
     ) async throws -> SendResult {
         let published = try await composeAndPublishContactRequest(
             senderSigningSeed: senderSigningSeed,
@@ -641,7 +665,9 @@ public final class ContactsClient {
             recipientSignaturePubkey: recipientSignaturePubkey,
             recipientX25519Pubkey: recipientX25519Pubkey,
             profile: profile,
-            introMessage: introMessage
+            introMessage: introMessage,
+            replyGrant: try await reach.replyGrant(recipientAccountId),
+            writeAuth: reach.writeAuth(recipientSignaturePubkey)
         )
         return SendResult(
             recipientUsername: "",
@@ -662,7 +688,9 @@ public final class ContactsClient {
         recipientSignaturePubkey: Data,
         recipientX25519Pubkey: Data,
         profile: FfiProfile?,
-        introMessage: Data
+        introMessage: Data,
+        replyGrant: FfiReachGrant?,
+        writeAuth: DsMailboxWriteAuth?
     ) async throws -> PublishedRequest {
         let recipientPseudonym: Data
         let senderPseudonym: Data
@@ -699,6 +727,9 @@ public final class ContactsClient {
                 validAfterMs: validAfterMs,
                 privacyPassToken: privacyPassToken,
                 profile: profile,
+                // ADR-0058 section 6 — the requester's single-use `reply`
+                // grant: the recipient writes the accept and the ack with it.
+                replyGrant: replyGrant,
                 introMessage: introMessage
             )
         }
@@ -717,11 +748,18 @@ public final class ContactsClient {
         let envelope = wrapEnvelope(kind: .contactRequest, body: wireBytes)
         let publish: PublishResult
         do {
+            // ADR-0058 section 2 — signed with the grant that lets this
+            // device reach the recipient (a link grant, a search result's
+            // grant, a co-member's); unsigned only for an Everyone mailbox.
             publish = try await ds.publishMailbox(
                 pseudonym: recipientPseudonym,
-                payload: envelope
+                payload: envelope,
+                writeAuth: writeAuth
             )
         } catch {
+            if case .http(401, _, _)? = error as? DsClientError {
+                throw ContactsError.requestRefused
+            }
             throw ContactsError.wrap(error)
         }
         return PublishedRequest(messageId: publish.id, createdAt: publish.createdAt)
@@ -748,7 +786,8 @@ public final class ContactsClient {
         accepterSigningSeed: Data,
         accepterAccountId: Data,
         accepterX25519Pubkey: Data,
-        originalRequest: IncomingContactRequest
+        originalRequest: IncomingContactRequest,
+        writeAuth: DsMailboxWriteAuth? = nil
     ) async throws -> PublishedAck {
         let senderMailbox: Data
         do {
@@ -776,9 +815,11 @@ public final class ContactsClient {
         let envelope = wrapEnvelope(kind: .contactAck, body: wireBytes)
         let publish: PublishResult
         do {
+            // ADR-0058 section 6 — written with the requester's `reply` grant.
             publish = try await ds.publishMailbox(
                 pseudonym: senderMailbox,
-                payload: envelope
+                payload: envelope,
+                writeAuth: writeAuth
             )
         } catch {
             throw ContactsError.wrap(error)
@@ -814,11 +855,25 @@ public final class ContactsClient {
         do {
             // ADR-0053 point 1 — reading a claimed mailbox needs a proof under
             // the identity key it is named after.
+            // ADR-0058 section 2 — an unclaimed mailbox answers a read `401`
+            // too, so a refusal claims it (claim-on-open) and retries once.
+            let ds = self.ds
             raw = try await ds.fetchMailbox(
                 pseudonym: myPseudonym,
                 after: after,
                 waitSecs: waitSecs,
-                auth: mailboxSigner.map { DsAuth(signer: $0) }
+                auth: mailboxSigner.map { signer in
+                    DsAuth(signer: signer, reclaim: {
+                        guard let proof = signer as? DsProofSigner else { return nil }
+                        do {
+                            try await ds.claimMailbox(
+                                pseudonym: myPseudonym, bodyJson: proof.mailboxClaimBodyJson())
+                        } catch {
+                            return nil
+                        }
+                        return signer
+                    })
+                }
             )
         } catch {
             throw ContactsError.wrap(error)
@@ -875,11 +930,13 @@ public final class ContactsClient {
 
                 let intro: String?
                 let profile: ProfileClaim?
+                var replyGrant: FfiReachGrant?
                 do {
                     let opened = try parsed.openEnvelope(
                         recipientX25519Priv: myX25519Secret
                     )
                     intro = String(data: opened.introMessage, encoding: .utf8) ?? ""
+                    replyGrant = opened.replyGrant
                     // ADR-0048 — `nil` when the request carried no profile, or
                     // one that failed its bounds (the request itself stays
                     // valid). Bound by the caller to `fromPubkey`, which the
@@ -891,7 +948,8 @@ public final class ContactsClient {
                             updatedAtMs: $0.updatedAtMs,
                             // Envelope v2 — the requester's account id, or
                             // `nil` when it sent none (ADR-0021 tile match).
-                            accountId: $0.accountId
+                            accountId: $0.accountId,
+                            usernameCertificate: $0.usernameCertificate
                         )
                     }
                 } catch {
@@ -909,11 +967,34 @@ public final class ContactsClient {
                     profile: profile,
                     createdAt: message.createdAt
                 )
-                events.append(.contactRequest(req))
+                events.append(.contactRequest(req, replyGrant: replyGrant))
             }
         }
         return PollResult(events: events, cursor: cursor, hasMore: raw.hasMore)
     }
+}
+
+// MARK: - ADR-0058 request reach
+
+/// How an outgoing contact request is authorised (ADR-0058 section 6): the
+/// requester's fresh `reply` grant (registered by the caller before it is
+/// returned) and the grant that lets this device write to the recipient.
+public struct ContactRequestReach {
+    /// Mint the `reply` grant for a request to the account id given.
+    public var replyGrant: (Data) async throws -> FfiReachGrant?
+    /// The authorisation to write to the recipient with account key given.
+    public var writeAuth: (Data) -> DsMailboxWriteAuth?
+
+    public init(
+        replyGrant: @escaping (Data) async throws -> FfiReachGrant?,
+        writeAuth: @escaping (Data) -> DsMailboxWriteAuth?
+    ) {
+        self.replyGrant = replyGrant
+        self.writeAuth = writeAuth
+    }
+
+    /// No reply grant and an unsigned write (tests, and an Everyone mailbox).
+    public static let none = ContactRequestReach(replyGrant: { _ in nil }, writeAuth: { _ in nil })
 }
 
 // MARK: - Result types
@@ -1058,7 +1139,10 @@ public struct PublishedAck: Equatable {
 /// Discriminated mailbox event surfaced by
 /// ``ContactsClient/pollStrangerInbox(...)``.
 public enum IncomingMailboxEvent: Equatable {
-    case contactRequest(IncomingContactRequest)
+    /// A verified request, with the requester's `reply` grant (ADR-0058
+    /// section 6) — SECRET, handed to ``ReachCenter`` at receipt and never
+    /// persisted with the pending request.
+    case contactRequest(IncomingContactRequest, replyGrant: FfiReachGrant? = nil)
     case welcome(messageId: Int64, welcomeBytes: Data, createdAt: String)
     /// 1.9b1 — original recipient's accept-reply.
     case contactAck(IncomingContactAck)
@@ -1097,6 +1181,9 @@ public enum ContactsError: Error {
     /// ``DsClientError`` / UniFFI `FfiError`. The UI surfaces the
     /// wrapped message verbatim.
     case wrapped(Error)
+    /// ADR-0058 — the recipient's mailbox refused the request's key: they
+    /// changed who can find them after this device found them.
+    case requestRefused
 
     public static func wrap(_ error: Error) -> ContactsError {
         if let ce = error as? ContactsError { return ce }
@@ -1125,6 +1212,8 @@ extension ContactsError: LocalizedError {
         case .wrapped(let cause):
             return (cause as? LocalizedError)?.errorDescription
                 ?? String(describing: cause)
+        case .requestRefused:
+            return "Couldn't send the request. They may have changed who can find them."
         }
     }
 }

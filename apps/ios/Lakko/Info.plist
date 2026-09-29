@@ -58,6 +58,8 @@
 	<string></string>
 	<key>LakkoTransparencyWitnessThreshold</key>
 	<string></string>
+	<key>LakkoUsernameCertKey</key>
+	<string></string>
 	<key>LakkoWebOrigin</key>
 	<string>$(LAKKO_WEB_ORIGIN)</string>
 	<key>NSCameraUsageDescription</key>

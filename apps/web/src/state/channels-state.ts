@@ -80,9 +80,11 @@ interface ChannelsStateInternal {
    *  re-using an AEAD `(key, nonce)` under the reload-stable
    *  channel seed. */
   readonly counterByChannel: Accessor<ReadonlyMap<string, bigint>>;
-  /** Per-channel subscriber-side X25519 keypair the
+  /** Per-channel subscriber-side Ed25519 keypair the
    *  device generated for joining a channel as a
-   *  reader (Phase 4b G4-3c). Persisted in the encrypted
+   *  reader (Phase 4b G4-3c; Ed25519 since ADR-0058, so it
+   *  can sign member-card requests - a publisher holds one
+   *  too, for its own member card). Persisted in the encrypted
    *  channel log so a page reload does not lose the secret
    *  half (and with it, access to undecoded posts on the
    *  channel). */
@@ -609,7 +611,7 @@ export const channelsActions = {
     });
     return value;
   },
-  /** Install / replace the subscriber-side X25519 keypair
+  /** Install / replace the subscriber-side Ed25519 keypair
    *  the device generated when joining `channelId` as a
    *  reader. Persisted so a reload does not strand the user
    *  without the secret needed to open future envelopes. */

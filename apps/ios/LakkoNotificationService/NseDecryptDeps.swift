@@ -245,7 +245,9 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
             decodesAsProfileRequest: Self.decodesAsProfileRequest,
             profileRequestEnvelopeLen: Self.profileRequestEnvelopeLength,
             decodesAsPin: Self.decodesAsPin,
-            pinEnvelopeLen: Self.pinEnvelopeLength
+            pinEnvelopeLen: Self.pinEnvelopeLength,
+            decodesAsScopedDiscovery: Self.decodesAsScopedDiscovery,
+            scopedDiscoveryEnvelopeLens: Self.scopedDiscoveryEnvelopeLengths
         ) {
             return nil
         }
@@ -397,6 +399,20 @@ private final class NseRealThrowawayGroup: NseThrowawayGroup {
     /// body. The foreground app applies it on its own receive path.
     private static func decodesAsPin(_ bytes: Data) -> Bool {
         (try? decodePinEnvelope(plaintext: bytes)) != nil
+    }
+
+    /// The AUTHORITATIVE half of the ADR-0058 filter: the slim FFI's
+    /// `decodeScopedDiscoveryEnvelope`, which answers "one of the five 'who can
+    /// find me' envelopes" and returns nothing else. READ-ONLY: a pure decode;
+    /// the NSE never keeps a grant, a setting or a delegation (C-59). The
+    /// foreground app acts on them on its own receive path.
+    private static func decodesAsScopedDiscovery(_ bytes: Data) -> Bool {
+        (try? decodeScopedDiscoveryEnvelope(plaintext: bytes)) != nil
+    }
+
+    /// The length range of the five ADR-0058 envelopes, from the slim FFI.
+    private static var scopedDiscoveryEnvelopeLengths: ClosedRange<Int> {
+        Int(scopedDiscoveryEnvelopeMinLen())...Int(scopedDiscoveryEnvelopeMaxLen())
     }
 
     /// The exact composed length of an ADR-0052 pin envelope, read from the

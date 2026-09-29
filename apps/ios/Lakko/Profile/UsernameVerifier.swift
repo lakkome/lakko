@@ -73,6 +73,12 @@ final class UsernameVerifier {
     /// re-render names in place.
     var onChange: (() -> Void)?
 
+    /// ADR-0058 section 5 — verify `(signature key b64, username)` against the
+    /// username certificate the profile carried: `true` verified, `false` a
+    /// refusal, a throw a transient failure (retried after `retryAfterMs`).
+    /// When set, it replaces ``resolve``.
+    var verifyBinding: ((String, String) async throws -> Bool)?
+
     init(
         resolve: @escaping (String) async throws -> UsernameResolution,
         nowMs: @escaping () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) },
@@ -144,8 +150,15 @@ final class UsernameVerifier {
         }
         let resolve = self.resolve
         let nowMs = self.nowMs
+        let bindingCheck = self.verifyBinding
         let task = Task<UsernameVerificationState, Never> {
             do {
+                // ADR-0058 section 5 — a certificate check, when wired, replaces
+                // the lookup: a person hidden from search answers no lookup,
+                // and no endpoint confirms a guessed username for a known key.
+                if let bindingCheck {
+                    return try await bindingCheck(signatureKeyB64, username) ? .verified : .mismatch
+                }
                 switch try await resolve(username) {
                 case .signatureKey(let resolved):
                     return resolved == expected ? .verified : .mismatch

@@ -7,13 +7,14 @@
  *
  *   * A **pointer** slug is the server-assigned ledger id: 6 random bytes,
  *     8 base64url characters, no padding.
- *   * An **inline** slug is the whole capability, never shorter than the
- *     per-kind floor (always >= 100 bytes).
+ *   * An **inline** slug is the whole sealed link blob, never shorter than
+ *     the per-kind floor (always >= 100 bytes).
  *   * Anything else is refused, including the pre-amendment 32-byte /
  *     43-character content-addressed id.
- *   * A `/g/` link may carry the 12-byte link secret as its fragment, exactly
- *     16 base64url characters. Any other non-empty fragment is damaged, never
- *     "no fragment".
+ *   * Every link carries its 12-byte link secret as the fragment, exactly 16
+ *     base64url characters (the 2026-09-28 security pass): the whole signed
+ *     capability is sealed under it, so a link without one opens nothing and
+ *     any other fragment is damaged.
  *
  * The widths come from the wasm core (`inviteBlobIdLen` and friends) so the
  * client cannot drift from the Rust codec; every helper here takes them as an
@@ -21,7 +22,7 @@
  * {@link inviteLinkWidths}. The copy for the two link-level failures the
  * landing pages show lives here too, in a plain module `vitest` can load.
  */
-import { base64UrlDecodeNoPad } from "../auth/account-id";
+import { base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
 import type { Wasm } from "../wasm";
 
 /** The four widths a link is checked against. */
@@ -30,16 +31,16 @@ export interface InviteLinkWidths {
   readonly blobIdLen: number;
   /** Ledger id in a URL, base64url characters (8). */
   readonly blobIdUrlLen: number;
-  /** `/g/` link secret, bytes (12). */
+  /** Link secret, bytes (12), every kind. */
   readonly linkSecretLen: number;
-  /** `/g/` link secret in a URL fragment, base64url characters (16). */
+  /** Link secret in a URL fragment, base64url characters (16). */
   readonly linkSecretUrlLen: number;
 }
 
 /** The part of the wasm namespace the widths are read from. */
 export type InviteLinkWidthSource = Pick<
   Wasm,
-  "inviteBlobIdLen" | "inviteBlobIdUrlLen" | "groupInviteLinkSecretLen" | "groupInviteLinkSecretUrlLen"
+  "inviteBlobIdLen" | "inviteBlobIdUrlLen" | "inviteLinkSecretLen" | "inviteLinkSecretUrlLen"
 >;
 
 /** Read the widths from the loaded wasm core. Throws when the core reports a
@@ -48,8 +49,8 @@ export function inviteLinkWidths(wasm: InviteLinkWidthSource): InviteLinkWidths 
   const widths: InviteLinkWidths = {
     blobIdLen: wasm.inviteBlobIdLen(),
     blobIdUrlLen: wasm.inviteBlobIdUrlLen(),
-    linkSecretLen: wasm.groupInviteLinkSecretLen(),
-    linkSecretUrlLen: wasm.groupInviteLinkSecretUrlLen(),
+    linkSecretLen: wasm.inviteLinkSecretLen(),
+    linkSecretUrlLen: wasm.inviteLinkSecretUrlLen(),
   };
   for (const [name, value] of Object.entries(widths)) {
     if (!Number.isInteger(value) || value <= 0) {
@@ -67,14 +68,15 @@ export const INVITE_INLINE_FLOOR = 100;
  *  character is refused before it is decoded. */
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 
-/** What a slug turned out to be. */
+/** What a slug turned out to be. An inline slug carries the sealed link
+ *  blob, opened with the fragment's secret like a fetched one. */
 export type ClassifiedInviteSlug =
   | { readonly kind: "pointer"; readonly blobId: Uint8Array }
-  | { readonly kind: "inline"; readonly capabilityBytes: Uint8Array };
+  | { readonly kind: "inline"; readonly sealed: Uint8Array };
 
 /** Classify a `/i/`, `/c/` or `/g/` slug. A pointer is exactly
  *  `widths.blobIdUrlLen` characters decoding to `widths.blobIdLen` bytes;
- *  an inline capability decodes to at least `inlineMinLen` bytes. Throws on
+ *  an inline sealed blob decodes to at least `inlineMinLen` bytes. Throws on
  *  anything else, fail-closed, so an old 43-character id is refused rather
  *  than fetched. */
 export function classifyInviteSlug(
@@ -92,7 +94,7 @@ export function classifyInviteSlug(
   }
   const floor = Math.max(inlineMinLen, INVITE_INLINE_FLOOR);
   if (bytes.length >= floor) {
-    return { kind: "inline", capabilityBytes: bytes };
+    return { kind: "inline", sealed: bytes };
   }
   throw new Error(
     `${what} slug decoded to ${bytes.length} bytes: neither a ${widths.blobIdLen}-byte ` +
@@ -108,23 +110,24 @@ export function requireBlobId(blobId: Uint8Array, widths: InviteLinkWidths): voi
   }
 }
 
-/** What a `/g/` link's fragment carries. `none` is a link without one (a chat
- *  app that stripped it, a hand-typed URL); `damaged` is a fragment that is
- *  present but is not a link secret, which the page refuses. */
-export type GroupInviteFragment =
+/** What a link's fragment carries. `none` is a link without one (a chat app
+ *  that stripped it, a hand-typed URL); `damaged` is a fragment that is
+ *  present but is not a link secret. Since the 2026-09-28 security pass both
+ *  are refused: nothing opens without the secret. */
+export type InviteFragment =
   | { readonly kind: "none" }
   | { readonly kind: "secret"; readonly secret: Uint8Array }
   | { readonly kind: "damaged" };
 
-/** Read a `/g/` fragment (`location.hash`, with or without its `#`). An
+/** Read a link fragment (`location.hash`, with or without its `#`). An
  *  absent or empty fragment is `none`; exactly `widths.linkSecretUrlLen`
  *  base64url characters decoding to `widths.linkSecretLen` bytes is a secret;
  *  anything else, the pre-amendment 43-character key included, is
  *  `damaged`. Never throws. */
-export function parseGroupInviteFragment(
+export function parseInviteFragment(
   fragment: string | null | undefined,
   widths: InviteLinkWidths,
-): GroupInviteFragment {
+): InviteFragment {
   if (fragment === null || fragment === undefined) return { kind: "none" };
   const raw = fragment.startsWith("#") ? fragment.slice(1) : fragment;
   if (raw.length === 0) return { kind: "none" };
@@ -138,13 +141,79 @@ export function parseGroupInviteFragment(
   return bytes.length === widths.linkSecretLen ? { kind: "secret", secret: bytes } : { kind: "damaged" };
 }
 
+/** The `/g/` names, kept for the callers written before every kind carried
+ *  a fragment. */
+export type GroupInviteFragment = InviteFragment;
+export const parseGroupInviteFragment = parseInviteFragment;
+
+/** The link secret a fragment must carry, or `null` when it carries none or
+ *  a damaged one (both refused: a link opens only with its secret). */
+export function linkSecretFromFragment(
+  fragment: string | null | undefined,
+  widths: InviteLinkWidths,
+): Uint8Array | null {
+  const parsed = parseInviteFragment(fragment, widths);
+  return parsed.kind === "secret" ? parsed.secret : null;
+}
+
+/** The `#<secret>` suffix of a minted link. Throws on a secret of the wrong
+ *  width, which only a broken build can produce. */
+export function linkFragment(secret: Uint8Array, widths: InviteLinkWidths): string {
+  if (secret.length !== widths.linkSecretLen) {
+    throw new Error(`link secret must be ${widths.linkSecretLen} bytes, got ${secret.length}`);
+  }
+  return `#${base64UrlEncodeNoPad(secret)}`;
+}
+
+/** Split a pasted link, or a bare `<slug>#<secret>`, into its slug and its
+ *  fragment (with the `#`, or `""`). The path prefix, when present, must be
+ *  `/<kind>/`. */
+export function splitInviteLink(
+  input: string,
+  kind: "i" | "c" | "g",
+): { readonly slug: string; readonly fragment: string } | null {
+  const trimmed = input.trim();
+  if (trimmed.length === 0) return null;
+  const hashAt = trimmed.indexOf("#");
+  const beforeHash = hashAt < 0 ? trimmed : trimmed.slice(0, hashAt);
+  const fragment = hashAt < 0 ? "" : trimmed.slice(hashAt);
+  const marker = `/${kind}/`;
+  const at = beforeHash.lastIndexOf(marker);
+  const slug = (at < 0 ? beforeHash : beforeHash.slice(at + marker.length)).split(/[?/]/)[0] ?? "";
+  if (slug.length === 0) return null;
+  return { slug, fragment };
+}
+
+/** A link whose fragment is missing or does not open it. Carries the same
+ *  `inviteLinkError: "damaged"` tag the wasm `openLink` refusal carries, so
+ *  one check ({@link isInviteLinkDamaged}) covers both. */
+export class InviteLinkDamagedError extends Error {
+  override name = "InviteLinkDamagedError";
+  readonly inviteLinkError = "damaged" as const;
+  constructor() {
+    super("invite link is damaged");
+  }
+}
+
+/** Whether an error is the "damaged link" refusal: the wasm `openLink` one
+ *  (the error carries `inviteLinkError: "damaged"`), an
+ *  {@link InviteLinkDamagedError}, or either of them wrapped as a `cause`. */
+export function isInviteLinkDamaged(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 4 && typeof current === "object" && current !== null; depth += 1) {
+    if ((current as { inviteLinkError?: unknown }).inviteLinkError === "damaged") return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 // ----------------------------------------------------------------------------
 // Copy (the same sentences ship on iOS and Android)
 // ----------------------------------------------------------------------------
 
-/** A `/g/` link whose fragment is present but does not open the preview: a
- *  truncated copy, a tampered link, or a capability a server swapped in under
- *  a live id. Refused rather than shown without a preview. */
+/** A link whose fragment is missing or does not open it (or, on `/g/`, its
+ *  preview): a truncated copy, a tampered link, or a blob a server swapped in
+ *  under a live id. Refused, never shown half-opened. */
 export const INVITE_LINK_DAMAGED = "This invite link is damaged. Ask for a new link.";
 
 /** The discovery service answered 429 on fetch or consume: the link may be

@@ -5531,3 +5531,56 @@ html[data-call-bar] body {
 .lk-call-collapse > svg {
   transform: rotate(90deg);
 }
+
+/* Settings > Privacy > Who can find me (docs/ux/who-can-find-me.md section 3):
+   radio and check rows, the parts indented under Some people, the form
+   indented under its part. */
+.lk-privacy-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.lk-privacy-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--surface-muted);
+}
+.lk-privacy-group {
+  display: flex;
+  flex-direction: column;
+}
+.lk-privacy-choice {
+  cursor: pointer;
+  align-items: flex-start;
+}
+.lk-privacy-choice > input,
+.lk-privacy-choice-label > input {
+  margin: 3px 0 0;
+  flex: 0 0 auto;
+  padding: 0;
+  min-height: 0;
+  width: auto;
+}
+.lk-privacy-choice-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+  font-weight: 400;
+}
+.lk-privacy-nested {
+  display: flex;
+  flex-direction: column;
+  padding-left: 28px;
+  border-top: 1px solid var(--surface-border);
+}
+.lk-privacy-disclosure {
+  display: inline-flex;
+  align-items: center;
+  color: var(--surface-muted);
+}

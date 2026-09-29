@@ -280,7 +280,7 @@ public enum StateBundle {
         )
         defer { key.resetBytes(in: 0..<key.count) }
         let sealed = try sealWithKey(key: key, plaintext: encode(bundle))
-        _ = try await ds.publishMailbox(pseudonym: rendezvousPseudonym, payload: wrapRow(sealed))
+        _ = try await ds.publishRendezvous(id: rendezvousPseudonym, payload: wrapRow(sealed))
     }
 
     /// Joiner side: poll the state row past the Welcome cursor (skipping the
@@ -304,8 +304,7 @@ public enum StateBundle {
             let waitSecs = min(perRequestLongPollSeconds, max(1, Int(remaining)))
             let result: FetchResult
             do {
-                result = try await ds.fetchMailbox(
-                    pseudonym: rendezvousPseudonym, after: cursor, limit: 1, waitSecs: waitSecs)
+                result = try await ds.fetchRendezvous(id: rendezvousPseudonym, after: cursor, limit: 1, waitSecs: waitSecs)
             } catch {
                 // 404 ("no rows yet") and network blips: keep polling until
                 // the deadline, as the history and recovery polls do.
