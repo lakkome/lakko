@@ -267,7 +267,7 @@ public fun ChatListScreen(
         modifier = modifier,
         topBar = {
             TopAppBar(
-                title = { Text("Chats") },
+                title = { Text(me.lakko.app.l10n.t("nav.chats")) },
                 actions = {
                     Box {
                         IconButton(onClick = { createMenuOpen = true }) {

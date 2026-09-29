@@ -24,6 +24,8 @@ public struct ContactsScreen: View {
     /// ADR-0048 — names resolve through the directory; observing it here
     /// regroups the list in place when a profile or a verdict arrives.
     @ObservedObject private var profiles = ProfileDirectory.shared
+    /// ADR-0058 — the title follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
 
     @State private var query = ""
     @State private var addContactPresented = false
@@ -125,7 +127,7 @@ public struct ContactsScreen: View {
         }
         .searchable(text: $query, prompt: "Search contacts")
         .refreshable { await viewModel.pullToRefresh() }
-        .navigationTitle("Contacts")
+        .navigationTitle(l10n.t("nav.contacts"))
         .navigationBarTitleDisplayMode(.large)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {

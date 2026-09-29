@@ -21,6 +21,7 @@ import { useAuth } from "../auth/AuthContext";
 import { DeviceRequestPrompt } from "../devices/DeviceRequestPrompt";
 import { Avatar } from "./Avatar";
 import { Icon, type IconName } from "./icons";
+import { t } from "../l10n";
 
 /**
  * `docs/ux/navigation.md` section 1 - four destinations, not five.
@@ -35,15 +36,15 @@ import { Icon, type IconName } from "./icons";
  * never an argument against call history, and the design system's own
  * information architecture kept it as destination 4 throughout.
  */
-const ITEMS: ReadonlyArray<{ href: string; label: string; icon: IconName; prefix: string[] }> = [
+const ITEMS: ReadonlyArray<{ href: string; labelKey: string; icon: IconName; prefix: string[] }> = [
   // A group conversation still lives under `/groups/<id>`, so that prefix
   // keeps Chats lit while one is open - the list is one list now, and which
   // URL a conversation happens to sit at is not something the rail should
   // show.
-  { href: paths.home, label: "Chats", icon: "chat", prefix: ["/chat/", "/groups", "/channels"] },
-  { href: paths.contacts, label: "Contacts", icon: "contacts", prefix: [] },
-  { href: paths.calls, label: "Calls", icon: "calls", prefix: [] },
-  { href: paths.settings, label: "Settings", icon: "settings", prefix: ["/devices"] },
+  { href: paths.home, labelKey: "nav.chats", icon: "chat", prefix: ["/chat/", "/groups", "/channels"] },
+  { href: paths.contacts, labelKey: "nav.contacts", icon: "contacts", prefix: [] },
+  { href: paths.calls, labelKey: "nav.calls", icon: "calls", prefix: [] },
+  { href: paths.settings, labelKey: "nav.settings", icon: "settings", prefix: ["/devices"] },
 ];
 
 /**
@@ -85,14 +86,14 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
             aria-current={isActive(item) ? "page" : undefined}
           >
             <Icon name={item.icon} size={22} />
-            <span>{item.label}</span>
+            <span>{t(item.labelKey)}</span>
           </A>
         ))}
         <div class="lk-rail-spacer" />
         <button
           type="button"
           class="lk-rail-me"
-          title={username().length > 0 ? `@${username()} · Settings` : "Settings"}
+          title={username().length > 0 ? `@${username()} · ${t("nav.settings")}` : t("nav.settings")}
           onClick={() => navigate(paths.settingsSection("profile"))}
         >
           <Avatar label={username().length > 0 ? username() : "?"} id={username()} size="sm" />

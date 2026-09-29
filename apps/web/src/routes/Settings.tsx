@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * `/settings/:section?` — Profile · Security · Appearance · Media · About ·
- * Account (docs/ux/client-redesign.md section 5.5). A section list on the
+ * `/settings/:section?` — Profile · Security · Appearance · Language · Media ·
+ * About · Account (docs/ux/client-redesign.md section 5.5). A section list on the
  * left, the section on the right; a narrow screen shows one of the two.
  * `/settings` lands on Profile. `recovery` (authenticator, email or phone) is
  * a page under Security rather than a section of its own. Account is last:
@@ -22,20 +22,29 @@ import { appLicense, appVersion } from "../ui/app-version";
 import { Avatar } from "../ui/Avatar";
 import { Icon, type IconName } from "../ui/icons";
 import { setTheme, useTheme, type Theme } from "../ui/theme";
+import { currentLanguage, supportedLanguages, t } from "../l10n";
+import { LanguagePicker } from "../l10n/LanguagePicker";
 import Profile from "./Profile";
 import { paths } from "./paths";
 
-type Section = "profile" | "security" | "appearance" | "media" | "about" | "account";
+type Section = "profile" | "security" | "appearance" | "language" | "media" | "about" | "account";
 type Page = Section | "recovery";
 
-const SECTIONS: ReadonlyArray<{ id: Section; label: string; icon: IconName }> = [
-  { id: "profile", label: "Profile", icon: "user" },
-  { id: "security", label: "Security", icon: "shield" },
-  { id: "appearance", label: "Appearance", icon: "palette" },
-  { id: "media", label: "Media", icon: "video" },
-  { id: "about", label: "About", icon: "info" },
-  { id: "account", label: "Account", icon: "logout" },
+// Language sits after Appearance (`docs/ux/localization.md` section 1).
+const SECTIONS: ReadonlyArray<{ id: Section; labelKey: string; icon: IconName }> = [
+  { id: "profile", labelKey: "settings.section.profile", icon: "user" },
+  { id: "security", labelKey: "settings.section.security", icon: "shield" },
+  { id: "appearance", labelKey: "settings.section.appearance", icon: "palette" },
+  { id: "language", labelKey: "settings.language.title", icon: "globe" },
+  { id: "media", labelKey: "settings.section.media", icon: "video" },
+  { id: "about", labelKey: "settings.section.about", icon: "info" },
+  { id: "account", labelKey: "settings.section.account", icon: "logout" },
 ];
+
+/** The interface language in its own name: the Language row's trailing text. */
+function currentLanguageOwnName(): string {
+  return supportedLanguages().find((l) => l.code === currentLanguage())?.ownName ?? "";
+}
 
 function pageOf(s: string | undefined): Page | null {
   if (s === "recovery") return "recovery";
@@ -67,8 +76,8 @@ export default function Settings(): JSX.Element {
 
   return (
     <div class="lk-settings" data-open={page() === null ? "false" : "true"}>
-      <nav class="lk-settings-nav" aria-label="Settings">
-        <h1>Settings</h1>
+      <nav class="lk-settings-nav" aria-label={t("nav.settings")}>
+        <h1>{t("nav.settings")}</h1>
         <div class="lk-settings-me">
           <Avatar
             label={displayName().length > 0 ? displayName() : username()}
@@ -92,7 +101,12 @@ export default function Settings(): JSX.Element {
             inactiveClass=""
           >
             <Icon name={s.icon} size={20} />
-            <span>{s.label}</span>
+            <span>{t(s.labelKey)}</span>
+            <Show when={s.id === "language"}>
+              <span class="lk-settings-nav-trail">
+                <bdi lang={currentLanguage()}>{currentLanguageOwnName()}</bdi>
+              </span>
+            </Show>
           </A>
         ))}
       </nav>
@@ -100,7 +114,7 @@ export default function Settings(): JSX.Element {
         <div class="lk-page lk-stack">
           <A href={paths.settings} class="ghost small lk-narrow-only" style={{ "align-self": "flex-start" }}>
             <Icon name="back" size={16} />
-            Settings
+            {t("nav.settings")}
           </A>
           <Show when={shown() === "profile"}>
             <Profile />
@@ -114,6 +128,9 @@ export default function Settings(): JSX.Element {
           <Show when={shown() === "appearance"}>
             <AppearanceSection />
           </Show>
+          <Show when={shown() === "language"}>
+            <LanguageSection />
+          </Show>
           <Show when={shown() === "media"}>
             <MediaSection />
           </Show>
@@ -122,7 +139,7 @@ export default function Settings(): JSX.Element {
           </Show>
           <Show when={shown() === "account"}>
             <div class="lk-page-head">
-              <h1>Account</h1>
+              <h1>{t("settings.section.account")}</h1>
               <p>Your data, signing out, this device, and deleting your account.</p>
             </div>
             <ExportDataCard />
@@ -138,7 +155,7 @@ function SecuritySection(): JSX.Element {
   return (
     <>
       <div class="lk-page-head">
-        <h1>Security</h1>
+        <h1>{t("settings.section.security")}</h1>
         <p>How you sign in, which devices can read your messages, and how you get back in.</p>
       </div>
       <PasskeysSection />
@@ -192,7 +209,7 @@ function RecoverySection(): JSX.Element {
     <>
       <A href={paths.settingsSection("security")} class="ghost small lk-wide-only" style={{ "align-self": "flex-start" }}>
         <Icon name="back" size={16} />
-        Security
+        {t("settings.section.security")}
       </A>
       <div class="lk-page-head">
         <h1>Recovery</h1>
@@ -215,20 +232,20 @@ function RecoverySection(): JSX.Element {
 }
 
 function AppearanceSection(): JSX.Element {
-  const options: ReadonlyArray<{ value: Theme; label: string; icon: IconName }> = [
-    { value: "system", label: "System", icon: "monitor" },
-    { value: "light", label: "Light", icon: "sun" },
-    { value: "dark", label: "Dark", icon: "moon" },
+  const options: ReadonlyArray<{ value: Theme; labelKey: string; icon: IconName }> = [
+    { value: "system", labelKey: "settings.appearance.theme.system", icon: "monitor" },
+    { value: "light", labelKey: "settings.appearance.theme.light", icon: "sun" },
+    { value: "dark", labelKey: "settings.appearance.theme.dark", icon: "moon" },
   ];
   return (
     <>
       <div class="lk-page-head">
-        <h1>Appearance</h1>
+        <h1>{t("settings.section.appearance")}</h1>
         <p>The theme on this device.</p>
       </div>
       <section class="lk-card">
-        <h2>Theme</h2>
-        <div class="lk-segmented" role="radiogroup" aria-label="Theme">
+        <h2>{t("settings.appearance.theme")}</h2>
+        <div class="lk-segmented" role="radiogroup" aria-label={t("settings.appearance.theme")}>
           {options.map((o) => (
             <label>
               <input
@@ -239,10 +256,23 @@ function AppearanceSection(): JSX.Element {
                 onChange={() => setTheme(o.value)}
               />
               <Icon name={o.icon} size={16} />
-              {o.label}
+              {t(o.labelKey)}
             </label>
           ))}
         </div>
+      </section>
+    </>
+  );
+}
+
+function LanguageSection(): JSX.Element {
+  return (
+    <>
+      <div class="lk-page-head">
+        <h1>{t("settings.language.title")}</h1>
+      </div>
+      <section class="lk-card">
+        <LanguagePicker />
       </section>
     </>
   );
@@ -252,7 +282,7 @@ function AboutSection(): JSX.Element {
   return (
     <>
       <div class="lk-page-head">
-        <h1>About</h1>
+        <h1>{t("settings.section.about")}</h1>
         <p>Lakko on the web.</p>
       </div>
       <section class="lk-card">
@@ -298,7 +328,7 @@ function MediaSection(): JSX.Element {
   return (
     <>
       <div class="lk-page-head">
-        <h1>Media</h1>
+        <h1>{t("settings.section.media")}</h1>
         <p>Playback on this device.</p>
       </div>
       <section class="lk-card">

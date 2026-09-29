@@ -59,6 +59,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.app.NotificationManagerCompat
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import me.lakko.app.l10n.t
 import me.lakko.app.push.NOTIFICATIONS_OFF_NOTICE
 import me.lakko.app.push.NOTIFICATIONS_OFF_TITLE
 import me.lakko.app.ui.chat.AutoplayVideoNotesSetting
@@ -85,6 +86,7 @@ public fun SettingsScreen(
     onOpenDevices: () -> Unit,
     onOpenRecovery: () -> Unit,
     onOpenAntiCensorship: () -> Unit,
+    onOpenLanguage: () -> Unit,
     onLogout: () -> Unit,
     onForgetDevice: () -> Unit,
     modifier: Modifier = Modifier,
@@ -109,7 +111,7 @@ public fun SettingsScreen(
 
     Scaffold(
         modifier = modifier,
-        topBar = { TopAppBar(title = { Text("Settings") }) },
+        topBar = { TopAppBar(title = { Text(t("nav.settings")) }) },
     ) { padding ->
         Column(
             modifier = Modifier
@@ -127,10 +129,16 @@ public fun SettingsScreen(
                 LakkoAvatar(name = headerName, seed = username ?: headerName, size = 56.dp)
                 Spacer(Modifier.width(16.dp))
                 Column {
-                    Text(headerName, style = MaterialTheme.typography.titleLarge)
+                    // A name keeps its own direction (FSI); a bare @username is LTR.
+                    Text(
+                        if (headerName.startsWith("@")) "\u2066$headerName\u2069" else "\u2068$headerName\u2069",
+                        style = MaterialTheme.typography.titleLarge,
+                    )
                     username?.let {
+                        // A username is always laid out LTR (docs/ux/localization.md
+                        // section 6), isolated from an RTL interface around it.
                         Text(
-                            "@$it",
+                            "\u2066@$it\u2069",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -145,7 +153,7 @@ public fun SettingsScreen(
             // notifications are on — a row confirming that things work is a row
             // nobody needs.
             if (!notificationsEnabled) {
-                SectionLabel("Notifications")
+                SectionLabel(t("settings.section.notifications"))
                 SettingsRow(
                     title = NOTIFICATIONS_OFF_TITLE,
                     icon = Icons.Filled.NotificationsOff,
@@ -154,10 +162,10 @@ public fun SettingsScreen(
                 )
             }
 
-            SectionLabel("Account")
-            SettingsRow("Profile", Icons.Filled.Person, onOpenProfile)
+            SectionLabel(t("settings.section.account"))
+            SettingsRow(t("settings.section.profile"), Icons.Filled.Person, onOpenProfile)
 
-            SectionLabel("Security")
+            SectionLabel(t("settings.section.security"))
             SettingsRow("Passkeys", Icons.Filled.Key, onOpenPasskeys)
             SettingsRow("Devices", Icons.Filled.Devices, onOpenDevices)
             SettingsRow(
@@ -167,7 +175,7 @@ public fun SettingsScreen(
                 supporting = "Recovery phrase, authenticator, email or phone",
             )
 
-            SectionLabel("Appearance")
+            SectionLabel(t("settings.section.appearance"))
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
@@ -180,7 +188,7 @@ public fun SettingsScreen(
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.width(16.dp))
-                Text("Theme", modifier = Modifier.weight(1f))
+                Text(t("settings.appearance.theme"), modifier = Modifier.weight(1f))
             }
             SingleChoiceSegmentedButtonRow(
                 modifier = Modifier
@@ -194,13 +202,15 @@ public fun SettingsScreen(
                         onClick = { ThemePreference.set(option) },
                         shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
                     ) {
-                        Text(option.name)
+                        Text(t(themeModeKey(option)))
                     }
                 }
             }
             Spacer(Modifier.height(8.dp))
+            // docs/ux/localization.md section 1: a top-level row after Appearance.
+            LanguageSettingsRow(onClick = onOpenLanguage)
 
-            SectionLabel("Media")
+            SectionLabel(t("settings.section.media"))
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
@@ -221,7 +231,7 @@ public fun SettingsScreen(
             SectionLabel("Network")
             SettingsRow("Anti-censorship", Icons.Filled.Shield, onOpenAntiCensorship)
 
-            SectionLabel("About")
+            SectionLabel(t("settings.section.about"))
             InfoRow(
                 title = "Version",
                 value = "${me.lakko.app.BuildConfig.VERSION_NAME} (${me.lakko.app.BuildConfig.VERSION_CODE})",
@@ -282,6 +292,13 @@ public fun SettingsScreen(
             },
         )
     }
+}
+
+/** Catalog key of a theme option's label. */
+private fun themeModeKey(mode: ThemeMode): String = when (mode) {
+    ThemeMode.System -> "settings.appearance.theme.system"
+    ThemeMode.Light -> "settings.appearance.theme.light"
+    ThemeMode.Dark -> "settings.appearance.theme.dark"
 }
 
 @Composable

@@ -215,7 +215,7 @@ public fun ContactsScreen(
         modifier = modifier,
         topBar = {
             TopAppBar(
-                title = { Text("Contacts") },
+                title = { Text(me.lakko.app.l10n.t("nav.contacts")) },
                 actions = {
                     Box {
                         IconButton(onClick = { menuOpen = true }) {

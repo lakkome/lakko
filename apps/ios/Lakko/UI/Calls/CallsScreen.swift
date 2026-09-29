@@ -41,6 +41,8 @@ struct CallsScreen: View {
     /// Titles come from the conversation list's own resolver, so a call and
     /// its chat are never named two ways.
     @ObservedObject var conversations: ChatListViewModel
+    /// ADR-0058 — the title follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
     /// Start a group video call and land in it. Returns the one sentence to
     /// show when it could not start (another call holds the slot, or there is
     /// no session), `nil` when it did.
@@ -66,7 +68,7 @@ struct CallsScreen: View {
 
     var body: some View {
         content
-            .navigationTitle("Calls")
+            .navigationTitle(l10n.t("nav.calls"))
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
                 ToolbarItemGroup(placement: .topBarTrailing) {

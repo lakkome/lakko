@@ -42,6 +42,8 @@ public struct ChatListScreen: View {
     /// groups. Observed rather than passed as a snapshot: a post arriving
     /// re-times a channel's row, and re-timing is re-ordering.
     @ObservedObject public var channels: ChannelsUiState
+    /// ADR-0058 — the title follows the interface language.
+    @ObservedObject private var l10n = Localization.shared
     /// Open the conversation this row names, whichever kind it is.
     public var onOpen: (ConversationListRow) -> Void
     /// One of the three create-menu items.
@@ -93,7 +95,7 @@ public struct ChatListScreen: View {
         let _ = BodyEvaluationCounter.tick("ChatListScreen")
 #endif
         content
-            .navigationTitle("Chats")
+            .navigationTitle(l10n.t("nav.chats"))
             .navigationBarTitleDisplayMode(.large)
             .searchable(text: $searchText, prompt: "Search")
             .onChange(of: searchText) { _, _ in lookupNote = nil }

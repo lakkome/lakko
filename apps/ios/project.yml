@@ -79,6 +79,14 @@ targets:
     platform: iOS
     sources:
       - path: Lakko
+        # The compiled ADR-0058 catalogs ride as ONE folder reference below,
+        # so they land under `L10n/` in the bundle instead of flat at its
+        # root, where `source.json` and two-letter names could collide.
+        excludes:
+          - "Resources/L10n"
+      - path: Lakko/Resources/L10n
+        type: folder
+        buildPhase: resources
       # G3-sframe-native N-4 — pull the C++ bridge sub-sprint
       # source into the iOS target as a sibling compile unit.
       # Only the production .cc / .h ship; test_bridge.cc +

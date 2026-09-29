@@ -16,6 +16,8 @@ struct SettingsScreen: View {
 
     /// ADR-0048 — the own name in the header updates when saved.
     @ObservedObject private var profiles = ProfileDirectory.shared
+    /// ADR-0058 — the interface language; every catalog string here follows it.
+    @ObservedObject private var l10n = Localization.shared
     /// The existing delete-account flow (auth `DELETE /account`, the passkey
     /// action ceremony on a 403, the discovery purge, then the local wipe)
     /// lives on ``PasskeysViewModel``; the danger zone drives that same
@@ -98,7 +100,7 @@ struct SettingsScreen: View {
                             }
                         }
                         Spacer()
-                        Image(systemName: "chevron.right")
+                        Image(systemName: "chevron.forward")
                             .font(.footnote.weight(.semibold))
                             .foregroundStyle(Color.lakkoTextMuted)
                     }
@@ -107,27 +109,46 @@ struct SettingsScreen: View {
                 .buttonStyle(.plain)
             }
 
-            Section("Account") {
-                row("Profile", systemImage: "person.crop.circle") { onOpen(.profile) }
+            Section(l10n.t("settings.section.account")) {
+                row(l10n.t("settings.section.profile"), systemImage: "person.crop.circle") { onOpen(.profile) }
             }
 
-            Section("Security") {
+            Section(l10n.t("settings.section.security")) {
                 row("Passkeys", systemImage: "person.badge.key") { onOpen(.passkeys) }
                 row("Devices", systemImage: "laptopcomputer.and.iphone") { onOpen(.devices) }
                 row("Recovery", systemImage: "lifepreserver") { onOpen(.recoveryFactors) }
             }
 
-            Section("Appearance") {
+            Section(l10n.t("settings.section.appearance")) {
                 Picker(selection: appearance) {
                     ForEach(AppearanceSetting.allCases) { setting in
-                        Text(setting.label).tag(setting)
+                        Text(l10n.t(setting.labelKey)).tag(setting)
                     }
                 } label: {
-                    Label("Theme", systemImage: "circle.lefthalf.filled")
+                    Label(l10n.t("settings.appearance.theme"), systemImage: "circle.lefthalf.filled")
                 }
             }
 
-            Section("Media") {
+            // UX spec `docs/ux/localization.md` section 1: a top-level row
+            // after Appearance, trailing text = the current language in its
+            // own name.
+            Section {
+                Button { onOpen(.language) } label: {
+                    HStack {
+                        Label(l10n.t("settings.language.title"), systemImage: "globe")
+                            .foregroundStyle(Color.lakkoText)
+                        Spacer()
+                        Text(l10n.ownName(of: l10n.language))
+                            .foregroundStyle(Color.lakkoTextMuted)
+                        Image(systemName: "chevron.forward")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(Color.lakkoTextMuted)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+
+            Section(l10n.t("settings.section.media")) {
                 Toggle(isOn: $autoplayVideoNotes) {
                     Label("Autoplay video notes", systemImage: "play.circle")
                 }
@@ -139,7 +160,7 @@ struct SettingsScreen: View {
                 }
             }
 
-            Section("About") {
+            Section(l10n.t("settings.section.about")) {
                 HStack {
                     Label("Version", systemImage: "info.circle")
                         .foregroundStyle(Color.lakkoText)
@@ -198,7 +219,11 @@ struct SettingsScreen: View {
             }
         }
         .listStyle(.insetGrouped)
-        .navigationTitle("Settings")
+        // A UIKit-backed List keeps the mirroring it was built with when the
+        // environment's layout direction flips under it (its glyphs come out
+        // mirrored), so the list is rebuilt when the direction changes.
+        .id(l10n.layoutDirection)
+        .navigationTitle(l10n.t("nav.settings"))
         .navigationBarTitleDisplayMode(.large)
         .confirmationDialog(
             "Log out of Lakko?",
@@ -247,7 +272,7 @@ struct SettingsScreen: View {
                 Label(title, systemImage: systemImage)
                     .foregroundStyle(Color.lakkoText)
                 Spacer()
-                Image(systemName: "chevron.right")
+                Image(systemName: "chevron.forward")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(Color.lakkoTextMuted)
             }

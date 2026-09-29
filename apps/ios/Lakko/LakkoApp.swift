@@ -215,20 +215,11 @@ struct LakkoApp: App {
 
     var body: some Scene {
         WindowGroup {
-            // A UI test launched with `-LakkoUITestFixture <name>` gets that
-            // fixture INSTEAD of the app, so an XCUITest can reach a real
-            // production screen without signing in. DEBUG only — see
-            // ``UiTestFixture`` for why testing through login would be testing
-            // the deployment rather than the screen.
-#if DEBUG
-            if let fixture = UiTestFixture.requested {
-                UiTestFixtureRoot(fixture: fixture)
-            } else {
-                appRoot
+            // ADR-0058 — the interface language: locale + layout direction
+            // for everything below, switched live (no restart).
+            LocalizedRoot {
+                windowContent
             }
-#else
-            appRoot
-#endif
         }
         // G-29 — `BGAppRefreshTask` handler. iOS launches this opportunistically;
         // run one quick (non-long-poll) inbox fetch, then chain the next
@@ -238,6 +229,25 @@ struct LakkoApp: App {
             await contactsRepository.refreshInbox()
             ContactBackgroundRefresh.schedule()
         }
+    }
+
+    /// What the window shows, wrapped in ``LocalizedRoot`` by ``body``.
+    @ViewBuilder
+    private var windowContent: some View {
+        // A UI test launched with `-LakkoUITestFixture <name>` gets that
+        // fixture INSTEAD of the app, so an XCUITest can reach a real
+        // production screen without signing in. DEBUG only — see
+        // ``UiTestFixture`` for why testing through login would be testing
+        // the deployment rather than the screen.
+#if DEBUG
+        if let fixture = UiTestFixture.requested {
+            UiTestFixtureRoot(fixture: fixture)
+        } else {
+            appRoot
+        }
+#else
+        appRoot
+#endif
     }
 
     /// The real root of the app. Extracted from ``body`` unchanged so the
@@ -616,6 +626,8 @@ enum TabRoute: Hashable {
     case addDevice
     case recoveryFactors
     case antiCensorship
+    /// Settings > Language (ADR-0058).
+    case language
     /// Deep links (`/i/`, `/g/`, `/c/`), pushed over the current tab rather
     /// than replacing the app (UX spec section 3).
     case inviteLanding(slug: String)
@@ -723,6 +735,9 @@ private struct SessionRoot: View, Equatable {
     private var chatListVM: ChatListViewModel { models.chatListVM }
     private var channelsState: ChannelsUiState { models.channelsState }
 
+    /// ADR-0058 — the tab titles follow the interface language.
+    @ObservedObject private var l10n = Localization.shared
+
     @State private var selectedTab: SessionTab = .chats
     @State private var chatsPath: [TabRoute] = []
     @State private var contactsPath: [TabRoute] = []
@@ -760,14 +775,14 @@ private struct SessionRoot: View, Equatable {
                 )
                 .navigationDestination(for: TabRoute.self) { routeView($0, tab: .chats) }
             }
-            .tabItem { Label("Chats", systemImage: "bubble.left") }
+            .tabItem { Label(l10n.t("nav.chats"), systemImage: "bubble.left") }
             .tag(SessionTab.chats)
 
             NavigationStack(path: $contactsPath) {
                 ContactsScreen(viewModel: contactsVM)
                     .navigationDestination(for: TabRoute.self) { routeView($0, tab: .contacts) }
             }
-            .tabItem { Label("Contacts", systemImage: "person.crop.circle") }
+            .tabItem { Label(l10n.t("nav.contacts"), systemImage: "person.crop.circle") }
             .tag(SessionTab.contacts)
 
             NavigationStack(path: $callsPath) {
@@ -790,7 +805,7 @@ private struct SessionRoot: View, Equatable {
                 .task { services.chatRepository.backfillCallHistory() }
                 .navigationDestination(for: TabRoute.self) { routeView($0, tab: .calls) }
             }
-            .tabItem { Label("Calls", systemImage: "phone") }
+            .tabItem { Label(l10n.t("nav.calls"), systemImage: "phone") }
             .tag(SessionTab.calls)
 
             NavigationStack(path: $settingsPath) {
@@ -803,7 +818,7 @@ private struct SessionRoot: View, Equatable {
                 )
                 .navigationDestination(for: TabRoute.self) { routeView($0, tab: .settings) }
             }
-            .tabItem { Label("Settings", systemImage: "gearshape") }
+            .tabItem { Label(l10n.t("nav.settings"), systemImage: "gearshape") }
             .tag(SessionTab.settings)
         }
         // Deep links: park on the current tab's stack when a slug arrives
@@ -1145,6 +1160,8 @@ private struct SessionRoot: View, Equatable {
             RecoveryFactorsScreen(authRepository: authRepository)
         case .antiCensorship:
             AntiCensorshipSettingsView(manager: AntiCensorshipManager.shared)
+        case .language:
+            LanguageScreen()
         case .inviteLanding(let slug):
             InviteLandingScreen(
                 viewModel: InviteLandingViewModel(
@@ -1371,6 +1388,12 @@ private struct AnonRoot: View {
                 onCreateAccount: { path = [.signup] },
                 onLogIn: { path = [.login] }
             )
+            // ADR-0058 — the language button in the top corner. Welcome hides
+            // its navigation bar, so it rides an overlay (trailing = the
+            // corner that mirrors in right-to-left languages).
+            .overlay(alignment: .topTrailing) {
+                LanguageButton().padding(.horizontal, 16)
+            }
             .navigationDestination(for: AnonRoute.self) { route in
                 switch route {
                 case .signup:
@@ -1378,12 +1401,14 @@ private struct AnonRoot: View {
                         viewModel: signupVM,
                         onNavigateToLogin: { path = [.login] }
                     )
+                    .toolbar { ToolbarItem(placement: .topBarTrailing) { LanguageButton() } }
                 case .login:
                     LoginScreen(
                         viewModel: loginVM,
                         onNavigateToSignup: { path = [.signup] },
                         onNavigateToRecover: { path.append(.recover) }
                     )
+                    .toolbar { ToolbarItem(placement: .topBarTrailing) { LanguageButton() } }
                 case .recover:
                     RecoverScreen(
                         viewModel: recoverVM,

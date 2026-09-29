@@ -6,6 +6,10 @@
       "text": "Change language",
       "comment": "Accessibility label of the globe button on the sign-in and sign-up screens."
     },
+    "common.close": {
+      "text": "Close",
+      "comment": "Accessibility label of a button that closes a sheet or dialog, e.g. the language list opened from the sign-in screen."
+    },
     "language.name.ar": {
       "text": "Arabic",
       "comment": "Name of the Arabic language, shown under its own name in the language list."

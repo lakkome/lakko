@@ -41,7 +41,7 @@ public fun LoginScreen(
     val state by viewModel.state.collectAsStateWithLifecycle()
     var explainerOpen by rememberSaveable { mutableStateOf(false) }
 
-    AuthScaffold(title = "Log in", onBack = onBack, modifier = modifier) {
+    AuthScaffold(title = "Log in", onBack = onBack, modifier = modifier, showLanguageButton = true) {
         Spacer(Modifier.height(8.dp))
         OutlinedTextField(
             value = state.username,

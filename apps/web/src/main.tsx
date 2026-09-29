@@ -19,6 +19,7 @@ import "./styles.css";
 import { registerServiceWorker } from "./sw/register";
 import { runBootUpdateCheck } from "./update/release-check";
 import { bootstrapTheme } from "./ui/theme";
+import { bootstrapL10n } from "./l10n";
 
 const root = document.getElementById("root");
 if (root === null) {
@@ -32,6 +33,12 @@ if (root === null) {
 // theme. Synchronous reads of localStorage + a single
 // setAttribute; ~0.5 ms typical.
 bootstrapTheme();
+
+// ADR-0058: resolve the interface language (stored choice, else the system
+// list, else English) and load its catalog. Not awaited: until the core has
+// loaded, every string renders from the English source, and the switch to the
+// resolved language then swaps the whole dictionary at once. Never rejects.
+void bootstrapL10n();
 
 render(() => <App />, root);
 

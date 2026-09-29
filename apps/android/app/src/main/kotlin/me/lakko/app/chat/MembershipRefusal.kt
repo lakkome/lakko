@@ -444,6 +444,9 @@ internal fun membershipRefusalReason(error: Throwable): FfiRefusalReason? {
                 is FfiException.AnonToken,
                 is FfiException.AnonTokenAlreadyFinalized,
                 -> null
+                // ADR-0058 - a localization catalog or bundle refusal; not a
+                // membership refusal.
+                is FfiException.L10n -> null
 
                 // Everything that is NOT a membership refusal. Enumerated
                 // rather than defaulted, so a new `FfiException` subclass has

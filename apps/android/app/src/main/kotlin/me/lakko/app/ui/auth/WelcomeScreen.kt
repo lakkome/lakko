@@ -5,6 +5,7 @@ package me.lakko.app.ui.auth
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -42,6 +43,11 @@ public fun WelcomeScreen(
                 .padding(horizontal = 24.dp, vertical = 32.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            // docs/ux/localization.md section 1: switchable before an account
+            // exists. Top end corner; mirrors in right-to-left languages.
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                me.lakko.app.ui.settings.AuthLanguageButton()
+            }
             Spacer(Modifier.weight(1f))
             BrandMark(size = 96.dp)
             Spacer(Modifier.height(24.dp))

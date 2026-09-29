@@ -65,6 +65,8 @@ public fun AuthScaffold(
     title: String,
     onBack: (() -> Unit)?,
     modifier: Modifier = Modifier,
+    /** Show the language button in the top bar (sign-in and sign-up, ADR-0058). */
+    showLanguageButton: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     Scaffold(
@@ -78,6 +80,9 @@ public fun AuthScaffold(
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                         }
                     }
+                },
+                actions = {
+                    if (showLanguageButton) me.lakko.app.ui.settings.AuthLanguageButton()
                 },
             )
         },

@@ -63,6 +63,7 @@ const PATHS = {
   qr: `<rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 14h2v2h-2zM18 14h2v2h-2zM14 18h2v2h-2zM18 18h2v2h-2z"/>`,
   sun: `<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/>`,
   moon: `<path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/>`,
+  globe: `<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.3 2.4 3.5 5.2 3.5 8.5s-1.2 6.1-3.5 8.5c-2.3-2.4-3.5-5.2-3.5-8.5S9.7 5.9 12 3.5z"/>`,
   monitor: `<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>`,
   cameraFlip: `<path d="M3 9a2 2 0 0 1 2-2h2.2l1.3-2h7l1.3 2H19a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M8.5 13.5a3.5 3.5 0 0 1 6.2-2.2M15.5 12.5a3.5 3.5 0 0 1-6.2 2.2"/><path d="M14.7 8.8v2.5h-2.5M9.3 17.2v-2.5h2.5"/>`,
   smile: `<circle cx="12" cy="12" r="8.5"/><path d="M8.5 14a4.5 4.5 0 0 0 7 0M9.2 9.8h.01M14.8 9.8h.01"/>`,
@@ -100,7 +101,7 @@ export function Icon(props: {
       stroke-width={props.strokeWidth ?? 1.8}
       stroke-linecap="round"
       stroke-linejoin="round"
-      class={props.class}
+      class={props.name === "back" ? `lk-icon-flip-rtl ${props.class ?? ""}`.trim() : props.class}
       aria-hidden={props.title === undefined ? "true" : undefined}
       role={props.title === undefined ? undefined : "img"}
       style={{ "flex-shrink": 0, display: "block" }}

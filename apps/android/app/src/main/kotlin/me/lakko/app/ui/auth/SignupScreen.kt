@@ -36,7 +36,7 @@ public fun SignupScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
 
-    AuthScaffold(title = "Create account", onBack = onBack, modifier = modifier) {
+    AuthScaffold(title = "Create account", onBack = onBack, modifier = modifier, showLanguageButton = true) {
         Spacer(Modifier.height(8.dp))
         OutlinedTextField(
             value = state.username,

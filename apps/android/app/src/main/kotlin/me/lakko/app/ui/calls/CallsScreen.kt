@@ -140,7 +140,7 @@ public fun CallsScreen(
         modifier = modifier,
         topBar = {
             TopAppBar(
-                title = { Text("Calls") },
+                title = { Text(me.lakko.app.l10n.t("nav.calls")) },
                 actions = {
                     TextButton(onClick = onJoinByLink) { Text("Join by link") }
                 },

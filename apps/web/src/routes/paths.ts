@@ -53,13 +53,22 @@ export const paths = {
   contact(keyB64Url: string): string {
     return `/contacts/${keyB64Url}`;
   },
-  /** Settings — Profile · Security · Appearance · Media · About · Account. */
+  /** Settings — Profile · Security · Appearance · Language · Media · About ·
+   *  Account. */
   settings: "/settings",
   /** Settings sub-sections; `settings` itself lands on Profile. `recovery`
    *  is reached from Security (authenticator, email or phone), not from the
    *  section list. */
   settingsSection(
-    section: "profile" | "security" | "appearance" | "media" | "about" | "account" | "recovery",
+    section:
+      | "profile"
+      | "security"
+      | "appearance"
+      | "language"
+      | "media"
+      | "about"
+      | "account"
+      | "recovery",
   ): string {
     return `/settings/${section}`;
   },
