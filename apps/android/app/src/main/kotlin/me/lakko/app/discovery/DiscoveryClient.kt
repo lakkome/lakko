@@ -280,9 +280,9 @@ public class DiscoveryClient(
         return getNullableOn404(endpoint)
     }
 
-    /** `POST /discovery/invite` — upload a sealed
-     *  `InviteCapability` blob with its clear fields, get the
-     *  server-assigned `blob_id` back. */
+    /** `POST /discovery/invite` — upload a verified
+     *  `InviteCapability` blob, get the server-assigned
+     *  `blob_id` back (Phase 1.18d1). */
     public suspend fun inviteUpload(req: InviteUploadRequest): InviteUploadResponse =
         doPost("/discovery/invite") {
             contentType(ContentType.Application.Json)
@@ -327,9 +327,9 @@ public class DiscoveryClient(
     /** `POST /discovery/call-invite` — upload a verified
      *  `CallInviteCapability` blob, get the server-assigned
      *  `blob_id` back (Phase 3c3-server). Sibling of
-     *  [inviteUpload] without the `/i/`-only owner fields. The high-level
+     *  [inviteUpload]; wire shape is shared. The high-level
      *  [uploadCallInvite] wrapper is the session-gated write. */
-    public suspend fun callInviteUpload(req: SealedInviteUploadRequest): InviteUploadResponse =
+    public suspend fun callInviteUpload(req: InviteUploadRequest): InviteUploadResponse =
         doPost("/discovery/call-invite") {
             contentType(ContentType.Application.Json)
             setBody(req)
@@ -374,9 +374,10 @@ public class DiscoveryClient(
 
     /** `POST /discovery/group-invite` — upload a verified
      *  `GroupInviteCapability` blob, get the server-assigned `blob_id` back
-     *  (ADR-0028, G-3). Same body as [callInviteUpload]; `max_uses` is a
-     *  soft throttle the capability does NOT embed. The high-level [uploadGroupInvite] wrapper is the session-gated write. */
-    public suspend fun groupInviteUpload(req: SealedInviteUploadRequest): InviteUploadResponse =
+     *  (ADR-0028, G-3). Distinct from [callInviteUpload] because the
+     *  group-invite request carries a `max_uses` the capability does NOT embed.
+     *  The high-level [uploadGroupInvite] wrapper is the session-gated write. */
+    public suspend fun groupInviteUpload(req: GroupInviteUploadRequest): InviteUploadResponse =
         doPost("/discovery/group-invite") {
             contentType(ContentType.Application.Json)
             setBody(req)
@@ -791,74 +792,58 @@ public class DiscoveryClient(
     }
 
     /**
-     * Upload a freshly-minted sealed `/i/` invite and receive the
-     * server-assigned `blobId` (a random 6-byte ledger id, ADR-0028
-     * amendment of 2026-09-27). Drives one `POST /discovery/invite`
-     * (session-gated). NOT idempotent: the same bytes uploaded twice
-     * get two ids.
+     * Upload a freshly-composed [InviteCapability] blob and
+     * receive the server-assigned `blobId` (a random 6-byte
+     * ledger id, ADR-0028 amendment of 2026-09-27). Drives one
+     * `POST /discovery/invite` (session-gated). NOT idempotent: the
+     * same bytes uploaded twice get two ids.
      *
-     * [sealed] and [issuerPubkey] come straight from the
-     * `InviteLinkMint` [uniffi.lakko_ffi_uniffi.composeInviteCapability]
-     * returns; the other fields repeat what went into the capability, in
-     * clear, because the server can no longer read it (sealed-link
-     * amendment of 2026-09-28). The link secret is never sent.
+     * Feed `capabilityBytes` straight from
+     * [uniffi.lakko_ffi_uniffi.composeInviteCapability]. The
+     * server runs `decode_and_verify` server-side, so a junk
+     * upload surfaces as
+     * `DiscoveryHttpError(400, "/discovery/invite", …)`.
      *
-     * Returns the 6-byte `blobId`, ready for
-     * `https://<host>/i/<slug>#<secret>`.
+     * Returns the 6-byte `blobId`, ready to substitute into a
+     * `https://<host>/i/<slug>` pointer URL via
+     * [base64UrlEncodeNoPad].
      */
-    public suspend fun uploadInvite(
-        sealed: ByteArray,
-        issuerPubkey: ByteArray,
-        expiryMs: Long,
-        maxUses: Long,
-        label: String,
-        bootstrapReferral: Boolean,
-    ): ByteArray {
-        checkSealedUpload(sealed, issuerPubkey, MAX_SEALED_INVITE_BYTES)
+    public suspend fun uploadInvite(capabilityBytes: ByteArray): ByteArray {
+        if (capabilityBytes.isEmpty()) {
+            throw DiscoveryClientArgError("capabilityBytes must be non-empty")
+        }
+        if (capabilityBytes.size > MAX_CAPABILITY_BYTES) {
+            // Mirror the server-side ceiling so a misbehaving
+            // caller fails fast without a round-trip.
+            throw DiscoveryClientArgError(
+                "capabilityBytes exceeds the $MAX_CAPABILITY_BYTES-byte ceiling " +
+                    "(got ${capabilityBytes.size} bytes)",
+            )
+        }
+
         val resp = inviteUpload(
-            InviteUploadRequest(
-                sealed = base64Encode(sealed),
-                issuer_pubkey = base64Encode(issuerPubkey),
-                expiry_ms = expiryMs,
-                max_uses = maxUses,
-                label = label,
-                bootstrap_referral = bootstrapReferral,
-            ),
+            InviteUploadRequest(capability = base64Encode(capabilityBytes)),
         )
         // Server returns the 8-character base64url id; decode it
         // back to the raw 6 bytes.
         return uploadedBlobId(resp.blob_id, "/discovery/invite")
     }
 
-    private fun checkSealedUpload(sealed: ByteArray, issuerPubkey: ByteArray, max: Int) {
-        if (sealed.isEmpty()) {
-            throw DiscoveryClientArgError("sealed must be non-empty")
-        }
-        if (sealed.size > max) {
-            // Mirror the server-side ceiling so a misbehaving
-            // caller fails fast without a round-trip.
-            throw DiscoveryClientArgError(
-                "sealed exceeds the $max-byte ceiling (got ${sealed.size} bytes)",
-            )
-        }
-        if (issuerPubkey.size != PUBKEY_LEN) {
-            throw DiscoveryClientArgError("issuerPubkey must be $PUBKEY_LEN bytes")
-        }
-    }
-
     /**
-     * Fetch a previously-uploaded sealed `/i/` invite by its ledger id
-     * [blobId]. Returns `null` on 404 (server folds expired blobs into
-     * the same status), the sealed blob on 200; the caller opens it with
-     * [uniffi.lakko_ffi_uniffi.InviteCapability.openLink] and the link
-     * secret from the fragment, so a substituted blob fails the open.
+     * Fetch a previously-uploaded `InviteCapability` by its
+     * ledger id [blobId]. Returns `null` on 404 (server
+     * folds expired blobs into the same status), the raw
+     * capability bytes on 200 (the caller drives
+     * [uniffi.lakko_ffi_uniffi.InviteCapability.decodeAndVerify]
+     * to re-verify locally so a malicious server cannot serve
+     * substituted bytes).
      */
     public suspend fun fetchInvite(blobId: ByteArray): ByteArray? {
         if (blobId.size != blobIdLen) {
             throw DiscoveryClientArgError("blobId must be $blobIdLen bytes")
         }
         val raw = inviteFetch(blobId) ?: return null
-        return base64Decode(raw.sealed)
+        return base64Decode(raw.capability)
     }
 
     /**
@@ -982,44 +967,52 @@ public class DiscoveryClient(
     }
 
     /**
-     * Upload a freshly-minted sealed `/c/` call link and receive the
-     * server-assigned 6-byte `blobId` (a fresh random ledger id per
-     * upload). Session-gated `POST /discovery/call-invite`.
+     * Upload a freshly-composed `CallInviteCapability` blob and
+     * receive the server-assigned 6-byte `blobId` (a fresh
+     * random ledger id per upload). Session-gated
+     * `POST /discovery/call-invite`.
      *
-     * [sealed] / [issuerPubkey] come from the `InviteLinkMint`
-     * [uniffi.lakko_ffi_uniffi.composeCallInviteCapability] returns;
-     * [expiryMs] / [maxUses] repeat the capability's own values in clear.
+     * Sibling of [uploadInvite]; the client-side ceiling is
+     * [MAX_CALL_CAPABILITY_BYTES] (8 KiB, 4× contact-invite)
+     * because the call-invite capability embeds a one-time
+     * MLS KeyPackage.
+     *
+     * Returns the 6-byte `blobId`, ready to substitute into a
+     * `https://<host>/c/<slug>` pointer URL via
+     * [base64UrlEncodeNoPad].
      */
-    public suspend fun uploadCallInvite(
-        sealed: ByteArray,
-        issuerPubkey: ByteArray,
-        expiryMs: Long,
-        maxUses: Long,
-    ): ByteArray {
-        checkSealedUpload(sealed, issuerPubkey, MAX_SEALED_CALL_INVITE_BYTES)
+    public suspend fun uploadCallInvite(capabilityBytes: ByteArray): ByteArray {
+        if (capabilityBytes.isEmpty()) {
+            throw DiscoveryClientArgError("capabilityBytes must be non-empty")
+        }
+        if (capabilityBytes.size > MAX_CALL_CAPABILITY_BYTES) {
+            throw DiscoveryClientArgError(
+                "capabilityBytes exceeds the $MAX_CALL_CAPABILITY_BYTES-byte ceiling " +
+                    "(got ${capabilityBytes.size} bytes)",
+            )
+        }
+
         val resp = callInviteUpload(
-            SealedInviteUploadRequest(
-                sealed = base64Encode(sealed),
-                issuer_pubkey = base64Encode(issuerPubkey),
-                expiry_ms = expiryMs,
-                max_uses = maxUses,
-            ),
+            InviteUploadRequest(capability = base64Encode(capabilityBytes)),
         )
         return uploadedBlobId(resp.blob_id, "/discovery/call-invite")
     }
 
     /**
-     * Fetch a previously-uploaded sealed `/c/` call link by its ledger id
-     * [blobId]. Returns `null` on 404 (server folds expired blobs into the
-     * same status), the sealed blob on 200; the caller opens it with
-     * [uniffi.lakko_ffi_uniffi.CallInviteCapability.openLink].
+     * Fetch a previously-uploaded `CallInviteCapability` by its
+     * ledger id [blobId]. Returns `null` on 404 (server
+     * folds expired blobs into the same status), raw capability
+     * bytes on 200 (the caller drives
+     * [uniffi.lakko_ffi_uniffi.CallInviteCapability.decodeAndVerify]
+     * to re-verify locally so a malicious server cannot serve
+     * substituted bytes).
      */
     public suspend fun fetchCallInvite(blobId: ByteArray): ByteArray? {
         if (blobId.size != blobIdLen) {
             throw DiscoveryClientArgError("blobId must be $blobIdLen bytes")
         }
         val raw = callInviteFetch(blobId) ?: return null
-        return base64Decode(raw.sealed)
+        return base64Decode(raw.capability)
     }
 
     /**
@@ -1078,26 +1071,34 @@ public class DiscoveryClient(
     }
 
     /**
-     * Upload a freshly-minted sealed `/g/` link and receive the
+     * Upload a freshly-composed `GroupInviteCapability` blob and receive the
      * server-assigned 6-byte `blobId` (a fresh random ledger id per upload).
      * Session-gated `POST /discovery/group-invite`.
      *
      * `maxUses` is a SOFT anti-spam throttle (NOT part of the signed capability,
      * NOT an access control — the admin approval gate is the security
      * boundary): `0` = single-use, `0xFFFFFFFF` = unlimited.
+     *
+     * Returns the 6-byte `blobId`, ready to substitute into a
+     * `https://<host>/g/<slug>` pointer URL via [base64UrlEncodeNoPad].
      */
     public suspend fun uploadGroupInvite(
-        sealed: ByteArray,
-        issuerPubkey: ByteArray,
-        expiryMs: Long,
+        capabilityBytes: ByteArray,
         maxUses: Long,
     ): ByteArray {
-        checkSealedUpload(sealed, issuerPubkey, MAX_SEALED_GROUP_INVITE_BYTES)
+        if (capabilityBytes.isEmpty()) {
+            throw DiscoveryClientArgError("capabilityBytes must be non-empty")
+        }
+        if (capabilityBytes.size > MAX_GROUP_CAPABILITY_BYTES) {
+            throw DiscoveryClientArgError(
+                "capabilityBytes exceeds the $MAX_GROUP_CAPABILITY_BYTES-byte ceiling " +
+                    "(got ${capabilityBytes.size} bytes)",
+            )
+        }
+
         val resp = groupInviteUpload(
-            SealedInviteUploadRequest(
-                sealed = base64Encode(sealed),
-                issuer_pubkey = base64Encode(issuerPubkey),
-                expiry_ms = expiryMs,
+            GroupInviteUploadRequest(
+                capability = base64Encode(capabilityBytes),
                 max_uses = maxUses,
             ),
         )
@@ -1105,17 +1106,19 @@ public class DiscoveryClient(
     }
 
     /**
-     * Fetch a previously-uploaded sealed `/g/` link by its ledger id
-     * [blobId]. Returns `null` on 404 (the server folds expired blobs into
-     * the same status), the sealed blob on 200; the caller opens it with
-     * [uniffi.lakko_ffi_uniffi.GroupInviteCapability.openLink].
+     * Fetch a previously-uploaded `GroupInviteCapability` by its
+     * ledger id [blobId]. Returns `null` on 404 (the server folds
+     * expired blobs into the same status), raw capability bytes on 200 (the
+     * caller drives
+     * [uniffi.lakko_ffi_uniffi.GroupInviteCapability.decodeAndVerify] to
+     * re-verify locally so a malicious server cannot serve substituted bytes).
      */
     public suspend fun fetchGroupInvite(blobId: ByteArray): ByteArray? {
         if (blobId.size != blobIdLen) {
             throw DiscoveryClientArgError("blobId must be $blobIdLen bytes")
         }
         val raw = groupInviteFetch(blobId) ?: return null
-        return base64Decode(raw.sealed)
+        return base64Decode(raw.capability)
     }
 
     /**
@@ -1599,20 +1602,26 @@ public class DiscoveryClient(
          *  misbehaving caller. */
         private const val MAX_KEYPACKAGE_BYTES: Int = 2048
 
-        /** Mirror of `services/discovery`'s `/i/` `MAX_SEALED_BYTES`
-         *  (`lakko_contacts::invite::MAX_SEALED_LEN`, the
-         *  `invites.sealed_capability` width in migration 0022). */
-        internal const val MAX_SEALED_INVITE_BYTES: Int = 254
+        /** Mirror of `services/discovery`'s
+         *  `MAX_CAPABILITY_BYTES`. The 1.18a wire format is
+         *  small (a few hundred bytes); the 2048 ceiling has
+         *  generous headroom. */
+        private const val MAX_CAPABILITY_BYTES: Int = 2048
 
-        /** Mirror of `services/discovery`'s `/c/` `MAX_SEALED_BYTES`
-         *  (`lakko_contacts::call_invite::MAX_SEALED_LEN`): the call
-         *  capability embeds a one-time MLS KeyPackage. */
-        internal const val MAX_SEALED_CALL_INVITE_BYTES: Int = 4338
+        /** Mirror of `services/discovery`'s
+         *  `MAX_CALL_CAPABILITY_BYTES`. The call-invite
+         *  ledger uses an 8 KiB ceiling (vs. contact-invite's
+         *  2 KiB) because `CallInviteCapability` embeds a
+         *  one-time MLS KeyPackage (~4 KiB upper bound per
+         *  `MAX_KEY_PACKAGE_LEN`). */
+        private const val MAX_CALL_CAPABILITY_BYTES: Int = 8192
 
-        /** Mirror of `services/discovery`'s `/g/` `MAX_SEALED_BYTES`
-         *  (`lakko_contacts::group_invite::MAX_SEALED_LEN`): the maximal
-         *  v2 capability with a preview, sealed. */
-        internal const val MAX_SEALED_GROUP_INVITE_BYTES: Int = 938
+        /** Mirror of `services/discovery`'s group-invite
+         *  `MAX_CAPABILITY_BYTES`. The ADR-0028 wire format tops
+         *  out around 363 bytes (a 256-byte group_id); the 512
+         *  ceiling has comfortable headroom and matches the
+         *  server's `VARBINARY(512)` column. */
+        private const val MAX_GROUP_CAPABILITY_BYTES: Int = 512
 
         /** Ed25519 signing seed length, mirrors
          *  `me.lakko.app.auth` constants. */

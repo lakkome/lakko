@@ -90,9 +90,9 @@ import me.lakko.app.chat.invitedByLine
 public class JoinGroupLandingViewModel(
     private val repository: ChatRepository,
     private val slug: String,
-    /** The URL fragment: the 12-byte link secret, or absent / malformed (the
-     *  link is refused as damaged; nothing opens without the secret). */
-    private val fragment: me.lakko.app.discovery.InviteLinkFragment,
+    /** The URL fragment: absent (no preview), the 12-byte link secret, or
+     *  malformed (the link is refused as damaged). */
+    private val fragment: me.lakko.app.chat.GroupInviteFragment,
 ) : ViewModel() {
 
     /** Local FSM: Loading -> Invalid | Ready -> Requesting -> Waiting (poll
@@ -102,7 +102,7 @@ public class JoinGroupLandingViewModel(
         public data object Loading : State
         /** The capability does not decode, verify, or has expired. */
         public data object Invalid : State
-        /** The link has no usable secret, or the blob does not open under it. */
+        /** The link carries a fragment its preview does not open under. */
         public data object Damaged : State
         /** The ledger answered `429`; the link may be fine. */
         public data object RateLimited : State
@@ -145,10 +145,9 @@ public class JoinGroupLandingViewModel(
     public fun start() {
         if (started) return
         started = true
-        if (fragment !is me.lakko.app.discovery.InviteLinkFragment.Secret) {
-            // Refused before any network: no fragment, the old 43-character
-            // key, a truncated secret, anything that is not the 16-character
-            // secret (sealed-link amendment of 2026-09-28).
+        if (fragment == me.lakko.app.chat.GroupInviteFragment.Malformed) {
+            // Refused before any network: the old 43-character key, a
+            // truncated secret, anything that is not the 16-character secret.
             mutableState.value = State.Damaged
             return
         }
@@ -164,9 +163,9 @@ public class JoinGroupLandingViewModel(
             val nowMs = System.currentTimeMillis().toULong()
             try {
                 // ADR-0028 OQ1 — resolve the slug (a 6-byte ledger-id
-                // pointer => fetch the sealed blob from the ledger; an inline
-                // blob => pass through) and open it under the secret.
-                val wireAndBlob = repository.resolveGroupInviteSlug(slug, fragment)
+                // pointer => fetch the capability from the ledger; an inline
+                // capability => pass through).
+                val wireAndBlob = repository.resolveGroupInviteSlug(slug)
                 val card = repository.inspectGroupInvite(wireAndBlob.first, fragment, nowMs)
                 if (!card.valid) {
                     mutableState.value = State.Invalid

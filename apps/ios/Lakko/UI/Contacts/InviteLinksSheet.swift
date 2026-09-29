@@ -77,7 +77,7 @@ struct InviteLinksSheet: View {
                                 url: row.url,
                                 highlighted: row.slug == viewModel.lastGeneratedInvite?.blobIdSlug,
                                 revoking: viewModel.revokingActiveInviteSlug == row.slug,
-                                revoke: canRevoke(row) ? { revoke(row) } : nil
+                                revoke: { revoke(row) }
                             )
                             .disabled(
                                 viewModel.revokingActiveInviteSlug != nil
@@ -117,21 +117,12 @@ struct InviteLinksSheet: View {
         return lines
     }
 
-    /// An inline link (the upload failed on transport) has no ledger row,
-    /// so nothing to revoke.
-    private func canRevoke(_ row: InviteLinkRow) -> Bool {
-        if case .session(nil) = row.origin { return false }
-        return true
-    }
-
     private func revoke(_ row: InviteLinkRow) {
         switch row.origin {
         case .server:
             viewModel.onRevokeActiveInviteClicked(slug: row.slug)
-        case .session(let blobId?):
+        case .session(let blobId):
             viewModel.onRevokeInviteClicked(blobId: blobId)
-        case .session(nil):
-            break
         }
     }
 }
@@ -143,10 +134,7 @@ struct InviteLinksSheet: View {
 struct LinkActionsRow: View {
     let title: String
     var details: [String] = []
-    /// `nil` when this device does not hold the whole link (its secret): the
-    /// row then says so instead of offering Copy / Share of a link that
-    /// would open as damaged.
-    let url: String?
+    let url: String
     var highlighted: Bool = false
     var revoking: Bool = false
     var revoke: (() -> Void)? = nil
@@ -174,32 +162,25 @@ struct LinkActionsRow: View {
                     .font(.footnote)
                     .foregroundStyle(Color.lakkoTextMuted)
             }
-            if url == nil {
-                Text("This link cannot be copied again here. Make a new one to share.")
-                    .font(.footnote)
-                    .foregroundStyle(Color.lakkoTextMuted)
-            }
             HStack(spacing: 8) {
-                if let url {
-                    Button {
-                        UIPasteboard.general.string = url
-                        copied = true
-                        Task { @MainActor in
-                            try? await Task.sleep(nanoseconds: 1_500_000_000)
-                            copied = false
-                        }
-                    } label: {
-                        Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                Button {
+                    UIPasteboard.general.string = url
+                    copied = true
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 1_500_000_000)
+                        copied = false
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-
-                    ShareLink(item: url) {
-                        Label("Share", systemImage: "square.and.arrow.up")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                } label: {
+                    Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
                 }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                ShareLink(item: url) {
+                    Label("Share", systemImage: "square.and.arrow.up")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
 
                 if let revoke {
                     Spacer()

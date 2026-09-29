@@ -34,7 +34,6 @@ import me.lakko.app.contacts.KIND_WELCOME
 import me.lakko.app.contacts.wrapEnvelope
 import me.lakko.app.discovery.ConsumeInviteResult
 import me.lakko.app.discovery.DiscoveryClient
-import me.lakko.app.discovery.InviteLinkFragment
 import me.lakko.app.ds.DsClient
 import me.lakko.app.ds.DsJournalSigner
 import me.lakko.app.ds.DsSignerRegistry
@@ -2627,10 +2626,9 @@ public class ChatRepository(
         // ADR-0028 v2 (docs/ux/group-invite-page.md) — the link carries a
         // sealed preview: the group's shared name, this device's own profile
         // name and the roster size at mint time, all already on the device.
-        // Since the sealed-link amendment of 2026-09-28 the whole capability
-        // is sealed too, under the same fresh 12-byte link secret that goes
-        // into the URL fragment and nowhere a server reads. The core trims the
-        // names and reads a blank one as absent.
+        // Sealed under a key derived from a fresh 12-byte link secret that
+        // goes into the URL fragment and nowhere a server reads. The core trims the names and reads a blank
+        // one as absent.
         val groupName = groupName(groupIdHex)?.name
         val inviterName = ownDisplayName()
         val members = (memberCount(groupIdHex) ?: 0).coerceIn(0, UShort.MAX_VALUE.toInt()).toUShort()
@@ -2663,6 +2661,7 @@ public class ChatRepository(
                 throw ChatError("composeGroupInviteCapabilityWithPreview failed", again)
             }
         }
+        val wire = mint.wire
         // Production default (ADR-0028 OQ1): upload to the discovery ledger --
         // the server-side anti-abuse surface (per-joiner consume dedup + soft
         // max_uses) -- and share the short pointer URL. The upload is
@@ -2676,21 +2675,20 @@ public class ChatRepository(
         val blobId = uploadGroupInviteOrNull(
             sessionToken = keyPackageAccount.get()?.sessionToken,
             clientFactory = keyPackageDiscoveryFactory,
-            upload = { client ->
-                client.uploadGroupInvite(
-                    sealed = mint.sealed,
-                    issuerPubkey = mint.issuerPubkey,
-                    expiryMs = 0L,
-                    maxUses = 0xFFFFFFFFL,
-                )
-            },
+            upload = { client -> client.uploadGroupInvite(wire, 0xFFFFFFFFL) },
             log = { message -> android.util.Log.w("ChatRepository", message) },
         )
-        return if (blobId != null) {
-            composePointerGroupInviteUrl(blobId, mint.linkSecret)
+        val url = if (blobId != null) {
+            composePointerGroupInviteUrl(blobId)
         } else {
-            composeInlineGroupInviteUrl(mint.sealed, mint.linkSecret)
+            try {
+                composeInlineGroupInviteUrl(wire)
+            } catch (fallbackError: Throwable) {
+                GROUP_INVITE_DEFAULT_ORIGIN + GROUP_INVITE_URL_PREFIX +
+                    me.lakko.app.auth.base64UrlEncodeNoPad(wire)
+            }
         }
+        return appendGroupInviteLinkKey(url, mint.linkKey)
     }
 
     /**
@@ -2707,7 +2705,7 @@ public class ChatRepository(
             ?: throw IllegalStateException(
                 "ChatRepository not bootstrapped — call bootstrap() first",
             )
-        // The slug ends before the `#<link secret>` fragment.
+        // The slug ends before the `#<link key>` fragment (ADR-0028 v2).
         val slug = groupInviteSlugOf(link) ?: return false
         val parsed = try {
             parseGroupInviteSlug(slug)
@@ -2736,37 +2734,25 @@ public class ChatRepository(
     }
 
     /**
-     * ADR-0028 (G-3) — resolve a `/g/<slug>#<fragment>` link to the PLAINTEXT
-     * capability wire, fetching the sealed blob from the discovery ledger when
-     * the slug is a 6-byte ledger-id pointer (the production form) or taking it
-     * from the slug when inline, then opening it under the link secret in
-     * [fragment] (sealed-link amendment of 2026-09-28). Returns the plaintext
-     * wire + the `blobId` (non-null only for the pointer form) so the caller
-     * can drive the consume gate (the joiner tag is computed over the
-     * plaintext) before requesting to join.
-     *
-     * @throws GroupInviteLinkDamaged when the fragment is missing or malformed
-     *   (before any request) or the blob does not open under it.
+     * ADR-0028 (G-3) — resolve a `/g/<slug>` slug to the capability wire bytes,
+     * fetching from the discovery ledger when the slug is a 6-byte ledger-id
+     * pointer (the production form) or passing the bytes
+     * straight through when it is an inline capability (the censored-region
+     * fallback). Returns the wire bytes + the `blobId` (non-null only for the
+     * pointer form) so the caller can drive the consume gate before requesting
+     * to join.
      */
-    public suspend fun resolveGroupInviteSlug(
-        slug: String,
-        fragment: InviteLinkFragment,
-    ): Pair<ByteArray, ByteArray?> =
-        withContext(mlsDispatcher) { resolveGroupInviteSlugOnMlsThread(slug = slug, fragment = fragment) }
+    public suspend fun resolveGroupInviteSlug(slug: String): Pair<ByteArray, ByteArray?> =
+        withContext(mlsDispatcher) { resolveGroupInviteSlugOnMlsThread(slug = slug) }
 
-    private suspend fun resolveGroupInviteSlugOnMlsThread(
-        slug: String,
-        fragment: InviteLinkFragment,
-    ): Pair<ByteArray, ByteArray?> {
-        val linkSecret = (fragment as? InviteLinkFragment.Secret)?.bytes
-            ?: throw GroupInviteLinkDamaged()
+    private suspend fun resolveGroupInviteSlugOnMlsThread(slug: String): Pair<ByteArray, ByteArray?> {
         val parsed = try {
             parseGroupInviteSlug(slug)
         } catch (e: GroupInviteUrlException) {
             throw ChatError("group invite link is malformed", e)
         }
-        val (sealed, blobId) = when (parsed) {
-            is ParsedGroupInvite.Inline -> Pair(parsed.sealed, null)
+        return when (parsed) {
+            is ParsedGroupInvite.Inline -> Pair(parsed.capabilityBytes, null)
             is ParsedGroupInvite.Pointer -> {
                 val fetched = try {
                     discovery.fetchGroupInvite(parsed.blobId)
@@ -2779,26 +2765,21 @@ public class ChatRepository(
                 Pair(fetched, parsed.blobId)
             }
         }
-        val wire = try {
-            uniffi.lakko_ffi_uniffi.GroupInviteCapability.openLink(sealed, linkSecret).use { it.wire() }
-        } catch (e: FfiException) {
-            android.util.Log.w("ChatRepository", "invite link does not open under its secret; refusing the link")
-            throw GroupInviteLinkDamaged()
-        }
-        return Pair(wire, blobId)
     }
 
     /**
      * What the group invite page shows before anyone taps (ADR-0028 v2,
      * `docs/ux/group-invite-page.md` section 3). Decodes + verifies the
-     * PLAINTEXT capability (the one [resolveGroupInviteSlug] opened), checks
-     * expiry at [nowMs], and opens the sealed preview under the link secret in
-     * [fragment].
+     * capability, checks expiry at [nowMs], and opens the sealed preview under
+     * the link secret in [fragment].
      *
-     * A missing or malformed fragment, or a preview that does not open, throw
-     * [GroupInviteLinkDamaged] — fail closed. A capability minted without a
-     * preview is shown without one: it opened under the same secret, so a
-     * server could not have swapped it in.
+     * A link without a fragment shows the page with no preview. A link WITH a
+     * fragment must open its preview (ADR-0028 amendment of 2026-09-27): the
+     * preview key is bound to the capability's group id and issuer, so a
+     * capability a malicious server swapped in under a live ledger id does not
+     * open under the link's secret. A malformed fragment, a capability without
+     * a preview, or a preview that does not open all throw
+     * [GroupInviteLinkDamaged] — fail closed, never a preview-less fallback.
      *
      * @throws ChatError when the capability does not decode or verify — the
      *   page's "invalid or expired" state.
@@ -2806,7 +2787,7 @@ public class ChatRepository(
      */
     public suspend fun inspectGroupInvite(
         capabilityWire: ByteArray,
-        fragment: InviteLinkFragment,
+        fragment: GroupInviteFragment,
         nowMs: ULong,
     ): GroupInviteCard = withContext(mlsDispatcher) {
         val cap = try {
@@ -2826,7 +2807,7 @@ public class ChatRepository(
             }
             when (outcome) {
                 GroupInvitePreviewOutcome.Damaged -> {
-                    android.util.Log.w("ChatRepository", "invite link secret does not open its preview; refusing the link")
+                    android.util.Log.w("ChatRepository", "invite link fragment does not open its preview; refusing the link")
                     throw GroupInviteLinkDamaged()
                 }
                 is GroupInvitePreviewOutcome.Shown -> GroupInviteCard(
@@ -2842,7 +2823,7 @@ public class ChatRepository(
 
     /**
      * ADR-0028 (G-3) — joiner step 1: request to join a group from a `/g/` link
-     * capability (the PLAINTEXT wire [resolveGroupInviteSlug] opened). Decodes +
+     * capability (the wire bytes the slug base64url-decodes to). Decodes +
      * verifies the capability fail-closed (before any post), then knocks
      * (ADR-0053 §4): an empty knock learns the group's epoch, a second one
      * carries the attribution and the external-join proposal (ADR-0027) built

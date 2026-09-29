@@ -53,7 +53,7 @@ import {
   createSignal,
   onCleanup,
 } from "solid-js";
-import { A, useLocation, useParams } from "@solidjs/router";
+import { A, useParams } from "@solidjs/router";
 
 import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
@@ -67,13 +67,11 @@ import { GUEST_WORKING_TITLE, SIGNUP_WORKING_LINE } from "../auth/signup-working
 import { loadWasm } from "../wasm";
 import { DiscoveryClient, DiscoveryHttpError, isDiscoveryRateLimited } from "../discovery/client";
 import {
-  INVITE_LINK_DAMAGED,
   INVITE_LINK_RATE_LIMITED,
   INVITE_LINK_TRY_AGAIN,
   inviteLinkWidths,
-  openSealedInviteLink,
 } from "../contacts/invite-link";
-import { CALL_INVITE_INLINE_MIN_LEN } from "../calls/invite";
+import { parseCallInviteSlug } from "../calls/invite";
 import { useCallHost, type CallHostApi } from "../calls/CallHostContext";
 import { callIdHex } from "../calls/call-signaling-dispatch";
 import { hexKey } from "../calls/multi-joiner-election";
@@ -101,7 +99,6 @@ interface DecodedCall {
 
 export default function JoinCall() {
   const params = useParams<{ slug: string }>();
-  const location = useLocation();
   const auth = useAuth();
   const chats = useChats();
   const profiles = useProfiles();
@@ -128,38 +125,28 @@ export default function JoinCall() {
 
   const discovery = new DiscoveryClient();
 
-  // Open + verify the sealed capability in a resource so the panel renders
-  // the right state declaratively. Re-runs on navigation, of the slug or of
-  // the fragment (the link secret the capability is sealed under).
-  const slugSignal = createMemo(() => ({ slug: params.slug, hash: location.hash }));
+  // Decode + verify the capability in a resource so the panel renders the
+  // right state declaratively. Re-runs on navigation.
+  const slugSignal = createMemo(() => params.slug);
   /** The ledger answered 429: the link may be fine, so the page says "try
    *  again later" instead of "invalid" (ADR-0028 short-link amendment). */
   const [rateLimited, setRateLimited] = createSignal(false);
-  /** The fragment is missing or wrong, or the secret does not open the
-   *  sealed blob: the link is damaged (the 2026-09-28 amendment). */
-  const [damaged, setDamaged] = createSignal(false);
   const [decoded, { refetch }] = createResource(
     slugSignal,
-    async ({ slug, hash }): Promise<DecodedCall | null> => {
+    async (slug): Promise<DecodedCall | null> => {
       try {
         setRateLimited(false);
-        setDamaged(false);
         const wasm = await loadWasm();
-        const opened = await openSealedInviteLink({
-          slug,
-          fragment: hash,
-          widths: inviteLinkWidths(wasm),
-          inlineMinLen: CALL_INVITE_INLINE_MIN_LEN,
-          what: "call-invite",
-          fetchSealed: (id) => discovery.fetchCallInvite(id),
-          open: (sealed, secret) => wasm.CallInviteCapability.openLink(sealed, secret),
-        });
-        if (opened.kind === "damaged") {
-          setDamaged(true);
-          return null;
+        const parsed = parseCallInviteSlug(slug, inviteLinkWidths(wasm));
+        let capabilityBytes: Uint8Array;
+        if (parsed.kind === "pointer") {
+          const fetched = await discovery.fetchCallInvite(parsed.blobId);
+          if (fetched === null) return null;
+          capabilityBytes = fetched;
+        } else {
+          capabilityBytes = parsed.capabilityBytes;
         }
-        if (opened.kind === "not-found") return null;
-        const cap = opened.capability;
+        const cap = wasm.CallInviteCapability.decodeAndVerify(capabilityBytes);
         const identity = chats.identity();
         const isOwner =
           identity !== null &&
@@ -358,10 +345,6 @@ export default function JoinCall() {
           <Show when={decoded.loading}>
             <p>Loading call link…</p>
           </Show>
-          <Show when={!decoded.loading && decoded() === null && damaged()}>
-            <p>{INVITE_LINK_DAMAGED}</p>
-            <A href={paths.home}>Open Lakko</A>
-          </Show>
           <Show when={!decoded.loading && decoded() === null && rateLimited()}>
             <p>{INVITE_LINK_RATE_LIMITED}</p>
             <button type="button" class="primary" onClick={() => void refetch()}>
@@ -372,8 +355,7 @@ export default function JoinCall() {
           <Show
             when={
               !decoded.loading &&
-              ((decoded() === null && !rateLimited() && !damaged()) ||
-                decoded()?.valid === false)
+              ((decoded() === null && !rateLimited()) || decoded()?.valid === false)
             }
           >
             <p>This call link is invalid or has expired.</p>

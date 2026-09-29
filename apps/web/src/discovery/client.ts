@@ -57,7 +57,6 @@ import type {
   IdentityFetchResponse,
   IdentityUploadRequest,
   IdentityUploadResponse,
-  CallInviteUploadRequest,
   GroupInviteUploadRequest,
   InviteConsumeRequest,
   InviteConsumeResponse,
@@ -310,48 +309,6 @@ async function decodeServerLedgerId(slug: string, endpoint: string): Promise<Uin
   return blobId;
 }
 
-/** What every sealed-link upload carries (`/i/`, `/c/`, `/g/`): the blob and
- *  the clear fields the server needs because it cannot read the capability
- *  (the sealed-link amendment of 2026-09-28). */
-export interface SealedInviteUpload {
-  /** `InviteLinkMint.sealed`. */
-  readonly sealed: Uint8Array;
-  /** `InviteLinkMint.issuerPubkey` — 32 bytes, the key a revoke verifies
-   *  against. */
-  readonly issuerPubkey: Uint8Array;
-  /** The capability's `expiry_ms`, UNIX millis (`0n` = never expires). */
-  readonly expiryMs: bigint;
-  /** The consume ceiling sentinel (`0` single-use, `0xFFFFFFFF` unlimited). */
-  readonly maxUses: number;
-}
-
-/** Validate a sealed upload and turn it into the clear wire fields. */
-function sealedUploadFields(upload: SealedInviteUpload): {
-  sealed: string;
-  issuer_pubkey: string;
-  expiry_ms: number;
-  max_uses: number;
-} {
-  if (upload.sealed.length === 0) {
-    throw new DiscoveryClientArgError("sealed must be non-empty");
-  }
-  if (upload.issuerPubkey.length !== 32) {
-    throw new DiscoveryClientArgError("issuerPubkey must be 32 bytes");
-  }
-  if (upload.expiryMs < 0n || upload.expiryMs > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new DiscoveryClientArgError("expiryMs is out of range");
-  }
-  if (!Number.isInteger(upload.maxUses) || upload.maxUses < 0 || upload.maxUses > 0xff_ff_ff_ff) {
-    throw new DiscoveryClientArgError("maxUses must be a u32");
-  }
-  return {
-    sealed: base64Encode(upload.sealed),
-    issuer_pubkey: base64Encode(upload.issuerPubkey),
-    expiry_ms: Number(upload.expiryMs),
-    max_uses: upload.maxUses,
-  };
-}
-
 /** One device of an account, as the directory serves it (ADR-0050). */
 export interface DeviceKeyPackage {
   /** The device leaf's 32-byte Ed25519 signature key. */
@@ -458,10 +415,12 @@ export class DiscoveryClient {
   /** `POST /discovery/call-invite` — upload a verified
    *  `CallInviteCapability` blob, get the server-assigned
    *  `blob_id` back (Phase 3c3-server). Sibling of
-   *  [`inviteUpload`] without the owner-list metadata. The
-   *  high-level [`uploadCallInvite`] wrapper validates the input. */
+   *  [`inviteUpload`]; wire shape (`InviteUploadRequest`) is
+   *  shared with the contact-invite endpoint — only the URL
+   *  path differs. The high-level [`uploadCallInvite`] wrapper
+   *  validates the input. */
   async callInviteUpload(
-    req: CallInviteUploadRequest,
+    req: InviteUploadRequest,
   ): Promise<InviteUploadResponse> {
     return this.post("/discovery/call-invite", req);
   }
@@ -998,30 +957,50 @@ export class DiscoveryClient {
   }
 
   /**
-   * Upload a sealed `/i/` link (`InviteCapability.compose(...)` returns an
-   * `InviteLinkMint`) and receive the server-assigned `blob_id` (6 random
-   * bytes, ADR-0028 short-link amendment). Not idempotent — every upload
-   * mints a fresh id. The server cannot read the sealed capability, so its
-   * `expiry_ms`, `max_uses`, `label` and `bootstrap_referral` travel in clear
-   * beside it (the sealed-link amendment of 2026-09-28), and the issuer key
-   * the revoke verifies against.
+   * Upload a freshly-composed `InviteCapability` blob and
+   * receive the server-assigned `blob_id` (6 random bytes,
+   * ADR-0028 short-link amendment). Phase 1.18d1: drives one bearer
+   * solve + `POST /discovery/invite`. Not idempotent — every
+   * upload mints a fresh id.
    *
-   * @returns The 6-byte `blob_id`, ready for `composePointerInviteUrl`.
+   * Caller responsibility: feed `capabilityBytes` straight from
+   * `wasm.InviteCapability.compose(...)`. The server runs
+   * `decode_and_verify` server-side, so a junk upload surfaces
+   * as `DiscoveryHttpError(400, "/discovery/invite", …)`.
+   *
+   * @param capabilityBytes  The 1.18a wire-format bytes.
+   * @returns The 6-byte `blob_id`, ready to substitute into a
+   *          pointer URL via `composePointerInviteUrl`.
    *
    * @throws `DiscoveryClientArgError` on local input validation,
-   *         `DiscoveryHttpError` on server rejection,
+   *         `DiscoveryHttpError` on server rejection (rate limit /
+   *         malformed bytes / failed verify),
    *         `DiscoveryNetworkError` on transport failure.
    */
-  async uploadInvite(upload: SealedInviteUpload & {
-    readonly label: string;
-    readonly bootstrapReferral: boolean;
-  }): Promise<Uint8Array> {
-    const clear = sealedUploadFields(upload);
+  async uploadInvite(capabilityBytes: Uint8Array): Promise<Uint8Array> {
+    if (capabilityBytes.length === 0) {
+      throw new DiscoveryClientArgError(
+        "capabilityBytes must be non-empty",
+      );
+    }
+    // Mirror the server-side `MAX_CAPABILITY_BYTES = 2048`
+    // ceiling so a misbehaving caller fails fast without a
+    // round-trip.
+    const MAX = 2048;
+    if (capabilityBytes.length > MAX) {
+      throw new DiscoveryClientArgError(
+        `capabilityBytes exceeds the ${MAX}-byte ceiling ` +
+          `(got ${capabilityBytes.length} bytes)`,
+      );
+    }
+
+
     const resp = await this.inviteUpload({
-      ...clear,
-      label: upload.label,
-      bootstrap_referral: upload.bootstrapReferral,
+      capability: base64Encode(capabilityBytes),
     });
+
+    // Server returns base64url-no-pad; decode back to raw 32
+    // bytes via the same helper we use for `accountId` slugs.
     return decodeServerLedgerId(resp.blob_id, "/discovery/invite");
   }
 
@@ -1030,9 +1009,11 @@ export class DiscoveryClient {
    * server-assigned `blob_id`. Returns `null` on 404 (the
    * server folds expired blobs into the same status — see
    * `services/discovery/src/invite.rs::fetch` for why we don't
-   * use 410). Returns the sealed blob on 200; the caller opens it
-   * with `wasm.InviteCapability.openLink(sealed, secret)`, which
-   * also verifies the signature inside. Throws
+   * use 410). Returns the raw capability bytes on 200; the
+   * caller drives `wasm.InviteCapability.decodeAndVerify(...)`
+   * to validate the signature locally (the server already
+   * verified at upload time, but we re-verify so a malicious
+   * server cannot serve forged bytes). Throws
    * `DiscoveryRateLimitedError` on 429 (per-address rate limit).
    */
   async fetchInvite(blobId: Uint8Array): Promise<Uint8Array | null> {
@@ -1056,7 +1037,7 @@ export class DiscoveryClient {
       );
     }
     const raw = (await response.json()) as InviteFetchResponse;
-    return base64Decode(raw.sealed);
+    return base64Decode(raw.capability);
   }
 
   /**
@@ -1094,10 +1075,12 @@ export class DiscoveryClient {
    * @param blobId            6-byte ledger id
    *                          (the same value `uploadInvite`
    *                          returned).
-   * @param capabilityBytes   The PLAINTEXT capability wire the
-   *                          sealed link opened to
-   *                          (`InviteCapability.wire`) — the
+   * @param capabilityBytes   The same wire-format bytes the
+   *                          server holds — mandatory for the
    *                          tag's per-blob salt derivation.
+   *                          The caller already has them after
+   *                          `decodeAndVerify` ran on the
+   *                          /i/:slug landing path.
    * @param joinerAccountId   The joiner's 16-byte UUIDv7
    *                          account_id. Never sent to the
    *                          server in plaintext — only the
@@ -1129,17 +1112,52 @@ export class DiscoveryClient {
   }
 
   /**
-   * Upload a sealed `/c/` link (`composeCallInviteCapability(...)` returns an
-   * `InviteLinkMint`) and get its server-assigned `blob_id` back. Sibling of
-   * [`uploadInvite`] without the owner-list metadata; every upload mints a
-   * fresh 6-byte id.
+   * Upload a verified [`CallInviteCapability`] blob and get its
+   * server-assigned `blob_id` back (Phase 3c3-client).
+   *
+   * Sibling of [`uploadInvite`] for the call-invite ecosystem.
+   * Drives one bearer `POST /discovery/call-invite`.
+   * Every upload mints a fresh 6-byte id (ADR-0028 short-link amendment).
+   *
+   * Caller responsibility: feed `capabilityBytes` straight from
+   * `wasm.composeCallInviteCapability(...)`. The server runs
+   * `decode_and_verify` server-side, so a junk upload surfaces
+   * as `DiscoveryHttpError(400, "/discovery/call-invite", …)`.
+   *
+   * The 8192-byte client-side ceiling matches the server's
+   * `MAX_CAPABILITY_BYTES` for the call-invite ledger (2× the
+   * 4 KiB `MAX_KEY_PACKAGE_LEN` headroom; contact-invite uses
+   * the tighter 2048-byte limit because it has no embedded KP).
+   *
+   * @param capabilityBytes  The 3a wire-format `CallInviteCapability`
+   *                         bytes (composed via the wasm FFI).
+   * @returns The 6-byte `blob_id`, ready to substitute into a
+   *          `/c/<slug>` pointer URL via the call-invite link
+   *          composer.
    *
    * @throws `DiscoveryClientArgError` on local input validation,
    *         `DiscoveryHttpError` on server rejection,
    *         `DiscoveryNetworkError` on transport failure.
    */
-  async uploadCallInvite(upload: SealedInviteUpload): Promise<Uint8Array> {
-    const resp = await this.callInviteUpload(sealedUploadFields(upload));
+  async uploadCallInvite(capabilityBytes: Uint8Array): Promise<Uint8Array> {
+    if (capabilityBytes.length === 0) {
+      throw new DiscoveryClientArgError(
+        "capabilityBytes must be non-empty",
+      );
+    }
+    const MAX = 8192;
+    if (capabilityBytes.length > MAX) {
+      throw new DiscoveryClientArgError(
+        `capabilityBytes exceeds the ${MAX}-byte ceiling ` +
+          `(got ${capabilityBytes.length} bytes)`,
+      );
+    }
+
+
+    const resp = await this.callInviteUpload({
+      capability: base64Encode(capabilityBytes),
+    });
+
     return decodeServerLedgerId(resp.blob_id, "/discovery/call-invite");
   }
 
@@ -1149,8 +1167,11 @@ export class DiscoveryClient {
    *
    * Sibling of [`fetchInvite`]. Returns `null` on 404 (server
    * folds expired blobs into the same status to deny attacker
-   * status-code probing). Returns the sealed blob on 200; the
-   * caller opens it with `wasm.CallInviteCapability.openLink`. Throws
+   * status-code probing). Returns the raw capability bytes on
+   * 200; the caller drives
+   * `wasm.decodeAndVerifyCallInviteCapability(...)` locally —
+   * the server already verified at upload time, but we re-verify
+   * so a malicious server cannot serve forged bytes. Throws
    * `DiscoveryRateLimitedError` on 429 (per-address rate limit).
    */
   async fetchCallInvite(blobId: Uint8Array): Promise<Uint8Array | null> {
@@ -1174,7 +1195,7 @@ export class DiscoveryClient {
       );
     }
     const raw = (await response.json()) as InviteFetchResponse;
-    return base64Decode(raw.sealed);
+    return base64Decode(raw.capability);
   }
 
   /**
@@ -1204,9 +1225,9 @@ export class DiscoveryClient {
    * `lakko_contacts::invite`).
    *
    * @param blobId            6-byte ledger id.
-   * @param capabilityBytes   The PLAINTEXT capability wire the
-   *                          sealed link opened to
-   *                          (`CallInviteCapability.wire`).
+   * @param capabilityBytes   The same wire-format bytes the
+   *                          server holds — mandatory for the
+   *                          per-blob salt of `computeJoinerInviteTag`.
    * @param joinerAccountId   The joiner's 16-byte UUIDv7
    *                          account_id. Never crosses the wire
    *                          in plaintext.
@@ -1243,16 +1264,46 @@ export class DiscoveryClient {
   }
 
   /**
-   * Upload a sealed `/g/` link and get its server-assigned `blob_id` back
-   * (ADR-0028, G-3). Every upload mints a fresh 6-byte id.
+   * Upload a verified [`GroupInviteCapability`] blob and get its
+   * server-assigned `blob_id` back (ADR-0028, G-3).
+   *
+   * Sibling of [`uploadCallInvite`] for the group join-ticket ledger.
+   * Drives one bearer `POST /discovery/group-invite`. Every upload
+   * mints a fresh 6-byte id (ADR-0028 short-link amendment).
    *
    * `maxUses` is a SOFT anti-spam throttle (NOT part of the signed
    * capability, NOT an access control — the admin approval gate is the
    * security boundary): `0` = single-use, `0xFFFFFFFF` = unlimited, any
    * other N = at most N consumes.
+   *
+   * The 512-byte client-side ceiling matches the server's
+   * `MAX_CAPABILITY_BYTES` for the group-invite ledger (the wire format
+   * tops out near 363 bytes).
+   *
+   * @returns The 6-byte `blob_id`, ready to substitute into a
+   *          `/g/<slug>` pointer URL.
    */
-  async uploadGroupInvite(upload: SealedInviteUpload): Promise<Uint8Array> {
-    const resp = await this.groupInviteUpload(sealedUploadFields(upload));
+  async uploadGroupInvite(
+    capabilityBytes: Uint8Array,
+    maxUses: number,
+  ): Promise<Uint8Array> {
+    if (capabilityBytes.length === 0) {
+      throw new DiscoveryClientArgError("capabilityBytes must be non-empty");
+    }
+    const MAX = 512;
+    if (capabilityBytes.length > MAX) {
+      throw new DiscoveryClientArgError(
+        `capabilityBytes exceeds the ${MAX}-byte ceiling ` +
+          `(got ${capabilityBytes.length} bytes)`,
+      );
+    }
+
+
+    const resp = await this.groupInviteUpload({
+      capability: base64Encode(capabilityBytes),
+      max_uses: maxUses,
+    });
+
     return decodeServerLedgerId(resp.blob_id, "/discovery/group-invite");
   }
 
@@ -1262,9 +1313,10 @@ export class DiscoveryClient {
    *
    * Sibling of [`fetchCallInvite`]. Returns `null` on 404 (server folds
    * expired blobs into the same status to deny attacker status-code
-   * probing). Returns the sealed blob; the caller opens it with
-   * `wasm.GroupInviteCapability.openLink(sealed, secret)`, which a blob
-   * swapped in under a live id does not pass. Throws `DiscoveryRateLimitedError` on
+   * probing). The caller re-runs `wasm.GroupInviteCapability.decodeAndVerify`
+   * locally so a malicious server cannot serve forged bytes; a capability
+   * swapped in under a live id does not open the link's preview (the preview
+   * key binds the group id and issuer). Throws `DiscoveryRateLimitedError` on
    * 429 (per-address rate limit).
    */
   async fetchGroupInvite(blobId: Uint8Array): Promise<Uint8Array | null> {
@@ -1288,7 +1340,7 @@ export class DiscoveryClient {
       );
     }
     const raw = (await response.json()) as InviteFetchResponse;
-    return base64Decode(raw.sealed);
+    return base64Decode(raw.capability);
   }
 
   /**
@@ -1336,8 +1388,8 @@ export class DiscoveryClient {
    * `wasm.signInviteRevocation(seed, blobId, signedAtMs)`
    * builds the canonical bytes (`REVOKE_DOMAIN_V1 || blob_id ||
    * signed_at_ms_be`) and signs. We POST `signed_at_ms +
-   * signature` as the DELETE body; server takes the
-   * issuer pubkey the upload stored in clear and
+   * signature` as the DELETE body; server recovers the
+   * inviter's pubkey from the stored capability bytes and
    * verifies the signature against the same canonical layout.
    *
    * Replay window: the server enforces `±10 min` against its

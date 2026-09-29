@@ -13,9 +13,8 @@ final class GroupInviteDiscoveryURLProtocol: URLProtocol {
         case ok
         case status(Int)
         case network
-        /// A `GET` answers 200 with this sealed blob (`{"sealed": ...}`, the
-        /// sealed-links wire); anything else as `.ok`.
-        case sealed(Data)
+        /// A `GET` answers 200 with this capability; anything else as `.ok`.
+        case capability(Data)
         /// An upload answers 200 with this `blob_id` string.
         case uploadAnswers(String)
     }
@@ -24,8 +23,6 @@ final class GroupInviteDiscoveryURLProtocol: URLProtocol {
         let method: String
         let path: String
         let authorization: String?
-        /// The request body (URLProtocol sees uploads as a stream).
-        var body: Data? = nil
     }
 
     private static let lock = NSLock()
@@ -56,21 +53,6 @@ final class GroupInviteDiscoveryURLProtocol: URLProtocol {
         return seen[scope] ?? []
     }
 
-    private static func body(of request: URLRequest) -> Data? {
-        if let body = request.httpBody { return body }
-        guard let stream = request.httpBodyStream else { return nil }
-        stream.open()
-        defer { stream.close() }
-        var data = Data()
-        var buffer = [UInt8](repeating: 0, count: 4096)
-        while stream.hasBytesAvailable {
-            let read = stream.read(&buffer, maxLength: buffer.count)
-            if read <= 0 { break }
-            data.append(buffer, count: read)
-        }
-        return data
-    }
-
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
@@ -84,8 +66,7 @@ final class GroupInviteDiscoveryURLProtocol: URLProtocol {
         Self.seen[scope, default: []].append(Seen(
             method: request.httpMethod ?? "GET",
             path: url.path,
-            authorization: request.value(forHTTPHeaderField: "Authorization"),
-            body: Self.body(of: request)))
+            authorization: request.value(forHTTPHeaderField: "Authorization")))
         let mode = Self.modes[scope] ?? .ok
         Self.lock.unlock()
 
@@ -99,13 +80,13 @@ final class GroupInviteDiscoveryURLProtocol: URLProtocol {
             case .status(let code):
                 status = code
                 body = Data("refused".utf8)
-            case .sealed(let blob) where request.httpMethod == "GET":
+            case .capability(let wire) where request.httpMethod == "GET":
                 status = 200
-                body = Data(#"{"sealed":"\#(blob.base64EncodedString())"}"#.utf8)
+                body = Data(#"{"capability":"\#(wire.base64EncodedString())"}"#.utf8)
             case .uploadAnswers(let slug):
                 status = 200
                 body = Data(#"{"blob_id":"\#(slug)"}"#.utf8)
-            case .ok, .sealed:
+            case .ok, .capability:
                 status = 200
                 body = Data(#"{"blob_id":"\#(Self.mintedBlobIdSlug)"}"#.utf8)
             }
@@ -151,15 +132,6 @@ final class GroupInviteUploadAuthTests: XCTestCase {
             return XCTFail("the minted fragment is a link secret, got \(String(describing: fragment))")
         }
         XCTAssertEqual(secret.count, 12)
-        // Sealed links: the upload is the sealed blob and its clear fields,
-        // the secret is not in it.
-        let body = try XCTUnwrap(upload.body)
-        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
-        XCTAssertEqual(Set(json.keys), ["sealed", "issuer_pubkey", "expiry_ms", "max_uses"])
-        XCTAssertFalse(String(decoding: body, as: UTF8.self).contains(base64UrlEncodeNoPad(secret)))
-        let sealed = try XCTUnwrap(base64Decode(try XCTUnwrap(json["sealed"] as? String)))
-        let cap = try GroupInviteCapability.openLink(sealed: sealed, linkSecret: secret)
-        XCTAssertEqual(DsClient.pseudonymHex(cap.groupId()), f.groupIdHex)
     }
 
     /// The token is read when the request is made, not captured at bootstrap:
@@ -215,16 +187,11 @@ final class GroupInviteUploadAuthTests: XCTestCase {
         let slug = try XCTUnwrap(GroupInviteLink.split(link).base
             .components(separatedBy: "/g/").last)
         XCTAssertGreaterThan(slug.count, 100, "the inline form carries the whole capability")
-        guard case .inline(let sealed) = try GroupInviteUrl.parseGroupInviteSlug(slug) else {
+        guard case .inline = try GroupInviteUrl.parseGroupInviteSlug(slug) else {
             return XCTFail("the fallback link parses as inline")
         }
         XCTAssertEqual(GroupInviteLink.split(link).fragment?.count, 16,
                        "the link secret still rides the fragment, 16 characters")
-        // The inline slug is the SEALED capability; it opens under the
-        // fragment's secret and carries the preview.
-        let secret = try XCTUnwrap(InviteLink.secret(fromFragment: GroupInviteLink.split(link).fragment))
-        let cap = try GroupInviteCapability.openLink(sealed: sealed, linkSecret: secret)
-        XCTAssertTrue(cap.hasPreview())
     }
 
     func testTheFallbackRuleAndTheLogSummary() {

@@ -347,11 +347,7 @@ class MainActivity : ComponentActivity() {
         if (!path.startsWith("/i/")) return
         val slug = path.removePrefix("/i/").trim().removeSuffix("/")
         if (slug.isEmpty()) return
-        // Sealed-link amendment of 2026-09-28: the `#<secret>` fragment is
-        // what the sealed capability opens under. Read here and nowhere
-        // else (`Uri.fragment` is never sent); a URL that lost it reaches
-        // the landing as damaged, never as a retry without the secret.
-        inviteIntake.publish(slug, uri.fragment?.takeIf { it.isNotBlank() })
+        inviteIntake.publish(slug)
     }
 
     /**
@@ -367,10 +363,11 @@ class MainActivity : ComponentActivity() {
         if (!path.startsWith("/g/")) return
         val slug = path.removePrefix("/g/").trim().removeSuffix("/")
         if (slug.isEmpty()) return
-        // Sealed-link amendment of 2026-09-28 — the `#<link secret>` fragment
-        // opens the sealed capability and its preview. It is read here and
-        // nowhere else (`Uri.fragment` is never sent); a URL that lost it is
-        // damaged. Its width is checked on the landing, not here.
+        // ADR-0028 v2 — the `#<link secret>` fragment unlocks the page's
+        // preview. It is read here and nowhere else: `Uri.fragment` is decoded,
+        // never sent, and a URL that lost it still joins, only without the
+        // preview. Its width is checked on the landing (a wrong one refuses
+        // the link), not here.
         inviteIntake.publishGroupJoin(slug, uri.fragment?.takeIf { it.isNotBlank() })
     }
 
@@ -389,8 +386,7 @@ class MainActivity : ComponentActivity() {
         if (!path.startsWith("/c/")) return
         val slug = path.removePrefix("/c/").trim().removeSuffix("/")
         if (slug.isEmpty()) return
-        // The `#<secret>` fragment rides with the slug (sealed links).
-        inviteIntake.publishCallJoin(slug, uri.fragment?.takeIf { it.isNotBlank() })
+        inviteIntake.publishCallJoin(slug)
     }
 
     /**
@@ -1346,7 +1342,6 @@ private fun SessionRoot(
                             state = channelsState,
                             client = channelsClient,
                             onBack = { navController.popBackStack() },
-                            sessionToken = { authRepository.identitySecrets.value?.sessionToken },
                         )
                     } else {
                         LoadingScreen()
@@ -1762,7 +1757,7 @@ private fun SessionRoot(
                     // ADR-0028 (G-3) — request to join the group the `/g/<slug>`
                     // link points at + poll for the admin's approval.
                     // The one argument carries `<slug>` or `<slug>#<fragment>`
-                    // (ADR-0028 v2); the fragment is the link secret.
+                    // (ADR-0028 v2); the fragment is the preview's link key.
                     val groupJoinArgument = entry.arguments?.getString("slug") ?: return@composable
                     val groupJoinLink = me.lakko.app.chat.parseGroupJoinArgument(groupJoinArgument)
                     val groupJoinVm: me.lakko.app.ui.chat.JoinGroupLandingViewModel = viewModel(
@@ -1771,7 +1766,7 @@ private fun SessionRoot(
                             me.lakko.app.ui.chat.JoinGroupLandingViewModel(
                                 chatRepository,
                                 groupJoinLink.slug,
-                                me.lakko.app.discovery.parseInviteLinkFragment(groupJoinLink.fragment),
+                                me.lakko.app.chat.parseGroupInviteFragment(groupJoinLink.fragment),
                             )
                         },
                     )

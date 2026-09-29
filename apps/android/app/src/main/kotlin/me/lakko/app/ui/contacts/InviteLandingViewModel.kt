@@ -99,7 +99,6 @@ public class InviteLandingViewModel(
             AcceptInviteResult.Exhausted -> InviteLandingState.Exhausted
             AcceptInviteResult.NotFound -> InviteLandingState.NotFound
             AcceptInviteResult.MalformedSlug -> InviteLandingState.MalformedSlug
-            AcceptInviteResult.Damaged -> InviteLandingState.Damaged
             AcceptInviteResult.RateLimited -> InviteLandingState.RateLimited
             AcceptInviteResult.AllowanceUsed -> InviteLandingState.AllowanceUsed
             AcceptInviteResult.RequiresReauth -> InviteLandingState.RequiresReauth
@@ -142,9 +141,6 @@ public sealed interface InviteLandingState {
     public data object Exhausted : InviteLandingState
     public data object NotFound : InviteLandingState
     public data object MalformedSlug : InviteLandingState
-
-    /** The link's secret is missing, malformed, or does not open it. */
-    public data object Damaged : InviteLandingState
     /** The discovery service answered `429`; the link may be fine. */
     public data object RateLimited : InviteLandingState
 

@@ -20,17 +20,15 @@
  *   2. Mint a one-time MLS `KeyPackage` via
  *      `identity.createKeyPackage()` — the joiner consumes
  *      it to bootstrap the call MLS group.
- *   3. `composeCallInviteCapability(...)` via wasm — signs the
- *      capability under the owner's Ed25519 identity and seals
- *      it under a fresh 12-byte link secret (`InviteLinkMint`).
- *   4. `DiscoveryClient.uploadCallInvite(...)` — pushes the
- *      sealed blob, plus the clear `issuer_pubkey`, `expiry_ms`
- *      and `max_uses`, to the ledger; the server mints a random
- *      6-byte id and cannot read the capability.
- *   5. `composePointerCallInviteUrl(...)` — builds
- *      `https://<origin>/c/<id>#<secret>`. When the upload fails
- *      on transport the link is the inline
- *      `https://<origin>/c/<sealed>#<secret>` instead.
+ *   3. `composeCallInviteCapability(...)` via wasm — produces
+ *      wire bytes signed under the owner's Ed25519 identity.
+ *   4. `DiscoveryClient.uploadCallInvite(capabilityBytes)` —
+ *      pushes the bytes to the server-side ledger; the
+ *      server verifies the signature + content-addresses by
+ *      SHA-256.
+ *   5. `composePointerCallInviteUrl(blobId, origin?)` —
+ *      builds the `https://<origin>/c/<slug>` shape the
+ *      owner shares.
  *
  * Sibling of `apps/web/src/contacts/composer.ts` (the
  * contact-invite composer); kept separate because the call-
@@ -44,14 +42,9 @@
  */
 
 import { loadWasm } from "../wasm";
-import { DiscoveryClient, DiscoveryNetworkError } from "../discovery/client";
-import {
-  composeInlineCallInviteUrl,
-  composePointerCallInviteUrl,
-  CALL_ID_LEN,
-  CALL_INVITE_LABEL_MAX_LEN,
-} from "./invite";
-import { inviteLinkWidths, takeInviteLinkMint } from "../contacts/invite-link";
+import { DiscoveryClient } from "../discovery/client";
+import { composePointerCallInviteUrl, CALL_ID_LEN, CALL_INVITE_LABEL_MAX_LEN } from "./invite";
+import { inviteLinkWidths } from "../contacts/invite-link";
 
 /** Options bag the UI hands to [`composeAndUploadCallInvite`]. */
 export interface ComposeCallInviteOptions {
@@ -109,20 +102,23 @@ export interface ComposeCallInviteOptions {
  *  revoke flow, and keeps `callId` around for the in-call
  *  signaling layer. */
 export interface ComposedCallInvite {
-  /** The 6-byte ledger id, or `null` when the upload failed on
-   *  transport and the link is inline. Pass to
+  /** Raw 32-byte content-addressed `blob_id`. Pass to
    *  `DiscoveryClient.revokeCallInvite(blobId, signingSeed)`
    *  when the owner cancels the link. */
-  readonly blobId: Uint8Array | null;
-  /** The full `https://<origin>/c/<id>#<secret>` link the owner
-   *  shares (or the inline form). */
+  readonly blobId: Uint8Array;
+  /** The full `https://<origin>/c/<slug>` URL the owner
+   *  shares — base64url-no-pad of `blobId`. */
   readonly url: string;
   /** The 16-byte `call_id` embedded in the capability — the
    *  caller's live call. Returned so a caller that did not keep
    *  it can bind a call-admission JWT to the same id. */
   readonly callId: Uint8Array;
-  /** The sealed blob the ledger (or the inline link) carries. */
-  readonly sealed: Uint8Array;
+  /** The wire-format capability bytes the server now holds.
+   *  Returned for the rare case where the UI wants to drive
+   *  `CallInviteCapability.decodeAndVerify(...)` against the
+   *  same bytes (e.g. to read back `expiryMs` for the
+   *  landing-page rendering). */
+  readonly capabilityBytes: Uint8Array;
 }
 
 /** Programmer-error path: input validation caught before any
@@ -195,47 +191,28 @@ export async function composeAndUploadCallInvite(
 
   // ---- 4. composeCallInviteCapability via wasm -------------
   const wasm = await loadWasm();
-  const mint = takeInviteLinkMint(
-    wasm.composeCallInviteCapability(
-      opts.ownerSigningSeed,
-      opts.ownerAccountId,
-      callId,
-      opts.expiryMs,
-      opts.maxUses,
-      mediaAudio,
-      opts.mediaVideo,
-      oneTimeKeyPackage,
-      opts.label,
-    ),
+  const capabilityBytes = wasm.composeCallInviteCapability(
+    opts.ownerSigningSeed,
+    opts.ownerAccountId,
+    callId,
+    opts.expiryMs,
+    opts.maxUses,
+    mediaAudio,
+    opts.mediaVideo,
+    oneTimeKeyPackage,
+    opts.label,
   );
-  const widths = inviteLinkWidths(wasm);
 
   // ---- 5. uploadCallInvite via HTTP ------------------------
-  let blobId: Uint8Array | null;
-  try {
-    blobId = await opts.discoveryClient.uploadCallInvite({
-      sealed: mint.sealed,
-      issuerPubkey: mint.issuerPubkey,
-      expiryMs: opts.expiryMs,
-      maxUses: opts.maxUses,
-    });
-  } catch (err) {
-    // Only a transport failure falls back to the inline link; a server
-    // refusal is an error the caller shows.
-    if (!(err instanceof DiscoveryNetworkError)) throw err;
-    blobId = null;
-  }
+  const blobId = await opts.discoveryClient.uploadCallInvite(capabilityBytes);
 
   // ---- 6. URL build ----------------------------------------
-  const url =
-    blobId === null
-      ? composeInlineCallInviteUrl(mint.sealed, mint.linkSecret, widths, opts.origin)
-      : composePointerCallInviteUrl(blobId, mint.linkSecret, widths, opts.origin);
+  const url = composePointerCallInviteUrl(blobId, inviteLinkWidths(wasm), opts.origin);
 
   return {
     blobId,
     url,
     callId,
-    sealed: mint.sealed,
+    capabilityBytes,
   };
 }

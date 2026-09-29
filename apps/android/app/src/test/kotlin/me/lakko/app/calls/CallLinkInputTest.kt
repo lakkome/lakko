@@ -26,23 +26,9 @@ class CallLinkInputTest {
     }
 
     @Test
-    fun `a query a sharing app appended is dropped`() {
+    fun `a query or a fragment a sharing app appended is dropped`() {
         assertEquals("abc123", callInviteSlugFromInput("https://lakko.me/c/abc123?utm=mail"))
-    }
-
-    @Test
-    fun `the fragment is kept, it carries the link secret`() {
-        // Sealed-link amendment of 2026-09-28: without the fragment the link
-        // opens nothing, so it must reach the landing whole.
-        assertEquals(
-            "abc123#AAECAwQFBgcICQoL",
-            callInviteSlugFromInput("https://lakko.me/c/abc123#AAECAwQFBgcICQoL"),
-        )
-        assertEquals(
-            "abc123#AAECAwQFBgcICQoL",
-            callInviteSlugFromInput("https://lakko.me/c/abc123/?utm=mail#AAECAwQFBgcICQoL"),
-        )
-        assertEquals("abc123", callInviteSlugFromInput("https://lakko.me/c/abc123#"))
+        assertEquals("abc123", callInviteSlugFromInput("https://lakko.me/c/abc123#top"))
     }
 
     @Test

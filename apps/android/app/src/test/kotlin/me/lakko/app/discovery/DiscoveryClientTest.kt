@@ -523,7 +523,7 @@ class DiscoveryClientTest {
     // ===================================================================
 
     @Test
-    fun `inviteUpload sends the sealed blob and its clear fields + parses blob_id`() = runTest {
+    fun `inviteUpload sends capability + parses blob_id`() = runTest {
         val captured = mutableListOf<CapturedRequest>()
         client(
             responses = listOf(HttpStatusCode.OK to """{"blob_id":"BLOB_B64URL"}"""),
@@ -531,114 +531,14 @@ class DiscoveryClientTest {
         ).use { client ->
             val resp = client.inviteUpload(
                 InviteUploadRequest(
-                    sealed = "SEALED_B64",
-                    issuer_pubkey = "PK_B64",
-                    expiry_ms = 5L,
-                    max_uses = 0L,
-                    label = "",
-                    bootstrap_referral = false,
+                    capability = "CAP_B64",
                 ),
             )
             assertEquals("BLOB_B64URL", resp.blob_id)
         }
         val body = captured[0].body!!
-        assertEquals("SEALED_B64", body["sealed"]!!.jsonPrimitive.content)
-        assertEquals("PK_B64", body["issuer_pubkey"]!!.jsonPrimitive.content)
-        assertNull(body["capability"])
+        assertEquals("CAP_B64", body["capability"]!!.jsonPrimitive.content)
         assertTrue(captured[0].url.endsWith("/discovery/invite"))
-    }
-
-    // ===================================================================
-    // Sealed invite links (the 2026-09-28 amendment): the wire the server
-    // reads, field for field (services/discovery/src/{invite,call_invite,
-    // group_invite}.rs `UploadRequest` / `FetchResponse`).
-    // ===================================================================
-
-    private val sealedBlob = ByteArray(180) { (it + 3).toByte() }
-    private val issuerKey = ByteArray(32) { (it + 100).toByte() }
-
-    @Test
-    fun `uploadInvite sends exactly the server's upload fields and never the secret`() = runTest {
-        val captured = mutableListOf<CapturedRequest>()
-        val blobId = client(
-            responses = listOf(HttpStatusCode.OK to """{"blob_id":"AQIDBAUG"}"""),
-            captured = captured,
-        ).use { client ->
-            client.uploadInvite(
-                sealed = sealedBlob,
-                issuerPubkey = issuerKey,
-                expiryMs = 1_700_000_000_000L,
-                maxUses = 0xFFFFFFFFL,
-                label = "Book club",
-                bootstrapReferral = true,
-            )
-        }
-        assertEquals(listOf<Byte>(1, 2, 3, 4, 5, 6), blobId.toList())
-        val body = captured.single().body!!
-        assertEquals(
-            setOf("sealed", "issuer_pubkey", "expiry_ms", "max_uses", "label", "bootstrap_referral"),
-            body.keys,
-        )
-        assertEquals(java.util.Base64.getEncoder().encodeToString(sealedBlob), body["sealed"]!!.jsonPrimitive.content)
-        assertEquals(java.util.Base64.getEncoder().encodeToString(issuerKey), body["issuer_pubkey"]!!.jsonPrimitive.content)
-        assertEquals("1700000000000", body["expiry_ms"]!!.jsonPrimitive.content)
-        assertEquals("4294967295", body["max_uses"]!!.jsonPrimitive.content)
-        assertEquals("Book club", body["label"]!!.jsonPrimitive.content)
-        assertEquals("true", body["bootstrap_referral"]!!.jsonPrimitive.content)
-    }
-
-    @Test
-    fun `call and group uploads send the four clear fields and no label`() = runTest {
-        for ((endpoint, call) in listOf<Pair<String, suspend (DiscoveryClient) -> ByteArray>>(
-            "/discovery/call-invite" to { it.uploadCallInvite(sealedBlob, issuerKey, 42L, 7L) },
-            "/discovery/group-invite" to { it.uploadGroupInvite(sealedBlob, issuerKey, 42L, 7L) },
-        )) {
-            val captured = mutableListOf<CapturedRequest>()
-            client(
-                responses = listOf(HttpStatusCode.OK to """{"blob_id":"AQIDBAUG"}"""),
-                captured = captured,
-            ).use { call(it) }
-            val req = captured.single()
-            assertTrue(req.url.endsWith(endpoint))
-            assertEquals(setOf("sealed", "issuer_pubkey", "expiry_ms", "max_uses"), req.body!!.keys)
-            assertEquals("42", req.body!!["expiry_ms"]!!.jsonPrimitive.content)
-            assertEquals("7", req.body!!["max_uses"]!!.jsonPrimitive.content)
-        }
-    }
-
-    @Test
-    fun `every fetch returns the decoded sealed blob`() = runTest {
-        val b64 = java.util.Base64.getEncoder().encodeToString(sealedBlob)
-        for (call in listOf<suspend (DiscoveryClient) -> ByteArray?>(
-            { it.fetchInvite(ByteArray(6)) },
-            { it.fetchCallInvite(ByteArray(6)) },
-            { it.fetchGroupInvite(ByteArray(6)) },
-        )) {
-            val fetched = client(responses = listOf(HttpStatusCode.OK to """{"sealed":"$b64"}""")).use { call(it) }
-            assertEquals(sealedBlob.toList(), fetched!!.toList())
-        }
-    }
-
-    @Test
-    fun `sealed uploads refuse a wrong-width issuer key and an oversized blob before network`() {
-        val engine = MockEngine { error("must not reach the network") }
-        for (call in listOf<suspend (DiscoveryClient) -> Unit>(
-            { it.uploadInvite(sealedBlob, ByteArray(31), 0L, 0L, "", false) },
-            { it.uploadCallInvite(sealedBlob, ByteArray(33), 0L, 0L) },
-            { it.uploadGroupInvite(ByteArray(0), issuerKey, 0L, 0L) },
-            { it.uploadGroupInvite(ByteArray(939), issuerKey, 0L, 0L) },
-            { it.uploadCallInvite(ByteArray(4339), issuerKey, 0L, 0L) },
-        )) {
-            assertThrows(DiscoveryClientArgError::class.java) {
-                runTest {
-                    DiscoveryClient(
-                        baseUrl = "http://test.invalid",
-                        engine = engine,
-                        inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS },
-                    ).use { call(it) }
-                }
-            }
-        }
     }
 
     @Test
@@ -646,14 +546,14 @@ class DiscoveryClientTest {
         val captured = mutableListOf<CapturedRequest>()
         client(
             responses = listOf(
-                HttpStatusCode.OK to """{"sealed":"CAP_B64"}""",
+                HttpStatusCode.OK to """{"capability":"CAP_B64"}""",
                 HttpStatusCode.NotFound to "",
             ),
             captured = captured,
         ).use { client ->
             val ok = client.inviteFetch(ByteArray(6))
             assertNotNull(ok)
-            assertEquals("CAP_B64", ok!!.sealed)
+            assertEquals("CAP_B64", ok!!.capability)
 
             val gone = client.inviteFetch(ByteArray(6))
             assertNull(gone)
@@ -755,7 +655,7 @@ class DiscoveryClientTest {
         assertThrows(DiscoveryClientArgError::class.java) {
             runTest {
                 DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
-                    client.uploadInvite(ByteArray(0), ByteArray(32), 0L, 0L, "", false)
+                    client.uploadInvite(ByteArray(0))
                 }
             }
         }
@@ -767,11 +667,11 @@ class DiscoveryClientTest {
         val err = assertThrows(DiscoveryClientArgError::class.java) {
             runTest {
                 DiscoveryClient(baseUrl = "http://test.invalid", engine = engine, inviteLinkLengths = { TEST_INVITE_LINK_LENGTHS }).use { client ->
-                    client.uploadInvite(ByteArray(255), ByteArray(32), 0L, 0L, "", false)
+                    client.uploadInvite(ByteArray(2049))
                 }
             }
         }
-        assertTrue(err.message!!.contains("254"))
+        assertTrue(err.message!!.contains("2048"))
     }
 
     @Test
@@ -857,7 +757,7 @@ class DiscoveryClientTest {
         val captured = mutableListOf<CapturedRequest>()
         val id = ByteArray(6) { (it + 1).toByte() }
         client(
-            responses = listOf(HttpStatusCode.OK to """{"sealed":"CAP_B64"}"""),
+            responses = listOf(HttpStatusCode.OK to """{"capability":"CAP_B64"}"""),
             captured = captured,
         ).use { client -> client.inviteFetch(id) }
         val slug = captured[0].url.substringAfter("/discovery/invite/")

@@ -51,9 +51,7 @@ describe("DiscoveryClient session token", () => {
   it("the group-invite upload carries the provider's token", async () => {
     const client = new DiscoveryClient("/api/discovery", { sessionToken: () => "tok" });
     await client.groupInviteUpload({
-      sealed: "",
-      issuer_pubkey: "",
-      expiry_ms: 0,
+      capability: "",
       max_uses: 0,
     });
     expect(authHeaders).toEqual(["Bearer tok"]);

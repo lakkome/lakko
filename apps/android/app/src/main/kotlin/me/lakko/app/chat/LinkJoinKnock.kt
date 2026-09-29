@@ -98,27 +98,12 @@ public fun joinFailureCopy(error: Throwable): String {
         }
         cause = cause.cause
     }
-    // Sealed-link amendment of 2026-09-28: a link whose secret is missing or
-    // does not open it. Never retried without the secret.
-    if (me.lakko.app.discovery.isInviteLinkDamaged(error) || hasCause<GroupInviteLinkDamaged>(error)) {
-        return me.lakko.app.discovery.INVITE_LINK_DAMAGED_COPY
-    }
     // The ledger consume answered 429: the link is fine, the network's budget
     // is spent. Never "link invalid".
     if (me.lakko.app.discovery.isDiscoveryRateLimited(error)) {
         return me.lakko.app.discovery.INVITE_RATE_LIMITED_COPY
     }
     return JOIN_FAILED_COPY
-}
-
-private inline fun <reified T : Throwable> hasCause(error: Throwable): Boolean {
-    var cause: Throwable? = error
-    val seen = HashSet<Throwable>()
-    while (cause != null && seen.add(cause)) {
-        if (cause is T) return true
-        cause = cause.cause
-    }
-    return false
 }
 
 /**

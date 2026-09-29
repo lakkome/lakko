@@ -81,10 +81,13 @@ import { recordConversationKind } from "../chat/conversation-kind-store";
 // ADR-0028 v2 — the sealed preview and the link key in the URL fragment
 // (docs/ux/group-invite-page.md). The copy lives in a plain module for the
 // same `vitest` reason as the wait copy above.
+import { parseGroupInviteSlug } from "../contacts/group-invite";
 import {
   INVITE_LINK_DAMAGED,
   INVITE_LINK_RATE_LIMITED,
   INVITE_LINK_TRY_AGAIN,
+  inviteLinkWidths,
+  parseGroupInviteFragment,
 } from "../contacts/invite-link";
 import { isDiscoveryRateLimited } from "../discovery/client";
 import {
@@ -106,9 +109,8 @@ interface DecodedTicket {
   fingerprint: string;
   valid: boolean;
   /** The sealed preview, opened with the link secret from the URL fragment,
-   *  or `null` when the capability carries none. A link without its fragment,
-   *  or whose preview does not open, never reaches here: it is refused as
-   *  damaged. */
+   *  or `null` when the link has no fragment. A fragment that does not open
+   *  the preview never reaches here: the link is refused as damaged. */
   preview: GroupInvitePreviewData | null;
 }
 
@@ -145,15 +147,21 @@ export default function JoinGroup() {
     async ({ slug, hash }): Promise<DecodedTicket | LinkRefusal | null> => {
       try {
         const wasm = await loadWasm();
-        // The capability is sealed under the fragment secret (the 2026-09-28
-        // sealed-link amendment): a missing or wrong fragment, an unreadable
-        // slug, or a blob the secret does not open is damaged. A damaged
-        // fragment never reaches the network.
-        const resolved = await client.resolveGroupInviteLink(slug, hash);
-        if (resolved === "damaged") return "damaged";
-        const { capabilityWire, blobId, linkSecret } = resolved;
+        const widths = inviteLinkWidths(wasm);
+        // An old-width or malformed slug is invalid (it throws into the
+        // invalid-or-expired state below) and never reaches the network.
+        parseGroupInviteSlug(slug, widths);
+        // A fragment that is present but is not a 16-character link secret
+        // (the pre-amendment 43-character key included) is damaged: refuse it
+        // before any network round-trip.
+        const fragment = parseGroupInviteFragment(hash, widths);
+        if (fragment.kind === "damaged") return "damaged";
+        const { capabilityWire, blobId } = await client.resolveGroupInviteSlug(slug);
         const cap = wasm.GroupInviteCapability.decodeAndVerify(capabilityWire);
-        const outcome = resolveInvitePreview(cap, linkSecret);
+        // The preview key binds the capability's group id and issuer, so a
+        // capability a server swapped in under a live id does not open under
+        // the link's secret. Fail closed: no preview-less join is offered.
+        const outcome = resolveInvitePreview(cap, fragment);
         if (outcome.kind === "damaged") return "damaged";
         return {
           wire: capabilityWire,

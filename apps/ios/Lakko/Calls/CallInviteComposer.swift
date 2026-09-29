@@ -56,23 +56,22 @@ public enum CallInviteComposer {
     /// revoke flow, and keeps ``callId`` around for the in-
     /// call signaling layer.
     public struct Composed: Sendable, Equatable {
-        /// Raw 6-byte ledger `blob_id` the server minted, or `nil` when the
-        /// upload failed on transport and the link is the inline fallback
-        /// (no ledger row, nothing to revoke). Pass to
+        /// Raw 6-byte ledger `blob_id` the server minted. Pass to
         /// ``DiscoveryClient/revokeCallInvite(blobId:signingSeed:)``
         /// when the owner cancels the link.
-        public let blobId: Data?
-        /// The full `<origin>/c/<id>#<secret>` URL the owner shares
-        /// (sealed-links amendment of 2026-09-28): the capability is sealed
-        /// under the 12-byte secret in the fragment, which never leaves this
-        /// device except inside this string.
+        public let blobId: Data
+        /// The full `<origin>/c/<slug>` URL the owner
+        /// shares — base64url-no-pad of ``blobId``.
         public let url: String
         /// The 16-byte `call_id` embedded in the capability —
         /// the live call's, so a person who follows the link
         /// arrives in THAT call.
         public let callId: Data
-        /// The PLAINTEXT capability wire (what a joiner tag is computed
-        /// over). The server holds only the sealed blob.
+        /// Wire-format capability bytes the server now holds.
+        /// Returned for the rare case where the UI wants to
+        /// drive `CallInviteCapability.decodeAndVerify(...)`
+        /// against the same bytes (e.g. to read back
+        /// `expiryMs` for the landing-page rendering).
         public let capabilityBytes: Data
     }
 
@@ -87,10 +86,8 @@ public enum CallInviteComposer {
     ///   3. `composeCallInviteCapability(...)` via UniFFI —
     ///      wire bytes signed under the owner's Ed25519 key,
     ///      carrying the ``CallInviteValues`` every link does.
-    ///   4. ``DiscoveryClient/uploadCallInvite(mint:expiryMs:maxUses:)``
-    ///      then the pointer link `<origin>/c/<id>#<secret>`; on a
-    ///      TRANSPORT failure only, the inline link
-    ///      `<origin>/c/<sealed>#<secret>`.
+    ///   4. ``DiscoveryClient/uploadCallInvite(capabilityBytes:)``
+    ///      then ``CallInviteUrl/composePointerCallInviteUrl(blobId:origin:)``.
     ///
     /// The call must be driven from a background `Task`: the
     /// upload solves a server-issued anti-spam challenge that
@@ -144,50 +141,28 @@ public enum CallInviteComposer {
 
         // ---- 2. The values every link carries ----------------
         // Fixed, not asked (`docs/ux/call-links.md` section 4).
-        let expiryMs = CallInviteValues.expiryMs(nowMs: nowMs)
-        let mint = try composeCallInviteCapability(
+        let capabilityBytes = try composeCallInviteCapability(
             ownerSigningSeed: ownerSigningSeed,
             ownerAccountId: ownerAccountId,
             callId: callId,
-            expiryMs: expiryMs,
+            expiryMs: CallInviteValues.expiryMs(nowMs: nowMs),
             maxUses: CallInviteValues.maxUses,
             media: FfiCallInviteMedia(
                 audio: CallInviteValues.audio, video: CallInviteValues.video),
             oneTimeKeyPackage: oneTimeKeyPackage,
             label: CallInviteValues.label
         )
-        // The plaintext wire, for the joiner-tag and anything that reads the
-        // capability back; the seal is what goes to the server.
-        let capabilityBytes = try CallInviteCapability.openLink(
-            sealed: mint.sealed, linkSecret: mint.linkSecret
-        ).wire()
 
         // ---- 3. uploadCallInvite via HTTP --------------------
-        // Only a TRANSPORT failure falls back to the inline link; a refusal
-        // from the server surfaces.
-        let blobId: Data?
-        do {
-            blobId = try await discoveryClient.uploadCallInvite(
-                mint: mint,
-                expiryMs: expiryMs,
-                maxUses: CallInviteValues.maxUses
-            )
-        } catch let error where InviteLink.uploadFallsBackInline(error) {
-            NSLog("call invite upload failed (network); sharing the inline link")
-            blobId = nil
-        }
+        let blobId = try await discoveryClient.uploadCallInvite(
+            capabilityBytes: capabilityBytes
+        )
 
         // ---- 4. URL build ------------------------------------
-        let url: String
-        if let blobId {
-            url = InviteLink.pointer(
-                origin: origin, prefix: CallInviteUrl.urlPrefix,
-                blobId: blobId, secret: mint.linkSecret)
-        } else {
-            url = InviteLink.inline(
-                origin: origin, prefix: CallInviteUrl.urlPrefix,
-                sealed: mint.sealed, secret: mint.linkSecret)
-        }
+        let url = try CallInviteUrl.composePointerCallInviteUrl(
+            blobId: blobId,
+            origin: origin
+        )
 
         return Composed(
             blobId: blobId,

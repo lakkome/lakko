@@ -51,9 +51,7 @@ public class LinkCallRequest(
     /** The local identity IS the capability owner: found + host. */
     public val isOwner: Boolean,
     /**
-     * The `/c/` landing argument the call was started from (`<slug>#<secret>`,
-     * [me.lakko.app.discovery.composeInviteLinkArgument]; the fragment is what
-     * reopens the landing), to return to its landing, or
+     * The `/c/` slug the call was started from, to return to its landing, or
      * `null` for a call started from the Calls destination's `New call`
      * (`docs/ux/call-links.md` section 2), which has no landing to return to
      * and no link at all until somebody asks for one.

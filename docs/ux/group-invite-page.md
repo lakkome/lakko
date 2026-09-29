@@ -54,9 +54,8 @@ Invited by <fingerprint>            (small, muted, one line)
   `Invited by`, so a person who was told the digits out of band can still
   compare them. It is never the only thing on the page when a preview exists.
 
-**Without a preview** (a link minted without one; since the sealed-link
-amendment of 2026-09-28 a link whose fragment was lost is damaged instead,
-because the whole capability is encrypted under that fragment):
+**Without a preview** (a link minted without one, or a link whose fragment was
+lost - a chat app that strips fragments, a hand-typed URL):
 
 ```
 You are invited to a group
@@ -66,10 +65,9 @@ Invited by <fingerprint>
 
 Nothing invents a name. The page does not say why the preview is missing.
 
-**Damaged link** (amended 2026-09-28, short links, then sealed links): the
-fragment is missing or malformed, or the sealed link does not open under it
-(ADR-0028 sealed-link amendment; the same rule and copy on `/i/` and `/c/`), or
-the preview does not open under it - a wrong or truncated key, a tampered link, or a
+**Damaged link** (amended 2026-09-28, short links): the fragment is present but
+malformed, or present while the capability carries no preview, or the preview
+does not open under it - a wrong or truncated key, a tampered link, or a
 capability a server swapped in under a live short id (the preview key is bound
 to the group id and the issuer, so a swapped capability never opens). The page
 refuses: `This invite link is damaged. Ask for a new link.` and nothing else.
@@ -99,7 +97,7 @@ the join lands.
 pointer form (`<slug>` = the ledger id, 8 chars) and the inline form (`<slug>` =
 the whole capability). A pointer link is therefore about 45 characters
 (ADR-0028 amendment of 2026-09-27). `Copy link` copies the fragment with it. A link without
-its fragment opens nothing and shows the damaged state (sealed links, 2026-09-28).
+a fragment still works; it only loses the preview.
 
 ## 5. Copy rules
 
@@ -113,6 +111,6 @@ device wrote them, unlinked, with no verification mark (the same rule as the
 - On mint: the group's name (empty = none), the issuer's own profile display
   name (empty = none), the member count - all already on the device.
 - On open: the capability's `hasPreview`, and `openPreview(linkKey)` giving
-  `groupName?`, `inviterName?`, `memberCount`, or nothing when the capability
-  carries no preview; a missing fragment, a link that does not open, or a
-  preview that does not open is the damaged state (section 3).
+  `groupName?`, `inviterName?`, `memberCount`, or nothing when the fragment is
+  absent; a present fragment whose preview does not open is the damaged state
+  (section 3), not an absent preview.

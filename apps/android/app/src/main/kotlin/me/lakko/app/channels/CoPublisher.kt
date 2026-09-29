@@ -4,16 +4,6 @@
 package me.lakko.app.channels
 
 import android.util.Base64
-import me.lakko.app.chat.GroupInviteUrlException
-import me.lakko.app.chat.ParsedGroupInvite
-import me.lakko.app.chat.composeInlineGroupInviteUrl
-import me.lakko.app.chat.composePointerGroupInviteUrl
-import me.lakko.app.chat.parseGroupInviteSlug
-import me.lakko.app.discovery.DiscoveryClient
-import me.lakko.app.discovery.inviteLinkFragmentOf
-import me.lakko.app.discovery.inviteLinkSecretOrNull
-import me.lakko.app.discovery.inviteLinkSlugOf
-import uniffi.lakko_ffi_uniffi.InviteLinkMint
 import me.lakko.app.chat.GroupNotAcceptingRequests
 import me.lakko.app.chat.JournalHeadEpoch
 import me.lakko.app.chat.runLinkJoinKnock
@@ -81,19 +71,8 @@ public object CoPublisher {
         public class MalformedSubscriberHex(hex: String) :
             CoPublisherException("subscriber pubkey hex is not valid: $hex")
 
-        /** The link text is deliberately NOT in the message: it may carry the
-         *  link secret in its fragment, and the message reaches the log. */
-        public class NotACoPublisherLink(@Suppress("UNUSED_PARAMETER") link: String) :
-            CoPublisherException("not a /g/ co-publisher link")
-
-        /** The link's secret is missing or malformed, or the sealed blob does
-         *  not open under it. */
-        public class Damaged(cause: Throwable? = null) :
-            CoPublisherException("co-publisher link is damaged") {
-            init {
-                if (cause != null) initCause(cause)
-            }
-        }
+        public class NotACoPublisherLink(link: String) :
+            CoPublisherException("not a /g/ co-publisher link: $link")
 
         public object NotAChannelGroup :
             CoPublisherException("co-publisher link does not target a channel PublisherGroup")
@@ -117,31 +96,17 @@ public object CoPublisher {
         }
     }
 
-    /** Mint a co-publisher invite capability over the PublisherGroup's MLS
-     *  `group_id`, sealed for a `/g/` link under a fresh link secret
-     *  (sealed-link amendment of 2026-09-28). A non-member opens the link,
-     *  requests to join, and the owner approves (reusing the ADR-0027/0028
-     *  external-join machinery). `0` = never expires. The caller uploads the
-     *  sealed blob and builds the URL with [coPublisherLinkUrl]. */
-    public fun mintCoPublisherLink(
+    /** Mint a co-publisher invite link over the PublisherGroup's MLS `group_id`.
+     *  A non-member opens it, requests to join, and the owner approves (reusing
+     *  the ADR-0027/0028 external-join machinery). `0` = never expires. */
+    public fun createCoPublisherLink(
         identity: Identity,
         publisherGroup: PublisherGroup,
-    ): InviteLinkMint {
-        val groupId = publisherGroup.groupId()
-        return composeGroupInviteCapability(identity.ed25519Seed(), groupId, 0uL)
-    }
-
-    /** The shareable `/g/` link for [mint]: the pointer form when the upload
-     *  returned a ledger [blobId], else the inline form (the upload failed on
-     *  transport). The link secret rides in the fragment either way. */
-    public fun coPublisherLinkUrl(
-        mint: InviteLinkMint,
-        blobId: ByteArray?,
         origin: String = DEFAULT_ORIGIN,
-    ): String = if (blobId != null) {
-        composePointerGroupInviteUrl(blobId, mint.linkSecret, origin)
-    } else {
-        composeInlineGroupInviteUrl(mint.sealed, mint.linkSecret, origin)
+    ): String {
+        val groupId = publisherGroup.groupId()
+        val wire = composeGroupInviteCapability(identity.ed25519Seed(), groupId, 0uL)
+        return "$origin$URL_PREFIX${base64UrlEncode(wire)}"
     }
 
     /** Poll the PublisherGroup's DS journal and apply incoming MLS messages
@@ -334,36 +299,14 @@ public object CoPublisher {
         ds: DsClient,
         identity: Identity,
         link: String,
-        fetchSealed: suspend (blobId: ByteArray) -> ByteArray? = { blobId ->
-            DiscoveryClient().use { it.fetchGroupInvite(blobId) }
-        },
     ): CoPublishRequest {
-        // Sealed-link amendment of 2026-09-28: the fragment is the secret the
-        // capability opens under; without it the link is damaged and nothing
-        // is fetched.
-        val slug = inviteLinkSlugOf(link.trim(), URL_PREFIX)
+        val idx = link.lastIndexOf(URL_PREFIX)
+        if (idx < 0) throw CoPublisherException.NotACoPublisherLink(link)
+        val slug = link.substring(idx + URL_PREFIX.length)
+        val wire = base64UrlDecode(slug)
             ?: throw CoPublisherException.NotACoPublisherLink(link)
-        val linkSecret = inviteLinkSecretOrNull(inviteLinkFragmentOf(link.trim()))
-            ?: throw CoPublisherException.Damaged()
-        val parsed = try {
-            parseGroupInviteSlug(slug)
-        } catch (e: GroupInviteUrlException) {
-            throw CoPublisherException.NotACoPublisherLink(link)
-        }
-        val sealed = when (parsed) {
-            is ParsedGroupInvite.Inline -> parsed.sealed
-            is ParsedGroupInvite.Pointer -> fetchSealed(parsed.blobId)
-                ?: throw CoPublisherException.NotACoPublisherLink(link)
-        }
-        val cap = try {
-            GroupInviteCapability.openLink(sealed, linkSecret)
-        } catch (e: uniffi.lakko_ffi_uniffi.FfiException) {
-            throw CoPublisherException.Damaged(e)
-        }
-        // The PLAINTEXT wire rides in the attribution (ADR-0028 OQ2).
-        val wire: ByteArray
+        val cap = GroupInviteCapability.decodeAndVerify(wire)
         val groupId = try {
-            wire = cap.wire()
             cap.groupId()
         } finally {
             cap.close()
@@ -519,4 +462,12 @@ public object CoPublisher {
         }
         return out
     }
+
+    private fun base64UrlEncode(bytes: ByteArray): String =
+        Base64.encodeToString(bytes, Base64.NO_WRAP or Base64.URL_SAFE or Base64.NO_PADDING)
+
+    private fun base64UrlDecode(slug: String): ByteArray? =
+        runCatching {
+            Base64.decode(slug, Base64.URL_SAFE or Base64.NO_PADDING)
+        }.getOrNull()
 }

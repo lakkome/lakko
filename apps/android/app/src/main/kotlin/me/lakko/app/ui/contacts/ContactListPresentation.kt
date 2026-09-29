@@ -113,10 +113,8 @@ internal const val INVITE_UNLIMITED_USES: Long = 0xFFFF_FFFFL
 public data class InviteLinkRow(
     /** The `/i/<slug>` segment; the row identity. */
     val slug: String,
-    /** The full shareable URL with its `#secret`, or `null` when this device
-     *  does not hold the link secret (a row only the server lists: the
-     *  secret never reaches the server, so it cannot be copied again). */
-    val url: String?,
+    /** The full shareable URL. */
+    val url: String,
     /** Owner label, or empty. */
     val label: String,
     /** When this device created the link, or `null` when only the server

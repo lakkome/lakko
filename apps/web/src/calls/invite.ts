@@ -8,8 +8,8 @@
  * Sibling of `apps/web/src/contacts/invite.ts` for the
  * `CallInviteCapability` ecosystem. Two surfaces:
  *
- *   * URL plumbing — `composePointerCallInviteUrl(...)` /
- *     `composeInlineCallInviteUrl(...)` +
+ *   * URL plumbing — `composeCallInviteUrl(...)` +
+ *     `composePointerCallInviteUrl(...)` +
  *     `parseCallInviteSlug(...)`. The pointer form is the
  *     production default — owner uploads via
  *     `DiscoveryClient.uploadCallInvite(...)` and substitutes
@@ -31,10 +31,10 @@
  * server-side route table and the joiner-side landing-page
  * dispatcher can branch on a one-character lookahead.
  */
+import { base64UrlEncodeNoPad } from "../auth/account-id";
 import {
   classifyInviteSlug,
-  composeInlineInviteLink,
-  composePointerInviteLink,
+  requireBlobId,
   type ClassifiedInviteSlug,
   type InviteLinkWidths,
 } from "../contacts/invite-link";
@@ -69,37 +69,65 @@ export const CALL_INVITE_LABEL_MAX_LEN = 64;
  *  formats that might shrink slightly. */
 export const CALL_INVITE_INLINE_MIN_LEN = 400;
 
-/** Builder for the **pointer** link — `https://<host>/c/<8-char id>#<secret>`,
- *  backed by the `/discovery/call-invite/<id>` lookup of the sealed blob. */
-export function composePointerCallInviteUrl(
-  blobId: Uint8Array,
-  linkSecret: Uint8Array,
-  widths: InviteLinkWidths,
-  origin?: string,
+/** Auto-pick the URL form by argument shape — pointer (6
+ *  bytes) when the caller has uploaded the capability and
+ *  wants the short form, inline-bytes (≥ 400 bytes) when the
+ *  caller is staying server-free.
+ *
+ *  Both produce a `https://<origin>/c/<base64url>` shape; the
+ *  joiner side discriminates via `parseCallInviteSlug` on the
+ *  byte length. */
+export function composeCallInviteUrl(
+  bytes: Uint8Array,
+  origin: string = typeof location !== "undefined"
+    ? location.origin
+    : "https://lakko.me",
 ): string {
-  return composePointerInviteLink("c", blobId, linkSecret, widths, origin);
+  return `${origin}${CALL_INVITE_URL_PREFIX}${base64UrlEncodeNoPad(bytes)}`;
 }
 
-/** Builder for the **inline** link — `https://<host>/c/<base64url sealed>#<secret>`,
- *  used only when the upload failed on transport. */
-export function composeInlineCallInviteUrl(
-  sealed: Uint8Array,
-  linkSecret: Uint8Array,
+/** Builder for the **pointer** URL form — the short
+ *  `https://<host>/c/<blob_id_b64url>` shape backed by
+ *  `/discovery/call-invite/<blob_id>` lookup. Equivalent to
+ *  `composeCallInviteUrl` (just a thin name wrapper) but reads
+ *  better at the call site after a `uploadCallInvite(...)`
+ *  round-trip. */
+export function composePointerCallInviteUrl(
+  blobId: Uint8Array,
   widths: InviteLinkWidths,
   origin?: string,
 ): string {
-  return composeInlineInviteLink("c", sealed, linkSecret, widths, CALL_INVITE_INLINE_MIN_LEN, origin);
+  requireBlobId(blobId, widths);
+  return composeCallInviteUrl(blobId, origin);
+}
+
+/** Builder for the **inline-bytes** URL form — the long shape
+ *  that carries the capability inside the URL itself, no
+ *  server round-trip on open. Reserved for the censored-region
+ *  fallback where `/discovery/call-invite` is unreachable; the
+ *  pointer form is the production default. */
+export function composeInlineCallInviteUrl(
+  capabilityBytes: Uint8Array,
+  origin?: string,
+): string {
+  if (capabilityBytes.length < CALL_INVITE_INLINE_MIN_LEN) {
+    throw new Error(
+      `capabilityBytes must be ≥ ${CALL_INVITE_INLINE_MIN_LEN} bytes, got ${capabilityBytes.length}`,
+    );
+  }
+  return composeCallInviteUrl(capabilityBytes, origin);
 }
 
 /** Discriminated parse of a URL slug. Returns the wire-form +
  *  the decoded bytes so the caller can dispatch:
  *
- *    * `kind: "pointer"` — fetch the sealed blob from
- *      `DiscoveryClient.fetchCallInvite(blobId)`.
- *    * `kind: "inline"` — the slug is the sealed blob.
- *
- *  Either way the blob is opened with
- *  `CallInviteCapability.openLink(sealed, secret)`.
+ *    * `kind: "pointer"` — fetch from
+ *      `DiscoveryClient.fetchCallInvite(blobId)` → run
+ *      `decodeAndVerifyCallInviteCapability` on the returned
+ *      bytes.
+ *    * `kind: "inline"` — run
+ *      `decodeAndVerifyCallInviteCapability` directly on the
+ *      bytes, no server round-trip.
  *
  *  The dispatch rule (`contacts/invite-link.ts`): 8 characters
  *  decoding to 6 bytes ⇒ pointer, ≥ 400 bytes ⇒ inline (3c3

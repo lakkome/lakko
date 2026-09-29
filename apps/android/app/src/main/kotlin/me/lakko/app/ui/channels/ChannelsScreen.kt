@@ -1450,9 +1450,6 @@ public fun ChannelManageScreen(
     state: ChannelsUiState,
     client: ChannelsClient,
     onBack: () -> Unit,
-    /** The signed-in session token, read when a co-publisher link is
-     *  uploaded (the ledger upload is bearer-gated). */
-    sessionToken: () -> String? = { null },
 ) {
     val channels by state.channels.collectAsState()
     val channel = channels.firstOrNull { it.id == channelId }
@@ -1528,7 +1525,6 @@ public fun ChannelManageScreen(
                 onCopy = { copyToClipboard(context, it) },
                 onShare = { launchShareIntent(context, it) },
                 afterApprove = { refreshPublisherKey() },
-                sessionToken = sessionToken,
             )
             KeysCard(
                 channelId = channelId,
@@ -1719,7 +1715,6 @@ private fun CoPublishersCard(
     onCopy: (String) -> Unit,
     onShare: (String) -> Unit,
     afterApprove: suspend () -> Unit,
-    sessionToken: () -> String?,
 ) {
     var link by remember(channelId) { mutableStateOf<String?>(null) }
     var pending by remember(channelId) { mutableStateOf<List<ByteArray>>(emptyList()) }
@@ -1764,26 +1759,9 @@ private fun CoPublishersCard(
                     error = null
                     scope.launch {
                         try {
-                            val mint = pub.withIdentity(persist = false) { id ->
-                                CoPublisher.mintCoPublisherLink(id, pg)
+                            link = pub.withIdentity(persist = false) { id ->
+                                CoPublisher.createCoPublisherLink(id, pg)
                             }
-                            // Sealed-link amendment of 2026-09-28: upload the
-                            // sealed blob and share the short pointer; only a
-                            // transport failure falls back to the inline form.
-                            val blobId = me.lakko.app.chat.uploadGroupInviteOrNull(
-                                sessionToken = sessionToken(),
-                                clientFactory = { me.lakko.app.discovery.DiscoveryClient() },
-                                upload = { discovery ->
-                                    discovery.uploadGroupInvite(
-                                        sealed = mint.sealed,
-                                        issuerPubkey = mint.issuerPubkey,
-                                        expiryMs = 0L,
-                                        maxUses = 0xFFFFFFFFL,
-                                    )
-                                },
-                                log = { message -> Log.w(TAG, message) },
-                            )
-                            link = CoPublisher.coPublisherLinkUrl(mint, blobId)
                         } catch (e: Throwable) {
                             Log.w(TAG, "create co-publisher link failed", e)
                             error = "Could not create the link. Try again."

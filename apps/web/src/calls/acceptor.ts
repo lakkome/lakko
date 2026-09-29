@@ -10,16 +10,15 @@
  * result so the `/c/<slug>` landing page can render the
  * right outcome copy without re-implementing the dispatch:
  *
- *   1. Read the fragment secret (none or wrong → `damaged`) and
- *      classify the slug (pointer | inline).
+ *   1. `parseCallInviteSlug(slug)` → pointer | inline | error
  *   2. (pointer branch) `DiscoveryClient.fetchCallInvite(blobId)`
- *      → the sealed blob | null (404 → `notFound`)
- *   3. `CallInviteCapability.openLink(sealed, secret)` — opens the
- *      blob and verifies the Ed25519 signature inside; any failure
- *      (wrong secret, substituted blob) is `damaged`
+ *      → bytes | null (404 → `notFound`)
+ *   3. `CallInviteCapability.decodeAndVerify(bytes)` — local
+ *      Ed25519 signature check (catches a malicious server
+ *      serving substituted bytes)
  *   4. `capability.isValidNow(nowMs)` — expiry filter
  *   5. (pointer branch) `DiscoveryClient.consumeCallInvite(
- *      blobId, capability.wire, joinerAccountId)` — atomic
+ *      blobId, capabilityBytes, joinerAccountId)` — atomic
  *      counter bump + per-joiner dedup tag
  *   6. `acceptCallInvite(capability, joinerIdentity)` —
  *      bootstrap a fresh MLS group with joiner as founder +
@@ -42,8 +41,8 @@ import {
   DiscoveryHttpError,
   isDiscoveryRateLimited,
 } from "../discovery/client";
-import { inviteLinkWidths, openSealedInviteLink } from "../contacts/invite-link";
-import { CALL_INVITE_INLINE_MIN_LEN } from "./invite";
+import { inviteLinkWidths } from "../contacts/invite-link";
+import { parseCallInviteSlug } from "./invite";
 
 // Re-exported by `loadWasm()` — the wasm module surfaces
 // `CallInviteCapability` + `acceptCallInvite` + (joiner-side)
@@ -64,12 +63,9 @@ export interface JoinerIdentityHandle {
 export interface AcceptCallInviteOptions {
   /** The `<slug>` segment from a `/c/<slug>` URL — base64url-
    *  no-pad of either a 6-byte ledger id (pointer form) or
-   *  the inline sealed blob (upload-failure fallback). */
+   *  ≥ 400 bytes of inline capability (censored-region
+   *  fallback). */
   readonly slug: string;
-  /** The link's fragment (`location.hash`, with or without `#`):
-   *  the 12-byte secret the capability is sealed under. Missing or
-   *  wrong → `damaged`. */
-  readonly fragment: string | null | undefined;
   /** Joiner's 16-byte UUIDv7 account_id — folded into the
    *  per-joiner dedup tag locally before posting to consume.
    *  Never crosses the wire in plaintext. */
@@ -144,9 +140,8 @@ export type AcceptCallInviteResult =
   /** 429 from the ledger on fetch or consume: the link may be fine, try
    *  again later. Never folded into `notFound`. */
   | { readonly kind: "rateLimited" }
-  /** The fragment is missing or wrong, the slug is unreadable, or the
-   *  secret does not open the blob (a substituted or tampered link). */
-  | { readonly kind: "damaged" }
+  | { readonly kind: "malformedSlug"; readonly reason: string }
+  | { readonly kind: "signatureFailure"; readonly reason: string }
   | { readonly kind: "failed"; readonly message: string };
 
 /**
@@ -171,39 +166,60 @@ export type AcceptCallInviteResult =
 export async function acceptCallInviteFromSlug(
   opts: AcceptCallInviteOptions,
 ): Promise<AcceptCallInviteResult> {
-  // ---- 1-3. Fragment, slug, fetch, open ------------------
+  // ---- 1. Parse the slug -----------------------------------
   const wasm = await loadWasm();
+  let parsed: ReturnType<typeof parseCallInviteSlug>;
+  try {
+    parsed = parseCallInviteSlug(opts.slug, inviteLinkWidths(wasm));
+  } catch (err) {
+    return {
+      kind: "malformedSlug",
+      reason: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  // ---- 2. Pointer branch: fetch bytes from server ----------
+  let capabilityBytes: Uint8Array;
+  let blobId: Uint8Array | null = null;
+  if (parsed.kind === "pointer") {
+    blobId = parsed.blobId;
+    try {
+      const fetched = await opts.discoveryClient.fetchCallInvite(blobId);
+      if (fetched === null) {
+        return { kind: "notFound" };
+      }
+      capabilityBytes = fetched;
+    } catch (err) {
+      if (err instanceof DiscoveryHttpError && err.status === 404) {
+        return { kind: "notFound" };
+      }
+      if (isDiscoveryRateLimited(err)) return { kind: "rateLimited" };
+      throw err; // bubble up network / non-404 HTTP errors
+    }
+  } else {
+    capabilityBytes = parsed.capabilityBytes;
+  }
+
+  // ---- 3. decodeAndVerify --- catches malicious-server
+  //          substitution + signature tamper ----------------
   let capability: {
     readonly callId: Uint8Array;
     readonly ownerAccountId: Uint8Array;
     readonly expiryMs: bigint;
     readonly ownerFingerprint: string;
-    readonly wire: Uint8Array;
     isValidNow(nowMs: bigint): boolean;
   };
-  let blobId: Uint8Array | null;
   try {
-    const opened = await openSealedInviteLink({
-      slug: opts.slug,
-      fragment: opts.fragment,
-      widths: inviteLinkWidths(wasm),
-      inlineMinLen: CALL_INVITE_INLINE_MIN_LEN,
-      what: "call-invite",
-      fetchSealed: (id) => opts.discoveryClient.fetchCallInvite(id),
-      open: (sealed, secret) => wasm.CallInviteCapability.openLink(sealed, secret),
-    });
-    if (opened.kind === "damaged") return { kind: "damaged" };
-    if (opened.kind === "not-found") return { kind: "notFound" };
-    capability = opened.capability;
-    blobId = opened.blobId;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    capability = (wasm as any).CallInviteCapability.decodeAndVerify(
+      capabilityBytes,
+    );
   } catch (err) {
-    if (err instanceof DiscoveryHttpError && err.status === 404) {
-      return { kind: "notFound" };
-    }
-    if (isDiscoveryRateLimited(err)) return { kind: "rateLimited" };
-    throw err; // bubble up network / non-404 HTTP errors
+    return {
+      kind: "signatureFailure",
+      reason: err instanceof Error ? err.message : String(err),
+    };
   }
-  const capabilityBytes = capability.wire;
 
   // ---- 4. Expiry check ------------------------------------
   const nowMs = opts.nowMs ?? Date.now();
@@ -212,7 +228,7 @@ export async function acceptCallInviteFromSlug(
   }
 
   // ---- 5. Pointer branch: consume (counter bump + dedup) --
-  if (blobId !== null) {
+  if (parsed.kind === "pointer" && blobId !== null) {
     let consumeResult: Awaited<
       ReturnType<DiscoveryClient["consumeCallInvite"]>
     >;

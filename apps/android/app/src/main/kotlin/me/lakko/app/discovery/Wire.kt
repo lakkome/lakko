@@ -231,44 +231,15 @@ data class KeyPackageFetchResponse(
 // /discovery/invite   (services/discovery/src/invite.rs — Phase 1.18d1)
 // ----------------------------------------------------------------------------
 
-/** Body of `POST /discovery/invite` (sealed-link amendment of 2026-09-28).
- *  The capability is encrypted under the link secret, which never leaves the
- *  device except in the link's fragment; what the server needs travels in
- *  the clear fields beside the sealed blob. */
+/** Body of `POST /discovery/invite`. */
 @Serializable
 data class InviteUploadRequest(
-    /** Standard-alphabet base64 of the sealed link blob
-     *  (`InviteLinkMint.sealed`). Opaque to the server. */
-    val sealed: String,
-    /** Standard-alphabet base64 of the 32-byte Ed25519 key that signed the
-     *  capability (`InviteLinkMint.issuerPubkey`), the key an owner-signed
-     *  revoke is verified against. */
-    val issuer_pubkey: String,
-    /** The capability's `expiry_ms` (`0` = never expires). */
-    val expiry_ms: Long,
-    /** The capability's `max_uses` sentinel (`0` = single-use,
-     *  `0xFFFFFFFF` = unlimited), a JSON number the server reads as `u32`. */
-    val max_uses: Long,
-    /** The capability's label, for the owner's own list. Empty when none. */
-    val label: String,
-    /** The capability's `bootstrap_referral` flag, for the owner's own list. */
-    val bootstrap_referral: Boolean,
-)
-
-/** Body of `POST /discovery/call-invite` and `POST /discovery/group-invite`
- *  (sealed-link amendment of 2026-09-28): the sealed blob plus the clear
- *  fields the server needs. The server stores no `call_id` / `group_id`. */
-@Serializable
-data class SealedInviteUploadRequest(
-    /** Standard-alphabet base64 of the sealed link blob. */
-    val sealed: String,
-    /** Standard-alphabet base64 of the issuer's 32-byte Ed25519 key. */
-    val issuer_pubkey: String,
-    /** The capability's `expiry_ms` (`0` = never expires). */
-    val expiry_ms: Long,
-    /** Consume ceiling (`0` = single-use, `0xFFFFFFFF` = unlimited). For
-     *  `/g/` a SOFT anti-spam throttle, not part of the capability. */
-    val max_uses: Long,
+    /** Standard-alphabet base64 of the
+     *  `composeInviteCapability(...)` output. Server caps
+     *  decoded size at 2048 bytes (mirrored client-side in
+     *  [DiscoveryClient.uploadInvite] so a misbehaving caller
+     *  fails fast). */
+    val capability: String,
 )
 
 /** Response body of `POST /discovery/invite`. */
@@ -288,9 +259,7 @@ data class InviteUploadResponse(
  *  status). */
 @Serializable
 data class InviteFetchResponse(
-    /** Standard-alphabet base64 of the sealed link blob. Opened locally
-     *  with the link secret from the URL fragment. */
-    val sealed: String,
+    val capability: String,
 )
 
 /** Body of `POST /discovery/invite/{blob_id_b64url}/consume`
@@ -326,6 +295,23 @@ data class InviteConsumeResponse(
 // ----------------------------------------------------------------------------
 // /discovery/group-invite   (services/discovery/src/group_invite.rs — ADR-0028)
 // ----------------------------------------------------------------------------
+
+/** Body of `POST /discovery/group-invite` (ADR-0028, G-3). Unlike the
+ *  contact-/call-invite uploads (which reuse [InviteUploadRequest]), the
+ *  group-invite carries a separate `max_uses` field: the `GroupInviteCapability`
+ *  wire format does NOT embed it, so the server reads it from the request. It is
+ *  a SOFT anti-spam throttle (`0` = single-use, `0xFFFFFFFF` = unlimited), NOT a
+ *  security boundary — the admin approval gate (ADR-0027) is the boundary. */
+@Serializable
+data class GroupInviteUploadRequest(
+    /** Standard-alphabet base64 of the
+     *  `composeGroupInviteCapability(...)` output. The server decodes + verifies
+     *  the Ed25519 wire signature before storing. */
+    val capability: String,
+    /** Soft consume ceiling. Serialised as a JSON number the server reads as a
+     *  `u32`; `0xFFFFFFFF` (= 4294967295) means unlimited. */
+    val max_uses: Long,
+)
 
 /** Body of `DELETE /discovery/invite/{blob_id_b64url}` (Phase
  *  1.18d2b). The `signature` field carries proof that the

@@ -37,8 +37,7 @@ import {
 } from "../calls/call-history";
 import { callRowLabel } from "../calls/call-log";
 import { useCallLog } from "../calls/CallLogContext";
-import { callLinkTarget } from "../calls/call-link-slug";
-import { withLinkFragment } from "../contacts/invite-link";
+import { callLinkSlug } from "../calls/call-link-slug";
 import { newCallId, newCallStart } from "../calls/new-call";
 import { useCallHost } from "../calls/CallHostContext";
 import { useChats } from "../chat/ChatContext";
@@ -127,14 +126,13 @@ export default function Calls(): JSX.Element {
   /** Open a link somebody sent that did not open by itself. */
   function joinByLink(e: SubmitEvent): void {
     e.preventDefault();
-    const target = callLinkTarget(joinInput());
-    if (target === null) {
+    const slug = callLinkSlug(joinInput());
+    if (slug === null) {
       setJoinError("That does not look like a call link. Paste the whole link and try again.");
       return;
     }
     setJoinError(null);
-    // The fragment is the link secret: routed without it, the link is damaged.
-    navigate(withLinkFragment(paths.joinCall(target.slug), target.fragment));
+    navigate(paths.joinCall(slug));
   }
 
   /** The row opens the conversation; the button places the call. Two

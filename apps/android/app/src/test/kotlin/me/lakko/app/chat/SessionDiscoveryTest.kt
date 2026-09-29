@@ -12,7 +12,7 @@ import java.io.IOException
 import kotlinx.coroutines.test.runTest
 import me.lakko.app.auth.base64UrlDecodeNoPad
 import me.lakko.app.discovery.DiscoveryClient
-import me.lakko.app.discovery.SealedInviteUploadRequest
+import me.lakko.app.discovery.GroupInviteUploadRequest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -55,7 +55,7 @@ class SessionDiscoveryTest {
     /** The wire half of `uploadGroupInvite`. */
     private val upload: suspend (DiscoveryClient) -> ByteArray = { client ->
         base64UrlDecodeNoPad(
-            client.groupInviteUpload(SealedInviteUploadRequest(sealed = "AA==", issuer_pubkey = "AA==", expiry_ms = 0L, max_uses = 1L)).blob_id,
+            client.groupInviteUpload(GroupInviteUploadRequest(capability = "AA==", max_uses = 1L)).blob_id,
         )
     }
 

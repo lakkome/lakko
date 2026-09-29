@@ -4,8 +4,6 @@
 package me.lakko.app.calls
 
 import me.lakko.app.discovery.DiscoveryClient
-import me.lakko.app.discovery.DiscoveryNetworkError
-import uniffi.lakko_ffi_uniffi.CallInviteCapability
 import uniffi.lakko_ffi_uniffi.FfiCallInviteMedia
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.composeCallInviteCapability
@@ -46,31 +44,27 @@ public class CallInviteComposer(
     }
 
     /**
-     * Result of [composeAndUpload]. The UI hands [url] to the share sheet;
-     * [blobId] is what a future revoke would name, `null` when the upload
-     * failed on transport and [url] is the inline form.
+     * Result of [composeAndUpload]. The fields are independent — the UI hands
+     * [url] to the share sheet, and [blobId] is what a future revoke would name.
      */
     public data class Composed(
-        /** Raw 6-byte server-assigned `blob_id`, or `null` for an inline link. */
-        val blobId: ByteArray?,
-        /** The full `<origin>/c/<slug>#<secret>` URL the owner shares. */
+        /** Raw 6-byte server-assigned `blob_id`. */
+        val blobId: ByteArray,
+        /** The full `<origin>/c/<slug>` URL the owner shares. */
         val url: String,
-        /** Plaintext capability wire (never uploaded; the server holds only
-         *  the sealed blob). */
+        /** Wire-format capability bytes the server now holds. */
         val capabilityBytes: ByteArray,
     ) {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (other !is Composed) return false
-            val otherId = other.blobId
-            val sameId = if (blobId == null) otherId == null else otherId != null && blobId.contentEquals(otherId)
-            return sameId &&
+            return blobId.contentEquals(other.blobId) &&
                 url == other.url &&
                 capabilityBytes.contentEquals(other.capabilityBytes)
         }
 
         override fun hashCode(): Int {
-            var result = blobId?.contentHashCode() ?: 0
+            var result = blobId.contentHashCode()
             result = 31 * result + url.hashCode()
             result = 31 * result + capabilityBytes.contentHashCode()
             return result
@@ -85,13 +79,9 @@ public class CallInviteComposer(
      *      founder, so this one goes unused — the wire format still carries the
      *      field, and a well-formed capability is what the joiner verifies.
      *   2. `composeCallInviteCapability(...)` via UniFFI — wire bytes signed
-     *      under the owner's Ed25519 key, with the section-4 values, sealed
-     *      under a fresh link secret (the `InviteLinkMint`).
-     *   3. [DiscoveryClient.uploadCallInvite] — pushes the sealed blob and its
-     *      clear fields to the ledger. The secret never leaves the device.
-     *   4. [composePointerCallInviteUrl] — builds `<origin>/c/<slug>#<secret>`;
-     *      when the upload fails on transport, [composeInlineCallInviteUrl]
-     *      carries the sealed blob in the URL instead.
+     *      under the owner's Ed25519 key, with the section-4 values.
+     *   3. [DiscoveryClient.uploadCallInvite] — pushes the bytes to the ledger.
+     *   4. [composePointerCallInviteUrl] — builds the `<origin>/c/<slug>` URL.
      *
      * Must be driven from a background coroutine: the upload is a network
      * round trip.
@@ -122,45 +112,24 @@ public class CallInviteComposer(
         }
 
         // ---- 2. composeCallInviteCapability via UniFFI ---------
-        val expiryMs = callInviteLinkExpiryMs(nowMs)
-        val maxUses = callInviteLinkMaxUses()
-        val mint = composeCallInviteCapability(
+        val capabilityBytes = composeCallInviteCapability(
             ownerSigningSeed = ownerSigningSeed,
             ownerAccountId = ownerAccountId,
             callId = callId,
-            expiryMs = expiryMs.toULong(),
-            maxUses = maxUses,
+            expiryMs = callInviteLinkExpiryMs(nowMs).toULong(),
+            maxUses = callInviteLinkMaxUses(),
             media = FfiCallInviteMedia(audio = true, video = CALL_INVITE_LINK_MEDIA_VIDEO),
             oneTimeKeyPackage = oneTimeKeyPackage,
             label = CALL_INVITE_LINK_LABEL,
         )
-        // The plaintext wire is the capability the joiner opens to; kept
-        // for the caller, never uploaded.
-        val capabilityBytes = CallInviteCapability.openLink(mint.sealed, mint.linkSecret).use { it.wire() }
 
         // ---- 3. uploadCallInvite via HTTP ----------------------
-        val blobId = try {
-            discoveryClient.uploadCallInvite(
-                sealed = mint.sealed,
-                issuerPubkey = mint.issuerPubkey,
-                expiryMs = expiryMs,
-                maxUses = maxUses.toLong(),
-            )
-        } catch (e: DiscoveryNetworkError) {
-            // Transport failure only: the link still works inline. Any HTTP
-            // answer (401, 400, 429) propagates.
-            null
-        }
+        val blobId = discoveryClient.uploadCallInvite(capabilityBytes)
 
         // ---- 4. URL build --------------------------------------
-        val url = if (blobId != null) {
-            composePointerCallInviteUrl(blobId, mint.linkSecret, origin)
-        } else {
-            composeInlineCallInviteUrl(mint.sealed, mint.linkSecret, origin)
-        }
         return Composed(
             blobId = blobId,
-            url = url,
+            url = composePointerCallInviteUrl(blobId, origin),
             capabilityBytes = capabilityBytes,
         )
     }

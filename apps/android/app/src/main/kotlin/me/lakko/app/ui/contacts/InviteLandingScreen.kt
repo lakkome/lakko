@@ -131,11 +131,6 @@ public fun InviteLandingScreen(
                     "share it again.",
                 onDone = onDone,
             )
-            InviteLandingState.Damaged -> InfoPanel(
-                title = "Damaged invite link",
-                body = me.lakko.app.discovery.INVITE_LINK_DAMAGED_COPY,
-                onDone = onDone,
-            )
             InviteLandingState.RateLimited -> RateLimitedPanel(
                 onRetry = viewModel::retry,
                 onDone = onDone,

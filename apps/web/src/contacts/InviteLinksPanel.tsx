@@ -7,29 +7,23 @@
  * form. Never a raw URL in a textarea.
  *
  * The create path is the one that lived in `routes/Contacts.tsx`: compose the
- * capability in the core (sealed under a fresh link secret, the 2026-09-28
- * sealed-link amendment), upload the sealed blob to the discovery service for
- * the short pointer URL, fall back to the self-contained inline URL only on a
- * network failure (a rejected upload is a real error). The list is the owner
- * query the old "Active invites" card made, run when this panel opens and
- * after every change, never behind a button.
- *
- * The link secret lives only in the URL fragment: the server never has it, so
- * a listed row can be turned back into a working link only while this tab
- * still remembers the secret it minted. A row whose secret is not known here
- * (created on another device, or before a reload) is shown without Copy and
- * Share, never with a link that would open as damaged.
+ * capability in the core, upload it to the discovery service for the short
+ * pointer URL, fall back to the self-contained inline URL only on a network
+ * failure (a rejected upload is a real error; the same bytes would be
+ * rejected again by whoever opens them). The list is the owner query the old
+ * "Active invites" card made, run when this panel opens and after every
+ * change, never behind a button.
  */
 import { createSignal, For, onMount, Show, type JSX } from "solid-js";
 
 import { useAuth } from "../auth/AuthContext";
-import { base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
+import { base64UrlDecodeNoPad } from "../auth/account-id";
 import { useChats } from "../chat/ChatContext";
 import { DiscoveryClient, type ActiveInvite } from "../discovery/client";
 import { Icon } from "../ui/icons";
 import { loadWasm } from "../wasm";
 import { formatContactsError } from "./errors";
-import { inviteLinkWidths, takeInviteLinkMint, type InviteLinkWidths } from "./invite-link";
+import { inviteLinkWidths, type InviteLinkWidths } from "./invite-link";
 import {
   composeInlineInviteUrl,
   composePointerInviteUrl,
@@ -49,38 +43,20 @@ import {
  *  fallback minted a moment ago (no server row, so it cannot be revoked). */
 interface LinkRow {
   readonly key: string;
-  /** `null` when this tab does not know the link secret (see the module
-   *  docs): the row can be revoked but not copied. */
-  readonly url: string | null;
+  readonly url: string;
   readonly title: string;
   readonly meta: string;
   readonly revocable: boolean;
   readonly blobIdSlug: string | null;
 }
 
-/** The link secrets this tab minted, by `<account hex>:<ledger id slug>`.
- *  In memory only: the secret is a bearer for the link, and the server never
- *  holds it. */
-const mintedLinkSecrets = new Map<string, Uint8Array>();
-
-function secretKey(accountId: Uint8Array, blobIdSlug: string): string {
-  return `${base64UrlEncodeNoPad(accountId)}:${blobIdSlug}`;
-}
-
 /** `null` when the listed id is not a ledger id of the current width (a row
  *  the server should not have sent); the row is then left out rather than
  *  breaking the list. */
-function rowOf(
-  invite: ActiveInvite,
-  nowMs: number,
-  widths: InviteLinkWidths,
-  secret: Uint8Array | undefined,
-): LinkRow | null {
-  let url: string | null;
+function rowOf(invite: ActiveInvite, nowMs: number, widths: InviteLinkWidths): LinkRow | null {
+  let url: string;
   try {
-    const blobId = base64UrlDecodeNoPad(invite.blobIdSlug);
-    if (blobId.length !== widths.blobIdLen) return null;
-    url = secret === undefined ? null : composePointerInviteUrl(blobId, secret, widths);
+    url = composePointerInviteUrl(base64UrlDecodeNoPad(invite.blobIdSlug), widths);
   } catch {
     return null;
   }
@@ -125,19 +101,11 @@ export function InviteLinksPanel(): JSX.Element {
   const rows = (): LinkRow[] => {
     const now = Date.now();
     const w = widths();
-    const account = auth.identitySecrets()?.accountId ?? null;
     const listed =
       w === null
         ? []
         : invites()
-            .map((i) =>
-              rowOf(
-                i,
-                now,
-                w,
-                account === null ? undefined : mintedLinkSecrets.get(secretKey(account, i.blobIdSlug)),
-              ),
-            )
+            .map((i) => rowOf(i, now, w))
             .filter((r): r is LinkRow => r !== null);
     const inline = inlineLink();
     return inline === null ? listed : [inline, ...listed];
@@ -177,32 +145,17 @@ export function InviteLinksPanel(): JSX.Element {
         throw new Error("Sign in again to create an invite link.");
       }
       const wasm = await loadWasm();
-      const expiryMs = expiryPresetToMs(expiry(), Date.now());
-      const uses = maxUsesPresetToValue(maxUses());
-      const mint = takeInviteLinkMint(
-        wasm.InviteCapability.compose(
-          id.ed25519Seed,
-          secrets.accountId,
-          id.x25519PublicKey,
-          expiryMs,
-          uses,
-          bootstrapReferral(),
-          label(),
-        ),
+      const bytes = wasm.InviteCapability.compose(
+        id.ed25519Seed,
+        secrets.accountId,
+        id.x25519PublicKey,
+        expiryPresetToMs(expiry(), Date.now()),
+        maxUsesPresetToValue(maxUses()),
+        bootstrapReferral(),
+        label(),
       );
       try {
-        const blobId = await discovery.uploadInvite({
-          sealed: mint.sealed,
-          issuerPubkey: mint.issuerPubkey,
-          expiryMs,
-          maxUses: uses,
-          label: label(),
-          bootstrapReferral: bootstrapReferral(),
-        });
-        mintedLinkSecrets.set(
-          secretKey(secrets.accountId, base64UrlEncodeNoPad(blobId)),
-          mint.linkSecret,
-        );
+        await discovery.uploadInvite(bytes);
         setInlineLink(null);
         await load();
       } catch (uploadErr) {
@@ -210,10 +163,10 @@ export function InviteLinksPanel(): JSX.Element {
           uploadErr instanceof Error && uploadErr.name === "DiscoveryNetworkError";
         if (!isNetwork) throw uploadErr;
         // eslint-disable-next-line no-console
-        console.warn("invite upload network-failed; falling back to the inline link");
+        console.warn("invite upload network-failed; falling back to inline-bytes URL", uploadErr);
         setInlineLink({
           key: "inline",
-          url: composeInlineInviteUrl(mint.sealed, mint.linkSecret, inviteLinkWidths(wasm)),
+          url: composeInlineInviteUrl(bytes),
           title: label().length > 0 ? label() : "Invite link",
           meta: "Lakko could not shorten this link, so it is long. It works the same way and cannot be revoked.",
           revocable: false,
@@ -231,7 +184,6 @@ export function InviteLinksPanel(): JSX.Element {
   }
 
   async function onCopy(row: LinkRow): Promise<void> {
-    if (row.url === null) return;
     try {
       await navigator.clipboard.writeText(row.url);
       setCopiedKey(row.key);
@@ -242,7 +194,6 @@ export function InviteLinksPanel(): JSX.Element {
   }
 
   async function onShare(row: LinkRow): Promise<void> {
-    if (row.url === null) return;
     if (typeof navigator !== "undefined" && typeof navigator.share === "function") {
       try {
         await navigator.share({ url: row.url });
@@ -366,40 +317,27 @@ export function InviteLinksPanel(): JSX.Element {
                     <span class="lk-meta">{row.meta}</span>
                   </div>
                   <div class="lk-link-row" role="group" aria-label={row.title}>
-                    <Show
-                      when={row.url}
-                      fallback={
-                        <span class="lk-link-text lk-muted">
-                          This link can be copied only on the device that created it.
-                        </span>
-                      }
+                    <span class="lk-link-text" title={row.url}>
+                      {row.url.replace(/^https?:\/\//, "")}
+                    </span>
+                    <button
+                      type="button"
+                      class="lk-icon-button"
+                      title={copiedKey() === row.key ? "Copied" : "Copy link"}
+                      aria-label={copiedKey() === row.key ? "Copied" : "Copy link"}
+                      onClick={() => void onCopy(row)}
                     >
-                      {(url) => (
-                        <>
-                          <span class="lk-link-text" title={url()}>
-                            {url().replace(/^https?:\/\//, "")}
-                          </span>
-                          <button
-                            type="button"
-                            class="lk-icon-button"
-                            title={copiedKey() === row.key ? "Copied" : "Copy link"}
-                            aria-label={copiedKey() === row.key ? "Copied" : "Copy link"}
-                            onClick={() => void onCopy(row)}
-                          >
-                            <Icon name={copiedKey() === row.key ? "check" : "copy"} size={16} />
-                          </button>
-                          <button
-                            type="button"
-                            class="lk-icon-button"
-                            title="Share"
-                            aria-label="Share"
-                            onClick={() => void onShare(row)}
-                          >
-                            <Icon name="share" size={16} />
-                          </button>
-                        </>
-                      )}
-                    </Show>
+                      <Icon name={copiedKey() === row.key ? "check" : "copy"} size={16} />
+                    </button>
+                    <button
+                      type="button"
+                      class="lk-icon-button"
+                      title="Share"
+                      aria-label="Share"
+                      onClick={() => void onShare(row)}
+                    >
+                      <Icon name="share" size={16} />
+                    </button>
                     <Show when={row.revocable}>
                       <button
                         type="button"

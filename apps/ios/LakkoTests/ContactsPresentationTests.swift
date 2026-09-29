@@ -100,7 +100,7 @@ final class ContactsPresentationTests: XCTestCase {
     private func generated(slug: String, expiryMs: Int64, createdAtMs: Int64) -> GeneratedInvite {
         GeneratedInvite(
             blobId: Data(repeating: 1, count: 6), blobIdSlug: slug,
-            url: "https://lakko.me/i/\(slug)#secret", label: "", expiryMs: expiryMs,
+            url: "https://lakko.me/i/\(slug)", label: "", expiryMs: expiryMs,
             maxUses: 0, createdAtMs: createdAtMs)
     }
 
@@ -136,41 +136,14 @@ final class ContactsPresentationTests: XCTestCase {
         // prefix comes from configuration (`ApiEndpoints.webOrigin`) and a
         // hardcoded production host here failed every Debug run - which is
         // worse than it sounds: three red tests are how a real failure hides.
-        // The server lists a link by id only and never holds its secret, so
-        // the whole link comes from the session copy that minted it.
-        XCTAssertEqual(rows[1].url, "https://lakko.me/i/srv#secret")
+        XCTAssertEqual(rows[1].url, ContactsRepository.inviteUrlPrefix + "srv")
         XCTAssertEqual(rows[0].title, "Invite link")
         XCTAssertEqual(rows[0].usesLeft, "1 use left")
         if case .session(let blobId) = rows[0].origin {
-            XCTAssertEqual(blobId?.count, 6)
+            XCTAssertEqual(blobId.count, 6)
         } else {
             XCTFail("a session-only link revokes through its blob id")
         }
-    }
-
-    /// A link listed by the server that this device did not mint here has no
-    /// secret on this device: it can be revoked, not shared again.
-    func testAServerRowWithoutASessionCopyHasNoShareableUrl() {
-        let now = Date(timeIntervalSince1970: 1_800_000_000)
-        let nowMs = UInt64(now.timeIntervalSince1970 * 1000)
-        let rows = InviteLinkRows.merge(
-            active: [active(slug: "elsewhere", expiryMs: nowMs + 60_000, maxUses: 0, used: 0,
-                            createdAt: "2026-09-10T10:00:00Z")],
-            sessionGenerated: [],
-            now: now)
-        XCTAssertEqual(rows.count, 1)
-        XCTAssertNil(rows[0].url)
-        XCTAssertEqual(rows[0].origin, .server)
-    }
-
-    func testAnInlineSessionLinkIsNotRevocable() {
-        let now = Date(timeIntervalSince1970: 1_800_000_000)
-        let inline = GeneratedInvite(
-            blobId: nil, blobIdSlug: "sealedslug", url: "https://lakko.me/i/sealedslug#secret",
-            label: "", expiryMs: 0, maxUses: 0, createdAtMs: 0)
-        let rows = InviteLinkRows.merge(active: [], sessionGenerated: [inline], now: now)
-        XCTAssertEqual(rows.first?.origin, .session(blobId: nil))
-        XCTAssertEqual(rows.first?.url, "https://lakko.me/i/sealedslug#secret")
     }
 
     func testCreatedAtParsesIsoWithAndWithoutFractionsAndSqlStyle() {

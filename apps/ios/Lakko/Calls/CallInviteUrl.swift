@@ -118,12 +118,11 @@ public enum CallInviteUrl {
     public enum ParsedCallInvite: Equatable {
         /// Short form — `blobId` is the 6-byte ledger id. Joiner fetches via
         /// `DiscoveryClient.fetchCallInvite(blobId:)` →
-        /// `CallInviteCapability.openLink(sealed:linkSecret:)`.
+        /// `CallInviteCapability.decodeAndVerify(...)`.
         case pointer(blobId: Data)
-        /// Long form — the bytes are the SEALED capability (sealed-links
-        /// amendment of 2026-09-28). Joiner runs
-        /// `CallInviteCapability.openLink(sealed:linkSecret:)` directly with
-        /// the secret from the fragment.
+        /// Long form — the bytes are the wire-format
+        /// `CallInviteCapability`. Joiner runs
+        /// `CallInviteCapability.decodeAndVerify(...)` directly.
         case inline(capabilityBytes: Data)
     }
 

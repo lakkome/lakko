@@ -41,10 +41,6 @@ afterEach(() => {
 const ID = new Uint8Array(6).fill(0x2a);
 const ACCOUNT = new Uint8Array(16).fill(0x01);
 const CAP = new Uint8Array(160).fill(0x41);
-const ISSUER = new Uint8Array(32).fill(0x05);
-/** A syntactically valid 16-character link secret fragment. */
-const FRAGMENT = `#${base64UrlEncodeNoPad(new Uint8Array(12).fill(0x07))}`;
-const SEALED_UPLOAD = { sealed: CAP, issuerPubkey: ISSUER, expiryMs: 0n, maxUses: 5 };
 
 /** Stub `fetch`: every request answers the given status (with an optional
  *  JSON body). No route asks for a proof of work any more (ADR-0054 S3). */
@@ -117,77 +113,12 @@ describe("upload returns an 8-character id", () => {
 
   it("decodes the fresh 8-character id to 6 bytes", async () => {
     stubFetch(200, { blob_id: base64UrlEncodeNoPad(ID) });
-    await expect(client.uploadGroupInvite(SEALED_UPLOAD)).resolves.toEqual(ID);
+    await expect(client.uploadGroupInvite(CAP, 5)).resolves.toEqual(ID);
   });
 
   it("refuses the old 43-character id from a server", async () => {
     stubFetch(200, { blob_id: base64UrlEncodeNoPad(new Uint8Array(32)) });
-    await expect(client.uploadGroupInvite(SEALED_UPLOAD)).rejects.toBeInstanceOf(DiscoveryHttpError);
-  });
-});
-
-describe("uploads send the sealed blob and the clear fields the server reads", () => {
-  function captureBodies(): { url: string; body: unknown }[] {
-    const seen: { url: string; body: unknown }[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string, init?: RequestInit) => {
-        seen.push({ url, body: JSON.parse(String(init?.body ?? "null")) });
-        return new Response(JSON.stringify({ blob_id: base64UrlEncodeNoPad(ID) }), { status: 200 });
-      }),
-    );
-    return seen;
-  }
-
-  const clear = {
-    sealed: Buffer.from(CAP).toString("base64"),
-    issuer_pubkey: Buffer.from(ISSUER).toString("base64"),
-    expiry_ms: 1_700_000_000_000,
-    max_uses: 5,
-  };
-
-  it("/i/ carries label and bootstrap_referral too", async () => {
-    const seen = captureBodies();
-    await new DiscoveryClient("https://d.test").uploadInvite({
-      ...SEALED_UPLOAD,
-      expiryMs: 1_700_000_000_000n,
-      label: "Hi",
-      bootstrapReferral: true,
-    });
-    expect(seen).toEqual([
-      {
-        url: "https://d.test/discovery/invite",
-        body: { ...clear, label: "Hi", bootstrap_referral: true },
-      },
-    ]);
-  });
-
-  it("/c/ and /g/ carry the blob, the issuer key, expiry and max_uses", async () => {
-    const seen = captureBodies();
-    const client = new DiscoveryClient("https://d.test");
-    const upload = { ...SEALED_UPLOAD, expiryMs: 1_700_000_000_000n };
-    await client.uploadCallInvite(upload);
-    await client.uploadGroupInvite(upload);
-    expect(seen).toEqual([
-      { url: "https://d.test/discovery/call-invite", body: clear },
-      { url: "https://d.test/discovery/group-invite", body: clear },
-    ]);
-  });
-
-  it("refuses an issuer key of the wrong width before any request", async () => {
-    const seen = captureBodies();
-    await expect(
-      new DiscoveryClient("https://d.test").uploadGroupInvite({
-        ...SEALED_UPLOAD,
-        issuerPubkey: new Uint8Array(31),
-      }),
-    ).rejects.toBeInstanceOf(DiscoveryClientArgError);
-    expect(seen).toHaveLength(0);
-  });
-
-  it("fetch returns the sealed blob the server stored", async () => {
-    stubFetch(200, { sealed: Buffer.from(CAP).toString("base64") });
-    await expect(new DiscoveryClient("https://d.test").fetchCallInvite(ID)).resolves.toEqual(CAP);
+    await expect(client.uploadGroupInvite(CAP, 5)).rejects.toBeInstanceOf(DiscoveryHttpError);
   });
 });
 
@@ -200,66 +131,33 @@ describe("the surfaces say 'try again later'", () => {
     });
   });
 
-  it("resolveGroupInviteLink surfaces a 429 as rate limited, not as not-found", async () => {
+  it("resolveGroupInviteSlug surfaces a 429 as rate limited, not as not-found", async () => {
     stubFetch(429);
     const contacts = new ContactsClient(new DiscoveryClient("https://d.test"));
     const err = await contacts
-      .resolveGroupInviteLink(base64UrlEncodeNoPad(ID), FRAGMENT)
+      .resolveGroupInviteSlug(base64UrlEncodeNoPad(ID))
       .catch((e: unknown) => e);
     expect(isDiscoveryRateLimited(err)).toBe(true);
   });
 
-  it("resolveGroupInviteLink calls an old 43-character pointer damaged without a request", async () => {
+  it("resolveGroupInviteSlug refuses an old 43-character pointer without a request", async () => {
     const calls = stubFetch(200);
     const contacts = new ContactsClient(new DiscoveryClient("https://d.test"));
     await expect(
-      contacts.resolveGroupInviteLink(base64UrlEncodeNoPad(new Uint8Array(32)), FRAGMENT),
-    ).resolves.toBe("damaged");
+      contacts.resolveGroupInviteSlug(base64UrlEncodeNoPad(new Uint8Array(32))),
+    ).rejects.toThrow();
     expect(calls).toHaveLength(0);
-  });
-
-  it("resolveGroupInviteLink calls a link without its fragment damaged without a request", async () => {
-    const calls = stubFetch(200);
-    const contacts = new ContactsClient(new DiscoveryClient("https://d.test"));
-    for (const fragment of [null, "", "#abc"]) {
-      await expect(
-        contacts.resolveGroupInviteLink(base64UrlEncodeNoPad(ID), fragment),
-      ).resolves.toBe("damaged");
-    }
-    expect(calls).toHaveLength(0);
-  });
-
-  it("resolveGroupInviteLink calls a stored blob the secret does not open damaged", async () => {
-    stubFetch(200, { sealed: Buffer.from(CAP).toString("base64") });
-    const contacts = new ContactsClient(new DiscoveryClient("https://d.test"));
-    await expect(
-      contacts.resolveGroupInviteLink(base64UrlEncodeNoPad(ID), FRAGMENT),
-    ).resolves.toBe("damaged");
   });
 
   it("the call-link acceptor reports rateLimited on a 429 fetch", async () => {
     stubFetch(429);
     const result = await acceptCallInviteFromSlug({
       slug: base64UrlEncodeNoPad(ID),
-      fragment: FRAGMENT,
       discoveryClient: new DiscoveryClient("https://d.test", { tokens: fakeTokenPool().pool }),
       joinerAccountId: ACCOUNT,
       // The fetch refuses before the identity is touched.
       joinerIdentity: {} as never,
     });
     expect(result).toEqual({ kind: "rateLimited" });
-  });
-
-  it("the call-link acceptor reports damaged, without a request, when the fragment is missing", async () => {
-    const calls = stubFetch(200);
-    const result = await acceptCallInviteFromSlug({
-      slug: base64UrlEncodeNoPad(ID),
-      fragment: "",
-      discoveryClient: new DiscoveryClient("https://d.test", { tokens: fakeTokenPool().pool }),
-      joinerAccountId: ACCOUNT,
-      joinerIdentity: {} as never,
-    });
-    expect(result).toEqual({ kind: "damaged" });
-    expect(calls).toHaveLength(0);
   });
 });

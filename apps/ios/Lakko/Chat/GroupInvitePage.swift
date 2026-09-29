@@ -10,44 +10,61 @@ import LakkoCore
 /// them:
 ///
 ///   1. **The link shape.** `https://lakko.me/g/<slug>#<link secret>` - the
-///      12-byte secret the whole capability is sealed under (and its preview,
-///      under an independent derivation) rides the URL fragment (16 base64url
-///      characters, ADR-0028 amendments of 2026-09-27 and 2026-09-28), which a
-///      browser never sends and this app never uploads (the discovery ledger
-///      and every access log stay ciphertext-only). ``GroupInviteLink``
-///      appends the fragment on mint and reads it back on open; a link without
-///      it opens nothing and is damaged.
+///      12-byte secret the sealed preview's key is derived from rides the URL
+///      fragment (16 base64url characters, ADR-0028 amendment of 2026-09-27),
+///      which a browser never sends and this app never uploads (the discovery
+///      ledger and every access log stay ciphertext-only). ``GroupInviteLink``
+///      appends the fragment on mint and reads it back on open.
 ///   2. **The headline.** What the card says for a given preview - or for
 ///      none. ``GroupInviteHeadline`` is a value the view renders line by line,
 ///      so the copy rules of the spec (section 3) are asserted once, in a test,
 ///      rather than re-derived inside SwiftUI where nothing can reach them.
 public enum GroupInviteLink {
-    /// The link secret is 12 bytes - shared by every invite kind since the
-    /// sealed-links amendment of 2026-09-28 (``InviteLink``).
-    public static var linkSecretLen: Int { InviteLink.secretLen }
+    /// The link secret is 12 bytes - `LINK_SECRET_LEN` in `lakko-contacts`,
+    /// read from the core.
+    public static var linkSecretLen: Int { Int(groupInviteLinkSecretLen()) }
 
     /// The link secret is exactly 16 characters in the URL.
-    public static var linkSecretUrlLen: Int { InviteLink.secretUrlLen }
+    public static var linkSecretUrlLen: Int { Int(groupInviteLinkSecretUrlLen()) }
 
-    /// What a link's fragment amounts to (see ``InviteLink/Fragment``). Since
-    /// the capability is sealed under the secret, an absent fragment is as
-    /// damaged as a malformed one.
-    public typealias Fragment = InviteLink.Fragment
+    /// What a link's fragment amounts to.
+    public enum Fragment: Equatable {
+        /// No fragment: the link carries no preview secret (a chat app that
+        /// strips fragments, a hand-typed URL). The page shows no preview.
+        case absent
+        /// A well-formed 12-byte link secret.
+        case secret(Data)
+        /// A fragment that is not exactly 16 base64url characters decoding to
+        /// 12 bytes - the retired 43-character key included. The link is
+        /// refused as damaged, fail-closed: nothing is fetched for it.
+        case malformed
+    }
 
-    /// Append the link secret to a `/g/` URL as its fragment. Any fragment the
-    /// URL already carried is replaced, never doubled.
+    /// Append the link secret to a `/g/` URL as its fragment (base64url, no
+    /// padding, 16 characters for 12 bytes). Any fragment the URL already
+    /// carried is replaced, never doubled.
     public static func withLinkKey(_ url: String, linkKey: Data) -> String {
-        InviteLink.withSecret(url, secret: linkKey)
+        let base = split(url).base
+        return base + "#" + base64UrlEncodeNoPad(linkKey)
     }
 
-    /// Split a link into the part before `#` and the fragment after it.
+    /// Split a link into the part before `#` and the fragment after it (`nil`
+    /// when there is none). The slug parsers must only ever see `base`.
     public static func split(_ link: String) -> (base: String, fragment: String?) {
-        InviteLink.split(link)
+        guard let hash = link.firstIndex(of: "#") else { return (link, nil) }
+        let fragment = String(link[link.index(after: hash)...])
+        return (String(link[..<hash]), fragment.isEmpty ? nil : fragment)
     }
 
-    /// Read a fragment: absent, a 12-byte secret, or malformed.
+    /// Read a fragment: absent, a 12-byte secret, or malformed. Only exactly
+    /// 16 base64url characters (no padding) decoding to 12 bytes is a secret.
     public static func readFragment(_ fragment: String?) -> Fragment {
-        InviteLink.readFragment(fragment)
+        guard let fragment, !fragment.isEmpty else { return .absent }
+        guard fragment.count == linkSecretUrlLen,
+              isBase64Url(fragment),
+              let bytes = base64UrlDecodeNoPad(fragment),
+              bytes.count == linkSecretLen else { return .malformed }
+        return .secret(bytes)
     }
 }
 
@@ -86,11 +103,10 @@ public struct GroupInviteHeadline: Equatable {
     public let groupName: String?
     public let members: String?
 
-    /// What the page says without a preview: the capability was minted
-    /// without one (a channel co-publisher link). Nothing is invented and the
-    /// page does not say why. (A link whose fragment is missing or does not
-    /// open the sealed capability is not this state: it is refused as damaged,
-    /// see ``groupInviteDamagedMessage``.)
+    /// What the page says without a preview: the link had no fragment.
+    /// Nothing is invented and the page does not say why. (A fragment under
+    /// which the preview does not open is not this state: that link is refused
+    /// as damaged, see ``groupInviteDamagedMessage``.)
     public static let noPreview = GroupInviteHeadline(
         lead: "You are invited to a group", groupName: nil, members: nil)
 
@@ -121,11 +137,12 @@ public struct GroupInviteHeadline: Equatable {
 /// The copy of the invalid / expired state, verbatim from the spec.
 public let groupInviteInvalidMessage = "This invite link is invalid or has expired."
 
-/// The copy of a `/g/` (and `/i/`) link that is damaged: no fragment, a
-/// fragment that is not a link secret, or a secret the sealed capability does
-/// not open under (ADR-0028 amendment of 2026-09-28). The AEAD open is what
-/// tells the joiner that the blob it was served is the one the link was made
-/// for, so a link that does not open is refused, never shown without a card.
+/// The copy of a `/g/` link whose fragment is present but whose preview does
+/// not open under it (or whose fragment is not a link secret at all). Since the
+/// ledger id stopped being a hash of the capability, the preview key - bound to
+/// the capability's group id and issuer - is what tells the joiner that the
+/// capability it was served is the one the link was made for, so a preview
+/// that does not open refuses the link rather than showing a card without one.
 public let groupInviteDamagedMessage = "This invite link is damaged. Ask for a new link."
 
 /// The copy of a `429` from the discovery ledger on an invite fetch or consume:

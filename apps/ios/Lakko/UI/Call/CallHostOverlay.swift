@@ -185,10 +185,8 @@ struct CallHostOverlay: ViewModifier {
                             notice: notice,
                             // A call started here has no link and so no landing
                             // to go back to; Open is hidden rather than dead.
-                            onOpen: link.slot.flatMap { slot in
-                                slot.slug.map { slug in
-                                    { inviteIntake.parkCallJoin(slug: slug, fragment: slot.fragment) }
-                                }
+                            onOpen: link.slot?.slug.map { slug in
+                                { inviteIntake.parkCallJoin(slug: slug) }
                             },
                             onCancel: { link.leave() },
                             onDismiss: { link.dismissOutcome() }

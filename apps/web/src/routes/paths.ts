@@ -105,14 +105,13 @@ export const paths = {
     return `/groups/${groupIdB64Url}`;
   },
   /**
-   * Build an invite-link path for a slug (1.18c): the 8-character
-   * ledger id or the inline sealed blob — see
-   * `contacts/invite.ts::composePointerInviteUrl` for the canonical
-   * builder that prepends the origin and appends the `#<secret>`
-   * fragment. This path carries no fragment; a caller that routes
-   * a link must keep it (`withLinkFragment`). The route handler at
-   * `/i/:slug` opens the sealed capability and drives the joiner-side
-   * ContactRequest send.
+   * Build an invite-link URL for a capability slug
+   * (1.18c). `slug` is the base64url-no-pad encoding of the
+   * `InviteCapability.compose(...)` wire bytes — see
+   * `contacts/invite.ts::composeInviteUrl` for the canonical
+   * builder that prepends the origin. The route handler at
+   * `/i/:slug` decodes + verifies the capability and drives
+   * the joiner-side ContactRequest send.
    */
   invite(slug: string): string {
     return `/i/${slug}`;
@@ -133,9 +132,8 @@ export const paths = {
   /**
    * Multi-joiner call-invite landing (ADR-0032, G-21/G-22). `slug` is the
    * base64url-no-pad of a `CallInviteCapability` blob_id (pointer form) or
-   * the inline sealed blob — the same `/c/<slug>` link
-   * `calls/invite.ts::composePointerCallInviteUrl` mints (without its
-   * `#<secret>` fragment, which a caller that routes a link must keep). The landing screen
+   * the inline capability bytes — the same `/c/<slug>` link
+   * `calls/invite.ts::composeCallInviteUrl` mints. The landing screen
    * decodes + verifies the capability and drives the joiner (or, when the
    * visitor is the owner, the host) flow.
    */

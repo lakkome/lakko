@@ -87,11 +87,10 @@ public enum GroupInviteUrl {
     public enum ParsedGroupInvite: Equatable {
         /// Short form — `blobId` is the 6-byte ledger id. Joiner fetches via
         /// `DiscoveryClient.fetchGroupInvite(blobId:)` ->
-        /// `GroupInviteCapability.openLink(sealed:linkSecret:)`.
+        /// `GroupInviteCapability.decodeAndVerify(...)`.
         case pointer(blobId: Data)
-        /// Long form — the bytes are the SEALED capability (sealed-links
-        /// amendment of 2026-09-28). Joiner runs
-        /// `GroupInviteCapability.openLink(sealed:linkSecret:)` directly.
+        /// Long form — the bytes are the wire-format `GroupInviteCapability`.
+        /// Joiner runs `GroupInviteCapability.decodeAndVerify(...)` directly.
         case inline(capabilityBytes: Data)
     }
 
